@@ -2,7 +2,12 @@
 
 use anyhow::Result;
 
+use crate::application::ports::StateRepository;
 use crate::db::Database;
+
+/// `daemon_state` key holding the comma-separated set of project hashes whose
+/// description or tags were changed (The Gardener mission).
+pub const GARDENER_PROJECTS_KEY: &str = "gamification:gardener_projects";
 
 impl Database {
     pub fn count_intelligence_nodes(&self) -> Result<i64> {
@@ -59,13 +64,17 @@ impl Database {
         Ok(max.max(0) as usize)
     }
 
+    /// True when at least one completed node run belongs to a member of a
+    /// `parallel` ensemble. The `parallelizable` spec flag alone does not
+    /// count — the engine never acts on it.
     pub fn has_parallel_graph_run(&self) -> Result<bool> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         let count: i64 = conn.query_row(
             "SELECT COUNT(*)
              FROM graph_runs wr
-             JOIN graph_specs ws ON ws.id = wr.spec_id
-             WHERE ws.parallelizable = 1",
+             JOIN ensemble_members em ON em.node_id = wr.node_id
+             JOIN ensembles e ON e.id = em.ensemble_id
+             WHERE e.kind = 'parallel' AND wr.status = 'success'",
             [],
             |r| r.get(0),
         )?;
@@ -82,6 +91,33 @@ impl Database {
             |r| r.get(0),
         )?;
         Ok(max)
+    }
+
+    /// Record one Gardener project: add `project_hash` to the deduplicated
+    /// comma-separated set at `GARDENER_PROJECTS_KEY`. Re-adding the same
+    /// project does not grow the set.
+    pub fn record_gardener_project(&self, project_hash: &str) -> Result<()> {
+        let current = self.get_state(GARDENER_PROJECTS_KEY)?.unwrap_or_default();
+        let mut known: Vec<&str> = current
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !known.contains(&project_hash) {
+            known.push(project_hash);
+            self.set_state(GARDENER_PROJECTS_KEY, &known.join(","))?;
+        }
+        Ok(())
+    }
+
+    /// How many distinct projects have had their description or tags changed.
+    pub fn count_gardener_projects(&self) -> Result<u64> {
+        let current = self.get_state(GARDENER_PROJECTS_KEY)?.unwrap_or_default();
+        Ok(current
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .count() as u64)
     }
 }
 
@@ -337,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn has_parallel_graph_run_true_when_parallel() {
+    fn has_parallel_graph_run_false_for_parallelizable_spec() {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
         let now = std::time::SystemTime::now()
@@ -365,7 +401,64 @@ mod tests {
         )
         .unwrap();
         drop(conn);
+        // The `parallelizable` flag alone never counted: the node is in no ensemble.
+        assert!(!db.has_parallel_graph_run().unwrap());
+    }
+
+    /// Seeds one graph with a join node, one member node, one ensemble of
+    /// `kind`, and one successful run of the member node.
+    fn seed_ensemble_run(db: &Database, kind: &str) {
+        let conn = db.conn.lock().unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        conn.execute(
+            "INSERT INTO graphs (id, name, workdir, status, created_at) VALUES (?1, 'loop1', '/tmp', 'draft', ?2)",
+            rusqlite::params!["loop1", now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO graph_specs (id, graph_id, name, position, parallelizable, status) VALUES (?1, ?2, 'spec1', 0, 0, 'pending')",
+            rusqlite::params!["spec1", "loop1"],
+        )
+        .unwrap();
+        for (id, node_kind, position) in [("j1", "join", 0), ("m1", "agent", 1)] {
+            conn.execute(
+                "INSERT INTO graph_nodes (id, spec_id, graph_id, name, kind, config, position, created_at) VALUES (?1, ?2, NULL, ?3, ?4, '{}', ?5, ?6)",
+                rusqlite::params![id, "spec1", id, node_kind, position, now],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO ensembles (id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, timeout_minutes, on_pass_to, on_fail_to, created_at, kind) VALUES (?1, ?2, NULL, 'ens', 'tmpl', 'j1', 'm1', 'always', 1, 15, 'j1', NULL, ?3, ?4)",
+            rusqlite::params!["ens1", "spec1", now, kind],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ensemble_members (ensemble_id, node_id, position, platform) VALUES (?1, ?2, 0, 'opencode')",
+            rusqlite::params!["ens1", "m1"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO graph_runs (id, graph_id, spec_id, node_id, status, started_at, iteration) VALUES (?1, ?2, ?3, ?4, 'success', ?5, 1)",
+            rusqlite::params!["run1", "loop1", "spec1", "m1", now],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn has_parallel_graph_run_true_for_parallel_ensemble_member() {
+        let db = test_db();
+        seed_ensemble_run(&db, "parallel");
         assert!(db.has_parallel_graph_run().unwrap());
+    }
+
+    #[test]
+    fn has_parallel_graph_run_false_for_cascade_ensemble_member() {
+        let db = test_db();
+        seed_ensemble_run(&db, "cascade");
+        assert!(!db.has_parallel_graph_run().unwrap());
     }
 
     #[test]

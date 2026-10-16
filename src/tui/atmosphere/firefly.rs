@@ -150,10 +150,6 @@ impl Scene for FireflyScene {
         let bounds = FlyBounds::from_area(area);
         let mouse = (ctx.mouse_col as f32, ctx.mouse_row as f32);
 
-        if ctx.mouse_clicked && self.any_fly_near(mouse) {
-            ctx.firefly_caught = true;
-        }
-
         let rng = &mut self.rng;
         self.fireflies
             .retain_mut(|fly| update_firefly(fly, rng, delta_secs, fade, &bounds, mouse));
@@ -194,6 +190,10 @@ impl Scene for FireflyScene {
 
     fn is_active(&self) -> bool {
         self.initialized && !self.fireflies.is_empty()
+    }
+
+    fn catch_at(&self, col: u16, row: u16) -> bool {
+        self.any_fly_near((col as f32, row as f32))
     }
 }
 
@@ -399,9 +399,9 @@ mod tests {
     }
 
     #[test]
-    fn test_firefly_catch_on_click_within_range() {
+    fn test_firefly_catch_at_within_range() {
         let mut scene = FireflyScene::new();
-        let area = Rect::new(0, 0, 80, 24);
+        scene.initialized = true;
         scene.fireflies.push(Firefly {
             x: 10.0,
             y: 12.0,
@@ -414,14 +414,8 @@ mod tests {
             time_in_state: 0.0,
             glow_duration: 0.0,
         });
-        let mut ctx = AtmosphereCtx {
-            mouse_col: 11,
-            mouse_row: 12,
-            mouse_clicked: true,
-            ..Default::default()
-        };
-        scene.tick(0.1, area, &mut ctx);
-        assert!(ctx.firefly_caught);
+        assert!(scene.catch_at(11, 12));
+        assert!(!scene.catch_at(13, 12));
     }
 
     #[test]

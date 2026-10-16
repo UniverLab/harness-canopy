@@ -123,7 +123,15 @@ Canopy tracks 28 achievement-style missions across six categories:
 
 Missions are checked automatically during normal TUI operation — no
 manual action required. Progress is persisted in the database and
-visible in the TUI's gamification panel.
+visible in the TUI's gamification panel. `canopy missions [--json]`
+lists the same missions read-only from the command line (see
+[CLI Reference](cli-reference.md#missions)).
+
+Two missions to know by their exact challenge: **The Gardener** —
+update descriptions or tags for 5+ different projects (via the
+`project_update` tool); **Parallel Vision** — run a graph with a
+parallel ensemble. On systems with no CPU temperature sensor (such as
+WSL), **Nuclear Winter** shows as `not measurable on this system`.
 
 Press **F1** to open the **Canopy hub**, a centered tabbed dialog:
 **Settings** edits every registry setting in place (with the value's apply

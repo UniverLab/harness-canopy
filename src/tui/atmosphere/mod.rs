@@ -36,6 +36,10 @@ pub trait Scene: Send {
     fn particles(&self) -> Vec<Particle>;
     /// Whether the scene has anything to render right now.
     fn is_active(&self) -> bool;
+    /// Whether a click at `(col, row)` catches something live in this scene.
+    fn catch_at(&self, _col: u16, _row: u16) -> bool {
+        false
+    }
 }
 
 // ── Context passed to scenes each tick ───────────────────────────
@@ -54,10 +58,6 @@ pub struct AtmosphereCtx {
     pub scroll_velocity: f32,
     /// Typing speed hint (0.0 = idle, 1.0 = fast).
     pub typing_speed: f32,
-    /// Set when the user clicks (consumed on the next atmosphere tick).
-    pub mouse_clicked: bool,
-    /// Set by `FireflyScene` when a firefly is caught.
-    pub firefly_caught: bool,
     /// Whether the active scene may spawn new particles this tick.
     /// `false` while a scene is winding down outside its time window — existing
     /// particles keep moving and expiring, but no new ones appear.
@@ -158,6 +158,13 @@ impl SceneManager {
 
     /// Notify the atmosphere about mouse movement (forwarded via ctx on next tick).
     pub fn notify_mouse(&mut self, _col: u16, _row: u16, _delta_col: i16, _delta_row: i16) {}
+
+    /// Whether a click at `(col, row)` catches something live in an active scene.
+    pub fn catch_at(&self, col: u16, row: u16) -> bool {
+        self.events
+            .iter()
+            .any(|event| event.scene.is_active() && event.scene.catch_at(col, row))
+    }
 }
 
 /// Draw a single particle into `buf` when it falls inside `area`.

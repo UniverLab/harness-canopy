@@ -37,6 +37,7 @@ use daemon::cli::{handle_daemon_action, DaemonAction};
 use daemon::crew_cli::{handle_crew_action, CrewAction};
 use daemon::doctor::run_doctor;
 use daemon::graph_cli::{handle_graph_action, GraphAction};
+use daemon::missions_cli::handle_missions_action;
 use daemon::models_cli::{handle_models_action, ModelsAction};
 use daemon::project_cli::{handle_project_action, ProjectAction};
 use daemon::prompts_cli::{handle_prompts_action, PromptsAction};
@@ -162,6 +163,13 @@ enum Commands {
         #[command(subcommand)]
         action: ModelsAction,
     },
+    /// List gamification missions with their unlock state (read-only, served
+    /// from the local database — no daemon required).
+    Missions {
+        /// Print the report as JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
     /// Manage the project registry (path-derived identity).
     Project {
         #[command(subcommand)]
@@ -285,6 +293,7 @@ async fn main() -> Result<()> {
         Some(Commands::Config { action }) => handle_settings_action(action, cli.port).await,
         Some(Commands::Queue { action }) => handle_queue_action(action, cli.port).await,
         Some(Commands::Models { action }) => handle_models_action(action).await,
+        Some(Commands::Missions { json }) => handle_missions_action(json).await,
         Some(Commands::Project { action }) => handle_project_action(action).await,
         Some(Commands::Clean {
             dry_run,

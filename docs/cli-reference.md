@@ -124,6 +124,16 @@ Read-only inspection of registered agents, served from the local database
 | `canopy agent show <id>` | Show one agent's full stored definition, prompt last and untruncated |
 | `canopy agent show <id> --json` | Print the same definition as JSON (identical to the `agent_get` MCP tool's output) |
 
+## Missions
+
+Read-only listing of the 28 gamification missions (see [TUI](tui.md#gamification)),
+served from the local database — no daemon required.
+
+| Command | Description |
+|---|---|
+| `canopy missions` | List every mission: icon, title, category, `unlocked <date>` or `locked: <challenge>`, plus `N / 28 unlocked` |
+| `canopy missions --json` | Print the same report as one JSON object (`unlocked`, `total`, `missions` with `id`, `title`, `icon`, `category`, `challenge`, `unlocked_at` as RFC 3339 UTC or null) |
+
 ## Spec backlog
 
 | Command | Description |

@@ -52,6 +52,7 @@ pub(crate) mod handler_transfer;
 pub(crate) mod handler_validate;
 pub(crate) mod health_routine;
 pub(crate) mod helpers;
+pub(crate) mod missions_cli;
 pub(crate) mod models_cli;
 pub(crate) mod params;
 pub(crate) mod params_extract;

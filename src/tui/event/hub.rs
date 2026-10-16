@@ -168,19 +168,19 @@ fn hub_filter_key(app: &mut App, code: KeyCode) {
     }
 }
 
-/// The Missions tab keeps the legend's ↑↓/jk selection.
+/// The Missions tab keeps the legend's ↑↓/jk selection across all missions.
 fn hub_missions_key(app: &mut App, code: KeyCode) {
     let forward = match code {
         KeyCode::Down | KeyCode::Char('j') => true,
         KeyCode::Up | KeyCode::Char('k') => false,
         _ => return,
     };
-    let unlocked_count = app.mission_manager.unlocked_count();
-    if unlocked_count == 0 {
+    let mission_count = crate::domain::gamification::MISSIONS.len();
+    if mission_count == 0 {
         return;
     }
     app.legend_selected =
-        crate::tui::selection::move_index(app.legend_selected, unlocked_count, forward);
+        crate::tui::selection::move_index(app.legend_selected, mission_count, forward);
 }
 
 /// The Keys tab scrolls with ↑↓/jk.
@@ -302,11 +302,12 @@ mod tests {
 
     #[test]
     fn missions_tab_keeps_the_selection_keys() {
+        use crate::domain::gamification::MISSIONS;
         use crate::tui::gamification::{MissionEvent, MissionSnapshot};
 
         let mut app = test_app();
-        // Unlock three missions through the real path so the cursor has room
-        // to move and wrap.
+        // Unlock three missions through the real path so the cursor has
+        // visited entries; the tab itself lists all 28 missions.
         let events = [
             MissionEvent::FireflyCaught,
             MissionEvent::WorldLinked,
@@ -325,10 +326,9 @@ mod tests {
         assert_eq!(app.legend_selected, 1);
         handle_hub_key(&mut app, KeyCode::Char('k'), KeyModifiers::NONE);
         assert_eq!(app.legend_selected, 0);
-        // Up from zero wraps to the last unlocked mission.
-        let count = app.mission_manager.unlocked_count();
+        // Up from zero wraps to the last mission of the full list.
         handle_hub_key(&mut app, KeyCode::Char('k'), KeyModifiers::NONE);
-        assert_eq!(app.legend_selected, count - 1);
+        assert_eq!(app.legend_selected, MISSIONS.len() - 1);
     }
 
     fn enum_row() -> SettingRow {

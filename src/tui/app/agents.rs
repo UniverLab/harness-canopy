@@ -127,6 +127,18 @@ impl App {
         self.atmosphere.notify_mouse(col, row, delta_col, delta_row);
     }
 
+    /// Hit-test a left click against the atmosphere: while the atmosphere is
+    /// active, a click within catch range of a live firefly queues the catch.
+    /// Call this before hiding the atmosphere for the click.
+    pub fn atmosphere_left_click(&mut self, col: u16, row: u16) {
+        if !crate::tui::ui::atmosphere_active(self) {
+            return;
+        }
+        if self.atmosphere.catch_at(col, row) {
+            self.queue_mission_event(MissionEvent::FireflyCaught);
+        }
+    }
+
     /// Advance the atmosphere engine one tick (called from App::refresh).
     pub(super) fn tick_atmosphere(&mut self) {
         use chrono::Timelike;
@@ -138,12 +150,6 @@ impl App {
         } else {
             0.0
         };
-
-        if self.atmosphere_ctx.firefly_caught {
-            self.queue_mission_event(MissionEvent::FireflyCaught);
-            self.atmosphere_ctx.firefly_caught = false;
-        }
-        self.atmosphere_ctx.mouse_clicked = false;
     }
 
     pub fn tick_banner_animation(&mut self) {

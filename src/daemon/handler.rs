@@ -21274,6 +21274,47 @@ mod endpoint_tests {
         assert!(is_err(&missing));
     }
 
+    #[tokio::test]
+    async fn project_update_unlocks_gardener_after_five_projects() {
+        let (_dir, db, handler) = endpoint_test_handler();
+        let base = tempdir().unwrap();
+        let mut hashes = Vec::new();
+        for i in 0..5 {
+            let dir = base.path().join(format!("gardener-project-{i}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            let project = db.register_project_path(&dir).unwrap();
+            hashes.push(project.hash);
+        }
+
+        // The same project twice counts once.
+        for _ in 0..2 {
+            let updated = handler
+                .project_update(Parameters(ProjectUpdateParams {
+                    project_hash: hashes[0].clone(),
+                    description: Some("A tended garden".to_string()),
+                    tags: None,
+                }))
+                .await
+                .unwrap();
+            assert!(!is_err(&updated), "{}", text(&updated));
+        }
+        assert_eq!(db.count_gardener_projects().unwrap(), 1);
+
+        // Tags-only updates count too; four more distinct projects unlock.
+        for hash in hashes.iter().skip(1) {
+            let updated = handler
+                .project_update(Parameters(ProjectUpdateParams {
+                    project_hash: hash.clone(),
+                    description: None,
+                    tags: Some(vec!["tended".to_string()]),
+                }))
+                .await
+                .unwrap();
+            assert!(!is_err(&updated), "{}", text(&updated));
+        }
+        assert_eq!(db.count_gardener_projects().unwrap(), 5);
+    }
+
     // ── project_remap ─────────────────────────────────────────────
 
     #[tokio::test]

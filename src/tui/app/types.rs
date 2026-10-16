@@ -681,6 +681,10 @@ pub struct App {
     pub(crate) mission_manager: crate::tui::gamification::MissionManager,
     pub(crate) mission_pending_events: Vec<crate::tui::gamification::MissionEvent>,
     pub(crate) max_cpu_frequency_seen: Option<u64>,
+    /// Whether a CPU temperature reading has ever been observed this session.
+    /// Sticky: once seen it stays true, so WSL-style never-present sensors
+    /// keep the Nuclear Winter mission marked as not measurable.
+    pub(crate) cpu_temperature_seen: bool,
     /// Monotonic anchor for accumulating real Canopy uptime (persisted in state).
     pub(crate) uptime_anchor: Option<std::time::Instant>,
 }

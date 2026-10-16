@@ -134,6 +134,11 @@ impl TaskTriggerHandler {
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         if updated {
+            // The Gardener mission counts distinct projects whose description
+            // or tags changed — same one-shot flag pattern as identity_evolved.
+            if params.description.is_some() || params.tags.is_some() {
+                let _ = self.db.record_gardener_project(&params.project_hash);
+            }
             Ok(success_result(&format!(
                 "Project '{}' metadata updated.",
                 params.project_hash

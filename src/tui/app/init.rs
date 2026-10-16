@@ -210,6 +210,7 @@ macro_rules! app_new_fields {
             mission_manager: $mission_manager,
             mission_pending_events: Vec::new(),
             max_cpu_frequency_seen: None,
+            cpu_temperature_seen: false,
             uptime_anchor: None,
         }
     };

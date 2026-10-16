@@ -113,6 +113,19 @@ pub enum MissionCategory {
     SysInfo,
 }
 
+impl MissionCategory {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Environment => "Environment",
+            Self::Intelligence => "Intelligence",
+            Self::Projects => "Projects",
+            Self::Graph => "Graph",
+            Self::Seeds => "Seeds",
+            Self::SysInfo => "System",
+        }
+    }
+}
+
 /// Static metadata for a mission (display + persistence key).
 #[derive(Debug, Clone, Copy)]
 pub struct MissionDef {
@@ -235,7 +248,7 @@ pub const MISSIONS: &[MissionDef] = &[
         title: "Parallel Vision",
         icon: "◪",
         category: MissionCategory::Graph,
-        challenge: "Run a graph with parallelizable specs enabled",
+        challenge: "Run a graph with a parallel ensemble",
     },
     MissionDef {
         id: MissionId::GraphSurvivor,
