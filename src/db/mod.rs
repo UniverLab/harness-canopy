@@ -615,6 +615,18 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
                 infra_backoff_seconds INTEGER,
                 PRIMARY KEY (crew_id, position)
             );",
+    "
+            -- CM49 import: entry sources of a crew-bound ensemble whose member
+            -- nodes are not materialized yet (see
+            -- domain/graph_transfer/pending.rs). The sync path reads them
+            -- alongside the `ensembles` row and wires the fan-out once the crew
+            -- supplies members, then deletes them.
+            CREATE TABLE IF NOT EXISTS ensemble_pending_entry_sources (
+                ensemble_id TEXT NOT NULL REFERENCES ensembles(id) ON DELETE CASCADE,
+                from_node TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
+                condition TEXT NOT NULL,
+                PRIMARY KEY (ensemble_id, from_node, condition)
+            );",
 ];
 
 impl Database {

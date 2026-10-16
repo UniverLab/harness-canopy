@@ -549,6 +549,16 @@ impl Database {
             )?;
         }
 
+        // Once members exist, the edges above carry the ensemble's entry
+        // wiring, so the pending rows a crew-bound import recorded are no
+        // longer the source of truth and would double-wire a later sync.
+        if !members.is_empty() {
+            tx.execute(
+                "DELETE FROM ensemble_pending_entry_sources WHERE ensemble_id = ?1",
+                params![ensemble_id],
+            )?;
+        }
+
         tx.commit()?;
         Ok(())
     }

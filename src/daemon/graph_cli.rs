@@ -595,11 +595,13 @@ fn handle_graph_export(db: &Database, id_or_name: &str, output: Option<&str>) ->
     let graph_nodes = db.list_graph_nodes_for_graph(&lp.id)?;
     let graph_edges = db.list_graph_edges_for_graph(&lp.id)?;
     let ensembles = db.list_ensembles_for_graph(&lp.id)?;
-    let document = crate::domain::graph_transfer::build_export_document(
+    let pending_entry_sources = db.pending_entry_sources_for_graph(&lp.id)?;
+    let document = crate::domain::graph_transfer::build_export_document_with_pending(
         lp,
         &graph_nodes,
         &graph_edges,
         &ensembles,
+        &pending_entry_sources,
     )
     .map_err(|e| anyhow!(e))?;
     let json = serde_json::to_string_pretty(&document)?;

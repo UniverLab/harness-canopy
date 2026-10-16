@@ -1,5 +1,19 @@
 use super::*;
 
+/// Test-only convenience for a graph with no pending entry sources (every
+/// literal-member ensemble, and any graph whose crews are materialised).
+/// Production callers read the rows first and call
+/// [`build_export_document_with_pending`].
+#[cfg(test)]
+pub fn build_export_document(
+    lp: &Graph,
+    graph_nodes: &[GraphNode],
+    graph_edges: &[GraphEdge],
+    ensembles: &[EnsembleDetails],
+) -> Result<GraphExportDocument, String> {
+    build_export_document_with_pending(lp, graph_nodes, graph_edges, ensembles, &HashMap::new())
+}
+
 /// Build a [`GraphExportDocument`] from a graph's already-fetched graph.
 ///
 /// `graph_nodes`/`graph_edges` are the graph's *entire* top-level graph — the
@@ -10,11 +24,20 @@ use super::*;
 /// excluded from `nodes`/`edges` and represented instead as one
 /// [`GraphExportEnsemble`] entry, so an ensemble survives the round trip as
 /// an ensemble, not as expanded member nodes.
-pub fn build_export_document(
+///
+/// `pending_entry_sources` carries the entry sources a crew-bound ensemble
+/// records at import (`ensemble_pending_entry_sources`, keyed by ensemble id):
+/// such an ensemble whose members are not materialised yet has no entry
+/// fan-out edges to derive its sources from, so the pending rows stand in for
+/// them and the document round-trips its entry wiring. Pure, like the rest of
+/// this module — the caller (`Database::pending_entry_sources_for_graph`)
+/// fetches the rows.
+pub fn build_export_document_with_pending(
     lp: &Graph,
     graph_nodes: &[GraphNode],
     graph_edges: &[GraphEdge],
     ensembles: &[EnsembleDetails],
+    pending_entry_sources: &HashMap<String, Vec<(String, GraphEdgeCondition)>>,
 ) -> Result<GraphExportDocument, String> {
     let owned_ids: std::collections::HashSet<&str> = ensembles
         .iter()
@@ -65,6 +88,9 @@ pub fn build_export_document(
             graph_edges,
             &owned_ids,
             &name_map,
+            pending_entry_sources
+                .get(&details.ensemble.id)
+                .map(Vec::as_slice),
         )?);
     }
 
@@ -221,6 +247,7 @@ pub(super) fn export_one_ensemble(
     graph_edges: &[GraphEdge],
     owned_ids: &std::collections::HashSet<&str>,
     name_map: &ExportNameMap<'_>,
+    pending_entry_sources: Option<&[(String, GraphEdgeCondition)]>,
 ) -> Result<GraphExportEnsemble, String> {
     let ensemble = &details.ensemble;
     let on_fail_to = ensemble
@@ -230,8 +257,13 @@ pub(super) fn export_one_ensemble(
         .transpose()?;
 
     let members = export_ensemble_members(details);
-    let extra_entry_sources =
-        export_ensemble_entry_sources(details, graph_edges, owned_ids, name_map)?;
+    let extra_entry_sources = export_ensemble_entry_sources(
+        details,
+        graph_edges,
+        owned_ids,
+        name_map,
+        pending_entry_sources,
+    )?;
 
     // CM49: a crew-bound ensemble exports the crew NAME and no members — the
     // design carries the reference, never the crew's contents.
@@ -287,11 +319,17 @@ pub(super) fn export_ensemble_members(details: &EnsembleDetails) -> Vec<GraphExp
 /// members/join and other units' joins — chained exits, already
 /// carried by the upstream ensemble's on_pass_to/on_fail_to) are not
 /// entry sources.
+///
+/// CM49: a crew-bound ensemble whose members are not materialized yet has no
+/// fan-out edges; its extra entry sources come from `pending_entry_sources`
+/// instead (the rows `graph_import` recorded), with owned sources skipped
+/// exactly as the edge-derived path skips them.
 pub(super) fn export_ensemble_entry_sources(
     details: &EnsembleDetails,
     graph_edges: &[GraphEdge],
     owned_ids: &std::collections::HashSet<&str>,
     name_map: &ExportNameMap<'_>,
+    pending_entry_sources: Option<&[(String, GraphEdgeCondition)]>,
 ) -> Result<Vec<GraphExportEntrySource>, String> {
     let ensemble = &details.ensemble;
     let member_ids: std::collections::HashSet<&str> = details
@@ -314,6 +352,21 @@ pub(super) fn export_ensemble_entry_sources(
             from_node: name_map.node_name(&edge.from_node)?,
             condition: edge.condition.clone(),
         });
+    }
+    if details.members.is_empty() {
+        if let Some(pending) = pending_entry_sources {
+            for (from_node, condition) in pending {
+                if owned_ids.contains(from_node.as_str())
+                    || !seen_sources.insert((from_node.as_str(), condition))
+                {
+                    continue;
+                }
+                extra_entry_sources.push(GraphExportEntrySource {
+                    from_node: name_map.node_name(from_node)?,
+                    condition: condition.clone(),
+                });
+            }
+        }
     }
     extra_entry_sources.sort_by_key(|source| {
         format!(

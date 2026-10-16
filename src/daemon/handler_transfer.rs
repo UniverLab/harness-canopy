@@ -51,12 +51,20 @@ impl TaskTriggerHandler {
             .db
             .list_ensembles_for_graph(&graph_id)
             .map_err(internal_error)?;
+        // CM49: a crew-bound ensemble whose members are not materialised yet
+        // has no entry-fan-out edges; its entry wiring lives in the pending
+        // rows an import recorded, so export must read them alongside.
+        let pending_entry_sources = self
+            .db
+            .pending_entry_sources_for_graph(&graph_id)
+            .map_err(internal_error)?;
 
-        let document = match crate::domain::graph_transfer::build_export_document(
+        let document = match crate::domain::graph_transfer::build_export_document_with_pending(
             &lp,
             &graph_nodes,
             &graph_edges,
             &ensembles,
+            &pending_entry_sources,
         ) {
             Ok(document) => document,
             Err(e) => return Ok(error_result(&e)),

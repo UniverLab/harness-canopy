@@ -10,6 +10,13 @@ pub struct GraphImportEnsemblePlan {
     pub members: Vec<EnsembleMember>,
     pub member_nodes: Vec<GraphNode>,
     pub join_node: GraphNode,
+    /// Entry sources to wire once this ensemble's members materialise — its
+    /// `extra_entry_sources` and every chained exit that lands on it, absent
+    /// as edges because the members (and therefore the fan-out) do not exist
+    /// yet. Persisted as `ensemble_pending_entry_sources` rows and consumed by
+    /// the sync path (`replace_ensemble_members`). Empty for a literal-member
+    /// ensemble, whose entry wiring is already real edges.
+    pub pending_entry_sources: Vec<(String, GraphEdgeCondition)>,
 }
 
 /// Every fresh-id graph piece [`build_import_plan`] assembles for one
@@ -84,6 +91,46 @@ pub fn build_import_plan(
         )?;
         edges.extend(plan_edges);
         ensembles.push(plan);
+    }
+
+    // A crew-bound ensemble chained into another ensemble whose members are
+    // not materialised yet has no member nodes to fan its exit out to (its
+    // exit edge is the target's entry edge). Record the source join as a
+    // pending entry source of the target so the target's first sync builds the
+    // fan-out — the same rows the extra entry sources use, so a chained exit
+    // is wired through the one sync path rather than by a second walk.
+    for (source_index, doc_ensemble) in document.ensembles.iter().enumerate() {
+        let exits = [
+            (
+                doc_ensemble.on_pass_to.as_ensemble_name(),
+                GraphEdgeCondition::Pass,
+            ),
+            (
+                doc_ensemble
+                    .on_fail_to
+                    .as_ref()
+                    .and_then(GraphExportEnsembleTarget::as_ensemble_name),
+                GraphEdgeCondition::Fail,
+            ),
+        ];
+        for (target_name, condition) in exits {
+            let Some(target_name) = target_name else {
+                continue;
+            };
+            let Some(target_index) = document
+                .ensembles
+                .iter()
+                .position(|candidate| candidate.name == target_name)
+            else {
+                continue;
+            };
+            if !allocations.entries[target_index].member_ids.is_empty() {
+                continue;
+            }
+            ensembles[target_index]
+                .pending_entry_sources
+                .push((allocations.entries[source_index].join_id.clone(), condition));
+        }
     }
 
     // Defense in depth: the same structural check `graph_run` runs on every
@@ -170,7 +217,7 @@ impl<'a> ImportNameMaps<'a> {
         }
     }
 
-    fn resolve_node_name(&self, name: &str) -> Result<String, String> {
+    pub(super) fn resolve_node_name(&self, name: &str) -> Result<String, String> {
         self.name_to_id
             .get(name)
             .cloned()
@@ -392,7 +439,7 @@ pub(super) fn build_import_ensemble_plan(
     );
     edges.extend(member_edges);
 
-    edges.extend(import_extra_entry_source_edges(
+    edges.extend(super::pending::import_extra_entry_source_edges(
         doc_ensemble,
         &targets.entry_from_node,
         maps,
@@ -411,6 +458,20 @@ pub(super) fn build_import_ensemble_plan(
         graph_id,
     ));
 
+    // CM49: a crew-bound ensemble has no member edges to derive entry wiring
+    // from, so its extra entry sources are recorded as pending rows the sync
+    // path consumes once the crew supplies members. A literal-member ensemble
+    // wires them as real edges above (`import_extra_entry_source_edges`).
+    let pending_entry_sources = if doc_ensemble.crew.is_some() {
+        super::pending::crew_bound_pending_entry_sources(
+            doc_ensemble,
+            &targets.entry_from_node,
+            maps,
+        )?
+    } else {
+        Vec::new()
+    };
+
     let ensemble =
         import_ensemble_record(doc_ensemble, import_kind, allocated, targets, graph_id, now);
 
@@ -420,6 +481,7 @@ pub(super) fn build_import_ensemble_plan(
             members,
             member_nodes,
             join_node,
+            pending_entry_sources,
         },
         edges,
     ))
@@ -515,50 +577,6 @@ pub(super) fn build_import_member_wiring(
     }
 
     (member_nodes, members, edges)
-}
-
-/// CB71: restore every extra entry source as one edge per member,
-/// exactly the shape `Database::add_ensemble_entry_source` writes at
-/// authoring time. A source duplicating the primary (same node AND
-/// condition) or another extra is refused, never silently doubled.
-pub(super) fn import_extra_entry_source_edges(
-    doc_ensemble: &GraphExportEnsemble,
-    entry_from_node: &str,
-    maps: &ImportNameMaps<'_>,
-    member_node_ids: &[String],
-    graph_id: &str,
-) -> Result<Vec<GraphEdge>, String> {
-    let mut entry_source_keys: std::collections::HashSet<(String, GraphEdgeCondition)> =
-        std::collections::HashSet::new();
-    entry_source_keys.insert((
-        entry_from_node.to_string(),
-        doc_ensemble.entry_condition.clone(),
-    ));
-    let mut edges: Vec<GraphEdge> = Vec::new();
-    for source in &doc_ensemble.extra_entry_sources {
-        let from_id = maps
-            .resolve_node_name(&source.from_node)
-            .map_err(|e| format!("Ensemble '{}' extra entry source {e}.", doc_ensemble.name))?;
-        if !entry_source_keys.insert((from_id.clone(), source.condition.clone())) {
-            return Err(format!(
-                "Ensemble '{}' lists entry source '{}' with condition '{}' more than once — the primary entry already uses it; remove the duplicate from extra_entry_sources.",
-                doc_ensemble.name,
-                source.from_node,
-                source.condition.as_str(),
-            ));
-        }
-        for member_node_id in member_node_ids {
-            edges.push(GraphEdge {
-                id: uuid::Uuid::new_v4().to_string(),
-                spec_id: None,
-                graph_id: Some(graph_id.to_string()),
-                from_node: from_id.clone(),
-                to_node: member_node_id.clone(),
-                condition: source.condition.clone(),
-            });
-        }
-    }
-    Ok(edges)
 }
 
 /// The ensemble's engine-managed quorum (join) node.

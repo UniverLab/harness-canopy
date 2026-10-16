@@ -777,6 +777,19 @@ leaves the binding pending — a pending ensemble cannot dispatch until
 a crew of that name is created, and `graph_preflight` reports it as
 `would_fail`.
 
+A crew-bound ensemble travels without `members` (the crew supplies them)
+but *not* without its wiring: an absent `members` key is simply an empty
+list, and the ensemble's `entry_from_node`/`entry_condition`, every
+`extra_entry_sources` item, and any `on_pass_to`/`on_fail_to` exit
+chained into another ensemble are all recorded at import. They are wired
+through the same sync path the engine already uses the moment the crew's
+members are materialised — during the import when the crew exists
+locally, or on the crew's first sync (dispatch, or `crew_create`/
+`crew_update`) when it is created later. Either way the result is a fully
+wired ensemble, so a shared design reaching a machine that has the crews
+arrives runnable; a document that names neither a crew nor any members is
+still refused, naming the ensemble.
+
 An [ensemble](#ensembles) round-trips as one ensemble — not as its
 expanded member/quorum nodes — via its own `ensembles` array entry.
 The `entry_from_node`, `on_pass_to`, and `on_fail_to` fields use a bare

@@ -300,9 +300,11 @@ pub(super) fn tx_ensemble_graph_scope(
     Ok((spec_id, graph_id, join_node_id, member_ids))
 }
 
-/// Entry sources read inside a transaction — same shape as
-/// [`ensemble_entry_sources`], but querying the rows the transaction itself
-/// sees.
+/// Entry sources read inside a transaction — the row's primary entry, every
+/// pending source recorded at import (a crew-bound ensemble whose members are
+/// not materialized yet; see `domain/graph_transfer/pending.rs`), plus the
+/// edges into its members with the same shape as
+/// [`ensemble_entry_sources`].
 pub(super) fn tx_entry_sources(
     tx: &rusqlite::Transaction<'_>,
     ensemble_id: &str,
@@ -311,6 +313,43 @@ pub(super) fn tx_entry_sources(
 ) -> Result<Vec<(String, GraphEdgeCondition)>> {
     let mut sources = Vec::new();
     let mut seen = std::collections::HashSet::new();
+
+    // The row's primary entry names the first source even when no edge
+    // materializes it yet — a crew-bound ensemble's members are supplied
+    // later, so its entry fan-out has nothing to derive from until then.
+    let (row_entry, row_condition_raw): (String, String) = tx.query_row(
+        "SELECT entry_from_node, entry_condition FROM ensembles WHERE id = ?1",
+        params![ensemble_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if let Some(row_condition) = GraphEdgeCondition::from_str(&row_condition_raw) {
+        if seen.insert((row_entry.clone(), row_condition.clone())) {
+            sources.push((row_entry, row_condition));
+        }
+    }
+
+    // Pending entry sources: the ensemble's extra entry sources and any
+    // chained exit that lands on it, recorded by `graph_import` because the
+    // member nodes (and so the fan-out edges) did not exist yet.
+    let mut pending_stmt = tx.prepare(
+        "SELECT from_node, condition FROM ensemble_pending_entry_sources WHERE ensemble_id = ?1",
+    )?;
+    let pending_rows = pending_stmt.query_map(params![ensemble_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in pending_rows {
+        let (from_node, condition_raw) = row?;
+        if member_ids.iter().any(|id| id == &from_node) || from_node == join_node_id {
+            continue;
+        }
+        let Some(condition) = GraphEdgeCondition::from_str(&condition_raw) else {
+            continue;
+        };
+        if seen.insert((from_node.clone(), condition.clone())) {
+            sources.push((from_node, condition));
+        }
+    }
+
     let mut stmt = tx.prepare(
         "SELECT DISTINCT from_node, condition FROM graph_edges WHERE to_node IN (
              SELECT node_id FROM ensemble_members WHERE ensemble_id = ?1
