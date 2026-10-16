@@ -708,6 +708,12 @@ impl App {
                 self.whimsg.notify_event(WhimEvent::new(kind, subject));
             }
         }
+        // Announced ids that fell out of the recent list can never be
+        // considered again; drop them so the set doesn't grow for the whole
+        // session (it otherwise holds one id per run ever announced).
+        let live: HashSet<&str> = self.recent_runs.iter().map(|run| run.id.as_str()).collect();
+        self.whimsg_announced_runs
+            .retain(|id| live.contains(id.as_str()));
     }
 
     pub(crate) fn check_log_context(&mut self) {

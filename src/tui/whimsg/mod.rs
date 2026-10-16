@@ -101,9 +101,16 @@ fn first_word(s: &str) -> &str {
     s.split_whitespace().next().unwrap_or(s)
 }
 
+/// Whether a template asks for the event's detail (`{node}`/`{spec}`);
+/// `{agent}`/`{graph}` always have the subject to fall back on.
+fn needs_detail(template: &str) -> bool {
+    template.contains("{node}") || template.contains("{spec}")
+}
+
 /// Fill an event template's placeholders from the event. `{agent}`/`{graph}`
 /// become the subject, `{spec}` the first word of the detail (a spec's id),
-/// `{node}` the detail itself.
+/// `{node}` the detail itself. Callers must have filtered out templates the
+/// event cannot fill (see [`needs_detail`]).
 fn fill_template(template: &str, ev: &WhimEvent) -> String {
     let spec = ev
         .detail
@@ -415,7 +422,19 @@ impl Whimsg {
         let templates = event_templates(ev.kind);
         let i = pick_no_repeat(&mut self.rng, templates.len(), &self.seen_event);
         self.seen_event.push(i);
-        fill_template(templates[i], ev)
+        // A template the event cannot fill would repeat the subject in its
+        // own place ("grove hit a rock at grove"), so fall back to the first
+        // template that only needs the subject.
+        let chosen = if ev.detail.is_some() || !needs_detail(templates[i]) {
+            templates[i]
+        } else {
+            templates
+                .iter()
+                .copied()
+                .find(|t| !needs_detail(t))
+                .unwrap_or(templates[i])
+        };
+        fill_template(chosen, ev)
     }
 }
 
@@ -651,6 +670,35 @@ mod tests {
             assert!(!w.active_text.contains("minimal"));
             assert!(!text_has_placeholder(&w.active_text));
         }
+    }
+
+    /// A blocked/failed graph with no recorded node never repeats the graph's
+    /// own name as the node it hit.
+    #[test]
+    fn stopped_graph_without_a_node_never_names_itself() {
+        for kind in [EventKind::GraphBlocked, EventKind::GraphFailed] {
+            let mut w = Whimsg::with_seed(13);
+            w.notify_event(WhimEvent::new(kind, "grove"));
+            for _ in 0..100 {
+                w.generate();
+                assert_eq!(w.active_text, "grove is waiting for you");
+                assert!(!text_has_placeholder(&w.active_text));
+            }
+        }
+
+        // With a node in the detail, the rock template stays reachable.
+        let mut w = Whimsg::with_seed(23);
+        w.notify_event(WhimEvent::with_detail(
+            EventKind::GraphBlocked,
+            "grove",
+            "node7",
+        ));
+        let mut saw_rock = false;
+        for _ in 0..20 {
+            w.generate();
+            saw_rock |= w.active_text.contains("node7");
+        }
+        assert!(saw_rock, "the rock template should render for a known node");
     }
 
     /// With no event, roughly a quarter of ambient generations are jokes.
