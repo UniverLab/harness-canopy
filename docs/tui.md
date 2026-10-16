@@ -136,7 +136,8 @@ WSL), **Nuclear Winter** shows as `not measurable on this system`.
 Press **F1** to open the **Canopy hub**, a centered tabbed dialog:
 **Settings** edits every registry setting in place (with the value's apply
 mode and status), **Keys** is a grouped reference of every shortcut the TUI
-handles, and **Missions & stats** lists the missions above. `Shift+←`/`Shift+→`
+handles, and **Missions & stats** lists all the missions above — unlocked
+ones in full colour, locked ones dimmed. `Shift+←`/`Shift+→`
 switch tabs, as everywhere else in Canopy; `Tab`/`Shift+Tab` and `1`/`2`/`3`
 also switch. `F1` closes the hub from any state; `Esc` closes it from the top
 level of every tab.
