@@ -91,6 +91,17 @@ mod tests {
             &crate::domain::canopy_config::CanopyConfig::default(),
         )
         .expect("create app");
+        // `App::new`'s refresh ranks the list by activity, which for three
+        // just-registered projects is their root nodes' registration
+        // timestamps (one-second resolution) — so the order depends on which
+        // second each upsert happened to land in. Pin the order the type-ahead
+        // tests below assume, the same way `app/project_filter.rs` does.
+        app.projects = vec![
+            project("h-aardvark", "aardvark"),
+            project("h-cadforge", "cadforge"),
+            project("h-canopy", "canopy"),
+        ];
+        app.selected_project = 0;
         app.sidebar_layer = SidebarLayer::Knowledge;
         app.focus = Focus::Preview;
         (app, data_dir)
