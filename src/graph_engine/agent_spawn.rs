@@ -159,6 +159,12 @@ pub(crate) async fn spawn_and_wait_cli_process(
             .build_command_with_session(prompt, model, Some(workdir), session_id, effort, run_id)
             .map_err(|error| SpawnError::from_build(&error))?,
     };
+    // Set the child process cwd to the node's workdir, whether or not the
+    // platform supports a working-dir flag. The flag behaviour for platforms
+    // that have one is unchanged.
+    if !workdir.is_empty() {
+        command.current_dir(workdir);
+    }
     // Only appended when the caller opted in (per node.config["trust_workdir"])
     // AND the harness has a registered trust flag — never a silent default
     // (see [`CliConfig::trust_flag`]).
@@ -762,5 +768,102 @@ pub(crate) fn record_session_diff(db: &Database, run_id: &str, diff: NewSessionD
             "session id capture: multiple new sessions (same-platform parallel runs?); \
              cannot attribute, leaving session_id NULL"
         ),
+    }
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+mod tests {
+    use super::*;
+    use crate::domain::cli_config::CliConfig;
+    use crate::domain::cli_strategy::CliStrategy;
+
+    /// Every graph node spawn — cold start and resume — must run the child in
+    /// the node's workdir, even when the platform has no working-dir flag
+    /// (`supports_working_dir = false`, opencode's case). This does not use the
+    /// flag: a fake harness records its own `pwd -P`, and both spawns must
+    /// record the workdir. With the `current_dir` call removed, the fake
+    /// records the test process's cwd and this fails.
+    #[tokio::test]
+    async fn spawn_sets_workdir_cwd_for_cold_and_resume() {
+        let workdir = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let record = scratch.path().join("cwd_record.txt");
+        let record_str = record.to_string_lossy().to_string();
+
+        // Fake harness: records its physical cwd and ignores its argv.
+        let fake_bin = scratch.path().join("fake-cwd-cli");
+        std::fs::write(&fake_bin, format!("#!/bin/sh\npwd -P >> '{record_str}'\n")).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        // `supports_working_dir = false` means no flag can carry the workdir;
+        // only the child's cwd can. `session_resume_cmd` gives the resume path
+        // a flag to inject.
+        let cli_config = CliConfig {
+            name: "fake-cwd".to_string(),
+            binary: fake_bin.to_string_lossy().to_string(),
+            supports_working_dir: false,
+            session_resume_cmd: Some("--resume".to_string()),
+            ..Default::default()
+        };
+        let strategy = CliStrategy::from_cli_config(&cli_config);
+        let workdir_str = workdir.path().to_string_lossy().to_string();
+
+        // Cold start.
+        let cold = spawn_and_wait_cli_process(
+            &strategy,
+            "prompt",
+            None,
+            None,
+            &workdir_str,
+            5,
+            None,
+            None,
+            false,
+            Some("run-cold"),
+            |_| {},
+            None,
+        )
+        .await;
+        assert!(
+            matches!(cold, Ok(CliProcessOutcome::Finished { exit_code: 0, .. })),
+            "cold spawn must succeed"
+        );
+
+        // Resume of an existing session.
+        let resume = spawn_and_wait_cli_process(
+            &strategy,
+            "prompt",
+            None,
+            None,
+            &workdir_str,
+            5,
+            None,
+            Some("ses_resume"),
+            false,
+            Some("run-resume"),
+            |_| {},
+            None,
+        )
+        .await;
+        assert!(
+            matches!(resume, Ok(CliProcessOutcome::Finished { exit_code: 0, .. })),
+            "resume spawn must succeed"
+        );
+
+        let expected = std::fs::canonicalize(workdir.path()).unwrap();
+        let recorded = std::fs::read_to_string(&record).unwrap();
+        let lines: Vec<&str> = recorded.lines().collect();
+        assert_eq!(lines.len(), 2, "one cwd record per spawn: {recorded}");
+        for line in lines {
+            assert_eq!(
+                line.trim(),
+                expected.to_string_lossy(),
+                "child cwd must be the node workdir, not the daemon's: {recorded}"
+            );
+        }
     }
 }

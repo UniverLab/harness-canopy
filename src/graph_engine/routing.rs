@@ -421,64 +421,141 @@ pub(crate) fn terminate_run_row(db: &Database, run: &GraphNodeRun, reason: &str,
         Some(&serde_json::json!({ "terminated": true, "reason": reason })),
         Some(chrono::Utc::now()),
     );
-    // CB84: end the harness session (best-effort, async, detached).
+    // CB84: end the harness session (best-effort, async, detached) and record
+    // the outcome on the run row.
     let platform = run.executed_platform.clone().unwrap_or_default();
     let run_clone = run.clone();
     let workdir = workdir.to_string();
+    let run_id = run.id.clone();
+    let db_clone = db.clone();
     if !platform.is_empty() {
         tokio::spawn(async move {
-            end_harness_session(&platform, &run_clone, &workdir).await;
+            let outcome = end_harness_session(&platform, &run_clone, &workdir).await;
+            record_session_end(&db_clone, &run_id, &outcome).await;
         });
     }
 }
 
-/// CB84: end the harness session behind a terminated node run. Best-effort —
-/// never fails the caller. Looks up the session id from the run row first,
-/// then by title from the platform's session list. Runs the platform's
-/// session-end command with a 30s timeout.
-pub(crate) async fn end_harness_session(platform: &str, run: &GraphNodeRun, workdir: &str) {
+/// CB84: end the harness session behind a terminated node run. Returns a
+/// String outcome for recording on the run row. Best-effort — never fails
+/// the caller.
+pub(crate) async fn end_harness_session(
+    platform: &str,
+    run: &GraphNodeRun,
+    workdir: &str,
+) -> String {
     let Some(cli_config) = load_cli_config(platform) else {
-        return;
+        return "not configured".to_string();
     };
+    if cli_config.session_end_args.is_none() {
+        return "not configured".to_string();
+    }
     let strategy = crate::domain::cli_strategy::CliStrategy::from_cli_config(&cli_config);
 
-    // Resolve session id: from the run row first, then by title lookup.
-    let session_id = if let Some(sid) = &run.session_id {
-        Some(sid.clone())
-    } else {
-        lookup_session_id_by_title(&strategy, workdir, &run.id).await
-    };
-
+    let session_id = resolve_session_id(&strategy, run, workdir, &cli_config).await;
     let Some(session_id) = session_id else {
-        return;
+        return "not found".to_string();
     };
 
-    let Some(mut cmd) = strategy.build_session_end_command(&session_id, workdir) else {
-        return;
+    run_session_end_command(&strategy, &session_id, workdir, &run.id).await
+}
+
+/// Resolve the session id for a run: from the run row first, then by title
+/// lookup. If title lookup finds nothing and the platform has session_list_args,
+/// retry with the home directory (for sessions created before the cwd fix).
+async fn resolve_session_id(
+    strategy: &crate::domain::cli_strategy::CliStrategy,
+    run: &GraphNodeRun,
+    workdir: &str,
+    cli_config: &crate::domain::cli_config::CliConfig,
+) -> Option<String> {
+    if let Some(sid) = &run.session_id {
+        return Some(sid.clone());
+    }
+
+    let by_title = lookup_session_id_by_title(strategy, workdir, &run.id).await;
+    if by_title.is_some() {
+        return by_title;
+    }
+
+    // Retry with home directory if the platform has session_list_args
+    // (covers sessions created before the cwd fix).
+    if cli_config.session_list_args.is_some() {
+        if let Some(home) = dirs::home_dir() {
+            let home_str = home.to_string_lossy().to_string();
+            if let Some(id) = lookup_session_id_by_title(strategy, &home_str, &run.id).await {
+                return Some(id);
+            }
+        }
+    }
+
+    None
+}
+
+/// Run the platform's session-end command with a 30s timeout. Returns the
+/// outcome string for recording.
+async fn run_session_end_command(
+    strategy: &crate::domain::cli_strategy::CliStrategy,
+    session_id: &str,
+    workdir: &str,
+    run_id: &str,
+) -> String {
+    let Some(mut cmd) = strategy.build_session_end_command(session_id, workdir) else {
+        return "failed: binary not resolved".to_string();
     };
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
     let timeout = std::time::Duration::from_secs(30);
     match tokio::time::timeout(timeout, cmd.output()).await {
-        Ok(Ok(output)) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let preview = stdout.chars().take(200).collect::<String>();
-            tracing::info!(
-                run_id = %run.id,
-                session_id = %session_id,
-                exit_code = ?output.status.code(),
-                stdout_preview = %preview,
-                "harness session ended"
-            );
-        }
+        Ok(Ok(output)) => classify_session_end_output(&output, session_id, run_id),
         Ok(Err(e)) => {
-            tracing::warn!(run_id = %run.id, session_id = %session_id, error = %e, "session end command failed");
+            tracing::warn!(
+                run_id = %run_id,
+                session_id = %session_id,
+                error = %e,
+                "session end command failed"
+            );
+            format!("failed: {}", e)
         }
         Err(_) => {
-            tracing::warn!(run_id = %run.id, session_id = %session_id, "session end command timed out");
+            tracing::warn!(
+                run_id = %run_id,
+                session_id = %session_id,
+                "session end command timed out"
+            );
+            "failed: timed out".to_string()
         }
     }
+}
+
+/// Turn a finished session-end invocation into the recorded outcome: success
+/// is `ended <id>`, a non-zero exit is `failed: exit <code>`.
+fn classify_session_end_output(
+    output: &std::process::Output,
+    session_id: &str,
+    run_id: &str,
+) -> String {
+    if !output.status.success() {
+        let code = output.status.code().unwrap_or(-1);
+        tracing::warn!(
+            run_id = %run_id,
+            session_id = %session_id,
+            exit_code = %code,
+            "session end command failed"
+        );
+        return format!("failed: exit {}", code);
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let preview = stdout.chars().take(200).collect::<String>();
+    tracing::info!(
+        run_id = %run_id,
+        session_id = %session_id,
+        exit_code = ?output.status.code(),
+        stdout_preview = %preview,
+        "harness session ended"
+    );
+    format!("ended {}", session_id)
 }
 
 /// Load a CLI config by platform name from `~/.canopy/config.toml`.
@@ -486,6 +563,20 @@ fn load_cli_config(platform_name: &str) -> Option<crate::domain::cli_config::Cli
     let canopy_dir = crate::domain::prompts::canopy_dir();
     let config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
     config.get_cli(platform_name).cloned()
+}
+
+/// Record the session end outcome on the run's output JSON. Best-effort:
+/// errors are ignored so the caller is never delayed.
+pub(crate) async fn record_session_end(db: &Database, run_id: &str, outcome: &str) {
+    let Ok(Some(run)) = db.get_graph_run(run_id) else {
+        return;
+    };
+    let mut output = run.output.clone().unwrap_or_default();
+    if !output.is_object() {
+        output = serde_json::Value::Object(serde_json::Map::new());
+    }
+    output["session_end"] = serde_json::Value::String(outcome.to_string());
+    let _ = db.update_graph_run_result(run_id, run.status, Some(&output), None);
 }
 
 /// Look up a session id by title: run the platform's session-list command

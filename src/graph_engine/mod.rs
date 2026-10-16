@@ -25636,6 +25636,207 @@ binary = "{}"
         );
     }
 
+    /// Fixture for the `session_end` recording tests: a `Running` node run on
+    /// platform `fake-end`, plus the graph workdir it is scoped to. Returns the
+    /// owners so the `TempDir`/`GraphEngine` outlive the detached task.
+    #[cfg(unix)]
+    fn session_end_run(
+        run_id: &str,
+        session_id: Option<&str>,
+    ) -> (TempDir, Arc<Database>, GraphEngine, GraphNodeRun, String) {
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        let spec = standalone_spec(&format!("sid-{run_id}"), 1);
+        db.insert_graph_spec(&spec).unwrap();
+        let mut node = sample_agent_node();
+        node.spec_id = Some(spec.id.clone());
+        db.insert_graph_node(&node).unwrap();
+        let run = GraphNodeRun {
+            id: run_id.to_string(),
+            graph_id,
+            spec_id: spec.id,
+            node_id: node.id,
+            status: GraphRunStatus::Running,
+            input: None,
+            output: None,
+            started_at: chrono::Utc::now(),
+            completed_at: None,
+            iteration: 1,
+            pid: None,
+            boot_id: None,
+            session_id: session_id.map(str::to_string),
+            executed_platform: Some("fake-end".to_string()),
+            executed_model: None,
+        };
+        db.insert_graph_run(&run).unwrap();
+        let workdir = workdir_for_run(&db, &run);
+        (dir, db, engine, run, workdir)
+    }
+
+    /// Poll the run row until `terminate_run_row`'s detached task has written
+    /// its `session_end` outcome, and return that value. Panics if it never
+    /// appears, so a test can then assert the exact string.
+    #[cfg(unix)]
+    async fn wait_for_session_end(db: &Database, run_id: &str) -> serde_json::Value {
+        for _ in 0..500 {
+            if let Ok(Some(run)) = db.get_graph_run(run_id) {
+                if let Some(value) = run.output.as_ref().and_then(|o| o.get("session_end")) {
+                    return value.clone();
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("session_end was never recorded on run {run_id}");
+    }
+
+    /// Writes a fake harness that answers `session list` with `list_json` and,
+    /// for an `end` invocation, appends every argv word plus a `done=1` marker
+    /// to `record`. Returns the binary path.
+    #[cfg(unix)]
+    fn write_fake_end_session_cli(
+        scratch: &std::path::Path,
+        list_json: &str,
+        record: &std::path::Path,
+    ) -> std::path::PathBuf {
+        let record_str = record.to_string_lossy().to_string();
+        let fake_bin = scratch.join("fake-end-cli");
+        let script = format!(
+            "#!/bin/sh\ncase \"$1\" in\n  session) printf '%s\\n' '{list_json}' ;;\n  end) for arg in \"$@\"; do echo \"arg=$arg\" >> '{record_str}'; done; echo \"done=1\" >> '{record_str}' ;;\nesac\nexit 0\n"
+        );
+        std::fs::write(&fake_bin, script).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fake_bin
+    }
+
+    /// CB84 outcome 1: when the id is not on the row, the title lookup finds the
+    /// session by `canopy-<run_id>` and the end command runs with that id — the
+    /// run output then carries `session_end: "ended <id>"`. Fails if the
+    /// detached task never records anything, or records a different outcome.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminate_run_row_records_session_ended_by_title() {
+        let home = tempdir().unwrap();
+        let canopy_dir = home.path().join(".canopy");
+        std::fs::create_dir_all(&canopy_dir).unwrap();
+
+        let scratch = tempdir().unwrap();
+        let record = scratch.path().join("end_record.txt");
+        let fake_bin = write_fake_end_session_cli(
+            scratch.path(),
+            r#"[{"id":"ses_found","title":"canopy-run-title-end"}]"#,
+            &record,
+        );
+        std::fs::write(
+            canopy_dir.join("config.toml"),
+            format!(
+                r#"[[clis]]
+name = "fake-end"
+binary = "{}"
+session_title_flag = "--title"
+session_list_args = ["session", "list", "--format", "json"]
+session_end_args = ["end", "--session-id", "{{session_id}}"]
+"#,
+                fake_bin.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let _home = HomeGuard::set(home.path());
+
+        // No session id on the row — the id must be discovered by title.
+        let (_dir, db, _engine, run, workdir) = session_end_run("run-title-end", None);
+        terminate_run_row(&db, &run, "test termination", &workdir);
+
+        let value = wait_for_session_end(&db, "run-title-end").await;
+        assert_eq!(
+            value,
+            serde_json::json!("ended ses_found"),
+            "the found session id must be reported as ended"
+        );
+        let recorded = std::fs::read_to_string(&record).unwrap();
+        assert!(
+            recorded.contains("arg=--session-id") && recorded.contains("arg=ses_found"),
+            "the end command must run with the id found by title: {recorded}"
+        );
+    }
+
+    /// CB84 outcome 2: a platform with no `session_end_args` records
+    /// `"not configured"` and never invokes its binary.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminate_run_row_records_not_configured_without_session_end_args() {
+        let home = tempdir().unwrap();
+        let canopy_dir = home.path().join(".canopy");
+        std::fs::create_dir_all(&canopy_dir).unwrap();
+
+        let scratch = tempdir().unwrap();
+        let record = scratch.path().join("end_record.txt");
+        let fake_bin = write_fake_end_session_cli(scratch.path(), "[]", &record);
+        std::fs::write(
+            canopy_dir.join("config.toml"),
+            format!(
+                r#"[[clis]]
+name = "fake-end"
+binary = "{}"
+"#,
+                fake_bin.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let _home = HomeGuard::set(home.path());
+
+        let (_dir, db, _engine, run, workdir) = session_end_run("run-not-configured", None);
+        terminate_run_row(&db, &run, "test termination", &workdir);
+
+        let value = wait_for_session_end(&db, "run-not-configured").await;
+        assert_eq!(value, serde_json::json!("not configured"));
+        assert!(
+            !record.exists(),
+            "no session-end command may run without session_end_args"
+        );
+    }
+
+    /// CB84 outcome 3: a title lookup that matches nothing records `"not found"`
+    /// and invokes no end command.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminate_run_row_records_not_found_for_unmatched_title() {
+        let home = tempdir().unwrap();
+        let canopy_dir = home.path().join(".canopy");
+        std::fs::create_dir_all(&canopy_dir).unwrap();
+
+        let scratch = tempdir().unwrap();
+        let record = scratch.path().join("end_record.txt");
+        // The list is empty, so no title can match.
+        let fake_bin = write_fake_end_session_cli(scratch.path(), "[]", &record);
+        std::fs::write(
+            canopy_dir.join("config.toml"),
+            format!(
+                r#"[[clis]]
+name = "fake-end"
+binary = "{}"
+session_title_flag = "--title"
+session_list_args = ["session", "list", "--format", "json"]
+session_end_args = ["end", "--session-id", "{{session_id}}"]
+"#,
+                fake_bin.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let _home = HomeGuard::set(home.path());
+
+        let (_dir, db, _engine, run, workdir) = session_end_run("run-no-title", None);
+        terminate_run_row(&db, &run, "test termination", &workdir);
+
+        let value = wait_for_session_end(&db, "run-no-title").await;
+        assert_eq!(value, serde_json::json!("not found"));
+        assert!(
+            !record.exists(),
+            "no end command may run when no session id is found"
+        );
+    }
+
     /// CB84 6e: a run that completes normally (pass/fail reported by the agent
     /// via `graph_complete_node`) never triggers `end_harness_session`.  The
     /// completion path only calls `update_graph_run_result` — neither

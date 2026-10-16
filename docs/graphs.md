@@ -485,7 +485,12 @@ When a node is terminated, canopy also ends the harness session that node
 started, for platforms that declare how to end a session (opencode does).
 Without that, a terminated opencode session could be resumed by the
 platform's background service after a restart and edit the repo beside the
-next attempt.
+next attempt. Every harness node runs with the node's workdir as its
+working directory, so the session list the end step searches is the same
+one the node created. The outcome is recorded on the run's output as
+`session_end` — `"ended <id>"`, `"not configured"` (the platform declares
+no way to end a session), `"not found"` (no id on the run and no title
+match), or `"failed: <reason>"` — readable via `graph_node_run_get`.
 
 A spec interrupted by a no-verdict ensemble block (see
 [No-verdict blocks](#no-verdict-blocks)) is resumed the same way:
