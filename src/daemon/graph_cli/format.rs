@@ -16,7 +16,7 @@ pub(super) fn commit_rights_note(output: Option<&serde_json::Value>) -> String {
         .and_then(|v| v.as_str())
         .unwrap_or("?");
     format!(
-        "  \x1b[31m(no commit rights — committed {})\x1b[0m",
+        "  \x1b[31m(no commit rights — HEAD moved to {})\x1b[0m",
         head_after.chars().take(8).collect::<String>()
     )
 }

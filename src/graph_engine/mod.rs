@@ -853,6 +853,37 @@ mod tests {
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
+    /// An empty commit at a fixed author/committer date, so a test can
+    /// assert on both the commit list's contents and its rendering.
+    fn empty_commit(path: &std::path::Path, subject: &str, date: &str) {
+        let status = std::process::Command::new("git")
+            .args(["commit", "--allow-empty", "-q", "-m", subject])
+            .current_dir(path)
+            .env("GIT_AUTHOR_DATE", date)
+            .env("GIT_COMMITTER_DATE", date)
+            .status()
+            .expect("git commit failed to run");
+        assert!(status.success(), "git commit --allow-empty failed");
+    }
+
+    /// The `<short hash> <subject> (<author date>)` line git should render
+    /// for `rev`, built from the same `git log` fields the blocker's commit
+    /// listing uses.
+    fn commit_line(path: &std::path::Path, rev: &str, subject: &str) -> String {
+        let log = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .output()
+                .expect("git log failed to run");
+            assert!(output.status.success(), "git log {:?} failed", args);
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        let hash = log(&["log", "-1", "--format=%h", rev]);
+        let date = log(&["log", "-1", "--format=%ad", "--date=short", rev]);
+        format!("{hash} {subject} ({date})")
+    }
+
     #[tokio::test]
     async fn graph_engine_captures_spec_start_head_for_git_workdir() {
         let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
@@ -2122,6 +2153,135 @@ mod tests {
 
         // The unauthorized commit is reported, never rewritten away.
         assert_ne!(git_head(dir.path()), head_before);
+    }
+
+    /// The commit-rights blocker states what canopy observed — HEAD moved
+    /// from h0 to h1 while the node ran — and lists the new commits so a
+    /// commit belonging to another process (a leftover session, a hook, a
+    /// human) is visible at once. It never claims the node committed: the
+    /// engine cannot know who moved HEAD.
+    #[tokio::test]
+    async fn commit_rights_blocker_lists_commits() {
+        let (dir, db, engine, _graph_id, spec_id) = graph_fixture().unwrap();
+        init_git_repo(dir.path());
+        let h0 = git_head(dir.path());
+        empty_commit(dir.path(), "alpha change", "2026-10-16T10:00:00Z");
+        empty_commit(dir.path(), "beta change", "2026-10-17T11:00:00Z");
+        let h1 = git_head(dir.path());
+
+        let exec = commit_rights_failure(
+            "Node 'worker'",
+            "node-1",
+            &h0,
+            &h1,
+            dir.path().to_str().unwrap(),
+            serde_json::json!({}),
+        )
+        .await;
+
+        db.insert_graph_node(&rights_node(&spec_id, "worker", "true", None, 1))
+            .unwrap();
+        let run_id = "run-head-move".to_string();
+        db.insert_graph_run(&GraphNodeRun {
+            id: run_id.clone(),
+            graph_id: "wf-test".to_string(),
+            spec_id,
+            node_id: "worker".to_string(),
+            status: GraphRunStatus::Fail,
+            input: None,
+            output: None,
+            started_at: chrono::Utc::now(),
+            completed_at: Some(chrono::Utc::now()),
+            iteration: 1,
+            pid: None,
+            boot_id: None,
+            session_id: None,
+            executed_platform: None,
+            executed_model: None,
+        })
+        .unwrap();
+        engine
+            .record_terminal_blocker(&run_id, "worker", &exec)
+            .unwrap();
+
+        let run = db.get_graph_run(&run_id).unwrap().unwrap();
+        let blocker = run
+            .output
+            .as_ref()
+            .and_then(|output| output.get("blocker"))
+            .and_then(Value::as_str)
+            .unwrap();
+        assert!(
+            blocker.contains(&commit_line(dir.path(), "HEAD~1", "alpha change")),
+            "blocker must list the first new commit: {blocker}"
+        );
+        assert!(
+            blocker.contains(&commit_line(dir.path(), "HEAD", "beta change")),
+            "blocker must list the second new commit: {blocker}"
+        );
+        assert!(blocker.contains(&h0), "blocker must name the old HEAD");
+        assert!(blocker.contains(&h1), "blocker must name the new HEAD");
+        assert!(
+            !blocker.contains("committed"),
+            "the blocker must not claim the node committed: {blocker}"
+        );
+
+        let message = exec
+            .output
+            .get("commit_rights_violation")
+            .and_then(|v| v.get("message"))
+            .and_then(Value::as_str)
+            .unwrap();
+        assert!(
+            !message.contains("committed"),
+            "the violation message must not claim the node committed: {message}"
+        );
+    }
+
+    /// Seven commits between the HEADs: the listing caps at 5 and reports
+    /// the remainder as `and 2 more`, so a long range never buries the
+    /// blocker — and the capped-out commits are never named.
+    #[tokio::test]
+    async fn commit_list_caps_at_five() {
+        let (dir, _db, _engine, _graph_id, _spec_id) = graph_fixture().unwrap();
+        init_git_repo(dir.path());
+        let h0 = git_head(dir.path());
+        for n in 1..=7 {
+            empty_commit(dir.path(), &format!("commit-{n}"), "2026-10-16T12:00:00Z");
+        }
+        let h1 = git_head(dir.path());
+
+        let exec = commit_rights_failure(
+            "Node 'worker'",
+            "node-1",
+            &h0,
+            &h1,
+            dir.path().to_str().unwrap(),
+            serde_json::json!({}),
+        )
+        .await;
+
+        let message = exec
+            .output
+            .get("commit_rights_violation")
+            .and_then(|v| v.get("message"))
+            .and_then(Value::as_str)
+            .unwrap();
+        assert!(message.contains("commit-7 ("), "newest listed: {message}");
+        assert!(
+            message.contains("commit-3 ("),
+            "5th newest listed: {message}"
+        );
+        assert!(
+            message.contains("and 2 more"),
+            "remainder reported: {message}"
+        );
+        assert!(!message.contains("commit-2"), "capped out: {message}");
+        assert!(!message.contains("commit-1"), "capped out: {message}");
+        assert!(
+            !message.contains("committed"),
+            "the message must not claim the node committed: {message}"
+        );
     }
 
     #[tokio::test]

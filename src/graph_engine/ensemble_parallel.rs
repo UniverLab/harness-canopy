@@ -114,8 +114,10 @@ pub(crate) async fn apply_round_robin_commit_watch(
         join_node_id,
         &watch.head_before,
         &head_after,
+        workdir,
         join_execution.output,
-    );
+    )
+    .await;
     join_execution
 }
 
@@ -599,8 +601,10 @@ pub(crate) async fn apply_parallel_commit_watch(
         join_node_id,
         &watch.head_before,
         &head_after,
+        workdir,
         execution.output,
-    );
+    )
+    .await;
     execution
 }
 

@@ -170,6 +170,53 @@ impl CommitRightsWatch {
     }
 }
 
+/// The commits between two HEADs, newest first, each rendered as
+/// `<short hash> <subject> (<author date>)` — the listing the commit-rights
+/// blocker appends so a commit that belongs to a different spec (or another
+/// process entirely, e.g. a leftover session of a previous run) is visible
+/// at a glance. Capped at 5 entries, then `and N more`: the blocker's job is
+/// diagnosis, not dumping a long range. Empty on any git failure (non-git
+/// workdir, missing ref) — the caller still reports the moved HEAD without
+/// the listing, exactly like `capture_workdir_head` never errors.
+pub(crate) async fn new_commits_between(
+    workdir: &str,
+    head_before: &str,
+    head_after: &str,
+) -> Vec<String> {
+    let Ok(output) = Command::new("git")
+        .arg("log")
+        .arg("--format=%h%x09%s%x09%ad")
+        .arg("--date=short")
+        .arg(format!("{head_before}..{head_after}"))
+        .current_dir(workdir)
+        .output()
+        .await
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let commits: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.splitn(3, '\t');
+            let hash = fields.next()?;
+            let subject = fields.next()?;
+            let date = fields.next()?;
+            Some(format!("{hash} {subject} ({date})"))
+        })
+        .collect();
+    if commits.len() > 5 {
+        let remaining = commits.len() - 5;
+        let mut capped: Vec<String> = commits.into_iter().take(5).collect();
+        capped.push(format!("and {remaining} more"));
+        capped
+    } else {
+        commits
+    }
+}
+
 /// Turn a detected commit-rights violation into the node's actual result: a
 /// deterministic FAIL carrying the reason, routed through the fail edge like
 /// any other failure.
@@ -180,18 +227,32 @@ impl CommitRightsWatch {
 /// *correct* work, made by the wrong node), and history rewriting is not
 /// something an unattended daemon should ever do on its own. Undoing is left
 /// to the operator, who now has both hashes in the run output.
-pub(crate) fn commit_rights_failure(
+///
+/// The wording never claims the node itself committed: canopy cannot know
+/// who moved HEAD — the commit may come from this node, another session, a
+/// hook, or a human — so it states the observed move and lists the new
+/// commits (capped at 5) for the human to judge.
+pub(crate) async fn commit_rights_failure(
     label: &str,
     node_id: &str,
     head_before: &str,
     head_after: &str,
+    workdir: &str,
     node_output: Value,
 ) -> NodeExecution {
-    let message = format!(
-        "{label} committed but has no commit rights: HEAD moved {head_before} -> {head_after}. \
-         Only a node configured with `commit_rights: true` may move git history. \
+    let mut message = format!(
+        "{label}: HEAD moved from {head_before} to {head_after} while it ran. \
+         The commit may come from this node or from another process (another session, a hook, a human). \
+         The run has no commit rights — only a node configured with `commit_rights: true` may move git history. \
          The commit was left in place — undo it yourself if it does not belong there."
     );
+    let commits = new_commits_between(workdir, head_before, head_after).await;
+    if !commits.is_empty() {
+        message.push_str("\nNew commits in that range:");
+        for line in &commits {
+            message.push_str(&format!("\n  {line}"));
+        }
+    }
     // Built by hand rather than with `json!` so the node's own output moves
     // in whole — it can be a full review document, and this runs on a path
     // that is already reporting a failure.

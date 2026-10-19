@@ -351,9 +351,14 @@ The engine records `git rev-parse HEAD` before and after every node it
 runs and compares the two. A node without `commit_rights` that moved
 HEAD is a deterministic **fail**, whatever the node itself reported —
 it routes through the `fail` edge like any other failure, and the
-reason (`Node 'X' committed but has no commit rights: HEAD moved
-a1b2c3 -> d4e5f6`) lands in the run output, in `canopy graph info`, and
-in the next node's `{{previous_feedback}}`.
+reason (`Node 'X': HEAD moved from a1b2c3 to d4e5f6 while it ran`,
+plus the new commits in that range, capped at 5) lands in the run
+output, in `canopy graph info`, and in the next node's
+`{{previous_feedback}}`. The engine cannot know *who* moved HEAD, so
+the message never claims the node committed: the commit may come from
+this node, another session, a hook, or a human — the listing shows
+each new commit so you can tell at a glance when it belongs to
+something else entirely.
 
 Three things are deliberate:
 

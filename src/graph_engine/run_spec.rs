@@ -544,8 +544,10 @@ impl GraphEngine {
             &node.id,
             &watch.head_before,
             &head_after,
+            ctx.workdir,
             execution.output,
-        );
+        )
+        .await;
         tracing::warn!(
             node = %node.name,
             head_before = %watch.head_before,
