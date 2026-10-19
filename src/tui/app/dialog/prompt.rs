@@ -1837,6 +1837,90 @@ mod tests {
         assert!(!entries.iter().any(|(_, _, p)| p == "canopy"));
     }
 
+    /// FR5: a store that cannot be read (missing dir, unreachable source,
+    /// no cached catalog) contributes no canopy rows — the disk skills
+    /// still show up on their own.
+    #[test]
+    fn collect_skills_for_picker_unreadable_store_yields_only_disk_entries() {
+        use crate::dynamic_skills::{GitSource, SkillStore};
+        use tempfile::tempdir;
+        let temp = tempdir().unwrap();
+        let workdir = temp.path();
+        let disk_skills = workdir.join(".agents").join("skills");
+        std::fs::create_dir_all(disk_skills.join("texforge")).unwrap();
+        std::fs::write(
+            disk_skills.join("texforge").join("SKILL.md"),
+            "---\nname: texforge\ndescription: TeX forge\n---\n# texforge\nbody\n",
+        )
+        .unwrap();
+
+        // Store dir does not exist and the source (a path that was never a
+        // repo) has no on-disk catalog cache, so nothing canopy-side is
+        // listable.
+        let missing = temp.path().join("no-such-store");
+        let store = SkillStore::new(
+            missing,
+            vec![GitSource::new(
+                temp.path()
+                    .join("no-such-source")
+                    .to_string_lossy()
+                    .to_string(),
+                None,
+            )],
+            15,
+        );
+        let entries = SimplePromptDialog::collect_skills_for_picker(workdir, Some(&store));
+        assert!(
+            entries
+                .iter()
+                .any(|(l, _, p)| l == "skill:texforge" && p == "skill"),
+            "disk entries must survive an unreadable store; got: {entries:?}"
+        );
+        assert!(
+            !entries.iter().any(|(_, _, p)| p == "canopy"),
+            "unreadable store must yield no canopy rows; got: {entries:?}"
+        );
+    }
+
+    /// FR3: a name that exists both on disk and in the canopy store yields
+    /// one row per prefix, so the user picks which one to reference.
+    #[test]
+    fn collect_skills_for_picker_same_name_in_both_prefixes() {
+        use crate::dynamic_skills::SkillStore;
+        use tempfile::tempdir;
+        let temp = tempdir().unwrap();
+        let workdir = temp.path();
+        let disk_skills = workdir.join(".agents").join("skills");
+        std::fs::create_dir_all(disk_skills.join("texforge")).unwrap();
+        std::fs::write(
+            disk_skills.join("texforge").join("SKILL.md"),
+            "---\nname: texforge\ndescription: TeX forge\n---\n# texforge\nbody\n",
+        )
+        .unwrap();
+
+        let store_dir = tempdir().unwrap();
+        std::fs::create_dir_all(store_dir.path().join("texforge")).unwrap();
+        std::fs::write(
+            store_dir.path().join("texforge").join("SKILL.md"),
+            "---\nname: texforge\ndescription: Canopy texforge\n---\n# texforge\nbody\n",
+        )
+        .unwrap();
+        let store = SkillStore::new(store_dir.path().to_path_buf(), vec![], 15);
+        let entries = SimplePromptDialog::collect_skills_for_picker(workdir, Some(&store));
+        assert!(
+            entries
+                .iter()
+                .any(|(l, _, p)| l == "skill:texforge" && p == "skill"),
+            "the disk row must stay; got: {entries:?}"
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|(l, _, p)| l == "canopy:texforge" && p == "canopy"),
+            "the canopy row must appear alongside the disk row; got: {entries:?}"
+        );
+    }
+
     #[test]
     fn build_body_renders_canopy_skill_with_skill_get_instruction() {
         let mut dialog = SimplePromptDialog::new();
