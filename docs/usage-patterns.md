@@ -414,7 +414,12 @@ Three levers, from least to most intrusive:
   recorded output of every earlier node. Use it after a crash, a rewired
   ensemble or a hand fix, instead of paying for the earlier nodes again. The
   run is refused, and names the missing node, when a prompt or check still
-  needs output that was never recorded for the spec.
+  needs output that was never recorded for the spec. On a queue-driven graph
+  the directed run restarts the spec you name — by default the graph's current
+  spec, a failed member before the next pending one — and the members queued
+  before it are skipped, so the retry does not quietly turn into the next
+  spec. The node you name always runs first, even when it is the node an
+  ensemble fans out from.
 - **Keep a related run warm.** Put specs that share context in one queue
   group. A grouped spec resumes the harness session its previous completed
   sibling used, so the repo is not analysed again from cold.
