@@ -216,7 +216,9 @@ row: `/` filters, `n` creates, `e` edits and `F4` deletes.
   preset selection. The Tools picker (opened from the `Tools` section in
   the section-add menu) lists on-disk `[skill]:`/`[global]:` skills first,
   then canopy's dynamic skills as `[canopy]:<name>` (name-sorted, local
-  cache only — no network). Selecting a `[canopy]:` entry renders
+  cache only — no network). A name present both on disk and in canopy's
+  store appears under both prefixes, so you pick which one to reference.
+  Selecting a `[canopy]:` entry renders
   `canopy skill <name> — load it with skill_get(name="<name>")` in the
   built prompt's tools block, so the agent fetches it over MCP; on-disk
   skills keep their plain `skill:<name>` entry.
