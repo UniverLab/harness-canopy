@@ -1471,6 +1471,10 @@ mod tests {
         let note = commit_rights_note(output.as_ref());
         assert!(note.contains("no commit rights"));
         assert!(note.contains("abcdef12"));
+        assert!(
+            !note.contains("committed"),
+            "the note must not claim a commit it cannot attribute: {note}"
+        );
     }
 
     #[test]

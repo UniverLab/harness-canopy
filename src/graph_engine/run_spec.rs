@@ -552,7 +552,7 @@ impl GraphEngine {
             node = %node.name,
             head_before = %watch.head_before,
             head_after = %head_after,
-            "node committed but has no commit rights"
+            "node without commit rights: HEAD moved during its run"
         );
         self.db.update_graph_run_result(
             run_id,

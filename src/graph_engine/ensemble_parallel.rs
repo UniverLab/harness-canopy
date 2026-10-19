@@ -594,7 +594,7 @@ pub(crate) async fn apply_parallel_commit_watch(
         ensemble = %ensemble_name,
         head_before = %watch.head_before,
         head_after = %head_after,
-        "ensemble member committed but has no commit rights"
+        "ensemble without commit rights: HEAD moved during its run"
     );
     execution = commit_rights_failure(
         &format!("Ensemble '{ensemble_name}' (one of its members)"),

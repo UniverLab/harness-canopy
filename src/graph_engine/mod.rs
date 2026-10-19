@@ -2219,8 +2219,20 @@ mod tests {
             blocker.contains(&commit_line(dir.path(), "HEAD", "beta change")),
             "blocker must list the second new commit: {blocker}"
         );
-        assert!(blocker.contains(&h0), "blocker must name the old HEAD");
-        assert!(blocker.contains(&h1), "blocker must name the new HEAD");
+        assert!(
+            blocker.contains(&format!(
+                "Node 'worker': HEAD moved from {h0} to {h1} while it ran"
+            )),
+            "the blocker must state the observed move while that node ran: {blocker}"
+        );
+        assert!(
+            blocker.contains("may come from this node or from another process"),
+            "the blocker must leave open who moved HEAD: {blocker}"
+        );
+        assert!(
+            blocker.contains("commit_rights: true") && blocker.contains("left in place"),
+            "the existing guidance must stay: {blocker}"
+        );
         assert!(
             !blocker.contains("committed"),
             "the blocker must not claim the node committed: {blocker}"
@@ -2232,6 +2244,12 @@ mod tests {
             .and_then(|v| v.get("message"))
             .and_then(Value::as_str)
             .unwrap();
+        assert!(
+            message.contains(&format!(
+                "Node 'worker': HEAD moved from {h0} to {h1} while it ran"
+            )),
+            "the run's own output must state which node was running: {message}"
+        );
         assert!(
             !message.contains("committed"),
             "the violation message must not claim the node committed: {message}"

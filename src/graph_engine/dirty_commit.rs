@@ -200,10 +200,12 @@ pub(crate) async fn new_commits_between(
     let commits: Vec<String> = String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter_map(|line| {
-            let mut fields = line.splitn(3, '\t');
-            let hash = fields.next()?;
-            let subject = fields.next()?;
-            let date = fields.next()?;
+            // Parsed from the right: the date has no tab and the hash has
+            // none either, so a tab inside a commit subject can never shift
+            // the fields — the rendered line keeps the spec's
+            // `<short hash> <subject> (<author date>)` shape regardless.
+            let (rest, date) = line.rsplit_once('\t')?;
+            let (hash, subject) = rest.split_once('\t')?;
             Some(format!("{hash} {subject} ({date})"))
         })
         .collect();
