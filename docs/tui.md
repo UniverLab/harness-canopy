@@ -216,9 +216,10 @@ row: `/` filters, `n` creates, `e` edits and `F4` deletes.
   preset selection. The Tools picker (opened from the `Tools` section in
   the section-add menu) lists on-disk `[skill]:`/`[global]:` skills first,
   then canopy's dynamic skills as `[canopy]:<name>` (name-sorted, local
-  cache only — no network). Selecting a `[canopy]:` entry renders a
-  `skill_get(name="...")` fetch instruction in the built prompt instead
-  of a file path.
+  cache only — no network). Selecting a `[canopy]:` entry renders
+  `canopy skill <name> — load it with skill_get(name="<name>")` in the
+  built prompt's tools block, so the agent fetches it over MCP; on-disk
+  skills keep their plain `skill:<name>` entry.
 - **Canopy protocol — once per session** — the builder prepends the
   `[CANOPY]` session-start protocol to the *first* prompt of an
   interactive session, never to the ones that follow. That fact is stored
