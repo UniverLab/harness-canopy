@@ -224,7 +224,7 @@ impl GraphEngine {
         format!("spec '{display}' (graph '{graph}', {status} {time})")
     }
 
-    /// CM43: the spec a *directed* `graph_run` (`start_node_id`) targets —
+    /// the spec a *directed* `graph_run` (`start_node_id`) targets —
     /// the first spec a FRESH dispatch would actually execute, so the plan
     /// the operator gets back names the spec the run really starts at. Unlike
     /// [`Self::preview_next_spec_id`] this never returns a queue member that

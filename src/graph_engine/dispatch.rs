@@ -12,7 +12,7 @@ pub(crate) struct DispatchCtx<'a> {
     pub(crate) graph_id: &'a str,
     pub(crate) workdir: &'a str,
     pub(crate) is_resume: bool,
-    /// CM43: when set, the first spec this run executes starts at this node
+    /// When set, the first spec this run executes starts at this node
     /// instead of at Start.
     pub(crate) directed: Option<&'a DirectedStart>,
     pub(crate) claimed_at: chrono::DateTime<chrono::Utc>,
@@ -138,15 +138,22 @@ impl GraphEngine {
         match &queue_id {
             Some(queue_id) => {
                 self.warn_stale_running_queue_members(&graph_id, queue_id)?;
+                // Members still `running` at dispatch start — besides the
+                // directed spec — are strays of a stale or inherited state.
+                // The directed resume resets them to `Pending` and defers
+                // them: the pick loop below leaves them for a later
+                // dispatch instead of running them right after the directed
+                // spec.
+                let stray_specs = self.stray_running_member_ids(&ctx, queue_id)?;
                 if self
-                    .run_resumed_queue_spec(&ctx, queue_id, &mut completed_specs)
+                    .run_resumed_queue_spec(&ctx, queue_id, &mut completed_specs, &stray_specs)
                     .await?
                     == DispatchFlow::Stop
                 {
                     return Ok(());
                 }
                 if self
-                    .run_queue_pick_loop(&ctx, queue_id, &mut completed_specs)
+                    .run_queue_pick_loop(&ctx, queue_id, &mut completed_specs, &stray_specs)
                     .await?
                     == DispatchFlow::Stop
                 {
@@ -253,14 +260,28 @@ impl GraphEngine {
         ctx: &DispatchCtx<'_>,
         queue_id: &str,
         completed_specs: &mut Vec<(String, String)>,
+        stray_specs: &[String],
     ) -> Result<DispatchFlow> {
         if !ctx.is_resume {
             return Ok(DispatchFlow::Continue);
         }
-        let Some(running_spec_id) = self.db.queue_running_spec_id(queue_id)? else {
-            return Ok(DispatchFlow::Continue);
+        // A directed resume targets its own `spec_id` first — it must not be
+        // displaced by the queue's still-`running` member, which a stale or
+        // inherited state may have left stranded. Before running the directed
+        // spec, reset every *other* Running member back to Pending so the
+        // directed spec is unambiguously the one the graph runs. When no
+        // directed spec is named, the running member stays the resume target
+        // exactly as before (and stale members are merely warned about).
+        let spec_id = if let Some(directed) = ctx.directed {
+            self.reset_stray_running_members(stray_specs)?;
+            directed.spec_id.clone()
+        } else {
+            let Some(running_spec_id) = self.db.queue_running_spec_id(queue_id)? else {
+                return Ok(DispatchFlow::Continue);
+            };
+            running_spec_id
         };
-        let Some(spec) = self.db.get_graph_spec(&running_spec_id)? else {
+        let Some(spec) = self.db.get_graph_spec(&spec_id)? else {
             return Ok(DispatchFlow::Continue);
         };
         let outcome = self
@@ -289,17 +310,70 @@ impl GraphEngine {
         }
     }
 
+    /// The still-`Running` members of `queue_id` at dispatch start, besides
+    /// the directed spec — strays of a stale or inherited state. Empty when
+    /// this dispatch is not directed: a plain resume keeps the running
+    /// member as its target.
+    fn stray_running_member_ids(
+        &self,
+        ctx: &DispatchCtx<'_>,
+        queue_id: &str,
+    ) -> Result<Vec<String>> {
+        let Some(directed) = ctx.directed else {
+            return Ok(Vec::new());
+        };
+        let mut strays = Vec::new();
+        for spec_id in self.db.list_queue_member_spec_ids(queue_id)? {
+            if spec_id == directed.spec_id {
+                continue;
+            }
+            let Some(spec) = self.db.get_graph_spec(&spec_id)? else {
+                continue;
+            };
+            if spec.status == GraphSpecStatus::Running {
+                strays.push(spec_id);
+            }
+        }
+        Ok(strays)
+    }
+
+    /// Reset the directed run's strays ([`Self::stray_running_member_ids`])
+    /// back to `Pending`. A directed resume makes its target spec the one
+    /// the graph runs; any other member left `running` by a stale or
+    /// inherited state would otherwise block the pick loop (it skips
+    /// `running` members) or displace the directed spec. Called only on the
+    /// directed path; the non-directed path warns instead
+    /// ([`warn_stale_running_queue_members`]).
+    fn reset_stray_running_members(&self, stray_specs: &[String]) -> Result<()> {
+        for spec_id in stray_specs {
+            self.db
+                .update_graph_spec_status(spec_id, GraphSpecStatus::Pending, None, None)?;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn run_queue_pick_loop(
         &self,
         ctx: &DispatchCtx<'_>,
         queue_id: &str,
         completed_specs: &mut Vec<(String, String)>,
+        stray_specs: &[String],
     ) -> Result<DispatchFlow> {
-        // CM43 queue caveat: a directed `graph_run` targets the queue's next
-        // pickable member (pending/interrupted — the same query the pick
-        // loop below uses). A member that is still `running` is never
-        // re-picked by a fresh run; `graph_continue run_from_node` is the
-        // entry point for it.
+        // A directed run makes its target spec the FIRST spec it executes —
+        // queue members before it are skipped, and every member after it runs
+        // normally from Start. `queue_next_pending_spec_id` re-queries the DB
+        // every iteration (so a queue run picks up live reordering), so an
+        // in-memory skip would re-pick the same member forever:
+        // skipped-before-directed members are materialized as `Skipped`,
+        // matching the bound-spec loop's "directed run starts later" message.
+        let order = self.db.list_queue_member_spec_ids(queue_id)?;
+        let directed_pos = ctx
+            .directed
+            .and_then(|d| order.iter().position(|id| id == &d.spec_id));
+        // Strays the directed run reset to `Pending` are deferred, not run —
+        // but they stay `Pending`, so the pick query keeps re-picking them;
+        // remember them here and stop when one comes back around.
+        let mut deferred: Vec<String> = Vec::new();
         loop {
             if self.is_paused(ctx.graph_id)? {
                 return Ok(DispatchFlow::Stop);
@@ -307,9 +381,50 @@ impl GraphEngine {
             let Some(spec_id) = self.db.queue_next_pending_spec_id(queue_id)? else {
                 break;
             };
+            if deferred.contains(&spec_id) {
+                break;
+            }
             let Some(spec) = self.db.get_graph_spec(&spec_id)? else {
                 continue;
             };
+            // A stray waits for a later dispatch — running it here would
+            // immediately re-run a spec some other node marked `running` by
+            // mistake.
+            if stray_specs.contains(&spec.id) {
+                deferred.push(spec.id);
+                continue;
+            }
+            if let Some(d_pos) = directed_pos {
+                let Some(idx) = order.iter().position(|id| id == &spec.id) else {
+                    continue;
+                };
+                if idx < d_pos {
+                    activity::record(
+                        &self.db,
+                        activity::GraphEvent {
+                            graph_id: ctx.graph_id,
+                            graph_name: &ctx.lp.name,
+                            workdir: ctx.workdir,
+                            spec_id: Some(&spec.id),
+                            node_id: None,
+                            run_id: None,
+                            kind: activity::GraphEventKind::SpecSkipped,
+                            message: format!(
+                                "Spec '{}' skipped (directed run starts later).",
+                                spec.name
+                            ),
+                            payload: None,
+                        },
+                    );
+                    self.db.update_graph_spec_status(
+                        &spec.id,
+                        GraphSpecStatus::Skipped,
+                        None,
+                        Some(chrono::Utc::now()),
+                    )?;
+                    continue;
+                }
+            }
             let outcome = self
                 .run_spec(
                     ctx.lp,
@@ -386,7 +501,7 @@ impl GraphEngine {
         specs: Vec<GraphSpec>,
         completed_specs: &mut Vec<(String, String)>,
     ) -> Result<DispatchFlow> {
-        // CM43: a directed run makes its target spec the FIRST spec it
+        // A directed run makes its target spec the FIRST spec it
         // executes — bound specs before it are skipped, and every spec after
         // it runs normally from Start.
         let mut reached_directed = ctx.directed.is_none();

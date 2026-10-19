@@ -8062,7 +8062,7 @@ echo done
         );
     }
 
-    /// CM43: `graph_run --from` must target the spec a FRESH dispatch would
+    /// `graph_run --from` must target the spec a FRESH dispatch would
     /// actually execute. [`GraphEngine::preview_next_spec_id`] returns a
     /// queue's still-`running` member first (the resumed-queue path
     /// `graph_continue` takes), but a fresh pick loop never re-picks it — so
@@ -8240,6 +8240,91 @@ echo done
             next_final.spec_start_head.as_deref(),
             Some(initial_head.as_str()),
             "the next queued member must still run, but only after the interrupted one"
+        );
+    }
+
+    /// End to end: a directed `graph_continue run_from_node` on a
+    /// queue-driven graph targets the operator-named spec even when another
+    /// member is mistakenly still `running` — it must not be displaced by the
+    /// queue's `running` cursor (`queue_running_spec_id`, which
+    /// `run_resumed_queue_spec` consulted first and resumed the wrong member).
+    /// The directed spec runs; the stale running member is reset to `Pending`
+    /// so the directed run takes over the graph.
+    #[tokio::test]
+    async fn directed_queue_resume_resets_stray_running_member() {
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        init_git_repo(dir.path());
+
+        let directed = {
+            let mut s = standalone_spec("queue-directed", 1);
+            s.status = GraphSpecStatus::Failed;
+            s
+        };
+        let stale = {
+            let mut s = standalone_spec("queue-stale-running", 2);
+            s.status = GraphSpecStatus::Running;
+            s
+        };
+        db.insert_graph_spec(&directed).unwrap();
+        db.insert_graph_spec(&stale).unwrap();
+        insert_queue_with_members(&db, "queue-1", &[&directed.id, &stale.id]);
+
+        db.insert_graph_node(&GraphNode {
+            id: "graph-check".to_string(),
+            spec_id: None,
+            graph_id: Some(graph_id.clone()),
+            name: "check".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": "printf APPROVED",
+                "success_condition": "exit_code_0"
+            }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+        db.update_graph_status(&graph_id, GraphStatus::Paused, None, None)
+            .unwrap();
+        db.set_graph_active_run_queue(&graph_id, Some("queue-1"))
+            .unwrap();
+
+        engine
+            .run_graph_dispatch(
+                graph_id.clone(),
+                Some("queue-1".to_string()),
+                None,
+                DispatchMode::resume_from(DirectedStart {
+                    spec_id: directed.id.clone(),
+                    node_arg: "check".to_string(),
+                }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let directed_after = db.get_graph_spec(&directed.id).unwrap().unwrap();
+        let stale_after = db.get_graph_spec(&stale.id).unwrap().unwrap();
+        assert_eq!(
+            directed_after.status,
+            GraphSpecStatus::Completed,
+            "the directed spec must be the one that ran, not the stale running member"
+        );
+        assert_eq!(
+            stale_after.status,
+            GraphSpecStatus::Pending,
+            "the stale running member must be reset to Pending so the directed run takes over"
+        );
+        assert!(
+            db.list_graph_runs_for_spec(&stale.id).unwrap().is_empty(),
+            "the stale member must get no new run row from this dispatch"
+        );
+        assert!(
+            !db.list_graph_runs_for_spec(&directed.id)
+                .unwrap()
+                .is_empty(),
+            "the directed spec must have run"
         );
     }
 
@@ -24591,7 +24676,7 @@ exit 0
         );
         assert!(
             blocker.contains("`graph_continue run_from_node`"),
-            "CM43: the blocked text names run_from_node as a way back in: {blocker}"
+            "the blocked text names run_from_node as a way back in: {blocker}"
         );
 
         // `graph_continue retry_current_node` must accept this spec…
@@ -26914,5 +26999,240 @@ session_end_args = ["end", "--session-id", "{{session_id}}"]
             old_stdout, "hello",
             "trailing whitespace is trimmed, as before"
         );
+    }
+    #[tokio::test]
+    async fn directed_queue_resume_runs_spec2_from_named_check_with_spec_id() {
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        init_git_repo(dir.path());
+
+        let s1 = {
+            let mut s = standalone_spec("s1", 1);
+            s.status = GraphSpecStatus::Pending;
+            s
+        };
+        let s2 = {
+            let mut s = standalone_spec("s2", 2);
+            s.status = GraphSpecStatus::Failed;
+            s
+        };
+        let s3 = {
+            let mut s = standalone_spec("s3", 3);
+            s.status = GraphSpecStatus::Pending;
+            s
+        };
+        db.insert_graph_spec(&s1).unwrap();
+        db.insert_graph_spec(&s2).unwrap();
+        db.insert_graph_spec(&s3).unwrap();
+        insert_queue_with_members(&db, "queue-1", &[&s1.id, &s2.id, &s3.id]);
+
+        db.insert_graph_node(&GraphNode {
+            id: "graph-check".to_string(),
+            spec_id: None,
+            graph_id: Some(graph_id.clone()),
+            name: "check".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": "printf APPROVED",
+                "success_condition": "exit_code_0"
+            }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+        db.update_graph_status(&graph_id, GraphStatus::Paused, None, None)
+            .unwrap();
+        db.set_graph_active_run_queue(&graph_id, Some("queue-1"))
+            .unwrap();
+
+        engine
+            .run_graph_dispatch(
+                graph_id.clone(),
+                Some("queue-1".to_string()),
+                None,
+                DispatchMode::resume_from(DirectedStart {
+                    spec_id: s2.id.clone(),
+                    node_arg: "check".to_string(),
+                }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let events = db
+            .list_graph_events(&graph_id, None, None, None, 200)
+            .unwrap();
+        let node_started_on_s2 = events
+            .iter()
+            .find(|e| e.kind == "node_started" && e.spec_id.as_deref() == Some(s2.id.as_str()))
+            .expect("first node_started on s2");
+        assert_eq!(node_started_on_s2.node_id.as_deref(), Some("graph-check"));
+    }
+
+    #[tokio::test]
+    async fn directed_queue_resume_runs_spec2_from_named_check_without_spec_id() {
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        init_git_repo(dir.path());
+
+        let s1 = {
+            let mut s = standalone_spec("s1", 1);
+            s.status = GraphSpecStatus::Pending;
+            s
+        };
+        let s2 = {
+            let mut s = standalone_spec("s2", 2);
+            s.status = GraphSpecStatus::Failed;
+            s
+        };
+        let s3 = {
+            let mut s = standalone_spec("s3", 3);
+            s.status = GraphSpecStatus::Pending;
+            s
+        };
+        db.insert_graph_spec(&s1).unwrap();
+        db.insert_graph_spec(&s2).unwrap();
+        db.insert_graph_spec(&s3).unwrap();
+        insert_queue_with_members(&db, "queue-1", &[&s1.id, &s2.id, &s3.id]);
+
+        db.insert_graph_node(&GraphNode {
+            id: "graph-check".to_string(),
+            spec_id: None,
+            graph_id: Some(graph_id.clone()),
+            name: "check".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": "printf APPROVED",
+                "success_condition": "exit_code_0"
+            }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+        db.update_graph_status(&graph_id, GraphStatus::Paused, None, None)
+            .unwrap();
+        db.set_graph_active_run_queue(&graph_id, Some("queue-1"))
+            .unwrap();
+
+        // No spec_id supplied: the directed default must be the Failed member
+        // (s2), not the first Pending one (s1), so a bare
+        // `graph_continue run_from_node <node>` restarts the failed spec.
+        let resolved = crate::daemon::handler_run_exec::resolve_directed_spec(&db, &graph_id, None)
+            .expect("resolve_directed_spec without spec_id returns the failed member");
+        assert_eq!(
+            resolved.id, s2.id,
+            "the directed default must be the failed member s2"
+        );
+
+        engine
+            .run_graph_dispatch(
+                graph_id.clone(),
+                Some("queue-1".to_string()),
+                None,
+                DispatchMode::resume_from(DirectedStart {
+                    spec_id: resolved.id,
+                    node_arg: "check".to_string(),
+                }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let events = db
+            .list_graph_events(&graph_id, None, None, None, 200)
+            .unwrap();
+        let node_started_on_s2 = events
+            .iter()
+            .find(|e| e.kind == "node_started" && e.spec_id.as_deref() == Some(s2.id.as_str()))
+            .expect("first node_started on s2");
+        assert_eq!(node_started_on_s2.node_id.as_deref(), Some("graph-check"));
+    }
+
+    #[tokio::test]
+    async fn directed_queue_resume_runs_spec2_then_spec3_in_order() {
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        init_git_repo(dir.path());
+
+        let s1 = {
+            let mut s = standalone_spec("s1", 1);
+            s.status = GraphSpecStatus::Pending;
+            s
+        };
+        let s2 = {
+            let mut s = standalone_spec("s2", 2);
+            s.status = GraphSpecStatus::Failed;
+            s
+        };
+        let s3 = {
+            let mut s = standalone_spec("s3", 3);
+            s.status = GraphSpecStatus::Pending;
+            s
+        };
+        db.insert_graph_spec(&s1).unwrap();
+        db.insert_graph_spec(&s2).unwrap();
+        db.insert_graph_spec(&s3).unwrap();
+        insert_queue_with_members(&db, "queue-1", &[&s1.id, &s2.id, &s3.id]);
+
+        db.insert_graph_node(&GraphNode {
+            id: "graph-check".to_string(),
+            spec_id: None,
+            graph_id: Some(graph_id.clone()),
+            name: "check".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": "printf APPROVED",
+                "success_condition": "exit_code_0"
+            }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+        db.update_graph_status(&graph_id, GraphStatus::Paused, None, None)
+            .unwrap();
+        db.set_graph_active_run_queue(&graph_id, Some("queue-1"))
+            .unwrap();
+
+        engine
+            .run_graph_dispatch(
+                graph_id.clone(),
+                Some("queue-1".to_string()),
+                None,
+                DispatchMode::resume_from(DirectedStart {
+                    spec_id: s2.id.clone(),
+                    node_arg: "check".to_string(),
+                }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let events = db
+            .list_graph_events(&graph_id, None, None, None, 200)
+            .unwrap();
+        let spec_started: Vec<_> = events.iter().filter(|e| e.kind == "spec_started").collect();
+        // s2 starts before s3. s2 emits a directed-start event too, so it can
+        // appear twice — assert on positions, not a fixed index.
+        let s2_pos = spec_started
+            .iter()
+            .position(|e| e.spec_id.as_deref() == Some(s2.id.as_str()))
+            .expect("s2 must have a spec_started event");
+        let s3_pos = spec_started
+            .iter()
+            .position(|e| e.spec_id.as_deref() == Some(s3.id.as_str()))
+            .expect("s3 must have a spec_started event");
+        assert!(s2_pos < s3_pos, "s2 must start before s3");
+        assert!(
+            !spec_started
+                .iter()
+                .any(|e| e.spec_id.as_deref() == Some(s1.id.as_str())),
+            "s1 must be skipped, not started"
+        );
+
+        let s1_after = db.get_graph_spec(&s1.id).unwrap().unwrap();
+        assert_eq!(s1_after.status, GraphSpecStatus::Skipped);
     }
 }

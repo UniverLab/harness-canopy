@@ -1,6 +1,6 @@
 use super::*;
 
-/// CM43 req 6: the directed-start activity message — the start node, the
+/// the directed-start activity message — the start node, the
 /// nodes skipped between Start and it, the outputs reused (by node and run
 /// id), and the counter restart.
 fn directed_start_message(
@@ -112,7 +112,7 @@ impl GraphEngine {
             None,
         )?;
 
-        // CM43 req 6: record the directed start on the run's activity feed —
+        // record the directed start on the run's activity feed —
         // the start node, the nodes skipped between Start and it, the
         // outputs reused (by node and run id), and the counter restart.
         if let Some(start) = directed.filter(|d| d.spec_id == spec.id) {

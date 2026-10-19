@@ -503,8 +503,11 @@ the blocked spec from its entry node.
 When the work up to some node is already done and good — after a crash,
 a rewired ensemble, or a hand fix — a **directed run** starts a spec at
 a node you choose instead of at Start: `graph_continue run_from_node
---spec <spec>` (or `graph_run --from` for the first spec the run
-executes). It reuses every earlier node's most recent recorded output
+[--spec <spec>]` (or `graph_run --from` for the first spec the run
+executes). `--spec` is optional: on a queue-driven graph it defaults to the
+graph's current spec — a failed or running member first, otherwise the next
+pending one — so a bare directed run restarts a failed spec rather than the
+next fresh one. It reuses every earlier node's most recent recorded output
 for that spec, sets the spec cursor to the start node, and then runs the
 graph with its normal edges, routers, ensembles and gates. The per-node
 iteration counters restart at 1 (earlier attempts stay in the run

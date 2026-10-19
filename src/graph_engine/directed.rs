@@ -68,8 +68,10 @@ pub(crate) struct DirectedPlan {
 
 /// Resolve the operator's `node_arg` to a cursor within one spec's effective graph.
 /// Ordered rules: exact ensemble name; then exact node id, exact node name, unique id
-/// prefix; a join or member is refused naming its ensemble; the ensemble's fan-out
-/// source (`entry_from_node`) targets the ensemble; anything else is a plain node.
+/// prefix; a join or member is refused naming its ensemble; anything else is a plain
+/// node. A node that is an ensemble's fan-out source (`entry_from_node`) is a plain
+/// node — routing fans out to the ensemble after it runs, so it is never reported as
+/// skipped and never replaced by its successor.
 pub(crate) fn resolve_directed_target(
     node_arg: &str,
     nodes: &[GraphNode],
@@ -93,12 +95,10 @@ pub(crate) fn resolve_directed_target(
             details.ensemble.name
         );
     }
-    if let Some(details) = ensembles
-        .iter()
-        .find(|d| d.ensemble.entry_from_node == node.id)
-    {
-        return Ok(ensemble_target(details, nodes, edges));
-    }
+    // A node that is an ensemble's fan-out source (`entry_from_node`) is a
+    // plain node — routing (routing.rs) fans out to the ensemble after it
+    // runs, so it is the start id, never reported as skipped, never replaced
+    // by its successor. Do NOT redirect to the ensemble here.
     let entry = find_entry_node(nodes, edges, "directed")?;
     let start_node_ids = vec![node.id.clone()];
     Ok(DirectedTarget {
@@ -603,7 +603,12 @@ mod tests {
         assert_eq!(by_name.cursor, SpecCursor::Ensemble("ens".to_string()));
 
         let by_entry = resolve_directed_target("A", &nodes, &edges, &ensembles).unwrap();
-        assert_eq!(by_entry.cursor, SpecCursor::Ensemble("ens".to_string()));
+        assert_eq!(by_entry.cursor, SpecCursor::Node("A".to_string()));
+        assert!(
+            !by_entry.skipped_nodes.contains(&"A".to_string()),
+            "the named node must not be listed as skipped: {:?}",
+            by_entry.skipped_nodes
+        );
 
         let runs = vec![];
         let directed = DirectedStart {

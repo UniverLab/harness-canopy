@@ -16932,7 +16932,7 @@ mod endpoint_tests {
         assert!(text(&bad_action).contains("retry_current_node, skip_next_spec or run_from_node"));
     }
 
-    // ── graph_continue run_from_node (CM43 directed runs) ───────────
+    // ── graph_continue run_from_node ───────────
 
     #[tokio::test]
     async fn graph_continue_run_from_node_refuses_a_graph_with_an_active_run() {

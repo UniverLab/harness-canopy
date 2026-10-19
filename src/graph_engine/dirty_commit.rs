@@ -325,7 +325,7 @@ pub(crate) fn resolve_spec_start(
     Option<Value>,
     HashMap<String, usize>,
 )> {
-    // CM43: a directed run starts the spec at the operator-named node
+    // A directed run starts the spec at the operator-named node
     // regardless of status, seeding every earlier node's recorded output so
     // reachable `{{output:X}}` markers still bind. `iterations` stays empty,
     // which restarts the per-node iteration counters at 1.

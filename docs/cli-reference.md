@@ -95,7 +95,7 @@ missing.
 | `canopy graph pause <id-or-name>` | Pause a running graph after the current node finishes |
 | `canopy graph continue <id-or-name> --retry-current-node` | Resume a paused graph by retrying the current node |
 | `canopy graph continue <id-or-name> --skip-next-spec` | Resume a paused graph by skipping to the next spec |
-| `canopy graph continue <id-or-name> --from <node> [--spec <spec>]` | Start a spec at a chosen node, reusing earlier nodes' recorded outputs (defaults to the graph's current spec) |
+| `canopy graph continue <id-or-name> --from <node> [--spec <spec>]` | Start a spec at a chosen node, reusing earlier nodes' recorded outputs (defaults to the graph's current spec: a failed or running member, else the next pending one) |
 | `canopy graph reset <id-or-name>` | Reset a completed/failed graph back to pending (prompts for confirmation) |
 | `canopy graph reset <id-or-name> --specs <id>...` | Reset specific spec ids, even if already completed |
 | `canopy graph reset <id-or-name> --yes` | Skip the confirmation prompt |
