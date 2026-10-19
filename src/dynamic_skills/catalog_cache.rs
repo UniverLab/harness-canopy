@@ -78,6 +78,17 @@ fn load_cache(path: &Path) -> Option<CachedCatalog> {
     toml::from_str(&content).ok()
 }
 
+/// Return a source's cached catalog entries without any network access:
+/// reads the on-disk cache file only, skipping the TTL check and never
+/// fetching or cloning the source. An unreadable or missing cache yields an
+/// empty `Vec`. Used by the Tools picker so listing canopy skills never
+/// blocks the UI on the network.
+pub fn cached_catalog(store_dir: &Path, source: &GitSource) -> Vec<CatalogEntry> {
+    load_cache(&cache_path(store_dir, source))
+        .map(|c| c.entries)
+        .unwrap_or_default()
+}
+
 fn save_cache(path: &Path, cache: &CachedCatalog) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;

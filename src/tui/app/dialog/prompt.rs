@@ -421,13 +421,22 @@ impl SimplePromptDialog {
 
     /// Collect all available skills for the skills picker.
     /// Returns `Vec<(display_label, raw_name, prefix)>`.
-    pub fn collect_skills_for_picker(workdir: &std::path::Path) -> Vec<(String, String, String)> {
+    pub fn collect_skills_for_picker(
+        workdir: &std::path::Path,
+        store: Option<&crate::dynamic_skills::SkillStore>,
+    ) -> Vec<(String, String, String)> {
         let mut entries: Vec<(String, String, String)> = Vec::new();
         let project = workdir.join(".agents").join("skills");
         add_skills_from_dir(&project, "skill", &mut entries);
         if let Some(global) = dirs::home_dir().map(|h| h.join(".agents").join("skills")) {
             if global != project {
                 add_skills_from_dir(&global, "global", &mut entries);
+            }
+        }
+        if let Some(s) = store {
+            for skill in s.list_local() {
+                let label = format!("canopy:{}", skill.name);
+                entries.push((label, skill.name.clone(), "canopy".to_string()));
             }
         }
         entries
@@ -1756,6 +1765,88 @@ mod tests {
         assert!(result.contains("<skill>"));
         assert!(result.contains("skill:code-engineering"));
         assert!(result.contains("</skill>"));
+    }
+
+    #[test]
+    fn append_tool_skill_canopy_formats_with_skill_get() {
+        let mut result = String::new();
+        append_tool_skill(&mut result, "canopy:canopy-graph-design");
+        assert!(result.contains("canopy skill canopy-graph-design"));
+        assert!(result.contains("skill_get(name=\"canopy-graph-design\")"));
+    }
+
+    #[test]
+    fn collect_skills_for_picker_includes_canopy_and_disk() {
+        use crate::dynamic_skills::SkillStore;
+        use tempfile::tempdir;
+        let temp = tempdir().unwrap();
+        let workdir = temp.path();
+        // Create disk skill
+        let disk_skills = workdir.join(".agents").join("skills");
+        std::fs::create_dir_all(disk_skills.join("texforge")).unwrap();
+        std::fs::write(
+            disk_skills.join("texforge").join("SKILL.md"),
+            "---\nname: texforge\ndescription: TeX forge\n---\n# texforge\nbody\n",
+        )
+        .unwrap();
+
+        // Create store with canopy skill installed
+        let store_dir = tempdir().unwrap();
+        std::fs::create_dir_all(store_dir.path().join("canopy-graph-design")).unwrap();
+        std::fs::write(
+            store_dir.path().join("canopy-graph-design").join("SKILL.md"),
+            "---\nname: canopy-graph-design\ndescription: Design\n---\n# canopy-graph-design\nbody\n",
+        )
+        .unwrap();
+        let store = SkillStore::new(store_dir.path().to_path_buf(), vec![], 15);
+        let entries = SimplePromptDialog::collect_skills_for_picker(workdir, Some(&store));
+        // Find entries
+        let has_texforge = entries.iter().any(|(label, name, prefix)| {
+            label == "skill:texforge" && name == "texforge" && prefix == "skill"
+        });
+        let has_canopy = entries.iter().any(|(label, name, prefix)| {
+            label == "canopy:canopy-graph-design"
+                && name == "canopy-graph-design"
+                && prefix == "canopy"
+        });
+        assert!(has_texforge, "should have texforge");
+        assert!(has_canopy, "should have canopy skill");
+        // Canopy rows after disk? Check positions
+        let texforge_idx = entries.iter().position(|(l, _, _)| l == "skill:texforge");
+        let canopy_idx = entries
+            .iter()
+            .position(|(l, _, _)| l == "canopy:canopy-graph-design");
+        assert!(texforge_idx.is_some() && canopy_idx.is_some());
+        assert!(canopy_idx.unwrap() > texforge_idx.unwrap());
+    }
+
+    #[test]
+    fn collect_skills_for_picker_no_canopy_when_none() {
+        use tempfile::tempdir;
+        let temp = tempdir().unwrap();
+        let workdir = temp.path();
+        let disk_skills = workdir.join(".agents").join("skills");
+        std::fs::create_dir_all(disk_skills.join("texforge")).unwrap();
+        std::fs::write(
+            disk_skills.join("texforge").join("SKILL.md"),
+            "---\nname: texforge\ndescription: TeX forge\n---\n# texforge\nbody\n",
+        )
+        .unwrap();
+        let entries = SimplePromptDialog::collect_skills_for_picker(workdir, None);
+        assert!(entries.iter().any(|(l, _, _)| l == "skill:texforge"));
+        assert!(!entries.iter().any(|(_, _, p)| p == "canopy"));
+    }
+
+    #[test]
+    fn build_body_renders_canopy_skill_with_skill_get_instruction() {
+        let mut dialog = SimplePromptDialog::new();
+        dialog.add_section_with_content("tools", "canopy:canopy-graph-design".to_string());
+        let body = dialog.build_body();
+        let expected = "canopy skill canopy-graph-design \u{2014} load it with skill_get(name=\"canopy-graph-design\")";
+        assert!(
+            body.contains(expected),
+            "build_body should render the canopy skill as a skill_get fetch instruction; got: {body}"
+        );
     }
 
     // ── visual_line_count edge cases ─────────────────────────────

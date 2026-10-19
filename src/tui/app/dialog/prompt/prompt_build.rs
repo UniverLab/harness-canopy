@@ -345,9 +345,17 @@ impl SimplePromptDialog {
 }
 
 pub(super) fn append_tool_skill(result: &mut String, tool_line: &str) {
-    result.push_str("  <skill>\n");
-    result.push_str(&format!("    {tool_line}\n"));
-    result.push_str("  </skill>\n\n");
+    if let Some(name) = tool_line.strip_prefix("canopy:") {
+        result.push_str("  <skill>\n");
+        result.push_str(&format!(
+            "    canopy skill {name} — load it with skill_get(name=\"{name}\")\n"
+        ));
+        result.push_str("  </skill>\n\n");
+    } else {
+        result.push_str("  <skill>\n");
+        result.push_str(&format!("    {tool_line}\n"));
+        result.push_str("  </skill>\n\n");
+    }
 }
 
 pub(super) fn strip_resources_section(prompt: &str) -> String {

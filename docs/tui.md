@@ -213,7 +213,12 @@ row: `/` filters, `n` creates, `e` edits and `F4` deletes.
   sections (instruction, context, resources, examples) and @-mention
   agent references. Press `Ctrl+L` to recall the last prompt you sent
   in the current project, restoring the full prompt text, tools, and
-  preset selection.
+  preset selection. The Tools picker (opened from the `Tools` section in
+  the section-add menu) lists on-disk `[skill]:`/`[global]:` skills first,
+  then canopy's dynamic skills as `[canopy]:<name>` (name-sorted, local
+  cache only — no network). Selecting a `[canopy]:` entry renders a
+  `skill_get(name="...")` fetch instruction in the built prompt instead
+  of a file path.
 - **Canopy protocol — once per session** — the builder prepends the
   `[CANOPY]` session-start protocol to the *first* prompt of an
   interactive session, never to the ones that follow. That fact is stored
