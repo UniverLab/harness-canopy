@@ -357,8 +357,8 @@ output, in `canopy graph info`, and in the next node's
 `{{previous_feedback}}`. The engine cannot know *who* moved HEAD, so
 the message never claims the node committed: the commit may come from
 this node, another session, a hook, or a human — the listing shows
-each new commit so you can tell at a glance when it belongs to
-something else entirely.
+each new commit as `a1b2c3d subject line (2026-10-16)` so you can tell
+at a glance when it belongs to something else entirely.
 
 Three things are deliberate:
 
