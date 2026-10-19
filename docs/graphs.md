@@ -505,16 +505,23 @@ a rewired ensemble, or a hand fix — a **directed run** starts a spec at
 a node you choose instead of at Start: `graph_continue run_from_node
 [--spec <spec>]` (or `graph_run --from` for the first spec the run
 executes). `--spec` is optional: on a queue-driven graph it defaults to the
-graph's current spec — a failed or running member first, otherwise the next
-pending one — so a bare directed run restarts a failed spec rather than the
-next fresh one. It reuses every earlier node's most recent recorded output
-for that spec, sets the spec cursor to the start node, and then runs the
-graph with its normal edges, routers, ensembles and gates. The per-node
-iteration counters restart at 1 (earlier attempts stay in the run
-history). A directed run accepts a `pending`, `paused`, `interrupted`,
+graph's current spec — an in-flight member (`running` or `interrupted`)
+first, else a `failed` one, else the next `pending` one — so a bare directed
+run restarts the failed spec rather than the next fresh one. It reuses every
+earlier node's most recent recorded output for that spec, sets the spec
+cursor to the start node, and then runs the graph with its normal edges,
+routers, ensembles and gates. On a queue-driven graph the chosen spec is
+what runs first: queue members before it are marked `skipped`, members
+after it run in their usual order, and any other member left `running` by a
+stale or mistaken state is reset to `pending` and left for a later run. The
+per-node iteration counters restart at 1 (earlier attempts stay in the run
+history). A directed run accepts a `pending`, `running`, `interrupted`,
 `failed` or `completed` spec on a graph with no active run; a running
-graph refuses. An ensemble is targeted by its name (or its fan-out
-node); a join node or a single member is refused, naming the ensemble.
+graph refuses. An ensemble is targeted by its name; targeting the node the
+ensemble fans out from starts at that node itself, runs it, and fans out
+to the ensemble from there — the named node always runs first and is never
+reported as skipped. A join node or a single ensemble member is refused,
+naming the ensemble.
 If a reachable prompt or check references a node with no recorded output
 for the spec, the run is refused and the missing node is named.
 

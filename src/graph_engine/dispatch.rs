@@ -362,14 +362,12 @@ impl GraphEngine {
         // A directed run makes its target spec the FIRST spec it executes —
         // queue members before it are skipped, and every member after it runs
         // normally from Start. `queue_next_pending_spec_id` re-queries the DB
-        // every iteration (so a queue run picks up live reordering), so an
-        // in-memory skip would re-pick the same member forever:
-        // skipped-before-directed members are materialized as `Skipped`,
-        // matching the bound-spec loop's "directed run starts later" message.
-        let order = self.db.list_queue_member_spec_ids(queue_id)?;
-        let directed_pos = ctx
-            .directed
-            .and_then(|d| order.iter().position(|id| id == &d.spec_id));
+        // every iteration (so a queue run picks up live reordering and members
+        // added mid-run), so the skip decision must re-read the order with it:
+        // a member missing from a stale snapshot would loop forever, and a live
+        // reordering would be judged against yesterday's order. Skipped
+        // before-directed members are materialized as `Skipped`, matching the
+        // bound-spec loop's "directed run starts later" message.
         // Strays the directed run reset to `Pending` are deferred, not run —
         // but they stay `Pending`, so the pick query keeps re-picking them;
         // remember them here and stop when one comes back around.
@@ -394,6 +392,10 @@ impl GraphEngine {
                 deferred.push(spec.id);
                 continue;
             }
+            let order = self.db.list_queue_member_spec_ids(queue_id)?;
+            let directed_pos = ctx
+                .directed
+                .and_then(|d| order.iter().position(|id| id == &d.spec_id));
             if let Some(d_pos) = directed_pos {
                 let Some(idx) = order.iter().position(|id| id == &spec.id) else {
                     continue;
