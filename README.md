@@ -199,7 +199,7 @@ docs/ is published at univerlab.org/canopy/docs and holds user documentation onl
 
 ---
 
-## MCP Tools (115)
+## MCP Tools (116)
 
 | Tools | Category |
 |---|---|
@@ -215,6 +215,7 @@ docs/ is published at univerlab.org/canopy/docs and holds user documentation onl
 | `blueprint_list`, `blueprint_create`, `blueprint_delete` | **Node blueprints** (3) |
 | `project_search`, `project_update`, `project_remap`, `project_register` | **Project** (4) |
 | `rag_search`, `rag_compact` | **RAG** (2) |
+| `registry_refresh` | **Platform registry** (1) |
 | `get_tools` | **Protocol** (1) |
 | `session_list` | **Interactive sessions** (1) |
 | `scheduled_send_create`, `scheduled_send_list`, `scheduled_send_cancel` | **Scheduled sends** (3) |

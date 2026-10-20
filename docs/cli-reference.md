@@ -59,6 +59,14 @@ Plain `canopy update` exits 2 on the same lookup errors.
 | `canopy uninstall --keep-shared-servers` | Only remove canopy's own `canopy` server entry; leave shared `fetch`/`filesystem` entries in place |
 | `canopy doctor` | Full health diagnostics |
 
+## Platform registry
+
+| Command | Description |
+|---|---|
+| `canopy registry refresh` | Fetch the platform registry and apply it now, ignoring the 24-hour interval the TUI's background refresh uses; prints one line per changed platform (`<platform>: changed <fields>`, local overrides as `<platform>: kept local override <fields>`), or `registry already up to date`. Rewrites only `config.toml` and the baseline file — never starts the TUI, wizard or daemon, safe while graphs run |
+| `canopy registry refresh --json` | Print the same report as JSON |
+| `canopy registry refresh --local-registry <path>` | Apply a local registry directory instead of fetching from GitHub (same flag as `canopy setup --local-registry`) |
+
 ## Graph inspection
 
 | Command | Description |

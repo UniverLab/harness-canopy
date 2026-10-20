@@ -466,6 +466,7 @@ fn merge_cli_registry_into_config(
                 registry_cli,
                 &name,
                 &mut changed_fields,
+                &mut Vec::new(),
             );
 
             // CM30 settings: canopy-side only, never registry-owned. Restore

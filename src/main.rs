@@ -49,6 +49,7 @@ use daemon::server::{run_http_server, run_stdio_server};
 use daemon::settings_cli::{handle_settings_action, SettingsAction};
 use daemon::spec_cli::{handle_spec_action, SpecAction};
 use daemon::subagent_cli::{handle_subagent_action, SubagentAction};
+use setup_module::registry_cli::{handle_registry_action, RegistryAction};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -92,6 +93,11 @@ enum Commands {
         /// skipped with a WARN and left untouched.
         #[arg(long = "force-skills")]
         force_skills: bool,
+    },
+    /// Apply the platform registry to config.toml without the TUI.
+    Registry {
+        #[command(subcommand)]
+        action: RegistryAction,
     },
     /// Remove canopy and optionally delete all local data.
     Uninstall {
@@ -271,6 +277,10 @@ async fn main() -> Result<()> {
                 setup_module::registry_fetch::set_local_registry(path);
             }
             tokio::task::block_in_place(mcp_wizard_module::run_mcp_wizard)?;
+            Ok(())
+        }
+        Some(Commands::Registry { action }) => {
+            tokio::task::block_in_place(|| handle_registry_action(action))?;
             Ok(())
         }
         Some(Commands::Uninstall {

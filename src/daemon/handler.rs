@@ -314,6 +314,7 @@ impl TaskTriggerHandler {
         router.merge(TaskTriggerHandler::tool_router_run_lifecycle());
         router.merge(TaskTriggerHandler::tool_router_meta());
         router.merge(TaskTriggerHandler::tool_router_settings());
+        router.merge(TaskTriggerHandler::tool_router_registry());
         router
     }
 }
@@ -774,6 +775,7 @@ mod tests {
         "queue_set_group",
         "rag_compact",
         "rag_search",
+        "registry_refresh",
         "remove_seed",
         "roster_check",
         "roster_clear",
@@ -897,6 +899,7 @@ mod tests {
                 "queue_set_group|3eb98961df3f175e2b84f14beecc1629cf21c635e2bef749fe79919470056082|fceee53aad275541592e779fa462c4257d72f85c1649abcfa64aeebc84cdc146",
                 "rag_compact|5d48c58fffa0c215e2b2fdcfafeb530f3fa62584e05f76bb5d6d99bd59897e84|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
                 "rag_search|8a1f6386074319d1c99700410f884ba9ed3a3f0f91276a50766cf677bf1b26cd|84c021f51349dfecbea78f5ebe89887d0f3e1e764ac91540bc20bc7e2d13ba45",
+                "registry_refresh|abfca8f63e35db90f993908eff7e4f13ba94d0b133ce72830fd5ec86df6c7908|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
                 "remove_seed|b24cd25a52f13d1714cd1a02c3156317166b33f19df049dc99326685750fc374|44f5accf3bb686511aa4445599a499601592df037d84886e46a92dccb6924c69",
                 "roster_check|80d72258ccfc8cbb6509168ff6197f0c073adc5600e7a50e9815172a65313387|86e91783cad72828f1d84fc73a2430d3a17c02833f1b448a00ba5616dabe0577",
                 "roster_clear|31c4ac456165d42a5b18c6f8ca8f37e05aafeba98ee44488bf6cfa1fbecf1720|d294066722284d29107550a44758682259c3f13cedc1d188da98d041e6eeb1cb",

@@ -1,12 +1,12 @@
 ---
 title: MCP Tools
-description: All 115 MCP tools exposed by the canopy daemon, by category.
+description: All 116 MCP tools exposed by the canopy daemon, by category.
 order: 11
 ---
 
 # MCP Tools
 
-The daemon exposes **115 MCP tools** over Streamable HTTP (port 7755) and
+The daemon exposes **116 MCP tools** over Streamable HTTP (port 7755) and
 stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 
 Writes wait up to 5 seconds for a concurrent writer. If the database is still
@@ -133,7 +133,7 @@ See [Graphs](graphs.md).
 
 Kept callable for the whole 3.x line, but excluded from tool listings
 (`tools/list`) so nothing new adopts them — call the 3.x name instead. Not
-counted in the 115 tools above.
+counted in the 116 tools above.
 
 | Deprecated name | Renamed to (3.0.0) |
 |---|---|
@@ -251,6 +251,12 @@ readable until `spec_convert` migrates them.
 | Tool | Description |
 |---|---|
 | `get_tools` | Scope-sensitive action protocols with recommended tool sets; the `session_start` scope also returns the caller's own session id |
+
+## Platform registry (1)
+
+| Tool | Description |
+|---|---|
+| `registry_refresh` | Fetch the platform registry and apply it to config.toml now, ignoring the 24-hour interval. Reports CLI fields changed, local overrides kept, and platforms added, updated or removed |
 
 ## Interactive sessions (1)
 
