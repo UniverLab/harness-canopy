@@ -102,7 +102,7 @@ See [`docs/installation.md`](docs/installation.md) for all methods and first-tim
 
 Full documentation lives in [`docs/`](docs/): installation, quick start, the
 TUI, agents and seed identities, intelligence & sync, graphs, the RAG
-pipeline, all 83 MCP tools, and the complete CLI reference.
+pipeline, all MCP tools, and the complete CLI reference.
 
 ## Contributing
 
@@ -159,7 +159,7 @@ docs/ is published at univerlab.org/canopy/docs and holds user documentation onl
 - **Full Lifecycle** — Create, update, run, pause, continue (retry or skip), reset, complete nodes, and report blockers for human intervention. `graph_schedule_autorun` resumes failed/completed graphs at a future time. Archive and restore graphs without losing history. Export and import graph designs as shareable JSON documents. Copy nodes and ensembles within or across graphs. View node run history for failure diagnosis.
 - **Event-keyed Hooks** — Agent execution, direct shell commands, or interactive messages into a live session on `on_completed`, `on_failed`, `on_blocked`, and `on_spec_completed` (e.g. documentation maintenance fires once per completion; a failing graph at midnight puts a message in the operator's session, delivered when they next open the TUI). Several hooks can serve one event in order; hooks are not retroactive and never change the graph's status.
 - **Template Variables** — Graph prompts support `{{graph_name}}`, `{{workdir}}`, `{{spec_id}}`, `{{spec_name}}`, `{{spec_content}}`, `{{node_id}}`, `{{previous_feedback}}`, and `{{spec_start_head}}` (git HEAD at spec start, for check nodes).
-- **24 MCP Tools** — Complete authoring, inspection, runtime, spec, queue, and blueprint management.
+- **MCP Tools** — Complete authoring, inspection, runtime, spec, queue, and blueprint management.
 
 ### 📚 Personal RAG Pipeline
 
@@ -199,27 +199,31 @@ docs/ is published at univerlab.org/canopy/docs and holds user documentation onl
 
 ---
 
-## MCP Tools (84)
+## MCP Tools (115)
 
-| Category | Tools |
-|----------|-------|
-| **Agent Management** (14) | `agent_add`, `agent_watch`, `agent_list`, `agent_remove`, `agent_enable`, `agent_disable`, `agent_schedule_enable`, `agent_run`, `agent_status`, `agent_models`, `agent_logs`, `agent_update`, `agent_report`, `agent_probe` |
-| **Multi-Agent Sync** (4) | `sync_declare_intent`, `sync_report_status`, `sync_broadcast`, `sync_get_context` |
-| **Intelligence V2** (8) | `intelligence_get_context`, `intelligence_upsert`, `intelligence_search`, `intelligence_graph_walk`, `intelligence_list_projects`, `intelligence_link_projects`, `intelligence_delete_node`, `intelligence_delete_relation` |
-| **Seed Identity** (5) | `get_identity`, `evolve_identity`, `create_seed`, `list_seeds`, `remove_seed` |
-| **Graph Engine** (33) | `graph_create`, `graph_update`, `graph_add_spec`, `graph_update_spec`, `graph_add_node`, `graph_update_node`, `graph_add_edge`, `graph_update_edge`, `graph_delete_edge`, `graph_delete_node`, `graph_add_ensemble`, `graph_update_ensemble`, `graph_delete_ensemble`, `graph_get`, `graph_list`, `graph_run`, `graph_reset`, `graph_schedule_autorun`, `graph_pause`, `graph_continue`, `graph_complete_node`, `graph_report_blocker`, `graph_export`, `graph_import`, `graph_archive`, `graph_restore`, `graph_node_runs_list`, `graph_node_run_get`, `graph_copy_node`, `graph_copy_ensemble`, `graph_audit_node_configs`, `graph_schedule_continue`, `graph_preflight` |
-| **Spec Backlog** (5) | `spec_create`, `spec_list`, `spec_update`, `spec_delete`, `spec_set_status` |
-| **Spec Queues** (6) | `queue_create`, `queue_add_spec`, `queue_list`, `queue_remove_spec`, `queue_reorder`, `queue_set_group` |
-| **Node Blueprints** (3) | `blueprint_list`, `blueprint_create`, `blueprint_delete` |
-| **Project** (4) | `project_search`, `project_update`, `project_remap`, `project_register` |
-| **RAG** (1) | `rag_search` |
-| **Protocol** (1) | `get_tools` |
+| Tools | Category |
+|---|---|
+| `agent_add`, `agent_watch`, `agent_list`, `agent_get`, `agent_remove`, `agent_enable`, `agent_schedule_enable`, `agent_disable`, `agent_run`, `agent_status`, `agent_models`, `agent_logs`, `agent_update`, `agent_report`, `agent_probe`, `agent_probe_recent`, `subagent_spawn`, `subagent_collect` | **Agent management** (18) |
+| `sync_declare_intent`, `sync_report_status`, `sync_broadcast`, `sync_get_context` | **Multi-agent sync** (4) |
+| `intelligence_get_context`, `intelligence_upsert`, `intelligence_search`, `intelligence_graph_walk`, `intelligence_list_projects`, `intelligence_link_projects`, `intelligence_delete_node`, `intelligence_delete_relation` | **Intelligence** (8) |
+| `get_identity`, `evolve_identity`, `create_seed`, `list_seeds`, `remove_seed` | **Seed identity** (5) |
+| `skill_list`, `skill_get` | **Skills** (2) |
+| `graph_create`, `graph_update`, `graph_add_spec`, `graph_update_spec`, `graph_remove_spec`, `graph_add_node`, `graph_update_node`, `graph_add_edge`, `graph_update_edge`, `graph_delete_edge`, `graph_delete_node`, `graph_add_ensemble`, `graph_update_ensemble`, `graph_delete_ensemble`, `crew_list`, `crew_get`, `crew_create`, `crew_update`, `crew_delete`, `config_list`, `config_get`, `config_set`, `config_reset`, `graph_get`, `graph_list`, `graph_crew`, `graph_run`, `graph_reset`, `graph_schedule_autorun`, `graph_pause`, `graph_continue`, `graph_complete_node`, `graph_report_blocker`, `graph_export`, `graph_import`, `graph_archive`, `graph_restore`, `graph_node_runs_list`, `graph_node_run_get`, `graph_events`, `graph_copy_node`, `graph_copy_ensemble`, `graph_audit_node_configs`, `graph_schedule_continue`, `graph_preflight` | **Graph engine** (45) |
+| `roster_set`, `roster_clear`, `roster_list`, `roster_check` | **Availability roster** (4) |
+| `spec_create`, `spec_list`, `spec_update`, `spec_delete`, `spec_set_status`, `spec_section_get`, `spec_convert`, `spec_note_write`, `spec_notes_get` | **Spec backlog** (9) |
+| `queue_create`, `queue_add_spec`, `queue_list`, `queue_remove_spec`, `queue_reorder`, `queue_set_group` | **Spec queues** (6) |
+| `blueprint_list`, `blueprint_create`, `blueprint_delete` | **Node blueprints** (3) |
+| `project_search`, `project_update`, `project_remap`, `project_register` | **Project** (4) |
+| `rag_search`, `rag_compact` | **RAG** (2) |
+| `get_tools` | **Protocol** (1) |
+| `session_list` | **Interactive sessions** (1) |
+| `scheduled_send_create`, `scheduled_send_list`, `scheduled_send_cancel` | **Scheduled sends** (3) |
 
 ---
 
 ## Architecture Overview
 
-- **Daemon** — Owns the MCP server (Streamable HTTP on port 7755 + stdio), scheduler, watcher engine, and database. Exposes all 83 MCP tools.
+- **Daemon** — Owns the MCP server (Streamable HTTP on port 7755 + stdio), scheduler, watcher engine, and database. Exposes all MCP tools.
 - **Scheduler** — Computes next fire times for all active tasks, sleeping until needed. Wakes instantly on changes.
 - **Watcher Engine** — Reacts to file system events, triggering tasks as defined.
 - **Executor** — Runs tasks and agents, manages locking, logs, and status.
