@@ -63,9 +63,18 @@ Plain `canopy update` exits 2 on the same lookup errors.
 
 | Command | Description |
 |---|---|
-| `canopy registry refresh` | Fetch the platform registry and apply it now, ignoring the 24-hour interval the TUI's background refresh uses; prints one line per changed platform (`<platform>: changed <fields>`, local overrides as `<platform>: kept local override <fields>`), or `registry already up to date`. Rewrites only `config.toml` and the baseline file — never starts the TUI, wizard or daemon, safe while graphs run |
-| `canopy registry refresh --json` | Print the same report as JSON |
+| `canopy registry refresh` | Fetch the platform registry and apply it now, ignoring the 24-hour interval the TUI's background refresh uses; prints one line per affected platform (`<platform>: changed <fields>`, `<platform>: kept local override <fields>`, `<platform>: added`, `<platform>: updated`, `<platform>: removed`), or `registry already up to date` when nothing changed. Rewrites only `config.toml` and the baseline file — never starts the TUI, wizard or daemon, safe while graphs run |
+| `canopy registry refresh --json` | Print the same report as JSON (`changed`, `kept`, `added`, `updated`, `deleted`, `up_to_date`) |
 | `canopy registry refresh --local-registry <path>` | Apply a local registry directory instead of fetching from GitHub (same flag as `canopy setup --local-registry`) |
+
+Registry-owned CLI fields — binary path, model flag, headless mode,
+environment variables — are rewritten from the registry. A field you edited
+yourself is kept as it is; when the registry changed that same field, the
+refresh reports it as a local override, so a refresh never overwrites your
+choice. The command needs an existing `~/.canopy/config.toml` — on a machine
+that has not run setup it fails with ``run `canopy setup` first``. The refresh
+time is recorded where the TUI's background refresh records it, so a manual
+refresh also restarts that 24-hour window.
 
 ## Graph inspection
 

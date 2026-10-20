@@ -246,17 +246,17 @@ readable until `spec_convert` migrates them.
 | `rag_search` | Semantic search over indexed documents (rate-limited) |
 | `rag_compact` | Compact the vector store now: merge fragments and prune old versions |
 
+## Platform registry (1)
+
+| Tool | Description |
+|---|---|
+| `registry_refresh` | Fetch the platform registry and apply it to config.toml now, ignoring the 24-hour interval. Takes no parameters; returns the report as JSON — `changed` and `kept` per platform, the `added`, `updated` and `deleted` platform names, and `up_to_date` |
+
 ## Protocol (1)
 
 | Tool | Description |
 |---|---|
 | `get_tools` | Scope-sensitive action protocols with recommended tool sets; the `session_start` scope also returns the caller's own session id |
-
-## Platform registry (1)
-
-| Tool | Description |
-|---|---|
-| `registry_refresh` | Fetch the platform registry and apply it to config.toml now, ignoring the 24-hour interval. Reports CLI fields changed, local overrides kept, and platforms added, updated or removed |
 
 ## Interactive sessions (1)
 
