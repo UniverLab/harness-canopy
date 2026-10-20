@@ -37,10 +37,17 @@ impl RegistryBaseline {
     }
 
     /// Persist this baseline, overwriting whatever was there before.
+    ///
+    /// Atomic (temp file + rename): a crash mid-write must never leave a
+    /// half-written baseline behind — [`Self::load`] treats an unparseable
+    /// baseline as absent, which would make the next refresh adopt registry
+    /// truth outright over possibly-customised config fields.
     pub fn save(&self, canopy_dir: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(canopy_dir)?;
         let content = toml::to_string_pretty(self).unwrap_or_default();
-        std::fs::write(canopy_dir.join(REGISTRY_BASELINE_FILE_NAME), content)
+        let temp = canopy_dir.join(format!("{REGISTRY_BASELINE_FILE_NAME}.tmp"));
+        std::fs::write(&temp, content)?;
+        std::fs::rename(&temp, canopy_dir.join(REGISTRY_BASELINE_FILE_NAME))
     }
 
     /// The baselined view of a single CLI by name, if the last refresh knew
@@ -131,6 +138,24 @@ mod tests {
         let loaded = RegistryBaseline::load(dir.path()).unwrap();
         assert_eq!(loaded.clis.len(), 1);
         assert_eq!(loaded.clis[0].name, "cursor");
+    }
+
+    /// The atomic write leaves no temp sidecar behind — the file the next
+    /// refresh reads is exactly the renamed one.
+    #[test]
+    fn save_leaves_no_temp_file_behind() {
+        let dir = TempDir::new().unwrap();
+        RegistryBaseline {
+            clis: vec![sample_cli("codex")],
+            ..Default::default()
+        }
+        .save(dir.path())
+        .unwrap();
+
+        assert!(!dir
+            .path()
+            .join(format!("{REGISTRY_BASELINE_FILE_NAME}.tmp"))
+            .exists());
     }
 
     #[test]
