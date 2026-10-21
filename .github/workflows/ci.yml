@@ -36,8 +36,7 @@ jobs:
       # underneath another — a race that surfaced as a coverage failure with a
       # green check job on the same commit. Same runner here as locally.
       use-nextest: true
-      # Trunk-based (decision 10eadef1): no version bump on PRs, and the
-      # release binaries are built by release.yml when a release is cut.
-      main-pr-checks: false
+      # Trunk-based (decision 10eadef1): the release binaries are built by
+      # release.yml when a release is cut.
       release-build: false
     secrets: inherit
