@@ -257,9 +257,21 @@ impl GraphEngine {
                 );
                 execution
             } else {
+                // A self-reported member keeps its own output; carry the
+                // process record (ended_after_verdict / session_end) onto it.
+                let mut output = run.output.clone().unwrap_or_else(|| serde_json::json!({}));
+                super::verdict_shutdown::carry_verdict_end(&mut output, &execution.output);
+                if output != run.output.clone().unwrap_or_else(|| serde_json::json!({})) {
+                    let _ = ctx.db.update_graph_run_result(
+                        &member_run_id,
+                        run.status,
+                        Some(&output),
+                        run.completed_at,
+                    );
+                }
                 NodeExecution {
                     status: run.status,
-                    output: run.output.unwrap_or_else(|| serde_json::json!({})),
+                    output,
                     summary: execution.summary,
                 }
             };

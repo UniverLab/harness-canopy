@@ -1,3 +1,4 @@
+use super::verdict_shutdown::carry_verdict_end;
 use super::*;
 
 /// the directed-start activity message — the start node, the
@@ -518,9 +519,18 @@ impl GraphEngine {
             )?;
             return Ok(execution);
         }
+        // A self-reported run keeps its own output; only the process record
+        // (ended_after_verdict / session_end) is merged onto it, never the verdict.
+        let mut output = run.output.clone().unwrap_or_else(|| serde_json::json!({}));
+        let before = output.clone();
+        carry_verdict_end(&mut output, &execution.output);
+        if output != before {
+            self.db
+                .update_graph_run_result(run_id, run.status, Some(&output), run.completed_at)?;
+        }
         Ok(NodeExecution {
             status: run.status,
-            output: run.output.clone().unwrap_or_else(|| serde_json::json!({})),
+            output,
             summary: execution.summary,
         })
     }

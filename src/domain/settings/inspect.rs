@@ -328,6 +328,7 @@ pub fn config_value(config: &CanopyConfig, key: &str) -> Value {
             Value::from(config.graphs.ensemble_max_members_sequential as i64)
         }
         "graphs.check_output_max_kib" => Value::from(config.graphs.check_output_max_kib as i64),
+        "graphs.verdict_grace_seconds" => Value::from(config.graphs.verdict_grace_seconds as i64),
         "agents.probe_timeout_seconds" => Value::from(config.agents.probe_timeout_seconds as i64),
         "clean.reclaim_min_deleted_rows" => {
             Value::from(config.clean.reclaim_min_deleted_rows as i64)

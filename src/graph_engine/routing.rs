@@ -565,6 +565,21 @@ fn load_cli_config(platform_name: &str) -> Option<crate::domain::cli_config::Cli
     config.get_cli(platform_name).cloned()
 }
 
+/// CB84 + verdict shutdown: end a terminated harness's session and record the
+/// outcome on its run row, awaiting completion (unlike the detached path used
+/// by `terminate_run_row`). Reuses `end_harness_session` + `record_session_end`.
+pub(crate) async fn end_harness_session_for_verdict(
+    db: &Database,
+    platform: &str,
+    run: &GraphNodeRun,
+    workdir: &str,
+    run_id: &str,
+) -> String {
+    let outcome = end_harness_session(platform, run, workdir).await;
+    record_session_end(db, run_id, &outcome).await;
+    outcome
+}
+
 /// Record the session end outcome on the run's output JSON. Best-effort:
 /// errors are ignored so the caller is never delayed.
 pub(crate) async fn record_session_end(db: &Database, run_id: &str, outcome: &str) {

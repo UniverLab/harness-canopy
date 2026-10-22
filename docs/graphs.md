@@ -505,6 +505,18 @@ one the node created. The outcome is recorded on the run's output as
 no way to end a session), `"not found"` (no id on the run and no title
 match), or `"failed: <reason>"` — readable via `graph_node_run_get`.
 
+An agent node that has filed its verdict must not keep running. Once the
+verdict is recorded, its process gets a grace period to exit on its own
+(`graphs.verdict_grace_seconds`, default 15; 0 disables the shutdown). If it
+is still alive when the grace period ends, canopy terminates its process
+group and ends its harness session as described above. The next node,
+ensemble member or join starts only after that process is gone; in a parallel
+ensemble each member gets the same grace period and is ended without waiting
+for the others. Termination never changes the verdict: a pass stays a pass.
+The node's output records `ended_after_verdict` — `"exited"` when the process
+left on its own, `"terminated"` when canopy ended it — readable via
+`graph_node_run_get`.
+
 A spec interrupted by a no-verdict ensemble block (see
 [No-verdict blocks](#no-verdict-blocks)) is resumed the same way:
 `graph_continue` with `retry` re-enters the blocked ensemble with its
@@ -1099,6 +1111,7 @@ retry budgets and caps. Each keeps its default until you set it.
 | `graphs.ensemble_max_members_parallel` | 8 (range 2–16) | Largest member count a `parallel` ensemble may have. Lowering it never edits an existing ensemble. |
 | `graphs.ensemble_max_members_sequential` | 16 (range 2–32) | Largest member count for a `cascade`/`round_robin` ensemble, and the largest crew. |
 | `graphs.check_output_max_kib` | 64 (range 16–4096) | Check-output tail kept, in KiB. |
+| `graphs.verdict_grace_seconds` | 15 (range 0–300) | Seconds an agent has to exit after filing its verdict before canopy terminates it. 0 disables the shutdown. |
 
 Two more engine settings sit outside the `graphs.` prefix (see
 [CLI reference](cli-reference.md#settings-reference)):

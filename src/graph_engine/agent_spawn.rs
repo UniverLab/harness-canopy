@@ -1,4 +1,5 @@
 use super::output_tee::{spawn_and_wait_tee, OutputTee};
+use super::verdict_shutdown::{guard_wait, VerdictWatch};
 use super::*;
 
 /// A failure to build or spawn the child process, classified by whether it
@@ -142,6 +143,7 @@ pub(crate) async fn spawn_and_wait_cli_process(
     run_id: Option<&str>,
     on_pid: impl FnOnce(u32),
     tee: Option<OutputTee>,
+    verdict_watch: Option<VerdictWatch>,
 ) -> Result<CliProcessOutcome, SpawnError> {
     // CB85: identity check before anything is spawned.
     if let Some(error) = ensure_platform_identity(strategy).await {
@@ -211,9 +213,10 @@ pub(crate) async fn spawn_and_wait_cli_process(
         )
     });
 
+    let watch = verdict_watch.as_ref();
     match readers {
         Some((stdout_reader, stderr_reader)) => {
-            spawn_and_wait_tee(
+            let wait = spawn_and_wait_tee(
                 child,
                 pid,
                 stdout_reader,
@@ -222,37 +225,16 @@ pub(crate) async fn spawn_and_wait_cli_process(
                 &stderr_buf,
                 tee.unwrap(),
                 timeout_minutes,
-            )
-            .await
+            );
+            guard_wait(watch, pid, wait).await
         }
         None => {
-            let timeout_result = tokio::time::timeout(
-                std::time::Duration::from_secs(timeout_minutes * 60),
-                child.wait_with_output(),
+            guard_wait(
+                watch,
+                pid,
+                super::verdict_shutdown::wait_untracked(child, pid, timeout_minutes),
             )
-            .await;
-
-            match timeout_result {
-                Ok(Ok(output)) => {
-                    let exit_code = output.status.code().unwrap_or(-1);
-                    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                    Ok(CliProcessOutcome::Finished {
-                        exit_code,
-                        stdout,
-                        stderr,
-                    })
-                }
-                Ok(Err(error)) => Err(SpawnError::transient(error.to_string())),
-                Err(_elapsed) => {
-                    if let Some(pid) = pid {
-                        crate::daemon::process::terminate_process_group_async(
-                            pid as i64, KILL_GRACE,
-                        );
-                    }
-                    Ok(CliProcessOutcome::TimedOut)
-                }
-            }
+            .await
         }
     }
 }
@@ -468,6 +450,8 @@ pub(crate) async fn run_agent_process(
 
     let capture = prepare_session_capture(db, run_id, strategy, workdir, resume_session_id).await;
 
+    let verdict = VerdictWatch::for_run(db, run_id);
+
     let outcome = spawn_and_wait_cli_process(
         strategy,
         prompt,
@@ -494,6 +478,7 @@ pub(crate) async fn run_agent_process(
             db: db.clone(),
             run_id: run_id.to_string(),
         }),
+        verdict.clone(),
     )
     .await;
 
@@ -552,6 +537,16 @@ pub(crate) async fn run_agent_process(
                 &stderr,
                 self_reported,
             );
+            super::verdict_shutdown::apply_verdict_end(
+                db,
+                cli.as_str(),
+                run.as_ref(),
+                workdir,
+                run_id,
+                verdict.as_ref(),
+                &mut exec.output,
+            )
+            .await;
             notices.stamp(&mut exec.output);
             Ok(exec)
         }
@@ -826,6 +821,7 @@ mod tests {
             Some("run-cold"),
             |_| {},
             None,
+            None,
         )
         .await;
         assert!(
@@ -846,6 +842,7 @@ mod tests {
             false,
             Some("run-resume"),
             |_| {},
+            None,
             None,
         )
         .await;

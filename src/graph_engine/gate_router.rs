@@ -565,6 +565,7 @@ pub(crate) async fn run_completion_hook_process(
             );
         },
         None,
+        None, // Hooks don't get verdict monitoring
     )
     .await;
 

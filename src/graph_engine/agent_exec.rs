@@ -1,3 +1,4 @@
+use super::verdict_shutdown::carry_verdict_end;
 use super::*;
 
 /// Execute an agent node, RESUMING its captured session (RS2) when the engine
@@ -127,7 +128,8 @@ pub(crate) async fn execute_agent_node(
     )
     .await?;
 
-    if let Some(reported) = self_reported_execution(db.get_graph_run(run_id)?.as_ref(), node) {
+    if let Some(mut reported) = self_reported_execution(db.get_graph_run(run_id)?.as_ref(), node) {
+        carry_verdict_end(&mut reported.output, &execution.output);
         return Ok(reported);
     }
     Ok(execution)
@@ -314,7 +316,8 @@ pub(crate) async fn try_resume_agent_node(
 
     let run = ctx.db.get_graph_run(ctx.run_id)?;
     // The resumed agent self-reported → route its verdict normally.
-    if let Some(reported) = self_reported_execution(run.as_ref(), ctx.node) {
+    if let Some(mut reported) = self_reported_execution(run.as_ref(), ctx.node) {
+        carry_verdict_end(&mut reported.output, &execution.output);
         return Ok(Some(reported));
     }
     // Resume flag rejected / crashed at spawn (quick, non-self-reported

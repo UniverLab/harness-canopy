@@ -55,6 +55,7 @@ mod routing;
 mod run_spec;
 mod shell_utils;
 mod spec_step;
+mod verdict_shutdown;
 
 pub(crate) use agent_exec::*;
 pub(crate) use agent_spawn::*;
@@ -438,7 +439,7 @@ mod tests {
             .into_owned()
     }
 
-    fn graph_fixture() -> Result<(TempDir, Arc<Database>, GraphEngine, String, String)> {
+    pub(crate) fn graph_fixture() -> Result<(TempDir, Arc<Database>, GraphEngine, String, String)> {
         let dir = tempdir()?;
         let db = Arc::new(Database::new(&dir.path().join(TEST_DB_FILENAME))?);
         let lp = crate::domain::graphs::Graph {
@@ -1431,7 +1432,7 @@ mod tests {
     /// run row is what `find_last_dirty_run_spec` joins. `graph_nodes` has a
     /// UNIQUE index on (graph_id, position) (`idx_graph_nodes_graph_position`
     /// in `src/db/mod.rs`) — pass a distinct `position` per node in a test.
-    fn insert_run_row(
+    pub(crate) fn insert_run_row(
         db: &Database,
         graph_id: &str,
         spec_id: &str,
@@ -11567,13 +11568,13 @@ echo done
     /// shell out to git (git reads `HOME` for `user.name`/`user.email`),
     /// intermittently failing unrelated reviewer-commit tests under
     /// `cargo test`'s default parallel execution.
-    struct HomeGuard {
+    pub(crate) struct HomeGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
         prev: Option<String>,
     }
 
     impl HomeGuard {
-        fn set(path: &std::path::Path) -> Self {
+        pub(crate) fn set(path: &std::path::Path) -> Self {
             let lock = HOME_OVERRIDE_LOCK
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -27388,6 +27389,7 @@ session_end_args = ["end", "--session-id", "{{session_id}}"]
             false,
             None,
             |_pid| {},
+            None,
             None,
         )
         .await
