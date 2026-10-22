@@ -13936,6 +13936,65 @@ mod endpoint_tests {
         );
     }
 
+    /// A name-only `spec_update` adopting a conventional title on an untyped
+    /// spec stores the subject alone — never the raw title, which would make
+    /// the commit message repeat the type (`fix(tui): fix(tui): ...`).
+    #[tokio::test]
+    async fn spec_update_name_only_conventional_title_stores_subject_and_code() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let _ = &dir;
+
+        let created = handler
+            .spec_create(Parameters(SpecCreateParams {
+                name: "Vague bug report".to_string(),
+                description: valid_spec_description(),
+                workdir: None,
+                spec_type: None,
+                spec_scope: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&created), "{}", text(&created));
+        let spec_id = db
+            .list_specs(None, None, false, None)
+            .unwrap()
+            .into_iter()
+            .find(|s| s.name == "Vague bug report")
+            .unwrap()
+            .id;
+
+        let updated = handler
+            .spec_update(Parameters(SpecUpdateParams {
+                spec_id: spec_id.clone(),
+                name: Some("fix(tui): open F1 from inside a session".to_string()),
+                description: None,
+                workdir: None,
+                spec_type: None,
+                spec_scope: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&updated), "{}", text(&updated));
+
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        assert_eq!(spec.name, "open F1 from inside a session");
+        assert_eq!(
+            spec.spec_type
+                .as_ref()
+                .map(crate::domain::spec_type::SpecType::as_str),
+            Some("fix")
+        );
+        assert_eq!(spec.spec_scope, Some("tui".to_string()));
+        assert_eq!(
+            crate::domain::spec_type::commit_message_opt(
+                spec.spec_type,
+                spec.spec_scope.as_deref(),
+                &spec.name,
+            ),
+            Some("fix(tui): open F1 from inside a session".to_string())
+        );
+    }
+
     #[tokio::test]
     async fn spec_set_status_transitions_and_rejects_bound_spec() {
         let (dir, db, handler) = endpoint_test_handler();

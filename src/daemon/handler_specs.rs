@@ -556,8 +556,17 @@ impl TaskTriggerHandler {
             return Ok(error_result(&e));
         }
 
+        // A name-only update that adopted a conventional title on an untyped
+        // spec already stored its subject in the adoption branch above; the
+        // pass-through write below must not overwrite it with the full title
+        // again (the commit message would repeat the type).
         self.db
-            .update_spec_tag_details(&spec_id, name, description, workdir)
+            .update_spec_tag_details(
+                &spec_id,
+                if adopts_type_by_name { None } else { name },
+                description,
+                workdir,
+            )
             .map_err(internal_error)?;
 
         Ok(build_spec_update_response(&spec_id))

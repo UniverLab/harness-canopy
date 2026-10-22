@@ -1,1 +1,0 @@
-Investigating 6 decisive gaps from completeness gate. Confirmed real in working tree: gap1 graph_get omits type/scope/code/commit_message; gap3 code resolution global not workdir-scoped; gap4 backlog TUI no badge; gap6 three #[allow(clippy)] suppressions. Proceeding top-down.

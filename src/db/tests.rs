@@ -7034,6 +7034,35 @@ fn resolve_spec_id_by_prefix_resolves_code() {
     assert_eq!(fetched.spec_code.as_deref(), Some("FIX-1"));
 }
 
+/// Codes are per-(workdir, type), so `FIX-1` exists in two workdirs at once:
+/// scoped resolution returns each workdir's own spec, and an unscoped lookup
+/// refuses instead of silently picking one.
+#[test]
+fn resolve_spec_code_scoped_to_workdir() {
+    let db = test_db();
+
+    for (idx, workdir) in ["/tmp/project-a", "/tmp/project-b"].iter().enumerate() {
+        let code = db.next_spec_code(workdir, SpecType::Fix).unwrap();
+        assert_eq!(code, "FIX-1");
+        let mut spec = sample_standalone_spec(&format!("spec-{idx}"), Some(workdir));
+        spec.spec_type = Some(SpecType::Fix);
+        spec.spec_code = Some(code);
+        db.insert_graph_spec(&spec).unwrap();
+    }
+
+    let resolved_a = db
+        .resolve_spec_id_by_prefix("FIX-1", Some("/tmp/project-a"))
+        .unwrap();
+    assert_eq!(resolved_a, Some("spec-0".to_string()));
+    let resolved_b = db
+        .resolve_spec_id_by_prefix("FIX-1", Some("/tmp/project-b"))
+        .unwrap();
+    assert_eq!(resolved_b, Some("spec-1".to_string()));
+
+    // Without a workdir the shared code is ambiguous: refuse, don't guess.
+    assert!(db.resolve_spec_id_by_prefix("FIX-1", None).is_err());
+}
+
 /// A legacy spec (no type) returns empty type/scope/code — the fields exist
 /// but hold `NULL`.
 #[test]
