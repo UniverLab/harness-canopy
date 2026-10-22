@@ -937,7 +937,8 @@ The CLI prints the most recent node runs in `canopy graph info <graph>`.
 Over MCP: `graph_node_runs_list { graph_id, node_id?, spec_id?, limit? }`
 returns the most recent runs first (default 20, capped at 200).
 `graph_node_run_get { run_id }` fetches one run's full stored input and
-output, including `infra_attempt`/`infra_crash` markers when present.
+output, including `infra_attempt`/`infra_crash` markers when present, and
+`ended_after_verdict`/`session_end` when an agent filed a verdict.
 Secret-shaped substrings are redacted before the output crosses the
 boundary.
 
