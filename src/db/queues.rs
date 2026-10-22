@@ -477,6 +477,30 @@ impl Database {
         Ok(count > 0)
     }
 
+    /// Whether `queue_id` has any member that is not a terminal success
+    /// (`completed` or `skipped`) — i.e. pending, interrupted, running, or
+    /// failed. Used by launch gating so a queue whose only remaining work
+    /// is settling failed member(s) can still be run, even though it is not
+    /// "stuck" in the sense [`Self::queue_has_incomplete_members`] checks.
+    pub fn queue_has_outstanding_members(&self, queue_id: &str) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM queue_members pm
+             JOIN graph_specs ls ON ls.id = pm.spec_id
+             WHERE pm.queue_id = ?1 AND ls.status NOT IN (?2, ?3)",
+            params![
+                queue_id,
+                GraphSpecStatus::Completed.as_str(),
+                GraphSpecStatus::Skipped.as_str()
+            ],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     /// Queue members that ended `failed`, in queue order, with their stored
     /// failure summary (the blocker recorded on their last graph run, if any).
     pub fn queue_failed_members(

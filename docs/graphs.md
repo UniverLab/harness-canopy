@@ -720,6 +720,12 @@ Queue membership is unaffected by `graph_run` — specs stay standalone.
 The `graph info` CLI and `graph_get` MCP tool show queue-driven progress
 by reconstructing what ran from the run history.
 
+When a queue run drains all runnable members, the graph settles on its own:
+`completed` if every member completed or was skipped, or `failed` — naming
+the failed members in its blocker/summary — if any member failed. A graph
+reported as `running` that has no node run in progress and no scheduled
+resume surfaces a `consistency_warning` in `graph_get`.
+
 ## The 36 MCP tools
 
 | Stage | Tools |

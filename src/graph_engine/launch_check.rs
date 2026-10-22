@@ -56,7 +56,7 @@ impl GraphEngine {
     ///   graph alone is not a spec and never substitutes for content.
     /// - A queue (`queue_id` is `Some`): the queue has no `pending` member *and*
     ///   no other non-terminal (`running`/`failed`) member left either — i.e.
-    ///   [`Database::queue_has_incomplete_members`] is false. Unlike bound
+    ///   `Database::queue_has_outstanding_members` (any non-completed/skipped member) is false. Unlike bound
     ///   specs, a queue is a shared queue another graph or a stale relaunch can
     ///   easily point at by mistake, so "every member already done" is
     ///   treated as an error here rather than a silent, do-nothing
@@ -80,7 +80,7 @@ impl GraphEngine {
         };
 
         if let Some(queue_id) = queue_id {
-            if !self.db.queue_has_incomplete_members(queue_id)? {
+            if !self.db.queue_has_outstanding_members(queue_id)? {
                 return Ok(Some(self.empty_spec_set_message(&lp, Some(queue_id))?));
             }
             // (CB22) Validate only the queue's own effective members: a
