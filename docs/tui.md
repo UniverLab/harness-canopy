@@ -164,7 +164,10 @@ The sidebar shows sections for the selected project:
 - **Graphs** — active graphs with spec progress (done/total) and current
   spec indicator. Selecting a graph opens the live graph view.
 - **Backlog** — standalone specs tagged to the project's workdir, not
-  yet assigned to any graph.
+  yet assigned to any graph. A spec with a type shows its code as a badge
+  before the name (`[FIX-7] open F1 from inside a session`), followed by its
+  type and scope dimmed (`(fix:tui)`). Legacy specs without a type show the
+  name alone.
 - **History** — completed and failed graphs for the project.
 
 Sections are automatically filtered by the selected project's workdir.

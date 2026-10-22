@@ -980,7 +980,10 @@ as a quick reference and counts features and bugs.
    `code = <TYPE>-<n>` with TYPE upper-cased (`FEAT-12`, `FIX-7`, `DOCS-3`)
    and `n` the next number for that type among the specs tagged with the
    same workdir (counter persisted per workdir and type; never reused,
-   even after a spec is deleted).
+   even after a spec is deleted). The code is immutable and never set by
+   callers. Setting `type` later on a legacy spec through `spec_update`
+   assigns its code at that moment; changing the type afterwards does not
+   renumber it.
 
 2. **Conventional titles.** When `spec_create`/`graph_add_spec` receive a
    name of the form `<type>(<scope>)?!?: <subject>` and no explicit `type`,
@@ -992,6 +995,13 @@ as a quick reference and counts features and bugs.
    message is `<type>(<scope>): <name>` (or `<type>: <name>` without scope).
    A deterministic commit node uses `$CANOPY_SPEC_COMMIT_MESSAGE` as the
    commit message and never guesses.
+
+4. **Opt-in enforcement.** A graph created or updated with
+   `require_spec_type: true` (default `false`) refuses a spec without a type
+   in `graph_add_spec`, and `graph_run` refuses a queue holding one, naming
+   the spec. `queue_add_spec` refuses an untyped spec while any graph has the
+   setting on, because queues are not tied to a single graph. Legacy specs
+   keep working everywhere else.
 
 **Recipe: deterministic commit node**
 

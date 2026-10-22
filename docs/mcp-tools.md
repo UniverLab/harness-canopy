@@ -79,8 +79,8 @@ was written, retry`. Nothing changed, so retry the same call.
 
 | Tool | Description |
 |---|---|
-| `graph_create` | Create a graph container |
-| `graph_update` | Update graph metadata and hooks |
+| `graph_create` | Create a graph container. `require_spec_type: true` (default `false`) makes it refuse specs without a type |
+| `graph_update` | Update graph metadata and hooks, including `require_spec_type` |
 | `graph_add_spec` | Add an ordered spec to a graph. Supports `spec_type` and `spec_scope` to enable automatic code generation. A graph with `require_spec_type: true` refuses specs without a type |
 | `graph_update_spec` | Update a graph spec. Accepts `spec_type` and `spec_scope` |
 | `graph_remove_spec` | Unbind a spec from a graph, making it a standalone backlog spec; execution history is preserved. |
@@ -192,9 +192,12 @@ platform-wide entry. An `unavailable` entry past its `until` reads as available
 
 ## Spec backlog (9)
 
+Every tool that takes a `spec_id` also accepts the spec's code (e.g. `FIX-7`),
+resolved within the caller's or the graph's workdir.
+
 | Tool | Description |
 |---|---|
-| `spec_create` | Create a standalone spec (not bound to any graph). Supports `spec_type` (Conventional Commits type: `feat`, `fix`, etc.) and `spec_scope` (e.g. `tui`) to enable automatic code generation and deterministic commit messages |
+| `spec_create` | Create a standalone spec (not bound to any graph). Supports `spec_type` (Conventional Commits type: `feat`, `fix`, etc.) and `spec_scope` (e.g. `tui`) to enable automatic code generation and deterministic commit messages. A conventional name such as `fix(tui): open F1` sets the type and scope and stores the subject alone. A spec created without a type still succeeds but returns a `warning`: it will have no code and no commit message |
 | `spec_list` | List specs, filterable by workdir, status, and `spec_type` |
 | `spec_update` | Update a spec's name, description, workdir tag, `spec_type`, or `spec_scope` |
 | `spec_delete` | Delete an unbound spec |
