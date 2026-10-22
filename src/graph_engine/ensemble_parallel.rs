@@ -183,16 +183,12 @@ pub(crate) async fn settle_parallel_member_outcome(
                 );
                 execution
             } else {
-                let mut output = run.output.clone().unwrap_or_else(|| serde_json::json!({}));
-                super::verdict_shutdown::carry_verdict_end(&mut output, &execution.output);
-                if output != run.output.clone().unwrap_or_else(|| serde_json::json!({})) {
-                    let _ = db.update_graph_run_result(
-                        &final_run_id,
-                        run.status,
-                        Some(&output),
-                        run.completed_at,
-                    );
-                }
+                let output = super::verdict_shutdown::merge_process_record(
+                    db,
+                    &final_run_id,
+                    &run,
+                    &execution.output,
+                );
                 NodeExecution {
                     status: run.status,
                     output,

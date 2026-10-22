@@ -12,7 +12,7 @@ use serde_json::Value;
 use crate::daemon::process::{terminate_process_group_async, KILL_GRACE};
 use crate::db::Database;
 use crate::domain::canopy_config::CanopyConfig;
-use crate::domain::graphs::GraphRunStatus;
+use crate::domain::graphs::{GraphNodeRun, GraphRunStatus};
 use crate::domain::prompts::canopy_dir;
 
 /// How often the run row is checked for a filed verdict.
@@ -70,9 +70,8 @@ impl VerdictWatch {
         self.ended.get().copied()
     }
 
-    /// Resolves once the run has left `Running`, i.e. its verdict is filed. A
-    /// run row that cannot be read never resolves, so nothing is terminated on
-    /// a read error.
+    /// Resolves once the run has filed a verdict. A run row that cannot be read
+    /// never resolves, so nothing is terminated on a read error.
     async fn verdict_filed(&self) {
         loop {
             if self.verdict_is_filed() {
@@ -82,12 +81,13 @@ impl VerdictWatch {
         }
     }
 
-    /// Whether the run row has left `Running` right now. An unreadable row
-    /// counts as no verdict.
+    /// Whether the run row carries a verdict (`Pass` or `Fail`) right now.
+    /// `Running`, `Interrupted` (operator stop) and `Error` (no verdict filed)
+    /// do not count. An unreadable row counts as no verdict.
     fn verdict_is_filed(&self) -> bool {
         matches!(
             self.db.get_graph_run(&self.run_id),
-            Ok(Some(run)) if run.status != GraphRunStatus::Running
+            Ok(Some(run)) if matches!(run.status, GraphRunStatus::Pass | GraphRunStatus::Fail)
         )
     }
 }
@@ -140,7 +140,7 @@ pub(crate) async fn guard_wait<T>(
 pub(crate) async fn apply_verdict_end(
     db: &Database,
     platform: &str,
-    run: Option<&crate::domain::graphs::GraphNodeRun>,
+    run: Option<&GraphNodeRun>,
     workdir: &str,
     run_id: &str,
     verdict: Option<&VerdictWatch>,
@@ -191,6 +191,28 @@ pub(crate) fn carry_verdict_end(reported: &mut Value, process: &Value) {
             map.insert(key.to_string(), value.clone());
         }
     }
+}
+
+/// Merge a self-reported node's process record onto its run row's output and
+/// persist it when it changed. The row's status and verdict are kept. A failed
+/// write is logged, not raised: the verdict is already on the row.
+pub(crate) fn merge_process_record(
+    db: &Database,
+    run_id: &str,
+    run: &GraphNodeRun,
+    process: &Value,
+) -> Value {
+    let mut output = run.output.clone().unwrap_or_else(|| serde_json::json!({}));
+    let before = output.clone();
+    carry_verdict_end(&mut output, process);
+    if output != before {
+        if let Err(error) =
+            db.update_graph_run_result(run_id, run.status, Some(&output), run.completed_at)
+        {
+            tracing::warn!(run_id, error = %error, "could not persist the verdict process record");
+        }
+    }
+    output
 }
 
 /// Wait for a child whose output is not streamed, bounded by the agent timeout
@@ -277,7 +299,14 @@ mod tests {
         ));
         let pid = child.id();
 
-        let status = guard_wait(Some(&watch), pid, child.wait()).await.unwrap();
+        // Bounded: without the shutdown this harness never exits on its own.
+        let status = tokio::time::timeout(
+            Duration::from_secs(20),
+            guard_wait(Some(&watch), pid, child.wait()),
+        )
+        .await
+        .expect("the grace period must end the harness well before 20 s")
+        .unwrap();
 
         assert_eq!(watch.ended(), Some(VerdictEnd::Terminated));
         assert!(
@@ -334,6 +363,47 @@ mod tests {
 
         assert!(status.success());
         assert_eq!(watch.ended(), None);
+    }
+
+    #[tokio::test]
+    async fn interrupted_run_is_not_a_verdict_and_its_process_is_never_terminated() {
+        let (_dir, _db, watch) = fixture(GraphRunStatus::Interrupted, Duration::from_millis(100));
+        let mut child = spawn_harness("sleep 0.5");
+
+        let status = guard_wait(Some(&watch), child.id(), child.wait())
+            .await
+            .unwrap();
+
+        assert!(status.success());
+        assert_eq!(watch.ended(), None);
+    }
+
+    #[test]
+    fn merge_keeps_the_filed_verdict_and_persists_the_process_record() {
+        let (_dir, db, _engine, graph_id, spec_id) = graph_fixture().unwrap();
+        insert_run_row(&db, &graph_id, &spec_id, "node-merge", 0, 1).unwrap();
+        let run_id = format!("run-{spec_id}-1");
+        db.update_graph_run_result(
+            &run_id,
+            GraphRunStatus::Pass,
+            Some(&serde_json::json!({ "verdict": "pass" })),
+            Some(chrono::Utc::now()),
+        )
+        .unwrap();
+        let run = db.get_graph_run(&run_id).unwrap().unwrap();
+
+        let merged = merge_process_record(
+            &db,
+            &run_id,
+            &run,
+            &serde_json::json!({ "ended_after_verdict": "exited" }),
+        );
+
+        assert_eq!(merged["verdict"], "pass");
+        assert_eq!(merged["ended_after_verdict"], "exited");
+        let stored = db.get_graph_run(&run_id).unwrap().unwrap();
+        assert_eq!(stored.status, GraphRunStatus::Pass);
+        assert_eq!(stored.output.unwrap()["ended_after_verdict"], "exited");
     }
 
     #[test]
