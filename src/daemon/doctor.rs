@@ -1551,6 +1551,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         })
         .unwrap();
         db.insert_graph_spec(&GraphSpec {
@@ -1572,6 +1573,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         })
         .unwrap();
 
@@ -2621,6 +2625,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks,
+            require_spec_type: false,
         })
         .unwrap();
         db.insert_graph_node(&GraphNode {
@@ -2817,6 +2822,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         })
         .unwrap();
         for i in 0..3 {

@@ -360,6 +360,9 @@ pub(crate) fn no_spec_placeholder(graph_id: &str) -> GraphSpec {
         completed_via: None,
         completed_via_reason: None,
         completed_via_at: None,
+        spec_code: None,
+        spec_scope: None,
+        spec_type: None,
     }
 }
 

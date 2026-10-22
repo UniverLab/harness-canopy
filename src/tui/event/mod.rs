@@ -895,6 +895,9 @@ mod project_panel_mouse_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         }
     }
 
@@ -1091,6 +1094,9 @@ mod graph_live_panel_mouse_tests {
             spec_name: format!("Spec {id}"),
             status,
             failure_reason: None,
+            spec_code: None,
+            spec_type: None,
+            spec_scope: None,
         }
     }
 

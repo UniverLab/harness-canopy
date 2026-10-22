@@ -49,6 +49,10 @@ Agent node prompts support these placeholders:
 | `{{spec_id}}` | The spec's unique ID |
 | `{{spec_name}}` | The spec's name |
 | `{{spec_content}}` | The spec's description (falls back to name) |
+| `{{spec_code}}` | Engine-generated quick reference (e.g. `FIX-7`) — empty on legacy specs without a type |
+| `{{spec_type}}` | Conventional Commits type (`feat`, `fix`, etc.) — empty on legacy specs without a type |
+| `{{spec_scope}}` | Optional scope (e.g. `tui`) — empty when absent |
+| `{{spec_commit_message}}` | Prebuilt commit message (`fix(tui): open F1`) — empty on legacy specs without a type |
 | `{{node_id}}` | The node's unique ID |
 | `{{previous_feedback}}` | JSON output of the previous node (truncated if oversized) |
 
@@ -93,6 +97,10 @@ workdir):
 | `CANOPY_GRAPH_NAME` | The graph's name |
 | `CANOPY_SPEC_START_HEAD` | The same value as `{{spec_start_head}}`; the empty string when unknown |
 | `CANOPY_SPEC_FILE` | Absolute path of a file holding the spec's full description — the idea text on an idea run, an empty file for a spec with no description. The engine writes it just before the command runs and removes it once the node finishes, so read it inside the command (quote the expansion: `"$CANOPY_SPEC_FILE"`). There is deliberately no `{{spec_content}}` marker in check commands: a file has no quoting problem and no command-length limit |
+| `CANOPY_SPEC_CODE` | Engine-generated quick reference (e.g. `FIX-7`) — empty on legacy specs without a type |
+| `CANOPY_SPEC_TYPE` | Conventional Commits type (`feat`, `fix`, etc.) — empty on legacy specs without a type |
+| `CANOPY_SPEC_SCOPE` | Optional scope (e.g. `tui`) — empty when absent |
+| `CANOPY_SPEC_COMMIT_MESSAGE` | Prebuilt commit message (`fix(tui): open F1`) — empty on legacy specs without a type |
 
 `{{spec_start_head}}` only proves *some* commit landed since the spec
 began; it's satisfied just as well by a commit from outside this run
@@ -959,6 +967,49 @@ Ordinary logging hooks keep working; they simply stop being necessary.
 Unlike the shared activity stream (bounded per workdir, free text), this log
 is never pruned by count. `canopy clean` removes events older than
 `graph_event_retention_days` (default 90) for graphs that are not running.
+
+## Deterministic commits
+
+Canopy can build a deterministic commit message from a spec's type and
+scope, and number specs automatically per type — a short code that serves
+as a quick reference and counts features and bugs.
+
+1. **Number specs by change type.** Give each spec a `type` (one of the
+   Conventional Commits types: `feat`, `fix`, `docs`, `style`, `refactor`,
+   `perf`, `test`, `build`, `ci`, `chore`, `revert`). Canopy assigns
+   `code = <TYPE>-<n>` with TYPE upper-cased (`FEAT-12`, `FIX-7`, `DOCS-3`)
+   and `n` the next number for that type among the specs tagged with the
+   same workdir (counter persisted per workdir and type; never reused,
+   even after a spec is deleted).
+
+2. **Conventional titles.** When `spec_create`/`graph_add_spec` receive a
+   name of the form `<type>(<scope>)?!?: <subject>` and no explicit `type`,
+   canopy parses it and stores the subject as the name, with type and scope
+   extracted. An explicit `type` wins over the parsed one.
+
+3. **Commit message.** Every spec exposes `CANOPY_SPEC_COMMIT_MESSAGE`
+   to check nodes and `{{spec_commit_message}}` to agent prompts. The
+   message is `<type>(<scope>): <name>` (or `<type>: <name>` without scope).
+   A deterministic commit node uses `$CANOPY_SPEC_COMMIT_MESSAGE` as the
+   commit message and never guesses.
+
+**Recipe: deterministic commit node**
+
+Add a check node with `commit_rights: true` and use the prebuilt message:
+
+```json
+{
+  "name": "commit",
+  "kind": "check",
+  "command": "git add -A && git commit -m \"$CANOPY_SPEC_COMMIT_MESSAGE\"",
+  "success_condition": "exit_code_0",
+  "commit_rights": true
+}
+```
+
+When the spec has `type: fix` and `scope: tui`, and its name is
+`"open F1 from inside a session"`, the node commits with message
+`fix(tui): open F1 from inside a session`.
 
 ## Spec notes
 

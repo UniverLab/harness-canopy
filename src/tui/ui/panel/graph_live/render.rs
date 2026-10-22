@@ -438,19 +438,49 @@ fn spec_detail_lines(
     };
 
     let (_, color) = spec_chip(entry, state.current_spec_id.as_deref(), theme);
-    let mut lines = vec![Line::from(vec![
-        Span::styled(
-            entry.spec_name.clone(),
-            Style::default()
-                .fg(theme.text_primary)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            format!("[{}]", spec_status_label(entry.status)),
-            Style::default().fg(color),
-        ),
-    ])];
+    let mut lines = Vec::new();
+
+    // SPECCODE: Show code badge before name, then dimmed type/scope
+    let mut name_line_parts = Vec::new();
+    if let Some(ref code) = entry.spec_code {
+        name_line_parts.push(Span::styled(
+            format!("[{code}] "),
+            Style::default().fg(theme.status_ok),
+        ));
+    }
+    name_line_parts.push(Span::styled(
+        entry.spec_name.clone(),
+        Style::default()
+            .fg(theme.text_primary)
+            .add_modifier(Modifier::BOLD),
+    ));
+
+    // SPECCODE: dimmed type/scope after name
+    if let Some(ref spec_type) = entry.spec_type {
+        let type_str = spec_type.as_str();
+        if let Some(ref scope) = entry.spec_scope {
+            name_line_parts.push(Span::raw(" "));
+            name_line_parts.push(Span::styled(
+                format!("({type_str}:{scope}) "),
+                Style::default().fg(theme.dim_text),
+            ));
+        } else {
+            name_line_parts.push(Span::raw(" "));
+            name_line_parts.push(Span::styled(
+                format!("({type_str}) "),
+                Style::default().fg(theme.dim_text),
+            ));
+        }
+    }
+
+    name_line_parts.push(Span::raw(" "));
+    name_line_parts.push(Span::styled(
+        format!("[{}]", spec_status_label(entry.status)),
+        Style::default().fg(color),
+    ));
+
+    lines.push(Line::from(name_line_parts));
+
     if let Some(reason) = entry.failure_reason.as_deref() {
         lines.push(Line::from(Span::styled(
             format!("  {reason}"),

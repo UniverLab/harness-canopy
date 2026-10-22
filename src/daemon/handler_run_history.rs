@@ -62,7 +62,7 @@ impl TaskTriggerHandler {
                 match resolve_prefix_or_error(
                     &self.db,
                     sid.trim(),
-                    Database::resolve_spec_id_by_prefix,
+                    |db, id| db.resolve_spec_id_by_prefix(id, None),
                     "spec",
                 ) {
                     Ok(id) => Some(id),
@@ -226,7 +226,7 @@ impl TaskTriggerHandler {
                 match resolve_prefix_or_error(
                     &self.db,
                     sid.trim(),
-                    Database::resolve_spec_id_by_prefix,
+                    |db, id| db.resolve_spec_id_by_prefix(id, None),
                     "spec",
                 ) {
                     Ok(id) => Some(id),

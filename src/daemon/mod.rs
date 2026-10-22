@@ -48,6 +48,7 @@ pub(crate) mod handler_seeds_skills;
 pub(crate) mod handler_send_session;
 pub(crate) mod handler_settings;
 pub(crate) mod handler_specs;
+pub(crate) mod handler_specs_helpers;
 pub(crate) mod handler_sync;
 pub(crate) mod handler_transfer;
 pub(crate) mod handler_validate;

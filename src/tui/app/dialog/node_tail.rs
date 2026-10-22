@@ -403,6 +403,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         })
         .unwrap();
         db.insert_graph_spec(&GraphSpec {
@@ -424,6 +425,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         })
         .unwrap();
         db.insert_graph_node(&GraphNode {
@@ -550,6 +554,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         })
         .unwrap();
         db.insert_graph_spec(&GraphSpec {
@@ -571,6 +576,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         })
         .unwrap();
         for (i, id) in node_ids.iter().enumerate() {
@@ -634,6 +642,9 @@ mod tests {
                 spec_name: "Pane spec".to_string(),
                 status: GraphSpecStatus::Running,
                 failure_reason: None,
+                spec_code: None,
+                spec_type: None,
+                spec_scope: None,
             }],
             done_count: 0,
             total_count: 1,

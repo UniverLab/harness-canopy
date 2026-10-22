@@ -7,7 +7,7 @@ use crate::daemon::handler_formatting::{
     build_id_result, build_node_update_response_with_changes, internal_error,
 };
 use crate::daemon::handler_helpers::record_config_change_if_running;
-use crate::daemon::handler_specs::validate_at_least_one_bool;
+use crate::daemon::handler_specs_helpers::validate_at_least_one_bool;
 use crate::daemon::handler_validate::{
     config_has_agent_harness, json_value_kind_name, parse_router_routes, resolve_prefix_or_error,
     validate_agent_crew_exclusive, validate_blueprint_agent_harness, validate_node_exists,

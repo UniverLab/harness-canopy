@@ -1645,6 +1645,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks,
+            require_spec_type: false,
         }
     }
 

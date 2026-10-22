@@ -134,6 +134,15 @@ impl TaskTriggerHandler {
             return Ok(error_result(&e));
         }
 
+        // SPECCODE: opt-in enforcement — a graph that demands spec types
+        // refuses to launch when a spec it would actually execute (a bound
+        // pending spec, or a pending queue member) still has none, naming it.
+        if lp.require_spec_type {
+            if let Err(message) = validate_specs_have_types_for_run(&self.db, &graph_id, queue_id) {
+                return Ok(error_result(&message));
+            }
+        }
+
         // (CB22) Synchronous launch validation: the same check the engine's
         // dispatch runs, so the TUI receives "what is missing" immediately
         // instead of a misleading successful background-launch response. A
@@ -734,4 +743,39 @@ pub(crate) fn directed_run_report(plan: Option<&DirectedPlan>) -> String {
          iteration counters restarted at 1; {head}.",
         plan.spec_name, plan.start_label
     )
+}
+
+/// SPECCODE: `require_spec_type` support for `graph_run` — name every
+/// would-run spec (bound to the graph as `pending`, or a pending queue
+/// member) that still has no type. Empty list is a pass.
+fn validate_specs_have_types_for_run(
+    db: &Database,
+    graph_id: &str,
+    queue_id: Option<&str>,
+) -> Result<(), String> {
+    let untyped: Vec<String> = match queue_id {
+        Some(queue_id) => db
+            .queue_members_in_order(queue_id)
+            .map_err(|e| e.to_string())?
+            .iter()
+            .filter(|member| !member.locked)
+            .filter_map(|member| db.get_graph_spec(&member.spec_id).ok().flatten())
+            .filter(|spec| spec.spec_type.is_none())
+            .map(|spec| format!("'{}'", spec.name))
+            .collect(),
+        None => db
+            .list_graph_specs(graph_id)
+            .map_err(|e| e.to_string())?
+            .iter()
+            .filter(|spec| spec.status == GraphSpecStatus::Pending && spec.spec_type.is_none())
+            .map(|spec| format!("'{}'", spec.name))
+            .collect(),
+    };
+    if untyped.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "Graph '{graph_id}' requires every spec to have a type (require_spec_type); still untyped: {}. Set the type with spec_update before relaunching.",
+        untyped.join(", ")
+    ))
 }

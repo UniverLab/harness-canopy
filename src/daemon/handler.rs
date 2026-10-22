@@ -117,7 +117,9 @@ pub(crate) use crate::daemon::handler_run_history::{
 #[cfg(test)]
 pub(crate) use crate::daemon::handler_run_lifecycle::perform_graph_reset;
 #[cfg(test)]
-pub(crate) use crate::daemon::handler_specs::{spec_summary_json, validate_at_least_one_bool};
+pub(crate) use crate::daemon::handler_specs_helpers::{
+    spec_summary_json, validate_at_least_one_bool,
+};
 #[cfg(test)]
 pub(crate) use crate::daemon::handler_sync::TaggedProjectKnowledge;
 #[cfg(test)]
@@ -157,7 +159,7 @@ pub(crate) const MCP_RESULT_BUDGET_BYTES: usize = 32_000;
 /// compact specs measured 55,605 characters on 2026-09-02, i.e. ~164
 /// bytes/row. Budgeted at 200 bytes/row so the default page keeps headroom
 /// against longer-than-average names.
-const SPEC_LIST_COMPACT_ROW_BYTES: usize = 200;
+const SPEC_LIST_COMPACT_ROW_BYTES: usize = 280;
 
 /// Default `session_list` page derived from the MCP result budget. The
 /// compact row estimate leaves room for long names while keeping the default
@@ -842,14 +844,14 @@ mod tests {
                 "graph_add_edge|0368038fcdc6790d79f1558cf8c5e66aae12d6c475c616849c217670707ec5f7|237b62884bf39b63f372273414288ea9179b392cb42bbb94315978049564986d",
                 "graph_add_ensemble|16d7fefa3784ffc61801c1efa5a3087810a30e9c083dd9033e62958a519ac7fa|93fd882b2db54d49cd6479a25a789d4ab3fcedf7914793646b62879a1bf0fadb",
                 "graph_add_node|5361586ae2254b13fea563379c35fff41f5aeddd2c63ec0e0221800dfa202617|7759661982738bea7c283e567107e2b53e38f778bbbf898afbfcec7dcf704a75",
-                "graph_add_spec|d054dce21de8cb570c402ef4081ebbec27391f28052aaae6b7636b75a6135343|4ca4c5b48737acddab29e888155a58a248bbb7ed0659f1ea56ef5c7620575c0c",
+                "graph_add_spec|d054dce21de8cb570c402ef4081ebbec27391f28052aaae6b7636b75a6135343|d0c1c7162862b6db87406407975b03d3e769e23d6fdbc33ad993016e09789b2b",
                 "graph_archive|86c62c25726d635c29691b8d1e90acbd2af55efafbf4b2acf866d82146fe9dc2|78e636b08231391ec48053bde18a790e2aede74da54003618003f2febe327bea",
                 "graph_audit_node_configs|be2716e66df14f94162057f5919f89bf87cab3b84d7f90ba6c2614e90b4ec749|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
                 "graph_complete_node|dd79817c0bd15c7fb324ee65bbf0b920c4d36f7958595932ab728a1d4418c76c|9fbd77387cb892656f3c66e396327bd2d66023f67f9cdae7c808091cac32cf9c",
                 "graph_continue|0b6466413a10ef19b9a929d94e662a4279c523d9b2904fc5e1208fc9a9d07edb|4c6d787abe1add21babc503b93b6ca04c35161ee5c0104ea44e28ed7a7d81770",
                 "graph_copy_ensemble|84fa10199406a21732121a5efcb531a8b635de720b9ced9ad23c9d21b442804b|81e6123364f5ffa77f6389270cf7cec410a5fc66bec93fd60631e66b85abc488",
                 "graph_copy_node|00f28a0220fed92a866e7e9489c5c6d0796b61f125ba83d7f2e4528ed8089d75|7aa9c075d640d2f792c386c0a0ca8d999bbaa223ea9787e40a52ab7471a2c8fc",
-                "graph_create|6f4749b2ffabdacfded946e01630ea558cefcf18110801fab0bb31c7fec79769|5f326cdb2c1ff3d7cca2cf25bf7fec5acc828bf70fe9e5e8e3d6423cb7de4a96",
+                "graph_create|6f4749b2ffabdacfded946e01630ea558cefcf18110801fab0bb31c7fec79769|9d2f33c50b700d8c649e0af88203c5a3ad4ecc9af0f195f6b6b0b666cbeb40de",
                 "graph_crew|21b4da02c1240d4ca5cb9609c412b60f6b89d07a31ce2b4f89e39669fce69180|69cec388444f8b50e9cebbec21f52cfbb1b326fde7e15c2bfcb2c2450b19a07c",
                 "graph_delete_edge|515e60718a86a111f77da9caab9a8f1a420c8a8cedea9c759dd3061efe54bcab|05d5202f073aea27378f794577e989b9636bad6d72397887d82887ad1d549d2f",
                 "graph_delete_ensemble|a1de1cf8f4d4a23060cbe860ac4eb31995cb9a166c99da92d209d5f18758940d|93fdb4962aa14f5b7921af9435ab70339df060c397464a3cc4e514bd83cc720b",
@@ -870,11 +872,11 @@ mod tests {
                 "graph_run|fa3db2dcec66808c55e2a5fe3623346e459ae74d796a4f54d478b85ac51636cc|9e084a80601932dc3d7241700eff51bb77c2764b1c886c8d1631cd8bfab52a27",
                 "graph_schedule_autorun|9981ca74a4d734696c604599f06ea45c74621f5931d9ac344c31f14a9cb3a5f4|7961251cc9060f411c0b3065833a2afe07a1c1ba27fb8ec57780eec33945b70a",
                 "graph_schedule_continue|1a383d649dbb9963e8ef76d698b9293b1a517205b3f61cd48d6c484f0c009c35|ab6b9783dd0a4ddb3cbcbe23c4ccaefa955cdffecead28d2a4ee758c21e27a55",
-                "graph_update|27c9d848836295967b3588395ddf8a8038ef4b881b7402fb4b9bcccf430d4da8|efcd24f3827ffad22568ecfd9627dd856545d98a47d8a5fd4cbecce117be9ea9",
+                "graph_update|27c9d848836295967b3588395ddf8a8038ef4b881b7402fb4b9bcccf430d4da8|9678a99d0ea333a793c176c75fa2911e7029fca084c82c9bee5c26c37fb64c14",
                 "graph_update_edge|ec07b87be17723f5212d8024e8bca2e2f44c215a417140898e1bab2539b832f5|51dafc02acbe8f4df24d69e44b6afcba2b381c212cfe426dcdbdde3a6196b6da",
                 "graph_update_ensemble|8f4a8cc93ef6623a86316c28879a1cf986490e97db21c650e99574a9e9ef3f3d|6191428edb5c8cab9d118dd7eaa326beb04d7313c491b0ccde2ae63e5572db81",
                 "graph_update_node|3d0f3c46a8d6fee1d776385e178662ae2a187e678bb5e3dd899c0bb93010c51e|13a30ea327b630709e99b78a98a12c210dc32034db31fad6595d4833a2a9697a",
-                "graph_update_spec|cc242e8d96c9fa9c957a7ca885258947ab54337e4a9e1b9f2ddc66eb6ae06b6d|e8c2e945b5f6f1080c5fe54b38f36e0c75e1716e61f80db812c32547d30e8264",
+                "graph_update_spec|cc242e8d96c9fa9c957a7ca885258947ab54337e4a9e1b9f2ddc66eb6ae06b6d|23fa760dd8a5a7e82ea7823fe7603209c9fa19517d389c0022a03985781969ed",
                 "intelligence_delete_node|b70ce24d59d2619e275cb40397037d7748f3ebca64ac5ffdc85eae6ee65bb1af|318c60c03fd6f5012a88be52de9aea7e9f372081ac1a378f5ee033b024ce229b",
                 "intelligence_delete_relation|14ac75ee8ed351ec58f6bec7bbb0a9ca8267f01931e936d287cc0aaf494612a8|d2f7f0e554ab5fe74e9ddd1e8052321c9134f26ad3a434e350194e34ad505b49",
                 "intelligence_get_context|669fe1f581e27a2bdf49f09765a42bc8f1f0879bf49c0466ff072ed315e73e33|55815882d32d2ebcf8374798bb69fdceacaf168be275a378115aa19551affc0c",
@@ -912,14 +914,14 @@ mod tests {
                 "skill_get|11bb4551bb0cf314b47867061fdb6ecc35812780d98808cd2f1e134d098bc8b9|a0ae058221b2b1a7b5105d991835dccd84a4a060693a3eebb05555b5b29e594e",
                 "skill_list|970ee8acf69615b521eaca0b1b27b8555a7fdc96b5655ebf435f4667418d290b|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
                 "spec_convert|dcabb9d52877782e47ac4fed3582e63e4c1cc6324c25b3079d6c25ef06552b16|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
-                "spec_create|7dd9a69253452c11b113743c3c5118f35cf4bf029c3380bcb9777254e41fd2eb|f9c780c473de2cac1bef89874ad42c7948a27ee448d423fa9732e5849bcd0b64",
+                "spec_create|7dd9a69253452c11b113743c3c5118f35cf4bf029c3380bcb9777254e41fd2eb|6684eb510e0675acc77f591547287cbe1dfad403c7a492ad309bab6887d8fe3d",
                 "spec_delete|cd48e914d536c1e203436b9694cc93ba0b107b488b0383537716107c02537df8|e2f8bf96018973b702208f786b228eeaf8970d19822323251941c3c2b58c6bd9",
-                "spec_list|9e42d06f6900ae06546a88a713f3e67e4fe3467a06561f1187f684b5d3579657|bcfbca658cfaeae86232022f6285d7f9a7f43357158f4d693e0fbba1a4a1a020",
+                "spec_list|0675cb8e001153bcf3691cf3d6e276c91f3e1f3be36beff51938b4b01afdd22c|b6f0f95a6b2595c9477cff2930cdab7fc91180a5ed69375895dfcf6e05e3be2b",
                 "spec_note_write|5864f496a2db355ac435a64b0fb172d0162b75eb50b84aba7913f43d89a0cecc|e299fd114d786af663d4e9f20a9673234f36f51815bf46fbbd9f00704ae276f7",
                 "spec_notes_get|c0a4e526752166f5544538fcbb039c03b03cfbaa2f57aa3aa1fbb8abf0c7bccb|fc547a4dcb686939788c1b51b1b076e9385f63ae9470cbb8534eb46e0328fc5d",
                 "spec_section_get|f2e7ae92e46d096fb4c5f1a3ce635e171dcd884e3f746ae936dfcb649e0aca22|c920c422e75f2d5dde9b2624d65af2613831ad217fd31d00bd00d7e34342f51e",
                 "spec_set_status|1a8612df16827c55d054df32ed3d585f33a14068c8c6737db584b918727ff5ab|313d1242ae0bb189c86b7cce07fdc51fe07588dac444491f089283e985db30f8",
-                "spec_update|4b63bd53115202d8c35c0e347ecc43491b5080564306c1fa643657d40790ba14|e7e35a41c1c50d14cc52e36b13a28342077e365683587e9207dd0ced2e28b0fa",
+                "spec_update|4b63bd53115202d8c35c0e347ecc43491b5080564306c1fa643657d40790ba14|fda93468219d4d22389c72f65e979fcf22b565d7fec0ec686935bd61004a999a",
                 "subagent_collect|c950e7193036445e86b6ffd6587304e0e71cf00302734d0ed6e83c549a2e95dd|5f286eb7d8c54c6fbc2148ca453732ed5773d888b6721af97d81de358ed14330",
                 "subagent_spawn|062b2ac16b1f04f1ada1607d2cb04fe4840b9a09809382eed9c09878ab038fd1|64cdeb14b7796657a8099c8489439ee01a3389e9b088aa08474d4d57c5b27d7c",
                 "sync_broadcast|c5904706ddfd0877686466deeff33f21d70075bbed6c8ae6eba5794fe3ea1043|41523abe2b3e2837139e505f609ec85fd6155ed80dd2cc4ff48fa3988fe8cd3b",
@@ -1178,6 +1180,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         })
         .unwrap();
         let now = chrono::Utc::now();
@@ -1364,6 +1369,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         }
     }
 
@@ -1403,6 +1411,7 @@ mod tests {
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,
+            require_spec_type: false,
             infra_node_id: None,
             id: graph_id.clone(),
             name: "Graph".to_string(),
@@ -1561,6 +1570,9 @@ mod tests {
             completed_via: Some("admin".to_string()),
             completed_via_reason: Some("premise false".to_string()),
             completed_via_at: Some(chrono::Utc::now()),
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         })
         .unwrap();
         db.insert_graph_spec(&spec_with_status(
@@ -1641,6 +1653,9 @@ mod tests {
             completed_via: Some("admin".to_string()),
             completed_via_reason: Some("premise false".to_string()),
             completed_via_at: Some(chrono::Utc::now()),
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         })
         .unwrap();
 
@@ -1708,6 +1723,7 @@ mod tests {
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,
+            require_spec_type: false,
             infra_node_id: None,
             id: graph_id.clone(),
             name: "Graph".to_string(),
@@ -1745,6 +1761,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         };
         db.insert_graph_spec(&standalone("queue-done", 1, GraphSpecStatus::Completed))
             .unwrap();
@@ -2413,6 +2432,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         }
     }
 
@@ -2696,6 +2718,7 @@ mod tests {
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,
+            require_spec_type: false,
             infra_node_id: None,
             id: id.to_string(),
             name: id.to_string(),
@@ -3244,6 +3267,7 @@ mod tests {
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,
+            require_spec_type: false,
             infra_node_id: None,
             id: graph_id.clone(),
             name: "Graph".to_string(),
@@ -3290,6 +3314,7 @@ mod tests {
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,
+            require_spec_type: false,
             infra_node_id: None,
             id: id.to_string(),
             name: id.to_string(),
@@ -3569,6 +3594,7 @@ mod tests {
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,
+            require_spec_type: false,
             infra_node_id: None,
             id: graph_id.clone(),
             name: "Graph".to_string(),
@@ -3623,6 +3649,7 @@ mod tests {
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,
+            require_spec_type: false,
             infra_node_id: None,
             id: graph_id.clone(),
             name: "Graph".to_string(),
@@ -3667,6 +3694,7 @@ mod tests {
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,
+            require_spec_type: false,
             infra_node_id: None,
             id: graph_id.to_string(),
             name: graph_id.to_string(),
@@ -4194,6 +4222,7 @@ mod tests {
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,
+            require_spec_type: false,
             infra_node_id: Some("infra".to_string()),
             id: "graph-1".to_string(),
             name: "graph-1".to_string(),
@@ -5360,6 +5389,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         })
         .unwrap();
     }
@@ -5728,6 +5760,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         };
         let json = spec_summary_json(&spec, true);
         assert_eq!(json["id"], "spec-1");
@@ -5762,6 +5797,9 @@ mod tests {
             completed_via: Some("graph_reset".to_string()),
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         };
         let json = spec_summary_json(&spec, true);
         assert_eq!(json["completed_via"], "graph_reset");
@@ -5831,6 +5869,7 @@ mod tests {
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,
+            require_spec_type: false,
             infra_node_id: None,
             id: "graph-1".to_string(),
             name: "Test Graph".to_string(),
@@ -6187,6 +6226,9 @@ mod additional_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         }
     }
 
@@ -6195,6 +6237,7 @@ mod additional_tests {
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,
+            require_spec_type: false,
             infra_node_id: None,
             id: id.to_string(),
             name: id.to_string(),
@@ -6785,6 +6828,9 @@ mod additional_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         };
         assert!(validate_spec_deletable(&spec).is_ok());
     }
@@ -6931,6 +6977,9 @@ mod additional_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         };
         let json = spec_summary_json(&spec, true);
         assert!(json["graph_id"].is_null());
@@ -7460,6 +7509,7 @@ mod additional_tests {
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,
+            require_spec_type: false,
             infra_node_id: None,
             id: "l1".to_string(),
             name: "l1".to_string(),
@@ -7487,6 +7537,7 @@ mod additional_tests {
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,
+            require_spec_type: false,
             infra_node_id: None,
             id: "l1".to_string(),
             name: "l1".to_string(),
@@ -7612,6 +7663,9 @@ mod coverage_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         }
     }
 
@@ -7649,6 +7703,7 @@ mod coverage_tests {
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,
+            require_spec_type: false,
             infra_node_id: None,
             id: graph_id.to_string(),
             name: graph_id.to_string(),
@@ -11772,6 +11827,7 @@ mod endpoint_tests {
                 trigger: None,
                 infra_node_id: None,
                 allow_dirty_start: false,
+                require_spec_type: false,
             }))
             .await
             .unwrap();
@@ -11790,6 +11846,7 @@ mod endpoint_tests {
                 hooks: None,
                 infra_node_id: None,
                 allow_dirty_start: None,
+                require_spec_type: None,
             }))
             .await
             .unwrap();
@@ -11812,6 +11869,7 @@ mod endpoint_tests {
                 trigger: None,
                 infra_node_id: None,
                 allow_dirty_start: false,
+                require_spec_type: false,
             }))
             .await
             .unwrap();
@@ -11859,6 +11917,7 @@ mod endpoint_tests {
                 hooks: Some(hooks),
                 infra_node_id: None,
                 allow_dirty_start: None,
+                require_spec_type: None,
             }))
             .await
             .unwrap();
@@ -11881,6 +11940,7 @@ mod endpoint_tests {
                 trigger: None,
                 infra_node_id: None,
                 allow_dirty_start: false,
+                require_spec_type: false,
             }))
             .await
             .unwrap();
@@ -11918,6 +11978,7 @@ mod endpoint_tests {
                 hooks: Some(hooks),
                 infra_node_id: None,
                 allow_dirty_start: None,
+                require_spec_type: None,
             }))
             .await
             .unwrap();
@@ -11937,6 +11998,7 @@ mod endpoint_tests {
                 trigger: None,
                 infra_node_id: None,
                 allow_dirty_start: false,
+                require_spec_type: false,
             }))
             .await
             .unwrap();
@@ -11973,6 +12035,7 @@ mod endpoint_tests {
                 hooks: Some(valid_hooks),
                 infra_node_id: None,
                 allow_dirty_start: None,
+                require_spec_type: None,
             }))
             .await
             .unwrap();
@@ -12010,6 +12073,7 @@ mod endpoint_tests {
                 hooks: Some(invalid_hooks),
                 infra_node_id: None,
                 allow_dirty_start: None,
+                require_spec_type: None,
             }))
             .await
             .unwrap();
@@ -12038,6 +12102,7 @@ mod endpoint_tests {
                 trigger: None,
                 infra_node_id: None,
                 allow_dirty_start: false,
+                require_spec_type: false,
             }))
             .await
             .unwrap();
@@ -12051,6 +12116,7 @@ mod endpoint_tests {
                 trigger: None,
                 infra_node_id: None,
                 allow_dirty_start: false,
+                require_spec_type: false,
             }))
             .await
             .unwrap();
@@ -12082,6 +12148,7 @@ mod endpoint_tests {
                 trigger: None,
                 infra_node_id: None,
                 allow_dirty_start: false,
+                require_spec_type: false,
             }))
             .await
             .unwrap();
@@ -12201,6 +12268,7 @@ mod endpoint_tests {
                 trigger: None,
                 infra_node_id: None,
                 allow_dirty_start: false,
+                require_spec_type: false,
             }))
             .await
             .unwrap();
@@ -12425,6 +12493,7 @@ mod endpoint_tests {
                 trigger: None,
                 infra_node_id: None,
                 allow_dirty_start: false,
+                require_spec_type: false,
             }))
             .await
             .unwrap();
@@ -12570,6 +12639,7 @@ mod endpoint_tests {
                 trigger: None,
                 infra_node_id: None,
                 allow_dirty_start: false,
+                require_spec_type: false,
             }))
             .await
             .unwrap();
@@ -12824,6 +12894,7 @@ mod endpoint_tests {
                 trigger: None,
                 infra_node_id: None,
                 allow_dirty_start: false,
+                require_spec_type: false,
             }))
             .await
             .unwrap();
@@ -12952,6 +13023,7 @@ mod endpoint_tests {
                 trigger: None,
                 infra_node_id: None,
                 allow_dirty_start: false,
+                require_spec_type: false,
             }))
             .await
             .unwrap();
@@ -13036,6 +13108,7 @@ mod endpoint_tests {
                 trigger: None,
                 infra_node_id: None,
                 allow_dirty_start: false,
+                require_spec_type: false,
             }))
             .await
             .unwrap();
@@ -13103,6 +13176,7 @@ mod endpoint_tests {
                 trigger: None,
                 infra_node_id: None,
                 allow_dirty_start: false,
+                require_spec_type: false,
             }))
             .await
             .unwrap();
@@ -13157,6 +13231,7 @@ mod endpoint_tests {
                 trigger: None,
                 infra_node_id: None,
                 allow_dirty_start: false,
+                require_spec_type: false,
             }))
             .await
             .unwrap();
@@ -13302,6 +13377,7 @@ mod endpoint_tests {
                 hooks: None,
                 infra_node_id: None,
                 allow_dirty_start: None,
+                require_spec_type: None,
             }))
             .await
             .unwrap();
@@ -13319,6 +13395,7 @@ mod endpoint_tests {
                 hooks: None,
                 infra_node_id: None,
                 allow_dirty_start: None,
+                require_spec_type: None,
             }))
             .await
             .unwrap();
@@ -13331,6 +13408,7 @@ mod endpoint_tests {
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,
+            require_spec_type: false,
             infra_node_id: None,
             id: uuid::Uuid::new_v4().to_string(),
             name: "Test Graph".to_string(),
@@ -13371,6 +13449,9 @@ mod endpoint_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         };
         db.insert_graph_spec(&spec).unwrap();
         spec
@@ -13402,6 +13483,9 @@ mod endpoint_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         };
         db.insert_graph_spec(&spec).unwrap();
         spec
@@ -13618,6 +13702,8 @@ mod endpoint_tests {
                 description: Some(valid_spec_description()),
                 position: 1,
                 parallelizable: false,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
@@ -13630,6 +13716,8 @@ mod endpoint_tests {
                 description: Some(valid_spec_description()),
                 position: 1,
                 parallelizable: false,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
@@ -13643,6 +13731,8 @@ mod endpoint_tests {
                 description: None,
                 position: 2,
                 parallelizable: false,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
@@ -13655,6 +13745,8 @@ mod endpoint_tests {
                 description: Some("just a sentence".to_string()),
                 position: 3,
                 parallelizable: false,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
@@ -13678,6 +13770,8 @@ mod endpoint_tests {
                 description: None,
                 position: None,
                 parallelizable: None,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
@@ -13694,6 +13788,8 @@ mod endpoint_tests {
                 description: None,
                 position: None,
                 parallelizable: None,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
@@ -13706,6 +13802,8 @@ mod endpoint_tests {
                 description: None,
                 position: None,
                 parallelizable: None,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
@@ -13723,6 +13821,8 @@ mod endpoint_tests {
                 name: "Backlog item".to_string(),
                 description: valid_spec_description(),
                 workdir: Some("/tmp".to_string()),
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
@@ -13733,6 +13833,8 @@ mod endpoint_tests {
                 name: "Backlog item 2".to_string(),
                 description: "too short".to_string(),
                 workdir: None,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
@@ -13746,6 +13848,7 @@ mod endpoint_tests {
                 include_descriptions: None,
                 limit: None,
                 offset: None,
+                spec_type: None,
             }))
             .await
             .unwrap();
@@ -13759,12 +13862,13 @@ mod endpoint_tests {
                 include_descriptions: None,
                 limit: None,
                 offset: None,
+                spec_type: None,
             }))
             .await
             .unwrap();
         assert!(is_err(&bad_status));
 
-        let all_specs = db.list_specs(None, None, false).unwrap();
+        let all_specs = db.list_specs(None, None, false, None).unwrap();
         let spec_id = all_specs
             .iter()
             .find(|s| s.name == "Backlog item")
@@ -13778,6 +13882,8 @@ mod endpoint_tests {
                 name: Some("Renamed backlog item".to_string()),
                 description: None,
                 workdir: None,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
@@ -13785,6 +13891,48 @@ mod endpoint_tests {
         assert_eq!(
             db.get_graph_spec(&spec_id).unwrap().unwrap().name,
             "Renamed backlog item"
+        );
+    }
+
+    #[tokio::test]
+    async fn spec_create_with_conventional_title_stores_subject_type_scope_and_code() {
+        let (dir, db, handler) = endpoint_test_handler();
+
+        let created = handler
+            .spec_create(Parameters(SpecCreateParams {
+                name: "fix(tui): open F1 from inside a session".to_string(),
+                description: valid_spec_description(),
+                workdir: Some(dir.path().to_string_lossy().to_string()),
+                spec_type: None,
+                spec_scope: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&created), "{}", text(&created));
+
+        // A conventional title is parsed and stored as subject + type + scope,
+        // never as the raw "fix(tui): ..." title.
+        let spec = db
+            .list_specs(None, None, false, None)
+            .unwrap()
+            .into_iter()
+            .find(|s| s.name == "open F1 from inside a session")
+            .expect("conventional title stored as the subject");
+        assert_eq!(
+            spec.spec_type
+                .as_ref()
+                .map(crate::domain::spec_type::SpecType::as_str),
+            Some("fix")
+        );
+        assert_eq!(spec.spec_scope, Some("tui".to_string()));
+        assert_eq!(spec.spec_code, Some("FIX-1".to_string()));
+        assert_eq!(
+            crate::domain::spec_type::commit_message_opt(
+                spec.spec_type,
+                spec.spec_scope.as_deref(),
+                &spec.name,
+            ),
+            Some("fix(tui): open F1 from inside a session".to_string())
         );
     }
 
@@ -13797,12 +13945,14 @@ mod endpoint_tests {
                 name: "Standalone".to_string(),
                 description: valid_spec_description(),
                 workdir: None,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
         assert!(!is_err(&standalone));
         let spec_id = db
-            .list_specs(None, None, false)
+            .list_specs(None, None, false, None)
             .unwrap()
             .into_iter()
             .find(|s| s.name == "Standalone")
@@ -13866,11 +14016,13 @@ mod endpoint_tests {
                 name: "Deletable".to_string(),
                 description: valid_spec_description(),
                 workdir: None,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
         let spec_id = db
-            .list_specs(None, None, false)
+            .list_specs(None, None, false, None)
             .unwrap()
             .into_iter()
             .find(|s| s.name == "Deletable")
@@ -13924,7 +14076,7 @@ mod endpoint_tests {
         let after = db.get_graph_spec(&spec.id).unwrap().unwrap();
         assert!(after.graph_id.is_none());
 
-        let unassigned = db.list_specs(None, None, true).unwrap();
+        let unassigned = db.list_specs(None, None, true, None).unwrap();
         assert!(unassigned.iter().any(|s| s.id == spec.id));
 
         assert!(db
@@ -13980,12 +14132,14 @@ mod endpoint_tests {
                 name: "Standalone".to_string(),
                 description: valid_spec_description(),
                 workdir: None,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
         assert!(!is_err(&created), "{}", text(&created));
         let standalone_id = db
-            .list_specs(None, None, false)
+            .list_specs(None, None, false, None)
             .unwrap()
             .into_iter()
             .find(|s| s.name == "Standalone")
@@ -21934,6 +22088,8 @@ mod endpoint_tests {
                 name: "Compact test".to_string(),
                 description: valid_spec_description(),
                 workdir: None,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
@@ -21947,6 +22103,7 @@ mod endpoint_tests {
                 include_descriptions: None,
                 limit: None,
                 offset: None,
+                spec_type: None,
             }))
             .await
             .unwrap();
@@ -21967,6 +22124,8 @@ mod endpoint_tests {
                 name: "Verbose test".to_string(),
                 description: desc.clone(),
                 workdir: None,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
@@ -21980,6 +22139,7 @@ mod endpoint_tests {
                 include_descriptions: Some(true),
                 limit: None,
                 offset: None,
+                spec_type: None,
             }))
             .await
             .unwrap();
@@ -22361,6 +22521,9 @@ mod endpoint_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         };
         db.insert_graph_spec(&spec).unwrap();
         spec
@@ -22390,6 +22553,7 @@ mod endpoint_tests {
                 include_descriptions: None,
                 limit: Some(3),
                 offset: Some(0),
+                spec_type: None,
             }))
             .await
             .unwrap();
@@ -22410,6 +22574,7 @@ mod endpoint_tests {
                 include_descriptions: None,
                 limit: Some(3),
                 offset: Some(3),
+                spec_type: None,
             }))
             .await
             .unwrap();
@@ -22431,6 +22596,7 @@ mod endpoint_tests {
                 include_descriptions: None,
                 limit: Some(3),
                 offset: Some(9),
+                spec_type: None,
             }))
             .await
             .unwrap();
@@ -22463,6 +22629,7 @@ mod endpoint_tests {
                 include_descriptions: None,
                 limit: None,
                 offset: None,
+                spec_type: None,
             }))
             .await
             .unwrap();
@@ -22652,12 +22819,14 @@ mod endpoint_tests {
                 name: "Prefix test".to_string(),
                 description: valid_spec_description(),
                 workdir: None,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
         assert!(!is_err(&created), "{}", text(&created));
 
-        let all_specs = db.list_specs(None, None, false).unwrap();
+        let all_specs = db.list_specs(None, None, false, None).unwrap();
         let full_id = all_specs[0].id.clone();
         let prefix = &full_id[..8];
 
@@ -22667,6 +22836,8 @@ mod endpoint_tests {
                 name: Some("Renamed via prefix".to_string()),
                 description: None,
                 workdir: None,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
@@ -22685,12 +22856,16 @@ mod endpoint_tests {
                 name: "Section test".to_string(),
                 description: valid_spec_description(),
                 workdir: None,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
         assert!(!is_err(&created), "{}", text(&created));
 
-        let spec_id = db.list_specs(None, None, false).unwrap()[0].id.clone();
+        let spec_id = db.list_specs(None, None, false, None).unwrap()[0]
+            .id
+            .clone();
 
         let result = handler
             .spec_section_get(Parameters(SpecSectionGetParams {
@@ -22713,12 +22888,16 @@ mod endpoint_tests {
                 name: "Section test 2".to_string(),
                 description: valid_spec_description(),
                 workdir: None,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
         assert!(!is_err(&created));
 
-        let spec_id = db.list_specs(None, None, false).unwrap()[0].id.clone();
+        let spec_id = db.list_specs(None, None, false, None).unwrap()[0]
+            .id
+            .clone();
 
         let result = handler
             .spec_section_get(Parameters(SpecSectionGetParams {
@@ -22756,6 +22935,9 @@ mod endpoint_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         })
         .unwrap();
 
@@ -22764,6 +22946,8 @@ mod endpoint_tests {
                 name: "Already tagged".to_string(),
                 description: valid_spec_description(),
                 workdir: None,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
@@ -22805,6 +22989,9 @@ mod endpoint_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         })
         .unwrap();
 
@@ -22853,6 +23040,9 @@ mod endpoint_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         })
         .unwrap();
 
@@ -22911,6 +23101,9 @@ mod endpoint_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         };
         db.insert_graph_spec(&spec1).unwrap();
         let spec2 = GraphSpec {
@@ -22932,20 +23125,23 @@ mod endpoint_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         };
         db.insert_graph_spec(&spec2).unwrap();
 
-        let exact = db.resolve_spec_id_by_prefix(&spec1.id).unwrap();
+        let exact = db.resolve_spec_id_by_prefix(&spec1.id, None).unwrap();
         assert_eq!(exact, Some(spec1.id.clone()));
 
-        let prefix_match = db.resolve_spec_id_by_prefix("aaaaaaaa-1111").unwrap();
+        let prefix_match = db.resolve_spec_id_by_prefix("aaaaaaaa-1111", None).unwrap();
         assert_eq!(prefix_match, Some(spec1.id));
 
-        let ambiguous = db.resolve_spec_id_by_prefix("aaaaaaaa");
+        let ambiguous = db.resolve_spec_id_by_prefix("aaaaaaaa", None);
         assert!(ambiguous.is_err(), "ambiguous prefix should error");
         assert!(ambiguous.unwrap_err().to_string().contains("Ambiguous"));
 
-        let not_found = db.resolve_spec_id_by_prefix("zzzzzzzz").unwrap();
+        let not_found = db.resolve_spec_id_by_prefix("zzzzzzzz", None).unwrap();
         assert_eq!(not_found, None);
     }
 
@@ -23000,6 +23196,7 @@ mod endpoint_tests {
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,
+            require_spec_type: false,
             infra_node_id: None,
         };
         db.insert_graph(&lp2).unwrap();
@@ -23764,6 +23961,9 @@ mod endpoint_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         })
         .unwrap();
 
@@ -23776,6 +23976,7 @@ mod endpoint_tests {
                     include_descriptions: Some(true),
                     limit: None,
                     offset: None,
+                    spec_type: None,
                 }))
                 .await
                 .unwrap(),
@@ -23831,6 +24032,9 @@ mod endpoint_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         })
         .unwrap();
 
@@ -23933,6 +24137,9 @@ mod endpoint_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         })
         .unwrap();
 
@@ -23955,6 +24162,9 @@ mod endpoint_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         };
         db.insert_graph_spec(&member).unwrap();
         let queue_id = uuid::Uuid::new_v4().to_string();
@@ -24011,6 +24221,9 @@ mod endpoint_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         })
         .unwrap();
 
@@ -24070,6 +24283,9 @@ mod endpoint_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         })
         .unwrap();
         db.insert_graph_node(&GraphNode {
@@ -24653,6 +24869,7 @@ mod endpoint_tests {
                 trigger: None,
                 infra_node_id: None,
                 allow_dirty_start: false,
+                require_spec_type: false,
             }))
             .await
             .unwrap();
@@ -24858,6 +25075,7 @@ mod endpoint_tests {
                 trigger: None,
                 infra_node_id: None,
                 allow_dirty_start: false,
+                require_spec_type: false,
             }))
             .await
             .unwrap();

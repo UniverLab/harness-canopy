@@ -3,7 +3,7 @@
 
 use crate::daemon::handler::TaskTriggerHandler;
 use crate::daemon::handler_formatting::{build_id_result, build_json_result, internal_error};
-use crate::daemon::handler_specs::spec_summary_json;
+use crate::daemon::handler_specs_helpers::spec_summary_json;
 use crate::daemon::handler_validate::{
     resolve_prefix_or_error, validate_non_empty, validate_spec_exists, validate_spec_unbindable,
 };
@@ -51,7 +51,7 @@ impl TaskTriggerHandler {
         let spec_id = match resolve_prefix_or_error(
             &self.db,
             params.spec_id.trim(),
-            Database::resolve_spec_id_by_prefix,
+            |db, id| db.resolve_spec_id_by_prefix(id, None),
             "spec",
         ) {
             Ok(id) => id,
@@ -110,7 +110,7 @@ impl TaskTriggerHandler {
         let spec_id = match resolve_prefix_or_error(
             &self.db,
             params.spec_id.trim(),
-            Database::resolve_spec_id_by_prefix,
+            |db, id| db.resolve_spec_id_by_prefix(id, None),
             "spec",
         ) {
             Ok(id) => id,
@@ -141,7 +141,7 @@ impl TaskTriggerHandler {
             match resolve_prefix_or_error(
                 &self.db,
                 sid.trim(),
-                Database::resolve_spec_id_by_prefix,
+                |db, id| db.resolve_spec_id_by_prefix(id, None),
                 "spec",
             ) {
                 Ok(id) => resolved_spec_ids.push(id),
@@ -171,7 +171,7 @@ impl TaskTriggerHandler {
         let spec_id = match resolve_prefix_or_error(
             &self.db,
             params.spec_id.trim(),
-            Database::resolve_spec_id_by_prefix,
+            |db, id| db.resolve_spec_id_by_prefix(id, None),
             "spec",
         ) {
             Ok(id) => id,
@@ -219,6 +219,23 @@ impl TaskTriggerHandler {
             Ok(spec) => spec,
             Err(e) => return Ok(error_result(&e)),
         };
+        // SPECCODE: a queue is graph-agnostic, so an untyped spec is refused
+        // at add time only when some browsing graph demands spec types
+        // (`require_spec_type`) — it might run the queue next.
+        if spec.spec_type.is_none() {
+            let wants_types = self
+                .db
+                .list_graphs(None, false)
+                .map_err(internal_error)?
+                .iter()
+                .any(|graph| graph.require_spec_type);
+            if wants_types {
+                return Ok(error_result(&format!(
+                    "Spec '{}' has no type: a graph with require_spec_type may run this queue. Set a Conventional Commits type via spec_update first.",
+                    spec.name
+                )));
+            }
+        }
         let already_member = self
             .db
             .queue_has_member(queue_id, spec_id)

@@ -831,6 +831,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         })
         .unwrap();
     }

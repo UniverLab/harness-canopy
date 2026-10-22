@@ -6,6 +6,7 @@ use crate::domain::graphs::{
 };
 use crate::domain::models::{Agent, Cli, RunLog, RunStatus, Trigger, TriggerType, WatchEvent};
 use crate::domain::queues::Queue;
+use crate::domain::spec_type::SpecType;
 use crate::domain::sync::{
     IntentPayload, MessageKind, MissionImpact, StatusPayload, WorkspaceStatus,
 };
@@ -348,6 +349,7 @@ fn sample_graph(id: &str) -> Graph {
         paused_by_reconciliation: false,
         allow_dirty_start: false,
         infra_node_id: None,
+        require_spec_type: false,
         id: id.to_string(),
         name: "Auth graph".to_string(),
         description: Some("Implements auth in ordered specs".to_string()),
@@ -385,6 +387,9 @@ fn sample_graph_spec(graph_id: &str, id: &str, position: i64) -> GraphSpec {
         completed_via: None,
         completed_via_reason: None,
         completed_via_at: None,
+        spec_type: None,
+        spec_scope: None,
+        spec_code: None,
     }
 }
 
@@ -1375,6 +1380,9 @@ fn graph_specs_migration_relaxes_graph_id_and_adds_workdir_and_is_idempotent() {
         completed_via: None,
         completed_via_reason: None,
         completed_via_at: None,
+        spec_type: None,
+        spec_scope: None,
+        spec_code: None,
     })
     .unwrap();
     let standalone = db.get_graph_spec("standalone-spec").unwrap().unwrap();
@@ -1481,6 +1489,9 @@ fn sample_standalone_spec(id: &str, workdir: Option<&str>) -> GraphSpec {
         completed_via: None,
         completed_via_reason: None,
         completed_via_at: None,
+        spec_type: None,
+        spec_scope: None,
+        spec_code: None,
     }
 }
 
@@ -1527,16 +1538,18 @@ fn list_specs_filters_by_workdir_and_unassigned_only() {
     db.insert_graph_spec(&standalone_b).unwrap();
 
     // No filters: every spec, bound or not.
-    let all = db.list_specs(None, None, false).unwrap();
+    let all = db.list_specs(None, None, false, None).unwrap();
     assert_eq!(all.len(), 3);
 
     // Filter by workdir: only the matching standalone spec.
-    let by_workdir = db.list_specs(Some("/tmp/project-a"), None, false).unwrap();
+    let by_workdir = db
+        .list_specs(Some("/tmp/project-a"), None, false, None)
+        .unwrap();
     assert_eq!(by_workdir.len(), 1);
     assert_eq!(by_workdir[0].id, "standalone-a");
 
     // unassigned_only excludes the graph-bound spec.
-    let unassigned = db.list_specs(None, None, true).unwrap();
+    let unassigned = db.list_specs(None, None, true, None).unwrap();
     assert_eq!(unassigned.len(), 2);
     assert!(unassigned.iter().all(|s| s.graph_id.is_none()));
     assert!(unassigned.iter().any(|s| s.id == "standalone-a"));
@@ -1544,11 +1557,11 @@ fn list_specs_filters_by_workdir_and_unassigned_only() {
 
     // Filter by status: none of these are running.
     let running = db
-        .list_specs(None, Some(GraphSpecStatus::Running), false)
+        .list_specs(None, Some(GraphSpecStatus::Running), false, None)
         .unwrap();
     assert!(running.is_empty());
     let pending = db
-        .list_specs(None, Some(GraphSpecStatus::Pending), false)
+        .list_specs(None, Some(GraphSpecStatus::Pending), false, None)
         .unwrap();
     assert_eq!(pending.len(), 3);
 }
@@ -3095,6 +3108,9 @@ fn legacy_queue_table_rename_is_a_noop_on_an_already_migrated_database() {
         completed_via: None,
         completed_via_reason: None,
         completed_via_at: None,
+        spec_type: None,
+        spec_scope: None,
+        spec_code: None,
     })
     .unwrap();
     db.insert_queue(&Queue {
@@ -6942,6 +6958,198 @@ fn cm9_retype_backlog_nodes_refuses_a_registry_project_node() {
     );
 }
 
+// ── SPECCODE: spec type / scope / code / commit message ──────────────
+
+/// Two `fix` specs in one workdir get FIX-1 and FIX-2 while a `feat` gets
+/// FEAT-1 — the counter is per (workdir, type), not per workdir overall.
+#[test]
+fn spec_code_numbers_per_type_in_workdir() {
+    let db = test_db();
+    let workdir = "/tmp/project-a";
+
+    let code1 = db.next_spec_code(workdir, SpecType::Fix).unwrap();
+    assert_eq!(code1, "FIX-1");
+
+    let code2 = db.next_spec_code(workdir, SpecType::Feat).unwrap();
+    assert_eq!(code2, "FEAT-1");
+
+    let code3 = db.next_spec_code(workdir, SpecType::Fix).unwrap();
+    assert_eq!(code3, "FIX-2");
+}
+
+/// A deleted spec's number is never reused — the counter only moves
+/// forward, even after a deletion.
+#[test]
+fn spec_code_not_reused_after_delete() {
+    let db = test_db();
+    let workdir = "/tmp/project-b";
+
+    let fix1 = db.next_spec_code(workdir, SpecType::Fix).unwrap();
+    assert_eq!(fix1, "FIX-1");
+    let fix2 = db.next_spec_code(workdir, SpecType::Fix).unwrap();
+    assert_eq!(fix2, "FIX-2");
+
+    // Simulate the deleted spec's slot being gone — the next number must not
+    // fill the gap.
+    let fix3 = db.next_spec_code(workdir, SpecType::Fix).unwrap();
+    assert_eq!(fix3, "FIX-3");
+}
+
+/// Another workdir starts its own counter at 1 for each type.
+#[test]
+fn spec_code_workdir_independent() {
+    let db = test_db();
+
+    let code_a = db.next_spec_code("/tmp/proj-a", SpecType::Fix).unwrap();
+    assert_eq!(code_a, "FIX-1");
+
+    let code_b = db.next_spec_code("/tmp/proj-b", SpecType::Fix).unwrap();
+    assert_eq!(code_b, "FIX-1");
+
+    let code_a2 = db.next_spec_code("/tmp/proj-a", SpecType::Fix).unwrap();
+    assert_eq!(code_a2, "FIX-2");
+}
+
+/// A spec's code is accepted wherever a spec id is (requirement 6).
+#[test]
+fn resolve_spec_id_by_prefix_resolves_code() {
+    let db = test_db();
+    let workdir = "/tmp/project-c";
+
+    let code = db.next_spec_code(workdir, SpecType::Fix).unwrap();
+    assert_eq!(code, "FIX-1");
+
+    let mut spec = sample_standalone_spec("spec-code-resolve", Some(workdir));
+    spec.spec_type = Some(SpecType::Fix);
+    spec.spec_scope = Some("tui".to_string());
+    spec.spec_code = Some(code);
+    db.insert_graph_spec(&spec).unwrap();
+
+    let resolved = db.resolve_spec_id_by_prefix("FIX-1", None).unwrap();
+    assert_eq!(resolved, Some("spec-code-resolve".to_string()));
+
+    let fetched = db.get_graph_spec("spec-code-resolve").unwrap().unwrap();
+    assert_eq!(fetched.spec_type, Some(SpecType::Fix));
+    assert_eq!(fetched.spec_scope.as_deref(), Some("tui"));
+    assert_eq!(fetched.spec_code.as_deref(), Some("FIX-1"));
+}
+
+/// A legacy spec (no type) returns empty type/scope/code — the fields exist
+/// but hold `NULL`.
+#[test]
+fn legacy_spec_has_empty_type_scope_code() {
+    let db = test_db();
+    let spec = sample_standalone_spec("legacy-empty", None);
+    db.insert_graph_spec(&spec).unwrap();
+
+    let fetched = db.get_graph_spec("legacy-empty").unwrap().unwrap();
+    assert_eq!(fetched.spec_type, None);
+    assert_eq!(fetched.spec_scope, None);
+    assert_eq!(fetched.spec_code, None);
+}
+
+/// Export → import (here: persist → read back) keeps type, scope and code.
+/// A spec with a type keeps its code through a DB round-trip; import never
+/// renumbers.
+#[test]
+fn spec_persists_type_scope_code_through_db_round_trip() {
+    let db = test_db();
+    let workdir = "/tmp/project-d";
+
+    let code = db.next_spec_code(workdir, SpecType::Fix).unwrap();
+    let mut spec = sample_standalone_spec("round-trip", Some(workdir));
+    spec.spec_type = Some(SpecType::Fix);
+    spec.spec_scope = Some("tui".to_string());
+    spec.spec_code = Some(code);
+    db.insert_graph_spec(&spec).unwrap();
+
+    // Read back: type, scope, code all survive.
+    let fetched = db.get_graph_spec("round-trip").unwrap().unwrap();
+    assert_eq!(fetched.spec_type, Some(SpecType::Fix));
+    assert_eq!(fetched.spec_scope.as_deref(), Some("tui"));
+    assert_eq!(fetched.spec_code.as_deref(), Some("FIX-1"));
+
+    // list_specs with a type filter sees only matching specs.
+    let only_fix = db
+        .list_specs(Some(workdir), None, false, Some(SpecType::Fix))
+        .unwrap();
+    assert_eq!(only_fix.len(), 1);
+    assert_eq!(only_fix[0].spec_code.as_deref(), Some("FIX-1"));
+
+    let no_fix = db
+        .list_specs(Some(workdir), None, false, Some(SpecType::Feat))
+        .unwrap();
+    assert!(no_fix.is_empty(), "no feat specs in this workdir");
+}
+
+/// A pre-migration database (graph_specs without spec_type/scope/code
+/// columns, no spec_code_counters table, no graphs.require_spec_type
+/// column) opens unchanged — the migration adds the columns with NULL
+/// defaults and the counter table.
+#[test]
+fn spec_type_migration_opens_pre_migration_db_unchanged() {
+    let tmp = NamedTempFile::new().expect("create temp file");
+    let path = tmp.path().to_path_buf();
+    std::mem::forget(tmp);
+
+    {
+        let conn = rusqlite::Connection::open(&path).expect("open raw legacy db");
+        conn.execute_batch(
+            "CREATE TABLE graph_specs (
+                id TEXT PRIMARY KEY,
+                graph_id TEXT,
+                name TEXT NOT NULL,
+                description TEXT,
+                position INTEGER NOT NULL,
+                parallelizable INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                started_at INTEGER,
+                completed_at INTEGER,
+                spec_start_head TEXT,
+                spec_start_dirty INTEGER,
+                workdir TEXT,
+                spec_committed_head TEXT,
+                spec_end_dirty INTEGER,
+                spec_end_dirty_paths TEXT,
+                completed_via TEXT,
+                completed_via_reason TEXT,
+                completed_via_at INTEGER
+            );
+            INSERT INTO graph_specs (id, graph_id, name, position, status, workdir)
+                VALUES ('legacy-spec', NULL, 'Spec', 1, 'pending', '/tmp');",
+        )
+        .expect("seed legacy schema");
+
+        let has_column = |col: &str| -> bool {
+            conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('graph_specs') WHERE name = ?1",
+                rusqlite::params![col],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+                == 1
+        };
+        assert!(!has_column("spec_type"));
+        assert!(!has_column("spec_scope"));
+        assert!(!has_column("spec_code"));
+    }
+
+    // Opening the DB (Database::new runs migrate_spec_type_columns) must
+    // succeed without error.
+    let db = Database::new(&path).expect("open pre-spec_type db, running migration");
+
+    // The legacy row survived and got NULLs for the new columns.
+    let spec = db.get_graph_spec("legacy-spec").unwrap().unwrap();
+    assert_eq!(spec.name, "Spec");
+    assert_eq!(spec.spec_type, None);
+    assert_eq!(spec.spec_scope, None);
+    assert_eq!(spec.spec_code, None);
+
+    // The counter table works after migration.
+    let code = db.next_spec_code("/tmp", SpecType::Fix).unwrap();
+    assert_eq!(code, "FIX-1");
+}
+
 #[cfg(test)]
 mod hooks_tests {
     use super::*;
@@ -6979,6 +7187,7 @@ mod hooks_tests {
             paused_by_reconciliation: false,
             allow_dirty_start: false,
             infra_node_id: None,
+            require_spec_type: false,
             id: id.to_string(),
             name: format!("Graph {id}"),
             description: None,

@@ -20,10 +20,13 @@ use crate::domain::graphs::{
 };
 use crate::domain::models::Cli;
 use crate::domain::sandbox::Sandbox;
+use crate::domain::spec_type::{commit_message, SpecType};
 
 mod agent_exec;
 mod agent_spawn;
 mod check;
+mod check_command;
+mod check_render;
 mod crew_resolve;
 mod decision;
 mod directed;
@@ -38,6 +41,7 @@ mod gate_router;
 mod hooks_fire;
 mod hooks_graph;
 mod hooks_interactive;
+mod hooks_render;
 mod infra;
 mod launch_check;
 mod lifecycle;
@@ -55,6 +59,7 @@ mod spec_step;
 pub(crate) use agent_exec::*;
 pub(crate) use agent_spawn::*;
 pub(crate) use check::*;
+pub(crate) use check_render::*;
 pub(crate) use decision::*;
 pub(crate) use directed::*;
 pub(crate) use dirty_commit::*;
@@ -73,6 +78,7 @@ pub(crate) use hooks_fire::*;
 pub(crate) use hooks_graph::*;
 #[allow(unused_imports)]
 pub(crate) use hooks_interactive::*;
+pub(crate) use hooks_render::*;
 pub(crate) use infra::*;
 #[allow(unused_imports)]
 pub(crate) use launch_check::*;
@@ -395,6 +401,10 @@ mod tests {
             spec_id: Some("spec-id"),
             blocker: None,
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
 
         assert_eq!(
@@ -450,6 +460,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let spec = crate::domain::graphs::GraphSpec {
             id: "spec-test".to_string(),
@@ -472,6 +483,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
 
         db.insert_graph(&lp)?;
@@ -545,6 +559,10 @@ mod tests {
             spec_id: None,
             blocker: None,
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         engine
             .fire_hooks(&stale_lp, GraphHookEvent::OnCompleted, &ctx)
@@ -781,6 +799,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let spec = crate::domain::graphs::GraphSpec {
             id: "spec-test".to_string(),
@@ -801,6 +820,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
 
         db.insert_graph(&lp)?;
@@ -1386,6 +1408,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         }
     }
 
@@ -1471,6 +1496,7 @@ mod tests {
             paused_by_reconciliation: false,
             infra_node_id: None,
             allow_dirty_start: false,
+            require_spec_type: false,
         })
         .unwrap();
 
@@ -3592,6 +3618,9 @@ mod tests {
             completed_via_reason: None,
             completed_via_at: None,
             spec_committed_head: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         db.insert_graph_spec(&spec_b).unwrap();
         db.insert_graph_node(&rights_node(
@@ -3963,6 +3992,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         })
         .unwrap();
         // An `on_failed` command hook that itself fails, so the recorded
@@ -4064,6 +4096,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let details = crate::domain::graphs::GraphSpecDetails {
             spec: spec.clone(),
@@ -4156,6 +4191,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let nodes = vec![
             GraphNode {
@@ -4262,6 +4300,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let nodes = vec![
             GraphNode {
@@ -4363,6 +4404,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let details = crate::domain::graphs::GraphSpecDetails {
             spec: spec.clone(),
@@ -4440,6 +4484,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let node = |id: &str, position: i64| GraphNode {
             id: id.to_string(),
@@ -4507,6 +4554,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let spec = GraphSpec {
             id: "spec".to_string(),
@@ -4527,6 +4575,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let node = GraphNode {
             id: "node-1".to_string(),
@@ -4583,6 +4634,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let spec = GraphSpec {
             id: "spec".to_string(),
@@ -4603,6 +4655,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let node = GraphNode {
             id: "node-1".to_string(),
@@ -4666,6 +4721,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let mut spec = GraphSpec {
             id: "spec".to_string(),
@@ -4686,6 +4742,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let node = GraphNode {
             id: "node-1".to_string(),
@@ -4862,6 +4921,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let spec = GraphSpec {
             id: "spec".to_string(),
@@ -4882,6 +4942,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let node = GraphNode {
             id: "node-1".to_string(),
@@ -7798,6 +7861,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         }
     }
 
@@ -8105,6 +8171,7 @@ echo done
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         db.insert_graph(&lp)?;
         Ok((
@@ -8139,6 +8206,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         }
     }
 
@@ -8734,6 +8804,7 @@ echo done
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         db.insert_graph(&lp).unwrap();
         let spec = standalone_spec("bound-spec", 1);
@@ -9279,6 +9350,7 @@ echo done
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let spec = GraphSpec {
             id: "spec".to_string(),
@@ -9299,6 +9371,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let node = GraphNode {
             id: "node-1".to_string(),
@@ -11906,6 +11981,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         })
         .unwrap();
         db.insert_graph_node(&GraphNode {
@@ -11979,6 +12057,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         })
         .unwrap();
 
@@ -12017,6 +12098,9 @@ echo done
             completed_via: None,
             completed_via_at: None,
             completed_via_reason: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         })
         .unwrap();
         db.insert_graph_node(&GraphNode {
@@ -12068,6 +12152,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         })
         .unwrap();
 
@@ -12130,6 +12217,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         })
         .unwrap();
         insert_queue_with_members(&db, "queue-1", &["blank-member"]);
@@ -12325,6 +12415,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         })
         .unwrap();
         db.insert_graph_spec(&GraphSpec {
@@ -12348,6 +12441,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         })
         .unwrap();
         db.insert_graph_node(&GraphNode {
@@ -12406,6 +12502,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         })
         .unwrap();
         db.insert_graph_node(&GraphNode {
@@ -12721,6 +12820,7 @@ echo done
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let completed_specs = vec![
             ("Spec-A".to_string(), "summary A".to_string()),
@@ -12763,6 +12863,7 @@ echo done
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
 
         let result =
@@ -12783,6 +12884,10 @@ echo done
             spec_id: None,
             blocker: None,
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let result = render_hook_prompt(
             &GraphHookEvent::OnCompleted,
@@ -12803,6 +12908,10 @@ echo done
             spec_id: None,
             blocker: Some("quota exceeded"),
             node_name: Some("agent-1"),
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let result =
             render_hook_prompt(&GraphHookEvent::OnFailed, &ctx, "{{blocker}} on {{node}}").unwrap();
@@ -12819,6 +12928,10 @@ echo done
             spec_id: None,
             blocker: Some("needs human review"),
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let result =
             render_hook_prompt(&GraphHookEvent::OnBlocked, &ctx, "Blocked: {{blocker}}").unwrap();
@@ -12835,6 +12948,10 @@ echo done
             spec_id: None,
             blocker: None,
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let result =
             render_hook_prompt(&GraphHookEvent::OnFailed, &ctx, "{{blocker}}/{{node}}").unwrap();
@@ -12852,6 +12969,10 @@ echo done
             spec_id: None,
             blocker: Some("graph failed"),
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let result =
             render_hook_command(&GraphHookEvent::OnFailed, &ctx, "echo {{node}} {{blocker}}")
@@ -12869,6 +12990,10 @@ echo done
             spec_id: None,
             blocker: None,
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let result = render_hook_idea(
             &GraphHookEvent::OnCompleted,
@@ -12890,6 +13015,10 @@ echo done
             spec_id: Some("spec-abc"),
             blocker: None,
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let result = render_hook_prompt(
             &GraphHookEvent::OnSpecCompleted,
@@ -12910,6 +13039,10 @@ echo done
             spec_id: None,
             blocker: None,
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         // {{unknown}} is not supported by graph hooks.
         let result = render_hook_prompt(
@@ -12930,6 +13063,10 @@ echo done
             spec_id: None,
             blocker: None,
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let result = render_hook_prompt(
             &GraphHookEvent::OnFailed,
@@ -12949,6 +13086,10 @@ echo done
             spec_id: None,
             blocker: None,
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let result = render_hook_prompt(&GraphHookEvent::OnFailed, &ctx, "{{nodee}}");
         assert!(result.is_err());
@@ -13508,6 +13649,10 @@ echo done
             spec_id: None,
             blocker: Some("build broke"),
             node_name: Some("builder"),
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         engine
             .fire_hooks(&lp, crate::domain::graphs::GraphHookEvent::OnFailed, &ctx)
@@ -13572,6 +13717,10 @@ echo done
             spec_id: None,
             blocker: None,
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         engine
             .fire_hooks(
@@ -13617,6 +13766,10 @@ echo done
             spec_id: None,
             blocker: None,
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         engine
             .fire_hooks(
@@ -13681,6 +13834,10 @@ echo done
             spec_id: None,
             blocker: None,
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         // No TUI delivery object exists anywhere in this test — firing only
         // enqueues.
@@ -13759,6 +13916,10 @@ echo done
             spec_id: None,
             blocker: Some("build broke"),
             node_name: Some("builder"),
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         engine
             .fire_hooks(&lp, crate::domain::graphs::GraphHookEvent::OnFailed, &ctx)
@@ -13800,6 +13961,10 @@ echo done
             spec_id: None,
             blocker: None,
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         engine
             .fire_hooks(
@@ -13874,6 +14039,10 @@ echo done
             spec_id: None,
             blocker: None,
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         engine
             .fire_hooks(
@@ -13930,6 +14099,10 @@ echo done
             spec_id: None,
             blocker: Some("build broke"),
             node_name: Some("builder"),
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         engine
             .fire_hooks(&lp, crate::domain::graphs::GraphHookEvent::OnFailed, &ctx)
@@ -13976,6 +14149,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         db.insert_graph_spec(&spec2).unwrap();
 
@@ -14226,6 +14402,10 @@ echo done
             spec_id: None,
             blocker: Some("Reviewer join has ambiguous outgoing edges"),
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         engine
             .fire_hooks(&graph, GraphHookEvent::OnFailed, &ctx)
@@ -19273,6 +19453,7 @@ echo done
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         db.insert_graph(&lp).unwrap();
         let engine = GraphEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
@@ -20672,6 +20853,7 @@ echo done
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let spec_a = GraphSpec {
             id: "spec-graph-a".to_string(),
@@ -20692,6 +20874,9 @@ echo done
             completed_via_reason: None,
             completed_via_at: None,
             spec_committed_head: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let node_a = GraphNode {
             id: "node-graph-a".to_string(),
@@ -20755,6 +20940,7 @@ echo done
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let spec_b = GraphSpec {
             id: "spec-graph-b".to_string(),
@@ -20775,6 +20961,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         db.insert_graph(&graph_b).unwrap();
         db.insert_graph_spec(&spec_b).unwrap();
@@ -20904,6 +21093,7 @@ echo done
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let spec_a = GraphSpec {
             id: "spec-signal-a".to_string(),
@@ -20924,6 +21114,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let node_a = GraphNode {
             id: "node-signal-a".to_string(),
@@ -20982,6 +21175,7 @@ echo done
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let spec_b = GraphSpec {
             id: "spec-signal-b".to_string(),
@@ -21002,6 +21196,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         db.insert_graph(&graph_b).unwrap();
         db.insert_graph_spec(&spec_b).unwrap();
@@ -21875,6 +22072,7 @@ echo done
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let spec = GraphSpec {
             id: "spec".to_string(),
@@ -21895,6 +22093,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let node = GraphNode {
             id: "node-1".to_string(),
@@ -21957,6 +22158,7 @@ echo done
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let spec = GraphSpec {
             id: "spec".to_string(),
@@ -21977,6 +22179,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let node = GraphNode {
             id: "node-1".to_string(),
@@ -22040,6 +22245,7 @@ echo done
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let spec = GraphSpec {
             id: "spec".to_string(),
@@ -22060,6 +22266,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let node = GraphNode {
             id: "node-1".to_string(),
@@ -22131,6 +22340,7 @@ echo done
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let spec = GraphSpec {
             id: "spec".to_string(),
@@ -22151,6 +22361,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let node = GraphNode {
             id: "node-impl".to_string(),
@@ -22257,6 +22470,7 @@ echo done
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let spec = GraphSpec {
             id: "spec".to_string(),
@@ -22277,6 +22491,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let node = GraphNode {
             id: "node-impl".to_string(),
@@ -22342,6 +22559,7 @@ echo done
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let spec = GraphSpec {
             id: "spec".to_string(),
@@ -22362,6 +22580,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let node = GraphNode {
             id: "node-impl".to_string(),
@@ -22417,6 +22638,7 @@ echo done
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let spec = GraphSpec {
             id: "spec".to_string(),
@@ -22437,6 +22659,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let node = GraphNode {
             id: "node-1".to_string(),
@@ -22823,6 +23048,7 @@ exit 0
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let tagged_body = "<spec>\n  <objective>Ship it.</objective>\n  <functional_requirements>Does thing.</functional_requirements>\n  <non_functional_requirements>Fast.</non_functional_requirements>\n  <constraints>None.</constraints>\n  <guidelines>Style.</guidelines>\n  <in_scope>This.</in_scope>\n  <out_of_scope>Nothing.</out_of_scope>\n</spec>";
         let spec = GraphSpec {
@@ -22844,6 +23070,9 @@ exit 0
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let node = GraphNode {
             id: "node-1".to_string(),
@@ -22899,6 +23128,7 @@ exit 0
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         db.insert_graph(&lp)?;
         // Add a Check node so the graph can actually run specs.
@@ -22933,6 +23163,9 @@ exit 0
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         db.insert_graph_spec(&spec)?;
         Ok(id.to_string())
@@ -22958,6 +23191,7 @@ exit 0
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         db.insert_graph(&lp)?;
         let node = crate::domain::graphs::GraphNode {
@@ -23020,6 +23254,7 @@ exit 0
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks,
+            require_spec_type: false,
         };
         db.insert_graph(&lp)?;
         // Add a graph node so the graph can actually run specs.
@@ -23054,6 +23289,9 @@ exit 0
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         db.insert_graph_spec(&spec)?;
         Ok(())
@@ -23299,6 +23537,7 @@ exit 0
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: b_hooks,
+            require_spec_type: false,
         };
         db.insert_graph(&lp_b).unwrap();
         // Add a Check node so graph B can actually run specs.
@@ -23333,6 +23572,9 @@ exit 0
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         db.insert_graph_spec(&b_spec).unwrap();
 
@@ -23562,6 +23804,10 @@ exit 0
             spec_id: None,
             blocker: None,
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let result = render_hook_idea(
             &GraphHookEvent::OnCompleted,
@@ -23583,6 +23829,10 @@ exit 0
             spec_id: None,
             blocker: None,
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let result = render_hook_idea(&GraphHookEvent::OnCompleted, &ctx, "Blocker: {{blocker}}");
         assert_eq!(result.unwrap(), "Blocker: (none)");
@@ -23612,6 +23862,7 @@ exit 0
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         db.insert_graph(&lp).unwrap();
         let spec = crate::domain::graphs::GraphSpec {
@@ -23633,6 +23884,9 @@ exit 0
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         db.insert_graph_spec(&spec).unwrap();
         let specs = db.list_graph_specs("test-graph").unwrap();
@@ -23685,6 +23939,7 @@ exit 0
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks,
+            require_spec_type: false,
         };
         db.insert_graph(&lp).unwrap();
 
@@ -23708,6 +23963,9 @@ exit 0
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         db.insert_graph_spec(&spec).unwrap();
 
@@ -25193,6 +25451,7 @@ exit 0
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         assert_eq!(
             GraphEngine::resolve_dispatch_workdir(&lp, None, &None),
@@ -26218,6 +26477,9 @@ session_end_args = ["end", "--session-id", "{{session_id}}"]
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         }
     }
 
@@ -26243,6 +26505,7 @@ session_end_args = ["end", "--session-id", "{{session_id}}"]
             paused_by_reconciliation: false,
             infra_node_id: None,
             allow_dirty_start: false,
+            require_spec_type: false,
         }
     }
 

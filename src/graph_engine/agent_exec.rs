@@ -617,6 +617,7 @@ mod spec_notes_prompt_tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         })
         .unwrap();
     }
@@ -641,6 +642,9 @@ mod spec_notes_prompt_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         }
     }
 

@@ -4,7 +4,7 @@
 use crate::daemon::handler::TaskTriggerHandler;
 use crate::daemon::handler_formatting::internal_error;
 use crate::daemon::handler_run_exec::{graph_run_blocker, graph_run_json};
-use crate::daemon::handler_specs::build_spec_run_info;
+use crate::daemon::handler_specs_helpers::build_spec_run_info;
 use crate::daemon::handler_validate::{parse_router_routes, resolve_prefix_or_error};
 use crate::daemon::helpers::error_result;
 use crate::daemon::params::*;
@@ -372,6 +372,7 @@ pub(crate) fn graph_details_json(
         "completed_at": lp.lp.completed_at.map(|value| value.to_rfc3339()),
         "autorun_at": lp.lp.autorun_at.map(|value| value.to_rfc3339()),
         "archived": lp.lp.archived,
+        "require_spec_type": lp.lp.require_spec_type,
         "graph": {
             "nodes": lp.graph_nodes.iter().map(|node| graph_node_json(node, &lp.graph_edges)).collect::<Vec<_>>(),
             "edges": lp.graph_edges.iter().map(graph_edge_json).collect::<Vec<_>>(),
@@ -549,6 +550,14 @@ pub(crate) fn graph_spec_details_json(
         "id": spec.spec.id,
         "graph_id": spec.spec.graph_id,
         "name": spec.spec.name,
+        "type": spec.spec.spec_type,
+        "scope": spec.spec.spec_scope,
+        "code": spec.spec.spec_code,
+        "commit_message": spec.spec.spec_type.map(|t| crate::domain::spec_type::commit_message(
+            t,
+            spec.spec.spec_scope.as_deref(),
+            &spec.spec.name,
+        )),
         "description": spec.spec.description,
         "position": spec.spec.position,
         "parallelizable": spec.spec.parallelizable,

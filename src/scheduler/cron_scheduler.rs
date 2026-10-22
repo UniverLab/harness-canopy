@@ -727,6 +727,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         }
     }
 
@@ -871,6 +872,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         })
         .unwrap();
         db.insert_graph_spec(&GraphSpec {
@@ -894,7 +896,10 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
-        })
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
+})
         .unwrap();
         db.insert_graph_node(&GraphNode {
             id: "node-check".to_string(),
@@ -977,6 +982,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         })
         .unwrap();
         // One failed spec — will be reset and resumed.
@@ -1001,7 +1007,10 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
-        })
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
+})
         .unwrap();
         // One admin-skipped spec — must survive the autorun reset.
         db.insert_graph_spec(&GraphSpec {
@@ -1023,6 +1032,9 @@ mod tests {
             completed_via: Some("admin".to_string()),
             completed_via_reason: Some("premise false".to_string()),
             completed_via_at: Some(Utc::now()),
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         })
         .unwrap();
         db.insert_graph_node(&GraphNode {
@@ -1132,7 +1144,10 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
-        };
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
+};
         db.insert_graph_spec(&spec).unwrap();
         db.update_graph_spec_status(&spec.id, GraphSpecStatus::Running, Some(Utc::now()), None)
             .unwrap();
@@ -1303,6 +1318,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         })
         .unwrap();
 
@@ -1331,6 +1347,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         })
         .unwrap();
         db.insert_graph_node(&GraphNode {
@@ -1415,6 +1434,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: Some("queue-1".to_string()),
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         })
         .unwrap();
 
@@ -1437,6 +1457,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         db.insert_graph_spec(&standalone("queue-done", 1, GraphSpecStatus::Completed))
             .unwrap();
@@ -1582,6 +1605,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         })
         .unwrap();
         std::fs::write(git_dir.path().join("dirty.txt"), "dirty").unwrap();
@@ -1764,6 +1790,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         })
         .unwrap();
         db.insert_graph_spec(&GraphSpec {
@@ -1789,7 +1816,10 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
-        })
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
+})
         .unwrap();
         db.insert_graph_node(&GraphNode {
             id: "node-check".to_string(),
@@ -1881,6 +1911,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         })
         .unwrap();
         db.insert_graph_spec(&GraphSpec {
@@ -1902,6 +1933,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         })
         .unwrap();
         db.schedule_graph_auto_continue(

@@ -419,18 +419,41 @@ pub(super) fn draw_backlog_overview(frame: &mut Frame, area: Rect, app: &App, th
         return;
     };
 
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled("Backlog ", Style::default().fg(theme.dim_text)),
-            Span::styled(
-                spec.name.as_str(),
-                Style::default()
-                    .fg(theme.header_color)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(""),
-    ];
+    // SPECCODE: code badge before the name, then dimmed type/scope — mirrors
+    // the graph-live spec view so backlog and graph stay consistent.
+    let mut line_parts: Vec<Span> = vec![Span::styled(
+        "Backlog ",
+        Style::default().fg(theme.dim_text),
+    )];
+    if let Some(ref code) = spec.spec_code {
+        line_parts.push(Span::styled(
+            format!("[{code}] "),
+            Style::default().fg(theme.status_ok),
+        ));
+    }
+    line_parts.push(Span::styled(
+        spec.name.as_str(),
+        Style::default()
+            .fg(theme.header_color)
+            .add_modifier(Modifier::BOLD),
+    ));
+    if let Some(ref spec_type) = spec.spec_type {
+        let type_str = spec_type.as_str();
+        line_parts.push(Span::raw(" "));
+        if let Some(ref scope) = spec.spec_scope {
+            line_parts.push(Span::styled(
+                format!("({type_str}:{scope}) "),
+                Style::default().fg(theme.dim_text),
+            ));
+        } else {
+            line_parts.push(Span::styled(
+                format!("({type_str}) "),
+                Style::default().fg(theme.dim_text),
+            ));
+        }
+    }
+
+    let mut lines = vec![Line::from(line_parts), Line::from("")];
 
     match spec.description.as_deref() {
         Some(description) if !description.is_empty() => {

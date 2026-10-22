@@ -53,6 +53,15 @@ pub enum SpecAction {
         /// Absolute workdir tag, for backlog filtering only.
         #[arg(long)]
         workdir: Option<String>,
+        /// SPECCODE: Conventional Commits type of the change (`feat`, `fix`,
+        /// `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`,
+        /// `revert`). Optional — when omitted and the name is a conventional
+        /// title, the type and scope are parsed from the name.
+        #[arg(long)]
+        spec_type: Option<String>,
+        /// SPECCODE: optional scope of that type (e.g. `tui`).
+        #[arg(long)]
+        spec_scope: Option<String>,
         /// Existing queue ID to append the new spec to.
         #[arg(long)]
         queue: Option<String>,
@@ -84,15 +93,21 @@ pub async fn handle_spec_action(action: SpecAction, port_override: Option<u16>) 
             name,
             description,
             workdir,
+            spec_type,
+            spec_scope,
             queue,
             group,
         } => create_spec(
             port_override,
-            &name,
-            &description,
-            workdir.as_deref(),
-            queue.as_deref(),
-            group.as_deref(),
+            &NewSpec {
+                name: &name,
+                description: &description,
+                workdir: workdir.as_deref(),
+                spec_type: spec_type.as_deref(),
+                spec_scope: spec_scope.as_deref(),
+                queue: queue.as_deref(),
+                group: group.as_deref(),
+            },
         ),
         SpecAction::Convert => convert_specs(port_override),
         SpecAction::Notes { spec_id } => print_notes(port_override, &spec_id),
@@ -109,17 +124,31 @@ fn set_status(port_override: Option<u16>, spec_id: &str, status: &str, reason: &
     Ok(())
 }
 
-fn create_spec(
-    port_override: Option<u16>,
-    name: &str,
-    description: &str,
-    workdir: Option<&str>,
-    queue: Option<&str>,
-    group: Option<&str>,
-) -> Result<()> {
-    let mut args = serde_json::json!({ "name": name, "description": description });
-    if let Some(workdir) = workdir {
+/// The `canopy spec create` flags, borrowed from the parsed [`SpecAction`].
+struct NewSpec<'a> {
+    name: &'a str,
+    description: &'a str,
+    workdir: Option<&'a str>,
+    spec_type: Option<&'a str>,
+    spec_scope: Option<&'a str>,
+    queue: Option<&'a str>,
+    group: Option<&'a str>,
+}
+
+fn create_spec(port_override: Option<u16>, spec: &NewSpec<'_>) -> Result<()> {
+    use crate::domain::spec_type::SpecType;
+
+    let mut args = serde_json::json!({ "name": spec.name, "description": spec.description });
+    if let Some(workdir) = spec.workdir {
         args["workdir"] = serde_json::json!(workdir);
+    }
+    if let Some(spec_type) = spec.spec_type {
+        let parsed_type = SpecType::parse(spec_type)
+            .ok_or_else(|| anyhow!("Unknown --spec-type '{spec_type}'"))?;
+        args["spec_type"] = serde_json::json!(parsed_type);
+    }
+    if let Some(spec_scope) = spec.spec_scope {
+        args["spec_scope"] = serde_json::json!(spec_scope);
     }
 
     let text = call_tool(port_override, "spec_create", &args)?;
@@ -134,9 +163,9 @@ fn create_spec(
         .ok_or_else(|| anyhow!("Unexpected response from spec_create: {text}"))?;
     println!("Spec '{spec_id}' created.");
 
-    if let Some(queue_id) = queue {
+    if let Some(queue_id) = spec.queue {
         let mut queue_args = serde_json::json!({ "queue_id": queue_id, "spec_id": spec_id });
-        if let Some(group) = group {
+        if let Some(group) = spec.group {
             queue_args["group"] = serde_json::json!(group);
         }
         let queue_text = call_tool(port_override, "queue_add_spec", &queue_args)?;
@@ -258,6 +287,8 @@ mod tests {
                 name,
                 description,
                 workdir,
+                spec_type: _,
+                spec_scope: _,
                 queue,
                 group,
             } => {
@@ -314,8 +345,19 @@ mod tests {
         }));
         let port: u16 = fake.port.parse().unwrap();
 
-        create_spec(Some(port), "My Spec", "Objective: x.", None, None, None)
-            .expect("should succeed");
+        create_spec(
+            Some(port),
+            &NewSpec {
+                name: "My Spec",
+                description: "Objective: x.",
+                workdir: None,
+                spec_type: None,
+                spec_scope: None,
+                queue: None,
+                group: None,
+            },
+        )
+        .expect("should succeed");
 
         let calls = fake.recorded_calls();
         assert_eq!(calls.len(), 1);
@@ -338,11 +380,15 @@ mod tests {
 
         create_spec(
             Some(port),
-            "My Spec",
-            "Objective: x.",
-            Some("/tmp/proj"),
-            Some("queue-1"),
-            Some("g1"),
+            &NewSpec {
+                name: "My Spec",
+                description: "Objective: x.",
+                workdir: Some("/tmp/proj"),
+                spec_type: None,
+                spec_scope: None,
+                queue: Some("queue-1"),
+                group: Some("g1"),
+            },
         )
         .expect("should succeed");
 
@@ -364,8 +410,19 @@ mod tests {
         }));
         let port: u16 = fake.port.parse().unwrap();
 
-        let err =
-            create_spec(Some(port), "My Spec", "Objective: x.", None, None, None).unwrap_err();
+        let err = create_spec(
+            Some(port),
+            &NewSpec {
+                name: "My Spec",
+                description: "Objective: x.",
+                workdir: None,
+                spec_type: None,
+                spec_scope: None,
+                queue: None,
+                group: None,
+            },
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("Unexpected response"));
     }
 

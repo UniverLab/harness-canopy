@@ -641,6 +641,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         })
         .unwrap();
     }
@@ -692,6 +693,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         })
         .ok();
         let now = chrono::Utc::now();
@@ -1032,6 +1036,7 @@ mod tests {
             )]
             .into_iter()
             .collect(),
+            require_spec_type: false,
         })
         .unwrap();
         db.crew_create("hooked", None, &[member("claude")]).unwrap();

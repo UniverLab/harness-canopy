@@ -39,12 +39,15 @@ pub(crate) fn validate_spec_workdir(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn resolve_prefix_or_error(
+pub(crate) fn resolve_prefix_or_error<R>(
     db: &Database,
     raw: &str,
-    resolver: fn(&Database, &str) -> anyhow::Result<Option<String>>,
+    resolver: R,
     kind_name: &str,
-) -> Result<String, CallToolResult> {
+) -> Result<String, CallToolResult>
+where
+    R: Fn(&Database, &str) -> anyhow::Result<Option<String>>,
+{
     match resolver(db, raw) {
         Ok(Some(full_id)) => Ok(full_id),
         Ok(None) => Err(error_result(&format!("{kind_name} '{raw}' not found."))),
@@ -61,9 +64,22 @@ pub(crate) fn validate_graph_exists(db: &Database, graph_id: &str) -> Result<(),
 }
 
 pub(crate) fn validate_spec_exists(db: &Database, spec_id: &str) -> Result<GraphSpec, String> {
-    db.get_graph_spec(spec_id)
+    // SPECCODE: exact id match first; otherwise the input may be a prefix or
+    // an engine-generated code (`FIX-7`) — both resolved within the
+    // caller's/graph's workdir by `resolve_spec_id_by_prefix`.
+    if let Some(spec) = db.get_graph_spec(spec_id).map_err(|e| e.to_string())? {
+        return Ok(spec);
+    }
+    match db
+        .resolve_spec_id_by_prefix(spec_id, None)
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Spec '{spec_id}' not found."))
+    {
+        Some(id) => db
+            .get_graph_spec(&id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Spec '{spec_id}' not found.")),
+        None => Err(format!("Spec '{spec_id}' not found.")),
+    }
 }
 
 pub(crate) fn validate_node_exists(db: &Database, node_id: &str) -> Result<GraphNode, String> {

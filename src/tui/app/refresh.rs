@@ -242,7 +242,7 @@ impl App {
         for project in &self.projects {
             let pending_backlog = self
                 .db
-                .list_specs(Some(project.path.as_str()), None, true)
+                .list_specs(Some(project.path.as_str()), None, true, None)
                 .map(|specs| specs.len())
                 .unwrap_or(0);
             let knowledge_entries = self
@@ -313,7 +313,9 @@ impl App {
     /// cadence as `refresh_projects` — no dedicated polling graph.
     pub(crate) fn refresh_backlog_specs(&mut self) -> Result<()> {
         let workdir_filter = self.selected_project().map(|p| p.path.clone());
-        self.backlog_specs = self.db.list_specs(workdir_filter.as_deref(), None, true)?;
+        self.backlog_specs = self
+            .db
+            .list_specs(workdir_filter.as_deref(), None, true, None)?;
         if self.backlog_specs.is_empty() {
             self.selected_backlog = 0;
         } else {

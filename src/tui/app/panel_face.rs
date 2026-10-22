@@ -537,6 +537,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         }
     }
 
@@ -627,6 +630,7 @@ mod tests {
             paused_by_reconciliation: false,
             allow_dirty_start: false,
             infra_node_id: None,
+            require_spec_type: false,
         }
     }
 

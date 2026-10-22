@@ -313,6 +313,10 @@ impl GraphEngine {
             spec_id: None,
             blocker: Some(summary),
             node_name: ending_node_with_dirty_note.as_deref(),
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         self.fire_hooks(lp, GraphHookEvent::OnFailed, &ctx).await;
     }

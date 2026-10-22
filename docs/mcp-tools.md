@@ -81,8 +81,8 @@ was written, retry`. Nothing changed, so retry the same call.
 |---|---|
 | `graph_create` | Create a graph container |
 | `graph_update` | Update graph metadata and hooks |
-| `graph_add_spec` | Add an ordered spec to a graph |
-| `graph_update_spec` | Update a graph spec |
+| `graph_add_spec` | Add an ordered spec to a graph. Supports `spec_type` and `spec_scope` to enable automatic code generation. A graph with `require_spec_type: true` refuses specs without a type |
+| `graph_update_spec` | Update a graph spec. Accepts `spec_type` and `spec_scope` |
 | `graph_remove_spec` | Unbind a spec from a graph, making it a standalone backlog spec; execution history is preserved. |
 | `graph_add_node` | Add a node to a graph |
 | `graph_update_node` | Update a graph node |
@@ -194,9 +194,9 @@ platform-wide entry. An `unavailable` entry past its `until` reads as available
 
 | Tool | Description |
 |---|---|
-| `spec_create` | Create a standalone spec (not bound to any graph) |
-| `spec_list` | List specs, filterable by workdir and status |
-| `spec_update` | Update a spec's name, description, or workdir tag |
+| `spec_create` | Create a standalone spec (not bound to any graph). Supports `spec_type` (Conventional Commits type: `feat`, `fix`, etc.) and `spec_scope` (e.g. `tui`) to enable automatic code generation and deterministic commit messages |
+| `spec_list` | List specs, filterable by workdir, status, and `spec_type` |
+| `spec_update` | Update a spec's name, description, workdir tag, `spec_type`, or `spec_scope` |
 | `spec_delete` | Delete an unbound spec |
 | `spec_set_status` | Admin transition: complete, skip, or reopen a standalone spec |
 | `spec_section_get` | Extract one canonical section (`<objective>`, `<constraints>`, …) from a spec body |

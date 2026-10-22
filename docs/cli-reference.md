@@ -157,6 +157,8 @@ served from the local database — no daemon required.
 |---|---|
 | `canopy spec create --name <name> --description <text>` | Create a standalone spec (a backlog item) |
 | `canopy spec create ... --workdir <path>` | Tag the new spec with a workdir, for backlog filtering |
+| `canopy spec create ... --spec-type <type>` | Set the Conventional Commits type (`feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`). Optional — when omitted and the name is a conventional title, the type and scope are parsed from the name |
+| `canopy spec create ... --spec-scope <scope>` | Set the optional scope (e.g. `tui`). Part of the deterministic commit message |
 | `canopy spec create ... --queue <queue-id>` | Also append the new spec to an existing queue |
 | `canopy spec create ... --queue <queue-id> --group <group>` | Add it to the queue within a context group |
 | `canopy spec complete <spec-id> --reason <text>` | Mark a standalone spec as completed |
