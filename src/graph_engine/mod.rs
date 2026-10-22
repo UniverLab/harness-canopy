@@ -9046,6 +9046,188 @@ echo done
         );
     }
 
+    #[tokio::test]
+    async fn graph_engine_queue_run_settles_failed_when_member_failed() {
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+
+        let spec_a = standalone_spec("queue-a", 1);
+        let mut spec_b = standalone_spec("queue-b", 2);
+        spec_b.status = GraphSpecStatus::Failed;
+        let spec_c = standalone_spec("queue-c", 3);
+        db.insert_graph_spec(&spec_a).unwrap();
+        db.insert_graph_spec(&spec_b).unwrap();
+        db.insert_graph_spec(&spec_c).unwrap();
+        insert_queue_with_members(&db, "queue-1", &[&spec_a.id, &spec_b.id, &spec_c.id]);
+
+        // A stored blocker summary for the already-failed member.
+        db.insert_graph_node(&GraphNode {
+            id: "graph-check".to_string(),
+            spec_id: None,
+            graph_id: Some(graph_id.clone()),
+            name: "check".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": "printf APPROVED",
+                "success_condition": "exit_code_0"
+            }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+        db.insert_graph_run(&GraphNodeRun {
+            id: "run-b".to_string(),
+            graph_id: graph_id.clone(),
+            spec_id: spec_b.id.clone(),
+            node_id: "graph-check".to_string(),
+            status: GraphRunStatus::Fail,
+            input: None,
+            output: Some(serde_json::json!({"blocker": "boom"})),
+            started_at: chrono::Utc::now(),
+            completed_at: Some(chrono::Utc::now()),
+            iteration: 1,
+            pid: None,
+            boot_id: None,
+            session_id: None,
+            executed_platform: None,
+            executed_model: None,
+        })
+        .unwrap();
+
+        let marker = dir.path().join("failed-hook.marker");
+        let hook = crate::domain::graphs::GraphCompletionHook {
+            platform: None,
+            model: None,
+            effort: None,
+            prompt: None,
+            command: Some(format!(
+                "printf '%s' '{{{{completed_specs}}}}' > '{}'",
+                marker.display()
+            )),
+            target_session_id: None,
+            target_session_name: None,
+            timeout_minutes: Some(1),
+            target_graph_id: None,
+            queue_id: None,
+            workdir_override: None,
+            idea: None,
+            crew: None,
+        };
+        let mut hooks = std::collections::BTreeMap::new();
+        hooks.insert(crate::domain::graphs::GraphHookEvent::OnFailed, vec![hook]);
+        db.update_graph_hooks(&graph_id, &hooks).unwrap();
+
+        engine
+            .run_graph(
+                graph_id.clone(),
+                Some("queue-1".to_string()),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Failed);
+
+        let blocker_text = std::fs::read_to_string(&marker).unwrap_or_default();
+        assert!(
+            blocker_text.contains("queue-a"),
+            "completed_specs must include A: {blocker_text}"
+        );
+        assert!(
+            blocker_text.contains("queue-c"),
+            "completed_specs must include C: {blocker_text}"
+        );
+
+        let hook_runs = db.list_graph_completion_hook_runs(&graph_id).unwrap();
+        assert_eq!(hook_runs.len(), 1);
+        assert_eq!(
+            hook_runs[0].event,
+            crate::domain::graphs::GraphHookEvent::OnFailed
+        );
+
+        // No dangling running node runs remain.
+        assert!(db.list_running_graph_runs(&graph_id).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn graph_engine_queue_run_settles_completed_when_all_done() {
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+
+        let spec_a = standalone_spec("queue-a", 1);
+        let spec_b = standalone_spec("queue-b", 2);
+        db.insert_graph_spec(&spec_a).unwrap();
+        db.insert_graph_spec(&spec_b).unwrap();
+        insert_queue_with_members(&db, "queue-1", &[&spec_a.id, &spec_b.id]);
+
+        db.insert_graph_node(&GraphNode {
+            id: "graph-check".to_string(),
+            spec_id: None,
+            graph_id: Some(graph_id.clone()),
+            name: "check".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": "printf APPROVED",
+                "success_condition": "exit_code_0"
+            }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+        let marker = dir.path().join("completed-hook.marker");
+        let hook = crate::domain::graphs::GraphCompletionHook {
+            platform: None,
+            model: None,
+            effort: None,
+            prompt: None,
+            command: Some(format!(
+                "printf '%s' '{{{{completed_specs}}}}' > '{}'",
+                marker.display()
+            )),
+            target_session_id: None,
+            target_session_name: None,
+            timeout_minutes: Some(1),
+            target_graph_id: None,
+            queue_id: None,
+            workdir_override: None,
+            idea: None,
+            crew: None,
+        };
+        let mut hooks = std::collections::BTreeMap::new();
+        hooks.insert(
+            crate::domain::graphs::GraphHookEvent::OnCompleted,
+            vec![hook],
+        );
+        db.update_graph_hooks(&graph_id, &hooks).unwrap();
+
+        engine
+            .run_graph(
+                graph_id.clone(),
+                Some("queue-1".to_string()),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Completed);
+
+        let hook_runs = db.list_graph_completion_hook_runs(&graph_id).unwrap();
+        assert_eq!(hook_runs.len(), 1);
+        assert_eq!(
+            hook_runs[0].event,
+            crate::domain::graphs::GraphHookEvent::OnCompleted
+        );
+
+        assert!(db.list_running_graph_runs(&graph_id).unwrap().is_empty());
+    }
+
     // ── R6: live queues — append and reorder while running ────────────────
 
     async fn wait_for_file(path: &std::path::Path) {
@@ -10271,6 +10453,7 @@ echo done
                 Some("spec"),
                 None,
                 "dispatch A's late failure",
+                &[],
             )
             .await
             .unwrap();
@@ -10335,6 +10518,7 @@ echo done
                 Some("spec"),
                 None,
                 "genuine failure",
+                &[],
             )
             .await
             .unwrap();

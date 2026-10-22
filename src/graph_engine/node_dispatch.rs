@@ -147,6 +147,7 @@ impl GraphEngine {
         spec_name: Option<&str>,
         spec_id: Option<&str>,
         summary: &str,
+        completed_specs: &[(String, String)],
     ) -> Result<()> {
         if let Some(expected) = dispatch_started_at {
             if self.dispatch_is_stale(graph_id, expected)? {
@@ -184,7 +185,7 @@ impl GraphEngine {
 
         // Fire `on_failed` hooks if any are registered.
         if let Ok(Some(lp)) = self.db.get_graph(graph_id) {
-            self.fire_on_failed_hooks(&lp, spec_id, ending_node.clone(), summary)
+            self.fire_on_failed_hooks(&lp, spec_id, ending_node.clone(), summary, completed_specs)
                 .await;
         }
 
@@ -291,6 +292,7 @@ impl GraphEngine {
         spec_id: Option<&str>,
         ending_node: Option<String>,
         summary: &str,
+        completed_specs: &[(String, String)],
     ) {
         let ending_node_with_dirty_note = spec_id
             .and_then(|id| self.db.get_graph_spec(id).ok().flatten())
@@ -308,7 +310,7 @@ impl GraphEngine {
         let ctx = HookContext {
             graph_name: &lp.name,
             workdir: &lp.workdir,
-            completed_specs: &[],
+            completed_specs,
             spec_name: None,
             spec_id: None,
             blocker: Some(summary),

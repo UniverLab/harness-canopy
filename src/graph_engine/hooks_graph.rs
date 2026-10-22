@@ -261,7 +261,7 @@ impl GraphEngine {
                 } else {
                     tracing::error!("Hook-launched graph '{}' failed: {error:#}", graph_id);
                     let _ = engine
-                        .fail_graph(&graph_id, None, None, None, &error.to_string())
+                        .fail_graph(&graph_id, None, None, None, &error.to_string(), &[])
                         .await;
                 }
             }

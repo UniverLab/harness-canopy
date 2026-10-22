@@ -66,6 +66,7 @@ impl GraphEngine {
                     Some(&spec.name),
                     Some(&spec.id),
                     &summary,
+                    &[],
                 )
                 .await?;
                 Ok(SpecOutcomeAction::Pause) // returns early anyway
@@ -174,6 +175,33 @@ impl GraphEngine {
         }
         if self.warn_incomplete_queue_members(&graph_id, queue_id.as_deref())? {
             return Ok(());
+        }
+        if let Some(qid) = queue_id.as_deref() {
+            let failed = self.db.queue_failed_members(qid)?;
+            if !failed.is_empty() {
+                let blocker = failed
+                    .iter()
+                    .map(|(_, name, summary)| {
+                        format!(
+                            "{}: {}",
+                            name,
+                            summary.clone().unwrap_or_else(|| "failed".to_string())
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                let blocker = format!("Queue run failed: {}", blocker);
+                self.fail_graph(
+                    &graph_id,
+                    Some(ctx.claimed_at),
+                    None,
+                    None,
+                    &blocker,
+                    &completed_specs,
+                )
+                .await?;
+                return Ok(());
+            }
         }
         self.finish_dispatch(&ctx, queue_id.as_deref(), sandbox, &completed_specs)
             .await?;
@@ -481,13 +509,13 @@ impl GraphEngine {
         }
         let Some(idea_text) = idea.as_ref() else {
             let message = self.empty_spec_set_message(ctx.lp, None)?;
-            self.fail_graph(graph_id, Some(ctx.claimed_at), None, None, &message)
+            self.fail_graph(graph_id, Some(ctx.claimed_at), None, None, &message, &[])
                 .await?;
             return Err(EmptySpecSetError(message).into());
         };
         if idea_text.trim().is_empty() {
             let message = self.empty_spec_set_message(ctx.lp, None)?;
-            self.fail_graph(graph_id, Some(ctx.claimed_at), None, None, &message)
+            self.fail_graph(graph_id, Some(ctx.claimed_at), None, None, &message, &[])
                 .await?;
             return Err(EmptySpecSetError(message).into());
         }

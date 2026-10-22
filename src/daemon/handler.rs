@@ -15915,6 +15915,110 @@ mod endpoint_tests {
     }
 
     #[tokio::test]
+    async fn graph_get_running_without_run_or_schedule_warns() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        db.update_graph_status(&lp.id, GraphStatus::Running, Some(chrono::Utc::now()), None)
+            .unwrap();
+
+        let result = handler
+            .graph_get(Parameters(GraphGetParams {
+                graph_id: lp.id.clone(),
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&result), "{}", text(&result));
+        let body = raw_text(&result);
+        assert!(body.contains("no node run in progress"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn graph_get_running_with_live_run_does_not_warn() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+        db.insert_graph_node(&GraphNode {
+            id: "node".to_string(),
+            spec_id: Some(spec.id.clone()),
+            graph_id: None,
+            name: "node".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({}),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+        db.update_graph_status(&lp.id, GraphStatus::Running, Some(chrono::Utc::now()), None)
+            .unwrap();
+        db.insert_graph_run(&crate::domain::graphs::GraphNodeRun {
+            id: "run-live".to_string(),
+            graph_id: lp.id.clone(),
+            spec_id: spec.id.clone(),
+            node_id: "node".to_string(),
+            status: crate::domain::graphs::GraphRunStatus::Running,
+            input: None,
+            output: None,
+            started_at: chrono::Utc::now(),
+            completed_at: None,
+            iteration: 1,
+            pid: None,
+            boot_id: None,
+            session_id: None,
+            executed_platform: None,
+            executed_model: None,
+        })
+        .unwrap();
+
+        let result = handler
+            .graph_get(Parameters(GraphGetParams {
+                graph_id: lp.id.clone(),
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&result), "{}", text(&result));
+        let body = raw_text(&result);
+        assert!(body.contains("\"consistency_warning\": null"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn graph_get_running_with_scheduled_resume_does_not_warn() {
+        let (dir, db, handler) = endpoint_test_handler();
+        // Build a running graph with an autorun schedule directly.
+        let lp = Graph {
+            archived: false,
+            paused_by_reconciliation: false,
+            allow_dirty_start: false,
+            require_spec_type: false,
+            infra_node_id: None,
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "Test Graph".to_string(),
+            description: None,
+            workdir: dir.path().to_string_lossy().to_string(),
+            status: GraphStatus::Running,
+            trigger: None,
+            created_at: chrono::Utc::now(),
+            started_at: Some(chrono::Utc::now()),
+            completed_at: None,
+            autorun_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+            auto_continue_at: None,
+            auto_continue_action: None,
+            active_run_queue_id: None,
+            hooks: std::collections::BTreeMap::new(),
+        };
+        db.insert_graph(&lp).unwrap();
+
+        let result = handler
+            .graph_get(Parameters(GraphGetParams {
+                graph_id: lp.id.clone(),
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&result), "{}", text(&result));
+        let body = raw_text(&result);
+        assert!(body.contains("\"consistency_warning\": null"), "{body}");
+    }
+
+    #[tokio::test]
     async fn topology_mutations_are_rejected_while_the_graph_is_running() {
         let (dir, db, handler) = endpoint_test_handler();
         let lp = insert_test_graph(&db, dir.path());

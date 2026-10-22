@@ -299,6 +299,21 @@ pub(crate) fn orphan_join_warning_json(node: &GraphNode) -> serde_json::Value {
     })
 }
 
+/// A graph reported as `running` must have a node run in progress or a
+/// scheduled resume; otherwise the caller surfaces this warning.
+fn running_graph_consistency_warning(db: &Database, graph: &Graph) -> Option<&'static str> {
+    if graph.status != GraphStatus::Running {
+        return None;
+    }
+    let has_running_run = !db
+        .list_running_graph_runs(&graph.id)
+        .unwrap_or_default()
+        .is_empty();
+    let scheduled_resume = graph.autorun_at.is_some() || graph.auto_continue_at.is_some();
+    (!has_running_run && !scheduled_resume)
+        .then_some("graph is running but has no node run in progress and no scheduled resume")
+}
+
 pub(crate) fn graph_details_json(
     db: &Database,
     lp: &GraphDetails,
@@ -414,6 +429,9 @@ pub(crate) fn graph_details_json(
             }
         }
     }
+    let consistency_warning = running_graph_consistency_warning(db, &lp.lp);
+    out["consistency_warning"] = serde_json::json!(consistency_warning);
+    out["consistency_warnings"] = serde_json::json!(consistency_warning.iter().collect::<Vec<_>>());
     if matches!(ctx, ActiveGraphSpec::Idea { .. }) && out.get("queue").is_none() {
         out["mode"] = serde_json::json!("idea");
     }
