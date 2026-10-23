@@ -8,7 +8,7 @@
 
 use axum::http::request::Parts;
 use chrono::Utc;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::ErrorData as McpError;
 
 use crate::application::ports::AgentRepository;
@@ -248,7 +248,7 @@ impl TaskTriggerHandler {
 
         if let Err(e) = self.watcher_engine.start_watcher(&agent).await {
             tracing::warn!("Watcher '{}' saved but failed to start: {}", agent.id, e);
-            return Ok(CallToolResult::success(vec![Content::text(format!(
+            return Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                 "Watcher '{}' for session '{}' registered but could not start watching '{}': {}. It will be retried on daemon restart.",
                 agent.id,
                 target_label(&agent.action),

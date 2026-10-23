@@ -11,7 +11,7 @@ use crate::daemon::params_extract::Parameters;
 use crate::db::graphs::events::GraphEventRow;
 use crate::db::Database;
 use crate::domain::graphs::GraphNodeRun;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::tool;
 use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
@@ -141,7 +141,7 @@ impl TaskTriggerHandler {
             body["omitted"] = serde_json::json!(remaining);
         }
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&body).unwrap_or_default(),
         )]))
     }
@@ -179,7 +179,7 @@ impl TaskTriggerHandler {
             None => None,
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&graph_node_run_detail_json(
                 &run,
                 node_name.as_deref(),
@@ -324,7 +324,7 @@ impl TaskTriggerHandler {
             "events": events,
             "next_since_id": next_since_id,
         });
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&body).unwrap_or_default(),
         )]))
     }

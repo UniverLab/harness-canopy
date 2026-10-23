@@ -14,7 +14,7 @@ use crate::domain::graphs::{
     Graph, GraphDetails, GraphEdge, GraphNode, GraphNodeKind, GraphRunStatus, GraphSpec,
     GraphSpecStatus, GraphStatus,
 };
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::tool;
 use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
@@ -44,7 +44,7 @@ impl TaskTriggerHandler {
             Err(e) => return Err(internal_error(e.to_string())),
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(
                 &graph_details_json(&self.db, &lp).map_err(internal_error)?,
             )
@@ -70,7 +70,7 @@ impl TaskTriggerHandler {
 
         let out = build_graph_list_json(&self.db, &graphs)?;
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&out).unwrap_or_default(),
         )]))
     }

@@ -9,7 +9,7 @@ use crate::daemon::handler_run_exec::validate_graph_ensembles_for_run;
 use crate::daemon::helpers::error_result;
 use crate::daemon::params::*;
 use crate::daemon::params_extract::Parameters;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::tool;
 use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
@@ -508,7 +508,7 @@ impl TaskTriggerHandler {
             ),
         };
         if graph_targets.is_empty() && missing_crews.is_empty() {
-            return Ok(CallToolResult::success(vec![Content::text(
+            return Ok(CallToolResult::success(vec![ContentBlock::text(
                 serde_json::to_string_pretty(&serde_json::json!({
                     "graph_id": params.graph_id,
                     "message": format!(
@@ -632,7 +632,7 @@ impl TaskTriggerHandler {
             })
             .collect();
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&serde_json::json!({
                 "graph_id": params.graph_id,
                 "timeout_seconds": timeout_secs,

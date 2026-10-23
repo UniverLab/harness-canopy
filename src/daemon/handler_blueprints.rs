@@ -10,7 +10,7 @@ use crate::daemon::params::*;
 use crate::daemon::params_extract::Parameters;
 use crate::domain::blueprints::validate_blueprint_deletable;
 use crate::domain::blueprints::Blueprint;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::tool;
 use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
@@ -24,7 +24,7 @@ impl TaskTriggerHandler {
     pub(crate) async fn blueprint_list(&self) -> Result<CallToolResult, McpError> {
         let blueprints = self.db.list_blueprints().map_err(internal_error)?;
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&serde_json::json!({
                 "blueprints": blueprints.iter().map(blueprint_json).collect::<Vec<_>>(),
             }))

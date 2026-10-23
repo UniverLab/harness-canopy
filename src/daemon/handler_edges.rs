@@ -14,7 +14,7 @@ use crate::daemon::params::*;
 use crate::daemon::params_extract::Parameters;
 use crate::db::Database;
 use crate::domain::graphs::{GraphEdge, GraphNode};
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::tool;
 use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
@@ -103,7 +103,7 @@ impl TaskTriggerHandler {
         };
         self.db.insert_graph_edge(&edge).map_err(internal_error)?;
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&serde_json::json!({ "ok": true })).unwrap_or_default(),
         )]))
     }

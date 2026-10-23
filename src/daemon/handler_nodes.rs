@@ -24,7 +24,7 @@ use crate::domain::graphs::{
     validate_router_edges_declared, validate_router_route_coverage, validate_router_routes,
     GraphEdge, GraphEdgeCondition, GraphNode, GraphNodeKind,
 };
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::tool;
 use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
@@ -417,7 +417,7 @@ impl TaskTriggerHandler {
             })
             .collect();
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&serde_json::json!({
                 "flagged_nodes": flagged,
                 "commit_rights_nodes": commit_rights_nodes,

@@ -18,7 +18,7 @@ use crate::shared::sync_identity::CANOPY_AGENT_ID_HEADER;
 use crate::shared::sync_identity::CANOPY_CLIENT_NAME_ENV;
 use crate::shared::sync_identity::CANOPY_CLIENT_NAME_HEADER;
 use axum::http::request::Parts;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::tool;
 use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
@@ -202,7 +202,7 @@ impl TaskTriggerHandler {
             "summary": summary,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&out).unwrap_or_default(),
         )]))
     }
@@ -242,7 +242,7 @@ impl TaskTriggerHandler {
             "projects": projects_json,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&out).unwrap_or_default(),
         )]))
     }
@@ -297,7 +297,7 @@ impl TaskTriggerHandler {
             "weight": edge.weight,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&out).unwrap_or_default(),
         )]))
     }

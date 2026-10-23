@@ -13,7 +13,7 @@ use crate::daemon::params_extract::Parameters;
 use crate::db::Database;
 use crate::domain::graphs::GraphSpecStatus;
 use crate::domain::queues::{Queue, QueueDetails, QueueMember};
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::tool;
 use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
@@ -340,7 +340,7 @@ impl TaskTriggerHandler {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&body).unwrap_or_default(),
         )]))
     }

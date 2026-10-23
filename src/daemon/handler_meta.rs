@@ -10,7 +10,7 @@ use crate::daemon::helpers::{data_dir, error_result, success_result};
 use crate::daemon::params::*;
 use crate::daemon::params_extract::Parameters;
 use axum::http::request::Parts;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::tool;
 use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
@@ -74,7 +74,7 @@ impl TaskTriggerHandler {
             }
         }
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&out).unwrap_or_default(),
         )]))
     }
@@ -110,7 +110,7 @@ impl TaskTriggerHandler {
             })
             .collect();
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&out).unwrap_or_default(),
         )]))
     }
@@ -205,7 +205,7 @@ impl TaskTriggerHandler {
                         "intelligence_nodes": outcome.counts.intelligence_nodes,
                     },
                 });
-                Ok(CallToolResult::success(vec![Content::text(
+                Ok(CallToolResult::success(vec![ContentBlock::text(
                     serde_json::to_string_pretty(&out).unwrap_or_default(),
                 )]))
             }
@@ -244,7 +244,7 @@ impl TaskTriggerHandler {
                     "name": project.name,
                     "path": project.path,
                 });
-                Ok(CallToolResult::success(vec![Content::text(
+                Ok(CallToolResult::success(vec![ContentBlock::text(
                     serde_json::to_string_pretty(&out).unwrap_or_default(),
                 )]))
             }
@@ -319,7 +319,7 @@ impl TaskTriggerHandler {
 
         let out: Vec<serde_json::Value> = results.iter().map(rag_result_json).collect();
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&out).unwrap_or_default(),
         )]))
     }
@@ -334,7 +334,7 @@ impl TaskTriggerHandler {
     )]
     pub(crate) async fn rag_compact(&self) -> Result<CallToolResult, McpError> {
         let report = self.ingestion.compact_now_report().await;
-        Ok(CallToolResult::success(vec![Content::text(report)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(report)]))
     }
 
     #[tool(
@@ -425,7 +425,7 @@ impl TaskTriggerHandler {
                     if let Some(reason) = blocking_result.effort_not_applied {
                         json["effort_not_applied"] = serde_json::json!(reason);
                     }
-                    Ok(CallToolResult::success(vec![Content::text(
+                    Ok(CallToolResult::success(vec![ContentBlock::text(
                         serde_json::to_string_pretty(&json).unwrap_or_default(),
                     )]))
                 }
@@ -454,7 +454,7 @@ impl TaskTriggerHandler {
                     if let Some(reason) = effort_not_applied {
                         result["effort_not_applied"] = serde_json::json!(reason);
                     }
-                    Ok(CallToolResult::success(vec![Content::text(
+                    Ok(CallToolResult::success(vec![ContentBlock::text(
                         serde_json::to_string_pretty(&result).unwrap_or_default(),
                     )]))
                 }
@@ -486,7 +486,7 @@ impl TaskTriggerHandler {
                     "platform": result.platform,
                     "model": result.model,
                 });
-                Ok(CallToolResult::success(vec![Content::text(
+                Ok(CallToolResult::success(vec![ContentBlock::text(
                     serde_json::to_string_pretty(&json).unwrap_or_default(),
                 )]))
             }

@@ -22,7 +22,7 @@ use crate::domain::graphs::{
 };
 use crate::domain::spec_type::{parse_conventional_title, resolve_spec_naming};
 use crate::domain::specs::{extract_spec_section, SpecSection, SpecSectionResult};
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::tool;
 use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
@@ -415,7 +415,7 @@ impl TaskTriggerHandler {
             body["omitted"] = serde_json::json!(omitted);
         }
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&body).unwrap_or_default(),
         )]))
     }
@@ -706,7 +706,7 @@ impl TaskTriggerHandler {
                     "present": present,
                     "needs_conversion": false,
                 });
-                Ok(CallToolResult::success(vec![Content::text(
+                Ok(CallToolResult::success(vec![ContentBlock::text(
                     serde_json::to_string_pretty(&body).unwrap_or_default(),
                 )]))
             }
@@ -718,7 +718,7 @@ impl TaskTriggerHandler {
                     "present": present,
                     "needs_conversion": true,
                 });
-                Ok(CallToolResult::success(vec![Content::text(
+                Ok(CallToolResult::success(vec![ContentBlock::text(
                     serde_json::to_string_pretty(&body).unwrap_or_default(),
                 )]))
             }
@@ -754,7 +754,7 @@ impl TaskTriggerHandler {
             "errors": report.errors,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&report_json).unwrap_or_default(),
         )]))
     }
