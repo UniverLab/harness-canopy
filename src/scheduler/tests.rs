@@ -35,7 +35,8 @@ fn test_validate_cron_invalid() {
 
 #[test]
 fn test_substitute_variables_all_vars() {
-    let prompt = "Task {{TASK_ID}} at {{TIMESTAMP}} on {{FILE_PATH}} for {{EVENT_TYPE}}";
+    let prompt =
+        "Task {{TASK_ID}} at {{TIMESTAMP}} on {{FILE_PATH}} for {{EVENT_TYPE}}, log {{LOG_PATH}}";
     let result = substitute_variables(
         prompt,
         "task-123",

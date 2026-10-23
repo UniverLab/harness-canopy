@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/UniverLab/.github/main/assets/banner-canopy.svg" alt="canopy"/>
+  <img src="https://raw.githubusercontent.com/UniverLab/.github/main/assets/banner-canopy.svg" alt="Canopy"/>
 </p>
 
 <p align="center">
