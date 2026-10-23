@@ -190,13 +190,13 @@ fn append_cli_section(
     cli_field: usize,
     theme: &Theme,
 ) {
-    // The harness name always reads in that harness's own accent; focus only
-    // adds the header-coloured highlight behind it.
+    // The harness name reads in its own accent; focus turns the name into a
+    // solid block of that accent with black text.
     let cli_accent = dialog.cli_accent_color(dialog.cli_index, theme);
     let value_style = if dialog.field == cli_field {
         Style::default()
-            .fg(cli_accent)
-            .bg(accent)
+            .fg(Color::Black)
+            .bg(cli_accent)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(cli_accent)
@@ -254,16 +254,21 @@ fn append_cli_picker_rows(
             .take(CLI_PICKER_VISIBLE)
         {
             let is_selected = i == dialog.cli_picker_idx;
-            let style = picker_item_style(accent, is_selected);
-            // Each row names its own harness in that harness's accent; the
-            // selection highlight only adds the header background behind it.
-            let label_style = if is_selected {
-                Style::default()
-                    .fg(dialog.cli_accent_color(*cli_idx, theme))
-                    .bg(accent)
-                    .add_modifier(Modifier::BOLD)
+            let cli_accent = dialog.cli_accent_color(*cli_idx, theme);
+            // Each row names its own harness in that harness's accent. The
+            // selected row is a solid block of that accent with black text, so
+            // the marker and the label share one colour.
+            let (style, label_style) = if is_selected {
+                let block = Style::default()
+                    .fg(Color::Black)
+                    .bg(cli_accent)
+                    .add_modifier(Modifier::BOLD);
+                (block, block)
             } else {
-                Style::default().fg(dialog.cli_accent_color(*cli_idx, theme))
+                (
+                    picker_item_style(accent, false),
+                    Style::default().fg(cli_accent),
+                )
             };
             lines.push(Line::from(vec![
                 Span::styled(

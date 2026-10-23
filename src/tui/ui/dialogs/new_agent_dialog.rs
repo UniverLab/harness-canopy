@@ -1269,7 +1269,7 @@ mod tests {
         })];
         dialog.cli_index = 0;
         dialog.cli_picker_open = true;
-        dialog.field = 2; // harness row focused, so the name carries its accent
+        dialog.field = FieldLayout::for_task(dialog.task_type).cli; // harness focused: name fills with its accent
         let label = dialog.cli_display_label(0);
         let app = app_with_dialog(dialog);
         let theme = Theme::classic();
@@ -1295,32 +1295,195 @@ mod tests {
         );
 
         for (y, line) in grid.iter().enumerate() {
-            for (x, &(_, bg)) in line.iter().enumerate() {
-                assert_ne!(
-                    bg, harness,
-                    "cell ({x},{y}) must not use the harness accent as background"
-                );
-            }
-        }
-
-        let mut accent_rows = std::collections::BTreeSet::new();
-        for (row, (text, _)) in rows.iter().enumerate() {
-            for (x, _) in text.chars().enumerate() {
-                if grid[row][x].0 == harness {
-                    accent_rows.insert(row);
-                    assert!(
-                        text.contains(&label),
-                        "harness accent fg is only for the harness name row, found on: {text:?}"
+            for (x, &(fg, bg)) in line.iter().enumerate() {
+                if bg == harness {
+                    assert_eq!(
+                        fg,
+                        Color::Black,
+                        "cell ({x},{y}) may use the harness accent as background only with black text"
                     );
                 }
             }
         }
-        // Both the harness row's value and the picker row's own name carry the
-        // accent, so at least two distinct rows must be painted with it.
+
+        // The harness value and the selected picker row are both drawn as a
+        // solid block of the accent, so at least two rows carry that background.
+        let mut block_rows = std::collections::BTreeSet::new();
+        for (row, (text, _)) in rows.iter().enumerate() {
+            for (x, _) in text.chars().enumerate() {
+                if grid[row][x].1 == harness {
+                    block_rows.insert(row);
+                    assert!(
+                        text.contains(&label),
+                        "harness block is only for the harness name rows, found on: {text:?}"
+                    );
+                }
+            }
+        }
         assert!(
-            accent_rows.len() >= 2,
-            "the harness name must carry its accent on the value row and on the \
-             picker row (label {label:?}), found on rows {accent_rows:?}"
+            block_rows.len() >= 2,
+            "the harness name must fill the value row and the picker row \
+             (label {label:?}), found on rows {block_rows:?}"
         );
+    }
+
+    /// Two harnesses with fixed accents: row 0 is claude (red), row 1 is
+    /// mistral (blue). The picker is open and row 0 is selected.
+    fn two_harness_dialog() -> NewAgentDialog {
+        use crate::domain::cli_config::CliConfig;
+        use crate::domain::models::Cli;
+        let mut d = NewAgentDialog::new(Some("."));
+        d.available_clis = vec![Cli::new("claude"), Cli::new("mistral")];
+        d.cli_configs = vec![
+            Some(CliConfig {
+                name: "claude".to_string(),
+                accent_color: Some([255, 0, 0]),
+                ..Default::default()
+            }),
+            Some(CliConfig {
+                name: "mistral".to_string(),
+                accent_color: Some([0, 0, 255]),
+                ..Default::default()
+            }),
+        ];
+        d.cli_picker_open = true;
+        d
+    }
+
+    fn assert_harness_block(span: &Span<'static>, harness: Color, what: &str) {
+        assert_eq!(
+            span.style.bg,
+            Some(harness),
+            "{what} must be filled with the harness accent"
+        );
+        assert_eq!(
+            span.style.fg,
+            Some(Color::Black),
+            "{what} must use black text"
+        );
+        assert!(
+            span.style.add_modifier.contains(Modifier::BOLD),
+            "{what} must be bold"
+        );
+    }
+
+    #[test]
+    fn selected_harness_row_is_one_block_in_its_accent() {
+        let d = two_harness_dialog();
+        let label = d.cli_display_label(0);
+        let lines = build_dialog_lines(
+            &d,
+            Color::Cyan,
+            &[0, 1],
+            40,
+            &Theme::classic(),
+            DIR_BROWSER_VISIBLE,
+        );
+        let spans: Vec<&Span<'static>> = lines.iter().flat_map(|l| l.spans.iter()).collect();
+        let marker = spans
+            .iter()
+            .find(|s| s.content.starts_with("    \u{203a}"))
+            .expect("selected row marker drawn");
+        let name = spans
+            .iter()
+            .find(|s| s.content == label)
+            .expect("selected row label drawn");
+        let harness = Color::Rgb(255, 0, 0);
+        assert_harness_block(marker, harness, "selected harness marker");
+        assert_harness_block(name, harness, "selected harness label");
+    }
+
+    #[test]
+    fn unselected_harness_row_keeps_accent_text_without_background() {
+        let d = two_harness_dialog();
+        let label = d.cli_display_label(1);
+        let lines = build_dialog_lines(
+            &d,
+            Color::Cyan,
+            &[0, 1],
+            40,
+            &Theme::classic(),
+            DIR_BROWSER_VISIBLE,
+        );
+        let name = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|s| s.content == label)
+            .expect("unselected row label drawn");
+        assert_eq!(name.style.fg, Some(Color::Rgb(0, 0, 255)));
+        assert_eq!(
+            name.style.bg, None,
+            "unselected harness row has no background"
+        );
+    }
+
+    #[test]
+    fn focused_harness_value_is_one_block_in_its_accent() {
+        let mut d = two_harness_dialog();
+        d.field = FieldLayout::for_task(d.task_type).cli;
+        let value = format!(" {} ", d.cli_display_label(0));
+        let lines = build_dialog_lines(
+            &d,
+            Color::Cyan,
+            &[0, 1],
+            40,
+            &Theme::classic(),
+            DIR_BROWSER_VISIBLE,
+        );
+        let span = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|s| s.content == value)
+            .expect("harness value drawn");
+        assert_harness_block(span, Color::Rgb(255, 0, 0), "focused harness value");
+    }
+
+    #[test]
+    fn unfocused_harness_value_keeps_accent_text_without_background() {
+        let mut d = two_harness_dialog();
+        d.field = 0; // harness row not focused
+        let value = format!(" {} ", d.cli_display_label(0));
+        let lines = build_dialog_lines(
+            &d,
+            Color::Cyan,
+            &[0, 1],
+            40,
+            &Theme::classic(),
+            DIR_BROWSER_VISIBLE,
+        );
+        let span = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|s| s.content == value)
+            .expect("harness value drawn");
+        assert_eq!(span.style.fg, Some(Color::Rgb(255, 0, 0)));
+        assert_eq!(
+            span.style.bg, None,
+            "unfocused harness value has no background"
+        );
+    }
+
+    #[test]
+    fn directory_picker_selected_row_keeps_canopy_accent() {
+        let root = root_with_dirs(&["alpha", "bravo"]);
+        let mut d = NewAgentDialog::new(Some(root.path().to_string_lossy().as_ref()));
+        d.dir_selected = 1;
+        let accent = Theme::classic().header_color;
+        let lines = build_dialog_lines(&d, accent, &[], 40, &Theme::classic(), DIR_BROWSER_VISIBLE);
+        let spans: Vec<&Span<'static>> = lines.iter().flat_map(|l| l.spans.iter()).collect();
+        let selected = spans
+            .iter()
+            .find(|s| s.content.contains("bravo"))
+            .expect("selected folder drawn");
+        let other = spans
+            .iter()
+            .find(|s| s.content.contains("alpha"))
+            .expect("unselected folder drawn");
+        assert_eq!(
+            selected.style.bg,
+            Some(accent),
+            "selected folder keeps the canopy accent"
+        );
+        assert_eq!(other.style.bg, None, "unselected folder has no background");
     }
 }
