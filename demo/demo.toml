@@ -1,8 +1,6 @@
 [demo]
 name = "demo"
 output_dir = "./dist"
-speed = "3x"
-targets = ["gif", "mp4"]
 prompt = '\[\e[1;32m\]canopy@univerlab\[\e[0m\]:\[\e[1;34m\]~\[\e[0m\]$ '
 
 [typing]
@@ -15,7 +13,7 @@ height = 1080
 fps = 15
 line_height = 1.2000000476837158
 background = "#0b0f14"
-font_family = "IBM Plex Mono"
+font_family = "DejaVu Sans Mono"
 
 [[layout.panes]]
 id = "main"
@@ -30,48 +28,6 @@ font_size = 16
 [[timeline]]
 action = "focus"
 pane = "main"
-
-[[timeline]]
-action = "type"
-text = "canopy doctor"
-human_salt = true
-
-[[timeline]]
-action = "wait"
-duration_ms = 200
-
-[[timeline]]
-action = "keypress"
-key = "enter"
-
-[[timeline]]
-action = "wait_for_quiet"
-quiet_ms = 500
-
-[[timeline]]
-action = "type"
-text = "canopy mcp"
-human_salt = true
-
-[[timeline]]
-action = "wait"
-duration_ms = 200
-
-[[timeline]]
-action = "keypress"
-key = "enter"
-
-[[timeline]]
-action = "wait"
-duration_ms = 200
-
-[[timeline]]
-action = "keypress"
-key = "enter"
-
-[[timeline]]
-action = "wait_for_quiet"
-quiet_ms = 2500
 
 [[timeline]]
 action = "type"
@@ -92,151 +48,275 @@ duration_ms = 2500
 
 [[timeline]]
 action = "keypress"
-key = "f2"
+key = "shift-down"
 
 [[timeline]]
 action = "wait"
-duration_ms = 2500
+duration_ms = 397
 
 [[timeline]]
 action = "keypress"
-key = "down"
+key = "shift-down"
 
 [[timeline]]
 action = "wait"
-duration_ms = 330
+duration_ms = 403
 
 [[timeline]]
 action = "keypress"
-key = "down"
+key = "shift-down"
 
 [[timeline]]
 action = "wait"
-duration_ms = 364
+duration_ms = 626
 
 [[timeline]]
 action = "keypress"
-key = "down"
+key = "shift-down"
 
 [[timeline]]
 action = "wait"
-duration_ms = 324
+duration_ms = 772
 
 [[timeline]]
 action = "keypress"
-key = "down"
+key = "shift-down"
 
 [[timeline]]
 action = "wait"
-duration_ms = 376
+duration_ms = 2111
 
 [[timeline]]
 action = "keypress"
-key = "tab"
+key = "shift-right"
 
 [[timeline]]
 action = "wait"
-duration_ms = 467
+duration_ms = 2459
 
 [[timeline]]
 action = "keypress"
-key = "down"
+key = "shift-down"
 
 [[timeline]]
 action = "wait"
-duration_ms = 927
+duration_ms = 384
 
 [[timeline]]
 action = "keypress"
-key = "down"
+key = "shift-down"
 
 [[timeline]]
 action = "wait"
-duration_ms = 376
+duration_ms = 435
 
 [[timeline]]
 action = "keypress"
-key = "down"
+key = "shift-down"
 
 [[timeline]]
 action = "wait"
-duration_ms = 1448
+duration_ms = 519
 
 [[timeline]]
 action = "keypress"
-key = "f1"
+key = "shift-up"
 
 [[timeline]]
 action = "wait"
-duration_ms = 1559
+duration_ms = 421
 
 [[timeline]]
 action = "keypress"
-key = "down"
+key = "shift-up"
 
 [[timeline]]
 action = "wait"
-duration_ms = 278
+duration_ms = 319
 
 [[timeline]]
 action = "keypress"
-key = "down"
+key = "shift-up"
 
 [[timeline]]
 action = "wait"
-duration_ms = 214
+duration_ms = 1101
 
 [[timeline]]
 action = "keypress"
-key = "down"
+key = "shift-right"
 
 [[timeline]]
 action = "wait"
-duration_ms = 259
+duration_ms = 1593
 
 [[timeline]]
 action = "keypress"
-key = "down"
+key = "shift-down"
 
 [[timeline]]
 action = "wait"
-duration_ms = 290
+duration_ms = 969
 
 [[timeline]]
 action = "keypress"
-key = "down"
+key = "shift-up"
 
 [[timeline]]
 action = "wait"
-duration_ms = 306
+duration_ms = 200
 
 [[timeline]]
 action = "keypress"
-key = "down"
+key = "enter"
 
 [[timeline]]
 action = "wait"
-duration_ms = 293
+duration_ms = 956
 
 [[timeline]]
 action = "keypress"
-key = "down"
+key = "shift-right"
 
 [[timeline]]
 action = "wait"
-duration_ms = 931
+duration_ms = 645
 
 [[timeline]]
 action = "keypress"
-key = "f1"
+key = "shift-right"
 
 [[timeline]]
 action = "wait"
-duration_ms = 2500
+duration_ms = 1155
 
 [[timeline]]
 action = "keypress"
-key = "f2"
+key = "shift-down"
+
+[[timeline]]
+action = "wait"
+duration_ms = 275
+
+[[timeline]]
+action = "keypress"
+key = "shift-down"
+
+[[timeline]]
+action = "wait"
+duration_ms = 231
+
+[[timeline]]
+action = "keypress"
+key = "shift-down"
+
+[[timeline]]
+action = "wait"
+duration_ms = 252
+
+[[timeline]]
+action = "keypress"
+key = "shift-down"
+
+[[timeline]]
+action = "wait"
+duration_ms = 231
+
+[[timeline]]
+action = "keypress"
+key = "shift-down"
+
+[[timeline]]
+action = "wait"
+duration_ms = 355
+
+[[timeline]]
+action = "keypress"
+key = "shift-up"
+
+[[timeline]]
+action = "wait"
+duration_ms = 245
+
+[[timeline]]
+action = "keypress"
+key = "shift-up"
+
+[[timeline]]
+action = "wait"
+duration_ms = 586
+
+[[timeline]]
+action = "keypress"
+key = "shift-right"
+
+[[timeline]]
+action = "wait"
+duration_ms = 1328
+
+[[timeline]]
+action = "keypress"
+key = "shift-down"
+
+[[timeline]]
+action = "wait"
+duration_ms = 185
+
+[[timeline]]
+action = "keypress"
+key = "shift-down"
+
+[[timeline]]
+action = "wait"
+duration_ms = 156
+
+[[timeline]]
+action = "keypress"
+key = "shift-down"
+
+[[timeline]]
+action = "wait"
+duration_ms = 438
+
+[[timeline]]
+action = "keypress"
+key = "shift-left"
+
+[[timeline]]
+action = "wait"
+duration_ms = 186
+
+[[timeline]]
+action = "keypress"
+key = "shift-left"
+
+[[timeline]]
+action = "wait"
+duration_ms = 593
+
+[[timeline]]
+action = "keypress"
+key = "shift-left"
+
+[[timeline]]
+action = "wait"
+duration_ms = 1912
+
+[[timeline]]
+action = "keypress"
+key = "esc"
+
+[[timeline]]
+action = "keypress"
+key = "shift-left"
+
+[[timeline]]
+action = "wait"
+duration_ms = 2331
+
+[[timeline]]
+action = "keypress"
+key = "shift-left"
 
 [[timeline]]
 action = "wait"
@@ -251,45 +331,13 @@ action = "wait"
 duration_ms = 200
 
 [[timeline]]
-action = "keypress"
-key = "down"
-
-[[timeline]]
-action = "wait"
-duration_ms = 1337
-
-[[timeline]]
 action = "type"
 text = " "
 human_salt = true
 
 [[timeline]]
 action = "wait"
-duration_ms = 739
-
-[[timeline]]
-action = "keypress"
-key = "down"
-
-[[timeline]]
-action = "wait"
-duration_ms = 299
-
-[[timeline]]
-action = "keypress"
-key = "down"
-
-[[timeline]]
-action = "wait"
-duration_ms = 227
-
-[[timeline]]
-action = "keypress"
-key = "down"
-
-[[timeline]]
-action = "wait"
-duration_ms = 256
+duration_ms = 664
 
 [[timeline]]
 action = "keypress"
@@ -305,7 +353,7 @@ key = "down"
 
 [[timeline]]
 action = "wait"
-duration_ms = 248
+duration_ms = 256
 
 [[timeline]]
 action = "keypress"
@@ -313,36 +361,27 @@ key = "down"
 
 [[timeline]]
 action = "wait"
-duration_ms = 259
+duration_ms = 615
 
 [[timeline]]
 action = "keypress"
-key = "down"
+key = "up"
 
 [[timeline]]
 action = "wait"
-duration_ms = 273
+duration_ms = 242
 
 [[timeline]]
 action = "keypress"
-key = "down"
+key = "up"
 
 [[timeline]]
 action = "wait"
-duration_ms = 281
+duration_ms = 264
 
 [[timeline]]
 action = "keypress"
-key = "down"
-
-[[timeline]]
-action = "wait"
-duration_ms = 602
-
-[[timeline]]
-action = "type"
-text = "ope"
-human_salt = true
+key = "up"
 
 [[timeline]]
 action = "wait"
@@ -354,126 +393,11 @@ key = "enter"
 
 [[timeline]]
 action = "wait"
-duration_ms = 1295
+duration_ms = 200
 
 [[timeline]]
 action = "keypress"
-key = "down"
-
-[[timeline]]
-action = "wait"
-duration_ms = 263
-
-[[timeline]]
-action = "keypress"
-key = "down"
-
-[[timeline]]
-action = "wait"
-duration_ms = 279
-
-[[timeline]]
-action = "keypress"
-key = "down"
-
-[[timeline]]
-action = "wait"
-duration_ms = 798
-
-[[timeline]]
-action = "keypress"
-key = "left"
-
-[[timeline]]
-action = "wait"
-duration_ms = 338
-
-[[timeline]]
-action = "keypress"
-key = "left"
-
-[[timeline]]
-action = "wait"
-duration_ms = 290
-
-[[timeline]]
-action = "keypress"
-key = "left"
-
-[[timeline]]
-action = "wait"
-duration_ms = 276
-
-[[timeline]]
-action = "keypress"
-key = "left"
-
-[[timeline]]
-action = "wait"
-duration_ms = 295
-
-[[timeline]]
-action = "keypress"
-key = "left"
-
-[[timeline]]
-action = "wait"
-duration_ms = 823
-
-[[timeline]]
-action = "type"
-text = "hom"
-human_salt = true
-
-[[timeline]]
-action = "wait"
-duration_ms = 818
-
-[[timeline]]
-action = "keypress"
-key = "right"
-
-[[timeline]]
-action = "wait"
-duration_ms = 1195
-
-[[timeline]]
-action = "keypress"
-key = "right"
-
-[[timeline]]
-action = "wait"
-duration_ms = 2418
-
-[[timeline]]
-action = "type"
-text = "pro"
-human_salt = true
-
-[[timeline]]
-action = "wait"
-duration_ms = 544
-
-[[timeline]]
-action = "keypress"
-key = "right"
-
-[[timeline]]
-action = "wait"
-duration_ms = 1451
-
-[[timeline]]
-action = "type"
-text = "uni"
-human_salt = true
-
-[[timeline]]
-action = "wait"
-duration_ms = 887
-
-[[timeline]]
-action = "keypress"
-key = "right"
+key = "enter"
 
 [[timeline]]
 action = "wait"
@@ -485,7 +409,7 @@ key = "enter"
 
 [[timeline]]
 action = "wait"
-duration_ms = 884
+duration_ms = 1483
 
 [[timeline]]
 action = "type"
@@ -502,11 +426,142 @@ key = "enter"
 
 [[timeline]]
 action = "wait"
-duration_ms = 200
+duration_ms = 1936
+
+[[timeline]]
+action = "type"
+text = "tell me what this project is about without reading any files, rely solely on intelligence"
+human_salt = true
+
+[[timeline]]
+action = "wait"
+duration_ms = 2500
 
 [[timeline]]
 action = "keypress"
-key = "enter"
+key = "ctrl+s"
+
+[[timeline]]
+action = "wait"
+duration_ms = 2500
+
+[[timeline]]
+action = "keypress"
+key = "f1"
+
+[[timeline]]
+action = "wait"
+duration_ms = 1316
+
+[[timeline]]
+action = "keypress"
+key = "down"
+
+[[timeline]]
+action = "wait"
+duration_ms = 452
+
+[[timeline]]
+action = "keypress"
+key = "down"
+
+[[timeline]]
+action = "wait"
+duration_ms = 472
+
+[[timeline]]
+action = "keypress"
+key = "up"
+
+[[timeline]]
+action = "wait"
+duration_ms = 414
+
+[[timeline]]
+action = "keypress"
+key = "right"
+
+[[timeline]]
+action = "wait"
+duration_ms = 502
+
+[[timeline]]
+action = "keypress"
+key = "down"
+
+[[timeline]]
+action = "wait"
+duration_ms = 1328
+
+[[timeline]]
+action = "type"
+text = " "
+human_salt = true
+
+[[timeline]]
+action = "wait"
+duration_ms = 1191
+
+[[timeline]]
+action = "type"
+text = " "
+human_salt = true
+
+[[timeline]]
+action = "wait"
+duration_ms = 1191
+
+[[timeline]]
+action = "keypress"
+key = "down"
+
+[[timeline]]
+action = "wait"
+duration_ms = 414
+
+[[timeline]]
+action = "keypress"
+key = "down"
+
+[[timeline]]
+action = "wait"
+duration_ms = 377
+
+[[timeline]]
+action = "keypress"
+key = "down"
+
+[[timeline]]
+action = "wait"
+duration_ms = 289
+
+[[timeline]]
+action = "keypress"
+key = "down"
+
+[[timeline]]
+action = "wait"
+duration_ms = 371
+
+[[timeline]]
+action = "keypress"
+key = "down"
+
+[[timeline]]
+action = "wait"
+duration_ms = 370
+
+[[timeline]]
+action = "keypress"
+key = "down"
+
+[[timeline]]
+action = "wait"
+duration_ms = 422
+
+[[timeline]]
+action = "keypress"
+key = "down"
 
 [[timeline]]
 action = "wait"
@@ -521,111 +576,8 @@ action = "wait"
 duration_ms = 2500
 
 [[timeline]]
-action = "type"
-text = "/model"
-human_salt = true
-
-[[timeline]]
-action = "wait"
-duration_ms = 200
-
-[[timeline]]
 action = "keypress"
-key = "enter"
-
-[[timeline]]
-action = "wait"
-duration_ms = 1501
-
-[[timeline]]
-action = "type"
-text = "free"
-human_salt = true
-
-[[timeline]]
-action = "wait"
-duration_ms = 1536
-
-[[timeline]]
-action = "keypress"
-key = "down"
-
-[[timeline]]
-action = "wait"
-duration_ms = 200
-
-[[timeline]]
-action = "keypress"
-key = "enter"
-
-[[timeline]]
-action = "wait"
-duration_ms = 500
-
-[[timeline]]
-action = "keypress"
-key = "ctrl+b"
-
-[[timeline]]
-action = "wait"
-duration_ms = 200
-
-[[timeline]]
-action = "type"
-text = "Using only Canopy's intelligence, tell me everything you know about this project, without reading any files."
-human_salt = true
-
-[[timeline]]
-action = "wait"
-duration_ms = 200
-
-[[timeline]]
-action = "keypress"
-key = "ctrl+s"
-
-[[timeline]]
-action = "wait"
-duration_ms = 2500
-
-[[timeline]]
-action = "keypress"
-key = "f3"
-
-[[timeline]]
-action = "wait"
-duration_ms = 1368
-
-[[timeline]]
-action = "keypress"
-key = "f3"
-
-[[timeline]]
-action = "wait"
-duration_ms = 1030
-
-[[timeline]]
-action = "keypress"
-key = "f3"
-
-[[timeline]]
-action = "wait"
-duration_ms = 2500
-
-[[timeline]]
-action = "keypress"
-key = "f3"
-
-[[timeline]]
-action = "wait"
-duration_ms = 2500
-
-[[timeline]]
-action = "keypress"
-key = "f3"
-
-[[timeline]]
-action = "wait"
-duration_ms = 5000
+key = "esc"
 
 [[timeline]]
 action = "type"
@@ -642,7 +594,7 @@ key = "enter"
 
 [[timeline]]
 action = "wait"
-duration_ms = 2500
+duration_ms = 1754
 
 [[timeline]]
 action = "keypress"
@@ -650,7 +602,7 @@ key = "f10"
 
 [[timeline]]
 action = "wait"
-duration_ms = 1067
+duration_ms = 621
 
 [[timeline]]
 action = "keypress"
@@ -658,7 +610,7 @@ key = "f10"
 
 [[timeline]]
 action = "wait"
-duration_ms = 608
+duration_ms = 2327
 
 [[timeline]]
 action = "keypress"
