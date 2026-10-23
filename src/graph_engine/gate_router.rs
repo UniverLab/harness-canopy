@@ -565,7 +565,8 @@ pub(crate) async fn run_completion_hook_process(
             );
         },
         None,
-        None, // Hooks don't get verdict monitoring
+        None,  // Hooks don't get verdict monitoring
+        false, // Hooks keep the full tool list, not the node profile.
     )
     .await;
 

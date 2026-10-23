@@ -144,6 +144,7 @@ pub(crate) async fn spawn_and_wait_cli_process(
     on_pid: impl FnOnce(u32),
     tee: Option<OutputTee>,
     verdict_watch: Option<VerdictWatch>,
+    node_profile: bool,
 ) -> Result<CliProcessOutcome, SpawnError> {
     // CB85: identity check before anything is spawned.
     if let Some(error) = ensure_platform_identity(strategy).await {
@@ -162,8 +163,11 @@ pub(crate) async fn spawn_and_wait_cli_process(
             .map_err(|error| SpawnError::from_build(&error))?,
     };
     // Graph agent/ensemble nodes run with the node MCP tool profile so their
-    // session stays far under the 128-tool provider cap.
-    command.env(crate::shared::sync_identity::CANOPY_MCP_PROFILE_ENV, "node");
+    // session stays far under the 128-tool provider cap. Hooks and other
+    // callers pass `node_profile = false` and keep the full tool list.
+    if node_profile {
+        command.env(crate::shared::sync_identity::CANOPY_MCP_PROFILE_ENV, "node");
+    }
     // Set the child process cwd to the node's workdir, whether or not the
     // platform supports a working-dir flag. The flag behaviour for platforms
     // that have one is unchanged.
@@ -482,6 +486,7 @@ pub(crate) async fn run_agent_process(
             run_id: run_id.to_string(),
         }),
         verdict.clone(),
+        true,
     )
     .await;
 
@@ -825,6 +830,7 @@ mod tests {
             |_| {},
             None,
             None,
+            true,
         )
         .await;
         assert!(
@@ -847,6 +853,7 @@ mod tests {
             |_| {},
             None,
             None,
+            true,
         )
         .await;
         assert!(
@@ -867,8 +874,9 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn spawn_sets_node_mcp_profile_env() {
+    /// Spawns a fake CLI that records its `CANOPY_MCP_PROFILE` env value and
+    /// returns what it recorded (empty when the variable was unset).
+    async fn profile_env_seen_by_child(node_profile: bool) -> String {
         let workdir = tempfile::tempdir().unwrap();
         let scratch = tempfile::tempdir().unwrap();
         let record = scratch.path().join("profile_record.txt");
@@ -907,6 +915,7 @@ mod tests {
             |_| {},
             None,
             None,
+            node_profile,
         )
         .await;
         assert!(
@@ -917,10 +926,24 @@ mod tests {
             "spawn must succeed"
         );
 
-        let recorded = std::fs::read_to_string(&record).unwrap_or_default();
+        std::fs::read_to_string(&record).unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn spawn_sets_node_mcp_profile_env() {
         assert_eq!(
-            recorded, "node",
+            profile_env_seen_by_child(true).await,
+            "node",
             "agent node spawn must set CANOPY_MCP_PROFILE=node"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_without_node_profile_leaves_env_unset() {
+        assert_eq!(
+            profile_env_seen_by_child(false).await,
+            "",
+            "hook spawn must keep the full tool list (no CANOPY_MCP_PROFILE)"
         );
     }
 }

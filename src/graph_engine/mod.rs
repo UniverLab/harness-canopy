@@ -27823,6 +27823,7 @@ session_end_args = ["end", "--session-id", "{{session_id}}"]
             |_pid| {},
             None,
             None,
+            false,
         )
         .await
         {

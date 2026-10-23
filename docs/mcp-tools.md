@@ -13,6 +13,11 @@ Writes wait up to 5 seconds for a concurrent writer. If the database is still
 busy after that, the call fails with `<tool>: database busy after 5 s — nothing
 was written, retry`. Nothing changed, so retry the same call.
 
+Graph-node sessions (agent and ensemble nodes launched by the graph engine) get
+a fixed node profile of 18 tools in `tools/list` (`CANOPY_MCP_PROFILE=node`), so
+every node stays under the 128-tool cap of OpenAI-compatible providers. Calls to
+any other tool still work. All other sessions keep the full list.
+
 ## Agent management (18)
 
 | Tool | Description |
