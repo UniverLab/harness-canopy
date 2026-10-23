@@ -8577,6 +8577,254 @@ echo done
         );
     }
 
+    /// Regression: a queue-driven graph Start -> Check -> Reviewer, where
+    /// Check's last run failed. A directed dispatch at Check must re-execute
+    /// Check (a new run row), and Reviewer must not run unless the new Check
+    /// passes. The historical Check output must not be reused/reported, and
+    /// the start message must name Check as the first executed node.
+    #[tokio::test]
+    async fn directed_queue_resume_reruns_failed_check_and_gates_reviewer_fail() {
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        init_git_repo(dir.path());
+
+        let directed = {
+            let mut s = standalone_spec("queue-directed", 1);
+            s.status = GraphSpecStatus::Failed;
+            s
+        };
+        db.insert_graph_spec(&directed).unwrap();
+        insert_queue_with_members(&db, "queue-1", &[&directed.id]);
+
+        for (id, name, cmd) in [
+            ("graph-start", "Start", "printf START"),
+            ("graph-check", "Check", "printf FAIL; exit 1"),
+            ("graph-reviewer", "Reviewer", "printf REVIEWED"),
+        ] {
+            db.insert_graph_node(&GraphNode {
+                id: id.to_string(),
+                spec_id: None,
+                graph_id: Some(graph_id.clone()),
+                name: name.to_string(),
+                kind: GraphNodeKind::Check,
+                config: serde_json::json!({
+                    "command": cmd,
+                    "success_condition": "exit_code_0"
+                }),
+                position: match name {
+                    "Start" => 0,
+                    "Check" => 1,
+                    _ => 2,
+                },
+                created_at: chrono::Utc::now(),
+            })
+            .unwrap();
+        }
+        db.insert_graph_edge(&GraphEdge {
+            id: "e-start-check".to_string(),
+            spec_id: None,
+            graph_id: Some(graph_id.clone()),
+            from_node: "graph-start".to_string(),
+            to_node: "graph-check".to_string(),
+            condition: GraphEdgeCondition::Pass,
+        })
+        .unwrap();
+        db.insert_graph_edge(&GraphEdge {
+            id: "e-check-reviewer".to_string(),
+            spec_id: None,
+            graph_id: Some(graph_id.clone()),
+            from_node: "graph-check".to_string(),
+            to_node: "graph-reviewer".to_string(),
+            condition: GraphEdgeCondition::Pass,
+        })
+        .unwrap();
+
+        // Seed Check's historical Fail run (must not be reused).
+        db.insert_graph_run(&GraphNodeRun {
+            id: "run-check-old".to_string(),
+            graph_id: graph_id.clone(),
+            spec_id: directed.id.clone(),
+            node_id: "graph-check".to_string(),
+            status: GraphRunStatus::Fail,
+            input: None,
+            output: Some(serde_json::json!({"old": true})),
+            started_at: chrono::Utc::now(),
+            completed_at: Some(chrono::Utc::now()),
+            iteration: 1,
+            pid: None,
+            boot_id: None,
+            session_id: None,
+            executed_platform: None,
+            executed_model: None,
+        })
+        .unwrap();
+
+        db.update_graph_status(&graph_id, GraphStatus::Paused, None, None)
+            .unwrap();
+        db.set_graph_active_run_queue(&graph_id, Some("queue-1"))
+            .unwrap();
+
+        engine
+            .run_graph_dispatch(
+                graph_id.clone(),
+                Some("queue-1".to_string()),
+                None,
+                DispatchMode::resume_from(DirectedStart {
+                    spec_id: directed.id.clone(),
+                    node_arg: "Check".to_string(),
+                }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let runs = db.list_graph_runs_for_spec(&directed.id).unwrap();
+        let check_runs: Vec<_> = runs.iter().filter(|r| r.node_id == "graph-check").collect();
+        // Historical + new run.
+        assert!(
+            check_runs.len() >= 2,
+            "Check must be re-executed: {:?}",
+            check_runs
+        );
+        let reviewer_runs: Vec<_> = runs
+            .iter()
+            .filter(|r| r.node_id == "graph-reviewer")
+            .collect();
+        assert!(
+            reviewer_runs.is_empty(),
+            "Reviewer must not run when the new Check fails: {:?}",
+            reviewer_runs
+        );
+
+        // Start message names Check.
+        let events = db
+            .list_graph_events(&graph_id, None, None, None, 200)
+            .unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| { e.message.contains("starts at node 'Check'") }),
+            "start message must name Check: {:?}",
+            events.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        // Historical Check output must not be reported as reused.
+        assert!(
+            !events
+                .iter()
+                .any(|e| { e.message.contains("run-check-old") }),
+            "historical Check run must not be reported/reused: {:?}",
+            events.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    /// Regression (passing variant): when Check passes on rerun, Reviewer runs.
+    #[tokio::test]
+    async fn directed_queue_resume_reruns_failed_check_and_gates_reviewer_pass() {
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        init_git_repo(dir.path());
+
+        let directed = {
+            let mut s = standalone_spec("queue-directed", 1);
+            s.status = GraphSpecStatus::Failed;
+            s
+        };
+        db.insert_graph_spec(&directed).unwrap();
+        insert_queue_with_members(&db, "queue-1", &[&directed.id]);
+
+        for (id, name, cmd) in [
+            ("graph-start", "Start", "printf START"),
+            ("graph-check", "Check", "printf APPROVED"),
+            ("graph-reviewer", "Reviewer", "printf REVIEWED"),
+        ] {
+            db.insert_graph_node(&GraphNode {
+                id: id.to_string(),
+                spec_id: None,
+                graph_id: Some(graph_id.clone()),
+                name: name.to_string(),
+                kind: GraphNodeKind::Check,
+                config: serde_json::json!({
+                    "command": cmd,
+                    "success_condition": "exit_code_0"
+                }),
+                position: match name {
+                    "Start" => 0,
+                    "Check" => 1,
+                    _ => 2,
+                },
+                created_at: chrono::Utc::now(),
+            })
+            .unwrap();
+        }
+        db.insert_graph_edge(&GraphEdge {
+            id: "e-start-check".to_string(),
+            spec_id: None,
+            graph_id: Some(graph_id.clone()),
+            from_node: "graph-start".to_string(),
+            to_node: "graph-check".to_string(),
+            condition: GraphEdgeCondition::Pass,
+        })
+        .unwrap();
+        db.insert_graph_edge(&GraphEdge {
+            id: "e-check-reviewer".to_string(),
+            spec_id: None,
+            graph_id: Some(graph_id.clone()),
+            from_node: "graph-check".to_string(),
+            to_node: "graph-reviewer".to_string(),
+            condition: GraphEdgeCondition::Pass,
+        })
+        .unwrap();
+
+        db.insert_graph_run(&GraphNodeRun {
+            id: "run-check-old".to_string(),
+            graph_id: graph_id.clone(),
+            spec_id: directed.id.clone(),
+            node_id: "graph-check".to_string(),
+            status: GraphRunStatus::Fail,
+            input: None,
+            output: Some(serde_json::json!({"old": true})),
+            started_at: chrono::Utc::now(),
+            completed_at: Some(chrono::Utc::now()),
+            iteration: 1,
+            pid: None,
+            boot_id: None,
+            session_id: None,
+            executed_platform: None,
+            executed_model: None,
+        })
+        .unwrap();
+
+        db.update_graph_status(&graph_id, GraphStatus::Paused, None, None)
+            .unwrap();
+        db.set_graph_active_run_queue(&graph_id, Some("queue-1"))
+            .unwrap();
+
+        engine
+            .run_graph_dispatch(
+                graph_id.clone(),
+                Some("queue-1".to_string()),
+                None,
+                DispatchMode::resume_from(DirectedStart {
+                    spec_id: directed.id.clone(),
+                    node_arg: "Check".to_string(),
+                }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let runs = db.list_graph_runs_for_spec(&directed.id).unwrap();
+        let reviewer_runs: Vec<_> = runs
+            .iter()
+            .filter(|r| r.node_id == "graph-reviewer")
+            .collect();
+        assert!(
+            !reviewer_runs.is_empty(),
+            "Reviewer must run after the new Check passes: {:?}",
+            reviewer_runs
+        );
+    }
+
     /// CB50 FR2+FR3, end to end: a daemon crash mid-ensemble (one member
     /// still `running`, no pid/boot_id — reconcile's dangling-run signature)
     /// followed by a resume (`run_graph_dispatch(is_resume: true)`, what

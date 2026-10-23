@@ -8,6 +8,7 @@ fn directed_start_message(
     spec_name: &str,
     target: &super::directed::DirectedTarget,
     nodes: &[GraphNode],
+    edges: &[GraphEdge],
     existing_runs: &[GraphNodeRun],
 ) -> String {
     let skipped = if target.skipped_nodes.is_empty() {
@@ -15,7 +16,7 @@ fn directed_start_message(
     } else {
         format!(" [{}]", target.skipped_nodes.join(", "))
     };
-    let reused = reused_output_records(nodes, existing_runs);
+    let reused = reused_output_records(nodes, edges, &target.start_node_ids, existing_runs);
     let reused = if reused.is_empty() {
         "none".to_string()
     } else {
@@ -33,6 +34,38 @@ fn directed_start_message(
         target.skipped_nodes.len(),
         skipped
     )
+}
+
+/// Records the directed-start activity event for `start` when it targets
+/// `spec`; an unresolvable target records nothing (the dispatch already
+/// refused it upstream).
+fn record_directed_start(
+    db: &Database,
+    lp: &crate::domain::graphs::Graph,
+    workdir: &str,
+    spec: &GraphSpec,
+    graph: (&[GraphNode], &[GraphEdge], &[EnsembleDetails]),
+    existing_runs: &[GraphNodeRun],
+    start: &DirectedStart,
+) {
+    let (nodes, edges, ensembles) = graph;
+    let Ok(target) = resolve_directed_target(&start.node_arg, nodes, edges, ensembles) else {
+        return;
+    };
+    activity::record(
+        db,
+        activity::GraphEvent {
+            graph_id: &lp.id,
+            graph_name: &lp.name,
+            workdir,
+            spec_id: Some(&spec.id),
+            node_id: None,
+            run_id: None,
+            kind: activity::GraphEventKind::SpecStarted,
+            message: directed_start_message(&spec.name, &target, nodes, edges, existing_runs),
+            payload: None,
+        },
+    );
 }
 
 impl GraphEngine {
@@ -117,22 +150,15 @@ impl GraphEngine {
         // the start node, the nodes skipped between Start and it, the
         // outputs reused (by node and run id), and the counter restart.
         if let Some(start) = directed.filter(|d| d.spec_id == spec.id) {
-            if let Ok(target) = resolve_directed_target(&start.node_arg, nodes, edges, &ensembles) {
-                activity::record(
-                    &self.db,
-                    activity::GraphEvent {
-                        graph_id: &lp.id,
-                        graph_name: &lp.name,
-                        workdir,
-                        spec_id: Some(&spec.id),
-                        node_id: None,
-                        run_id: None,
-                        kind: activity::GraphEventKind::SpecStarted,
-                        message: directed_start_message(&spec.name, &target, nodes, &existing_runs),
-                        payload: None,
-                    },
-                );
-            }
+            record_directed_start(
+                &self.db,
+                lp,
+                workdir,
+                spec,
+                (nodes, edges, &ensembles),
+                &existing_runs,
+                start,
+            );
         }
 
         // RS2: session ids captured for each node during THIS dispatch, so a

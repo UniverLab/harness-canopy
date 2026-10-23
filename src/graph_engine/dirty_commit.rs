@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::VecDeque;
 
 /// The workdir's current `git rev-parse HEAD`, or `None` if it isn't a git
 /// repo (or the command otherwise fails). Never errors the caller — a check
@@ -397,9 +398,13 @@ pub(crate) fn resolve_spec_start(
     // which restarts the per-node iteration counters at 1.
     if let Some(start) = directed.filter(|d| d.spec_id == spec.id) {
         let target = resolve_directed_target(&start.node_arg, nodes, edges, ensembles)?;
-        let node_outputs = retained_node_outputs(nodes, existing_runs);
-        let previous = directed_previous_output(&target.start_node_ids, existing_runs);
-        return Ok((target.cursor, node_outputs, previous, HashMap::new()));
+        // Only nodes upstream of the resolved cursor reuse recorded outputs.
+        // The cursor's own node (and everything downstream) is executed
+        // fresh, so its prior output/input is never seeded.
+        let upstream_ids = directed_upstream_node_ids(edges, &target.start_node_ids);
+        check_upstream_prerequisites(nodes, &upstream_ids, existing_runs)?;
+        let node_outputs = upstream_node_outputs(nodes, &upstream_ids, existing_runs);
+        return Ok((target.cursor, node_outputs, None, HashMap::new()));
     }
     // CB50 FR4: `Interrupted` resumes at its cursor only via `loop_continue`
     // (`is_resume: true`); `loop_run` (`is_resume: false`) restarts it from the
@@ -447,6 +452,74 @@ pub(crate) fn resolve_spec_start(
         None,
         HashMap::new(),
     ))
+}
+
+/// Node ids upstream of a directed cursor's start nodes: every node that can
+/// reach one of the start nodes (walking edges backwards), excluding the
+/// start nodes themselves and everything downstream of them.
+pub(crate) fn directed_upstream_node_ids(
+    edges: &[GraphEdge],
+    start_node_ids: &[String],
+) -> HashSet<String> {
+    let start: HashSet<&str> = start_node_ids.iter().map(String::as_str).collect();
+    let mut can_reach_start: HashSet<String> = HashSet::new();
+    let mut back: VecDeque<String> = start_node_ids.iter().cloned().collect();
+    while let Some(id) = back.pop_front() {
+        if !can_reach_start.insert(id.clone()) {
+            continue;
+        }
+        for edge in edges.iter().filter(|e| e.to_node == id) {
+            if !can_reach_start.contains(&edge.from_node) {
+                back.push_back(edge.from_node.clone());
+            }
+        }
+    }
+    can_reach_start
+        .into_iter()
+        .filter(|id| !start.contains(id.as_str()))
+        .collect()
+}
+
+/// Refuses a directed start when an upstream prerequisite (one whose output
+/// would be reused) last ran Fail, Error or Interrupted. Skipping it as if it
+/// had passed would route on work that never cleared its gates.
+pub(crate) fn check_upstream_prerequisites(
+    nodes: &[GraphNode],
+    upstream_ids: &HashSet<String>,
+    runs: &[GraphNodeRun],
+) -> anyhow::Result<()> {
+    for node in nodes.iter().filter(|n| upstream_ids.contains(&n.id)) {
+        let Some(latest) = runs.iter().rev().find(|r| r.node_id == node.id) else {
+            continue;
+        };
+        if matches!(
+            latest.status,
+            GraphRunStatus::Fail | GraphRunStatus::Error | GraphRunStatus::Interrupted
+        ) {
+            bail!(
+                "Directed run refused: prerequisite node '{}' last run was {} ({}). Re-run it first or start at an earlier node.",
+                node.name,
+                latest.status.as_str(),
+                latest.id
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Recorded outputs a directed start may reuse: only nodes upstream of its
+/// cursor. The cursor's own output (and anything downstream) is never seeded.
+pub(crate) fn upstream_node_outputs(
+    nodes: &[GraphNode],
+    upstream_ids: &HashSet<String>,
+    runs: &[GraphNodeRun],
+) -> HashMap<String, Value> {
+    let upstream_runs: Vec<GraphNodeRun> = runs
+        .iter()
+        .filter(|run| upstream_ids.contains(&run.node_id))
+        .cloned()
+        .collect();
+    retained_node_outputs(nodes, &upstream_runs)
 }
 
 pub(crate) fn retained_node_outputs(

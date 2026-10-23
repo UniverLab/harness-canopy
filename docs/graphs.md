@@ -532,8 +532,13 @@ a node you choose instead of at Start: `graph_continue run_from_node
 executes). `--spec` is optional: on a queue-driven graph it defaults to the
 graph's current spec — an in-flight member (`running` or `interrupted`)
 first, else a `failed` one, else the next `pending` one — so a bare directed
-run restarts the failed spec rather than the next fresh one. It reuses every
-earlier node's most recent recorded output for that spec, sets the spec
+run restarts the failed spec rather than the next fresh one. It reuses the
+most recent recorded output of each node upstream of the start node for that
+spec; the start node and everything downstream of it always run again, and
+its own old output is never reused. If an upstream node's latest run is
+`failed`, `error` or `interrupted`, the directed run is refused and that node
+is named: a failed prerequisite is never treated as passed. The spec cursor
+is set to the start node, and the graph then runs with its normal edges,
 cursor to the start node, and then runs the graph with its normal edges,
 routers, ensembles and gates. On a queue-driven graph the chosen spec is
 what runs first: queue members before it are marked `skipped`, members

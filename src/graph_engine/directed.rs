@@ -307,29 +307,22 @@ pub(crate) fn check_reachable_outputs(
     )
 }
 
-/// `{{previous_feedback}}` for a directed start: the `input` of the most recent
-/// recorded run at the start cursor (a member/node), falling back to the most
-/// recent run there that carries one. `None` when the cursor never ran.
-pub(crate) fn directed_previous_output(
-    start_node_ids: &[String],
-    runs: &[GraphNodeRun],
-) -> Option<Value> {
-    runs.iter()
-        .rev()
-        .filter(|run| start_node_ids.iter().any(|id| id == &run.node_id))
-        .find_map(|run| run.input.clone())
-}
-
-/// `(node name, run id)` for every output `retained_node_outputs` would seed,
-/// most recent Pass/Fail run per node, in node order.
+/// `(node name, run id)` for every output the directed run actually seeds:
+/// only nodes upstream of the resolved cursor (excluding the cursor's own
+/// nodes and everything downstream), most recent Pass/Fail run per node, in
+/// node order. The cursor's own prior output is never reported as reused.
 pub(crate) fn reused_output_records(
     nodes: &[GraphNode],
+    edges: &[GraphEdge],
+    start_node_ids: &[String],
     runs: &[GraphNodeRun],
 ) -> Vec<(String, String)> {
+    let upstream_ids = directed_upstream_node_ids(edges, start_node_ids);
     let mut latest: HashMap<String, String> = HashMap::new();
     for run in runs {
         if (run.status == GraphRunStatus::Pass || run.status == GraphRunStatus::Fail)
             && run.output.is_some()
+            && upstream_ids.contains(&run.node_id)
         {
             if let Some(node) = nodes.iter().find(|n| n.id == run.node_id) {
                 latest.insert(node.name.clone(), run.id.clone());
@@ -338,6 +331,7 @@ pub(crate) fn reused_output_records(
     }
     nodes
         .iter()
+        .filter(|n| upstream_ids.contains(&n.id))
         .filter_map(|n| latest.get(&n.name).map(|id| (n.name.clone(), id.clone())))
         .collect()
 }
@@ -388,9 +382,12 @@ impl GraphEngine {
             .db
             .list_graph_runs_for_spec(spec_id)
             .map_err(|e| e.to_string())?;
-        let node_outputs = retained_node_outputs(&nodes, &runs);
         let target = resolve_directed_target(node_arg, &nodes, &edges, &ensembles)
             .map_err(|e| e.to_string())?;
+        // Validate unsafe upstream prerequisites synchronously, before dispatch.
+        let upstream_ids = directed_upstream_node_ids(&edges, &target.start_node_ids);
+        check_upstream_prerequisites(&nodes, &upstream_ids, &runs).map_err(|e| e.to_string())?;
+        let node_outputs = upstream_node_outputs(&nodes, &upstream_ids, &runs);
         // The same prompts dir the agent spawn path resolves presets from, so
         // a preset body's `{{output:X}}` is validated exactly as it will bind.
         let prompts_dir =
@@ -408,7 +405,7 @@ impl GraphEngine {
             spec_name: spec.name,
             start_label: target.label,
             skipped_nodes: target.skipped_nodes,
-            reused_outputs: reused_output_records(&nodes, &runs),
+            reused_outputs: reused_output_records(&nodes, &edges, &target.start_node_ids, &runs),
             start_head: spec.spec_start_head,
         })
     }
