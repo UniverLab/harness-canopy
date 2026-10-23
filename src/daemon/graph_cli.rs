@@ -595,11 +595,13 @@ fn handle_graph_export(db: &Database, id_or_name: &str, output: Option<&str>) ->
     let graph_nodes = db.list_graph_nodes_for_graph(&lp.id)?;
     let graph_edges = db.list_graph_edges_for_graph(&lp.id)?;
     let ensembles = db.list_ensembles_for_graph(&lp.id)?;
-    let document = crate::domain::graph_transfer::build_export_document(
+    let pending_entry_sources = db.pending_entry_sources_for_graph(&lp.id)?;
+    let document = crate::domain::graph_transfer::build_export_document_with_pending(
         lp,
         &graph_nodes,
         &graph_edges,
         &ensembles,
+        &pending_entry_sources,
     )
     .map_err(|e| anyhow!(e))?;
     let json = serde_json::to_string_pretty(&document)?;
@@ -1032,6 +1034,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         }
     }
 
@@ -1055,6 +1058,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         }
     }
 
@@ -1469,6 +1475,10 @@ mod tests {
         let note = commit_rights_note(output.as_ref());
         assert!(note.contains("no commit rights"));
         assert!(note.contains("abcdef12"));
+        assert!(
+            !note.contains("committed"),
+            "the note must not claim a commit it cannot attribute: {note}"
+        );
     }
 
     #[test]

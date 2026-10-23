@@ -13,7 +13,6 @@ use crate::tui::gamification::{MissionEvent, MissionManager, MissionSnapshot};
 
 use super::types::App;
 
-const GARDENER_EDITS_KEY: &str = "gamification:gardener_edits";
 const IDENTITY_EVOLVED_KEY: &str = "gamification:identity_evolved";
 const DEEP_RAG_SEARCH_KEY: &str = "gamification:deep_rag_search";
 const DIGITAL_ARCHEOLOGIST_KEY: &str = "gamification:digital_archeologist";
@@ -54,15 +53,10 @@ impl App {
         self.mission_pending_events.push(event);
     }
 
-    pub fn record_gardener_edit(&mut self) -> Result<()> {
-        let current = self
-            .db
-            .get_state(GARDENER_EDITS_KEY)?
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
-        self.db
-            .set_state(GARDENER_EDITS_KEY, &(current + 1).to_string())?;
-        Ok(())
+    /// Whether a CPU temperature has ever been measurable this session.
+    /// False on systems (like WSL) that expose no CPU temperature sensor.
+    pub fn cpu_temperature_measurable(&self) -> bool {
+        self.cpu_temperature_seen
     }
 
     /// True when the session was launched in yolo mode. Checks both the
@@ -162,11 +156,10 @@ impl App {
             }
         }
 
-        let gardener_edits = self
-            .db
-            .get_state(GARDENER_EDITS_KEY)?
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
+        // The Gardener counts distinct projects whose description or tags
+        // changed (recorded by the daemon's `project_update`); the legacy
+        // knowledge-dialog counter is gone.
+        let gardener_edits = self.db.count_gardener_projects().unwrap_or(0);
 
         // One-shot flags written by the daemon (MCP tools run there, not in
         // the TUI process); consumed once via the shared DB.
@@ -214,6 +207,11 @@ impl App {
         }
 
         self.tick_uptime_persist();
+        // Sticky measurability flag for Nuclear Winter: once a temperature
+        // reading exists it stays seen for the session.
+        if self.system_info.cpu_temperature.is_some() {
+            self.cpu_temperature_seen = true;
+        }
         let gpu = self.system_info.gpu_info.as_ref();
         let agent_running = self.has_active_agent_work();
 
@@ -296,6 +294,59 @@ fn harnesses_used_count(usage: &CliUsage, registered: &[String]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    fn test_app_with_gardener_projects(hashes: &[&str]) -> App {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let db = Arc::new(crate::db::Database::new(&path).unwrap());
+        for hash in hashes {
+            db.record_gardener_project(hash).unwrap();
+        }
+        let data_dir = tempfile::tempdir().unwrap();
+        App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn gardener_snapshot_counts_distinct_projects() {
+        let mut app = test_app_with_gardener_projects(&["hash-a", "hash-b", "hash-a"]);
+        let snapshot = app.build_mission_snapshot().unwrap();
+        assert_eq!(snapshot.gardener_edits, 2);
+    }
+
+    #[test]
+    fn gardener_snapshot_unlocks_after_five_projects() {
+        use crate::domain::gamification::MissionId;
+        use crate::tui::gamification::{MissionEvent, MissionSnapshot};
+        use crate::tui::whimsg::Whimsg;
+
+        // Four projects: still locked after the construction refresh.
+        let mut app = test_app_with_gardener_projects(&["a", "b", "c", "d"]);
+        assert!(!app.mission_manager.is_unlocked(MissionId::TheGardener));
+        // The fifth distinct project unlocks it on the next refresh.
+        app.db.record_gardener_project("e").unwrap();
+        let snapshot = MissionSnapshot {
+            gardener_edits: app.build_mission_snapshot().unwrap().gardener_edits,
+            ..Default::default()
+        };
+        assert_eq!(snapshot.gardener_edits, 5);
+        let mut whimsg = Whimsg::new();
+        let unlocked = app
+            .mission_manager
+            .process_refresh(&snapshot, &[] as &[MissionEvent], &mut whimsg)
+            .unwrap();
+        assert!(
+            unlocked.iter().any(|title| title == "The Gardener"),
+            "five distinct gardener projects must unlock The Gardener: {unlocked:?}"
+        );
+        assert!(app.mission_manager.is_unlocked(MissionId::TheGardener));
+    }
 
     #[test]
     fn harnesses_used_ignores_unregistered_clis() {

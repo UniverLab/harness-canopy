@@ -177,6 +177,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         })
         .unwrap();
 
@@ -249,6 +250,78 @@ mod tests {
         assert!(
             text.contains('\u{2588}') || text.contains('\u{28ff}'),
             "expected Brian's Brain glyphs in the sidebar's unclaimed rows, got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn sidebar_brain_reaches_the_right_edge_of_its_area() {
+        use crate::db::Database;
+        use crate::domain::graphs::{Graph, GraphStatus};
+        use crate::tui::app::App;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let db = Arc::new(Database::new(&path).unwrap());
+        db.insert_graph(&Graph {
+            archived: false,
+            paused_by_reconciliation: false,
+            allow_dirty_start: false,
+            infra_node_id: None,
+            id: "wf-probe".to_string(),
+            name: "Probe Graph".to_string(),
+            description: None,
+            workdir: "/tmp/probe".to_string(),
+            status: GraphStatus::Running,
+            trigger: None,
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            completed_at: None,
+            autorun_at: None,
+            auto_continue_at: None,
+            auto_continue_action: None,
+            active_run_queue_id: None,
+            hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
+        })
+        .unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
+        app.atmosphere_hidden = true;
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                crate::tui::ui::draw(frame, &mut app);
+            })
+            .unwrap();
+        app.ensure_sidebar_brain();
+        let (rows, cols) = {
+            let brain = app.sidebar_brain.as_ref().expect("brain should exist");
+            (brain.rows, brain.cols)
+        };
+        app.sidebar_brain = Some(solid_brain(rows, cols));
+        terminal
+            .draw(|frame| {
+                crate::tui::ui::draw(frame, &mut app);
+            })
+            .unwrap();
+        let rect = app.sidebar_brain_rect.expect("brain rect should be known");
+        assert_eq!(rect.width, crate::tui::ui::SIDEBAR_WIDTH);
+        let buffer = terminal.backend().buffer();
+        let cell = &buffer[(rect.x + rect.width - 1, rect.y)];
+        let glyph = cell.symbol().chars().next().unwrap_or(' ');
+        assert!(
+            ('\u{2800}'..='\u{28ff}').contains(&glyph),
+            "expected a Braille glyph at the right edge of the brain area, got {glyph:?}"
         );
     }
 
@@ -463,6 +536,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         }
     }
 
@@ -502,6 +576,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         })
         .unwrap();
         db.insert_graph_node(&GraphNode {

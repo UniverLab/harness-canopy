@@ -392,6 +392,28 @@ pub struct FailDeadEnd {
     pub has_error_path: bool,
 }
 
+/// An ensemble's quorum (join) node as seen by graph-level validation. The
+/// join node itself is engine-managed and skipped by [`collect_outgoing_coverage`],
+/// so the ensemble's fail exit has to be checked from the ensemble record.
+pub struct EnsembleQuorumView<'a> {
+    pub ensemble_id: &'a str,
+    pub ensemble_name: &'a str,
+    pub join_node_id: &'a str,
+    /// `None` means the quorum has no `on_fail_to`: when the quorum fails, the
+    /// spec ends at the join node.
+    pub on_fail_to: Option<&'a str>,
+}
+
+/// An ensemble whose quorum can only end the spec on failure: it has
+/// `on_pass_to` but no `on_fail_to`, and its join node has no outgoing
+/// `fail`/`always` edge. Advisory, like [`FailDeadEnd`].
+#[derive(Debug)]
+pub struct QuorumFailDeadEnd {
+    pub node_id: String,
+    pub ensemble_id: String,
+    pub ensemble_name: String,
+}
+
 /// Result of structural graph validation.
 #[derive(Debug)]
 pub struct GraphValidationReport {
@@ -400,6 +422,9 @@ pub struct GraphValidationReport {
     /// Non-terminal agent/check/gate nodes with no outgoing `fail`/`always`
     /// edge (CM19). Advisory — does not affect the Ok verdict.
     pub fail_dead_ends: Vec<FailDeadEnd>,
+    /// Ensembles whose quorum has no fail exit (no `on_fail_to` and no
+    /// outgoing `fail`/`always` edge from the join node). Advisory.
+    pub quorum_fail_dead_ends: Vec<QuorumFailDeadEnd>,
 }
 
 /// A node as seen by graph-level validation — identified by an opaque
@@ -433,10 +458,22 @@ pub fn validate_graph(
     nodes: &[GraphNodeView<'_>],
     edges: &[GraphEdgeView<'_>],
 ) -> Result<GraphValidationReport, String> {
+    validate_graph_with_ensembles(nodes, edges, &[])
+}
+
+/// Validate a graph together with the ensembles that own its join nodes.
+/// [`validate_graph`] is this function with no ensembles, so a caller that
+/// has no ensemble rows gets exactly the historical checks.
+pub fn validate_graph_with_ensembles(
+    nodes: &[GraphNodeView<'_>],
+    edges: &[GraphEdgeView<'_>],
+    ensembles: &[EnsembleQuorumView<'_>],
+) -> Result<GraphValidationReport, String> {
     if nodes.is_empty() {
         return Ok(GraphValidationReport {
             terminals: Vec::new(),
             fail_dead_ends: Vec::new(),
+            quorum_fail_dead_ends: Vec::new(),
         });
     }
 
@@ -444,10 +481,12 @@ pub fn validate_graph(
     ensure_router_edges_declare_routes(nodes, edges)?;
     let entry_id = resolve_graph_entry_point(nodes, edges)?;
     ensure_all_nodes_reachable(nodes, edges, entry_id)?;
-    let (terminals, fail_dead_ends) = collect_outgoing_coverage(nodes, edges)?;
+    let (terminals, fail_dead_ends, quorum_fail_dead_ends) =
+        collect_outgoing_coverage(nodes, edges, ensembles)?;
     Ok(GraphValidationReport {
         terminals,
         fail_dead_ends,
+        quorum_fail_dead_ends,
     })
 }
 
@@ -569,12 +608,18 @@ fn ensure_all_nodes_reachable(
     Ok(())
 }
 
-/// 4. Outgoing coverage — collect terminals (states with no outgoing edge)
-///    and CM19 fail dead-ends; routers must cover every declared route.
+/// The three collections produced by outgoing coverage: deliberate terminals,
+/// CM19 fail dead-ends, and ensemble quorum dead-ends.
+type OutgoingCoverage = (Vec<GraphTerminal>, Vec<FailDeadEnd>, Vec<QuorumFailDeadEnd>);
+
+/// 4. Outgoing coverage — collect terminals (states with no outgoing edge),
+///    CM19 fail dead-ends, and ensemble quorum dead-ends; routers must cover
+///    every declared route.
 fn collect_outgoing_coverage(
     nodes: &[GraphNodeView<'_>],
     edges: &[GraphEdgeView<'_>],
-) -> Result<(Vec<GraphTerminal>, Vec<FailDeadEnd>), String> {
+    ensembles: &[EnsembleQuorumView<'_>],
+) -> Result<OutgoingCoverage, String> {
     let mut outgoing: HashMap<&str, Vec<&GraphEdgeCondition>> = HashMap::new();
     for edge in edges {
         outgoing.entry(edge.from).or_default().push(edge.condition);
@@ -651,7 +696,47 @@ fn collect_outgoing_coverage(
         }
     }
 
-    Ok((terminals, fail_dead_ends))
+    let quorum_fail_dead_ends = collect_quorum_dead_ends(ensembles, nodes, &outgoing);
+
+    Ok((terminals, fail_dead_ends, quorum_fail_dead_ends))
+}
+
+/// Ensembles whose quorum has no way to route a failure onward: no
+/// `on_fail_to` and no `fail`/`always` edge leaving the join node. Reuses the
+/// outgoing-edge map built by [`collect_outgoing_coverage`] — no second walk.
+/// An ensemble with no join node in this graph (e.g. a spec's ensemble checked
+/// against the graph's nodes) is skipped; it is not this graph's concern.
+fn collect_quorum_dead_ends(
+    ensembles: &[EnsembleQuorumView<'_>],
+    nodes: &[GraphNodeView<'_>],
+    outgoing: &HashMap<&str, Vec<&GraphEdgeCondition>>,
+) -> Vec<QuorumFailDeadEnd> {
+    let mut dead_ends = Vec::new();
+    for ensemble in ensembles {
+        if ensemble.on_fail_to.is_some() {
+            continue;
+        }
+        let Some(join) = nodes
+            .iter()
+            .find(|node| node.id == ensemble.join_node_id)
+            .filter(|node| node.kind == GraphNodeKind::Join)
+        else {
+            continue;
+        };
+        let has_fail_exit = outgoing.get(join.id).is_some_and(|conds| {
+            conds
+                .iter()
+                .any(|c| **c == GraphEdgeCondition::Fail || **c == GraphEdgeCondition::Always)
+        });
+        if !has_fail_exit {
+            dead_ends.push(QuorumFailDeadEnd {
+                node_id: join.id.to_string(),
+                ensemble_id: ensemble.ensemble_id.to_string(),
+                ensemble_name: ensemble.ensemble_name.to_string(),
+            });
+        }
+    }
+    dead_ends
 }
 
 /// Router-only outgoing coverage: no outgoing edge may use an undeclared

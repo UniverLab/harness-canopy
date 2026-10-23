@@ -117,7 +117,9 @@ pub(crate) use crate::daemon::handler_run_history::{
 #[cfg(test)]
 pub(crate) use crate::daemon::handler_run_lifecycle::perform_graph_reset;
 #[cfg(test)]
-pub(crate) use crate::daemon::handler_specs::{spec_summary_json, validate_at_least_one_bool};
+pub(crate) use crate::daemon::handler_specs_helpers::{
+    spec_summary_json, validate_at_least_one_bool,
+};
 #[cfg(test)]
 pub(crate) use crate::daemon::handler_sync::TaggedProjectKnowledge;
 #[cfg(test)]
@@ -157,7 +159,7 @@ pub(crate) const MCP_RESULT_BUDGET_BYTES: usize = 32_000;
 /// compact specs measured 55,605 characters on 2026-09-02, i.e. ~164
 /// bytes/row. Budgeted at 200 bytes/row so the default page keeps headroom
 /// against longer-than-average names.
-const SPEC_LIST_COMPACT_ROW_BYTES: usize = 200;
+const SPEC_LIST_COMPACT_ROW_BYTES: usize = 280;
 
 /// Default `session_list` page derived from the MCP result budget. The
 /// compact row estimate leaves room for long names while keeping the default
@@ -314,6 +316,7 @@ impl TaskTriggerHandler {
         router.merge(TaskTriggerHandler::tool_router_run_lifecycle());
         router.merge(TaskTriggerHandler::tool_router_meta());
         router.merge(TaskTriggerHandler::tool_router_settings());
+        router.merge(TaskTriggerHandler::tool_router_registry());
         router
     }
 }
@@ -331,6 +334,36 @@ const HIDDEN_DEPRECATED_TOOLS: &[&str] = &[
     "loop_schedule_autorun",
 ];
 
+/// Fixed toolset handed to graph-node sessions so they stay far under the
+/// 128-tool provider cap regardless of how many tools canopy adds later.
+pub const NODE_TOOLS: &[&str] = &[
+    "spec_section_get",
+    "spec_notes_get",
+    "spec_note_write",
+    "graph_complete_node",
+    "graph_report_blocker",
+    "intelligence_get_context",
+    "intelligence_search",
+    "intelligence_upsert",
+    "intelligence_graph_walk",
+    "rag_search",
+    "skill_get",
+    "skill_list",
+    "sync_get_context",
+    "sync_declare_intent",
+    "sync_report_status",
+    "sync_broadcast",
+    "get_tools",
+    "get_identity",
+];
+
+fn node_tool_list() -> Vec<Tool> {
+    visible_tool_list()
+        .into_iter()
+        .filter(|t| NODE_TOOLS.contains(&t.name.as_ref()))
+        .collect()
+}
+
 fn visible_tool_list() -> Vec<Tool> {
     TaskTriggerHandler::tool_router()
         .list_all()
@@ -344,10 +377,32 @@ impl ServerHandler for TaskTriggerHandler {
     async fn list_tools(
         &self,
         _request: Option<rmcp::model::PaginatedRequestParams>,
-        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
+        // Header-then-env resolution, mirroring resolve_sync_agent_id: an HTTP
+        // transport carries the profile in a header; the stdio path (including
+        // the embedded server) carries it in the environment.
+        let profile = (|| {
+            if let Some(parts) = context.extensions.get::<axum::http::request::Parts>() {
+                if let Some(value) = crate::shared::sync_identity::header_str(
+                    parts,
+                    crate::shared::sync_identity::CANOPY_MCP_PROFILE_HEADER,
+                ) {
+                    return Some(value.to_string());
+                }
+            }
+            std::env::var(crate::shared::sync_identity::CANOPY_MCP_PROFILE_ENV)
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        })();
+        let tools = if profile.as_deref() == Some("node") {
+            node_tool_list()
+        } else {
+            visible_tool_list()
+        };
         Ok(rmcp::model::ListToolsResult {
-            tools: visible_tool_list(),
+            tools,
             meta: None,
             next_cursor: None,
         })
@@ -365,6 +420,130 @@ impl ServerHandler for TaskTriggerHandler {
                  agent_run to test immediately, and agent_status for daemon health."
                     .to_string(),
             )
+    }
+}
+
+#[cfg(test)]
+mod readme_docs_tool_sync {
+    use super::{visible_tool_list, HIDDEN_DEPRECATED_TOOLS};
+    use std::collections::BTreeSet;
+    use std::fs;
+
+    fn canonical() -> BTreeSet<String> {
+        visible_tool_list()
+            .into_iter()
+            .map(|t| t.name.as_ref().to_owned())
+            .collect::<BTreeSet<String>>()
+    }
+
+    fn first_cell_names(text: &str) -> BTreeSet<String> {
+        let mut names = BTreeSet::new();
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if !trimmed.starts_with('|') || !trimmed.ends_with('|') {
+                continue;
+            }
+            let first_cell = trimmed.split('|').nth(1).unwrap_or("");
+            let bytes = first_cell.as_bytes();
+            let mut i = 0;
+            while i + 1 < bytes.len() {
+                if bytes[i] == b'`' {
+                    i += 1;
+                    let start = i;
+                    while i < bytes.len() && bytes[i] != b'`' {
+                        i += 1;
+                    }
+                    if i < bytes.len() && bytes[i] == b'`' {
+                        let name = &first_cell[start..i];
+                        if !name.is_empty()
+                            && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+                        {
+                            names.insert(name.to_string());
+                        }
+                        i += 1;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        names
+    }
+
+    fn section(text: &str, head: &str) -> String {
+        let head_trim = head.trim();
+        let mut result = String::new();
+        let mut in_section = false;
+        for line in text.lines() {
+            let trimmed = line.trim();
+            let trimmed_start = line.trim_start();
+            if !in_section {
+                if trimmed.starts_with(head_trim) {
+                    in_section = true;
+                    result.push_str(line);
+                    result.push('\n');
+                }
+                continue;
+            }
+            if trimmed_start.starts_with("## ") || trimmed_start.starts_with("---") {
+                break;
+            }
+            result.push_str(line);
+            result.push('\n');
+        }
+        result
+    }
+
+    fn heading_total(sec: &str) -> usize {
+        for line in sec.lines() {
+            let trimmed = line.trim();
+            if trimmed.contains("MCP Tools") && trimmed.contains('(') && trimmed.contains(')') {
+                if let Some(start) = trimmed.find('(') {
+                    if let Some(end) = trimmed[start + 1..].find(')') {
+                        let num = &trimmed[start + 1..start + 1 + end];
+                        if let Ok(v) = num.parse::<usize>() {
+                            return v;
+                        }
+                    }
+                }
+            }
+        }
+        0
+    }
+
+    #[test]
+    fn readme_and_docs_match_registered() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let readme_path = format!("{}/README.md", manifest_dir);
+        let docs_path = format!("{}/docs/mcp-tools.md", manifest_dir);
+        let readme = fs::read_to_string(&readme_path).expect("Failed to read README.md");
+        let docs = fs::read_to_string(&docs_path).expect("Failed to read docs/mcp-tools.md");
+        let readme_section = section(&readme, "## MCP Tools");
+        let readme_names = first_cell_names(&readme_section);
+        let canonical_names = canonical();
+        assert_eq!(
+            readme_names,
+            canonical_names,
+            "README MCP tools table mismatch. missing: {:?}, extra: {:?}",
+            canonical_names.difference(&readme_names),
+            readme_names.difference(&canonical_names)
+        );
+        let mut docs_names = first_cell_names(&docs);
+        for h in HIDDEN_DEPRECATED_TOOLS {
+            docs_names.remove(*h);
+        }
+        assert_eq!(
+            docs_names,
+            canonical_names,
+            "docs/mcp-tools.md mismatch. missing: {:?}, extra: {:?}",
+            canonical_names.difference(&docs_names),
+            docs_names.difference(&canonical_names)
+        );
+        assert_eq!(
+            heading_total(&readme_section),
+            canonical_names.len(),
+            "README heading total mismatch"
+        );
     }
 }
 
@@ -555,6 +734,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn node_tools_all_registered_and_small() {
+        use std::collections::BTreeSet;
+        let registered: BTreeSet<String> = TaskTriggerHandler::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        for name in super::NODE_TOOLS {
+            assert!(
+                registered.contains(*name),
+                "NODE_TOOLS entry not registered: {name}"
+            );
+        }
+        assert!(super::NODE_TOOLS.len() <= 32);
+    }
+
+    #[test]
+    fn node_tool_list_matches_node_tools() {
+        use std::collections::BTreeSet;
+        let names: BTreeSet<String> = super::node_tool_list()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        let expected: BTreeSet<String> = super::NODE_TOOLS.iter().map(|s| s.to_string()).collect();
+        assert_eq!(names, expected);
+    }
+
     /// B7 A1 frozen inventory: sorted MCP tool names. Any added, removed, or
     /// renamed tool fails `tool_inventory_is_byte_identical`.
     const EXPECTED_TOOL_NAMES: &[&str] = &[
@@ -650,6 +857,7 @@ mod tests {
         "queue_set_group",
         "rag_compact",
         "rag_search",
+        "registry_refresh",
         "remove_seed",
         "roster_check",
         "roster_clear",
@@ -680,125 +888,129 @@ mod tests {
 
     /// B7 A1 frozen snapshot: per-tool `name|sha256(description)|sha256(input_schema JSON)`.
     /// Any byte drift in a description or schema fails `tool_inventory_is_byte_identical`.
+    /// The schema hashes were re-pinned for rmcp 2.x, whose `validate_and_strip` drops the
+    /// root `title`/`description` of each input schema (rmcp 1.6 kept them). Properties,
+    /// required fields and tool descriptions are unchanged by that.
     const EXPECTED_TOOL_ROWS: &[&str] = &[
-                "agent_add|dce812557e165d8d06b92ab956bafaf4c4eccd29acd4216074adbce66d116570|7483eea0afc405f19c5e149fa2963fbc5c329d1a4984feb1ab3fa82fb94941bc",
-                "agent_disable|a5d3befdd0358cdb34f4cbceba2ad730b8cb7968bea1f4d5af15095cfc3e5d16|0b0c3f322df51316c53bc050ccdddd27c4296ae0ce3c97b074416a17f5bb8081",
-                "agent_enable|812c3569335836df22c0021c4591ab1642a739c0be32ab921aa3a9dad35040f3|0b0c3f322df51316c53bc050ccdddd27c4296ae0ce3c97b074416a17f5bb8081",
-                "agent_get|efc57a83aaf2b2b93b249749d2af313ad14b7d5f78bc63dfeb4a8067069d81fb|0b0c3f322df51316c53bc050ccdddd27c4296ae0ce3c97b074416a17f5bb8081",
+                "agent_add|dce812557e165d8d06b92ab956bafaf4c4eccd29acd4216074adbce66d116570|dbbb12a5bbe342e026592882ae703d056cf0804f60271060da1195e4a167acd9",
+                "agent_disable|a5d3befdd0358cdb34f4cbceba2ad730b8cb7968bea1f4d5af15095cfc3e5d16|aaaa4591bf27eb54bc4052fa58a07a3b5af8a671b8595c525bfe323462c90387",
+                "agent_enable|812c3569335836df22c0021c4591ab1642a739c0be32ab921aa3a9dad35040f3|aaaa4591bf27eb54bc4052fa58a07a3b5af8a671b8595c525bfe323462c90387",
+                "agent_get|efc57a83aaf2b2b93b249749d2af313ad14b7d5f78bc63dfeb4a8067069d81fb|aaaa4591bf27eb54bc4052fa58a07a3b5af8a671b8595c525bfe323462c90387",
                 "agent_list|f12441b7b162701cc3feeead67ecc6adf610b4e28b3d2a2ba2eedd22d17b6b45|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
-                "agent_logs|313a92b2669f743f4352fff989b30a666510fef1a7f6be65b4b17e8862d04acb|5632dbbe5962335a927367d89f703e6962b77257d60e3429e4226916bc6135ff",
-                "agent_models|e26acac42beb6e5abc68fd28473196c549864a9796e020a4ebf9d62f81606090|5fa23052795e0ac7d84ebc3b37ee11e62c84d9d673da815b8d1249313b8133b7",
-                "agent_probe|b1c612dc5b845b72e90f81458538c0fb18cb07768105adb87b06590875904577|69f6897484b8f07f4e272f180de0a41a1e275e0d152e13cbe413e26578376f64",
-                "agent_probe_recent|665aea90717bcf46854edda2c7627d61c2242f960ae586d53185923e27f76e2e|9915aca58f0d6e4a64233b795f9f1d77d68f5bbf987b4afb76aeff4419241d73",
-                "agent_remove|304a93b8e0d8f9957d7ff6e134154d1f67bc0e8920b5d7ff86874a93361d5de2|0b0c3f322df51316c53bc050ccdddd27c4296ae0ce3c97b074416a17f5bb8081",
-                "agent_report|998eb6d649fe53809656f0a4db81248aa0feb0b045f957686d917fbcfe289224|ecc33998c9c269c62efe2a825c3492c7a8b986476cd10fbfe5d7cc179451c5a5",
-                "agent_run|39ae4bbed141b7635a135111a7cf767c2569bf36d7d2d64da8089091534706f1|0b0c3f322df51316c53bc050ccdddd27c4296ae0ce3c97b074416a17f5bb8081",
-                "agent_schedule_enable|ed852e08dc893d9cd6ae715374b0e695ee4516030ebe02b2e5ecb09aa0d98f1c|75b1290fa28ea5e614bbf45495964ab03ac917d86e3ce703843b403c8904221f",
+                "agent_logs|313a92b2669f743f4352fff989b30a666510fef1a7f6be65b4b17e8862d04acb|f89711d2401e85da80adc2b687e731c2cdff0fee8a6883ac3b36b52cd0ab2a61",
+                "agent_models|e26acac42beb6e5abc68fd28473196c549864a9796e020a4ebf9d62f81606090|aec8a95e3baea87069ac61ae2a4c64f2f61261ba9e5bd7f409ffac07b7858c51",
+                "agent_probe|b1c612dc5b845b72e90f81458538c0fb18cb07768105adb87b06590875904577|5464fa5580132a97b0a7e2129a2384de8337dae47e6009095aa8a03eb5982d94",
+                "agent_probe_recent|665aea90717bcf46854edda2c7627d61c2242f960ae586d53185923e27f76e2e|8e49086ca9899f371ee52f4bebb5bfcdc745540d0bf78e3080d5f9ba2b4bde2c",
+                "agent_remove|304a93b8e0d8f9957d7ff6e134154d1f67bc0e8920b5d7ff86874a93361d5de2|aaaa4591bf27eb54bc4052fa58a07a3b5af8a671b8595c525bfe323462c90387",
+                "agent_report|998eb6d649fe53809656f0a4db81248aa0feb0b045f957686d917fbcfe289224|f40f986d373435cf862cf0e260812d92f78eaf4bfcfbe98ffce5d724a1685d54",
+                "agent_run|39ae4bbed141b7635a135111a7cf767c2569bf36d7d2d64da8089091534706f1|aaaa4591bf27eb54bc4052fa58a07a3b5af8a671b8595c525bfe323462c90387",
+                "agent_schedule_enable|ed852e08dc893d9cd6ae715374b0e695ee4516030ebe02b2e5ecb09aa0d98f1c|3a3c50b04564580555f0ab8dbf04f391912190d0fd86dfada5936f08f89bf5b3",
                 "agent_status|d1054486453a2080fe05eb9ccbcd4a86aefe4894a2a93870b6b2bb9e8781b194|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
-                "agent_update|5f6ad5332501fc94b77510ae0093dcf92d451b051a90b3843e3e134c2d029415|36f48264461d4613308196fa21be49ce3f87de117e8f1471e68aedd8f27a4452",
-                "agent_watch|b7aeeaf163d575665d5e2f9699687dede83db72e17a55d0b1aa0becd998aea87|027d5fa87372afb37c5970c218175408a01801e964fe5b83cfd48cbe6951a601",
-                "blueprint_create|066e750e9f90069f2f3ed530cdff588725ea3751872f30ea1aec5758bb15b5d2|8bcf3050ebfd3b2d22ef822cdfd1c41d40448d7f65cb3c1d5ed51abbd9e73a8f",
-                "blueprint_delete|1eaa169fb5798e6d4095b44d1784bfb6a390925ec2e8513ca4dbe542119b69fb|12321d76b465455bffa88b83e79d533adc9ea8c854db8a5af7b5a559c93203a7",
+                "agent_update|5f6ad5332501fc94b77510ae0093dcf92d451b051a90b3843e3e134c2d029415|56e670152acde083334d2f34d983971b86174a67b3d47d2388036efe865d4bff",
+                "agent_watch|b7aeeaf163d575665d5e2f9699687dede83db72e17a55d0b1aa0becd998aea87|29c1b840934a7296c55fa378446e948aa6e3479192ec924ef0bbf65f9ad2318d",
+                "blueprint_create|066e750e9f90069f2f3ed530cdff588725ea3751872f30ea1aec5758bb15b5d2|6fb8818467c11e7b59e5805216d4a4b0ffa0b4af4c7de450f2de31cc9560135c",
+                "blueprint_delete|1eaa169fb5798e6d4095b44d1784bfb6a390925ec2e8513ca4dbe542119b69fb|f1e32f55c6e9420ef2484a0af9a8aab3080b5c9df3d1b0e99e48be1a60bdee58",
                 "blueprint_list|3408d1c0af354e3890676ffa6fff2237a27a130aaa7b49ca3e0e075f95362584|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
-                "config_get|f1ddfd06dae3dc171e677fcb02ff75eb7ceca0aaffbb868a91ee11a8c271fa9e|8175c3fece403d4b9e0e101fa8e9e9949a22669944764fe861d73c83c241bada",
-                "config_list|72678d9d9c372128e56333712c1fc402a70318f3ed63909ff91c629fdab0f683|d6c1b74cd9671775125cc9b6b2f72352a59a108486dd055bd7971d9cc202edbe",
-                "config_reset|3a0f24b627f69af16eeefd214b2f0c92df61f4e60ac982704c58457f24708c54|81027280afebc9d59fae573201cdf60037646e626370ab9e4258fe597602afda",
-                "config_set|d3c69dd3454c45c952ee10f97731f2dd9e5e419a3492a3aa52e8c703634ab479|2c3e790dbe43573349b1e665d5eb6f6db4637ee08b80ef68061811785bff4a47",
-                "create_seed|ec16a67a00abe30d8410e1720468a039cd4b4c1a85820894e9b766a6ba868701|804d0cbcfaf45bb6e046d219beeeda3d4981abb00893efbcbc22e9d2547db8e6",
-                "crew_create|731ac03f7474a59d939a6acd2e6cb97344805db5dea7dc185c287468f39a6ce3|fee9ee72a0374a920bb6c867d714b832c32af904c5628af9c16d16abf6d090d9",
-                "crew_delete|6ac73732aec72b5596cf240decbc0da64ea177ae39be4e40f77629371bb81f48|c39d718a7b13b7d9432a28814db6f3e555fee5d78ea8ef1be866966fb8e80889",
-                "crew_get|d9471965dee083abac1ffe1f0b61cff31f46f3c339f42cd1b7cd646ac62181d5|b2a1d8c6ff42aa877b0a58ddd1455838dc2933a7e8d968fa43b1842cc7d85eb5",
+                "config_get|f1ddfd06dae3dc171e677fcb02ff75eb7ceca0aaffbb868a91ee11a8c271fa9e|d7d40b7d47032b9ca22bfcdd95cf4a6b6ce70e92ead8ee20a5d22aae577214b8",
+                "config_list|72678d9d9c372128e56333712c1fc402a70318f3ed63909ff91c629fdab0f683|87452c7ab16b470feb183acedadff7f2eab93fd98dbf1f710b49631254c32dcf",
+                "config_reset|3a0f24b627f69af16eeefd214b2f0c92df61f4e60ac982704c58457f24708c54|d90d4323bbec97685cda52f36bc28c0a66d45f10ee58725b389c46d8dba06158",
+                "config_set|d3c69dd3454c45c952ee10f97731f2dd9e5e419a3492a3aa52e8c703634ab479|4c7761d6b13cfd0bf93e31b449ed2b002a3ad598cc67f635d7ee492e89ddc4d4",
+                "create_seed|ec16a67a00abe30d8410e1720468a039cd4b4c1a85820894e9b766a6ba868701|c79d95c1377cbed5559441027de27bbaace22d9ee8945fdd8c3d47c0333f0d7e",
+                "crew_create|731ac03f7474a59d939a6acd2e6cb97344805db5dea7dc185c287468f39a6ce3|5fbc0737c82ee925cc6b708ce63fe4ea11d2238c905f9974587b1cf021ab9fb4",
+                "crew_delete|6ac73732aec72b5596cf240decbc0da64ea177ae39be4e40f77629371bb81f48|21f065b99a46c1d795525e2f941ed4b7fe8f69e6593bc79ef81182897d4faa57",
+                "crew_get|d9471965dee083abac1ffe1f0b61cff31f46f3c339f42cd1b7cd646ac62181d5|5dd7b6e4bb6740844ab949d730a74a3035678090f0f52e329fec09ff93cc3c7f",
                 "crew_list|de5d37159a9000510178aa3147800fdb7166d2feab4fc55b7a66622d0a0c0cec|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
-                "crew_update|ba98471566591039ce23de7339c7b0355f9715bf8ff743e7ede1715319479689|530c5d983133929d9ea3704500d0871f7109e24eb7089f3155ac5f971f46415f",
-                "evolve_identity|cbae994f70163b304935cc28f006ffac2eec8e1bea905dea2c0fb59bd1c66cdc|5def265f8dddb09352b474cd0068aff558d8993ec3711458fe912388888c42a4",
+                "crew_update|ba98471566591039ce23de7339c7b0355f9715bf8ff743e7ede1715319479689|4cd37a027dac954b477faae56e13cc566ca5b620929feee69f100b6d842a0c93",
+                "evolve_identity|cbae994f70163b304935cc28f006ffac2eec8e1bea905dea2c0fb59bd1c66cdc|5ec9c4410613adf3d140071d76d032723c8112c15228ccd582212ec76839a681",
                 "get_identity|21d80d3a69d9719487bc498958b5600e86bf36519e229d270d2c2ae338383f72|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
-                "get_tools|ea4c08804bf3a96c7e2e9f9be825feedb18ce038998f953065423576f6783beb|d81bd1699af6df84ec62ca38e6e360f6bae3c9d7f38fa307061f4eff5f84ba6f",
-                "graph_add_edge|0368038fcdc6790d79f1558cf8c5e66aae12d6c475c616849c217670707ec5f7|237b62884bf39b63f372273414288ea9179b392cb42bbb94315978049564986d",
-                "graph_add_ensemble|16d7fefa3784ffc61801c1efa5a3087810a30e9c083dd9033e62958a519ac7fa|93fd882b2db54d49cd6479a25a789d4ab3fcedf7914793646b62879a1bf0fadb",
-                "graph_add_node|5361586ae2254b13fea563379c35fff41f5aeddd2c63ec0e0221800dfa202617|7759661982738bea7c283e567107e2b53e38f778bbbf898afbfcec7dcf704a75",
-                "graph_add_spec|d054dce21de8cb570c402ef4081ebbec27391f28052aaae6b7636b75a6135343|4ca4c5b48737acddab29e888155a58a248bbb7ed0659f1ea56ef5c7620575c0c",
-                "graph_archive|86c62c25726d635c29691b8d1e90acbd2af55efafbf4b2acf866d82146fe9dc2|78e636b08231391ec48053bde18a790e2aede74da54003618003f2febe327bea",
+                "get_tools|ea4c08804bf3a96c7e2e9f9be825feedb18ce038998f953065423576f6783beb|8d1085667f9f7b280bc979a52911ce87934bee573c8dd9a35175afad22365c8f",
+                "graph_add_edge|0368038fcdc6790d79f1558cf8c5e66aae12d6c475c616849c217670707ec5f7|7d566ad0c4bd03073fbb853a2173742c44d0ea98ed2616b7cea6eb1138c656ee",
+                "graph_add_ensemble|16d7fefa3784ffc61801c1efa5a3087810a30e9c083dd9033e62958a519ac7fa|7860220f2e8d0000409e11ba6ac283ee12fccc177025d30f94e7d2d970bbf50d",
+                "graph_add_node|5361586ae2254b13fea563379c35fff41f5aeddd2c63ec0e0221800dfa202617|1e69250d65d030a8a6ceb57beffb792b4941e884a409af813ceb224ccb76a506",
+                "graph_add_spec|d054dce21de8cb570c402ef4081ebbec27391f28052aaae6b7636b75a6135343|e7d42c59ce2d7562681c85b529a8b32f873f46013b0e41b9aca12378cbf50646",
+                "graph_archive|86c62c25726d635c29691b8d1e90acbd2af55efafbf4b2acf866d82146fe9dc2|ffee5a13290c895a4b822c65948298658b131c5c24554e3c6a3277ada768e49f",
                 "graph_audit_node_configs|be2716e66df14f94162057f5919f89bf87cab3b84d7f90ba6c2614e90b4ec749|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
-                "graph_complete_node|dd79817c0bd15c7fb324ee65bbf0b920c4d36f7958595932ab728a1d4418c76c|9fbd77387cb892656f3c66e396327bd2d66023f67f9cdae7c808091cac32cf9c",
-                "graph_continue|0b6466413a10ef19b9a929d94e662a4279c523d9b2904fc5e1208fc9a9d07edb|4c6d787abe1add21babc503b93b6ca04c35161ee5c0104ea44e28ed7a7d81770",
-                "graph_copy_ensemble|84fa10199406a21732121a5efcb531a8b635de720b9ced9ad23c9d21b442804b|81e6123364f5ffa77f6389270cf7cec410a5fc66bec93fd60631e66b85abc488",
-                "graph_copy_node|00f28a0220fed92a866e7e9489c5c6d0796b61f125ba83d7f2e4528ed8089d75|7aa9c075d640d2f792c386c0a0ca8d999bbaa223ea9787e40a52ab7471a2c8fc",
-                "graph_create|6f4749b2ffabdacfded946e01630ea558cefcf18110801fab0bb31c7fec79769|5f326cdb2c1ff3d7cca2cf25bf7fec5acc828bf70fe9e5e8e3d6423cb7de4a96",
-                "graph_crew|21b4da02c1240d4ca5cb9609c412b60f6b89d07a31ce2b4f89e39669fce69180|69cec388444f8b50e9cebbec21f52cfbb1b326fde7e15c2bfcb2c2450b19a07c",
-                "graph_delete_edge|515e60718a86a111f77da9caab9a8f1a420c8a8cedea9c759dd3061efe54bcab|05d5202f073aea27378f794577e989b9636bad6d72397887d82887ad1d549d2f",
-                "graph_delete_ensemble|a1de1cf8f4d4a23060cbe860ac4eb31995cb9a166c99da92d209d5f18758940d|93fdb4962aa14f5b7921af9435ab70339df060c397464a3cc4e514bd83cc720b",
-                "graph_delete_node|82e65603faf2df8e3ff9ada9b0cb11f8470db786d91b32fa5ce0f9c3f9afbded|d9668a40560f1659b0e0d6e83a66825f8bb0e36729220f69f27f08bf81a4418f",
-                "graph_events|677db9851982f4cd2d3d0323deed764eb78d7467382b08b0601c4aa1be418857|17b52b076584af5ee1dcf2ef11a7ddcdadb23cbea710303d0972bc7e94c88f8a",
-                "graph_export|ecbcb9a42255ea4787502974d9f75d5e71fee34887d7ada9905b569ec26332a0|7321f3e8e4a31cc2e83e859854951f755aa5f62b8ae46b3151183247f19f458a",
-                "graph_get|8307f64e41f067c8c502c2c431c24e3a4bfe3f9b609c44f62b4688fe37b851d0|df9a23578a82d3e67a8e963f14dfe8435035ab3ce659002aa35d330d6e9976b4",
-                "graph_import|3fde95a92dfb21be5c47a8cd32140761b05aadbf10e18a198927153fdf8db2b3|ddf8cb9f351263109c144f91e08487b7f779d3afaf8b16c2971270b8e78e86ff",
-                "graph_list|b06ff3bcc3cd8edcb2a8567034184a69561c8f350386f7647be570871fef776d|479e1ab97c37c84fcc3c4947dd99f6d7687bcb91d74682397d93c033b8e6e8b3",
-                "graph_node_run_get|275f0c286c5378b0e0711d396d62695a2f54d0d1506b5c3ad3172b51fc4cf2ec|06fe6be024365e42918fb964eed4293abe33218115a300116d7d8778f4c14dc6",
-                "graph_node_runs_list|9ad9113d90f883f5c739d9241d6012bf02fe59a4638b62730909301f9b93574b|aa2f6bbbff49f2bbfd014a1637f3c2a14afb08157d90fa6a6b58e4d8c6d64653",
-                "graph_pause|b562a899a0c4d0913552a0f7d1d4c32ca357c940d64ba49b81b439b42b7c956f|c29898bc2505d3e3452dc002330223bc60ec88b3823bcb9b5f1d40fd75b5af7c",
-                "graph_preflight|e322fc728e4eef3943934049c3291baf119a1a4f96a1c3b1d2f17d4f934e4dec|3425a799605c1b3b15ac19b666d4ed6580d61fddfa653caa8cf573061b648615",
-                "graph_remove_spec|4ff8c80f3cd7d5fa1c2752f82a8eac04f93342355ff9789da4fc5f4ebd474fef|bdf4ae3b6449289652a28e7e04276b7d6d74eec7b4e35a85cbd45a11061eea33",
-                "graph_report_blocker|e8b03ebc2341ed1dcec92b824650173db7d164d076ff501b3c460682c81f072c|666b976ef1b6f73603515e223da6b187b911606572b2bbba0377f4b5ca2798e7",
-                "graph_reset|5fb36ec5cb4ed11594d06fb11f2be62ef911f5c9bc25c24b7e41e72d9f739a07|77f3a37a64867d8e50c5e5cf4f491918381089ade6fc20fce8edd93dd2f8e16b",
-                "graph_restore|40e6e59ed7d4000db2dc48187e28d916ee02c7ee0a8fa7e2e6c07d9251988044|31a70644d3c87bb210f308e6aa19a31d08b38440498374efbac531b3f7bcb242",
-                "graph_run|fa3db2dcec66808c55e2a5fe3623346e459ae74d796a4f54d478b85ac51636cc|9e084a80601932dc3d7241700eff51bb77c2764b1c886c8d1631cd8bfab52a27",
-                "graph_schedule_autorun|9981ca74a4d734696c604599f06ea45c74621f5931d9ac344c31f14a9cb3a5f4|7961251cc9060f411c0b3065833a2afe07a1c1ba27fb8ec57780eec33945b70a",
-                "graph_schedule_continue|1a383d649dbb9963e8ef76d698b9293b1a517205b3f61cd48d6c484f0c009c35|ab6b9783dd0a4ddb3cbcbe23c4ccaefa955cdffecead28d2a4ee758c21e27a55",
-                "graph_update|27c9d848836295967b3588395ddf8a8038ef4b881b7402fb4b9bcccf430d4da8|efcd24f3827ffad22568ecfd9627dd856545d98a47d8a5fd4cbecce117be9ea9",
-                "graph_update_edge|ec07b87be17723f5212d8024e8bca2e2f44c215a417140898e1bab2539b832f5|51dafc02acbe8f4df24d69e44b6afcba2b381c212cfe426dcdbdde3a6196b6da",
-                "graph_update_ensemble|8f4a8cc93ef6623a86316c28879a1cf986490e97db21c650e99574a9e9ef3f3d|6191428edb5c8cab9d118dd7eaa326beb04d7313c491b0ccde2ae63e5572db81",
-                "graph_update_node|3d0f3c46a8d6fee1d776385e178662ae2a187e678bb5e3dd899c0bb93010c51e|13a30ea327b630709e99b78a98a12c210dc32034db31fad6595d4833a2a9697a",
-                "graph_update_spec|cc242e8d96c9fa9c957a7ca885258947ab54337e4a9e1b9f2ddc66eb6ae06b6d|e8c2e945b5f6f1080c5fe54b38f36e0c75e1716e61f80db812c32547d30e8264",
-                "intelligence_delete_node|b70ce24d59d2619e275cb40397037d7748f3ebca64ac5ffdc85eae6ee65bb1af|318c60c03fd6f5012a88be52de9aea7e9f372081ac1a378f5ee033b024ce229b",
-                "intelligence_delete_relation|14ac75ee8ed351ec58f6bec7bbb0a9ca8267f01931e936d287cc0aaf494612a8|d2f7f0e554ab5fe74e9ddd1e8052321c9134f26ad3a434e350194e34ad505b49",
-                "intelligence_get_context|669fe1f581e27a2bdf49f09765a42bc8f1f0879bf49c0466ff072ed315e73e33|55815882d32d2ebcf8374798bb69fdceacaf168be275a378115aa19551affc0c",
-                "intelligence_graph_walk|2f5efed1b23f5b4400575ed31c19a02c454bbeaa364f7036ae14049663c0e0cb|6d5f32bf6c3e5676189186261fe35cc231358c0c49dd25bd0d0484939e506408",
-                "intelligence_link_projects|e0b46f79afb49768ec33f101e8210ea7818dd8418aad92df4a8be69eebadbe2e|06275342174b1971a8ecbbad8520d1cf229436ed82b29cd5ce8451001b042b25",
-                "intelligence_list_projects|68da4fb4e810e0f41612e0f56052ba26bbe029553038b43b7f4aa9aa6259f3aa|bab7d4f9c5d6321017d35ea0512c00090791f384e19f4a718198f9687c77f297",
-                "intelligence_search|a91c69fe51924face0f4a2a6c4777b9dde708606f68cc44c7c46d16719d3f67c|94dbbccb091c5a677adfec1e8da82d11fec0b879f1aeed0a3c2fee95a2b0ed2d",
-                "intelligence_upsert|164de5427fff75a57508a5da581435374ebd7176ced490cf2e21577294d1aa01|9828296fdbd78308b641b434b6d6958c72228a6d4c7abcc705c4c41f4bb6aec1",
+                "graph_complete_node|dd79817c0bd15c7fb324ee65bbf0b920c4d36f7958595932ab728a1d4418c76c|e4d69bbb70ef2131b2283c6695389cea76e8bd3a3af90ef7c139fb7772513bce",
+                "graph_continue|137422625fc3916de454818fb07a00e329136ebb56904fced3043af546ea048f|6f6a38a5f164645be654bcd77012eea030a92b3567e3fc0b73986e05b772c5a8",
+                "graph_copy_ensemble|84fa10199406a21732121a5efcb531a8b635de720b9ced9ad23c9d21b442804b|116fa95d1cbc45bff374e36e4519168f24f89605c96a57e40034ce7eb9238705",
+                "graph_copy_node|00f28a0220fed92a866e7e9489c5c6d0796b61f125ba83d7f2e4528ed8089d75|d57051cc836518fbcc5f602ada29b97a23d0bcb83cc52135b528eb19278395ec",
+                "graph_create|6f4749b2ffabdacfded946e01630ea558cefcf18110801fab0bb31c7fec79769|462c734a41964a177fc0956cef3fa8eef1357deb361fb71cfe08f5d533b848c3",
+                "graph_crew|21b4da02c1240d4ca5cb9609c412b60f6b89d07a31ce2b4f89e39669fce69180|0034468e8fee6ccb105e52327ac46b4ea0842965c6da921f19977031e15ee86a",
+                "graph_delete_edge|515e60718a86a111f77da9caab9a8f1a420c8a8cedea9c759dd3061efe54bcab|478804396db7525b1e01cd3a182453b7d9b1ce9825d01c16198576b4b631cf3d",
+                "graph_delete_ensemble|a1de1cf8f4d4a23060cbe860ac4eb31995cb9a166c99da92d209d5f18758940d|e4048cbd5ed61436780fd9fdd229f90fd173e368f1e6aaf6721d81bd3dac4dbd",
+                "graph_delete_node|82e65603faf2df8e3ff9ada9b0cb11f8470db786d91b32fa5ce0f9c3f9afbded|ae2e7931181137cf401c2997ec2f96ed31a32f031cbde6767587a7966dc5f502",
+                "graph_events|677db9851982f4cd2d3d0323deed764eb78d7467382b08b0601c4aa1be418857|57d3a7cc159021a314f8b86b6de4a364965cf99204d48fb88b9353d72dcc2a00",
+                "graph_export|ecbcb9a42255ea4787502974d9f75d5e71fee34887d7ada9905b569ec26332a0|bea656f9f3640f2f0a2dfc7e2b61a549520be3b41c5cbb951d1567e982f5b787",
+                "graph_get|8307f64e41f067c8c502c2c431c24e3a4bfe3f9b609c44f62b4688fe37b851d0|c3c4bf90681df6c7cb1873edbf19b0f4e467f5a7cb516038d5516b49e0b6bee8",
+                "graph_import|3fde95a92dfb21be5c47a8cd32140761b05aadbf10e18a198927153fdf8db2b3|fec6ca127479714ad97ac3db3fe74a4290fa469d95cfd01faf61ac7bc132af90",
+                "graph_list|b06ff3bcc3cd8edcb2a8567034184a69561c8f350386f7647be570871fef776d|d90d20bdd2c54e6e69b495ce3a0e1453971558ffe2375e8a3fa960a0bab348f1",
+                "graph_node_run_get|275f0c286c5378b0e0711d396d62695a2f54d0d1506b5c3ad3172b51fc4cf2ec|3650a218940ab2e9ce442b74b2adcd48c18cad6b0d43e81738612ef3ee458ded",
+                "graph_node_runs_list|9ad9113d90f883f5c739d9241d6012bf02fe59a4638b62730909301f9b93574b|e805cb9575e5489acab464530c3f43ffe59b5a5a6f5b28aae57cac07633aee71",
+                "graph_pause|b562a899a0c4d0913552a0f7d1d4c32ca357c940d64ba49b81b439b42b7c956f|06164f1cabb86abbb36cd792ef1a31244ea1d1e5989b7c03a4d79dc426963eeb",
+                "graph_preflight|e322fc728e4eef3943934049c3291baf119a1a4f96a1c3b1d2f17d4f934e4dec|24dd1e4a649c199f54d6a8a37678d6b61b41d8e262a284034dcaffd5533095b1",
+                "graph_remove_spec|4ff8c80f3cd7d5fa1c2752f82a8eac04f93342355ff9789da4fc5f4ebd474fef|64fd0eb9ea96f090eaae11d26531496ed66d3d926ea452ed51323e924a08f15b",
+                "graph_report_blocker|e8b03ebc2341ed1dcec92b824650173db7d164d076ff501b3c460682c81f072c|8659fd458ed655692eb594522433fe42ab4a7c69f8164862571038fa7b254192",
+                "graph_reset|c1df81b0aae092e3a80ea96485152f1217594950ded807d721eceb1dd9f294b0|10443d3f384e19e5cdaa3285f5042f3adca7f328c652d45ee5d251797820adaa",
+                "graph_restore|40e6e59ed7d4000db2dc48187e28d916ee02c7ee0a8fa7e2e6c07d9251988044|855baed3655a190c5ada94d47ba43147514daa609fd1b1878d96d198468f5c0e",
+                "graph_run|fa3db2dcec66808c55e2a5fe3623346e459ae74d796a4f54d478b85ac51636cc|b2ab10cd61f65ba538654c0142006bd6ef2d12ad9fd915452eddcb3dde1ebc71",
+                "graph_schedule_autorun|9981ca74a4d734696c604599f06ea45c74621f5931d9ac344c31f14a9cb3a5f4|6695fae46c66a17d567222762add4dd3e58075af57f56e8ca98f81aab9753718",
+                "graph_schedule_continue|1a383d649dbb9963e8ef76d698b9293b1a517205b3f61cd48d6c484f0c009c35|a51b5bd5b7348893892f941a7633d8c36ca18fa98ff3b13a66dc4d63a38a1b13",
+                "graph_update|27c9d848836295967b3588395ddf8a8038ef4b881b7402fb4b9bcccf430d4da8|99b9438b06c8b2abf7f9aae98cebf81fbc7a4526bb5fdc4a32617819cfdc4907",
+                "graph_update_edge|ec07b87be17723f5212d8024e8bca2e2f44c215a417140898e1bab2539b832f5|487e9bb2913f1d4a8b7232733ab066bd7f08b295f411457c9118ccf9f7ba4896",
+                "graph_update_ensemble|8f4a8cc93ef6623a86316c28879a1cf986490e97db21c650e99574a9e9ef3f3d|cb58cb778f5a27bbec69a7c3b41238d67c111f82002c48fba8afa0eabf3b7fba",
+                "graph_update_node|3d0f3c46a8d6fee1d776385e178662ae2a187e678bb5e3dd899c0bb93010c51e|a658e57090f68b4628fd2290c13e6e7682533a0be5ea633370be5f0f9cd0a731",
+                "graph_update_spec|cc242e8d96c9fa9c957a7ca885258947ab54337e4a9e1b9f2ddc66eb6ae06b6d|939fc5607765a972a02a8d785a1bf18447c5a5a5e055e85ab1e82dc90ebb31b1",
+                "intelligence_delete_node|b70ce24d59d2619e275cb40397037d7748f3ebca64ac5ffdc85eae6ee65bb1af|28ea20eaac05de60c91d7d9f3f7af2d48bab582aae5ee9dd04b5bc04ba88f1ca",
+                "intelligence_delete_relation|14ac75ee8ed351ec58f6bec7bbb0a9ca8267f01931e936d287cc0aaf494612a8|811a9f24eda2e40c4d023042194be57946b8da97789fe52c5855eb4e6d258752",
+                "intelligence_get_context|669fe1f581e27a2bdf49f09765a42bc8f1f0879bf49c0466ff072ed315e73e33|21815b7ab3af1404c86b99df1bd52c8d73a656d5ffa2229c6ba6e7b95402b58f",
+                "intelligence_graph_walk|2f5efed1b23f5b4400575ed31c19a02c454bbeaa364f7036ae14049663c0e0cb|0c72c72222c0cda81d69c26df97f41217d836bc7360a555346e460653e25b4d9",
+                "intelligence_link_projects|e0b46f79afb49768ec33f101e8210ea7818dd8418aad92df4a8be69eebadbe2e|13d886b67b4f5e77eb671cce41a6b7423cc24e6867c99ee1e51125e07844376a",
+                "intelligence_list_projects|68da4fb4e810e0f41612e0f56052ba26bbe029553038b43b7f4aa9aa6259f3aa|893537157a2d2c8ab5753a889bc25ff91b60e2e95f23f1af34fc418e9ec34224",
+                "intelligence_search|a91c69fe51924face0f4a2a6c4777b9dde708606f68cc44c7c46d16719d3f67c|fa7481fcecc2528cae994223e58076d4818ac3f55cb99577e71a45e5d85c395e",
+                "intelligence_upsert|164de5427fff75a57508a5da581435374ebd7176ced490cf2e21577294d1aa01|7f55a980873729de4e6ae987d684496da34ac296de5d6d75603bf72dc039db1d",
                 "list_seeds|94657a2e7927a4f05350461cdef7c05569145bc39c512444039f38077c689cde|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
-                "loop_complete_node|a3a48975f0dafdc50569ac00a150cb091479281e7339f112708580a1764f95e8|9fbd77387cb892656f3c66e396327bd2d66023f67f9cdae7c808091cac32cf9c",
-                "loop_report_blocker|9fb9038c5d224015aa25b157730b99339dd91372deb3c1460abb1e5e4fad2081|666b976ef1b6f73603515e223da6b187b911606572b2bbba0377f4b5ca2798e7",
-                "loop_schedule_autorun|1e53058a7dad22cc057ce87b32d9fbaa20cca2b0e7721cc121e5c16b2b2677dd|23ebb42b7149e90e2ec3038873414a514267ea6a72e480535aee337f54caa1d5",
-                "project_register|95d40d7773adb80b430d84f928d60d6a48d369505e8bf6c0d9f54aaa64b1d535|24cd867a6223c9a9ed47dea26a94d7d447da7ebd52364af69d06b426adf5f032",
-                "project_remap|ee326ec962be9943ccf911a190168d71163903ab4370775a0a433d32e7721f25|a40e97ce72cb3e27c300467212bb6bb457c4d20ceb93b09aeb861d550484df69",
-                "project_search|c0abdc269d287d6cf3465702f699e8464f18e0d6952f6870d2d1b4e37401b8da|65039e6ad0bffe393a7304d289e1197ef20782efe8f1694b8fb5d2bb793a2516",
-                "project_update|33152dd73661dc1c449e9dc09e4b4bd72bdead18268244c1279c4e2dd3afb6b4|30ea776f5c3a35516b0f4d5e23ddce8eb5da7a3d6e31eee2e1c06fcde2cdc6b1",
-                "queue_add_spec|71fed63c512e34c3bb79ae3438fd29bb76321b919c42fef162603a6d0f458e3d|c1408f7e09bff0fd60903ad268291abce4b2082e3ea571200c1f94a893fecb68",
-                "queue_create|ad96a6520c976c9acdcf08610dc74a7d0728ae1cc81d47b678aed41ca63f1ac1|2e8186c094ebdc9401648f134916f125e5e0ce2daeca7bfe5167433716891e27",
-                "queue_list|1f3e846f9b91428f0a705e8e2232e40ed93bd57e45eeb2960fee25b912bd06dc|6e2c5062a027279e85f76b630dac6eb45935821cc7b9fe21d0b5e85d5fa1a4ba",
-                "queue_remove_spec|d607661fcaed39c344ae545f5a1f2246ed530af3ce9cc13615e2a62b933aafa8|20e00504d371ad091fc75d443e57fe7fe7479b6304cae52402e207af924ce134",
-                "queue_reorder|c2553e02e72d85646d644b7aa94c6096ffcea3ffb819194875bc9e7d421ffb26|5d1dfef5e6016db1e4c9adddf9df2d7b22b4816fa0d3b5a38a08de10de4802b0",
-                "queue_set_group|3eb98961df3f175e2b84f14beecc1629cf21c635e2bef749fe79919470056082|fceee53aad275541592e779fa462c4257d72f85c1649abcfa64aeebc84cdc146",
+                "loop_complete_node|a3a48975f0dafdc50569ac00a150cb091479281e7339f112708580a1764f95e8|e4d69bbb70ef2131b2283c6695389cea76e8bd3a3af90ef7c139fb7772513bce",
+                "loop_report_blocker|9fb9038c5d224015aa25b157730b99339dd91372deb3c1460abb1e5e4fad2081|8659fd458ed655692eb594522433fe42ab4a7c69f8164862571038fa7b254192",
+                "loop_schedule_autorun|1e53058a7dad22cc057ce87b32d9fbaa20cca2b0e7721cc121e5c16b2b2677dd|e944f37adcf8af70ea07acb64a916306c54a4bf3b998ddf4bd0ca0fb52026163",
+                "project_register|95d40d7773adb80b430d84f928d60d6a48d369505e8bf6c0d9f54aaa64b1d535|2fe9ec9ceb19c66e3a5f34a073529e6088506baa2e77dcca8d0d8f31081bcadd",
+                "project_remap|ee326ec962be9943ccf911a190168d71163903ab4370775a0a433d32e7721f25|9fb44ff73d1e90118188516f4eb03a9741b9ad7cc2a0309a81a1919179158c35",
+                "project_search|c0abdc269d287d6cf3465702f699e8464f18e0d6952f6870d2d1b4e37401b8da|4b6603ec8691bbbfa1813460965630dcdbc2613d655f1b3047e215a2a5693259",
+                "project_update|33152dd73661dc1c449e9dc09e4b4bd72bdead18268244c1279c4e2dd3afb6b4|f82719dddba8f813c95d438e67ebb669b9414a60489aae2ac46de3adc377dde0",
+                "queue_add_spec|71fed63c512e34c3bb79ae3438fd29bb76321b919c42fef162603a6d0f458e3d|7ebca2cc7b5207dc54b7089e3b2492f9812dbc1fb3752cce3978e9e80dbb4f7e",
+                "queue_create|ad96a6520c976c9acdcf08610dc74a7d0728ae1cc81d47b678aed41ca63f1ac1|dda4afff54546d6abf4068d69851810d4e9eae9e40eebd0d11a3312500d0d538",
+                "queue_list|1f3e846f9b91428f0a705e8e2232e40ed93bd57e45eeb2960fee25b912bd06dc|9896c1d2e6097e411c53d81f1b34541d5b7a0848b4f4cd439eb39deae4fcd655",
+                "queue_remove_spec|d607661fcaed39c344ae545f5a1f2246ed530af3ce9cc13615e2a62b933aafa8|6399dab2f77e4bacd80b88aff1f4530000cff7157384c10e252844d5ce85c53e",
+                "queue_reorder|c2553e02e72d85646d644b7aa94c6096ffcea3ffb819194875bc9e7d421ffb26|503be7944f0afe9758aa3d587bd223892125df857f671f6efbed7ffab5fc447c",
+                "queue_set_group|3eb98961df3f175e2b84f14beecc1629cf21c635e2bef749fe79919470056082|65cad91c82f116e5b68100ab9268eded30c0612d2d0bbfacb27d1bd55776e302",
                 "rag_compact|5d48c58fffa0c215e2b2fdcfafeb530f3fa62584e05f76bb5d6d99bd59897e84|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
-                "rag_search|8a1f6386074319d1c99700410f884ba9ed3a3f0f91276a50766cf677bf1b26cd|84c021f51349dfecbea78f5ebe89887d0f3e1e764ac91540bc20bc7e2d13ba45",
-                "remove_seed|b24cd25a52f13d1714cd1a02c3156317166b33f19df049dc99326685750fc374|44f5accf3bb686511aa4445599a499601592df037d84886e46a92dccb6924c69",
-                "roster_check|80d72258ccfc8cbb6509168ff6197f0c073adc5600e7a50e9815172a65313387|86e91783cad72828f1d84fc73a2430d3a17c02833f1b448a00ba5616dabe0577",
-                "roster_clear|31c4ac456165d42a5b18c6f8ca8f37e05aafeba98ee44488bf6cfa1fbecf1720|d294066722284d29107550a44758682259c3f13cedc1d188da98d041e6eeb1cb",
-                "roster_list|99f9cd3cdad9f30fe335f61cb51bdeb618ee0a743d3c0decdce04c8a9572af68|276db5b4a3f990897ee3a03ea73cc40be04234716117cf4c861c70ca9c23d411",
-                "roster_set|4a5445a5af19460e4fcc5a4bff5c9d32174fa64373b922d74392bfc7178a8e0c|6cdcbf499a6476ff9bb3daedb89f6adc3a731a5dbc77ce8aba7e60c2c16651ee",
-                "scheduled_send_cancel|e97ad927d1c1d8778e0e7862e7ac4df954098bd847329a5cac398d19177d47e8|31cd20154b502bce97777d5d0b780d65ae849538b776016a121ba608bb227b9c",
-                "scheduled_send_create|e6defc41d6d01fe133056562efc3aba3b50b6d1e2a06fe278894cbbbcb65a165|75bdf795b390451ff08f87c147f0f353f69b5f25ff2219f02c7e8901fff30ca6",
-                "scheduled_send_list|946cdf95ebf54570fe9566aa69f8f5e7a18f08ea7b29a6be390bd9ce66a4df63|6ade068b88c489253907d5a691508969588e152e77aee3c2eeccd8ac385e8aab",
-                "session_list|f983db33c96519c95584055f90c807dda350a17e9b12d402c0551590e772532b|23286691699c0a61ed77db5dac0618bc04db4ad52c21cdcf5df13a98242ed452",
-                "skill_get|11bb4551bb0cf314b47867061fdb6ecc35812780d98808cd2f1e134d098bc8b9|a0ae058221b2b1a7b5105d991835dccd84a4a060693a3eebb05555b5b29e594e",
+                "rag_search|8a1f6386074319d1c99700410f884ba9ed3a3f0f91276a50766cf677bf1b26cd|cad73c0b5b678b2f49d622a364b008d729b24da064fffa4fa9bb0543c6bc2563",
+                "registry_refresh|abfca8f63e35db90f993908eff7e4f13ba94d0b133ce72830fd5ec86df6c7908|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
+                "remove_seed|b24cd25a52f13d1714cd1a02c3156317166b33f19df049dc99326685750fc374|b892848b7943f3e267ee87a61dc0600b279b87f2e291c69fa7878c9c71dc4678",
+                "roster_check|80d72258ccfc8cbb6509168ff6197f0c073adc5600e7a50e9815172a65313387|289fb4a620ecfc6f1ffb6a4f702621f09fec4b818a97f94c2d86f075f7812abd",
+                "roster_clear|31c4ac456165d42a5b18c6f8ca8f37e05aafeba98ee44488bf6cfa1fbecf1720|dbf92e8f2bf597121d5a9484dcd66ce0d0797733186803ac36aa963821094bbf",
+                "roster_list|99f9cd3cdad9f30fe335f61cb51bdeb618ee0a743d3c0decdce04c8a9572af68|1fe958cb823e3ec1da7395e8033dccb055b2dcdc456019ecffc8da3c2a7e2b37",
+                "roster_set|4a5445a5af19460e4fcc5a4bff5c9d32174fa64373b922d74392bfc7178a8e0c|8c757aa7220d7226152ef854113c682393ece93695cf62844c0c6dcb3a2bccf3",
+                "scheduled_send_cancel|e97ad927d1c1d8778e0e7862e7ac4df954098bd847329a5cac398d19177d47e8|4fcc384db51c3909ff831c4c888499597bbcdd4e95af1a16c5a7b851fbbdc778",
+                "scheduled_send_create|e6defc41d6d01fe133056562efc3aba3b50b6d1e2a06fe278894cbbbcb65a165|959aa8850eee97391ca1529377085f07115c926742f575ceac2d01e143b80880",
+                "scheduled_send_list|946cdf95ebf54570fe9566aa69f8f5e7a18f08ea7b29a6be390bd9ce66a4df63|db1ee418b59faad9b3fae002b3f21eb04fa7f25097f3a595c26e7bc54f700d0f",
+                "session_list|f983db33c96519c95584055f90c807dda350a17e9b12d402c0551590e772532b|adae59573f649012ccb3856be07ea7740581587cfeb6e9caba07ab66ca88ec84",
+                "skill_get|11bb4551bb0cf314b47867061fdb6ecc35812780d98808cd2f1e134d098bc8b9|ffa1d0d446d446ba220972aac074b9d9d386caa3a92df3b710eadbc7cdfa0b59",
                 "skill_list|970ee8acf69615b521eaca0b1b27b8555a7fdc96b5655ebf435f4667418d290b|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
                 "spec_convert|dcabb9d52877782e47ac4fed3582e63e4c1cc6324c25b3079d6c25ef06552b16|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
-                "spec_create|7dd9a69253452c11b113743c3c5118f35cf4bf029c3380bcb9777254e41fd2eb|f9c780c473de2cac1bef89874ad42c7948a27ee448d423fa9732e5849bcd0b64",
-                "spec_delete|cd48e914d536c1e203436b9694cc93ba0b107b488b0383537716107c02537df8|e2f8bf96018973b702208f786b228eeaf8970d19822323251941c3c2b58c6bd9",
-                "spec_list|9e42d06f6900ae06546a88a713f3e67e4fe3467a06561f1187f684b5d3579657|bcfbca658cfaeae86232022f6285d7f9a7f43357158f4d693e0fbba1a4a1a020",
-                "spec_note_write|5864f496a2db355ac435a64b0fb172d0162b75eb50b84aba7913f43d89a0cecc|e299fd114d786af663d4e9f20a9673234f36f51815bf46fbbd9f00704ae276f7",
-                "spec_notes_get|c0a4e526752166f5544538fcbb039c03b03cfbaa2f57aa3aa1fbb8abf0c7bccb|fc547a4dcb686939788c1b51b1b076e9385f63ae9470cbb8534eb46e0328fc5d",
-                "spec_section_get|f2e7ae92e46d096fb4c5f1a3ce635e171dcd884e3f746ae936dfcb649e0aca22|c920c422e75f2d5dde9b2624d65af2613831ad217fd31d00bd00d7e34342f51e",
-                "spec_set_status|1a8612df16827c55d054df32ed3d585f33a14068c8c6737db584b918727ff5ab|313d1242ae0bb189c86b7cce07fdc51fe07588dac444491f089283e985db30f8",
-                "spec_update|4b63bd53115202d8c35c0e347ecc43491b5080564306c1fa643657d40790ba14|e7e35a41c1c50d14cc52e36b13a28342077e365683587e9207dd0ced2e28b0fa",
-                "subagent_collect|c950e7193036445e86b6ffd6587304e0e71cf00302734d0ed6e83c549a2e95dd|5f286eb7d8c54c6fbc2148ca453732ed5773d888b6721af97d81de358ed14330",
-                "subagent_spawn|062b2ac16b1f04f1ada1607d2cb04fe4840b9a09809382eed9c09878ab038fd1|64cdeb14b7796657a8099c8489439ee01a3389e9b088aa08474d4d57c5b27d7c",
-                "sync_broadcast|c5904706ddfd0877686466deeff33f21d70075bbed6c8ae6eba5794fe3ea1043|41523abe2b3e2837139e505f609ec85fd6155ed80dd2cc4ff48fa3988fe8cd3b",
-                "sync_declare_intent|621ecbc55446f78d4050026a7554487c33116b0ca218f359fc4355207d92abfe|87d05006d1026af131f08a68690f907d7419392b0774491f4347be5038d40bb4",
-                "sync_get_context|5bf5707dc316b32fa427141fab68b709dc07af8a52676da646958774a432a1ff|66c7399ba7a381b4222e14f80163c35769d7ce4a474278464c8ccb326b831fab",
-                "sync_report_status|ee93a882c476cc2792fa68bce24c1f187de5947c08b72bb55400dd114bdc07a4|b877ac8a670f1fb146c47ec679deaa5045ffa167867c24c06d192a0814b4a1ad"
+                "spec_create|7dd9a69253452c11b113743c3c5118f35cf4bf029c3380bcb9777254e41fd2eb|9a7716e491160f3935cb57a19fffa132eaa261ef7ea9455c208811fe4244cfab",
+                "spec_delete|cd48e914d536c1e203436b9694cc93ba0b107b488b0383537716107c02537df8|5b662f4985d9d6880743467a057fa666350855e935d09b710e04fe7c958a701f",
+                "spec_list|0675cb8e001153bcf3691cf3d6e276c91f3e1f3be36beff51938b4b01afdd22c|adb821d596c9cb76c6b557a59ab6afb4fa0dba9eea1d4f3c009fc9881835312f",
+                "spec_note_write|5864f496a2db355ac435a64b0fb172d0162b75eb50b84aba7913f43d89a0cecc|d48e9814cc0265adbd0d55121b2537649d71afdae08221b567bde38aff7b2c33",
+                "spec_notes_get|c0a4e526752166f5544538fcbb039c03b03cfbaa2f57aa3aa1fbb8abf0c7bccb|4a09a00d0f82bc519a07b0f23d1bcc28ddcbc9f7cdb830a54ba30fbd6e6ab494",
+                "spec_section_get|f2e7ae92e46d096fb4c5f1a3ce635e171dcd884e3f746ae936dfcb649e0aca22|8ba9af8b72d50548d76ed5795411302e403b639c6fb0c1f2ad085fcc8a1c2a69",
+                "spec_set_status|1a8612df16827c55d054df32ed3d585f33a14068c8c6737db584b918727ff5ab|432f735505cfff0df84802fa35c02800341b240c276037bfb6772e2a0fb589cd",
+                "spec_update|4b63bd53115202d8c35c0e347ecc43491b5080564306c1fa643657d40790ba14|2fb17064e36c1ef3e25b4a7acba170162686e939bc4ddf22a7c730e7340767ed",
+                "subagent_collect|c950e7193036445e86b6ffd6587304e0e71cf00302734d0ed6e83c549a2e95dd|5c379cd2fe57942f2460934525f4f8645ea490dcdd7130a4d49035cd8354fa21",
+                "subagent_spawn|062b2ac16b1f04f1ada1607d2cb04fe4840b9a09809382eed9c09878ab038fd1|8ea96b320e0b3bf02c54fa0bad48a60e941089abeb0af2b7ff2e592103abaeff",
+                "sync_broadcast|c5904706ddfd0877686466deeff33f21d70075bbed6c8ae6eba5794fe3ea1043|f5584c95194a960c79e39b84a115e439c1b0e5f7b91d39385e5788cc344e83af",
+                "sync_declare_intent|621ecbc55446f78d4050026a7554487c33116b0ca218f359fc4355207d92abfe|ec40954a22bc0559f68b428ff8071f9ffa02c9e5702620ad4432f33b5e384eba",
+                "sync_get_context|5bf5707dc316b32fa427141fab68b709dc07af8a52676da646958774a432a1ff|4bd69d426fd995f95a4bc3d546c79b60f85a0a282552cd0d9523052e2467216a",
+                "sync_report_status|ee93a882c476cc2792fa68bce24c1f187de5947c08b72bb55400dd114bdc07a4|ca10e912be130d9d76d33ccb1ced7bfce5f119e46d3d222fda29af25b4fd95a1",
     ];
 
     /// B7 A1: the MCP tool inventory is byte-identical across the handler
@@ -1051,6 +1263,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         })
         .unwrap();
         let now = chrono::Utc::now();
@@ -1237,6 +1452,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         }
     }
 
@@ -1276,6 +1494,7 @@ mod tests {
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,
+            require_spec_type: false,
             infra_node_id: None,
             id: graph_id.clone(),
             name: "Graph".to_string(),
@@ -1434,6 +1653,9 @@ mod tests {
             completed_via: Some("admin".to_string()),
             completed_via_reason: Some("premise false".to_string()),
             completed_via_at: Some(chrono::Utc::now()),
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         })
         .unwrap();
         db.insert_graph_spec(&spec_with_status(
@@ -1514,6 +1736,9 @@ mod tests {
             completed_via: Some("admin".to_string()),
             completed_via_reason: Some("premise false".to_string()),
             completed_via_at: Some(chrono::Utc::now()),
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         })
         .unwrap();
 
@@ -1581,6 +1806,7 @@ mod tests {
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,
+            require_spec_type: false,
             infra_node_id: None,
             id: graph_id.clone(),
             name: "Graph".to_string(),
@@ -1618,6 +1844,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         };
         db.insert_graph_spec(&standalone("queue-done", 1, GraphSpecStatus::Completed))
             .unwrap();
@@ -2286,6 +2515,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         }
     }
 
@@ -2569,6 +2801,7 @@ mod tests {
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,
+            require_spec_type: false,
             infra_node_id: None,
             id: id.to_string(),
             name: id.to_string(),
@@ -3117,6 +3350,7 @@ mod tests {
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,
+            require_spec_type: false,
             infra_node_id: None,
             id: graph_id.clone(),
             name: "Graph".to_string(),
@@ -3163,6 +3397,7 @@ mod tests {
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,
+            require_spec_type: false,
             infra_node_id: None,
             id: id.to_string(),
             name: id.to_string(),
@@ -3442,6 +3677,7 @@ mod tests {
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,
+            require_spec_type: false,
             infra_node_id: None,
             id: graph_id.clone(),
             name: "Graph".to_string(),
@@ -3496,6 +3732,7 @@ mod tests {
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,
+            require_spec_type: false,
             infra_node_id: None,
             id: graph_id.clone(),
             name: "Graph".to_string(),
@@ -3540,6 +3777,7 @@ mod tests {
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,
+            require_spec_type: false,
             infra_node_id: None,
             id: graph_id.to_string(),
             name: graph_id.to_string(),
@@ -4067,6 +4305,7 @@ mod tests {
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,
+            require_spec_type: false,
             infra_node_id: Some("infra".to_string()),
             id: "graph-1".to_string(),
             name: "graph-1".to_string(),
@@ -5233,6 +5472,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         })
         .unwrap();
     }
@@ -5601,6 +5843,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         };
         let json = spec_summary_json(&spec, true);
         assert_eq!(json["id"], "spec-1");
@@ -5635,6 +5880,9 @@ mod tests {
             completed_via: Some("graph_reset".to_string()),
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         };
         let json = spec_summary_json(&spec, true);
         assert_eq!(json["completed_via"], "graph_reset");
@@ -5704,6 +5952,7 @@ mod tests {
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,
+            require_spec_type: false,
             infra_node_id: None,
             id: "graph-1".to_string(),
             name: "Test Graph".to_string(),
@@ -6060,6 +6309,9 @@ mod additional_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         }
     }
 
@@ -6068,6 +6320,7 @@ mod additional_tests {
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,
+            require_spec_type: false,
             infra_node_id: None,
             id: id.to_string(),
             name: id.to_string(),
@@ -6658,6 +6911,9 @@ mod additional_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         };
         assert!(validate_spec_deletable(&spec).is_ok());
     }
@@ -6804,6 +7060,9 @@ mod additional_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         };
         let json = spec_summary_json(&spec, true);
         assert!(json["graph_id"].is_null());
@@ -7333,6 +7592,7 @@ mod additional_tests {
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,
+            require_spec_type: false,
             infra_node_id: None,
             id: "l1".to_string(),
             name: "l1".to_string(),
@@ -7360,6 +7620,7 @@ mod additional_tests {
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,
+            require_spec_type: false,
             infra_node_id: None,
             id: "l1".to_string(),
             name: "l1".to_string(),
@@ -7485,6 +7746,9 @@ mod coverage_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         }
     }
 
@@ -7522,6 +7786,7 @@ mod coverage_tests {
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,
+            require_spec_type: false,
             infra_node_id: None,
             id: graph_id.to_string(),
             name: graph_id.to_string(),
@@ -9126,7 +9391,8 @@ mod coverage_tests {
     fn cb43_prepend_recent_usage_first_on_success_only() {
         let section = "Recently used on this machine (last 30 days):\n- a/b: x".to_string();
 
-        let mut ok = CallToolResult::success(vec![Content::text("Source: catalogue".to_string())]);
+        let mut ok =
+            CallToolResult::success(vec![ContentBlock::text("Source: catalogue".to_string())]);
         prepend_recent_usage(&mut ok, &section);
         let text = ok.content[0].as_text().unwrap().text.clone();
         assert!(text.starts_with("Recently used"));
@@ -9137,7 +9403,8 @@ mod coverage_tests {
         prepend_recent_usage(&mut err, &section);
         assert_eq!(format!("{:?}", err.content), before);
 
-        let mut ok2 = CallToolResult::success(vec![Content::text("Source: catalogue".to_string())]);
+        let mut ok2 =
+            CallToolResult::success(vec![ContentBlock::text("Source: catalogue".to_string())]);
         prepend_recent_usage(&mut ok2, "");
         assert_eq!(ok2.content[0].as_text().unwrap().text, "Source: catalogue");
     }
@@ -9425,7 +9692,7 @@ mod endpoint_tests {
     }
 
     /// The raw (unescaped) text of a result's first content block — unlike
-    /// [`text`] (which Debug-formats the whole `Vec<Content>`, escaping
+    /// [`text`] (which Debug-formats the whole `Vec<ContentBlock>`, escaping
     /// embedded quotes), this is safe to `serde_json::from_str` or otherwise
     /// parse structurally.
     fn raw_text(result: &CallToolResult) -> String {
@@ -11645,6 +11912,7 @@ mod endpoint_tests {
                 trigger: None,
                 infra_node_id: None,
                 allow_dirty_start: false,
+                require_spec_type: false,
             }))
             .await
             .unwrap();
@@ -11663,6 +11931,7 @@ mod endpoint_tests {
                 hooks: None,
                 infra_node_id: None,
                 allow_dirty_start: None,
+                require_spec_type: None,
             }))
             .await
             .unwrap();
@@ -11685,6 +11954,7 @@ mod endpoint_tests {
                 trigger: None,
                 infra_node_id: None,
                 allow_dirty_start: false,
+                require_spec_type: false,
             }))
             .await
             .unwrap();
@@ -11732,6 +12002,7 @@ mod endpoint_tests {
                 hooks: Some(hooks),
                 infra_node_id: None,
                 allow_dirty_start: None,
+                require_spec_type: None,
             }))
             .await
             .unwrap();
@@ -11754,6 +12025,7 @@ mod endpoint_tests {
                 trigger: None,
                 infra_node_id: None,
                 allow_dirty_start: false,
+                require_spec_type: false,
             }))
             .await
             .unwrap();
@@ -11791,6 +12063,7 @@ mod endpoint_tests {
                 hooks: Some(hooks),
                 infra_node_id: None,
                 allow_dirty_start: None,
+                require_spec_type: None,
             }))
             .await
             .unwrap();
@@ -11810,6 +12083,7 @@ mod endpoint_tests {
                 trigger: None,
                 infra_node_id: None,
                 allow_dirty_start: false,
+                require_spec_type: false,
             }))
             .await
             .unwrap();
@@ -11846,6 +12120,7 @@ mod endpoint_tests {
                 hooks: Some(valid_hooks),
                 infra_node_id: None,
                 allow_dirty_start: None,
+                require_spec_type: None,
             }))
             .await
             .unwrap();
@@ -11883,6 +12158,7 @@ mod endpoint_tests {
                 hooks: Some(invalid_hooks),
                 infra_node_id: None,
                 allow_dirty_start: None,
+                require_spec_type: None,
             }))
             .await
             .unwrap();
@@ -11911,6 +12187,7 @@ mod endpoint_tests {
                 trigger: None,
                 infra_node_id: None,
                 allow_dirty_start: false,
+                require_spec_type: false,
             }))
             .await
             .unwrap();
@@ -11924,6 +12201,7 @@ mod endpoint_tests {
                 trigger: None,
                 infra_node_id: None,
                 allow_dirty_start: false,
+                require_spec_type: false,
             }))
             .await
             .unwrap();
@@ -11955,6 +12233,7 @@ mod endpoint_tests {
                 trigger: None,
                 infra_node_id: None,
                 allow_dirty_start: false,
+                require_spec_type: false,
             }))
             .await
             .unwrap();
@@ -12074,6 +12353,7 @@ mod endpoint_tests {
                 trigger: None,
                 infra_node_id: None,
                 allow_dirty_start: false,
+                require_spec_type: false,
             }))
             .await
             .unwrap();
@@ -12298,6 +12578,7 @@ mod endpoint_tests {
                 trigger: None,
                 infra_node_id: None,
                 allow_dirty_start: false,
+                require_spec_type: false,
             }))
             .await
             .unwrap();
@@ -12443,6 +12724,7 @@ mod endpoint_tests {
                 trigger: None,
                 infra_node_id: None,
                 allow_dirty_start: false,
+                require_spec_type: false,
             }))
             .await
             .unwrap();
@@ -12697,6 +12979,7 @@ mod endpoint_tests {
                 trigger: None,
                 infra_node_id: None,
                 allow_dirty_start: false,
+                require_spec_type: false,
             }))
             .await
             .unwrap();
@@ -12825,6 +13108,7 @@ mod endpoint_tests {
                 trigger: None,
                 infra_node_id: None,
                 allow_dirty_start: false,
+                require_spec_type: false,
             }))
             .await
             .unwrap();
@@ -12909,6 +13193,7 @@ mod endpoint_tests {
                 trigger: None,
                 infra_node_id: None,
                 allow_dirty_start: false,
+                require_spec_type: false,
             }))
             .await
             .unwrap();
@@ -12976,6 +13261,7 @@ mod endpoint_tests {
                 trigger: None,
                 infra_node_id: None,
                 allow_dirty_start: false,
+                require_spec_type: false,
             }))
             .await
             .unwrap();
@@ -13030,6 +13316,7 @@ mod endpoint_tests {
                 trigger: None,
                 infra_node_id: None,
                 allow_dirty_start: false,
+                require_spec_type: false,
             }))
             .await
             .unwrap();
@@ -13161,6 +13448,355 @@ mod endpoint_tests {
         );
     }
 
+    /// Build a graph whose only ensemble has a pass exit but no `on_fail_to`
+    /// and no manual fail/always edge from its quorum. Returns the graph, the
+    /// ensemble id, the quorum node id and the arbiter (pass target) id.
+    async fn graph_with_unexited_quorum(
+        dir: &tempfile::TempDir,
+        db: &Database,
+        handler: &TaskTriggerHandler,
+    ) -> (Graph, String, String, String) {
+        let lp = insert_test_graph(db, dir.path());
+
+        let mk_node = |name: &str, position: i64| GraphNode {
+            id: uuid::Uuid::new_v4().to_string(),
+            spec_id: None,
+            graph_id: Some(lp.id.clone()),
+            name: name.to_string(),
+            kind: GraphNodeKind::Agent,
+            // Unconfigured platform -> probe returns NotConfigured instantly,
+            // no quota spent, preflight still succeeds.
+            config: serde_json::json!({"platform": "cm19-unconfigured-platform"}),
+            position,
+            created_at: chrono::Utc::now(),
+        };
+        let entry = mk_node("entry", 1);
+        let arbiter = mk_node("arbiter", 2);
+        db.insert_graph_node(&entry).unwrap();
+        db.insert_graph_node(&arbiter).unwrap();
+
+        let added = handler
+            .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                spec_id: None,
+                graph_id: Some(lp.id.clone()),
+                name: "Implementer".to_string(),
+                kind: None,
+                prompt_template: Some("Review".to_string()),
+                members: Some(vec![
+                    EnsembleMemberParams {
+                        platform: "cm19-unconfigured-platform".to_string(),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
+                    },
+                    EnsembleMemberParams {
+                        platform: "cm19-unconfigured-platform".to_string(),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
+                    },
+                ]),
+                blueprint: None,
+                from_node: entry.id.clone(),
+                condition: "always".to_string(),
+                min_pass: None,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+                on_pass_to: arbiter.id.clone(),
+                on_fail_to: None,
+                commit_rights: None,
+                crew: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&added), "{}", text(&added));
+
+        let ensembles = db.list_ensembles_for_graph(&lp.id).unwrap();
+        assert_eq!(ensembles.len(), 1, "expected one ensemble");
+        let ensemble = &ensembles[0].ensemble;
+        (
+            lp,
+            ensemble.id.clone(),
+            ensemble.join_node_id.clone(),
+            arbiter.id.clone(),
+        )
+    }
+
+    /// Run `graph_preflight` and return the `graph_warnings` array. Shared by
+    /// the quorum tests so each can assert the baseline warning first: a
+    /// negative test that only checks for silence would still pass if the
+    /// warning never existed at all.
+    async fn preflight_warnings(
+        handler: &TaskTriggerHandler,
+        graph_id: &str,
+    ) -> Vec<serde_json::Value> {
+        let result = handler
+            .graph_preflight(Parameters(GraphPreflightParams {
+                graph_id: graph_id.to_string(),
+                timeout_seconds: Some(5),
+                reviewer: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&result), "{}", text(&result));
+        let body: serde_json::Value = serde_json::from_str(&raw_text(&result)).unwrap();
+        body["graph_warnings"]
+            .as_array()
+            .unwrap_or_else(|| panic!("preflight must include graph_warnings: {body}"))
+            .clone()
+    }
+
+    /// (FR1/FR4-a) An ensemble with `on_pass_to` and no `on_fail_to`, whose
+    /// quorum has no `fail`/`always` edge, produces exactly one advisory
+    /// `graph_warnings` entry naming the ensemble and its quorum node.
+    #[tokio::test]
+    async fn graph_preflight_warns_quorum_without_fail_exit() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let (lp, ensemble_id, join_id, _arbiter_id) =
+            graph_with_unexited_quorum(&dir, &db, &handler).await;
+
+        let result = handler
+            .graph_preflight(Parameters(GraphPreflightParams {
+                graph_id: lp.id.clone(),
+                timeout_seconds: Some(5),
+                reviewer: None,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            !is_err(&result),
+            "a quorum warning must not be a tool error: {}",
+            text(&result)
+        );
+        let body: serde_json::Value = serde_json::from_str(&raw_text(&result)).unwrap();
+        let warnings = body["graph_warnings"]
+            .as_array()
+            .unwrap_or_else(|| panic!("preflight must include graph_warnings: {body}"));
+        println!(
+            "{}",
+            serde_json::to_string_pretty(warnings).unwrap_or_default()
+        );
+        assert_eq!(
+            warnings.len(),
+            1,
+            "expected exactly one quorum warning: {body}"
+        );
+        let warning = &warnings[0];
+        let details = db.get_graph_details(&lp.id).unwrap().unwrap();
+        let join_name = details
+            .graph_nodes
+            .iter()
+            .find(|n| n.id == join_id)
+            .map(|n| n.name.clone())
+            .unwrap();
+        assert_eq!(warning["node_id"], join_id);
+        assert_eq!(warning["node_name"], join_name);
+        assert_eq!(warning["kind"], "join");
+        assert_eq!(warning["ensemble_id"], ensemble_id);
+        assert_eq!(warning["ensemble_name"], "Implementer");
+        assert_eq!(warning["missing_edge"], "fail");
+        let warn_text = warning["warning"].as_str().unwrap_or_default();
+        assert!(
+            warn_text.contains("Ensemble 'Implementer'")
+                && warn_text.contains(&ensemble_id)
+                && warn_text.contains("no on_fail_to"),
+            "warning must name the ensemble and the missing exit: {body}"
+        );
+        assert!(
+            body.get("would_fail").is_some(),
+            "verdict fields intact: {body}"
+        );
+    }
+
+    /// (FR2/FR4-b) The same ensemble with `on_fail_to` set is silent — while
+    /// the identical graph without it warns first, so silence cannot be the
+    /// absence of the check.
+    #[tokio::test]
+    async fn graph_preflight_quiet_with_on_fail_to() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let (lp, ensemble_id, _join_id, arbiter_id) =
+            graph_with_unexited_quorum(&dir, &db, &handler).await;
+
+        assert_eq!(
+            preflight_warnings(&handler, &lp.id).await.len(),
+            1,
+            "baseline: the null-on_fail_to graph must warn before the update"
+        );
+
+        let updated = handler
+            .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                ensemble_id: ensemble_id.clone(),
+                kind: None,
+                prompt_template: None,
+                members: None,
+                crew: None,
+                min_pass: None,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+                on_pass_to: None,
+                on_fail_to: Some(Some(arbiter_id)),
+                from_node: None,
+                condition: None,
+                add_entry_from: None,
+                add_entry_condition: None,
+                remove_entry_from: None,
+                commit_rights: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&updated), "{}", text(&updated));
+
+        let warnings = preflight_warnings(&handler, &lp.id).await;
+        assert!(
+            warnings.is_empty(),
+            "on_fail_to must silence the quorum warning: {warnings:?}"
+        );
+    }
+
+    /// (FR2/FR4-c) No `on_fail_to` but a hand-added `always` edge from the
+    /// quorum routes a failed quorum onward, so there is nothing to warn about
+    /// — while the same graph without that edge warns first.
+    #[tokio::test]
+    async fn graph_preflight_quiet_with_manual_always_edge() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let (lp, _ensemble_id, join_id, arbiter_id) =
+            graph_with_unexited_quorum(&dir, &db, &handler).await;
+
+        assert_eq!(
+            preflight_warnings(&handler, &lp.id).await.len(),
+            1,
+            "baseline: the quorum must warn before the manual edge is added"
+        );
+
+        db.insert_graph_edge(&GraphEdge {
+            id: uuid::Uuid::new_v4().to_string(),
+            spec_id: None,
+            graph_id: Some(lp.id.clone()),
+            from_node: join_id,
+            to_node: arbiter_id,
+            condition: GraphEdgeCondition::Always,
+        })
+        .unwrap();
+
+        let warnings = preflight_warnings(&handler, &lp.id).await;
+        assert!(
+            warnings.is_empty(),
+            "a manual 'always' edge is a fail exit: {warnings:?}"
+        );
+    }
+
+    /// A spec-owned ensemble (not the graph's top-level one) is the case this
+    /// warning exists for: a round-robin member reports FAIL and the spec ends
+    /// at the quorum. The spec's own graph reaches preflight through the
+    /// per-spec branch, so assert it there rather than only on the top level.
+    #[tokio::test]
+    async fn graph_preflight_warns_spec_quorum_without_fail_exit() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+
+        let mk_node =
+            |name: &str, kind: GraphNodeKind, config: serde_json::Value, position: i64| GraphNode {
+                id: uuid::Uuid::new_v4().to_string(),
+                spec_id: Some(spec.id.clone()),
+                graph_id: None,
+                name: name.to_string(),
+                kind,
+                config,
+                position,
+                created_at: chrono::Utc::now(),
+            };
+        let kickoff = mk_node(
+            "kickoff",
+            GraphNodeKind::Check,
+            serde_json::json!({"command": "true", "success_condition": "exit_code_0"}),
+            1,
+        );
+        let arbiter = mk_node(
+            "arbiter",
+            GraphNodeKind::Agent,
+            serde_json::json!({"platform": "cm19-unconfigured-platform"}),
+            2,
+        );
+        db.insert_graph_node(&kickoff).unwrap();
+        db.insert_graph_node(&arbiter).unwrap();
+
+        let added = handler
+            .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                spec_id: Some(spec.id.clone()),
+                graph_id: None,
+                name: "Implementer".to_string(),
+                kind: None,
+                prompt_template: Some("Review".to_string()),
+                members: Some(vec![
+                    EnsembleMemberParams {
+                        platform: "cm19-unconfigured-platform".to_string(),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
+                    },
+                    EnsembleMemberParams {
+                        platform: "cm19-unconfigured-platform".to_string(),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
+                    },
+                ]),
+                blueprint: None,
+                from_node: kickoff.id.clone(),
+                condition: "always".to_string(),
+                min_pass: None,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+                on_pass_to: arbiter.id.clone(),
+                on_fail_to: None,
+                commit_rights: None,
+                crew: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&added), "{}", text(&added));
+
+        let ensembles = db.list_ensembles_for_spec(&spec.id).unwrap();
+        assert_eq!(ensembles.len(), 1, "expected one spec ensemble");
+        let ensemble = &ensembles[0].ensemble;
+
+        let warnings = preflight_warnings(&handler, &lp.id).await;
+        assert_eq!(
+            warnings.len(),
+            1,
+            "the spec's quorum must warn: {warnings:?}"
+        );
+        assert_eq!(warnings[0]["node_id"], ensemble.join_node_id);
+        assert_eq!(warnings[0]["ensemble_id"], ensemble.id);
+        assert_eq!(warnings[0]["ensemble_name"], "Implementer");
+        assert_eq!(warnings[0]["kind"], "join");
+    }
+
     #[tokio::test]
     async fn graph_update_rejects_unknown_graph_and_requires_a_field() {
         let (dir, db, handler) = endpoint_test_handler();
@@ -13175,6 +13811,7 @@ mod endpoint_tests {
                 hooks: None,
                 infra_node_id: None,
                 allow_dirty_start: None,
+                require_spec_type: None,
             }))
             .await
             .unwrap();
@@ -13192,6 +13829,7 @@ mod endpoint_tests {
                 hooks: None,
                 infra_node_id: None,
                 allow_dirty_start: None,
+                require_spec_type: None,
             }))
             .await
             .unwrap();
@@ -13204,6 +13842,7 @@ mod endpoint_tests {
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,
+            require_spec_type: false,
             infra_node_id: None,
             id: uuid::Uuid::new_v4().to_string(),
             name: "Test Graph".to_string(),
@@ -13244,6 +13883,9 @@ mod endpoint_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         };
         db.insert_graph_spec(&spec).unwrap();
         spec
@@ -13275,6 +13917,9 @@ mod endpoint_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         };
         db.insert_graph_spec(&spec).unwrap();
         spec
@@ -13491,6 +14136,8 @@ mod endpoint_tests {
                 description: Some(valid_spec_description()),
                 position: 1,
                 parallelizable: false,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
@@ -13503,6 +14150,8 @@ mod endpoint_tests {
                 description: Some(valid_spec_description()),
                 position: 1,
                 parallelizable: false,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
@@ -13516,6 +14165,8 @@ mod endpoint_tests {
                 description: None,
                 position: 2,
                 parallelizable: false,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
@@ -13528,6 +14179,8 @@ mod endpoint_tests {
                 description: Some("just a sentence".to_string()),
                 position: 3,
                 parallelizable: false,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
@@ -13551,6 +14204,8 @@ mod endpoint_tests {
                 description: None,
                 position: None,
                 parallelizable: None,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
@@ -13567,6 +14222,8 @@ mod endpoint_tests {
                 description: None,
                 position: None,
                 parallelizable: None,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
@@ -13579,6 +14236,8 @@ mod endpoint_tests {
                 description: None,
                 position: None,
                 parallelizable: None,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
@@ -13596,6 +14255,8 @@ mod endpoint_tests {
                 name: "Backlog item".to_string(),
                 description: valid_spec_description(),
                 workdir: Some("/tmp".to_string()),
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
@@ -13606,6 +14267,8 @@ mod endpoint_tests {
                 name: "Backlog item 2".to_string(),
                 description: "too short".to_string(),
                 workdir: None,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
@@ -13619,6 +14282,7 @@ mod endpoint_tests {
                 include_descriptions: None,
                 limit: None,
                 offset: None,
+                spec_type: None,
             }))
             .await
             .unwrap();
@@ -13632,12 +14296,13 @@ mod endpoint_tests {
                 include_descriptions: None,
                 limit: None,
                 offset: None,
+                spec_type: None,
             }))
             .await
             .unwrap();
         assert!(is_err(&bad_status));
 
-        let all_specs = db.list_specs(None, None, false).unwrap();
+        let all_specs = db.list_specs(None, None, false, None).unwrap();
         let spec_id = all_specs
             .iter()
             .find(|s| s.name == "Backlog item")
@@ -13651,6 +14316,8 @@ mod endpoint_tests {
                 name: Some("Renamed backlog item".to_string()),
                 description: None,
                 workdir: None,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
@@ -13658,6 +14325,107 @@ mod endpoint_tests {
         assert_eq!(
             db.get_graph_spec(&spec_id).unwrap().unwrap().name,
             "Renamed backlog item"
+        );
+    }
+
+    #[tokio::test]
+    async fn spec_create_with_conventional_title_stores_subject_type_scope_and_code() {
+        let (dir, db, handler) = endpoint_test_handler();
+
+        let created = handler
+            .spec_create(Parameters(SpecCreateParams {
+                name: "fix(tui): open F1 from inside a session".to_string(),
+                description: valid_spec_description(),
+                workdir: Some(dir.path().to_string_lossy().to_string()),
+                spec_type: None,
+                spec_scope: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&created), "{}", text(&created));
+
+        // A conventional title is parsed and stored as subject + type + scope,
+        // never as the raw "fix(tui): ..." title.
+        let spec = db
+            .list_specs(None, None, false, None)
+            .unwrap()
+            .into_iter()
+            .find(|s| s.name == "open F1 from inside a session")
+            .expect("conventional title stored as the subject");
+        assert_eq!(
+            spec.spec_type
+                .as_ref()
+                .map(crate::domain::spec_type::SpecType::as_str),
+            Some("fix")
+        );
+        assert_eq!(spec.spec_scope, Some("tui".to_string()));
+        assert_eq!(spec.spec_code, Some("FIX-1".to_string()));
+        assert_eq!(
+            crate::domain::spec_type::commit_message_opt(
+                spec.spec_type,
+                spec.spec_scope.as_deref(),
+                &spec.name,
+            ),
+            Some("fix(tui): open F1 from inside a session".to_string())
+        );
+    }
+
+    /// A name-only `spec_update` adopting a conventional title on an untyped
+    /// spec stores the subject alone — never the raw title, which would make
+    /// the commit message repeat the type (`fix(tui): fix(tui): ...`).
+    #[tokio::test]
+    async fn spec_update_name_only_conventional_title_stores_subject_and_code() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let _ = &dir;
+
+        let created = handler
+            .spec_create(Parameters(SpecCreateParams {
+                name: "Vague bug report".to_string(),
+                description: valid_spec_description(),
+                workdir: None,
+                spec_type: None,
+                spec_scope: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&created), "{}", text(&created));
+        let spec_id = db
+            .list_specs(None, None, false, None)
+            .unwrap()
+            .into_iter()
+            .find(|s| s.name == "Vague bug report")
+            .unwrap()
+            .id;
+
+        let updated = handler
+            .spec_update(Parameters(SpecUpdateParams {
+                spec_id: spec_id.clone(),
+                name: Some("fix(tui): open F1 from inside a session".to_string()),
+                description: None,
+                workdir: None,
+                spec_type: None,
+                spec_scope: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&updated), "{}", text(&updated));
+
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        assert_eq!(spec.name, "open F1 from inside a session");
+        assert_eq!(
+            spec.spec_type
+                .as_ref()
+                .map(crate::domain::spec_type::SpecType::as_str),
+            Some("fix")
+        );
+        assert_eq!(spec.spec_scope, Some("tui".to_string()));
+        assert_eq!(
+            crate::domain::spec_type::commit_message_opt(
+                spec.spec_type,
+                spec.spec_scope.as_deref(),
+                &spec.name,
+            ),
+            Some("fix(tui): open F1 from inside a session".to_string())
         );
     }
 
@@ -13670,12 +14438,14 @@ mod endpoint_tests {
                 name: "Standalone".to_string(),
                 description: valid_spec_description(),
                 workdir: None,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
         assert!(!is_err(&standalone));
         let spec_id = db
-            .list_specs(None, None, false)
+            .list_specs(None, None, false, None)
             .unwrap()
             .into_iter()
             .find(|s| s.name == "Standalone")
@@ -13739,11 +14509,13 @@ mod endpoint_tests {
                 name: "Deletable".to_string(),
                 description: valid_spec_description(),
                 workdir: None,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
         let spec_id = db
-            .list_specs(None, None, false)
+            .list_specs(None, None, false, None)
             .unwrap()
             .into_iter()
             .find(|s| s.name == "Deletable")
@@ -13797,7 +14569,7 @@ mod endpoint_tests {
         let after = db.get_graph_spec(&spec.id).unwrap().unwrap();
         assert!(after.graph_id.is_none());
 
-        let unassigned = db.list_specs(None, None, true).unwrap();
+        let unassigned = db.list_specs(None, None, true, None).unwrap();
         assert!(unassigned.iter().any(|s| s.id == spec.id));
 
         assert!(db
@@ -13853,12 +14625,14 @@ mod endpoint_tests {
                 name: "Standalone".to_string(),
                 description: valid_spec_description(),
                 workdir: None,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
         assert!(!is_err(&created), "{}", text(&created));
         let standalone_id = db
-            .list_specs(None, None, false)
+            .list_specs(None, None, false, None)
             .unwrap()
             .into_iter()
             .find(|s| s.name == "Standalone")
@@ -15575,6 +16349,110 @@ mod endpoint_tests {
     }
 
     #[tokio::test]
+    async fn graph_get_running_without_run_or_schedule_warns() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        db.update_graph_status(&lp.id, GraphStatus::Running, Some(chrono::Utc::now()), None)
+            .unwrap();
+
+        let result = handler
+            .graph_get(Parameters(GraphGetParams {
+                graph_id: lp.id.clone(),
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&result), "{}", text(&result));
+        let body = raw_text(&result);
+        assert!(body.contains("no node run in progress"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn graph_get_running_with_live_run_does_not_warn() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+        db.insert_graph_node(&GraphNode {
+            id: "node".to_string(),
+            spec_id: Some(spec.id.clone()),
+            graph_id: None,
+            name: "node".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({}),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+        db.update_graph_status(&lp.id, GraphStatus::Running, Some(chrono::Utc::now()), None)
+            .unwrap();
+        db.insert_graph_run(&crate::domain::graphs::GraphNodeRun {
+            id: "run-live".to_string(),
+            graph_id: lp.id.clone(),
+            spec_id: spec.id.clone(),
+            node_id: "node".to_string(),
+            status: crate::domain::graphs::GraphRunStatus::Running,
+            input: None,
+            output: None,
+            started_at: chrono::Utc::now(),
+            completed_at: None,
+            iteration: 1,
+            pid: None,
+            boot_id: None,
+            session_id: None,
+            executed_platform: None,
+            executed_model: None,
+        })
+        .unwrap();
+
+        let result = handler
+            .graph_get(Parameters(GraphGetParams {
+                graph_id: lp.id.clone(),
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&result), "{}", text(&result));
+        let body = raw_text(&result);
+        assert!(body.contains("\"consistency_warning\": null"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn graph_get_running_with_scheduled_resume_does_not_warn() {
+        let (dir, db, handler) = endpoint_test_handler();
+        // Build a running graph with an autorun schedule directly.
+        let lp = Graph {
+            archived: false,
+            paused_by_reconciliation: false,
+            allow_dirty_start: false,
+            require_spec_type: false,
+            infra_node_id: None,
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "Test Graph".to_string(),
+            description: None,
+            workdir: dir.path().to_string_lossy().to_string(),
+            status: GraphStatus::Running,
+            trigger: None,
+            created_at: chrono::Utc::now(),
+            started_at: Some(chrono::Utc::now()),
+            completed_at: None,
+            autorun_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+            auto_continue_at: None,
+            auto_continue_action: None,
+            active_run_queue_id: None,
+            hooks: std::collections::BTreeMap::new(),
+        };
+        db.insert_graph(&lp).unwrap();
+
+        let result = handler
+            .graph_get(Parameters(GraphGetParams {
+                graph_id: lp.id.clone(),
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&result), "{}", text(&result));
+        let body = raw_text(&result);
+        assert!(body.contains("\"consistency_warning\": null"), "{body}");
+    }
+
+    #[tokio::test]
     async fn topology_mutations_are_rejected_while_the_graph_is_running() {
         let (dir, db, handler) = endpoint_test_handler();
         let lp = insert_test_graph(&db, dir.path());
@@ -16932,7 +17810,7 @@ mod endpoint_tests {
         assert!(text(&bad_action).contains("retry_current_node, skip_next_spec or run_from_node"));
     }
 
-    // ── graph_continue run_from_node (CM43 directed runs) ───────────
+    // ── graph_continue run_from_node ───────────
 
     #[tokio::test]
     async fn graph_continue_run_from_node_refuses_a_graph_with_an_active_run() {
@@ -21274,6 +22152,47 @@ mod endpoint_tests {
         assert!(is_err(&missing));
     }
 
+    #[tokio::test]
+    async fn project_update_unlocks_gardener_after_five_projects() {
+        let (_dir, db, handler) = endpoint_test_handler();
+        let base = tempdir().unwrap();
+        let mut hashes = Vec::new();
+        for i in 0..5 {
+            let dir = base.path().join(format!("gardener-project-{i}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            let project = db.register_project_path(&dir).unwrap();
+            hashes.push(project.hash);
+        }
+
+        // The same project twice counts once.
+        for _ in 0..2 {
+            let updated = handler
+                .project_update(Parameters(ProjectUpdateParams {
+                    project_hash: hashes[0].clone(),
+                    description: Some("A tended garden".to_string()),
+                    tags: None,
+                }))
+                .await
+                .unwrap();
+            assert!(!is_err(&updated), "{}", text(&updated));
+        }
+        assert_eq!(db.count_gardener_projects().unwrap(), 1);
+
+        // Tags-only updates count too; four more distinct projects unlock.
+        for hash in hashes.iter().skip(1) {
+            let updated = handler
+                .project_update(Parameters(ProjectUpdateParams {
+                    project_hash: hash.clone(),
+                    description: None,
+                    tags: Some(vec!["tended".to_string()]),
+                }))
+                .await
+                .unwrap();
+            assert!(!is_err(&updated), "{}", text(&updated));
+        }
+        assert_eq!(db.count_gardener_projects().unwrap(), 5);
+    }
+
     // ── project_remap ─────────────────────────────────────────────
 
     #[tokio::test]
@@ -21766,6 +22685,8 @@ mod endpoint_tests {
                 name: "Compact test".to_string(),
                 description: valid_spec_description(),
                 workdir: None,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
@@ -21779,6 +22700,7 @@ mod endpoint_tests {
                 include_descriptions: None,
                 limit: None,
                 offset: None,
+                spec_type: None,
             }))
             .await
             .unwrap();
@@ -21799,6 +22721,8 @@ mod endpoint_tests {
                 name: "Verbose test".to_string(),
                 description: desc.clone(),
                 workdir: None,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
@@ -21812,6 +22736,7 @@ mod endpoint_tests {
                 include_descriptions: Some(true),
                 limit: None,
                 offset: None,
+                spec_type: None,
             }))
             .await
             .unwrap();
@@ -22193,6 +23118,9 @@ mod endpoint_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         };
         db.insert_graph_spec(&spec).unwrap();
         spec
@@ -22222,6 +23150,7 @@ mod endpoint_tests {
                 include_descriptions: None,
                 limit: Some(3),
                 offset: Some(0),
+                spec_type: None,
             }))
             .await
             .unwrap();
@@ -22242,6 +23171,7 @@ mod endpoint_tests {
                 include_descriptions: None,
                 limit: Some(3),
                 offset: Some(3),
+                spec_type: None,
             }))
             .await
             .unwrap();
@@ -22263,6 +23193,7 @@ mod endpoint_tests {
                 include_descriptions: None,
                 limit: Some(3),
                 offset: Some(9),
+                spec_type: None,
             }))
             .await
             .unwrap();
@@ -22295,6 +23226,7 @@ mod endpoint_tests {
                 include_descriptions: None,
                 limit: None,
                 offset: None,
+                spec_type: None,
             }))
             .await
             .unwrap();
@@ -22484,12 +23416,14 @@ mod endpoint_tests {
                 name: "Prefix test".to_string(),
                 description: valid_spec_description(),
                 workdir: None,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
         assert!(!is_err(&created), "{}", text(&created));
 
-        let all_specs = db.list_specs(None, None, false).unwrap();
+        let all_specs = db.list_specs(None, None, false, None).unwrap();
         let full_id = all_specs[0].id.clone();
         let prefix = &full_id[..8];
 
@@ -22499,6 +23433,8 @@ mod endpoint_tests {
                 name: Some("Renamed via prefix".to_string()),
                 description: None,
                 workdir: None,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
@@ -22517,12 +23453,16 @@ mod endpoint_tests {
                 name: "Section test".to_string(),
                 description: valid_spec_description(),
                 workdir: None,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
         assert!(!is_err(&created), "{}", text(&created));
 
-        let spec_id = db.list_specs(None, None, false).unwrap()[0].id.clone();
+        let spec_id = db.list_specs(None, None, false, None).unwrap()[0]
+            .id
+            .clone();
 
         let result = handler
             .spec_section_get(Parameters(SpecSectionGetParams {
@@ -22545,12 +23485,16 @@ mod endpoint_tests {
                 name: "Section test 2".to_string(),
                 description: valid_spec_description(),
                 workdir: None,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
         assert!(!is_err(&created));
 
-        let spec_id = db.list_specs(None, None, false).unwrap()[0].id.clone();
+        let spec_id = db.list_specs(None, None, false, None).unwrap()[0]
+            .id
+            .clone();
 
         let result = handler
             .spec_section_get(Parameters(SpecSectionGetParams {
@@ -22588,6 +23532,9 @@ mod endpoint_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         })
         .unwrap();
 
@@ -22596,6 +23543,8 @@ mod endpoint_tests {
                 name: "Already tagged".to_string(),
                 description: valid_spec_description(),
                 workdir: None,
+                spec_type: None,
+                spec_scope: None,
             }))
             .await
             .unwrap();
@@ -22637,6 +23586,9 @@ mod endpoint_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         })
         .unwrap();
 
@@ -22685,6 +23637,9 @@ mod endpoint_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         })
         .unwrap();
 
@@ -22743,6 +23698,9 @@ mod endpoint_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         };
         db.insert_graph_spec(&spec1).unwrap();
         let spec2 = GraphSpec {
@@ -22764,20 +23722,23 @@ mod endpoint_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         };
         db.insert_graph_spec(&spec2).unwrap();
 
-        let exact = db.resolve_spec_id_by_prefix(&spec1.id).unwrap();
+        let exact = db.resolve_spec_id_by_prefix(&spec1.id, None).unwrap();
         assert_eq!(exact, Some(spec1.id.clone()));
 
-        let prefix_match = db.resolve_spec_id_by_prefix("aaaaaaaa-1111").unwrap();
+        let prefix_match = db.resolve_spec_id_by_prefix("aaaaaaaa-1111", None).unwrap();
         assert_eq!(prefix_match, Some(spec1.id));
 
-        let ambiguous = db.resolve_spec_id_by_prefix("aaaaaaaa");
+        let ambiguous = db.resolve_spec_id_by_prefix("aaaaaaaa", None);
         assert!(ambiguous.is_err(), "ambiguous prefix should error");
         assert!(ambiguous.unwrap_err().to_string().contains("Ambiguous"));
 
-        let not_found = db.resolve_spec_id_by_prefix("zzzzzzzz").unwrap();
+        let not_found = db.resolve_spec_id_by_prefix("zzzzzzzz", None).unwrap();
         assert_eq!(not_found, None);
     }
 
@@ -22832,6 +23793,7 @@ mod endpoint_tests {
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,
+            require_spec_type: false,
             infra_node_id: None,
         };
         db.insert_graph(&lp2).unwrap();
@@ -23596,6 +24558,9 @@ mod endpoint_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         })
         .unwrap();
 
@@ -23608,6 +24573,7 @@ mod endpoint_tests {
                     include_descriptions: Some(true),
                     limit: None,
                     offset: None,
+                    spec_type: None,
                 }))
                 .await
                 .unwrap(),
@@ -23663,6 +24629,9 @@ mod endpoint_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         })
         .unwrap();
 
@@ -23765,6 +24734,9 @@ mod endpoint_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         })
         .unwrap();
 
@@ -23787,6 +24759,9 @@ mod endpoint_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         };
         db.insert_graph_spec(&member).unwrap();
         let queue_id = uuid::Uuid::new_v4().to_string();
@@ -23843,6 +24818,9 @@ mod endpoint_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         })
         .unwrap();
 
@@ -23902,6 +24880,9 @@ mod endpoint_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         })
         .unwrap();
         db.insert_graph_node(&GraphNode {
@@ -24485,6 +25466,7 @@ mod endpoint_tests {
                 trigger: None,
                 infra_node_id: None,
                 allow_dirty_start: false,
+                require_spec_type: false,
             }))
             .await
             .unwrap();
@@ -24690,6 +25672,7 @@ mod endpoint_tests {
                 trigger: None,
                 infra_node_id: None,
                 allow_dirty_start: false,
+                require_spec_type: false,
             }))
             .await
             .unwrap();

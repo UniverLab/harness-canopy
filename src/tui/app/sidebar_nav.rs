@@ -185,28 +185,34 @@ impl App {
     }
 
     pub(crate) fn navigate_projects_next(&mut self) {
-        if self.projects.is_empty() {
+        let visible = self.visible_project_indices();
+        if visible.is_empty() {
             return;
         }
-        let next = self.selected_project + 1;
-        self.selected_project = if next < self.projects.len() { next } else { 0 };
+        let pos = visible.iter().position(|&idx| idx == self.selected_project);
+        self.selected_project = match pos {
+            Some(pos) => visible[(pos + 1) % visible.len()],
+            None => visible[0],
+        };
         self.refresh_graphs_selection();
     }
 
     pub(crate) fn navigate_projects_prev(&mut self) {
-        if self.projects.is_empty() {
+        let visible = self.visible_project_indices();
+        if visible.is_empty() {
             return;
         }
-        if self.selected_project > 0 {
-            self.selected_project -= 1;
-            self.refresh_graphs_selection();
-            return;
+        match visible.iter().position(|&idx| idx == self.selected_project) {
+            Some(pos) if pos > 0 => self.selected_project = visible[pos - 1],
+            // Off the top: leave for the RAG summary when there is one and no
+            // type-ahead is narrowing the list — a filtered list owns its
+            // edges (the wrap stays inside the matches).
+            _ if self.project_filter.is_empty() && self.rag_info.has_rag_activity() => {
+                self.enter_rag_focus();
+                return;
+            }
+            _ => self.selected_project = *visible.last().unwrap(),
         }
-        if self.rag_info.has_rag_activity() {
-            self.enter_rag_focus();
-            return;
-        }
-        self.selected_project = self.projects.len() - 1;
         self.refresh_graphs_selection();
     }
 

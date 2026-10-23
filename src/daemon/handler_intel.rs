@@ -12,7 +12,7 @@ use crate::daemon::helpers::error_result;
 use crate::daemon::params::*;
 use crate::daemon::params_extract::Parameters;
 use axum::http::request::Parts;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::tool;
 use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
@@ -154,7 +154,7 @@ impl TaskTriggerHandler {
             resolved_agent_id.as_deref(),
         );
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&out).unwrap_or_default(),
         )]))
     }
@@ -292,7 +292,7 @@ impl TaskTriggerHandler {
             out["undeclared_references"] = serde_json::json!(undeclared_references);
         }
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&out).unwrap_or_default(),
         )]))
     }
@@ -379,7 +379,7 @@ impl TaskTriggerHandler {
                 "examined_count": search_result.examined_count,
                 "results": results,
             });
-            return Ok(CallToolResult::success(vec![Content::text(
+            return Ok(CallToolResult::success(vec![ContentBlock::text(
                 serde_json::to_string_pretty(&out).unwrap_or_default(),
             )]));
         }
@@ -398,7 +398,7 @@ impl TaskTriggerHandler {
             "results": search_result.results.iter().map(intelligence_node_json).collect::<Vec<_>>(),
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&out).unwrap_or_default(),
         )]))
     }
@@ -472,7 +472,7 @@ impl TaskTriggerHandler {
             );
         }
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&out).unwrap_or_default(),
         )]))
     }
@@ -537,7 +537,7 @@ impl TaskTriggerHandler {
             Err(e) => return Err(McpError::internal_error(e.to_string(), None)),
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&serde_json::json!({
                 "deleted_node_id": effective_id,
                 "relations_removed": relations_removed,
@@ -596,7 +596,7 @@ impl TaskTriggerHandler {
             )));
         }
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&serde_json::json!({
                 "deleted_edge_id": params.edge_id,
             }))

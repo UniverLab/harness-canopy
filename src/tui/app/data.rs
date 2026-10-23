@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::collections::HashSet;
 
 use crate::application::ports::{AgentRepository, RunRepository, StateRepository};
-use crate::db::scheduled_sends::ScheduledSend;
+use crate::db::scheduled_sends::{ScheduledSend, ScheduledSendProvenance};
 
 use super::types::{AgentEntry, App};
 use super::utils::{is_local_port_open, is_process_running, relative_time, tail_lines};
@@ -268,40 +268,53 @@ impl App {
             send.id,
             send.target_session_id
         );
-        Self::notify_hook_delivery(send);
+        self.notify_hook_delivery(send);
     }
 
-    fn notify_hook_delivery(send: &ScheduledSend) -> bool {
-        // bool only for testability; caller ignores
+    fn notify_hook_delivery(&self, send: &ScheduledSend) -> bool {
         let Some(provenance) = send.provenance.as_ref() else {
             return false;
         };
         match provenance.kind.as_str() {
             "hook" => {
+                let name = self.hook_graph_name(provenance);
                 crate::domain::notification::send_notification(
                     "Hook message delivered",
-                    &format!(
-                        "Graph '{}' sent a message to this session (event '{}').",
-                        provenance.graph_id, provenance.event
-                    ),
+                    &hook_delivery_body(provenance, name.as_deref()),
                     crate::domain::notification::NotificationLevel::Info,
                 );
                 true
             }
             "agent_trigger" => {
+                let name = self.trigger_agent_name(provenance);
                 crate::domain::notification::send_notification(
                     "Agent message delivered",
-                    &format!(
-                        "Agent '{}' ({}) sent a message to this session.",
-                        provenance.agent_id.as_deref().unwrap_or(""),
-                        provenance.trigger.as_deref().unwrap_or("trigger")
-                    ),
+                    &agent_trigger_delivery_body(provenance, name.as_deref()),
                     crate::domain::notification::NotificationLevel::Info,
                 );
                 true
             }
             _ => false,
         }
+    }
+
+    /// Name of the graph behind a hook delivery; `None` once it is gone.
+    fn hook_graph_name(&self, provenance: &ScheduledSendProvenance) -> Option<String> {
+        self.db
+            .get_graph(&provenance.graph_id)
+            .ok()
+            .flatten()
+            .map(|g| g.name)
+    }
+
+    /// Name of the agent behind an agent-trigger delivery; `None` once it is
+    /// gone. An agent's name is its id, so the id is what the user sees.
+    fn trigger_agent_name(&self, provenance: &ScheduledSendProvenance) -> Option<String> {
+        provenance
+            .agent_id
+            .as_deref()
+            .and_then(|id| self.db.get_agent(id).ok().flatten())
+            .map(|a| a.id)
     }
 
     fn preserve_dead_scheduled_send(
@@ -359,10 +372,33 @@ impl App {
     }
 }
 
+fn display_name<'a>(resolved: Option<&'a str>, id: &'a str) -> &'a str {
+    resolved
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| id.get(..8).unwrap_or(id))
+}
+
+fn hook_delivery_body(provenance: &ScheduledSendProvenance, name: Option<&str>) -> String {
+    format!(
+        "{} · {}: message delivered to this session",
+        display_name(name, &provenance.graph_id),
+        provenance.event
+    )
+}
+
+fn agent_trigger_delivery_body(provenance: &ScheduledSendProvenance, name: Option<&str>) -> String {
+    format!(
+        "{} ({}): message delivered to this session",
+        display_name(name, provenance.agent_id.as_deref().unwrap_or("")),
+        provenance.trigger.as_deref().unwrap_or("trigger")
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::App;
+    use super::{agent_trigger_delivery_body, hook_delivery_body, App};
     use crate::application::ports::AgentRepository;
+    use crate::db::scheduled_sends::{ScheduledSend, ScheduledSendProvenance};
     use crate::db::Database;
     use std::sync::Arc;
     use tempfile::{tempdir, NamedTempFile};
@@ -607,7 +643,7 @@ mod tests {
     /// notify_hook_delivery returns true for hook and agent-trigger provenance.
     #[test]
     fn notify_hook_delivery_is_true_for_hook_and_agent_trigger_provenance() {
-        use crate::db::scheduled_sends::{ScheduledSend, ScheduledSendProvenance};
+        let (app, _dir) = test_app();
 
         let hook_prov = ScheduledSendProvenance::hook("graph-1", "on_failed");
         let send_hook = ScheduledSend {
@@ -620,7 +656,7 @@ mod tests {
             builder_state: None,
             provenance: Some(hook_prov),
         };
-        assert!(App::notify_hook_delivery(&send_hook));
+        assert!(app.notify_hook_delivery(&send_hook));
 
         // CM53: an agent-triggered send announces delivery the same way.
         let agent_prov = ScheduledSendProvenance::agent_trigger("nudger", "cron");
@@ -634,7 +670,7 @@ mod tests {
             builder_state: None,
             provenance: Some(agent_prov),
         };
-        assert!(App::notify_hook_delivery(&send_agent));
+        assert!(app.notify_hook_delivery(&send_agent));
 
         let non_hook_prov = ScheduledSendProvenance {
             kind: "other".into(),
@@ -655,7 +691,7 @@ mod tests {
             builder_state: None,
             provenance: Some(non_hook_prov),
         };
-        assert!(!App::notify_hook_delivery(&send_other));
+        assert!(!app.notify_hook_delivery(&send_other));
 
         let send_none = ScheduledSend {
             id: "ss-none".into(),
@@ -667,7 +703,7 @@ mod tests {
             builder_state: None,
             provenance: None,
         };
-        assert!(!App::notify_hook_delivery(&send_none));
+        assert!(!app.notify_hook_delivery(&send_none));
     }
 
     // ── notify_finished_run tests ───────────────────────────────────────
@@ -749,5 +785,121 @@ mod tests {
 
         // Should skip because no runs exist for this agent
         app.notify_finished_run("agent-no-runs");
+    }
+
+    /// hook_delivery_body uses the graph name when available.
+    #[test]
+    fn hook_delivery_body_names_the_graph() {
+        let prov = ScheduledSendProvenance::hook("g-canopy", "on_completed");
+        assert_eq!(
+            hook_delivery_body(&prov, Some("canopy-next")),
+            "canopy-next · on_completed: message delivered to this session"
+        );
+    }
+
+    /// hook_delivery_body falls back to the first 8 characters of the id when
+    /// the graph is not found.
+    #[test]
+    fn hook_delivery_body_falls_back_to_short_id() {
+        let prov =
+            ScheduledSendProvenance::hook("969ee102-0138-4054-95fd-2946ef237431", "on_completed");
+        assert_eq!(
+            hook_delivery_body(&prov, None),
+            "969ee102 · on_completed: message delivered to this session"
+        );
+    }
+
+    /// agent_trigger_delivery_body uses the agent name when available.
+    #[test]
+    fn agent_trigger_delivery_body_names_the_agent() {
+        let prov = ScheduledSendProvenance::agent_trigger("nudger", "cron");
+        assert_eq!(
+            agent_trigger_delivery_body(&prov, Some("nudger")),
+            "nudger (cron): message delivered to this session"
+        );
+    }
+
+    /// A hook delivery for a graph in the db is announced by its name.
+    #[test]
+    fn hook_delivery_names_an_existing_graph_from_the_db() {
+        use crate::domain::graphs::{Graph, GraphStatus};
+        let (app, _dir) = test_app();
+        app.db
+            .insert_graph(&Graph {
+                archived: false,
+                paused_by_reconciliation: false,
+                allow_dirty_start: false,
+                infra_node_id: None,
+                id: "g-canopy-next".into(),
+                name: "canopy-next".into(),
+                description: None,
+                workdir: "/tmp".into(),
+                status: GraphStatus::Draft,
+                trigger: None,
+                created_at: chrono::Utc::now(),
+                started_at: None,
+                completed_at: None,
+                autorun_at: None,
+                auto_continue_at: None,
+                auto_continue_action: None,
+                active_run_queue_id: None,
+                hooks: std::collections::BTreeMap::new(),
+                require_spec_type: false,
+            })
+            .expect("insert graph");
+
+        let prov = ScheduledSendProvenance::hook("g-canopy-next", "on_completed");
+        let name = app.hook_graph_name(&prov);
+        assert_eq!(
+            hook_delivery_body(&prov, name.as_deref()),
+            "canopy-next · on_completed: message delivered to this session"
+        );
+
+        let unknown =
+            ScheduledSendProvenance::hook("969ee102-0138-4054-95fd-2946ef237431", "on_completed");
+        assert_eq!(app.hook_graph_name(&unknown), None);
+    }
+
+    /// An agent-trigger delivery for an agent in the db is announced by the
+    /// agent's name, and an unknown agent resolves to nothing.
+    #[test]
+    fn agent_trigger_delivery_names_an_existing_agent_from_the_db() {
+        use crate::domain::models::{Agent, AgentAction, Cli, Trigger};
+        let (app, _dir) = test_app();
+        app.db
+            .upsert_agent(&Agent {
+                id: "nudger".into(),
+                prompt: "test".into(),
+                trigger: Some(Trigger::Cron {
+                    schedule_expr: "0 9 * * *".into(),
+                }),
+                cli: Cli::new("claude"),
+                model: None,
+                effort: None,
+                working_dir: None,
+                enabled: true,
+                enable_at: None,
+                created_at: chrono::Utc::now(),
+                log_path: "/tmp/test.log".into(),
+                timeout_minutes: 15,
+                expires_at: None,
+                last_run_at: None,
+                last_run_ok: None,
+                last_triggered_at: None,
+                trigger_count: 0,
+                action: AgentAction::Headless,
+            })
+            .expect("insert agent");
+
+        let prov = ScheduledSendProvenance::agent_trigger("nudger", "cron");
+        let name = app.trigger_agent_name(&prov);
+        assert_eq!(
+            agent_trigger_delivery_body(&prov, name.as_deref()),
+            "nudger (cron): message delivered to this session"
+        );
+
+        let unknown =
+            ScheduledSendProvenance::agent_trigger("969ee102-0138-4054-95fd-2946ef237431", "cron");
+        assert_eq!(app.trigger_agent_name(&unknown), None);
     }
 }

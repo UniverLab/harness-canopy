@@ -76,7 +76,7 @@ impl Database {
 
         let orphaned: Vec<Graph> = {
             let mut stmt = tx.prepare(
-                "SELECT id, name, description, workdir, status, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start
+                "SELECT id, name, description, workdir, status, trigger_type, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start, require_spec_type
                  FROM graphs WHERE status IN (?1, ?2)",
             )?;
             // CB31: a graph caught mid-`Pausing` (wait-for-completion pause
@@ -538,12 +538,48 @@ impl Database {
         }
     }
 
-    pub fn resolve_spec_id_by_prefix(&self, prefix: &str) -> Result<Option<String>> {
+    pub fn resolve_spec_id_by_prefix(
+        &self,
+        prefix: &str,
+        workdir: Option<&str>,
+    ) -> Result<Option<String>> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
-        Self::resolve_id_prefix("graph_specs", prefix, &conn)
+        // SPECCODE: an engine-generated code (`FIX-7`) is accepted wherever a
+        // spec id is. Exact match first (an id never looks like a code, so a
+        // shared plain-prefix can't shadow it); ambiguity names the rows.
+        //
+        // When a workdir is supplied the code lookup is scoped to that
+        // workdir — requirement 6: "resolved within the caller's or graph's
+        // workdir".  Codes are per-(workdir, type), so `FIX-1` in two
+        // workdirs is the normal case and must not error here.
+        let code_ids: Vec<String> = if let Some(wd) = workdir {
+            let sql = "SELECT id FROM graph_specs \
+                     WHERE spec_code = ?1 \
+                     AND (graph_id IN (SELECT id FROM graphs WHERE workdir = ?2) \
+                          OR (workdir = ?2 AND graph_id IS NULL))";
+            let mut stmt = conn.prepare(sql)?;
+            let collected: rusqlite::Result<Vec<String>> = stmt
+                .query_map(params![prefix, wd], |row| row.get(0))?
+                .collect();
+            collected?
+        } else {
+            let mut stmt = conn.prepare("SELECT id FROM graph_specs WHERE spec_code = ?1")?;
+            let collected: rusqlite::Result<Vec<String>> =
+                stmt.query_map(params![prefix], |row| row.get(0))?.collect();
+            collected?
+        };
+        match code_ids.len() {
+            0 => Self::resolve_id_prefix("graph_specs", prefix, &conn),
+            1 => Ok(Some(code_ids.into_iter().next().unwrap())),
+            _ => Err(anyhow!(
+                "'{prefix}' as a spec code is ambiguous between {} and {}; use the full spec id.",
+                code_ids[0],
+                code_ids[1..].join(", ")
+            )),
+        }
     }
 
     pub fn resolve_graph_id_by_prefix(&self, prefix: &str) -> Result<Option<String>> {

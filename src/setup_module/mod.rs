@@ -4,6 +4,7 @@ pub mod dir_browser;
 pub mod models;
 pub mod platform_adapter;
 pub mod public_api;
+pub mod registry_cli;
 pub mod registry_fetch;
 pub mod sync_and_skills;
 pub mod uninstall;

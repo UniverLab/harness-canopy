@@ -1,446 +1,13 @@
 use super::*;
-
-/// Result of [`execute_shell_command`] — reused by both check nodes and
-/// command hooks so there is exactly one way to run a command in the
-/// codebase.
-pub(crate) struct ShellCommandResult {
-    pub(crate) status: GraphRunStatus,
-    /// Check-shaped output JSON, with `stdout`/`stderr` already truncated to
-    /// tail of `graphs.check_output_max_kib` KiB (CB5 contract).
-    pub(crate) output: Value,
-    pub(crate) summary: String,
-    /// The command's *full*, untruncated stdout / stderr as it emitted them.
-    /// A check node evaluates its `success_condition` (`output_contains` /
-    /// `output_not_contains`) against everything the command wrote, not just
-    /// the tail kept in `output`. Empty when `timed_out` is set.
-    pub(crate) full_stdout: String,
-    pub(crate) full_stderr: String,
-    /// The command exceeded its timeout and its process group was killed.
-    /// A check node treats this as an unconditional fail (B28) rather than
-    /// evaluating its `success_condition` against the partial output.
-    pub(crate) timed_out: bool,
-}
-/// Run a shell command with the same capture contract as a check node:
-/// `command`, `exit_code`, `stdout`, `stderr`, `passed` in the output JSON,
-/// whether it succeeded or failed (CB5). Reused by command hooks so there
-/// is exactly one way to run a command in the codebase.
-pub(crate) async fn execute_shell_command(
-    db: &Database,
-    run_id: &str,
-    command: &str,
-    workdir: &str,
-    timeout_seconds: u64,
-    env_vars: &[(String, String)],
-) -> Result<ShellCommandResult> {
-    let spawned = spawn_shell_command(db, run_id, command, workdir, env_vars)?;
-    let timeout_result = run_with_timeout(
-        spawned.child,
-        spawned.stdout_handle,
-        spawned.stderr_handle,
-        timeout_seconds,
-    )
-    .await?;
-
-    match timeout_result {
-        TimeoutOutcome::TimedOut => handle_timeout(
-            db,
-            run_id,
-            spawned.pid,
-            &spawned.stdout_buf,
-            &spawned.stderr_buf,
-            command,
-            timeout_seconds,
-        ),
-        TimeoutOutcome::Completed(status) => handle_completion(
-            db,
-            run_id,
-            status,
-            &spawned.stdout_buf,
-            &spawned.stderr_buf,
-            command,
-        ),
-    }
-}
-
-pub(crate) fn lock_string(buf: &Arc<std::sync::Mutex<String>>) -> String {
-    buf.lock().map(|g| g.clone()).unwrap_or_default()
-}
-
-pub(crate) struct SpawnedShellCommand {
-    pub(crate) child: tokio::process::Child,
-    pub(crate) pid: Option<u32>,
-    pub(crate) stdout_buf: Arc<std::sync::Mutex<String>>,
-    pub(crate) stderr_buf: Arc<std::sync::Mutex<String>>,
-    pub(crate) stdout_handle: tokio::task::JoinHandle<()>,
-    pub(crate) stderr_handle: tokio::task::JoinHandle<()>,
-}
-
-pub(crate) fn spawn_shell_command(
-    db: &Database,
-    run_id: &str,
-    command: &str,
-    workdir: &str,
-    env_vars: &[(String, String)],
-) -> Result<SpawnedShellCommand> {
-    let mut process = shell_command(command);
-    process.current_dir(workdir);
-    for (key, value) in env_vars {
-        process.env(key, value);
-    }
-    let mut child = process
-        .spawn()
-        .with_context(|| format!("Failed to spawn command: {command}"))?;
-    let pid = child.id();
-    if let Some(pid) = pid {
-        let _ = db.set_graph_run_pid(run_id, pid as i64, crate::system::boot_id().as_deref());
-    }
-
-    let stdout_pipe = child.stdout.take().expect("shell_command pipes stdout");
-    let stderr_pipe = child.stderr.take().expect("shell_command pipes stderr");
-    let stdout_buf = Arc::new(std::sync::Mutex::new(String::new()));
-    let stderr_buf = Arc::new(std::sync::Mutex::new(String::new()));
-    let stdout_handle = spawn_output_reader(
-        stdout_pipe,
-        run_id.to_string(),
-        "stdout",
-        db.clone(),
-        stdout_buf.clone(),
-    );
-    let stderr_handle = spawn_output_reader(
-        stderr_pipe,
-        run_id.to_string(),
-        "stderr",
-        db.clone(),
-        stderr_buf.clone(),
-    );
-
-    Ok(SpawnedShellCommand {
-        child,
-        pid,
-        stdout_buf,
-        stderr_buf,
-        stdout_handle,
-        stderr_handle,
-    })
-}
-
-pub(crate) enum TimeoutOutcome {
-    TimedOut,
-    Completed(std::process::ExitStatus),
-}
-
-pub(crate) async fn run_with_timeout(
-    mut child: tokio::process::Child,
-    stdout_handle: tokio::task::JoinHandle<()>,
-    stderr_handle: tokio::task::JoinHandle<()>,
-    timeout_seconds: u64,
-) -> Result<TimeoutOutcome> {
-    let execution = async {
-        let status = child.wait().await?;
-        let drained = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            let _ = stdout_handle.await;
-            let _ = stderr_handle.await;
-        })
-        .await
-        .is_ok();
-        Ok::<_, std::io::Error>((status, drained))
-    };
-    let timeout_result =
-        tokio::time::timeout(std::time::Duration::from_secs(timeout_seconds), execution).await;
-
-    match timeout_result {
-        Ok(result) => {
-            let (status, drained) = result?;
-            if drained {
-                Ok(TimeoutOutcome::Completed(status))
-            } else {
-                Ok(TimeoutOutcome::TimedOut)
-            }
-        }
-        Err(_elapsed) => Ok(TimeoutOutcome::TimedOut),
-    }
-}
-
-pub(crate) fn handle_timeout(
-    db: &Database,
-    run_id: &str,
-    pid: Option<u32>,
-    stdout_buf: &Arc<std::sync::Mutex<String>>,
-    stderr_buf: &Arc<std::sync::Mutex<String>>,
-    command: &str,
-    timeout_seconds: u64,
-) -> Result<ShellCommandResult> {
-    if let Some(pid) = pid {
-        crate::daemon::process::terminate_process_group_async(pid as i64, KILL_GRACE);
-    }
-    let partial_stdout = lock_string(stdout_buf);
-    let partial_stderr = lock_string(stderr_buf);
-    let (stdout_snap, _) = truncate_check_output(partial_stdout.trim().to_string());
-    let (stderr_snap, _) = truncate_check_output(partial_stderr.trim().to_string());
-    let _ = db.finish_graph_run_output(run_id, Some(&stdout_snap), Some(&stderr_snap));
-    let output = serde_json::json!({
-        "kind": "check",
-        "command": command,
-        "error": "timed out",
-        "timeout_seconds": timeout_seconds,
-        "stdout": stdout_snap,
-        "stderr": stderr_snap,
-    });
-    let _ = db.update_graph_run_result(
-        run_id,
-        GraphRunStatus::Fail,
-        Some(&output),
-        Some(chrono::Utc::now()),
-    );
-    Ok(ShellCommandResult {
-        status: GraphRunStatus::Fail,
-        output,
-        summary: format!("Command timed out after {timeout_seconds}s."),
-        full_stdout: String::new(),
-        full_stderr: String::new(),
-        timed_out: true,
-    })
-}
-
-pub(crate) fn handle_completion(
-    db: &Database,
-    run_id: &str,
-    status: std::process::ExitStatus,
-    stdout_buf: &Arc<std::sync::Mutex<String>>,
-    stderr_buf: &Arc<std::sync::Mutex<String>>,
-    command: &str,
-) -> Result<ShellCommandResult> {
-    let exit_code = status.code().unwrap_or(-1);
-    let full_stdout = lock_string(stdout_buf).trim().to_string();
-    let full_stderr = lock_string(stderr_buf).trim().to_string();
-
-    let (stdout, truncated_stdout) = truncate_check_output(full_stdout.clone());
-    let (stderr, truncated_stderr) = truncate_check_output(full_stderr.clone());
-    let truncated = truncated_stdout || truncated_stderr;
-
-    let mut output_json = serde_json::json!({
-        "kind": "check",
-        "command": command,
-        "exit_code": exit_code,
-        "stdout": stdout,
-        "stderr": stderr,
-        "passed": exit_code == 0,
-    });
-    if truncated {
-        output_json["truncated"] = serde_json::Value::Bool(true);
-    }
-
-    let _ = db.finish_graph_run_output(run_id, Some(&stdout), Some(&stderr));
-
-    let status = if exit_code == 0 {
-        GraphRunStatus::Pass
-    } else {
-        GraphRunStatus::Fail
-    };
-
-    Ok(ShellCommandResult {
-        status,
-        output: output_json,
-        summary: format!("Command exited with code {exit_code}."),
-        full_stdout,
-        full_stderr,
-        timed_out: false,
-    })
-}
-
-/// The `{{...}}` markers a check command expands through POSIX shell
-/// quoting (CM38 FR1) — their values (graph/spec names, a directory) may
-/// contain spaces or quotes, so they must never be spliced in raw. Shared
-/// with `graph_preflight` via [`CHECK_COMMAND_MARKERS`]; the split matters
-/// because the pre-quoted-marker stripping below applies only to these.
-pub(crate) const CHECK_COMMAND_QUOTED_MARKERS: &[&str] =
-    &["graph_name", "workdir", "spec_id", "spec_name"];
-
-/// The `{{...}}` markers a check command expands RAW (CM38 FR2) — a git SHA
-/// or a dirty-count integer, exactly as before CM38. Stripping a
-/// `'{{marker}}'` wrapper here would change `test -n '{{spec_start_head}}'`
-/// from false to true on a non-git workdir, so they are never normalized.
-pub(crate) const CHECK_COMMAND_RAW_MARKERS: &[&str] =
-    &["spec_start_head", "spec_start_dirty", "spec_committed_head"];
-
-/// Every marker a check command can bind (CM38) — the one vocabulary both
-/// [`render_check_command`] and `graph_preflight` enforce, so the engine and
-/// the audit can never drift. Built from the quoted and raw vocabularies so
-/// the three can never drift from each other either.
-pub(crate) const CHECK_COMMAND_MARKERS: &[&str] = &[
-    CHECK_COMMAND_QUOTED_MARKERS[0],
-    CHECK_COMMAND_QUOTED_MARKERS[1],
-    CHECK_COMMAND_QUOTED_MARKERS[2],
-    CHECK_COMMAND_QUOTED_MARKERS[3],
-    CHECK_COMMAND_RAW_MARKERS[0],
-    CHECK_COMMAND_RAW_MARKERS[1],
-    CHECK_COMMAND_RAW_MARKERS[2],
-];
-
-/// Everything a check command's markers and environment are rendered from.
-/// `workdir` is the directory the command actually runs in (the graph's
-/// workdir, or the run's sandbox worktree / `workdir_override` when one
-/// applies) — never `lp.workdir` read at a distance.
-pub(crate) struct CheckCommandCtx<'a> {
-    pub(crate) graph_id: &'a str,
-    pub(crate) graph_name: &'a str,
-    pub(crate) workdir: &'a str,
-    pub(crate) spec_id: &'a str,
-    pub(crate) spec_name: &'a str,
-    pub(crate) spec_start_head: Option<&'a str>,
-    pub(crate) spec_start_dirty: Option<i64>,
-    pub(crate) spec_committed_head: Option<&'a str>,
-}
-
-/// Render a check node's command (CM38). Same contract as the CB48 hook
-/// command renderer: refuse any `{{...}}` marker the vocabulary cannot bind
-/// (first unknown marker wins, message is exactly
-/// `unknown marker {{x}} in check command`), strip a single-quote wrapper a
-/// template may already put around one of the QUOTED markers
-/// (`'{{spec_name}}'` → `{{spec_name}}`) so the shell quoting is never
-/// nested, then expand. Quoted markers go through `shell_quote`; the
-/// head/dirty markers expand raw. A `\{{x}}` escape stays literal text.
-pub(crate) fn render_check_command(template: &str, ctx: &CheckCommandCtx<'_>) -> Result<String> {
-    if let Some(name) =
-        crate::domain::prompts::unbindable_placeholders(template, CHECK_COMMAND_MARKERS).first()
-    {
-        bail!("unknown marker {{{{{name}}}}} in check command");
-    }
-    let normalized =
-        CHECK_COMMAND_QUOTED_MARKERS
-            .iter()
-            .fold(template.to_string(), |template, marker| {
-                template.replace(&format!("'{{{{{marker}}}}}'"), &format!("{{{{{marker}}}}}"))
-            });
-    Ok(crate::domain::prompts::render_template(
-        &normalized,
-        |raw| match raw {
-            "graph_name" => Some(shell_quote(ctx.graph_name)),
-            "workdir" => Some(shell_quote(ctx.workdir)),
-            "spec_id" => Some(shell_quote(ctx.spec_id)),
-            "spec_name" => Some(shell_quote(ctx.spec_name)),
-            "spec_start_head" => Some(ctx.spec_start_head.unwrap_or("").to_string()),
-            "spec_start_dirty" => Some(
-                ctx.spec_start_dirty
-                    .map(|value| value.to_string())
-                    .unwrap_or_default(),
-            ),
-            "spec_committed_head" => Some(ctx.spec_committed_head.unwrap_or("").to_string()),
-            _ => None,
-        },
-    ))
-}
-
-/// The `unknown marker {{x}} in check command` error for one check node, or
-/// `None` when every marker binds. Scans a whole `GraphDetails` — the
-/// graph's own nodes and every spec's nodes — so `graph_preflight` can
-/// report the defect before spending any probe quota (CM38 FR4).
-pub(crate) fn check_command_marker_error(
-    details: &crate::domain::graphs::GraphDetails,
-) -> Option<String> {
-    let all_nodes = details
-        .graph_nodes
-        .iter()
-        .chain(details.specs.iter().flat_map(|s| s.nodes.iter()));
-    for node in all_nodes {
-        if node.kind != GraphNodeKind::Check {
-            continue;
-        }
-        let Some(command) = node.config.get("command").and_then(Value::as_str) else {
-            continue;
-        };
-        if let Some(name) =
-            crate::domain::prompts::unbindable_placeholders(command, CHECK_COMMAND_MARKERS).first()
-        {
-            return Some(format!(
-                "unknown marker {{{{{name}}}}} in check command (check node '{}').",
-                node.name
-            ));
-        }
-    }
-    None
-}
-
-/// The environment every check-node command runs with (CM38 FR6). The
-/// command's working directory already IS the workdir, so there is no
-/// `CANOPY_WORKDIR`.
-pub(crate) fn check_command_env_vars(
-    ctx: &CheckCommandCtx<'_>,
-    spec_file: &str,
-    spec_notes_file: &str,
-) -> Vec<(String, String)> {
-    [
-        ("CANOPY_SPEC_ID", ctx.spec_id),
-        ("CANOPY_SPEC_NAME", ctx.spec_name),
-        ("CANOPY_GRAPH_ID", ctx.graph_id),
-        ("CANOPY_GRAPH_NAME", ctx.graph_name),
-        ("CANOPY_SPEC_START_HEAD", ctx.spec_start_head.unwrap_or("")),
-        ("CANOPY_SPEC_FILE", spec_file),
-        ("CANOPY_SPEC_NOTES_FILE", spec_notes_file),
-    ]
-    .into_iter()
-    .map(|(key, value)| (key.to_string(), value.to_string()))
-    .collect()
-}
-
-/// Write the spec text (CM38 FR6) to `spec.md` inside a fresh scratch dir
-/// for this node execution, and return the dir handle with the file's
-/// absolute path. The caller holds the `TempDir` until the node finishes,
-/// which removes the file afterwards on every path. The content is the
-/// spec's full `description` — which on an idea run IS the idea text; a
-/// spec with no description gets an empty file so the variable is always
-/// set.
-fn write_check_spec_file(
-    node: &GraphNode,
-    spec: &GraphSpec,
-) -> Result<(tempfile::TempDir, String)> {
-    let scratch = tempfile::tempdir().with_context(|| {
-        format!(
-            "Failed to create scratch dir for check node '{}'.",
-            node.name
-        )
-    })?;
-    let path = scratch.path().join("spec.md");
-    std::fs::write(&path, spec.description.as_deref().unwrap_or("")).with_context(|| {
-        format!(
-            "Failed to write the spec file for check node '{}'.",
-            node.name
-        )
-    })?;
-    Ok((scratch, path.display().to_string()))
-}
-
-/// Write the spec's notes (CM47) to `spec-notes.md` inside a fresh scratch
-/// dir for this node execution, and return the dir handle with the file's
-/// absolute path. One `## <owner_name>` section per note, newest first. An
-/// empty file when there are no notes, so `CANOPY_SPEC_NOTES_FILE` is always
-/// set and a `grep -q '^## Designer'` check correctly fails when there is no
-/// Designer note. Mirrors [`write_check_spec_file`]'s lifetime contract.
-fn write_check_notes_file(
-    db: &Database,
-    node: &GraphNode,
-    spec: &GraphSpec,
-) -> Result<(tempfile::TempDir, String)> {
-    let scratch = tempfile::tempdir().with_context(|| {
-        format!(
-            "Failed to create scratch dir for check node '{}'.",
-            node.name
-        )
-    })?;
-    let path = scratch.path().join("spec-notes.md");
-    let notes = db.spec_notes_get(&spec.id).unwrap_or_default();
-    let mut out = String::new();
-    for note in &notes {
-        out.push_str(&format!("## {}\n{}\n\n", note.owner_name, note.body));
-    }
-    std::fs::write(&path, out).with_context(|| {
-        format!(
-            "Failed to write the notes file for check node '{}'.",
-            node.name
-        )
-    })?;
-    Ok((scratch, path.display().to_string()))
-}
+use crate::db::Database;
+use crate::domain::graphs::GraphRunStatus;
+use check_command::{execute_shell_command, ShellCommandResult};
+use check_render::{
+    check_command_env_vars, render_check_command, write_check_notes_file, write_check_spec_file,
+    CheckCommandCtx,
+};
+#[cfg(test)]
+use check_render::{check_command_marker_error, CHECK_COMMAND_RAW_MARKERS};
 
 #[expect(clippy::too_many_arguments)]
 pub(crate) async fn execute_check_node(
@@ -460,12 +27,21 @@ pub(crate) async fn execute_check_node(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| anyhow!("Check node '{}' is missing a command.", node.name))?;
+    // SPECCODE: type/scope/code/commit message come straight off the spec
+    // row; an untyped spec yields all-empty (the legacy convention).
+    let spec_commit_message = spec
+        .spec_type
+        .map(|spec_type| commit_message(spec_type, spec.spec_scope.as_deref(), &spec.name));
     let ctx = CheckCommandCtx {
         graph_id: &lp.id,
         graph_name: &lp.name,
         workdir,
         spec_id: &spec.id,
         spec_name: &spec.name,
+        spec_type: spec.spec_type,
+        spec_scope: spec.spec_scope.as_deref(),
+        spec_code: spec.spec_code.as_deref(),
+        spec_commit_message: spec_commit_message.as_deref(),
         spec_start_head,
         spec_start_dirty: spec.spec_start_dirty,
         spec_committed_head,
@@ -803,6 +379,10 @@ mod check_command_tests {
             spec_start_head: head,
             spec_start_dirty: Some(2),
             spec_committed_head: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         }
     }
 
@@ -859,6 +439,10 @@ mod check_command_tests {
             ("CANOPY_SPEC_NAME", "a b"),
             ("CANOPY_GRAPH_ID", "wf-test"),
             ("CANOPY_GRAPH_NAME", "Graph"),
+            ("CANOPY_SPEC_CODE", ""),
+            ("CANOPY_SPEC_TYPE", ""),
+            ("CANOPY_SPEC_SCOPE", ""),
+            ("CANOPY_SPEC_COMMIT_MESSAGE", ""),
             ("CANOPY_SPEC_START_HEAD", "abc"),
             ("CANOPY_SPEC_FILE", "/scratch/spec.md"),
             ("CANOPY_SPEC_NOTES_FILE", "/scratch/spec-notes.md"),
@@ -867,6 +451,36 @@ mod check_command_tests {
         .map(|(key, value)| (key.to_string(), value.to_string()))
         .collect();
         assert_eq!(vars, pairs);
+    }
+
+    /// A typed spec exposes its code, type, scope, and prebuilt commit
+    /// message as CANOPY_SPEC_* env vars — e.g. `FIX-1` and
+    /// `fix(tui): open F1 from inside a session`.
+    #[test]
+    fn check_command_env_vars_with_spec_type_scope_code() {
+        let ctx = CheckCommandCtx {
+            graph_id: "wf-test",
+            graph_name: "Graph",
+            workdir: "/work/dir",
+            spec_id: "spec-f1",
+            spec_name: "open F1 from inside a session",
+            spec_start_head: None,
+            spec_start_dirty: None,
+            spec_committed_head: None,
+            spec_code: Some("FIX-1"),
+            spec_commit_message: Some("fix(tui): open F1 from inside a session"),
+            spec_scope: Some("tui"),
+            spec_type: Some(SpecType::Fix),
+        };
+        let vars = check_command_env_vars(&ctx, "/scratch/spec.md", "/scratch/spec-notes.md");
+        let map: std::collections::HashMap<String, String> = vars.into_iter().collect();
+        assert_eq!(map["CANOPY_SPEC_CODE"], "FIX-1");
+        assert_eq!(map["CANOPY_SPEC_TYPE"], "fix");
+        assert_eq!(map["CANOPY_SPEC_SCOPE"], "tui");
+        assert_eq!(
+            map["CANOPY_SPEC_COMMIT_MESSAGE"],
+            "fix(tui): open F1 from inside a session"
+        );
     }
 
     #[test]
@@ -893,6 +507,9 @@ mod check_command_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         })
         .unwrap();
         let node = GraphNode {
@@ -971,6 +588,9 @@ mod check_command_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let (scratch, path) = write_check_spec_file(&node, &spec).unwrap();
         assert_eq!(
@@ -1014,6 +634,7 @@ mod check_command_tests {
                 auto_continue_action: None,
                 active_run_queue_id: None,
                 hooks: std::collections::BTreeMap::new(),
+                require_spec_type: false,
             },
             graph_nodes: vec![node("echo {{nope}}", "gatekeeper")],
             graph_edges: vec![],
@@ -1051,6 +672,9 @@ mod check_command_tests {
                 completed_via: None,
                 completed_via_reason: None,
                 completed_via_at: None,
+                spec_code: None,
+                spec_scope: None,
+                spec_type: None,
             },
             nodes: vec![node("echo {{specnope}}", "spec-gate")],
             edges: vec![],

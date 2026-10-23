@@ -180,6 +180,55 @@ impl Database {
         Ok(())
     }
 
+    /// SPECCODE: add spec type/scope/code columns to `graph_specs`, the
+    /// `graphs.require_spec_type` opt-in flag, and the `spec_code_counters`
+    /// table (one counter row per (workdir, spec_type); never MAX+1). All
+    /// pre-existing spec rows keep their columns NULL — legacy specs stay
+    /// untyped and get no code unless `spec_update` assigns one, per the
+    /// no-backfill guideline.
+    pub(in crate::db) fn migrate_spec_type_columns(conn: &Connection) -> Result<()> {
+        for column in ["spec_type", "spec_scope", "spec_code"] {
+            let has_column: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('graph_specs') WHERE name = ?1",
+                    [column],
+                    |row| Ok(row.get::<_, i32>(0)? > 0),
+                )
+                .unwrap_or(false);
+            if !has_column {
+                conn.execute(
+                    &format!("ALTER TABLE graph_specs ADD COLUMN {column} TEXT"),
+                    [],
+                )
+                .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+            }
+        }
+        let has_require_spec_type: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('graphs') WHERE name = 'require_spec_type'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if !has_require_spec_type {
+            conn.execute(
+                "ALTER TABLE graphs ADD COLUMN require_spec_type INTEGER NOT NULL DEFAULT 0",
+                [],
+            )
+            .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+        }
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS spec_code_counters (
+                workdir TEXT NOT NULL,
+                spec_type TEXT NOT NULL,
+                next INTEGER NOT NULL,
+                PRIMARY KEY (workdir, spec_type)
+            )",
+            [],
+        )?;
+        Ok(())
+    }
+
     /// C19: add `graph_specs.cross_run_attempts`.
     pub(in crate::db) fn migrate_spec_cross_run_attempts_column(conn: &Connection) -> Result<()> {
         // `cross_run_attempts` (C19): how many separate graph executions this

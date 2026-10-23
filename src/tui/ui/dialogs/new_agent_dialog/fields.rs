@@ -340,10 +340,38 @@ fn working_dir_row(
     Line::from(vec![
         Span::styled("  Dir:   ", Style::default().fg(theme.dim_text)),
         Span::styled(
-            truncate_str(&dialog.working_dir, 50),
+            truncate_path_start(&dialog.working_dir, 50),
             focus_style(dialog.field, dir_field, accent),
         ),
     ])
+}
+
+/// Shorten `path` from the start so the trailing components — the project
+/// folder the user cares about — stay visible. The result starts with `…/`
+/// followed by whole path components, counted in characters.
+fn truncate_path_start(path: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = path.chars().collect();
+    if chars.len() <= max_chars {
+        return path.to_string();
+    }
+    if max_chars <= 2 {
+        let start = chars.len() - max_chars;
+        return chars[start..].iter().collect();
+    }
+
+    let tail_start = chars.len() - (max_chars - 2);
+    let tail = &chars[tail_start..];
+    match tail.iter().position(|&ch| ch == '/') {
+        Some(slash) => {
+            let rest: String = tail[slash + 1..].iter().collect();
+            format!("…/{rest}")
+        }
+        None => {
+            let start = chars.len() - (max_chars - 1);
+            let rest: String = chars[start..].iter().collect();
+            format!("…{rest}")
+        }
+    }
 }
 
 pub(super) fn terminal_shell_row(
@@ -419,4 +447,68 @@ fn dir_browser_lines(
     )));
     lines.push(Line::from(""));
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LONG_PATH: &str = "/home/jheisonmblivecom/Projects/UniverLab/canopy-registry";
+
+    #[test]
+    fn truncate_path_start_keeps_short_paths() {
+        assert_eq!(truncate_path_start("/tmp/proj", 50), "/tmp/proj");
+        assert_eq!(truncate_path_start("/tmp/proj", 9), "/tmp/proj");
+    }
+
+    #[test]
+    fn truncate_path_start_keeps_whole_trailing_components() {
+        let out = truncate_path_start(LONG_PATH, 30);
+        assert!(out.starts_with("…/"), "{out}");
+        assert!(out.ends_with("canopy-registry"), "{out}");
+        assert!(out.chars().count() <= 30, "{out}");
+
+        let rest = out.trim_start_matches("…/");
+        assert!(LONG_PATH.ends_with(rest), "{out}");
+        let prefix = &LONG_PATH[..LONG_PATH.len() - rest.len()];
+        assert!(prefix.is_empty() || prefix.ends_with('/'), "{out}");
+        assert!(rest.starts_with("UniverLab/"), "{out}");
+    }
+
+    #[test]
+    fn truncate_path_start_handles_non_ascii() {
+        let path = "/home/josé/proyectos/diseño/año-2026/canopy";
+        let out = truncate_path_start(path, 20);
+        assert!(out.ends_with("canopy"), "{out}");
+        assert!(out.chars().count() <= 20, "{out}");
+    }
+
+    #[test]
+    fn truncate_path_start_without_slash_uses_ellipsis_only() {
+        let path = "a-very-long-single-component-name";
+        let out = truncate_path_start(path, 10);
+        assert!(out.starts_with('…'), "{out}");
+        assert!(!out.contains('/'), "{out}");
+        assert_eq!(out.chars().count(), 10);
+        assert!(path.ends_with(&out[3..]), "{out}");
+    }
+
+    #[test]
+    fn truncate_path_start_does_not_panic_on_tiny_limits() {
+        for max_chars in 0..=2 {
+            let out = truncate_path_start("/tmp/proj", max_chars);
+            assert_eq!(out.chars().count(), max_chars);
+        }
+    }
+
+    #[test]
+    fn working_dir_row_shows_the_end_of_a_long_path() {
+        let mut dialog = NewAgentDialog::new(Some(LONG_PATH));
+        dialog.working_dir = LONG_PATH.to_string();
+        let theme = Theme::classic();
+        let line = working_dir_row(&dialog, theme.header_color, 0, &theme);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.ends_with("canopy-registry"), "{text}");
+        assert!(text.starts_with("  Dir:   …/"), "{text}");
+    }
 }

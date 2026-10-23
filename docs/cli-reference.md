@@ -59,6 +59,23 @@ Plain `canopy update` exits 2 on the same lookup errors.
 | `canopy uninstall --keep-shared-servers` | Only remove canopy's own `canopy` server entry; leave shared `fetch`/`filesystem` entries in place |
 | `canopy doctor` | Full health diagnostics |
 
+## Platform registry
+
+| Command | Description |
+|---|---|
+| `canopy registry refresh` | Fetch the platform registry and apply it now, ignoring the 24-hour interval the TUI's background refresh uses; prints one line per affected platform (`<platform>: changed <fields>`, `<platform>: kept local override <fields>`, `<platform>: added`, `<platform>: updated`, `<platform>: removed`), or `registry already up to date` when nothing changed. Rewrites only `config.toml` and the baseline file — never starts the TUI, wizard or daemon, safe while graphs run |
+| `canopy registry refresh --json` | Print the same report as JSON (`changed`, `kept`, `added`, `updated`, `deleted`, `up_to_date`) |
+| `canopy registry refresh --local-registry <path>` | Apply a local registry directory instead of fetching from GitHub (same flag as `canopy setup --local-registry`) |
+
+Registry-owned CLI fields — binary path, model flag, headless mode,
+environment variables — are rewritten from the registry. A field you edited
+yourself is kept as it is; when the registry changed that same field, the
+refresh reports it as a local override, so a refresh never overwrites your
+choice. The command needs an existing `~/.canopy/config.toml` — on a machine
+that has not run setup it fails with ``run `canopy setup` first``. The refresh
+time is recorded where the TUI's background refresh records it, so a manual
+refresh also restarts that 24-hour window.
+
 ## Graph inspection
 
 | Command | Description |
@@ -91,11 +108,11 @@ missing.
 | `canopy graph run <id-or-name>` | Run a graph in the background, spec by spec |
 | `canopy graph run <id-or-name> --queue <queue-id>` | Run the queue's pending specs through the graph instead |
 | `canopy graph run <id-or-name> --workdir <path>` | Override the graph's workdir for this run only |
-| `canopy graph run <id-or-name> --from <node>` | Start the first spec this run executes at a chosen node (id, id prefix, node name, or ensemble name), reusing earlier nodes' recorded outputs |
+| `canopy graph run <id-or-name> --from <node>` | Start the first spec this run executes at a chosen node (id, id prefix, node name, or ensemble name), reusing the recorded outputs of upstream nodes; refused, naming the node, if an upstream node's latest run failed, errored or was interrupted |
 | `canopy graph pause <id-or-name>` | Pause a running graph after the current node finishes |
-| `canopy graph continue <id-or-name> --retry-current-node` | Resume a paused graph by retrying the current node |
-| `canopy graph continue <id-or-name> --skip-next-spec` | Resume a paused graph by skipping to the next spec |
-| `canopy graph continue <id-or-name> --from <node> [--spec <spec>]` | Start a spec at a chosen node, reusing earlier nodes' recorded outputs (defaults to the graph's current spec) |
+| `canopy graph continue <id-or-name> --retry-current-node` | Resume a paused or failed graph by retrying the current node (also resumes a paused graph whose current spec is pending with a recorded node; clears that spec's execution count and the reply says so) |
+| `canopy graph continue <id-or-name> --skip-next-spec` | Resume a paused or failed graph by skipping to the next spec |
+| `canopy graph continue <id-or-name> --from <node> [--spec <spec>]` | Start a spec at a chosen node, reusing the recorded outputs of upstream nodes (refused, naming the node, if one failed, errored or was interrupted; defaults to the graph's current spec: a running/interrupted member, else a failed one, else the next pending one) |
 | `canopy graph reset <id-or-name>` | Reset a completed/failed graph back to pending (prompts for confirmation) |
 | `canopy graph reset <id-or-name> --specs <id>...` | Reset specific spec ids, even if already completed |
 | `canopy graph reset <id-or-name> --yes` | Skip the confirmation prompt |
@@ -124,12 +141,24 @@ Read-only inspection of registered agents, served from the local database
 | `canopy agent show <id>` | Show one agent's full stored definition, prompt last and untruncated |
 | `canopy agent show <id> --json` | Print the same definition as JSON (identical to the `agent_get` MCP tool's output) |
 
+## Missions
+
+Read-only listing of the 28 gamification missions (see [TUI](tui.md#gamification)),
+served from the local database — no daemon required.
+
+| Command | Description |
+|---|---|
+| `canopy missions` | List every mission: icon, title, category, `unlocked <date>` or `locked: <challenge>`, plus `N / 28 unlocked` |
+| `canopy missions --json` | Print the same report as one JSON object (`unlocked`, `total`, `missions` with `id`, `title`, `icon`, `category`, `challenge`, `unlocked_at` as RFC 3339 UTC or null) |
+
 ## Spec backlog
 
 | Command | Description |
 |---|---|
 | `canopy spec create --name <name> --description <text>` | Create a standalone spec (a backlog item) |
 | `canopy spec create ... --workdir <path>` | Tag the new spec with a workdir, for backlog filtering |
+| `canopy spec create ... --spec-type <type>` | Set the Conventional Commits type (`feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`). Optional — when omitted and the name is a conventional title, the type and scope are parsed from the name |
+| `canopy spec create ... --spec-scope <scope>` | Set the optional scope (e.g. `tui`). Part of the deterministic commit message |
 | `canopy spec create ... --queue <queue-id>` | Also append the new spec to an existing queue |
 | `canopy spec create ... --queue <queue-id> --group <group>` | Add it to the queue within a context group |
 | `canopy spec complete <spec-id> --reason <text>` | Mark a standalone spec as completed |

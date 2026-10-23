@@ -37,6 +37,9 @@ pub enum PanelFace {
 }
 
 impl PanelFace {
+    /// Every face, in panel order. The panel picker that consumed this is
+    /// retired; the persistence round-trip test still walks it.
+    #[allow(dead_code)]
     pub const ALL: [PanelFace; 4] = [
         PanelFace::Activity,
         PanelFace::Knowledge,

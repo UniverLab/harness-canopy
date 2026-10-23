@@ -12,6 +12,7 @@ use crate::application::ports::AgentRepository;
 
 mod launch;
 mod launch_send;
+mod protocol;
 
 impl App {
     pub fn open_edit_dialog(&mut self) {
@@ -95,7 +96,9 @@ impl App {
     /// Restores any persisted session for the current workdir.
     /// Injects an invisible system block on every prompt: per-turn workspace
     /// context always, plus the session-start protocol on the first prompt
-    /// of a session (idempotent per `App::current_prompt_session_key`).
+    /// of a session — remembered in memory for this process and, for an
+    /// interactive session id, persisted in `daemon_state` so a restart or
+    /// resume never repeats it (see `mod protocol`).
     pub fn open_simple_prompt_dialog(
         &mut self,
         initial_content: Option<std::collections::HashMap<String, String>>,
@@ -117,25 +120,28 @@ impl App {
             .map(|project| project.path);
         dialog.migrate_legacy_sections(current_project_path.as_deref());
 
-        // The per-turn context (workspace/active missions/recent chatter) is
-        // worth its tokens every send, so it is never gated. The session-start
-        // protocol ("[START HERE — required]", the tool-usage contract, the
-        // skills list) is a one-time opening instruction: send it on the
-        // first prompt of a session only.
+        // The per-turn context (workspace/active missions) is worth its tokens
+        // every send, so it is never gated. The session-start protocol
+        // ("[CANOPY]", the tool-usage contract, the skills list) is a one-time
+        // opening instruction: send it on the first prompt of a session only,
+        // where "already sent" means the in-memory state OR — for an
+        // interactive session — the persisted `prompt_protocol_sent:<id>`
+        // key that survives restarts and resumes. The block itself is no
+        // longer prepended to `system_content`: it rides along in
+        // `SimplePromptDialog::system_text()` when `protocol_included` (or
+        // the manual `Canopy protocol` section) says it should.
         let state = self
             .session_protocol_state
             .get(&session_key)
             .cloned()
             .unwrap_or_default();
-        let should_send_protocol = !state.protocol_sent && self.active_sandbox.is_none();
+        let persisted_sent = session_key
+            .strip_prefix("interactive:")
+            .is_some_and(|session_id| self.protocol_persisted(session_id));
+        let should_send_protocol =
+            !state.protocol_sent && !persisted_sent && self.active_sandbox.is_none();
 
-        let turn_context = self.build_turn_context_block();
-        let content = if should_send_protocol {
-            format!("{}\n\n{turn_context}", self.build_session_protocol_block())
-        } else {
-            turn_context
-        };
-        dialog.system_content = Some(content);
+        dialog.system_content = Some(self.build_turn_context_block());
         dialog.protocol_included = should_send_protocol;
 
         if let Some(content) = initial_content {
@@ -170,52 +176,27 @@ impl App {
         self.focus = super::super::types::Focus::PromptTemplateDialog;
     }
 
-    /// Build the per-turn context block: workspace path, active missions,
-    /// and recent chatter. Genuinely changes turn to turn, so it is sent
-    /// with every prompt — never gated by session-start idempotency.
+    /// Build the per-turn context block: the workspace path and, when there
+    /// are any, the active missions. Genuinely changes turn to turn, so it is
+    /// sent with every prompt — never gated by session-start idempotency.
     fn build_turn_context_block(&self) -> String {
         let mut lines: Vec<String> = Vec::new();
 
-        let (workdir, intents, chatter) = self.build_system_context_parts();
+        let (workdir, intents) = self.build_system_context_parts();
         lines.push(format!("workspace: {workdir}"));
         Self::push_intents(&mut lines, &intents);
-        Self::push_chatter(&mut lines, &chatter);
 
         lines.join("\n")
     }
 
-    /// Build the session-start protocol block: the opening contract
-    /// ("[START HERE — required]", the tool-usage protocol, the skills
-    /// list). Static across a session — sent once, not per turn.
-    ///
-    /// Single source of truth: [`crate::domain::sandbox::canopy_protocol_block`],
-    /// so the text the promptbuilder injects (non-sandbox path) and the text
-    /// materialised into a sandbox's instruction file can never drift apart.
-    fn build_session_protocol_block(&self) -> String {
-        crate::domain::sandbox::canopy_protocol_block().to_string()
-    }
-
-    /// Extract workdir, intents, and chatter from activity state or fallback.
-    fn build_system_context_parts(
-        &self,
-    ) -> (
-        String,
-        Vec<crate::domain::sync::ActiveIntent>,
-        Vec<crate::domain::sync::SyncMessage>,
-    ) {
+    /// Extract workdir and intents from activity state or fallback.
+    fn build_system_context_parts(&self) -> (String, Vec<crate::domain::sync::ActiveIntent>) {
         if let Some(state) = self.selected_activity_state() {
-            let chatter = state
-                .recent_messages
-                .iter()
-                .filter(|m| m.kind.is_chatter())
-                .take(5)
-                .cloned()
-                .collect();
-            (state.workdir.clone(), state.active_intents, chatter)
+            (state.workdir.clone(), state.active_intents)
         } else {
             let workdir = self.current_workdir().to_string_lossy().to_string();
             let intents = self.active_missions_for_workdir(&workdir);
-            (workdir, intents, Vec::new())
+            (workdir, intents)
         }
     }
 
@@ -233,59 +214,6 @@ impl App {
                 intent.description
             ));
         }
-    }
-
-    fn push_chatter(lines: &mut Vec<String>, chatter: &[crate::domain::sync::SyncMessage]) {
-        if chatter.is_empty() {
-            return;
-        }
-        lines.push("recent messages:".to_string());
-        for msg in chatter {
-            lines.push(format!("  - {}: {}", msg.agent_name, msg.message));
-        }
-    }
-
-    /// Build a compact sync context string from active intents and recent chatter.
-    /// Kept for backwards compatibility; not used by the prompt builder any more.
-    #[allow(dead_code)]
-    fn build_sync_context_text(&self) -> Option<String> {
-        let state = self.selected_activity_state()?;
-        let mut lines = Vec::new();
-
-        lines.push(format!(
-            "workspace: {} | agents: {} | vibe: {}",
-            state.workdir,
-            state.participant_count,
-            state.vibe.as_str()
-        ));
-
-        if !state.active_intents.is_empty() {
-            lines.push("active missions:".to_string());
-            for intent in &state.active_intents {
-                lines.push(format!(
-                    "  - {} [{}] {}: {}",
-                    intent.agent_name,
-                    intent.impact.as_str(),
-                    intent.mission,
-                    intent.description
-                ));
-            }
-        }
-
-        let chatter: Vec<_> = state
-            .recent_messages
-            .iter()
-            .filter(|m| m.kind.is_chatter())
-            .take(5)
-            .collect();
-        if !chatter.is_empty() {
-            lines.push("recent messages:".to_string());
-            for msg in chatter {
-                lines.push(format!("  - {}: {}", msg.agent_name, msg.message));
-            }
-        }
-
-        Some(lines.join("\n"))
     }
 
     /// Close simple prompt dialog and persist its state for the current workdir.
@@ -1094,7 +1022,7 @@ mod tests {
         assert!(app.new_agent_dialog.is_none());
     }
 
-    // ── push_intents / push_chatter ─────────────────────────────
+    // ── push_intents ────────────────────────────────────────────
 
     #[test]
     fn push_intents_empty_does_not_add_header() {
@@ -1121,34 +1049,6 @@ mod tests {
         assert_eq!(lines[0], "active missions:");
         assert!(lines[1].contains("agent-a"));
         assert!(lines[1].contains("deploy"));
-    }
-
-    #[test]
-    fn push_chatter_empty_does_not_add_header() {
-        let mut lines = Vec::new();
-        App::push_chatter(&mut lines, &[]);
-        assert!(lines.is_empty());
-    }
-
-    #[test]
-    fn push_chatter_adds_header_and_items() {
-        use crate::domain::sync::SyncMessage;
-        let mut lines = Vec::new();
-        let messages = vec![SyncMessage {
-            id: 1,
-            workdir: "/tmp".to_string(),
-            agent_id: "agent-b-id".to_string(),
-            agent_name: "agent-b".to_string(),
-            kind: crate::domain::sync::MessageKind::Info,
-            message: "hello".to_string(),
-            payload: None,
-            created_at: Utc::now().timestamp(),
-        }];
-        App::push_chatter(&mut lines, &messages);
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0], "recent messages:");
-        assert!(lines[1].contains("agent-b"));
-        assert!(lines[1].contains("hello"));
     }
 
     // ── update_prompt_config ────────────────────────────────────
@@ -1196,10 +1096,85 @@ mod tests {
             &crate::domain::canopy_config::CanopyConfig::default(),
         )
         .expect("create app");
-        let (workdir, intents, chatter) = app.build_system_context_parts();
+        let (workdir, intents) = app.build_system_context_parts();
         assert!(!workdir.is_empty());
         assert!(intents.is_empty());
-        assert!(chatter.is_empty());
+    }
+
+    /// FR2/FR5: chatter in the activity state must not reach the per-turn
+    /// block, which keeps only the workspace line and the missions.
+    #[test]
+    fn build_turn_context_block_omits_recent_messages() {
+        let db = test_db();
+        db.insert_activity_log_entry(
+            "/tmp/ctx-project",
+            "sync",
+            Some("agent-a"),
+            "info",
+            "chatter that must not leak into the prompt",
+            None,
+        )
+        .expect("insert chatter");
+        // An intent only counts as an active mission while its agent is a live
+        // session in that workdir.
+        db.insert_interactive_session(
+            "agent-a",
+            "ctx-display",
+            "copilot",
+            "/tmp/ctx-project",
+            None,
+            None,
+            "interactive",
+            None,
+        )
+        .expect("insert session");
+        let intent_payload = serde_json::to_string(&crate::domain::sync::IntentPayload {
+            mission: "deploy".to_string(),
+            impact: crate::domain::sync::MissionImpact::High,
+            description: "ship it".to_string(),
+        })
+        .expect("serialize intent payload");
+        db.insert_activity_log_entry(
+            "/tmp/ctx-project",
+            "sync",
+            Some("agent-a"),
+            "intent",
+            "intent",
+            Some(intent_payload.as_str()),
+        )
+        .expect("insert intent");
+
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        let mut agent = cron_agent("bg-ctx");
+        agent.working_dir = Some("/tmp/ctx-project".to_string());
+        app.agents = vec![AgentEntry::Agent(agent)];
+        app.selected = 0;
+
+        // Precondition: the activity state this block reads from really does
+        // carry chatter, so the test fails if the chatter path returns.
+        let state = app
+            .selected_activity_state()
+            .expect("activity state present");
+        assert!(
+            state.recent_messages.iter().any(|m| m.kind.is_chatter()),
+            "the fixture must produce chatter"
+        );
+        assert!(
+            !state.active_intents.is_empty(),
+            "the fixture must produce an active mission"
+        );
+
+        let block = app.build_turn_context_block();
+        assert!(block.contains("workspace: /tmp/ctx-project"));
+        assert!(block.contains("active missions:"));
+        assert!(!block.contains("recent messages"));
+        assert!(!block.contains("chatter that must not leak into the prompt"));
     }
 
     // ── populate_dialog_from_agent: cli not in available list ───

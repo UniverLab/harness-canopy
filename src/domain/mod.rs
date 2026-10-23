@@ -29,7 +29,11 @@ pub mod roster;
 pub mod sandbox;
 pub mod seeds;
 pub mod settings;
+pub mod spec_type;
 pub mod specs;
+
+#[cfg(test)]
+mod spec_type_tests;
 pub mod subagent_mcp;
 pub mod sync;
 pub mod usage_stats;

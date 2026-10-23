@@ -1,5 +1,5 @@
 use chrono::Utc;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::ErrorData as McpError;
 
 use crate::application::ports::{AgentRepository, RunRepository};
@@ -542,7 +542,7 @@ pub(crate) fn build_node_update_response_with_changes(
         "changed_config_keys".to_string(),
         serde_json::json!(changed_keys),
     );
-    CallToolResult::success(vec![Content::text(
+    CallToolResult::success(vec![ContentBlock::text(
         serde_json::to_string_pretty(&serde_json::Value::Object(map)).unwrap_or_default(),
     )])
 }
@@ -550,7 +550,7 @@ pub(crate) fn build_node_update_response_with_changes(
 pub(crate) fn build_id_result(id: &str, key: &str) -> CallToolResult {
     let mut map = serde_json::Map::new();
     map.insert(key.to_string(), serde_json::json!(id));
-    CallToolResult::success(vec![Content::text(
+    CallToolResult::success(vec![ContentBlock::text(
         serde_json::to_string_pretty(&serde_json::Value::Object(map)).unwrap_or_default(),
     )])
 }
@@ -559,7 +559,7 @@ pub(crate) fn build_id_result(id: &str, key: &str) -> CallToolResult {
 /// (`graph_copy_node`/`graph_copy_ensemble`) whose response carries an explicit
 /// old→new id mapping and a wiring report, not just a single id.
 pub(crate) fn build_json_result(value: &serde_json::Value) -> CallToolResult {
-    CallToolResult::success(vec![Content::text(
+    CallToolResult::success(vec![ContentBlock::text(
         serde_json::to_string_pretty(value).unwrap_or_default(),
     )])
 }

@@ -7,7 +7,7 @@ use crate::daemon::handler_formatting::{
 };
 use crate::daemon::handler_helpers::record_config_change_if_running;
 use crate::daemon::handler_run_exec::find_in_flight_run;
-use crate::daemon::handler_specs::validate_at_least_one_bool;
+use crate::daemon::handler_specs_helpers::validate_at_least_one_bool;
 use crate::daemon::handler_validate::{
     resolve_prefix_or_error, validate_absolute_dir, validate_graph_exists, validate_non_empty,
 };
@@ -58,6 +58,7 @@ impl TaskTriggerHandler {
                 .infra_node_id
                 .filter(|value| !value.trim().is_empty()),
             allow_dirty_start: params.allow_dirty_start,
+            require_spec_type: params.require_spec_type,
             id: uuid::Uuid::new_v4().to_string(),
             name: name.to_string(),
             description: params.description.filter(|value| !value.trim().is_empty()),
@@ -203,6 +204,7 @@ impl TaskTriggerHandler {
                 new_hooks.is_some(),
                 new_infra_node_id.is_some(),
                 params.allow_dirty_start.is_some(),
+                params.require_spec_type.is_some(),
             ],
             "graph_update",
         ) {
@@ -257,6 +259,12 @@ impl TaskTriggerHandler {
         if let Some(value) = params.allow_dirty_start {
             self.db
                 .update_graph_allow_dirty_start(&graph_id, value)
+                .map_err(internal_error)?;
+        }
+
+        if let Some(value) = params.require_spec_type {
+            self.db
+                .update_graph_require_spec_type(&graph_id, value)
                 .map_err(internal_error)?;
         }
 

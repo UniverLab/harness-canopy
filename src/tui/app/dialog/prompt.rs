@@ -17,6 +17,9 @@ mod prompt_build;
 use prompt_build::*;
 mod prompt_edit;
 mod prompt_schedule;
+// `prompt_protocol` holds only an `impl SimplePromptDialog` block, so
+// there is nothing to re-export (same as `prompt_edit`/`prompt_schedule`).
+mod prompt_protocol;
 
 /// Picker state for adding/removing sections
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -150,14 +153,17 @@ pub struct SimplePromptDialog {
     pub collapsed_pastes: HashMap<String, String>,
     /// Section IDs that are read-only (auto-filled, cannot be edited).
     pub locked_sections: HashSet<String>,
-    /// Invisible system block rendered at the top of the final prompt so its
-    /// protocol is read before the task. None = omit.
+    /// Invisible per-turn system block (workspace/intents context) rendered
+    /// at the top of the final prompt. Holds no protocol text: `system_text()`
+    /// prepends the one-time protocol ahead of it when it rides along. None =
+    /// omit.
     pub system_content: Option<String>,
-    /// Whether `system_content` (if any) carries the one-time session-start
-    /// protocol block, as opposed to only the per-turn workspace/intents/
-    /// chatter context. Read by `submit_prompt` to decide whether to mark
-    /// the session's protocol as delivered; never persisted across
-    /// openings.
+    /// Whether this send should carry the one-time session-start protocol
+    /// block. `system_text()` prepends the block when this is true or the
+    /// manual `Canopy protocol` section is enabled; read by `submit_prompt`
+    /// to decide whether to mark the session's protocol as delivered. Decided
+    /// when the dialog opens (see `App::open_simple_prompt_dialog`); never
+    /// persisted across openings.
     pub protocol_included: bool,
     /// Send-timing selector (U11): `now` sends immediately, `date`
     /// schedules the delivery at `send_at`.
@@ -401,6 +407,9 @@ impl SimplePromptDialog {
             sections.push(("rag_search", "RAG Search"));
         }
         sections.extend([("constraints", "Constraints"), ("tools", "Tools")]);
+        // The manual resend path: a locked, read-only section holding the
+        // canonical protocol block (see `prompt_protocol`).
+        sections.push(("canopy_protocol", "Canopy protocol"));
         sections.push(("preset", "Preset"));
         sections
     }
@@ -412,13 +421,22 @@ impl SimplePromptDialog {
 
     /// Collect all available skills for the skills picker.
     /// Returns `Vec<(display_label, raw_name, prefix)>`.
-    pub fn collect_skills_for_picker(workdir: &std::path::Path) -> Vec<(String, String, String)> {
+    pub fn collect_skills_for_picker(
+        workdir: &std::path::Path,
+        store: Option<&crate::dynamic_skills::SkillStore>,
+    ) -> Vec<(String, String, String)> {
         let mut entries: Vec<(String, String, String)> = Vec::new();
         let project = workdir.join(".agents").join("skills");
         add_skills_from_dir(&project, "skill", &mut entries);
         if let Some(global) = dirs::home_dir().map(|h| h.join(".agents").join("skills")) {
             if global != project {
                 add_skills_from_dir(&global, "global", &mut entries);
+            }
+        }
+        if let Some(s) = store {
+            for skill in s.list_local() {
+                let label = format!("canopy:{}", skill.name);
+                entries.push((label, skill.name.clone(), "canopy".to_string()));
             }
         }
         entries
@@ -553,9 +571,15 @@ impl SimplePromptDialog {
             .insert(section_id.to_string(), label.to_string());
     }
 
-    /// Get section types available to add (can always add more instances)
+    /// Get section types available to add (can always add more instances).
+    /// `Canopy protocol` is single-instance: hidden from this list once a
+    /// `canopy_protocol` section is already enabled, so the picker only
+    /// offers it while a resend is still possible.
     pub fn get_addable_sections(&self) -> Vec<(&'static str, &'static str)> {
         Self::get_available_sections()
+            .into_iter()
+            .filter(|(name, _)| *name != "canopy_protocol" || !self.has_canopy_protocol_section())
+            .collect()
     }
 
     fn section_display_name(section_id: &str) -> String {
@@ -858,7 +882,7 @@ mod tests {
 
         let mut dialog = SimplePromptDialog::new();
         dialog.set_section_content("instruction_1", "do it".to_string());
-        dialog.system_content = Some("[START HERE — required] call get_tools".to_string());
+        dialog.system_content = Some("[CANOPY] call get_tools".to_string());
 
         let prompt = dialog
             .build_prompt_with_resolved_resources(&db, &project_dir)
@@ -1741,6 +1765,172 @@ mod tests {
         assert!(result.contains("<skill>"));
         assert!(result.contains("skill:code-engineering"));
         assert!(result.contains("</skill>"));
+    }
+
+    #[test]
+    fn append_tool_skill_canopy_formats_with_skill_get() {
+        let mut result = String::new();
+        append_tool_skill(&mut result, "canopy:canopy-graph-design");
+        assert!(result.contains("canopy skill canopy-graph-design"));
+        assert!(result.contains("skill_get(name=\"canopy-graph-design\")"));
+    }
+
+    #[test]
+    fn collect_skills_for_picker_includes_canopy_and_disk() {
+        use crate::dynamic_skills::SkillStore;
+        use tempfile::tempdir;
+        let temp = tempdir().unwrap();
+        let workdir = temp.path();
+        // Create disk skill
+        let disk_skills = workdir.join(".agents").join("skills");
+        std::fs::create_dir_all(disk_skills.join("texforge")).unwrap();
+        std::fs::write(
+            disk_skills.join("texforge").join("SKILL.md"),
+            "---\nname: texforge\ndescription: TeX forge\n---\n# texforge\nbody\n",
+        )
+        .unwrap();
+
+        // Create store with canopy skill installed
+        let store_dir = tempdir().unwrap();
+        std::fs::create_dir_all(store_dir.path().join("canopy-graph-design")).unwrap();
+        std::fs::write(
+            store_dir.path().join("canopy-graph-design").join("SKILL.md"),
+            "---\nname: canopy-graph-design\ndescription: Design\n---\n# canopy-graph-design\nbody\n",
+        )
+        .unwrap();
+        let store = SkillStore::new(store_dir.path().to_path_buf(), vec![], 15);
+        let entries = SimplePromptDialog::collect_skills_for_picker(workdir, Some(&store));
+        // Find entries
+        let has_texforge = entries.iter().any(|(label, name, prefix)| {
+            label == "skill:texforge" && name == "texforge" && prefix == "skill"
+        });
+        let has_canopy = entries.iter().any(|(label, name, prefix)| {
+            label == "canopy:canopy-graph-design"
+                && name == "canopy-graph-design"
+                && prefix == "canopy"
+        });
+        assert!(has_texforge, "should have texforge");
+        assert!(has_canopy, "should have canopy skill");
+        // Canopy rows after disk? Check positions
+        let texforge_idx = entries.iter().position(|(l, _, _)| l == "skill:texforge");
+        let canopy_idx = entries
+            .iter()
+            .position(|(l, _, _)| l == "canopy:canopy-graph-design");
+        assert!(texforge_idx.is_some() && canopy_idx.is_some());
+        assert!(canopy_idx.unwrap() > texforge_idx.unwrap());
+    }
+
+    #[test]
+    fn collect_skills_for_picker_no_canopy_when_none() {
+        use tempfile::tempdir;
+        let temp = tempdir().unwrap();
+        let workdir = temp.path();
+        let disk_skills = workdir.join(".agents").join("skills");
+        std::fs::create_dir_all(disk_skills.join("texforge")).unwrap();
+        std::fs::write(
+            disk_skills.join("texforge").join("SKILL.md"),
+            "---\nname: texforge\ndescription: TeX forge\n---\n# texforge\nbody\n",
+        )
+        .unwrap();
+        let entries = SimplePromptDialog::collect_skills_for_picker(workdir, None);
+        assert!(entries.iter().any(|(l, _, _)| l == "skill:texforge"));
+        assert!(!entries.iter().any(|(_, _, p)| p == "canopy"));
+    }
+
+    /// FR5: a store that cannot be read (missing dir, unreachable source,
+    /// no cached catalog) contributes no canopy rows — the disk skills
+    /// still show up on their own.
+    #[test]
+    fn collect_skills_for_picker_unreadable_store_yields_only_disk_entries() {
+        use crate::dynamic_skills::{GitSource, SkillStore};
+        use tempfile::tempdir;
+        let temp = tempdir().unwrap();
+        let workdir = temp.path();
+        let disk_skills = workdir.join(".agents").join("skills");
+        std::fs::create_dir_all(disk_skills.join("texforge")).unwrap();
+        std::fs::write(
+            disk_skills.join("texforge").join("SKILL.md"),
+            "---\nname: texforge\ndescription: TeX forge\n---\n# texforge\nbody\n",
+        )
+        .unwrap();
+
+        // Store dir does not exist and the source (a path that was never a
+        // repo) has no on-disk catalog cache, so nothing canopy-side is
+        // listable.
+        let missing = temp.path().join("no-such-store");
+        let store = SkillStore::new(
+            missing,
+            vec![GitSource::new(
+                temp.path()
+                    .join("no-such-source")
+                    .to_string_lossy()
+                    .to_string(),
+                None,
+            )],
+            15,
+        );
+        let entries = SimplePromptDialog::collect_skills_for_picker(workdir, Some(&store));
+        assert!(
+            entries
+                .iter()
+                .any(|(l, _, p)| l == "skill:texforge" && p == "skill"),
+            "disk entries must survive an unreadable store; got: {entries:?}"
+        );
+        assert!(
+            !entries.iter().any(|(_, _, p)| p == "canopy"),
+            "unreadable store must yield no canopy rows; got: {entries:?}"
+        );
+    }
+
+    /// FR3: a name that exists both on disk and in the canopy store yields
+    /// one row per prefix, so the user picks which one to reference.
+    #[test]
+    fn collect_skills_for_picker_same_name_in_both_prefixes() {
+        use crate::dynamic_skills::SkillStore;
+        use tempfile::tempdir;
+        let temp = tempdir().unwrap();
+        let workdir = temp.path();
+        let disk_skills = workdir.join(".agents").join("skills");
+        std::fs::create_dir_all(disk_skills.join("texforge")).unwrap();
+        std::fs::write(
+            disk_skills.join("texforge").join("SKILL.md"),
+            "---\nname: texforge\ndescription: TeX forge\n---\n# texforge\nbody\n",
+        )
+        .unwrap();
+
+        let store_dir = tempdir().unwrap();
+        std::fs::create_dir_all(store_dir.path().join("texforge")).unwrap();
+        std::fs::write(
+            store_dir.path().join("texforge").join("SKILL.md"),
+            "---\nname: texforge\ndescription: Canopy texforge\n---\n# texforge\nbody\n",
+        )
+        .unwrap();
+        let store = SkillStore::new(store_dir.path().to_path_buf(), vec![], 15);
+        let entries = SimplePromptDialog::collect_skills_for_picker(workdir, Some(&store));
+        assert!(
+            entries
+                .iter()
+                .any(|(l, _, p)| l == "skill:texforge" && p == "skill"),
+            "the disk row must stay; got: {entries:?}"
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|(l, _, p)| l == "canopy:texforge" && p == "canopy"),
+            "the canopy row must appear alongside the disk row; got: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn build_body_renders_canopy_skill_with_skill_get_instruction() {
+        let mut dialog = SimplePromptDialog::new();
+        dialog.add_section_with_content("tools", "canopy:canopy-graph-design".to_string());
+        let body = dialog.build_body();
+        let expected = "canopy skill canopy-graph-design \u{2014} load it with skill_get(name=\"canopy-graph-design\")";
+        assert!(
+            body.contains(expected),
+            "build_body should render the canopy skill as a skill_get fetch instruction; got: {body}"
+        );
     }
 
     // ── visual_line_count edge cases ─────────────────────────────

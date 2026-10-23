@@ -15,12 +15,14 @@
 //! columns — so nothing the import plan carries is silently dropped to a
 //! column default (CB62).
 
+use std::collections::HashMap;
+
 use anyhow::{anyhow, Result};
 use rusqlite::{params, Transaction};
 
 use crate::db::Database;
 use crate::domain::graph_transfer::{GraphImportEnsemblePlan, GraphImportPlan};
-use crate::domain::graphs::{Graph, GraphEdge, GraphNode};
+use crate::domain::graphs::{Graph, GraphEdge, GraphEdgeCondition, GraphNode};
 
 /// Record `name` once, preserving first-seen order.
 fn record_missing_crew(missing: &mut Vec<String>, name: &str) {
@@ -71,6 +73,7 @@ impl Database {
         }
         for (index, ensemble_plan) in plan.ensembles.iter().enumerate() {
             insert_ensemble_unit_tx(&tx, ensemble_plan, &resolved_crew_ids[index])?;
+            insert_pending_entry_sources_tx(&tx, ensemble_plan)?;
         }
 
         tx.commit()?;
@@ -131,6 +134,45 @@ impl Database {
             }
         }
         Ok((missing_crews, resolved_crew_ids))
+    }
+
+    /// Every pending entry source recorded for a graph's ensembles, keyed by
+    /// ensemble id — `graph_export` passes these to
+    /// [`build_export_document_with_pending`] so a crew-bound ensemble whose
+    /// members are not materialised yet still exports its entry wiring
+    /// (requirement 3). A literal-member ensemble has none.
+    pub fn pending_entry_sources_for_graph(
+        &self,
+        graph_id: &str,
+    ) -> Result<HashMap<String, Vec<(String, GraphEdgeCondition)>>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let mut stmt = conn.prepare(
+            "SELECT p.ensemble_id, p.from_node, p.condition
+             FROM ensemble_pending_entry_sources p
+             JOIN ensembles e ON e.id = p.ensemble_id
+             WHERE e.graph_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![graph_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut out: HashMap<String, Vec<(String, GraphEdgeCondition)>> = HashMap::new();
+        for row in rows {
+            let (ensemble_id, from_node, condition_raw) = row?;
+            let Some(condition) = GraphEdgeCondition::from_str(&condition_raw) else {
+                continue;
+            };
+            out.entry(ensemble_id)
+                .or_default()
+                .push((from_node, condition));
+        }
+        Ok(out)
     }
 }
 
@@ -220,6 +262,27 @@ fn insert_ensemble_unit_tx(
     Ok(())
 }
 
+/// CM49 import: record the entry sources a crew-bound ensemble must wire once
+/// its members materialise. `INSERT OR IGNORE` makes a repeated source a
+/// no-op rather than an error.
+fn insert_pending_entry_sources_tx(
+    tx: &Transaction,
+    ensemble_plan: &GraphImportEnsemblePlan,
+) -> Result<()> {
+    for (from_node, condition) in &ensemble_plan.pending_entry_sources {
+        tx.execute(
+            "INSERT OR IGNORE INTO ensemble_pending_entry_sources (ensemble_id, from_node, condition)
+             VALUES (?1, ?2, ?3)",
+            params![
+                &ensemble_plan.ensemble.id,
+                from_node,
+                condition.as_str()
+            ],
+        )?;
+    }
+    Ok(())
+}
+
 fn insert_graph_node_tx(tx: &Transaction, node: &GraphNode) -> Result<()> {
     tx.execute(
         "INSERT INTO graph_nodes (id, spec_id, graph_id, name, kind, config, position, created_at)
@@ -259,9 +322,15 @@ fn insert_graph_edge_tx(tx: &Transaction, edge: &GraphEdge) -> Result<()> {
 mod tests {
     use super::*;
     use crate::domain::graph_transfer::{
-        build_export_document, build_import_plan, GraphExportDocument,
+        build_export_document, build_export_document_with_pending, build_import_plan,
+        GraphExportDocument, GraphExportEnsembleTarget, GraphExportEntrySource,
     };
-    use crate::domain::graphs::{GraphEdgeCondition, GraphNodeKind, GraphStatus};
+    use crate::domain::graphs::{
+        Ensemble, EnsembleDetails, EnsembleKind, GraphEdgeCondition, GraphNodeKind, GraphStatus,
+    };
+    use crate::domain::validation::{
+        validate_ensembles_in_graph, validate_graph, GraphEdgeView, GraphNodeView,
+    };
     use chrono::Utc;
     use tempfile::tempdir;
 
@@ -290,6 +359,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         }
     }
 
@@ -1104,6 +1174,403 @@ mod tests {
         assert!(
             db.get_graph("graph-1").unwrap().is_some(),
             "import succeeds"
+        );
+    }
+
+    /// A graph with two crew-bound ensembles on the same crew: "Team A"
+    /// (round_robin) entered from `kickoff` (primary) and `alt` (an extra
+    /// `fail` source), and "Team B" (cascade) whose `on_fail_to` chains into
+    /// A. Both carry no member nodes of their own — the crew supplies them.
+    fn seed_crew_chain_graph(db: &Database) -> Graph {
+        let lp = draft_graph("graph-1", "crew-chain", "/tmp/project");
+        db.insert_graph(&lp).unwrap();
+        let now = Utc::now();
+        for (id, position) in [("kickoff", 1), ("alt", 2), ("final", 9)] {
+            db.insert_graph_node(&GraphNode {
+                id: id.to_string(),
+                spec_id: None,
+                graph_id: Some("graph-1".to_string()),
+                name: id.to_string(),
+                kind: GraphNodeKind::Check,
+                config: serde_json::json!({"command": "true"}),
+                position,
+                created_at: now,
+            })
+            .unwrap();
+        }
+        // kickoff -> alt keeps the graph at a single entry point (the `fail`
+        // source is reached rather than dangling).
+        db.insert_graph_edge(&GraphEdge {
+            id: "kickoff->alt".to_string(),
+            spec_id: None,
+            graph_id: Some("graph-1".to_string()),
+            from_node: "kickoff".to_string(),
+            to_node: "alt".to_string(),
+            condition: GraphEdgeCondition::Always,
+        })
+        .unwrap();
+        db.crew_create(
+            "reviewers",
+            None,
+            &[crew_member("openrouter"), crew_member("opencode-go")],
+        )
+        .unwrap();
+
+        for (suffix, kind, position, on_fail_to) in [
+            ("A", EnsembleKind::RoundRobin, 10, None),
+            ("B", EnsembleKind::Cascade, 20, Some("joinA")),
+        ] {
+            let ensemble = Ensemble {
+                id: format!("ens{suffix}"),
+                spec_id: None,
+                graph_id: Some("graph-1".to_string()),
+                name: format!("Team {suffix}"),
+                prompt_template: "go".to_string(),
+                join_node_id: format!("join{suffix}"),
+                entry_from_node: "kickoff".to_string(),
+                entry_condition: GraphEdgeCondition::Always,
+                min_pass: 1,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                timeout_minutes: 30,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+                on_pass_to: "final".to_string(),
+                on_fail_to: on_fail_to.map(str::to_string),
+                kind,
+                round_robin_index: (kind == EnsembleKind::RoundRobin).then_some(0),
+                commit_rights: false,
+                created_at: now,
+                crew_id: None,
+                crew_name: Some("reviewers".to_string()),
+                crew_version_applied: None,
+            };
+            let join_node = GraphNode {
+                id: format!("join{suffix}"),
+                spec_id: None,
+                graph_id: Some("graph-1".to_string()),
+                name: format!("Team {suffix} (quorum)"),
+                kind: GraphNodeKind::Join,
+                config: serde_json::json!({"ensemble_id": format!("ens{suffix}")}),
+                position,
+                created_at: now,
+            };
+            let exit = GraphEdge {
+                id: format!("join{suffix}->final"),
+                spec_id: None,
+                graph_id: Some("graph-1".to_string()),
+                from_node: format!("join{suffix}"),
+                to_node: "final".to_string(),
+                condition: GraphEdgeCondition::Pass,
+            };
+            db.insert_ensemble_unit(&ensemble, &[], &[], &join_node, &[exit])
+                .unwrap();
+            db.sync_ensemble_with_crew(&ensemble.id).unwrap();
+        }
+
+        // Team A's extra `fail` entry source.
+        db.add_ensemble_entry_source("ensA", "alt", &GraphEdgeCondition::Fail)
+            .unwrap();
+        // Team B's fail exit chains into A: the row holds A's quorum id, the
+        // edges fan out to every A member.
+        let a_members: Vec<String> = db
+            .list_ensemble_members("ensA")
+            .unwrap()
+            .into_iter()
+            .map(|member| member.node_id)
+            .collect();
+        db.retarget_ensemble_exit("ensB", &GraphEdgeCondition::Fail, &a_members, Some("joinA"))
+            .unwrap();
+
+        lp
+    }
+
+    /// `graph_export`'s document for a graph, reading the pending rows exactly
+    /// as the real handler does.
+    fn export_graph(db: &Database, graph_id: &str) -> GraphExportDocument {
+        let lp = db.get_graph(graph_id).unwrap().unwrap();
+        let nodes = db.list_graph_nodes_for_graph(graph_id).unwrap();
+        let edges = db.list_graph_edges_for_graph(graph_id).unwrap();
+        let ensembles = db.list_ensembles_for_graph(graph_id).unwrap();
+        let pending = db.pending_entry_sources_for_graph(graph_id).unwrap();
+        build_export_document_with_pending(&lp, &nodes, &edges, &ensembles, &pending).unwrap()
+    }
+
+    /// The same structural checks `graph_preflight` runs before spending probe
+    /// quota: `validate_graph` (the entry-point check that reported "Graph has
+    /// multiple entry points") and `validate_ensembles_in_graph` (every member
+    /// wired in and both exits wired out).
+    fn assert_graph_is_structurally_runnable(
+        nodes: &[GraphNode],
+        edges: &[GraphEdge],
+        ensembles: &[EnsembleDetails],
+    ) {
+        let router_labels: Vec<Vec<String>> = nodes.iter().map(|_| Vec::new()).collect();
+        let node_views: Vec<GraphNodeView<'_>> = nodes
+            .iter()
+            .enumerate()
+            .map(|(idx, node)| GraphNodeView {
+                id: &node.id,
+                kind: node.kind,
+                route_labels: &router_labels[idx],
+            })
+            .collect();
+        let edge_views: Vec<GraphEdgeView<'_>> = edges
+            .iter()
+            .map(|edge| GraphEdgeView {
+                from: &edge.from_node,
+                to: &edge.to_node,
+                condition: &edge.condition,
+            })
+            .collect();
+        if let Err(e) = validate_graph(&node_views, &edge_views) {
+            panic!("imported graph must report no entry-point error: {e}");
+        }
+        validate_ensembles_in_graph(ensembles, nodes, edges)
+            .expect("imported ensembles must be fully wired");
+    }
+
+    /// Requirement 4: two crew-bound ensembles (a round_robin with an extra
+    /// `fail` entry source, and a cascade chained by `on_fail_to` into it)
+    /// survive export → import → export with identical edges and ensemble
+    /// wiring, and the imported graph is structurally runnable. Exercised
+    /// both for the document as exported and with `members` explicitly
+    /// cleared.
+    #[test]
+    fn crew_bound_ensembles_round_trip_with_wiring() {
+        let db = test_db();
+        let lp = seed_crew_chain_graph(&db);
+        let first = export_graph(&db, &lp.id);
+
+        let team_a = first
+            .ensembles
+            .iter()
+            .find(|ensemble| ensemble.name == "Team A")
+            .expect("Team A");
+        assert_eq!(team_a.crew.as_deref(), Some("reviewers"));
+        assert!(
+            team_a.members.is_empty(),
+            "a crew-bound ensemble carries no members"
+        );
+        assert_eq!(
+            team_a.extra_entry_sources,
+            vec![GraphExportEntrySource {
+                from_node: "alt".to_string(),
+                condition: GraphEdgeCondition::Fail,
+            }]
+        );
+        let team_b = first
+            .ensembles
+            .iter()
+            .find(|ensemble| ensemble.name == "Team B")
+            .expect("Team B");
+        assert_eq!(
+            team_b.on_fail_to,
+            Some(GraphExportEnsembleTarget::Ensemble {
+                ensemble: "Team A".to_string(),
+            })
+        );
+
+        for (graph_id, clear_members) in [("graph-2", false), ("graph-3", true)] {
+            let mut document = first.clone();
+            if clear_members {
+                for ensemble in &mut document.ensembles {
+                    ensemble.members.clear();
+                }
+            }
+
+            let lp = draft_graph(graph_id, "crew-chain", "/tmp/project");
+            let plan = build_import_plan(&document, graph_id).unwrap();
+            let missing = db.import_graph(&lp, &plan).unwrap();
+            assert!(missing.is_empty(), "the crew exists locally");
+
+            let nodes = db.list_graph_nodes_for_graph(graph_id).unwrap();
+            let edges = db.list_graph_edges_for_graph(graph_id).unwrap();
+            let ensembles = db.list_ensembles_for_graph(graph_id).unwrap();
+            for details in &ensembles {
+                assert_eq!(
+                    details.members.len(),
+                    2,
+                    "{}'s members must materialise from the crew",
+                    details.ensemble.name
+                );
+            }
+            assert_graph_is_structurally_runnable(&nodes, &edges, &ensembles);
+
+            // Every member is entered from the extra `fail` source, and B's
+            // chained fail exit reaches all of A's members.
+            let node_id = |name: &str| {
+                nodes
+                    .iter()
+                    .find(|node| node.name == name)
+                    .unwrap_or_else(|| panic!("node '{name}'"))
+                    .id
+                    .clone()
+            };
+            let alt = node_id("alt");
+            let team_a = ensembles
+                .iter()
+                .find(|details| details.ensemble.name == "Team A")
+                .expect("Team A");
+            let team_b_join = ensembles
+                .iter()
+                .find(|details| details.ensemble.name == "Team B")
+                .expect("Team B")
+                .ensemble
+                .join_node_id
+                .clone();
+            for member in &team_a.members {
+                assert!(
+                    edges.iter().any(|edge| {
+                        edge.from_node == alt
+                            && edge.to_node == member.node_id
+                            && edge.condition == GraphEdgeCondition::Fail
+                    }),
+                    "A member must be entered from 'alt' on fail"
+                );
+                assert!(
+                    edges.iter().any(|edge| {
+                        edge.from_node == team_b_join
+                            && edge.to_node == member.node_id
+                            && edge.condition == GraphEdgeCondition::Fail
+                    }),
+                    "A member must be entered from Team B's chained fail exit"
+                );
+            }
+
+            let redone = export_graph(&db, graph_id);
+            assert_eq!(first.edges, redone.edges, "edges must round-trip");
+            assert_eq!(
+                first.ensembles, redone.ensembles,
+                "ensemble wiring must round-trip"
+            );
+        }
+    }
+
+    /// Requirement 3: with the crew missing locally the import still records
+    /// the ensemble's entry wiring; creating the crew and syncing wires a
+    /// fully runnable ensemble, and the pending rows are then consumed.
+    #[test]
+    fn crew_bound_ensemble_without_crew_wires_on_later_sync() {
+        let source = test_db();
+        let lp = seed_crew_chain_graph(&source);
+        let document = export_graph(&source, &lp.id);
+
+        let target = test_db();
+        let lp = draft_graph("graph-2", "crew-chain", "/tmp/project");
+        let plan = build_import_plan(&document, "graph-2").unwrap();
+        let missing = target.import_graph(&lp, &plan).unwrap();
+        assert_eq!(missing, vec!["reviewers".to_string()]);
+
+        // Both ensembles are pending: no members, but their entry wiring is
+        // recorded.
+        let ensembles = target.list_ensembles_for_graph("graph-2").unwrap();
+        for details in &ensembles {
+            assert!(details.members.is_empty(), "no crew, no members yet");
+        }
+        assert!(
+            !target
+                .pending_entry_sources_for_graph("graph-2")
+                .unwrap()
+                .is_empty(),
+            "entry wiring must be recorded while the crew is missing"
+        );
+
+        // Create the crew; the next sync materialises and fully wires both.
+        target
+            .crew_create(
+                "reviewers",
+                None,
+                &[crew_member("openrouter"), crew_member("opencode-go")],
+            )
+            .unwrap();
+        for details in &target.list_ensembles_for_graph("graph-2").unwrap() {
+            target
+                .sync_ensemble_with_crew(&details.ensemble.id)
+                .unwrap();
+        }
+
+        let nodes = target.list_graph_nodes_for_graph("graph-2").unwrap();
+        let edges = target.list_graph_edges_for_graph("graph-2").unwrap();
+        let ensembles = target.list_ensembles_for_graph("graph-2").unwrap();
+        assert_graph_is_structurally_runnable(&nodes, &edges, &ensembles);
+
+        let alt = nodes
+            .iter()
+            .find(|node| node.name == "alt")
+            .expect("alt node")
+            .id
+            .clone();
+        let team_a = ensembles
+            .iter()
+            .find(|details| details.ensemble.name == "Team A")
+            .expect("Team A");
+        assert_eq!(team_a.members.len(), 2);
+        for member in &team_a.members {
+            assert!(
+                edges.iter().any(|edge| {
+                    edge.from_node == alt
+                        && edge.to_node == member.node_id
+                        && edge.condition == GraphEdgeCondition::Fail
+                }),
+                "the recorded extra entry source must be wired after the sync"
+            );
+        }
+        assert!(
+            target
+                .pending_entry_sources_for_graph("graph-2")
+                .unwrap()
+                .is_empty(),
+            "pending rows are consumed once the members exist"
+        );
+    }
+
+    /// Requirement 3 (export half): a crew-bound ensemble that is still pending
+    /// — its crew absent, so it has no member nodes and no fan-out edges — must
+    /// still export every wired entry source, read from the pending rows rather
+    /// than the absent edges. The document that comes back is identical to the
+    /// one a graph with the crews materialised exports, so re-importing it on a
+    /// machine that has the crews is lossless.
+    #[test]
+    fn pending_crew_bound_ensemble_exports_its_recorded_wiring() {
+        let source = test_db();
+        let lp = seed_crew_chain_graph(&source);
+        let first = export_graph(&source, &lp.id);
+
+        // Import where the crew is missing: both ensembles stay pending.
+        let pending = test_db();
+        let lp = draft_graph("graph-2", "crew-chain", "/tmp/project");
+        let plan = build_import_plan(&first, "graph-2").unwrap();
+        let missing = pending.import_graph(&lp, &plan).unwrap();
+        assert_eq!(missing, vec!["reviewers".to_string()]);
+        for details in &pending.list_ensembles_for_graph("graph-2").unwrap() {
+            assert!(details.members.is_empty(), "still pending: no members");
+        }
+
+        // Export while pending: the entry wiring must come from the recorded
+        // rows, reproducing the source document exactly.
+        let redone = export_graph(&pending, "graph-2");
+        let team_a = redone
+            .ensembles
+            .iter()
+            .find(|ensemble| ensemble.name == "Team A")
+            .expect("Team A");
+        assert_eq!(
+            team_a.extra_entry_sources,
+            vec![GraphExportEntrySource {
+                from_node: "alt".to_string(),
+                condition: GraphEdgeCondition::Fail,
+            }],
+            "the pending extra entry source must export from the recorded rows"
+        );
+        assert_eq!(
+            first.edges, redone.edges,
+            "edges must round-trip while pending"
+        );
+        assert_eq!(
+            first.ensembles, redone.ensembles,
+            "ensemble wiring must export from the pending rows"
         );
     }
 }

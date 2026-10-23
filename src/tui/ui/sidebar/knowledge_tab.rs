@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::domain::project::Project;
+
 pub(super) fn draw_knowledge_body(
     frame: &mut Frame,
     area: Rect,
@@ -7,11 +9,12 @@ pub(super) fn draw_knowledge_body(
     theme: &Theme,
 ) -> Rect {
     let mut remaining = area;
+    let title = project_list_title(app);
     if let Some(sub) = take_top(&mut remaining, project_list_demand(app.projects.len())) {
         render_titled_panel(
             frame,
             sub,
-            " projects ",
+            &title,
             Style::default().fg(theme.dim_text),
             knowledge_border_style(app, theme),
             theme,
@@ -21,6 +24,16 @@ pub(super) fn draw_knowledge_body(
     draw_sidebar_gap(frame, &mut remaining, theme);
 
     remaining
+}
+
+/// The panel title, carrying the live type-ahead so it always shows what the
+/// list is being filtered by.
+fn project_list_title(app: &App) -> String {
+    if app.project_filter.is_empty() {
+        " projects ".to_string()
+    } else {
+        format!(" projects / {} ", app.project_filter)
+    }
 }
 
 // ── Knowledge layer: projects list ──────────────────────────────────
@@ -37,9 +50,24 @@ pub(super) fn draw_projects_list(frame: &mut Frame, area: Rect, app: &mut App, t
         return;
     }
 
+    // The type-ahead narrows the list — and so, with it, the scroll, the
+    // click regions and what the arrows walk over.
+    let visible = app.visible_project_indices();
+    if visible.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!("No project matches \"{}\"", app.project_filter),
+                Style::default().fg(theme.muted_text),
+            ))),
+            area,
+        );
+        return;
+    }
+
+    let selected_pos = visible.iter().position(|&idx| idx == app.selected_project);
     let scroll = scroll_state(
-        app.projects.len(),
-        Some(app.selected_project),
+        visible.len(),
+        selected_pos,
         (area.height / 4).max(1) as usize,
     );
     let panel_focused = knowledge_border_style_is_focused(app);
@@ -50,23 +78,24 @@ pub(super) fn draw_projects_list(frame: &mut Frame, area: Rect, app: &mut App, t
     // the graph body can also push into `app.project_click_map` — mirrors
     // `draw_automation_graphs_list`'s `graph_ids_and_meta` pattern, since both
     // borrow `app` mutably for the click map alongside the data being drawn.
-    let visible: Vec<(usize, String, String, String)> = app
-        .projects
+    // The index kept is the *project's* index, so a click on a filtered row
+    // lands on the project drawn there.
+    let cards: Vec<(usize, String, String, String)> = visible
         .iter()
-        .enumerate()
         .skip(scroll.start)
         .take(scroll.max_visible)
-        .map(|(idx, project)| {
+        .map(|&idx| {
+            let project = &app.projects[idx];
             (
                 idx,
                 project.name.clone(),
-                project.hash.clone(),
+                project_meta_line(app, project),
                 last_two_segments(&project.path),
             )
         })
         .collect();
 
-    for (idx, name, hash, path) in &visible {
+    for (idx, name, meta1, meta2) in &cards {
         if y + 3 > area.y + area.height {
             break;
         }
@@ -76,8 +105,8 @@ pub(super) fn draw_projects_list(frame: &mut Frame, area: Rect, app: &mut App, t
             *idx == app.selected_project,
             ProjectCardText {
                 title: name,
-                meta1: hash,
-                meta2: path,
+                meta1,
+                meta2,
             },
             panel_focused,
             theme,
@@ -87,6 +116,23 @@ pub(super) fn draw_projects_list(frame: &mut Frame, area: Rect, app: &mut App, t
     }
 
     draw_scroll_indicators(frame, area, scroll.has_up, scroll.has_down, theme);
+}
+
+/// A project row's first meta line: how long ago the project was last active
+/// — the recency the list is ordered by, made visible — then its hash.
+fn project_meta_line(app: &App, project: &Project) -> String {
+    let Some(activity) = app
+        .project_last_activity
+        .get(&project.hash)
+        .and_then(|at| chrono::DateTime::from_timestamp(*at, 0))
+    else {
+        return project.hash.clone();
+    };
+    format!(
+        "{} · {}",
+        crate::tui::app::utils::relative_time(&activity),
+        project.hash
+    )
 }
 
 /// Text rows for [`draw_project_graph_card`]: title plus two meta lines.

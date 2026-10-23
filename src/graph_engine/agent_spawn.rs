@@ -1,4 +1,5 @@
 use super::output_tee::{spawn_and_wait_tee, OutputTee};
+use super::verdict_shutdown::{guard_wait, VerdictWatch};
 use super::*;
 
 /// A failure to build or spawn the child process, classified by whether it
@@ -142,6 +143,8 @@ pub(crate) async fn spawn_and_wait_cli_process(
     run_id: Option<&str>,
     on_pid: impl FnOnce(u32),
     tee: Option<OutputTee>,
+    verdict_watch: Option<VerdictWatch>,
+    node_profile: bool,
 ) -> Result<CliProcessOutcome, SpawnError> {
     // CB85: identity check before anything is spawned.
     if let Some(error) = ensure_platform_identity(strategy).await {
@@ -159,6 +162,18 @@ pub(crate) async fn spawn_and_wait_cli_process(
             .build_command_with_session(prompt, model, Some(workdir), session_id, effort, run_id)
             .map_err(|error| SpawnError::from_build(&error))?,
     };
+    // Graph agent/ensemble nodes run with the node MCP tool profile so their
+    // session stays far under the 128-tool provider cap. Hooks and other
+    // callers pass `node_profile = false` and keep the full tool list.
+    if node_profile {
+        command.env(crate::shared::sync_identity::CANOPY_MCP_PROFILE_ENV, "node");
+    }
+    // Set the child process cwd to the node's workdir, whether or not the
+    // platform supports a working-dir flag. The flag behaviour for platforms
+    // that have one is unchanged.
+    if !workdir.is_empty() {
+        command.current_dir(workdir);
+    }
     // Only appended when the caller opted in (per node.config["trust_workdir"])
     // AND the harness has a registered trust flag — never a silent default
     // (see [`CliConfig::trust_flag`]).
@@ -205,9 +220,10 @@ pub(crate) async fn spawn_and_wait_cli_process(
         )
     });
 
+    let watch = verdict_watch.as_ref();
     match readers {
         Some((stdout_reader, stderr_reader)) => {
-            spawn_and_wait_tee(
+            let wait = spawn_and_wait_tee(
                 child,
                 pid,
                 stdout_reader,
@@ -216,37 +232,16 @@ pub(crate) async fn spawn_and_wait_cli_process(
                 &stderr_buf,
                 tee.unwrap(),
                 timeout_minutes,
-            )
-            .await
+            );
+            guard_wait(watch, pid, wait).await
         }
         None => {
-            let timeout_result = tokio::time::timeout(
-                std::time::Duration::from_secs(timeout_minutes * 60),
-                child.wait_with_output(),
+            guard_wait(
+                watch,
+                pid,
+                super::verdict_shutdown::wait_untracked(child, pid, timeout_minutes),
             )
-            .await;
-
-            match timeout_result {
-                Ok(Ok(output)) => {
-                    let exit_code = output.status.code().unwrap_or(-1);
-                    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                    Ok(CliProcessOutcome::Finished {
-                        exit_code,
-                        stdout,
-                        stderr,
-                    })
-                }
-                Ok(Err(error)) => Err(SpawnError::transient(error.to_string())),
-                Err(_elapsed) => {
-                    if let Some(pid) = pid {
-                        crate::daemon::process::terminate_process_group_async(
-                            pid as i64, KILL_GRACE,
-                        );
-                    }
-                    Ok(CliProcessOutcome::TimedOut)
-                }
-            }
+            .await
         }
     }
 }
@@ -462,6 +457,8 @@ pub(crate) async fn run_agent_process(
 
     let capture = prepare_session_capture(db, run_id, strategy, workdir, resume_session_id).await;
 
+    let verdict = VerdictWatch::for_run(db, run_id);
+
     let outcome = spawn_and_wait_cli_process(
         strategy,
         prompt,
@@ -488,6 +485,8 @@ pub(crate) async fn run_agent_process(
             db: db.clone(),
             run_id: run_id.to_string(),
         }),
+        verdict.clone(),
+        true,
     )
     .await;
 
@@ -546,6 +545,16 @@ pub(crate) async fn run_agent_process(
                 &stderr,
                 self_reported,
             );
+            super::verdict_shutdown::apply_verdict_end(
+                db,
+                cli.as_str(),
+                run.as_ref(),
+                workdir,
+                run_id,
+                verdict.as_ref(),
+                &mut exec.output,
+            )
+            .await;
             notices.stamp(&mut exec.output);
             Ok(exec)
         }
@@ -762,5 +771,179 @@ pub(crate) fn record_session_diff(db: &Database, run_id: &str, diff: NewSessionD
             "session id capture: multiple new sessions (same-platform parallel runs?); \
              cannot attribute, leaving session_id NULL"
         ),
+    }
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+mod tests {
+    use super::*;
+    use crate::domain::cli_config::CliConfig;
+    use crate::domain::cli_strategy::CliStrategy;
+
+    /// Every graph node spawn — cold start and resume — must run the child in
+    /// the node's workdir, even when the platform has no working-dir flag
+    /// (`supports_working_dir = false`, opencode's case). This does not use the
+    /// flag: a fake harness records its own `pwd -P`, and both spawns must
+    /// record the workdir. With the `current_dir` call removed, the fake
+    /// records the test process's cwd and this fails.
+    #[tokio::test]
+    async fn spawn_sets_workdir_cwd_for_cold_and_resume() {
+        let workdir = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let record = scratch.path().join("cwd_record.txt");
+        let record_str = record.to_string_lossy().to_string();
+
+        // Fake harness: records its physical cwd and ignores its argv.
+        let fake_bin = scratch.path().join("fake-cwd-cli");
+        std::fs::write(&fake_bin, format!("#!/bin/sh\npwd -P >> '{record_str}'\n")).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        // `supports_working_dir = false` means no flag can carry the workdir;
+        // only the child's cwd can. `session_resume_cmd` gives the resume path
+        // a flag to inject.
+        let cli_config = CliConfig {
+            name: "fake-cwd".to_string(),
+            binary: fake_bin.to_string_lossy().to_string(),
+            supports_working_dir: false,
+            session_resume_cmd: Some("--resume".to_string()),
+            ..Default::default()
+        };
+        let strategy = CliStrategy::from_cli_config(&cli_config);
+        let workdir_str = workdir.path().to_string_lossy().to_string();
+
+        // Cold start.
+        let cold = spawn_and_wait_cli_process(
+            &strategy,
+            "prompt",
+            None,
+            None,
+            &workdir_str,
+            5,
+            None,
+            None,
+            false,
+            Some("run-cold"),
+            |_| {},
+            None,
+            None,
+            true,
+        )
+        .await;
+        assert!(
+            matches!(cold, Ok(CliProcessOutcome::Finished { exit_code: 0, .. })),
+            "cold spawn must succeed"
+        );
+
+        // Resume of an existing session.
+        let resume = spawn_and_wait_cli_process(
+            &strategy,
+            "prompt",
+            None,
+            None,
+            &workdir_str,
+            5,
+            None,
+            Some("ses_resume"),
+            false,
+            Some("run-resume"),
+            |_| {},
+            None,
+            None,
+            true,
+        )
+        .await;
+        assert!(
+            matches!(resume, Ok(CliProcessOutcome::Finished { exit_code: 0, .. })),
+            "resume spawn must succeed"
+        );
+
+        let expected = std::fs::canonicalize(workdir.path()).unwrap();
+        let recorded = std::fs::read_to_string(&record).unwrap();
+        let lines: Vec<&str> = recorded.lines().collect();
+        assert_eq!(lines.len(), 2, "one cwd record per spawn: {recorded}");
+        for line in lines {
+            assert_eq!(
+                line.trim(),
+                expected.to_string_lossy(),
+                "child cwd must be the node workdir, not the daemon's: {recorded}"
+            );
+        }
+    }
+
+    /// Spawns a fake CLI that records its `CANOPY_MCP_PROFILE` env value and
+    /// returns what it recorded (empty when the variable was unset).
+    async fn profile_env_seen_by_child(node_profile: bool) -> String {
+        let workdir = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let record = scratch.path().join("profile_record.txt");
+        let record_str = record.to_string_lossy().to_string();
+
+        let fake_bin = scratch.path().join("fake-profile-cli");
+        std::fs::write(
+            &fake_bin,
+            format!("#!/bin/sh\nprintf '%s' \"$CANOPY_MCP_PROFILE\" > '{record_str}'\n"),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let cli_config = CliConfig {
+            name: "fake-profile".to_string(),
+            binary: fake_bin.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        let strategy = CliStrategy::from_cli_config(&cli_config);
+        let workdir_str = workdir.path().to_string_lossy().to_string();
+
+        let outcome = spawn_and_wait_cli_process(
+            &strategy,
+            "prompt",
+            None,
+            None,
+            &workdir_str,
+            5,
+            None,
+            None,
+            false,
+            Some("run-profile"),
+            |_| {},
+            None,
+            None,
+            node_profile,
+        )
+        .await;
+        assert!(
+            matches!(
+                outcome,
+                Ok(CliProcessOutcome::Finished { exit_code: 0, .. })
+            ),
+            "spawn must succeed"
+        );
+
+        std::fs::read_to_string(&record).unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn spawn_sets_node_mcp_profile_env() {
+        assert_eq!(
+            profile_env_seen_by_child(true).await,
+            "node",
+            "agent node spawn must set CANOPY_MCP_PROFILE=node"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_without_node_profile_leaves_env_unset() {
+        assert_eq!(
+            profile_env_seen_by_child(false).await,
+            "",
+            "hook spawn must keep the full tool list (no CANOPY_MCP_PROFILE)"
+        );
     }
 }

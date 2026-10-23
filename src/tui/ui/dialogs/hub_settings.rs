@@ -11,45 +11,73 @@ use super::centered_rect;
 use crate::domain::settings::find;
 use crate::tui::app::hub_settings::{
     display_value, effective_eq_default, settings_badge_for, SettingRow, SettingsEditor,
+    SettingsFocus,
 };
 use crate::tui::app::types::App;
 use crate::tui::selection::clamp_scroll;
 use crate::tui::ui::theme::Theme;
 
 pub(super) fn draw_settings_tab(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
-    let rows_area = if area.width >= 80 {
+    let categories_focused = app.hub.settings.focus == SettingsFocus::Categories;
+    let (rows_area, props_focused) = if area.width >= 80 {
         let cols = Layout::horizontal([Constraint::Length(22), Constraint::Min(0)]).split(area);
-        draw_group_column(frame, app, theme, cols[0]);
-        cols[1]
+        let left = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(cols[0]);
+        let right = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(cols[1]);
+        draw_column_header(frame, theme, left[0], "Categories", categories_focused);
+        draw_group_column(frame, app, theme, left[1], categories_focused);
+        draw_column_header(frame, theme, right[0], "Settings", !categories_focused);
+        (right[1], !categories_focused)
     } else {
+        // Narrow: only the property column shows, so it always has the focus.
         let split = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
         draw_group_header(frame, app, theme, split[0]);
-        split[1]
+        (split[1], true)
     };
 
     let rows_area = draw_filter_line(frame, app, theme, rows_area);
-    draw_rows(frame, app, theme, rows_area);
+    draw_rows(frame, app, theme, rows_area, props_focused);
     draw_message(frame, app, theme, area);
     draw_editor(frame, app, theme, area);
     draw_dir_picker(frame, app, theme, area);
 }
 
-fn draw_group_column(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
+/// A column header: `selected_bg` + `header_color` when its column has the
+/// focus, dimmed otherwise (requirement 3).
+fn draw_column_header(frame: &mut Frame, theme: &Theme, area: Rect, label: &str, focused: bool) {
+    let style = if focused {
+        Style::default()
+            .fg(theme.header_color)
+            .bg(theme.selected_bg)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.dim_text)
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(format!(" {label}"), style))),
+        area,
+    );
+}
+
+fn draw_group_column(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, focused: bool) {
     let labels = App::settings_group_labels();
     for (index, label) in labels.iter().enumerate() {
         if index as u16 >= area.height {
             break;
         }
-        let style = if index == app.hub.settings.group_idx {
+        let selected = index == app.hub.settings.group_idx;
+        let style = if selected && focused {
             Style::default()
-                .fg(theme.accent_fg)
+                .fg(theme.header_color)
                 .bg(theme.selected_bg)
                 .add_modifier(Modifier::BOLD)
+        } else if !focused {
+            Style::default().fg(theme.dim_text)
         } else {
             Style::default().fg(theme.text_primary)
         };
+        let marker = if selected && focused { "▸" } else { " " };
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(format!(" {label}"), style))),
+            Paragraph::new(Line::from(Span::styled(format!("{marker} {label}"), style))),
             Rect::new(area.x, area.y + index as u16, area.width, 1),
         );
     }
@@ -96,7 +124,7 @@ fn draw_filter_line(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) -> 
     Rect::new(area.x, area.y + 1, area.width, area.height - 1)
 }
 
-fn draw_rows(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
+fn draw_rows(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, props_focused: bool) {
     let height = area.height as usize;
     if height == 0 {
         return;
@@ -115,7 +143,15 @@ fn draw_rows(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         };
         let selected_row = start + offset == selected;
         let row_area = Rect::new(area.x, area.y + offset as u16, area.width, 1);
-        draw_setting_row(frame, row, selected_row, show_group, theme, row_area);
+        draw_setting_row(
+            frame,
+            row,
+            selected_row,
+            show_group,
+            props_focused,
+            theme,
+            row_area,
+        );
     }
 }
 
@@ -124,35 +160,48 @@ fn draw_setting_row(
     row: &SettingRow,
     selected: bool,
     show_group: bool,
+    props_focused: bool,
     theme: &Theme,
     area: Rect,
 ) {
-    let mut spans: Vec<Span> = Vec::new();
+    let highlighted = selected && props_focused;
+    let base = if props_focused {
+        theme.text_primary
+    } else {
+        theme.dim_text
+    };
+    let marker = if highlighted { "▸" } else { " " };
+    let marker_style = if highlighted {
+        Style::default().fg(theme.header_color)
+    } else {
+        Style::default().fg(base)
+    };
+    let key_style = if highlighted {
+        Style::default()
+            .fg(theme.header_color)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(base).add_modifier(Modifier::BOLD)
+    };
+
+    let mut spans: Vec<Span> = vec![Span::styled(format!("{marker} "), marker_style)];
     if show_group {
         spans.push(Span::styled(
-            format!(" [{}]", row.group),
+            format!("[{}] ", row.group),
             Style::default().fg(theme.dim_text),
         ));
     }
     spans.extend([
-        Span::styled(
-            format!(" {}", row.key),
-            Style::default()
-                .fg(theme.text_primary)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(row.key.clone(), key_style),
         Span::raw(" "),
-        Span::styled(
-            display_value(&row.effective),
-            Style::default().fg(theme.text_primary),
-        ),
+        Span::styled(display_value(&row.effective), Style::default().fg(base)),
     ]);
     spans.push(Span::styled(
         format!(" (default {})", display_value(&row.default)),
-        Style::default().fg(if effective_eq_default(row) {
-            theme.dim_text
-        } else {
+        Style::default().fg(if props_focused && !effective_eq_default(row) {
             theme.text_primary
+        } else {
+            theme.dim_text
         }),
     ));
     if let Some(def) = find(&row.key) {
@@ -171,7 +220,7 @@ fn draw_setting_row(
         spans.push(Span::styled(row.status.clone(), status_style(row, theme)));
     }
 
-    let line = if selected {
+    let line = if highlighted {
         Line::from(spans).style(Style::default().bg(theme.selected_bg))
     } else {
         Line::from(spans)

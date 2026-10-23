@@ -7,7 +7,7 @@ use crate::daemon::handler_formatting::{
     build_id_result, build_node_update_response_with_changes, internal_error,
 };
 use crate::daemon::handler_helpers::record_config_change_if_running;
-use crate::daemon::handler_specs::validate_at_least_one_bool;
+use crate::daemon::handler_specs_helpers::validate_at_least_one_bool;
 use crate::daemon::handler_validate::{
     config_has_agent_harness, json_value_kind_name, parse_router_routes, resolve_prefix_or_error,
     validate_agent_crew_exclusive, validate_blueprint_agent_harness, validate_node_exists,
@@ -24,7 +24,7 @@ use crate::domain::graphs::{
     validate_router_edges_declared, validate_router_route_coverage, validate_router_routes,
     GraphEdge, GraphEdgeCondition, GraphNode, GraphNodeKind,
 };
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::tool;
 use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
@@ -417,7 +417,7 @@ impl TaskTriggerHandler {
             })
             .collect();
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&serde_json::json!({
                 "flagged_nodes": flagged,
                 "commit_rights_nodes": commit_rights_nodes,

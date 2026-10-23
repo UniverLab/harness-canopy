@@ -56,7 +56,7 @@ impl GraphEngine {
     ///   graph alone is not a spec and never substitutes for content.
     /// - A queue (`queue_id` is `Some`): the queue has no `pending` member *and*
     ///   no other non-terminal (`running`/`failed`) member left either — i.e.
-    ///   [`Database::queue_has_incomplete_members`] is false. Unlike bound
+    ///   `Database::queue_has_outstanding_members` (any non-completed/skipped member) is false. Unlike bound
     ///   specs, a queue is a shared queue another graph or a stale relaunch can
     ///   easily point at by mistake, so "every member already done" is
     ///   treated as an error here rather than a silent, do-nothing
@@ -80,7 +80,7 @@ impl GraphEngine {
         };
 
         if let Some(queue_id) = queue_id {
-            if !self.db.queue_has_incomplete_members(queue_id)? {
+            if !self.db.queue_has_outstanding_members(queue_id)? {
                 return Ok(Some(self.empty_spec_set_message(&lp, Some(queue_id))?));
             }
             // (CB22) Validate only the queue's own effective members: a
@@ -224,7 +224,7 @@ impl GraphEngine {
         format!("spec '{display}' (graph '{graph}', {status} {time})")
     }
 
-    /// CM43: the spec a *directed* `graph_run` (`start_node_id`) targets —
+    /// the spec a *directed* `graph_run` (`start_node_id`) targets —
     /// the first spec a FRESH dispatch would actually execute, so the plan
     /// the operator gets back names the spec the run really starts at. Unlike
     /// [`Self::preview_next_spec_id`] this never returns a queue member that
@@ -279,7 +279,7 @@ impl GraphEngine {
         if predecessor.is_none() && !resuming {
             return Ok(None);
         }
-        let (dirty, _paths) = capture_workdir_dirty_with_paths(workdir).await;
+        let (dirty, paths) = capture_workdir_dirty_with_paths(workdir).await;
         let Some(count) = dirty.filter(|n| *n > 0) else {
             return Ok(None);
         };
@@ -318,7 +318,11 @@ impl GraphEngine {
         } else {
             format!("{head} — {attribution} — launched: the next spec is the one that left the dirt, resuming its own work.")
         };
-        Ok(Some(DirtyStartNotice { refuse, message }))
+        Ok(Some(DirtyStartNotice {
+            refuse,
+            message,
+            paths,
+        }))
     }
 
     /// CM29: called once at daemon boot, right after
@@ -340,4 +344,25 @@ impl GraphEngine {
         }
         Ok(())
     }
+}
+
+/// FR2: the blocker a queue run pauses on when the dirty-tree guard refuses the
+/// next spec. Keeps the guard's own text, lists the first 20 dirty paths, and
+/// names the ways out.
+pub(crate) fn dirty_advance_blocker(next_spec: &str, message: &str, paths: &[String]) -> String {
+    const LISTED: usize = 20;
+    let mut listed = paths
+        .iter()
+        .take(LISTED)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if paths.len() > LISTED {
+        listed.push_str(&format!(", ... (+{} more)", paths.len() - LISTED));
+    }
+    format!(
+        "{message}. Dirty paths: {listed}. Ways out: `graph_continue run_from_node` on spec \
+         '{next_spec}'; clean the tree by hand, then `graph_continue skip_next_spec`; or set \
+         `allow_dirty_start` on the graph."
+    )
 }

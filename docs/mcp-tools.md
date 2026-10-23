@@ -1,17 +1,22 @@
 ---
 title: MCP Tools
-description: All 115 MCP tools exposed by the canopy daemon, by category.
+description: All 116 MCP tools exposed by the canopy daemon, by category.
 order: 11
 ---
 
 # MCP Tools
 
-The daemon exposes **115 MCP tools** over Streamable HTTP (port 7755) and
+The daemon exposes **116 MCP tools** over Streamable HTTP (port 7755) and
 stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 
 Writes wait up to 5 seconds for a concurrent writer. If the database is still
 busy after that, the call fails with `<tool>: database busy after 5 s — nothing
 was written, retry`. Nothing changed, so retry the same call.
+
+Graph-node sessions (agent and ensemble nodes launched by the graph engine) get
+a fixed node profile of 18 tools in `tools/list` (`CANOPY_MCP_PROFILE=node`), so
+every node stays under the 128-tool cap of OpenAI-compatible providers. Calls to
+any other tool still work. All other sessions keep the full list.
 
 ## Agent management (18)
 
@@ -79,10 +84,10 @@ was written, retry`. Nothing changed, so retry the same call.
 
 | Tool | Description |
 |---|---|
-| `graph_create` | Create a graph container |
-| `graph_update` | Update graph metadata and hooks |
-| `graph_add_spec` | Add an ordered spec to a graph |
-| `graph_update_spec` | Update a graph spec |
+| `graph_create` | Create a graph container. `require_spec_type: true` (default `false`) makes it refuse specs without a type |
+| `graph_update` | Update graph metadata and hooks, including `require_spec_type` |
+| `graph_add_spec` | Add an ordered spec to a graph. Supports `spec_type` and `spec_scope` to enable automatic code generation. A graph with `require_spec_type: true` refuses specs without a type |
+| `graph_update_spec` | Update a graph spec. Accepts `spec_type` and `spec_scope` |
 | `graph_remove_spec` | Unbind a spec from a graph, making it a standalone backlog spec; execution history is preserved. |
 | `graph_add_node` | Add a node to a graph |
 | `graph_update_node` | Update a graph node |
@@ -105,11 +110,11 @@ was written, retry`. Nothing changed, so retry the same call.
 | `graph_get` | Get a graph with its specs, nodes, and edges |
 | `graph_list` | List graphs |
 | `graph_crew` | List every graph's harness/model assignments — agent nodes outside ensembles, ensemble members and agent hooks with platform, model, timeout, crew and availability; `group_by: "pair"` summarises per platform/model pair. No prompt text is returned |
-| `graph_run` | Run a graph (optionally `start_node_id` to start the first spec at a chosen node) |
-| `graph_reset` | Reset a graph's pending specs; `clear_notes: true` also deletes the reset specs' spec notes (kept by default) |
+| `graph_run` | Run a graph (optionally `start_node_id` to start the first spec at a chosen node — a directed start clears that spec's execution count before it runs and the reply says `Execution limit reset for spec '<name>'`) |
+| `graph_reset` | Reset a graph's pending specs; with `specs: [<id>, …]` exactly those specs are reset and each named spec's execution count (the per-spec failure limit) is zeroed, while a reset without `specs` keeps every count — the worktree is never touched. `clear_notes: true` also deletes the reset specs' spec notes (kept by default) |
 | `graph_schedule_autorun` | Schedule a graph to resume or run |
 | `graph_pause` | Pause a running graph |
-| `graph_continue` | Continue a paused graph (retry/skip), or start a spec at a chosen node with `run_from_node` |
+| `graph_continue` | Continue a paused **or failed** graph (retry/skip), or start a spec at a chosen node with `run_from_node` (`node_id` names the node the spec starts at; `spec_id` names the spec and defaults to the graph's current spec — in a queue-driven graph: a running/interrupted member, else a failed one, else the next pending one). `retry_current_node` also resumes a paused graph whose current spec is `pending` with a recorded node (the state daemon recovery leaves after a reboot mid-node). `retry_current_node` and `run_from_node` (like `graph_run`'s `start_node_id`) clear the targeted spec's execution count before it runs and the reply says `Execution limit reset for spec '<name>'`; automatic re-runs keep the count. Any other graph status is refused naming the status and the ways out (`run_from_node` with `spec_id`, or `graph_reset` with `specs: [<spec id>]` then `graph_run`). The launch is refused, naming the node, if an upstream node's latest run failed, errored or was interrupted |
 | `graph_complete_node` | Complete an active graph node |
 | `graph_report_blocker` | Report a blocker for an active graph node |
 | `graph_export` | Export a graph design |
@@ -133,7 +138,7 @@ See [Graphs](graphs.md).
 
 Kept callable for the whole 3.x line, but excluded from tool listings
 (`tools/list`) so nothing new adopts them — call the 3.x name instead. Not
-counted in the 115 tools above.
+counted in the 116 tools above.
 
 | Deprecated name | Renamed to (3.0.0) |
 |---|---|
@@ -192,11 +197,14 @@ platform-wide entry. An `unavailable` entry past its `until` reads as available
 
 ## Spec backlog (9)
 
+Every tool that takes a `spec_id` also accepts the spec's code (e.g. `FIX-7`),
+resolved within the caller's or the graph's workdir.
+
 | Tool | Description |
 |---|---|
-| `spec_create` | Create a standalone spec (not bound to any graph) |
-| `spec_list` | List specs, filterable by workdir and status |
-| `spec_update` | Update a spec's name, description, or workdir tag |
+| `spec_create` | Create a standalone spec (not bound to any graph). Supports `spec_type` (Conventional Commits type: `feat`, `fix`, etc.) and `spec_scope` (e.g. `tui`) to enable automatic code generation and deterministic commit messages. A conventional name such as `fix(tui): open F1` sets the type and scope and stores the subject alone. A spec created without a type still succeeds but returns a `warning`: it will have no code and no commit message |
+| `spec_list` | List specs, filterable by workdir, status, and `spec_type` |
+| `spec_update` | Update a spec's name, description, workdir tag, `spec_type`, or `spec_scope` |
 | `spec_delete` | Delete an unbound spec |
 | `spec_set_status` | Admin transition: complete, skip, or reopen a standalone spec |
 | `spec_section_get` | Extract one canonical section (`<objective>`, `<constraints>`, …) from a spec body |
@@ -245,6 +253,12 @@ readable until `spec_convert` migrates them.
 |---|---|
 | `rag_search` | Semantic search over indexed documents (rate-limited) |
 | `rag_compact` | Compact the vector store now: merge fragments and prune old versions |
+
+## Platform registry (1)
+
+| Tool | Description |
+|---|---|
+| `registry_refresh` | Fetch the platform registry and apply it to config.toml now, ignoring the 24-hour interval. Takes no parameters; returns the report as JSON — `changed` and `kept` per platform, the `added`, `updated` and `deleted` platform names, and `up_to_date` |
 
 ## Protocol (1)
 

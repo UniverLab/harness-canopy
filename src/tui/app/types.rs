@@ -65,6 +65,7 @@ pub enum Focus {
     NewAgentDialog,
     LaunchpadDialog,
     KnowledgeDialog,
+    KnowledgeViewer,
     Agent,
     ContextTransfer,
     RagTransfer,
@@ -253,12 +254,17 @@ pub struct App {
     /// Cheap per-project Preview summary, keyed by project hash and
     /// recomputed on the normal refresh cadence — never per keystroke.
     pub(crate) project_preview_cache: HashMap<String, ProjectPreviewSummary>,
+    /// Last-activity timestamp per project hash, in the same order
+    /// `projects` is ranked by (`Database::list_projects_by_activity`).
+    /// Rendered as the project row's first meta line.
+    pub(crate) project_last_activity: HashMap<String, i64>,
     pub(crate) log_content: String,
     pub(crate) log_scroll: u16,
     pub(crate) running: bool,
     pub(crate) new_agent_dialog: Option<NewAgentDialog>,
     pub(crate) launchpad_dialog: Option<LaunchpadDialog>,
     pub(crate) knowledge_dialog: Option<crate::tui::app::dialog::KnowledgeDialog>,
+    pub(crate) knowledge_viewer: Option<crate::tui::app::dialog::KnowledgeViewerDialog>,
     pub(crate) pending_launch_dialog: Option<NewAgentDialog>,
     pub(crate) quit_confirm: bool,
     pub(crate) delete_project_confirm: bool,
@@ -445,6 +451,10 @@ pub struct App {
     pub(crate) knowledge_graph_scroll: u16,
     pub(crate) knowledge_filter: String,
     pub(crate) knowledge_filter_mode: bool,
+    /// Type-ahead over the Knowledge layer's project list (sidebar layer
+    /// Knowledge, no project entered). Deliberately separate from
+    /// `knowledge_filter`, which filters entries *inside* a project.
+    pub(crate) project_filter: String,
     pub(crate) sidebar_visible: bool,
     pub(crate) hidden_activity_workdirs: HashSet<String>,
     pub(crate) forced_activity_workdirs: HashSet<String>,
@@ -472,6 +482,11 @@ pub struct App {
     /// Hash of the last log chunk scanned for whimsg triggers — avoids re-firing
     /// on the same content every tick.
     pub(crate) whimsg_last_log_hash: u64,
+    /// Previous per-graph snapshot for the header's graph events. `None` until
+    /// the first refresh primes it silently (no events on the first sighting).
+    pub(crate) whimsg_graphs: Option<HashMap<String, crate::tui::whimsg::events::GraphSnapshot>>,
+    /// Background run ids already announced by the header, so each fires once.
+    pub(crate) whimsg_announced_runs: HashSet<String>,
     pub(crate) context_transfer_modal: Option<crate::tui::context_transfer::ContextTransferModal>,
     pub(crate) rag_transfer_modal: Option<RagTransferModal>,
     pub(crate) context_transfer_config: crate::tui::context_transfer::ContextTransferConfig,
@@ -562,9 +577,6 @@ pub struct App {
     /// knowledge"`, …). Rendered as a badge so a face never appears
     /// unexplained. `None` after a manual pin/pick.
     pub(crate) panel_last_reason: Option<String>,
-    /// Whether the face picker overlay is open, and its cursor.
-    pub(crate) panel_picker_open: bool,
-    pub(crate) panel_picker_idx: usize,
     /// CM51 (D4): the last `settings_revision` this session has applied. When
     /// the daemon publishes a newer one (a `config_set`, or a hand edit seen
     /// by the file watcher), the TUI reloads `CanopyConfig` so the values it
@@ -666,6 +678,10 @@ pub struct App {
     pub(crate) mission_manager: crate::tui::gamification::MissionManager,
     pub(crate) mission_pending_events: Vec<crate::tui::gamification::MissionEvent>,
     pub(crate) max_cpu_frequency_seen: Option<u64>,
+    /// Whether a CPU temperature reading has ever been observed this session.
+    /// Sticky: once seen it stays true, so WSL-style never-present sensors
+    /// keep the Nuclear Winter mission marked as not measurable.
+    pub(crate) cpu_temperature_seen: bool,
     /// Monotonic anchor for accumulating real Canopy uptime (persisted in state).
     pub(crate) uptime_anchor: Option<std::time::Instant>,
 }
@@ -694,8 +710,8 @@ pub(crate) struct ProjectRelationDialog {
 }
 
 /// Tracks session-start protocol block delivery per session for idempotency.
-/// The block is the static "[START HERE — required]" contract, not the
-/// per-turn workspace/intents/chatter context, which is sent every turn
+/// The block is the static "[CANOPY]" contract, not the
+/// per-turn workspace/intents context, which is sent every turn
 /// regardless of this state.
 #[derive(Clone, Default)]
 pub(crate) struct SessionProtocolState {

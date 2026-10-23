@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::VecDeque;
 
 /// The workdir's current `git rev-parse HEAD`, or `None` if it isn't a git
 /// repo (or the command otherwise fails). Never errors the caller — a check
@@ -67,6 +68,9 @@ pub(crate) async fn capture_workdir_dirty_with_paths(workdir: &str) -> (Option<i
 pub struct DirtyStartNotice {
     pub refuse: bool,
     pub message: String,
+    /// The dirty paths the worktree reported (`git status --porcelain`),
+    /// so a refusal can list what blocks the launch.
+    pub paths: Vec<String>,
 }
 
 /// CM29: the one-line dirty-tree note folded onto a failed/interrupted
@@ -170,6 +174,55 @@ impl CommitRightsWatch {
     }
 }
 
+/// The commits between two HEADs, newest first, each rendered as
+/// `<short hash> <subject> (<author date>)` — the listing the commit-rights
+/// blocker appends so a commit that belongs to a different spec (or another
+/// process entirely, e.g. a leftover session of a previous run) is visible
+/// at a glance. Capped at 5 entries, then `and N more`: the blocker's job is
+/// diagnosis, not dumping a long range. Empty on any git failure (non-git
+/// workdir, missing ref) — the caller still reports the moved HEAD without
+/// the listing, exactly like `capture_workdir_head` never errors.
+pub(crate) async fn new_commits_between(
+    workdir: &str,
+    head_before: &str,
+    head_after: &str,
+) -> Vec<String> {
+    let Ok(output) = Command::new("git")
+        .arg("log")
+        .arg("--format=%h%x09%s%x09%ad")
+        .arg("--date=short")
+        .arg(format!("{head_before}..{head_after}"))
+        .current_dir(workdir)
+        .output()
+        .await
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let commits: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            // Parsed from the right: the date has no tab and the hash has
+            // none either, so a tab inside a commit subject can never shift
+            // the fields — the rendered line keeps the spec's
+            // `<short hash> <subject> (<author date>)` shape regardless.
+            let (rest, date) = line.rsplit_once('\t')?;
+            let (hash, subject) = rest.split_once('\t')?;
+            Some(format!("{hash} {subject} ({date})"))
+        })
+        .collect();
+    if commits.len() > 5 {
+        let remaining = commits.len() - 5;
+        let mut capped: Vec<String> = commits.into_iter().take(5).collect();
+        capped.push(format!("and {remaining} more"));
+        capped
+    } else {
+        commits
+    }
+}
+
 /// Turn a detected commit-rights violation into the node's actual result: a
 /// deterministic FAIL carrying the reason, routed through the fail edge like
 /// any other failure.
@@ -180,18 +233,32 @@ impl CommitRightsWatch {
 /// *correct* work, made by the wrong node), and history rewriting is not
 /// something an unattended daemon should ever do on its own. Undoing is left
 /// to the operator, who now has both hashes in the run output.
-pub(crate) fn commit_rights_failure(
+///
+/// The wording never claims the node itself committed: canopy cannot know
+/// who moved HEAD — the commit may come from this node, another session, a
+/// hook, or a human — so it states the observed move and lists the new
+/// commits (capped at 5) for the human to judge.
+pub(crate) async fn commit_rights_failure(
     label: &str,
     node_id: &str,
     head_before: &str,
     head_after: &str,
+    workdir: &str,
     node_output: Value,
 ) -> NodeExecution {
-    let message = format!(
-        "{label} committed but has no commit rights: HEAD moved {head_before} -> {head_after}. \
-         Only a node configured with `commit_rights: true` may move git history. \
+    let mut message = format!(
+        "{label}: HEAD moved from {head_before} to {head_after} while it ran. \
+         The commit may come from this node or from another process (another session, a hook, a human). \
+         The run has no commit rights — only a node configured with `commit_rights: true` may move git history. \
          The commit was left in place — undo it yourself if it does not belong there."
     );
+    let commits = new_commits_between(workdir, head_before, head_after).await;
+    if !commits.is_empty() {
+        message.push_str("\nNew commits in that range:");
+        for line in &commits {
+            message.push_str(&format!("\n  {line}"));
+        }
+    }
     // Built by hand rather than with `json!` so the node's own output moves
     // in whole — it can be a full review document, and this runs on a path
     // that is already reporting a failure.
@@ -297,6 +364,9 @@ pub(crate) fn no_spec_placeholder(graph_id: &str) -> GraphSpec {
         completed_via: None,
         completed_via_reason: None,
         completed_via_at: None,
+        spec_code: None,
+        spec_scope: None,
+        spec_type: None,
     }
 }
 
@@ -325,15 +395,19 @@ pub(crate) fn resolve_spec_start(
     Option<Value>,
     HashMap<String, usize>,
 )> {
-    // CM43: a directed run starts the spec at the operator-named node
+    // A directed run starts the spec at the operator-named node
     // regardless of status, seeding every earlier node's recorded output so
     // reachable `{{output:X}}` markers still bind. `iterations` stays empty,
     // which restarts the per-node iteration counters at 1.
     if let Some(start) = directed.filter(|d| d.spec_id == spec.id) {
         let target = resolve_directed_target(&start.node_arg, nodes, edges, ensembles)?;
-        let node_outputs = retained_node_outputs(nodes, existing_runs);
-        let previous = directed_previous_output(&target.start_node_ids, existing_runs);
-        return Ok((target.cursor, node_outputs, previous, HashMap::new()));
+        // Only nodes upstream of the resolved cursor reuse recorded outputs.
+        // The cursor's own node (and everything downstream) is executed
+        // fresh, so its prior output/input is never seeded.
+        let upstream_ids = directed_upstream_node_ids(edges, &target.start_node_ids);
+        check_upstream_prerequisites(nodes, &upstream_ids, existing_runs)?;
+        let node_outputs = upstream_node_outputs(nodes, &upstream_ids, existing_runs);
+        return Ok((target.cursor, node_outputs, None, HashMap::new()));
     }
     // CB50 FR4: `Interrupted` resumes at its cursor only via `loop_continue`
     // (`is_resume: true`); `loop_run` (`is_resume: false`) restarts it from the
@@ -381,6 +455,74 @@ pub(crate) fn resolve_spec_start(
         None,
         HashMap::new(),
     ))
+}
+
+/// Node ids upstream of a directed cursor's start nodes: every node that can
+/// reach one of the start nodes (walking edges backwards), excluding the
+/// start nodes themselves and everything downstream of them.
+pub(crate) fn directed_upstream_node_ids(
+    edges: &[GraphEdge],
+    start_node_ids: &[String],
+) -> HashSet<String> {
+    let start: HashSet<&str> = start_node_ids.iter().map(String::as_str).collect();
+    let mut can_reach_start: HashSet<String> = HashSet::new();
+    let mut back: VecDeque<String> = start_node_ids.iter().cloned().collect();
+    while let Some(id) = back.pop_front() {
+        if !can_reach_start.insert(id.clone()) {
+            continue;
+        }
+        for edge in edges.iter().filter(|e| e.to_node == id) {
+            if !can_reach_start.contains(&edge.from_node) {
+                back.push_back(edge.from_node.clone());
+            }
+        }
+    }
+    can_reach_start
+        .into_iter()
+        .filter(|id| !start.contains(id.as_str()))
+        .collect()
+}
+
+/// Refuses a directed start when an upstream prerequisite (one whose output
+/// would be reused) last ran Fail, Error or Interrupted. Skipping it as if it
+/// had passed would route on work that never cleared its gates.
+pub(crate) fn check_upstream_prerequisites(
+    nodes: &[GraphNode],
+    upstream_ids: &HashSet<String>,
+    runs: &[GraphNodeRun],
+) -> anyhow::Result<()> {
+    for node in nodes.iter().filter(|n| upstream_ids.contains(&n.id)) {
+        let Some(latest) = runs.iter().rev().find(|r| r.node_id == node.id) else {
+            continue;
+        };
+        if matches!(
+            latest.status,
+            GraphRunStatus::Fail | GraphRunStatus::Error | GraphRunStatus::Interrupted
+        ) {
+            bail!(
+                "Directed run refused: prerequisite node '{}' last run was {} ({}). Re-run it first or start at an earlier node.",
+                node.name,
+                latest.status.as_str(),
+                latest.id
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Recorded outputs a directed start may reuse: only nodes upstream of its
+/// cursor. The cursor's own output (and anything downstream) is never seeded.
+pub(crate) fn upstream_node_outputs(
+    nodes: &[GraphNode],
+    upstream_ids: &HashSet<String>,
+    runs: &[GraphNodeRun],
+) -> HashMap<String, Value> {
+    let upstream_runs: Vec<GraphNodeRun> = runs
+        .iter()
+        .filter(|run| upstream_ids.contains(&run.node_id))
+        .cloned()
+        .collect();
+    retained_node_outputs(nodes, &upstream_runs)
 }
 
 pub(crate) fn retained_node_outputs(

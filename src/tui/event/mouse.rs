@@ -573,11 +573,11 @@ fn handle_mouse_scroll(app: &mut App, mouse: &MouseEvent) {
 
     if app.hub_open {
         if app.hub.tab == crate::tui::app::hub::HubTab::Missions {
-            let unlocked_count = app.mission_manager.unlocked_count();
-            if unlocked_count != 0 {
+            let mission_count = crate::domain::gamification::MISSIONS.len();
+            if mission_count != 0 {
                 let forward = dir < 0;
                 app.legend_selected =
-                    crate::tui::selection::move_index(app.legend_selected, unlocked_count, forward);
+                    crate::tui::selection::move_index(app.legend_selected, mission_count, forward);
             }
         }
         return;

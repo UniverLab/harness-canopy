@@ -5,6 +5,10 @@ use super::*;
 impl App {
     pub fn refresh(&mut self) -> Result<()> {
         self.animation_tick = self.animation_tick.wrapping_add(1);
+        // The project type-ahead only ever applies to the Knowledge layer's
+        // list, so it is dropped here — the one place every way of leaving
+        // that layer (arrows, F2, click, Home) passes through.
+        self.sync_project_filter_to_layer();
         if self.update_available.is_none() {
             self.update_available = crate::autoupdate::update_available_tag();
         }
@@ -218,27 +222,8 @@ impl App {
     // to the first item of that same tab. Inside Knowledge, once a project
     // is entered (`project_focus.is_some()`) arrows navigate that project's
     // active tab list under the same rule (functional requirement 4).
-
-    pub(crate) fn refresh_projects(&mut self) -> Result<()> {
-        self.projects = self.db.list_projects()?;
-        if self.projects.is_empty() {
-            self.selected_project = 0;
-        } else {
-            self.selected_project = self.selected_project.min(self.projects.len() - 1);
-        }
-        self.refresh_project_knowledge()?;
-        self.refresh_backlog_specs()?;
-        self.refresh_project_preview_cache();
-        // Keep an already-open History tab live instead of only loading it
-        // once on first show — cheap (one indexed query) and scoped to just
-        // the project currently being looked at.
-        if self.project_focus == Some(ProjectTab::History) {
-            if let Some(hash) = self.selected_project().map(|p| p.hash.clone()) {
-                self.load_project_history(&hash);
-            }
-        }
-        Ok(())
-    }
+    //
+    // `refresh_projects` itself lives in `project_activity.rs`.
 
     /// Recompute the Knowledge layer's per-project Preview summary cache
     /// (pending backlog count, knowledge entry count, last activity, graph
@@ -257,7 +242,7 @@ impl App {
         for project in &self.projects {
             let pending_backlog = self
                 .db
-                .list_specs(Some(project.path.as_str()), None, true)
+                .list_specs(Some(project.path.as_str()), None, true, None)
                 .map(|specs| specs.len())
                 .unwrap_or(0);
             let knowledge_entries = self
@@ -328,7 +313,9 @@ impl App {
     /// cadence as `refresh_projects` — no dedicated polling graph.
     pub(crate) fn refresh_backlog_specs(&mut self) -> Result<()> {
         let workdir_filter = self.selected_project().map(|p| p.path.clone());
-        self.backlog_specs = self.db.list_specs(workdir_filter.as_deref(), None, true)?;
+        self.backlog_specs = self
+            .db
+            .list_specs(workdir_filter.as_deref(), None, true, None)?;
         if self.backlog_specs.is_empty() {
             self.selected_backlog = 0;
         } else {
@@ -682,12 +669,12 @@ impl App {
         use crate::tui::whimsg::WhimContext;
 
         if !self.daemon_running {
-            self.whimsg.set_ambient(WhimContext::AgentFailed);
-            self.whimsg.notify_event(WhimContext::AgentFailed);
+            self.whimsg.set_ambient(WhimContext::Idle);
             return;
         }
 
         self.check_recent_run_events();
+        self.notify_whimsg_for_graphs();
 
         if self.last_scroll_at.elapsed() < std::time::Duration::from_secs(5) {
             self.whimsg.set_ambient(WhimContext::Scrolling);
@@ -699,9 +686,9 @@ impl App {
     }
 
     pub(crate) fn check_recent_run_events(&mut self) {
-        use crate::tui::whimsg::WhimContext;
+        use crate::tui::whimsg::events::{EventKind, WhimEvent};
         let now = Utc::now();
-        let statuses: Vec<_> = self
+        let candidates: Vec<(String, String, EventKind)> = self
             .recent_runs
             .iter()
             .filter_map(|run| {
@@ -709,17 +696,26 @@ impl App {
                 if (now - finished).num_seconds() >= 60 {
                     return None;
                 }
-                match run.status {
+                let kind = match run.status {
                     crate::domain::models::RunStatus::Error
-                    | crate::domain::models::RunStatus::Timeout => Some(WhimContext::AgentFailed),
-                    crate::domain::models::RunStatus::Success => Some(WhimContext::AgentDone),
-                    _ => None,
-                }
+                    | crate::domain::models::RunStatus::Timeout => EventKind::AgentFailed,
+                    crate::domain::models::RunStatus::Success => EventKind::AgentDone,
+                    _ => return None,
+                };
+                Some((run.id.clone(), run.background_agent_id.clone(), kind))
             })
             .collect();
-        for ctx in statuses {
-            self.whimsg.notify_event(ctx);
+        for (run_id, subject, kind) in candidates {
+            if self.whimsg_announced_runs.insert(run_id) {
+                self.whimsg.notify_event(WhimEvent::new(kind, subject));
+            }
         }
+        // Announced ids that fell out of the recent list can never be
+        // considered again; drop them so the set doesn't grow for the whole
+        // session (it otherwise holds one id per run ever announced).
+        let live: HashSet<&str> = self.recent_runs.iter().map(|run| run.id.as_str()).collect();
+        self.whimsg_announced_runs
+            .retain(|id| live.contains(id.as_str()));
     }
 
     pub(crate) fn check_log_context(&mut self) {
@@ -738,7 +734,13 @@ impl App {
     }
 
     pub(crate) fn notify_whimsg_for_log(&mut self, raw_log: &str) {
-        use crate::tui::whimsg::WhimContext;
+        use crate::tui::whimsg::events::{EventKind, WhimEvent};
+
+        // A log event names a real agent; with none selected there is nothing
+        // to attribute it to, so it is skipped.
+        let Some(subject) = self.selected_live_agent().map(|agent| agent.name.clone()) else {
+            return;
+        };
 
         let log_hash = calculate_log_hash(raw_log);
         if log_hash == self.whimsg_last_log_hash {
@@ -747,13 +749,16 @@ impl App {
         self.whimsg_last_log_hash = log_hash;
 
         let log_up = raw_log.to_uppercase();
-        if log_contains_error(&log_up) {
-            self.whimsg.notify_event(WhimContext::AgentFailed);
+        let kind = if log_contains_error(&log_up) {
+            EventKind::AgentFailed
         } else if log_contains_success(&log_up) {
-            self.whimsg.notify_event(WhimContext::AgentDone);
+            EventKind::AgentDone
         } else if log_contains_spawn(&log_up) {
-            self.whimsg.notify_event(WhimContext::AgentSpawned);
-        }
+            EventKind::AgentSpawned
+        } else {
+            return;
+        };
+        self.whimsg.notify_event(WhimEvent::new(kind, subject));
     }
 
     pub(crate) fn update_ambient_context(&mut self) {
@@ -763,12 +768,10 @@ impl App {
             .iter()
             .filter(|a| a.status == crate::tui::agent::AgentStatus::Running)
             .count();
-        let has_active_runs = !self.active_runs.is_empty();
+        let active_runs = self.active_runs.len();
 
-        let ctx = if running >= 3 || (running >= 1 && has_active_runs) {
-            WhimContext::Busy
-        } else if has_active_runs {
-            WhimContext::TaskRunning
+        let ctx = if running + active_runs > 0 {
+            WhimContext::Busy(running + active_runs)
         } else {
             WhimContext::Idle
         };

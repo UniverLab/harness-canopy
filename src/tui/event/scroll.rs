@@ -69,6 +69,7 @@ pub(super) fn handle_scroll(app: &mut App, dir: i32) {
         }
         Focus::LaunchpadDialog
         | Focus::KnowledgeDialog
+        | Focus::KnowledgeViewer
         | Focus::ContextTransfer
         | Focus::RagTransfer
         | Focus::PromptTemplateDialog

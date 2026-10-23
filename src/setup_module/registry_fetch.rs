@@ -6,7 +6,8 @@ use crate::domain::registry_baseline::RegistryBaseline;
 use crate::setup_module::models::{resolve_config_path, CanonicalServers, Platform, RegistryRaw};
 use crate::setup_module::PlatformWithCli;
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -25,6 +26,82 @@ pub fn set_local_registry(path: PathBuf) {
 /// `pub` so the `canopy mcp` wizard can label which registry source it used.
 pub fn local_registry_path() -> Option<&'static PathBuf> {
     LOCAL_REGISTRY_PATH.get()
+}
+
+/// Outcome of a [`refresh_registry_inner`] run, suitable for surfacing to an
+/// operator via the `canopy registry refresh` CLI command or the
+/// `registry_refresh` MCP tool.
+#[derive(Debug, Serialize)]
+pub(crate) struct RegistryRefreshReport {
+    /// Registry-owned CLI fields that were rewritten on platforms the operator
+    /// already had configured, keyed by platform name.
+    pub(crate) changed: BTreeMap<String, Vec<String>>,
+    /// Local overrides (fields that drifted from the baseline) that were
+    /// preserved verbatim, keyed by platform name.
+    pub(crate) kept: BTreeMap<String, Vec<String>>,
+    /// Platforms newly added to the baseline this refresh.
+    pub(crate) added: Vec<String>,
+    /// Platforms whose structural definition was updated this refresh.
+    pub(crate) updated: Vec<String>,
+    /// Platforms removed from the registry.
+    pub(crate) deleted: Vec<String>,
+    /// True only when this refresh changed nothing.
+    pub(crate) up_to_date: bool,
+}
+
+impl RegistryRefreshReport {
+    /// Human-readable, one line per affected platform — or a single
+    /// "registry already up to date" line when there was nothing to report.
+    pub(crate) fn render_text(&self) -> String {
+        if self.up_to_date {
+            return "registry already up to date".to_string();
+        }
+
+        let mut lines: Vec<String> = Vec::new();
+        for (platform, fields) in &self.changed {
+            if !fields.is_empty() {
+                lines.push(format!("{}: changed {}", platform, fields.join(", ")));
+            }
+        }
+        for (platform, fields) in &self.kept {
+            if !fields.is_empty() {
+                lines.push(format!(
+                    "{}: kept local override {}",
+                    platform,
+                    fields.join(", ")
+                ));
+            }
+        }
+        for platform in &self.added {
+            lines.push(format!("{}: added", platform));
+        }
+        for platform in &self.updated {
+            lines.push(format!("{}: updated", platform));
+        }
+        for platform in &self.deleted {
+            lines.push(format!("{}: removed", platform));
+        }
+
+        if lines.is_empty() {
+            "registry already up to date".to_string()
+        } else {
+            lines.join("\n")
+        }
+    }
+}
+
+/// Group `cli.key` style entries (as produced by [`merge_cli_fields`]) into a
+/// per-platform map of bare field names.
+fn group_by_platform(entries: Vec<String>) -> BTreeMap<String, Vec<String>> {
+    let mut grouped: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for entry in entries {
+        if let Some(pos) = entry.find('.') {
+            let (platform, rest) = entry.split_at(pos);
+            let key = rest[1..].to_string();
+            grouped.entry(platform.to_string()).or_default().push(key);
+        }
+    }
+    grouped
 }
 
 /// Lightweight index for the per-platform registry (v6).
@@ -275,7 +352,7 @@ pub fn maybe_refresh_registry() -> bool {
 
     // Fetch and update in background thread
     std::thread::spawn(move || {
-        let _ = refresh_registry_inner(&home);
+        let _ = refresh_registry_inner(&home, fetch_registry);
     });
 
     true
@@ -309,8 +386,11 @@ fn needs_refresh(canopy_dir: &Path) -> bool {
     }
 }
 
-fn refresh_registry_inner(home: &Path) -> Result<()> {
-    let registry = fetch_registry()?;
+pub(crate) fn refresh_registry_inner(
+    home: &Path,
+    fetch: impl FnOnce() -> Result<RegistryRaw>,
+) -> Result<RegistryRefreshReport> {
+    let registry = fetch()?;
     apply_registry_refresh(home, &registry)
 }
 
@@ -321,7 +401,7 @@ fn refresh_registry_inner(home: &Path) -> Result<()> {
 /// record the successful refresh time. Split out from [`refresh_registry_inner`]
 /// so tests can drive it with an in-memory [`RegistryRaw`] instead of a real
 /// fetch.
-fn apply_registry_refresh(home: &Path, registry: &RegistryRaw) -> Result<()> {
+fn apply_registry_refresh(home: &Path, registry: &RegistryRaw) -> Result<RegistryRefreshReport> {
     let detected: Vec<&Platform> = registry
         .platforms
         .iter()
@@ -356,7 +436,7 @@ fn apply_registry_refresh(home: &Path, registry: &RegistryRaw) -> Result<()> {
     // invocation flags is everyone, permanently, with no way to even know.
     backup_config_before_first_refresh(&canopy_dir, baseline.is_none())?;
 
-    let changed_fields =
+    let (changed_fields, kept_fields) =
         merge_existing_cli_entries(&mut config, &registry_by_name, baseline.as_ref());
     remove_cli_entries_with_missing_binaries(&mut config, &platforms_with_cli);
     add_newly_detected_clis(&mut config, &cli_registry);
@@ -394,7 +474,22 @@ fn apply_registry_refresh(home: &Path, registry: &RegistryRaw) -> Result<()> {
         &chrono::Utc::now().to_rfc3339(),
     )?;
 
-    Ok(())
+    let changed = group_by_platform(changed_fields);
+    let kept = group_by_platform(kept_fields);
+    let up_to_date = changed.is_empty()
+        && kept.is_empty()
+        && refresh.added.is_empty()
+        && refresh.updated.is_empty()
+        && refresh.deleted.is_empty();
+
+    Ok(RegistryRefreshReport {
+        changed,
+        kept,
+        added: refresh.added,
+        updated: refresh.updated,
+        deleted: refresh.deleted,
+        up_to_date,
+    })
 }
 
 /// Back up `config.toml` before the first-ever refresh adopts registry
@@ -420,13 +515,16 @@ fn backup_config_before_first_refresh(canopy_dir: &Path, is_first_refresh: bool)
 /// the new registry value wins; a field that has drifted from the
 /// baseline was deliberately edited, so it's left alone. A user who
 /// customised `model_flag` must still receive a corrected `headless_mode`.
-/// Returns the registry-owned fields that actually changed.
+/// Returns the (rewritten, preserved) field lists for the CLIs that were
+/// three-way merged: fields that took the registry value, and local overrides
+/// that were deliberately kept. Both are emitted as `"cli.key"` strings.
 fn merge_existing_cli_entries(
     config: &mut crate::domain::canopy_config::CanopyConfig,
     registry_by_name: &std::collections::HashMap<String, CliConfig>,
     baseline: Option<&RegistryBaseline>,
-) -> Vec<String> {
+) -> (Vec<String>, Vec<String>) {
     let mut changed_fields: Vec<String> = Vec::new();
+    let mut kept_fields: Vec<String> = Vec::new();
 
     for existing in config.clis.iter_mut() {
         if let Some(registry_cli) = registry_by_name.get(&existing.name) {
@@ -438,11 +536,12 @@ fn merge_existing_cli_entries(
                 registry_cli,
                 &name,
                 &mut changed_fields,
+                &mut kept_fields,
             );
         }
     }
 
-    changed_fields
+    (changed_fields, kept_fields)
 }
 
 /// Remove CLIs only when the registry explicitly knows the platform AND
@@ -632,6 +731,7 @@ pub(crate) fn merge_cli_fields(
     registry: &CliConfig,
     cli_name: &str,
     changed_fields: &mut Vec<String>,
+    kept: &mut Vec<String>,
 ) -> CliConfig {
     let local_val = serde_json::to_value(local).unwrap_or_default();
     let registry_val = serde_json::to_value(registry).unwrap_or_default();
@@ -651,6 +751,10 @@ pub(crate) fn merge_cli_fields(
         if user_untouched && &local_field != registry_field {
             changed_fields.push(format!("{cli_name}.{key}"));
             merged.insert(key.clone(), registry_field.clone());
+        } else if !user_untouched && &local_field != registry_field {
+            // Deliberate local edit diverging from the registry: keep the
+            // user's value verbatim and report it as a preserved override.
+            kept.push(format!("{cli_name}.{key}"));
         }
     }
 
@@ -1074,12 +1178,13 @@ mod tests {
         let baseline_before =
             std::fs::read_to_string(canopy_dir.join(REGISTRY_BASELINE_FILE_NAME)).unwrap();
 
-        // Point local-registry mode at a directory with no registry files
-        // so `fetch_registry` fails deterministically, with no network call.
+        // Fetch from an empty local registry directory so the fetch fails
+        // deterministically, with no network call.
         let empty_registry_dir = TempDir::new().unwrap();
-        set_local_registry(empty_registry_dir.path().to_path_buf());
 
-        let result = refresh_registry_inner(home.path());
+        let result = refresh_registry_inner(home.path(), || {
+            try_fetch_local(empty_registry_dir.path()).context("x")
+        });
         assert!(result.is_err());
 
         let config_after = std::fs::read_to_string(canopy_dir.join("config.toml")).unwrap();
@@ -1502,5 +1607,192 @@ unsupported_keys = []
             try_fetch_local(dir.path()).expect("should succeed even with no binaries on PATH");
         assert_eq!(reg.platforms.len(), 1);
         assert_eq!(reg.platforms[0].name, "only_plat");
+    }
+
+    /// A platform TOML like the ones the real canopy-registry publishes, but
+    /// with a `[cli]` table the caller fills in.
+    fn platform_toml_with_cli(name: &str, cli_toml: &str) -> String {
+        format!(
+            "name = \"{name}\"\nconfig_path = \"{name}.marker\"\ncommand_format = \"separate\"\n\
+             mcp_servers_key = []\n\n[cli]\n{cli_toml}"
+        )
+    }
+
+    /// A test CLI built to match what a registry `[cli]` table parses to:
+    /// all serde defaults intact (`paste_submit_presses` must be the serde
+    /// default 1, not [`CliConfig`]'s `Default` trait 0, or the merge sees a
+    /// phantom change).
+    fn registry_equivalent_cli(headless: &str) -> CliConfig {
+        CliConfig {
+            name: "testcli".to_string(),
+            binary: "ls".to_string(),
+            headless_mode: headless.to_string(),
+            paste_submit_presses: 1,
+            ..Default::default()
+        }
+    }
+
+    /// Everything in agreement: a detected marker, a config whose `testcli`
+    /// entry and a baseline whose `testcli` entry and platform set both match
+    /// the local registry's published values — so a refresh of this setup is
+    /// a no-op.
+    fn write_in_sync_setup(home: &Path, registry_dir: &Path, headless: &str) {
+        std::fs::write(home.join("testcli.marker"), "").unwrap();
+        let canopy_dir = home.join(".canopy");
+        let cli = registry_equivalent_cli(headless);
+        write_config(&canopy_dir, vec![cli.clone()]);
+        let toml = platform_toml_with_cli(
+            "testcli",
+            &format!("binary = \"ls\"\nheadless_mode = \"{headless}\""),
+        );
+        let platform: Platform = toml::from_str(&toml).unwrap();
+        RegistryBaseline {
+            clis: vec![cli],
+            platforms: vec![platform],
+        }
+        .save(&canopy_dir)
+        .unwrap();
+        write_local_registry(registry_dir, &[("testcli", "ls", &toml)]);
+    }
+
+    /// (a) `canopy registry refresh` driven from a local registry directory
+    /// adds newly published CLI fields to an existing platform entry.
+    #[test]
+    fn local_registry_refresh_adds_new_cli_fields_to_existing_platform() {
+        let home = TempDir::new().unwrap();
+        let canopy_dir = home.path().join(".canopy");
+
+        let old = registry_equivalent_cli("--old");
+        write_config(&canopy_dir, vec![old.clone()]);
+        write_baseline(&canopy_dir, vec![old]);
+        std::fs::write(home.path().join("testcli.marker"), "").unwrap();
+
+        let dir = TempDir::new().unwrap();
+        write_local_registry(
+            dir.path(),
+            &[(
+                "testcli",
+                "ls",
+                &platform_toml_with_cli(
+                    "testcli",
+                    "binary = \"ls\"\nheadless_mode = \"--new\"\nmodel_flag = \"--model\"",
+                ),
+            )],
+        );
+
+        let report = refresh_registry_inner(home.path(), || {
+            try_fetch_local(dir.path()).context("local registry fetch")
+        })
+        .unwrap();
+
+        let config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
+        let cli = config.get_cli("testcli").unwrap();
+        assert_eq!(cli.headless_mode, "--new");
+        assert_eq!(cli.model_flag.as_deref(), Some("--model"));
+
+        let changed = report.changed.get("testcli").unwrap();
+        assert!(
+            changed.contains(&"headless_mode".to_string()),
+            "{changed:?}"
+        );
+        assert!(changed.contains(&"model_flag".to_string()), "{changed:?}");
+    }
+
+    /// (b) A locally overridden field diverging from the registry is kept
+    /// verbatim and reported as kept, not rewritten.
+    #[test]
+    fn local_registry_refresh_keeps_local_override_and_reports_it() {
+        let home = TempDir::new().unwrap();
+        let canopy_dir = home.path().join(".canopy");
+
+        let baseline_cli = registry_equivalent_cli("--baseline");
+        let local_cli = CliConfig {
+            headless_mode: "--custom".to_string(),
+            ..baseline_cli.clone()
+        };
+        write_config(&canopy_dir, vec![local_cli]);
+        write_baseline(&canopy_dir, vec![baseline_cli]);
+        std::fs::write(home.path().join("testcli.marker"), "").unwrap();
+
+        let dir = TempDir::new().unwrap();
+        write_local_registry(
+            dir.path(),
+            &[(
+                "testcli",
+                "ls",
+                &platform_toml_with_cli(
+                    "testcli",
+                    "binary = \"ls\"\nheadless_mode = \"--baseline\"",
+                ),
+            )],
+        );
+
+        let report = refresh_registry_inner(home.path(), || {
+            try_fetch_local(dir.path()).context("local registry fetch")
+        })
+        .unwrap();
+
+        let config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
+        assert_eq!(config.get_cli("testcli").unwrap().headless_mode, "--custom");
+
+        let kept = report.kept.get("testcli").unwrap();
+        assert!(kept.contains(&"headless_mode".to_string()), "{kept:?}");
+        assert!(
+            report.render_text().contains("kept local override"),
+            "{}",
+            report.render_text()
+        );
+    }
+
+    /// (c) When config, baseline and registry all agree, the report is the
+    /// single "already up to date" line.
+    #[test]
+    fn local_registry_refresh_in_sync_reports_already_up_to_date() {
+        let home = TempDir::new().unwrap();
+        let dir = TempDir::new().unwrap();
+        write_in_sync_setup(home.path(), dir.path(), "--headless");
+
+        let report = refresh_registry_inner(home.path(), || {
+            try_fetch_local(dir.path()).context("local registry fetch")
+        })
+        .unwrap();
+
+        assert!(report.up_to_date);
+        assert_eq!(report.render_text(), "registry already up to date");
+    }
+
+    /// (d) The on-demand refresh ignores the 24-hour interval: even with a
+    /// state entry recorded only 23 hours ago (so the TUI's background
+    /// refresh would skip), the manual refresh still runs and records a
+    /// fresh timestamp in the same state key.
+    #[test]
+    fn manual_refresh_applies_despite_fresh_24h_state() {
+        let home = TempDir::new().unwrap();
+        let dir = TempDir::new().unwrap();
+        write_in_sync_setup(home.path(), dir.path(), "--headless");
+
+        let canopy_dir = home.path().join(".canopy");
+        let db = Database::new_safe(&database_path(&canopy_dir), &canopy_dir).unwrap();
+        let stale = chrono::Utc::now() - chrono::Duration::hours(23);
+        db.set_state(REGISTRY_LAST_REFRESH_STATE_KEY, &stale.to_rfc3339())
+            .unwrap();
+        assert!(!needs_refresh(&canopy_dir));
+
+        let report = refresh_registry_inner(home.path(), || {
+            try_fetch_local(dir.path()).context("local registry fetch")
+        })
+        .unwrap();
+        assert!(report.up_to_date);
+
+        let recorded = db
+            .get_state(REGISTRY_LAST_REFRESH_STATE_KEY)
+            .unwrap()
+            .expect("refresh recorded its timestamp");
+        let ts = chrono::DateTime::parse_from_rfc3339(&recorded).unwrap();
+        let age = chrono::Utc::now().signed_duration_since(ts.with_timezone(&chrono::Utc));
+        assert!(
+            age < chrono::Duration::hours(1),
+            "refresh timestamp should be fresh, age {age:?}"
+        );
     }
 }

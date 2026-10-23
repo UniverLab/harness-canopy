@@ -9,7 +9,7 @@ use crate::daemon::handler_run_exec::validate_graph_ensembles_for_run;
 use crate::daemon::helpers::error_result;
 use crate::daemon::params::*;
 use crate::daemon::params_extract::Parameters;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::tool;
 use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
@@ -52,31 +52,8 @@ impl TaskTriggerHandler {
 
         // Graph-level structural validation (CB8) — same validate_graph
         // used by graph_import, before spending quota on platform probes.
-        let (terminal_list, graph_warnings): (Vec<String>, Vec<serde_json::Value>) = {
-            let router_labels: Vec<Vec<String>> = details
-                .graph_nodes
-                .iter()
-                .map(|n| {
-                    if n.kind == crate::domain::graphs::GraphNodeKind::Router {
-                        n.config
-                            .get("routes")
-                            .and_then(|v| v.as_array())
-                            .map(|arr| {
-                                arr.iter()
-                                    .filter_map(|entry| {
-                                        entry
-                                            .get("label")
-                                            .and_then(|v| v.as_str())
-                                            .map(|s| s.to_string())
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default()
-                    } else {
-                        Vec::new()
-                    }
-                })
-                .collect();
+        let (terminal_list, mut graph_warnings): (Vec<String>, Vec<serde_json::Value>) = {
+            let router_labels = router_labels_for(&details.graph_nodes);
             let node_views: Vec<crate::domain::validation::GraphNodeView> = details
                 .graph_nodes
                 .iter()
@@ -96,23 +73,39 @@ impl TaskTriggerHandler {
                     condition: &e.condition,
                 })
                 .collect();
-            let validation_report =
-                match crate::domain::validation::validate_graph(&node_views, &edge_views) {
-                    Ok(report) => report,
-                    Err(e) => {
-                        // The validator names nodes by id; a live graph's ids are
-                        // opaque UUIDs, so enrich with the display name where we can
-                        // (same treatment graph_import gives its message).
-                        let mut enriched = e;
-                        for n in &details.graph_nodes {
-                            if enriched.contains(n.id.as_str()) {
-                                enriched = enriched
-                                    .replace(n.id.as_str(), &format!("{} ({})", n.name, n.id));
-                            }
+            let graph_ensembles = self
+                .db
+                .list_ensembles_for_graph(&details.lp.id)
+                .map_err(internal_error)?;
+            let quorum_views: Vec<crate::domain::validation::EnsembleQuorumView> = graph_ensembles
+                .iter()
+                .map(|d| crate::domain::validation::EnsembleQuorumView {
+                    ensemble_id: &d.ensemble.id,
+                    ensemble_name: &d.ensemble.name,
+                    join_node_id: &d.ensemble.join_node_id,
+                    on_fail_to: d.ensemble.on_fail_to.as_deref(),
+                })
+                .collect();
+            let validation_report = match crate::domain::validation::validate_graph_with_ensembles(
+                &node_views,
+                &edge_views,
+                &quorum_views,
+            ) {
+                Ok(report) => report,
+                Err(e) => {
+                    // The validator names nodes by id; a live graph's ids are
+                    // opaque UUIDs, so enrich with the display name where we can
+                    // (same treatment graph_import gives its message).
+                    let mut enriched = e;
+                    for n in &details.graph_nodes {
+                        if enriched.contains(n.id.as_str()) {
+                            enriched =
+                                enriched.replace(n.id.as_str(), &format!("{} ({})", n.name, n.id));
                         }
-                        return Ok(error_result(&enriched));
                     }
-                };
+                    return Ok(error_result(&enriched));
+                }
+            };
             // Terminal exits are informational: a state with no outgoing edge
             // ends the run there (the engine treats a missing edge as an
             // ending). Name nodes the way the operator sees them — by name,
@@ -134,7 +127,7 @@ impl TaskTriggerHandler {
             // has nowhere to go. A warning, never a refusal — the graph may be
             // exactly what its author meant. Deliberate terminals are already
             // excluded upstream (they land in `terminals`, not here).
-            let graph_warnings: Vec<serde_json::Value> = validation_report
+            let mut graph_warnings: Vec<serde_json::Value> = validation_report
                 .fail_dead_ends
                 .iter()
                 .map(|d| {
@@ -161,8 +154,66 @@ impl TaskTriggerHandler {
                     })
                 })
                 .collect();
+            // FR1: an ensemble whose quorum has no fail exit ends its spec on
+            // failure. Same advisory list as CM19 — never a refusal.
+            graph_warnings.extend(quorum_warning_values(
+                &validation_report.quorum_fail_dead_ends,
+                &details.graph_nodes,
+            ));
             (terminal_list, graph_warnings)
         };
+
+        // FR2: the same quorum warning for ensembles owned by a spec's own
+        // graph. Failures here are skipped, not refused: the structural check
+        // above already errored on a broken graph.
+        for spec in &details.specs {
+            let spec_ensembles = self
+                .db
+                .list_ensembles_for_spec(&spec.spec.id)
+                .map_err(internal_error)?;
+            if spec_ensembles.is_empty() {
+                continue;
+            }
+            let router_labels = router_labels_for(&spec.nodes);
+            let node_views: Vec<crate::domain::validation::GraphNodeView> = spec
+                .nodes
+                .iter()
+                .enumerate()
+                .map(|(idx, n)| crate::domain::validation::GraphNodeView {
+                    id: &n.id,
+                    kind: n.kind,
+                    route_labels: &router_labels[idx],
+                })
+                .collect();
+            let edge_views: Vec<crate::domain::validation::GraphEdgeView> = spec
+                .edges
+                .iter()
+                .map(|e| crate::domain::validation::GraphEdgeView {
+                    from: &e.from_node,
+                    to: &e.to_node,
+                    condition: &e.condition,
+                })
+                .collect();
+            let quorum_views: Vec<crate::domain::validation::EnsembleQuorumView> = spec_ensembles
+                .iter()
+                .map(|d| crate::domain::validation::EnsembleQuorumView {
+                    ensemble_id: &d.ensemble.id,
+                    ensemble_name: &d.ensemble.name,
+                    join_node_id: &d.ensemble.join_node_id,
+                    on_fail_to: d.ensemble.on_fail_to.as_deref(),
+                })
+                .collect();
+            if let Ok(report) = crate::domain::validation::validate_graph_with_ensembles(
+                &node_views,
+                &edge_views,
+                &quorum_views,
+            ) {
+                graph_warnings.extend(quorum_warning_values(
+                    &report.quorum_fail_dead_ends,
+                    &spec.nodes,
+                ));
+            }
+        }
 
         // CB68 FR2: warn (never rewrite — FR4) about every node, ensemble and
         // hook whose prompt/command still names a removed 2.x `loop_<tool>` or
@@ -508,7 +559,7 @@ impl TaskTriggerHandler {
             ),
         };
         if graph_targets.is_empty() && missing_crews.is_empty() {
-            return Ok(CallToolResult::success(vec![Content::text(
+            return Ok(CallToolResult::success(vec![ContentBlock::text(
                 serde_json::to_string_pretty(&serde_json::json!({
                     "graph_id": params.graph_id,
                     "message": format!(
@@ -632,7 +683,7 @@ impl TaskTriggerHandler {
             })
             .collect();
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&serde_json::json!({
                 "graph_id": params.graph_id,
                 "timeout_seconds": timeout_secs,
@@ -658,6 +709,65 @@ impl TaskTriggerHandler {
             .unwrap_or_default(),
         )]))
     }
+}
+
+/// Declared route labels for each node, indexed the same as `nodes`; empty
+/// for every non-router. Shared by the graph-level and per-spec structural
+/// checks so both build identical [`GraphNodeView`]s.
+///
+/// [`GraphNodeView`]: crate::domain::validation::GraphNodeView
+fn router_labels_for(nodes: &[crate::domain::graphs::GraphNode]) -> Vec<Vec<String>> {
+    nodes
+        .iter()
+        .map(|n| {
+            if n.kind == crate::domain::graphs::GraphNodeKind::Router {
+                n.config
+                    .get("routes")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|entry| {
+                                entry
+                                    .get("label")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string())
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            }
+        })
+        .collect()
+}
+
+/// FR1 warning JSON for ensembles whose quorum has no fail exit. Fields match
+/// the CM19 entries in `graph_warnings` plus the ensemble identity.
+fn quorum_warning_values(
+    dead_ends: &[crate::domain::validation::QuorumFailDeadEnd],
+    nodes: &[crate::domain::graphs::GraphNode],
+) -> Vec<serde_json::Value> {
+    dead_ends
+        .iter()
+        .map(|d| {
+            let node = nodes.iter().find(|n| n.id == d.node_id);
+            let name = node.map(|n| n.name.clone()).unwrap_or_default();
+            let kind = node.map(|n| n.kind.as_str()).unwrap_or("join");
+            serde_json::json!({
+                "node_id": d.node_id,
+                "node_name": name,
+                "kind": kind,
+                "ensemble_id": d.ensemble_id,
+                "ensemble_name": d.ensemble_name,
+                "missing_edge": "fail",
+                "warning": format!(
+                    "Ensemble '{}' ({}) has no on_fail_to. When its quorum fails (for example, a member reports FAIL with partial work), the spec ends at the quorum and the graph fails instead of routing on. Set on_fail_to with graph_update_ensemble if a failed quorum should route somewhere.",
+                    d.ensemble_name, d.ensemble_id
+                ),
+            })
+        })
+        .collect()
 }
 
 // The design-reviewer helpers live in a sibling module to keep this file

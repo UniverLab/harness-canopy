@@ -48,6 +48,10 @@ impl GraphEngine {
                 spec_id: None,
                 blocker: Some(blocker_owned.as_str()),
                 node_name: node_owned.as_deref(),
+                spec_code: None,
+                spec_commit_message: None,
+                spec_scope: None,
+                spec_type: None,
             };
             self.fire_hooks(lp, GraphHookEvent::OnBlocked, &ctx).await;
         }
@@ -77,12 +81,19 @@ impl GraphEngine {
 
     /// Fire `on_spec_completed` hooks for a just-completed spec.
     pub async fn fire_on_spec_completed_hooks(&self, lp: &Graph, spec: &GraphSpec) {
+        let commit_message = spec
+            .spec_type
+            .map(|spec_type| commit_message(spec_type, spec.spec_scope.as_deref(), &spec.name));
         let ctx = HookContext {
             graph_name: &lp.name,
             workdir: &lp.workdir,
             completed_specs: &[],
             spec_name: Some(&spec.name),
             spec_id: Some(&spec.id),
+            spec_type: spec.spec_type,
+            spec_scope: spec.spec_scope.as_deref(),
+            spec_code: spec.spec_code.as_deref(),
+            spec_commit_message: commit_message.as_deref(),
             blocker: None,
             node_name: None,
         };

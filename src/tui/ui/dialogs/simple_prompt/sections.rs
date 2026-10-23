@@ -8,20 +8,6 @@ use super::content::{style_collapsed_paste_blocks, wrap_styled_content};
 use super::geometry::{generate_bottom_border, generate_top_border};
 use super::NormalContentCtx;
 use crate::tui::app::dialog::SimplePromptDialog;
-use crate::tui::app::types::{AgentEntry, App};
-use crate::tui::ui::theme::Theme;
-
-/// Accent color of the selected agent, falling back to the theme header color.
-pub(super) fn prompt_accent(app: &App, theme: &Theme) -> Color {
-    app.selected_agent()
-        .and_then(|a| match a {
-            AgentEntry::Interactive(idx) => {
-                app.interactive_agents.get(*idx).map(|ia| ia.accent_color)
-            }
-            _ => None,
-        })
-        .unwrap_or(theme.header_color)
-}
 
 /// Render the ▲/▼ scroll indicator, right-aligned on row `y`.
 pub(super) fn draw_scroll_arrow(
@@ -106,6 +92,7 @@ pub(super) fn section_display_label(
             "resources",
             "rag_search",
             "constraints",
+            "canopy_protocol",
         ];
         known
             .iter()

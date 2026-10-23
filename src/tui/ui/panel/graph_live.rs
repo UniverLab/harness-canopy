@@ -254,18 +254,27 @@ mod tests {
                     spec_name: "B1 fix".to_string(),
                     status: GraphSpecStatus::Completed,
                     failure_reason: None,
+                    spec_code: None,
+                    spec_type: None,
+                    spec_scope: None,
                 },
                 SpecQueueEntry {
                     spec_id: "s2".to_string(),
                     spec_name: "U1b live view".to_string(),
                     status: GraphSpecStatus::Running,
                     failure_reason: None,
+                    spec_code: None,
+                    spec_type: None,
+                    spec_scope: None,
                 },
                 SpecQueueEntry {
                     spec_id: "s3".to_string(),
                     spec_name: "T1 theme".to_string(),
                     status: GraphSpecStatus::Pending,
                     failure_reason: None,
+                    spec_code: None,
+                    spec_type: None,
+                    spec_scope: None,
                 },
             ],
             done_count: 1,
@@ -389,6 +398,9 @@ mod tests {
             spec_name: "T2 skipped thing".to_string(),
             status: GraphSpecStatus::Skipped,
             failure_reason: Some("superseded by s5".to_string()),
+            spec_code: None,
+            spec_type: None,
+            spec_scope: None,
         });
 
         let node_info = NodeRunInfo::default();
@@ -442,6 +454,9 @@ mod tests {
                 spec_name: format!("Spec {i}"),
                 status: GraphSpecStatus::Pending,
                 failure_reason: None,
+                spec_code: None,
+                spec_type: None,
+                spec_scope: None,
             })
             .collect();
         state.current_spec_id = None;
@@ -489,6 +504,9 @@ mod tests {
                 spec_name: format!("Spec {i}"),
                 status: GraphSpecStatus::Pending,
                 failure_reason: None,
+                spec_code: None,
+                spec_type: None,
+                spec_scope: None,
             })
             .collect();
         state.current_spec_id = None;
@@ -565,6 +583,9 @@ mod tests {
                 spec_name: format!("Spec {i}"),
                 status: GraphSpecStatus::Pending,
                 failure_reason: None,
+                spec_code: None,
+                spec_type: None,
+                spec_scope: None,
             })
             .collect();
         state.current_spec_id = None;
@@ -1244,6 +1265,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         db.insert_graph(&lp).unwrap();
 
@@ -1266,6 +1288,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         })
         .unwrap();
 

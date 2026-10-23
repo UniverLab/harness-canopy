@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::domain::models::{Trigger, WatchEvent};
+pub use crate::domain::spec_type::SpecType;
 
 #[allow(unused_imports)]
 pub use crate::domain::specs::validate_spec_description_template;
@@ -244,6 +245,13 @@ pub struct Graph {
     /// `graph_update`.
     #[serde(default)]
     pub allow_dirty_start: bool,
+    /// SPECCODE: opt-in enforcement. When true, `graph_add_spec` (and a
+    /// queue add / run that would feed one) refuses a spec whose type is
+    /// still `None`, named by id, so a graph can demand the conventional
+    /// data its deterministic commit node needs. Default `false` — legacy
+    /// specs keep working everywhere else.
+    #[serde(default)]
+    pub require_spec_type: bool,
 }
 
 impl Graph {
@@ -411,6 +419,20 @@ pub struct GraphSpec {
     /// Timestamp of the most recent administrative status transition.
     #[serde(default)]
     pub completed_via_at: Option<DateTime<Utc>>,
+    /// SPECCODE: the Conventional Commits type this spec is being delivered
+    /// as (`feat`, `fix`, ...). `None` on legacy specs and specs authored
+    /// without a type — they have no code and no precomputed commit message.
+    #[serde(default, rename = "type")]
+    pub spec_type: Option<SpecType>,
+    /// SPECCODE: optional scope (`tui`, `specs`, ...) of that change type.
+    #[serde(default)]
+    pub spec_scope: Option<String>,
+    /// SPECCODE: engine-generated quick reference (`FIX-7`), immutable once
+    /// assigned — assigned on create when the type is known, or by
+    /// `spec_update` assigning a type to a legacy spec. Never set by callers
+    /// and never part of the commit message.
+    #[serde(default)]
+    pub spec_code: Option<String>,
 }
 
 /// A node in either a spec's graph or a graph's top-level graph.
@@ -737,6 +759,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         }
     }
 

@@ -114,8 +114,10 @@ pub(crate) async fn apply_round_robin_commit_watch(
         join_node_id,
         &watch.head_before,
         &head_after,
+        workdir,
         join_execution.output,
-    );
+    )
+    .await;
     join_execution
 }
 
@@ -181,9 +183,15 @@ pub(crate) async fn settle_parallel_member_outcome(
                 );
                 execution
             } else {
+                let output = super::verdict_shutdown::merge_process_record(
+                    db,
+                    &final_run_id,
+                    &run,
+                    &execution.output,
+                );
                 NodeExecution {
                     status: run.status,
-                    output: run.output.unwrap_or_else(|| serde_json::json!({})),
+                    output,
                     summary: execution.summary,
                 }
             };
@@ -592,15 +600,17 @@ pub(crate) async fn apply_parallel_commit_watch(
         ensemble = %ensemble_name,
         head_before = %watch.head_before,
         head_after = %head_after,
-        "ensemble member committed but has no commit rights"
+        "ensemble without commit rights: HEAD moved during its run"
     );
     execution = commit_rights_failure(
         &format!("Ensemble '{ensemble_name}' (one of its members)"),
         join_node_id,
         &watch.head_before,
         &head_after,
+        workdir,
         execution.output,
-    );
+    )
+    .await;
     execution
 }
 

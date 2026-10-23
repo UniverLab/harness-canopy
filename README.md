@@ -15,7 +15,7 @@ harness-canopy is a modern, self-contained MCP (Model Context Protocol) server a
 
 ### Demo
 
-![Demo](demo/dist/demo.gif)
+![Demo](demo/dist/demo.svg)
 
 ---
 
@@ -94,7 +94,7 @@ See [`docs/installation.md`](docs/installation.md) for all methods and first-tim
 
 Full documentation lives in [`docs/`](docs/): installation, quick start, the
 TUI, agents and seed identities, intelligence & sync, graphs, the RAG
-pipeline, all 83 MCP tools, and the complete CLI reference.
+pipeline, all MCP tools, and the complete CLI reference.
 
 ## Contributing
 
@@ -122,7 +122,7 @@ docs/ is published at univerlab.org/canopy/docs and holds user documentation onl
 - **Seed Identity System** — Persistent, evolvable agent identities stored as structured TOML at `~/.canopy/seeds/<id>/identity.toml`. Each seed has a unique name, family, behavioral directives, and personality traits. Binded sessions receive the seed's prompt injection automatically. The `evolve_identity` MCP tool lets agents refine themselves over time. 4 KB size cap, case-insensitive name uniqueness, and mandatory field validation.
 - **Seed Nursery** — Collaborative workspace for creating new seed identities. Creates a temporary directory with a draft `identity.toml` and CLI-specific instruction files (e.g. `CLAUDE.md`, `AGENTS.md`) that guide the agent to interview the user and define the seed's personality. Validates and registers the seed on completion.
 - **Context Transfer** — Seamlessly transfer conversation context, prompts, and output between agents while preserving session state and scrollback history.
-- **Prompt Builder** — Structured prompt templates with configurable sections (instruction, context, resources, examples), section picker, and @-mention agent references.
+- **Prompt Builder** — Structured prompt templates with configurable sections (instruction, context, resources, examples, Canopy protocol), section picker, and @-mention agent references. The session-start Canopy protocol rides on the first prompt of an interactive session only — persisted per session across restarts and resumes — and the locked **Canopy protocol** section (`Ctrl+A`) resends it on purpose.
 - **Launchpad** — Start new interactive sessions with previous mission recovery, mission input, and auto-injected context.
 
 ### 🧠 Intelligence V2 — Knowledge Graph
@@ -150,8 +150,8 @@ docs/ is published at univerlab.org/canopy/docs and holds user documentation onl
 - **Node Blueprints** — Reusable `{name, kind, config}` templates referenced by name in `graph_add_node`. Five builtins seeded at startup; custom blueprints via `blueprint_create`/`blueprint_delete`/`blueprint_list`.
 - **Full Lifecycle** — Create, update, run, pause, continue (retry or skip), reset, complete nodes, and report blockers for human intervention. `graph_schedule_autorun` resumes failed/completed graphs at a future time. Archive and restore graphs without losing history. Export and import graph designs as shareable JSON documents. Copy nodes and ensembles within or across graphs. View node run history for failure diagnosis.
 - **Event-keyed Hooks** — Agent execution, direct shell commands, or interactive messages into a live session on `on_completed`, `on_failed`, `on_blocked`, and `on_spec_completed` (e.g. documentation maintenance fires once per completion; a failing graph at midnight puts a message in the operator's session, delivered when they next open the TUI). Several hooks can serve one event in order; hooks are not retroactive and never change the graph's status.
-- **Template Variables** — Graph prompts support `{{graph_name}}`, `{{workdir}}`, `{{spec_id}}`, `{{spec_name}}`, `{{spec_content}}`, `{{node_id}}`, `{{previous_feedback}}`, and `{{spec_start_head}}` (git HEAD at spec start, for check nodes).
-- **24 MCP Tools** — Complete authoring, inspection, runtime, spec, queue, and blueprint management.
+- **Template Variables** — Graph prompts support `{{graph_name}}`, `{{workdir}}`, `{{spec_id}}`, `{{spec_name}}`, `{{spec_content}}`, `{{spec_code}}`, `{{spec_type}}`, `{{spec_scope}}`, `{{spec_commit_message}}`, `{{node_id}}`, `{{previous_feedback}}`, and `{{spec_start_head}}` (git HEAD at spec start, for check nodes).
+- **MCP Tools** — Complete authoring, inspection, runtime, spec, queue, and blueprint management.
 
 ### 📚 Personal RAG Pipeline
 
@@ -175,8 +175,8 @@ docs/ is published at univerlab.org/canopy/docs and holds user documentation onl
 - **RAG Transfer Modal** — Send semantic search results to other agents as injected context.
 - **Context Transfer** — Two-step modal (preview → agent picker) to inject conversation context between sessions.
 - **Brian's Brain** — 3-state cellular automaton drawn as Braille glyphs; the cursor seeds clusters along its path at a fixed step rate.
-- **Whimsg** — Animated kaomoji status messages with typing effects.
-- **Gamification** — 28 achievement-style missions across 6 categories (Environment, Intelligence, Projects, Graph, Seeds, SysInfo) tracked automatically during normal TUI operation.
+- **Whimsg** — Animated kaomoji status messages with typing effects: curated forest-voice phrases and deliberate jokes, or a real-event message naming the agent, graph, or spec that just happened.
+- **Gamification** — 28 achievement-style missions across 6 categories (Environment, Intelligence, Projects, Graph, Seeds, SysInfo) tracked automatically during normal TUI operation; list them read-only with `canopy missions [--json]`.
 
 ### 🔧 Additional Features
 
@@ -184,6 +184,7 @@ docs/ is published at univerlab.org/canopy/docs and holds user documentation onl
 - **Project Registry** — Automatic project index keyed by workdir hash. README descriptions extracted from project roots (min 20 words, before first `##` heading). Search and update via `project_search` and `project_update` MCP tools.
 - **Action Protocol Advisor** — `get_tools` MCP tool returns scope-sensitive action protocols (`session_start`, `file_write`, `test_run`, `close_session`, `multi_agent`) with risk levels and recommended tool sets.
 - **Setup Wizard** — Interactive `canopy setup` detects installed AI CLIs from a GitHub-hosted registry, configures binary paths, model flags, headless modes, environment variables, and temperature units. Generates `~/.canopy/config.toml`.
+- **On-Demand Registry Refresh** — `canopy registry refresh` applies the platform registry to `config.toml` now, ignoring the 24-hour window the TUI's background refresh uses at startup. Reports the CLI fields it changed, the local overrides it kept, and the platforms added, updated or removed. The `registry_refresh` MCP tool does the same from an agent session.
 - **MCP Wizard** — `canopy mcp` subcommand for syncing, adding, and removing MCP server entries across all detected platforms with automatic format conversion (JSON ↔ TOML).
 - **Skills Manager** — Global skill directory at `~/.agents/skills/` with cross-platform symlinks. List, validate symlink integrity, and remove installed skills across platforms.
 - **Doctor Diagnostics** — `canopy doctor` checks data directory, database, config, harnesses, RAG status, file watchers, daemon process, registry connectivity, and auto-update health.
@@ -191,27 +192,34 @@ docs/ is published at univerlab.org/canopy/docs and holds user documentation onl
 
 ---
 
-## MCP Tools (84)
+## MCP Tools (116)
 
-| Category | Tools |
-|----------|-------|
-| **Agent Management** (14) | `agent_add`, `agent_watch`, `agent_list`, `agent_remove`, `agent_enable`, `agent_disable`, `agent_schedule_enable`, `agent_run`, `agent_status`, `agent_models`, `agent_logs`, `agent_update`, `agent_report`, `agent_probe` |
-| **Multi-Agent Sync** (4) | `sync_declare_intent`, `sync_report_status`, `sync_broadcast`, `sync_get_context` |
-| **Intelligence V2** (8) | `intelligence_get_context`, `intelligence_upsert`, `intelligence_search`, `intelligence_graph_walk`, `intelligence_list_projects`, `intelligence_link_projects`, `intelligence_delete_node`, `intelligence_delete_relation` |
-| **Seed Identity** (5) | `get_identity`, `evolve_identity`, `create_seed`, `list_seeds`, `remove_seed` |
-| **Graph Engine** (33) | `graph_create`, `graph_update`, `graph_add_spec`, `graph_update_spec`, `graph_add_node`, `graph_update_node`, `graph_add_edge`, `graph_update_edge`, `graph_delete_edge`, `graph_delete_node`, `graph_add_ensemble`, `graph_update_ensemble`, `graph_delete_ensemble`, `graph_get`, `graph_list`, `graph_run`, `graph_reset`, `graph_schedule_autorun`, `graph_pause`, `graph_continue`, `graph_complete_node`, `graph_report_blocker`, `graph_export`, `graph_import`, `graph_archive`, `graph_restore`, `graph_node_runs_list`, `graph_node_run_get`, `graph_copy_node`, `graph_copy_ensemble`, `graph_audit_node_configs`, `graph_schedule_continue`, `graph_preflight` |
-| **Spec Backlog** (5) | `spec_create`, `spec_list`, `spec_update`, `spec_delete`, `spec_set_status` |
-| **Spec Queues** (6) | `queue_create`, `queue_add_spec`, `queue_list`, `queue_remove_spec`, `queue_reorder`, `queue_set_group` |
-| **Node Blueprints** (3) | `blueprint_list`, `blueprint_create`, `blueprint_delete` |
-| **Project** (4) | `project_search`, `project_update`, `project_remap`, `project_register` |
-| **RAG** (1) | `rag_search` |
-| **Protocol** (1) | `get_tools` |
+Graph-node sessions (agent and ensemble nodes launched by the graph engine) receive a fixed node profile of 18 tools via `CANOPY_MCP_PROFILE=node`, so every node stays well under the 128-tool cap of OpenAI-compatible providers. All other sessions — the orchestrator, check nodes, hooks, TUI, subagents, and background agents — keep the full tool list.
+
+| Tools | Category |
+|---|---|
+| `agent_add`, `agent_watch`, `agent_list`, `agent_get`, `agent_remove`, `agent_enable`, `agent_schedule_enable`, `agent_disable`, `agent_run`, `agent_status`, `agent_models`, `agent_logs`, `agent_update`, `agent_report`, `agent_probe`, `agent_probe_recent`, `subagent_spawn`, `subagent_collect` | **Agent management** (18) |
+| `sync_declare_intent`, `sync_report_status`, `sync_broadcast`, `sync_get_context` | **Multi-agent sync** (4) |
+| `intelligence_get_context`, `intelligence_upsert`, `intelligence_search`, `intelligence_graph_walk`, `intelligence_list_projects`, `intelligence_link_projects`, `intelligence_delete_node`, `intelligence_delete_relation` | **Intelligence** (8) |
+| `get_identity`, `evolve_identity`, `create_seed`, `list_seeds`, `remove_seed` | **Seed identity** (5) |
+| `skill_list`, `skill_get` | **Skills** (2) |
+| `graph_create`, `graph_update`, `graph_add_spec`, `graph_update_spec`, `graph_remove_spec`, `graph_add_node`, `graph_update_node`, `graph_add_edge`, `graph_update_edge`, `graph_delete_edge`, `graph_delete_node`, `graph_add_ensemble`, `graph_update_ensemble`, `graph_delete_ensemble`, `crew_list`, `crew_get`, `crew_create`, `crew_update`, `crew_delete`, `config_list`, `config_get`, `config_set`, `config_reset`, `graph_get`, `graph_list`, `graph_crew`, `graph_run`, `graph_reset`, `graph_schedule_autorun`, `graph_pause`, `graph_continue`, `graph_complete_node`, `graph_report_blocker`, `graph_export`, `graph_import`, `graph_archive`, `graph_restore`, `graph_node_runs_list`, `graph_node_run_get`, `graph_events`, `graph_copy_node`, `graph_copy_ensemble`, `graph_audit_node_configs`, `graph_schedule_continue`, `graph_preflight` | **Graph engine** (45) |
+| `roster_set`, `roster_clear`, `roster_list`, `roster_check` | **Availability roster** (4) |
+| `spec_create`, `spec_list`, `spec_update`, `spec_delete`, `spec_set_status`, `spec_section_get`, `spec_convert`, `spec_note_write`, `spec_notes_get` | **Spec backlog** (9) |
+| `queue_create`, `queue_add_spec`, `queue_list`, `queue_remove_spec`, `queue_reorder`, `queue_set_group` | **Spec queues** (6) |
+| `blueprint_list`, `blueprint_create`, `blueprint_delete` | **Node blueprints** (3) |
+| `project_search`, `project_update`, `project_remap`, `project_register` | **Project** (4) |
+| `rag_search`, `rag_compact` | **RAG** (2) |
+| `registry_refresh` | **Platform registry** (1) |
+| `get_tools` | **Protocol** (1) |
+| `session_list` | **Interactive sessions** (1) |
+| `scheduled_send_create`, `scheduled_send_list`, `scheduled_send_cancel` | **Scheduled sends** (3) |
 
 ---
 
 ## Architecture Overview
 
-- **Daemon** — Owns the MCP server (Streamable HTTP on port 7755 + stdio), scheduler, watcher engine, and database. Exposes all 83 MCP tools.
+- **Daemon** — Owns the MCP server (Streamable HTTP on port 7755 + stdio), scheduler, watcher engine, and database. Exposes all MCP tools.
 - **Scheduler** — Computes next fire times for all active tasks, sleeping until needed. Wakes instantly on changes.
 - **Watcher Engine** — Reacts to file system events, triggering tasks as defined.
 - **Executor** — Runs tasks and agents, manages locking, logs, and status.

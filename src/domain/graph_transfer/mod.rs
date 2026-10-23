@@ -40,6 +40,7 @@ mod export;
 pub use export::*;
 mod import;
 pub use import::*;
+mod pending;
 mod validation;
 pub use validation::*;
 
@@ -176,6 +177,12 @@ pub struct GraphExportEnsemble {
     /// created.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crew: Option<String>,
+    /// A crew-bound ensemble travels without members (the crew supplies them)
+    /// and an author writing one by hand may omit the key entirely, so an
+    /// absent `members` means "no literal members" rather than a parse error.
+    /// An ensemble with neither `crew` nor `members` is still refused, naming
+    /// the ensemble.
+    #[serde(default)]
     pub members: Vec<GraphExportEnsembleMember>,
 }
 
@@ -204,6 +211,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         }
     }
 
@@ -2562,5 +2570,69 @@ mod tests {
             err.contains("bogus_field"),
             "err must name the field: {err}"
         );
+    }
+
+    /// CM49 import: a crew-bound ensemble travels without members —
+    /// `graph_export` writes it with `crew` and no `members`, so a document
+    /// that omits the key entirely must parse rather than fail with a serde
+    /// "missing field" error.
+    #[test]
+    fn import_accepts_crew_bound_ensemble_without_members_field() {
+        let value = serde_json::json!({
+            "format_version": 5,
+            "name": "crew-graph",
+            "nodes": [
+                {"name": "kickoff", "kind": "check", "position": 1, "config": {"command": "true"}},
+                {"name": "final", "kind": "check", "position": 2, "config": {"command": "true"}}
+            ],
+            "edges": [],
+            "ensembles": [{
+                "name": "Team",
+                "prompt_template": "go",
+                "entry_from_node": "kickoff",
+                "entry_condition": "always",
+                "on_pass_to": "final",
+                "min_pass": 2,
+                "timeout_minutes": 30,
+                "crew": "reviewers"
+            }]
+        });
+        let document =
+            parse_export_document_value(&value).expect("crew-bound ensemble may omit members");
+        let plan = build_import_plan(&document, "new-graph").expect("crew-bound ensemble imports");
+        assert_eq!(
+            plan.ensembles[0].ensemble.crew_name.as_deref(),
+            Some("reviewers")
+        );
+        assert!(plan.ensembles[0].members.is_empty());
+    }
+
+    /// An ensemble with neither `crew` nor `members` is still refused, and the
+    /// refusal names the ensemble — `members` defaults to empty, so this must
+    /// not slip through as a zero-member ensemble.
+    #[test]
+    fn import_refuses_ensemble_without_crew_or_members_naming_it() {
+        let value = serde_json::json!({
+            "format_version": 5,
+            "name": "x",
+            "nodes": [
+                {"name": "kickoff", "kind": "check", "position": 1, "config": {"command": "true"}},
+                {"name": "final", "kind": "check", "position": 2, "config": {"command": "true"}}
+            ],
+            "edges": [],
+            "ensembles": [{
+                "name": "Orphan",
+                "prompt_template": "go",
+                "entry_from_node": "kickoff",
+                "entry_condition": "always",
+                "on_pass_to": "final",
+                "min_pass": 1,
+                "timeout_minutes": 30
+            }]
+        });
+        let document = parse_export_document_value(&value).unwrap();
+        let err = build_import_plan(&document, "new-graph").unwrap_err();
+        assert!(err.contains("Orphan"), "err must name the ensemble: {err}");
+        assert!(err.contains("2-8 members"), "unexpected error: {err}");
     }
 }

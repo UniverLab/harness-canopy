@@ -6,23 +6,23 @@ use ratatui::Frame;
 
 use super::{centered_rect, draw_dialog_left_wave, truncate_str};
 use crate::tui::app::{
-    dialog::new_agent::{BackgroundTrigger, NewAgentDialog, NewTaskMode, NewTaskType, SeedOption},
+    dialog::new_agent::{BackgroundTrigger, DialogStep, NewAgentDialog, NewTaskType, SeedOption},
     types::App,
 };
 use crate::tui::ui::theme::Theme;
 
 mod fields;
+mod mode_step;
 mod pickers;
 
 #[cfg(test)]
 use fields::prompt_visual_line_range;
 use pickers::{
     append_background_sections, append_interactive_sections, append_terminal_sections,
-    session_resume_label, SectionLayout,
+    SectionLayout,
 };
 
 const TYPE_FIELD: usize = 0;
-const INTERACTIVE_MODE_FIELD: usize = 1;
 const BACKGROUND_TRIGGER_FIELD: usize = 1;
 const TERMINAL_DIR_FIELD: usize = 1;
 const TERMINAL_SHELL_FIELD: usize = 2;
@@ -52,15 +52,17 @@ struct FieldLayout {
 impl FieldLayout {
     fn for_task(task_type: NewTaskType) -> Self {
         match task_type {
+            // Interactive (CT34: no Mode row): 0 Type · 1 Harness · 2 Identity
+            // · 3 Yolo · 4 Sandbox · 5 Dir (model/prompt are unused here).
             NewTaskType::Interactive => Self {
-                cli: 2,
-                identity: 5,
+                cli: 1,
+                identity: 2,
                 model: 3,
                 prompt: 4,
                 extra: 5,
-                dir: 6,
-                yolo: 4,
-                sandbox: 7,
+                dir: 5,
+                yolo: 3,
+                sandbox: 4,
             },
             NewTaskType::Terminal => Self {
                 cli: 0,
@@ -109,25 +111,30 @@ pub fn draw_new_agent_dialog(frame: &mut Frame, app: &App, theme: &Theme) {
         return;
     };
 
-    let accent = dialog.selected_accent_color(theme);
-    let filtered_clis = dialog.filtered_cli_indices();
-    let field_width = prompt_field_width(frame.area());
-    let dir_visible = visible_dir_rows(
-        dialog,
-        accent,
-        &filtered_clis,
-        field_width,
-        theme,
-        frame.area(),
-    );
-    let lines = build_dialog_lines(
-        dialog,
-        accent,
-        &filtered_clis,
-        field_width,
-        theme,
-        dir_visible,
-    );
+    let lines = match dialog.step {
+        DialogStep::Mode => mode_step::build_dialog_lines(dialog, theme),
+        DialogStep::Form => {
+            let accent = theme.header_color;
+            let filtered_clis = dialog.filtered_cli_indices();
+            let field_width = prompt_field_width(frame.area());
+            let dir_visible = visible_dir_rows(
+                dialog,
+                accent,
+                &filtered_clis,
+                field_width,
+                theme,
+                frame.area(),
+            );
+            build_dialog_lines(
+                dialog,
+                accent,
+                &filtered_clis,
+                field_width,
+                theme,
+                dir_visible,
+            )
+        }
+    };
     let height = dialog_height(&lines, frame.area());
 
     let area = centered_rect(65, height, frame.area());
@@ -137,7 +144,7 @@ pub fn draw_new_agent_dialog(frame: &mut Frame, app: &App, theme: &Theme) {
     let block = Block::default()
         .title(dialog_title(dialog))
         .borders(crate::tui::ui::dialog_borders_for(theme))
-        .border_style(Style::default().fg(accent))
+        .border_style(Style::default().fg(theme.header_color))
         .style(Style::default().bg(theme.dialog_bg));
 
     let inner = block.inner(area);
@@ -183,7 +190,12 @@ pub(super) fn visible_dir_rows(
 
 fn dialog_title(dialog: &NewAgentDialog) -> &'static str {
     if !dialog.is_edit_mode() {
-        return " New Agent ";
+        // CT34: the dialog names the step it is showing; the Mode step is the
+        // New-or-Resume choice that follows the setup form.
+        return match dialog.step {
+            DialogStep::Form => " New Session · Setup ",
+            DialogStep::Mode => " New Session · Mode ",
+        };
     }
 
     match dialog.task_type {
@@ -201,13 +213,6 @@ fn task_type_label(task_type: NewTaskType) -> &'static str {
     }
 }
 
-fn interactive_mode_label(task_mode: NewTaskMode) -> &'static str {
-    match task_mode {
-        NewTaskMode::Interactive => "New",
-        NewTaskMode::Resume => "Resume",
-    }
-}
-
 fn background_trigger_label(trigger: BackgroundTrigger) -> &'static str {
     match trigger {
         BackgroundTrigger::Cron => "Cron",
@@ -215,26 +220,16 @@ fn background_trigger_label(trigger: BackgroundTrigger) -> &'static str {
     }
 }
 
-fn help_text(dialog: &NewAgentDialog) -> &'static str {
-    match dialog.task_type {
-        NewTaskType::Interactive => {
-            "  ↑↓: fields · Shift+↑↓: navigate  (in dirs: → enter  ← up) · Enter: launch · Esc: cancel"
-        }
-        NewTaskType::Background => {
-            "  ↑↓: fields · Shift+↑↓: navigate  (in dirs: → enter  ← up) · Enter: create · Esc: cancel"
-        }
-        NewTaskType::Terminal => {
-            "  ↑↓: fields · Shift+↑↓: navigate  (in dirs: → enter  ← up) · Enter: launch · Esc: cancel"
-        }
-    }
-}
-
-fn session_picker_label(dialog: &NewAgentDialog) -> String {
-    let Some((_, title)) = &dialog.selected_session else {
-        return "  ↵ pick session  (latest)".to_string();
+fn help_text(dialog: &NewAgentDialog) -> String {
+    let enter_label = match dialog.task_type {
+        NewTaskType::Interactive if dialog.is_edit_mode() => "Enter: launch",
+        NewTaskType::Interactive => "Enter: next (Mode)",
+        NewTaskType::Background => "Enter: create",
+        NewTaskType::Terminal => "Enter: launch",
     };
-
-    format!("  ↵ pick  [{}]", truncate_with_ellipsis(title, 40))
+    format!(
+        "  ↑↓: fields · Shift+↑↓: navigate  (in dirs: → enter  ← up) · {enter_label} · Esc: cancel"
+    )
 }
 
 pub(super) fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
@@ -406,52 +401,6 @@ fn push_spaced_row(lines: &mut Vec<Line<'static>>, row: Line<'static>) {
 
 // ── Section builders ─────────────────────────────────────────────────────────
 
-pub(super) fn interactive_mode_row(
-    dialog: &NewAgentDialog,
-    accent: Color,
-    theme: &Theme,
-) -> Line<'static> {
-    let mut spans = vec![Span::styled(
-        "  Session:  ",
-        Style::default().fg(theme.dim_text),
-    )];
-    spans.extend(selector_spans(
-        interactive_mode_label(dialog.task_mode),
-        INTERACTIVE_MODE_FIELD,
-        false,
-        accent,
-        dialog.field,
-        theme,
-    ));
-
-    if dialog.resume_unconfigured() && !dialog.has_session_picker() {
-        spans.push(Span::styled(
-            "  (not configured — falls back to new)",
-            Style::default().fg(Color::Yellow),
-        ));
-    }
-
-    if matches!(dialog.task_mode, NewTaskMode::Resume) && dialog.has_session_picker() {
-        spans.push(Span::styled(
-            session_picker_label(dialog),
-            Style::default().fg(Color::Cyan),
-        ));
-    }
-
-    if matches!(dialog.task_mode, NewTaskMode::Resume) {
-        spans.push(Span::styled(
-            session_resume_label(dialog),
-            Style::default().fg(if dialog.resume_sessions_empty {
-                Color::Yellow
-            } else {
-                Color::Cyan
-            }),
-        ));
-    }
-
-    Line::from(spans)
-}
-
 pub(super) fn model_value(dialog: &NewAgentDialog) -> String {
     if dialog.model.is_empty() {
         "(optional — Space to browse)".to_string()
@@ -617,7 +566,7 @@ mod tests {
     #[test]
     fn selector_uses_discreet_angle_glyphs_not_solid_triangles() {
         // Focused and unfocused variants both use the ‹ › glyphs, never ◀ ▶.
-        for current in [TYPE_FIELD, INTERACTIVE_MODE_FIELD] {
+        for current in [TYPE_FIELD, BACKGROUND_TRIGGER_FIELD] {
             let text = spans_text(&selector_spans(
                 "Background",
                 TYPE_FIELD,
@@ -647,10 +596,12 @@ mod tests {
     }
 
     #[test]
-    fn dialog_title_new_agent() {
+    fn dialog_title_names_the_setup_form_in_create_mode() {
         let mut d = NewAgentDialog::new(Some("."));
         d.task_type = NewTaskType::Interactive;
-        assert_eq!(dialog_title(&d), " New Agent ");
+        assert_eq!(dialog_title(&d), " New Session · Setup ");
+        d.step = DialogStep::Mode;
+        assert_eq!(dialog_title(&d), " New Session · Mode ");
     }
 
     #[test]
@@ -682,12 +633,6 @@ mod tests {
         assert_eq!(task_type_label(NewTaskType::Interactive), "Interactive");
         assert_eq!(task_type_label(NewTaskType::Terminal), "Terminal");
         assert_eq!(task_type_label(NewTaskType::Background), "Background");
-    }
-
-    #[test]
-    fn interactive_mode_label_all_variants() {
-        assert_eq!(interactive_mode_label(NewTaskMode::Interactive), "New");
-        assert_eq!(interactive_mode_label(NewTaskMode::Resume), "Resume");
     }
 
     #[test]
@@ -743,6 +688,15 @@ mod tests {
     fn help_text_interactive() {
         let mut d = NewAgentDialog::new(Some("."));
         d.task_type = NewTaskType::Interactive;
+        let text = help_text(&d);
+        assert!(text.contains("next (Mode)"));
+    }
+
+    #[test]
+    fn help_text_interactive_edit_mode() {
+        let mut d = NewAgentDialog::new(Some("."));
+        d.task_type = NewTaskType::Interactive;
+        d.edit_id = Some("test-id".to_string());
         let text = help_text(&d);
         assert!(text.contains("launch"));
     }
@@ -810,9 +764,13 @@ mod tests {
 
     #[test]
     fn field_layout_for_interactive() {
+        // CT34: the Mode row is gone, so every interactive field shifts up.
         let layout = FieldLayout::for_task(NewTaskType::Interactive);
-        assert_eq!(layout.cli, 2);
-        assert_eq!(layout.identity, 5);
+        assert_eq!(layout.cli, 1);
+        assert_eq!(layout.identity, 2);
+        assert_eq!(layout.yolo, 3);
+        assert_eq!(layout.sandbox, 4);
+        assert_eq!(layout.dir, 5);
     }
 
     #[test]
@@ -886,22 +844,6 @@ mod tests {
     }
 
     #[test]
-    fn session_picker_label_no_selection() {
-        let mut d = NewAgentDialog::new(Some("."));
-        d.selected_session = None;
-        let label = session_picker_label(&d);
-        assert!(label.contains("pick session"));
-    }
-
-    #[test]
-    fn session_picker_label_with_selection() {
-        let mut d = NewAgentDialog::new(Some("."));
-        d.selected_session = Some(("id-1".to_string(), "My Session".to_string()));
-        let label = session_picker_label(&d);
-        assert!(label.contains("My Session"));
-    }
-
-    #[test]
     fn focus_style_focused() {
         let style = focus_style(0, 0, Color::Cyan);
         assert_eq!(style.bg, Some(Color::Cyan));
@@ -940,24 +882,29 @@ mod tests {
         assert_eq!(style.fg, Some(theme.dim_text));
     }
 
+    /// CT34 FR 1: the Mode (Session) row is gone from the form — neither
+    /// `New`/`Resume` nor the old inline resume hints may render.
     #[test]
-    fn session_picker_label_truncates_long_title() {
+    fn interactive_form_has_no_mode_row() {
         let mut d = NewAgentDialog::new(Some("."));
-        d.selected_session = Some(("id".to_string(), "A".repeat(100)));
-        let label = session_picker_label(&d);
-        assert!(label.chars().count() < 60);
-    }
-
-    #[test]
-    fn interactive_mode_row_resume_unconfigured() {
-        let mut d = NewAgentDialog::new(Some("."));
-        d.task_mode = NewTaskMode::Resume;
-        d.session_entries = vec![];
-        d.cli_configs = vec![None];
-        d.cli_index = 0;
-        let line = interactive_mode_row(&d, Color::Cyan, &Theme::classic());
-        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.contains("not configured"));
+        d.task_type = NewTaskType::Interactive;
+        d.task_mode = crate::tui::app::dialog::new_agent::NewTaskMode::Resume;
+        let lines = build_dialog_lines(
+            &d,
+            Color::White,
+            &[0],
+            40,
+            &Theme::classic(),
+            DIR_BROWSER_VISIBLE,
+        );
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(!text.contains("Session:"), "mode row must be gone: {text}");
+        assert!(!text.contains("not configured"), "{text}");
+        assert!(!text.contains("pick session"), "{text}");
     }
 
     #[test]
@@ -982,17 +929,6 @@ mod tests {
     #[test]
     fn task_type_label_background() {
         assert_eq!(task_type_label(NewTaskType::Background), "Background");
-    }
-
-    /// interactive_mode_label returns correct labels for modes
-    #[test]
-    fn interactive_mode_label_new() {
-        assert_eq!(interactive_mode_label(NewTaskMode::Interactive), "New");
-    }
-
-    #[test]
-    fn interactive_mode_label_resume() {
-        assert_eq!(interactive_mode_label(NewTaskMode::Resume), "Resume");
     }
 
     /// background_trigger_label returns correct labels for triggers
@@ -1180,6 +1116,26 @@ mod tests {
             .join("\n")
     }
 
+    fn cell_grid(width: u16, height: u16, app: &App) -> Vec<Vec<(Color, Color)>> {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = Theme::classic();
+        terminal
+            .draw(|frame| draw_new_agent_dialog(frame, app, &theme))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| {
+                        let cell = &buffer[(x, y)];
+                        (cell.fg, cell.bg)
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
     fn app_with_dialog(dialog: NewAgentDialog) -> App {
         let db_file = tempfile::NamedTempFile::new().unwrap();
         let path = db_file.path().to_path_buf();
@@ -1227,7 +1183,7 @@ mod tests {
         let mut dialog = NewAgentDialog::new(Some(root.path().to_string_lossy().as_ref()));
         // 9× ↓ from 0: the list handler ends in selection index 9.
         dialog.dir_selected = 9;
-        let accent = dialog.selected_accent_color(&Theme::classic());
+        let accent = Theme::classic().header_color;
         let app = app_with_dialog(dialog);
         let rows = render_dialog(200, 50, &app);
         let text = join_rows(&rows);
@@ -1298,5 +1254,236 @@ mod tests {
             text.contains("filter:"),
             "filter rows use the plain label: {text}"
         );
+    }
+
+    #[test]
+    fn harness_accent_only_on_name() {
+        use crate::domain::cli_config::CliConfig;
+        use crate::domain::models::Cli;
+        let mut dialog = NewAgentDialog::new(Some("."));
+        dialog.available_clis = vec![Cli::new("claude")];
+        dialog.cli_configs = vec![Some(CliConfig {
+            name: "claude".to_string(),
+            accent_color: Some([255, 0, 0]),
+            ..Default::default()
+        })];
+        dialog.cli_index = 0;
+        dialog.cli_picker_open = true;
+        dialog.field = FieldLayout::for_task(dialog.task_type).cli; // harness focused: name fills with its accent
+        let label = dialog.cli_display_label(0);
+        let app = app_with_dialog(dialog);
+        let theme = Theme::classic();
+        let header = theme.header_color;
+        let harness = Color::Rgb(255, 0, 0);
+        assert_ne!(harness, header);
+
+        let rows = render_dialog(200, 50, &app);
+        let grid = cell_grid(200, 50, &app);
+        const BOX_GLYPHS: [char; 11] = ['┌', '┐', '└', '┘', '─', '│', '├', '┤', '┬', '┴', '┼'];
+
+        let mut border_cells = 0;
+        for (row, (text, _)) in rows.iter().enumerate() {
+            for (x, ch) in text.chars().enumerate() {
+                if BOX_GLYPHS.contains(&ch) && grid[row][x].0 == header {
+                    border_cells += 1;
+                }
+            }
+        }
+        assert!(
+            border_cells >= 1,
+            "dialog border must use the canopy header color"
+        );
+
+        for (y, line) in grid.iter().enumerate() {
+            for (x, &(fg, bg)) in line.iter().enumerate() {
+                if bg == harness {
+                    assert_eq!(
+                        fg,
+                        Color::Black,
+                        "cell ({x},{y}) may use the harness accent as background only with black text"
+                    );
+                }
+            }
+        }
+
+        // The harness value and the selected picker row are both drawn as a
+        // solid block of the accent, so at least two rows carry that background.
+        let mut block_rows = std::collections::BTreeSet::new();
+        for (row, (text, _)) in rows.iter().enumerate() {
+            for (x, _) in text.chars().enumerate() {
+                if grid[row][x].1 == harness {
+                    block_rows.insert(row);
+                    assert!(
+                        text.contains(&label),
+                        "harness block is only for the harness name rows, found on: {text:?}"
+                    );
+                }
+            }
+        }
+        assert!(
+            block_rows.len() >= 2,
+            "the harness name must fill the value row and the picker row \
+             (label {label:?}), found on rows {block_rows:?}"
+        );
+    }
+
+    /// Two harnesses with fixed accents: row 0 is claude (red), row 1 is
+    /// mistral (blue). The picker is open and row 0 is selected.
+    fn two_harness_dialog() -> NewAgentDialog {
+        use crate::domain::cli_config::CliConfig;
+        use crate::domain::models::Cli;
+        let mut d = NewAgentDialog::new(Some("."));
+        d.available_clis = vec![Cli::new("claude"), Cli::new("mistral")];
+        d.cli_configs = vec![
+            Some(CliConfig {
+                name: "claude".to_string(),
+                accent_color: Some([255, 0, 0]),
+                ..Default::default()
+            }),
+            Some(CliConfig {
+                name: "mistral".to_string(),
+                accent_color: Some([0, 0, 255]),
+                ..Default::default()
+            }),
+        ];
+        d.cli_picker_open = true;
+        d
+    }
+
+    fn assert_harness_block(span: &Span<'static>, harness: Color, what: &str) {
+        assert_eq!(
+            span.style.bg,
+            Some(harness),
+            "{what} must be filled with the harness accent"
+        );
+        assert_eq!(
+            span.style.fg,
+            Some(Color::Black),
+            "{what} must use black text"
+        );
+        assert!(
+            span.style.add_modifier.contains(Modifier::BOLD),
+            "{what} must be bold"
+        );
+    }
+
+    #[test]
+    fn selected_harness_row_is_one_block_in_its_accent() {
+        let d = two_harness_dialog();
+        let label = d.cli_display_label(0);
+        let lines = build_dialog_lines(
+            &d,
+            Color::Cyan,
+            &[0, 1],
+            40,
+            &Theme::classic(),
+            DIR_BROWSER_VISIBLE,
+        );
+        let spans: Vec<&Span<'static>> = lines.iter().flat_map(|l| l.spans.iter()).collect();
+        let marker = spans
+            .iter()
+            .find(|s| s.content.starts_with("    \u{203a}"))
+            .expect("selected row marker drawn");
+        let name = spans
+            .iter()
+            .find(|s| s.content == label)
+            .expect("selected row label drawn");
+        let harness = Color::Rgb(255, 0, 0);
+        assert_harness_block(marker, harness, "selected harness marker");
+        assert_harness_block(name, harness, "selected harness label");
+    }
+
+    #[test]
+    fn unselected_harness_row_keeps_accent_text_without_background() {
+        let d = two_harness_dialog();
+        let label = d.cli_display_label(1);
+        let lines = build_dialog_lines(
+            &d,
+            Color::Cyan,
+            &[0, 1],
+            40,
+            &Theme::classic(),
+            DIR_BROWSER_VISIBLE,
+        );
+        let name = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|s| s.content == label)
+            .expect("unselected row label drawn");
+        assert_eq!(name.style.fg, Some(Color::Rgb(0, 0, 255)));
+        assert_eq!(
+            name.style.bg, None,
+            "unselected harness row has no background"
+        );
+    }
+
+    #[test]
+    fn focused_harness_value_is_one_block_in_its_accent() {
+        let mut d = two_harness_dialog();
+        d.field = FieldLayout::for_task(d.task_type).cli;
+        let value = format!(" {} ", d.cli_display_label(0));
+        let lines = build_dialog_lines(
+            &d,
+            Color::Cyan,
+            &[0, 1],
+            40,
+            &Theme::classic(),
+            DIR_BROWSER_VISIBLE,
+        );
+        let span = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|s| s.content == value)
+            .expect("harness value drawn");
+        assert_harness_block(span, Color::Rgb(255, 0, 0), "focused harness value");
+    }
+
+    #[test]
+    fn unfocused_harness_value_keeps_accent_text_without_background() {
+        let mut d = two_harness_dialog();
+        d.field = 0; // harness row not focused
+        let value = format!(" {} ", d.cli_display_label(0));
+        let lines = build_dialog_lines(
+            &d,
+            Color::Cyan,
+            &[0, 1],
+            40,
+            &Theme::classic(),
+            DIR_BROWSER_VISIBLE,
+        );
+        let span = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|s| s.content == value)
+            .expect("harness value drawn");
+        assert_eq!(span.style.fg, Some(Color::Rgb(255, 0, 0)));
+        assert_eq!(
+            span.style.bg, None,
+            "unfocused harness value has no background"
+        );
+    }
+
+    #[test]
+    fn directory_picker_selected_row_keeps_canopy_accent() {
+        let root = root_with_dirs(&["alpha", "bravo"]);
+        let mut d = NewAgentDialog::new(Some(root.path().to_string_lossy().as_ref()));
+        d.dir_selected = 1;
+        let accent = Theme::classic().header_color;
+        let lines = build_dialog_lines(&d, accent, &[], 40, &Theme::classic(), DIR_BROWSER_VISIBLE);
+        let spans: Vec<&Span<'static>> = lines.iter().flat_map(|l| l.spans.iter()).collect();
+        let selected = spans
+            .iter()
+            .find(|s| s.content.contains("bravo"))
+            .expect("selected folder drawn");
+        let other = spans
+            .iter()
+            .find(|s| s.content.contains("alpha"))
+            .expect("unselected folder drawn");
+        assert_eq!(
+            selected.style.bg,
+            Some(accent),
+            "selected folder keeps the canopy accent"
+        );
+        assert_eq!(other.style.bg, None, "unselected folder has no background");
     }
 }

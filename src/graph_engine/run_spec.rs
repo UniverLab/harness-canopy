@@ -1,12 +1,14 @@
+use super::verdict_shutdown::merge_process_record;
 use super::*;
 
-/// CM43 req 6: the directed-start activity message — the start node, the
+/// the directed-start activity message — the start node, the
 /// nodes skipped between Start and it, the outputs reused (by node and run
 /// id), and the counter restart.
 fn directed_start_message(
     spec_name: &str,
     target: &super::directed::DirectedTarget,
     nodes: &[GraphNode],
+    edges: &[GraphEdge],
     existing_runs: &[GraphNodeRun],
 ) -> String {
     let skipped = if target.skipped_nodes.is_empty() {
@@ -14,7 +16,7 @@ fn directed_start_message(
     } else {
         format!(" [{}]", target.skipped_nodes.join(", "))
     };
-    let reused = reused_output_records(nodes, existing_runs);
+    let reused = reused_output_records(nodes, edges, &target.start_node_ids, existing_runs);
     let reused = if reused.is_empty() {
         "none".to_string()
     } else {
@@ -32,6 +34,38 @@ fn directed_start_message(
         target.skipped_nodes.len(),
         skipped
     )
+}
+
+/// Records the directed-start activity event for `start` when it targets
+/// `spec`; an unresolvable target records nothing (the dispatch already
+/// refused it upstream).
+fn record_directed_start(
+    db: &Database,
+    lp: &crate::domain::graphs::Graph,
+    workdir: &str,
+    spec: &GraphSpec,
+    graph: (&[GraphNode], &[GraphEdge], &[EnsembleDetails]),
+    existing_runs: &[GraphNodeRun],
+    start: &DirectedStart,
+) {
+    let (nodes, edges, ensembles) = graph;
+    let Ok(target) = resolve_directed_target(&start.node_arg, nodes, edges, ensembles) else {
+        return;
+    };
+    activity::record(
+        db,
+        activity::GraphEvent {
+            graph_id: &lp.id,
+            graph_name: &lp.name,
+            workdir,
+            spec_id: Some(&spec.id),
+            node_id: None,
+            run_id: None,
+            kind: activity::GraphEventKind::SpecStarted,
+            message: directed_start_message(&spec.name, &target, nodes, edges, existing_runs),
+            payload: None,
+        },
+    );
 }
 
 impl GraphEngine {
@@ -112,26 +146,19 @@ impl GraphEngine {
             None,
         )?;
 
-        // CM43 req 6: record the directed start on the run's activity feed —
+        // record the directed start on the run's activity feed —
         // the start node, the nodes skipped between Start and it, the
         // outputs reused (by node and run id), and the counter restart.
         if let Some(start) = directed.filter(|d| d.spec_id == spec.id) {
-            if let Ok(target) = resolve_directed_target(&start.node_arg, nodes, edges, &ensembles) {
-                activity::record(
-                    &self.db,
-                    activity::GraphEvent {
-                        graph_id: &lp.id,
-                        graph_name: &lp.name,
-                        workdir,
-                        spec_id: Some(&spec.id),
-                        node_id: None,
-                        run_id: None,
-                        kind: activity::GraphEventKind::SpecStarted,
-                        message: directed_start_message(&spec.name, &target, nodes, &existing_runs),
-                        payload: None,
-                    },
-                );
-            }
+            record_directed_start(
+                &self.db,
+                lp,
+                workdir,
+                spec,
+                (nodes, edges, &ensembles),
+                &existing_runs,
+                start,
+            );
         }
 
         // RS2: session ids captured for each node during THIS dispatch, so a
@@ -518,9 +545,12 @@ impl GraphEngine {
             )?;
             return Ok(execution);
         }
+        // A self-reported run keeps its own output; only the process record
+        // (ended_after_verdict / session_end) is merged onto it, never the verdict.
+        let output = merge_process_record(&self.db, run_id, run, &execution.output);
         Ok(NodeExecution {
             status: run.status,
-            output: run.output.clone().unwrap_or_else(|| serde_json::json!({})),
+            output,
             summary: execution.summary,
         })
     }
@@ -544,13 +574,15 @@ impl GraphEngine {
             &node.id,
             &watch.head_before,
             &head_after,
+            ctx.workdir,
             execution.output,
-        );
+        )
+        .await;
         tracing::warn!(
             node = %node.name,
             head_before = %watch.head_before,
             head_after = %head_after,
-            "node committed but has no commit rights"
+            "node without commit rights: HEAD moved during its run"
         );
         self.db.update_graph_run_result(
             run_id,

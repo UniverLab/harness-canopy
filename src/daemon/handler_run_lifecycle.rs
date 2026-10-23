@@ -3,6 +3,10 @@
 
 use crate::daemon::handler::TaskTriggerHandler;
 use crate::daemon::handler_formatting::internal_error;
+use crate::daemon::handler_run_directive::{
+    limit_reset_note, not_continuable_refusal, reset_execution_limit, restart_at_node,
+    retry_restart_target,
+};
 use crate::daemon::handler_run_exec::{
     directed_run_report, find_in_flight_run, handle_retry_current_node, handle_skip_next_spec,
     in_flight_run_error, node_name_for_error, resolve_directed_spec, resolve_reported_run,
@@ -32,7 +36,7 @@ impl TaskTriggerHandler {
     /// can never diverge in behavior.
     #[tool(
         name = "graph_reset",
-        description = "Reset a completed/failed graph back to pending so graph_run can relaunch it. Without `specs`, resets every non-completed spec, leaving already-completed ones untouched so graph_run resumes at the first pending spec. With `specs`, resets exactly those spec IDs, even if they were completed. If the graph's last run was against a queue, its queue members are what get reset (same semantics), since a queue run's own bound specs are typically empty. Rejects a `running` graph — call graph_pause first. Note: a `failed` graph with a pending graph_schedule_autorun resets and resumes itself automatically when the schedule fires — call this manually only to reset sooner, reset a `completed` graph, or reset specific spec IDs."
+        description = "Reset a completed/failed graph back to pending so graph_run can relaunch it. Without `specs`, resets every non-completed spec, leaving already-completed ones untouched so graph_run resumes at the first pending spec. With `specs`, resets exactly those spec IDs, even if they were completed, and zeroes each named spec's execution count (the per-spec limit that refuses relaunch after repeated failures). A reset without `specs` keeps every spec's execution count. The worktree is never touched. If the graph's last run was against a queue, its queue members are what get reset (same semantics), since a queue run's own bound specs are typically empty. Rejects a `running` graph — call graph_pause first. Note: a `failed` graph with a pending graph_schedule_autorun resets and resumes itself automatically when the schedule fires — call this manually only to reset sooner, reset a `completed` graph, or reset specific spec IDs."
     )]
     pub(crate) async fn graph_reset(
         &self,
@@ -299,7 +303,7 @@ impl TaskTriggerHandler {
 
     #[tool(
         name = "graph_continue",
-        description = "Continue a paused graph by retrying the current node or skipping to the next spec, or start a spec at a chosen node with action run_from_node (requires node_id; optional spec_id defaults to the current spec)."
+        description = "Continue a paused or failed graph by retrying the current node or skipping to the next spec, or start a spec at a chosen node with action run_from_node (requires node_id; optional spec_id defaults to the current spec). On a failed graph, or a paused one whose current spec is pending with a recorded node, retry_current_node re-runs that node as a directed run. Each of these directives clears the spec's execution limit before it runs (the response says so); automatic re-runs do not."
     )]
     pub(crate) async fn graph_continue(
         &self,
@@ -324,29 +328,47 @@ impl TaskTriggerHandler {
                 .graph_continue_run_from_node(graph_id, lp, params.node_id, params.spec_id)
                 .await;
         }
-        if lp.status != GraphStatus::Paused {
-            return Ok(error_result(&format!(
-                "Graph '{}' is not paused.",
-                graph_id
-            )));
+        // FR6: a failed graph takes the same two actions as a paused one.
+        if !matches!(lp.status, GraphStatus::Paused | GraphStatus::Failed) {
+            return Ok(error_result(&not_continuable_refusal(&graph_id, lp.status)));
         }
 
-        match params.action.trim() {
+        let limit = match params.action.trim() {
             "retry_current_node" => {
+                // FR6/FR7: a failed graph, or a pending spec with a recorded
+                // current node, restarts as a directed run at that node.
+                if let Some((spec, node_id)) = retry_restart_target(&self.db, &lp)? {
+                    return restart_at_node(
+                        &self.graph_engine,
+                        &self.db,
+                        &graph_id,
+                        &spec,
+                        node_id,
+                    );
+                }
+                let spec = resolve_directed_spec(&self.db, &graph_id, None).ok();
                 handle_retry_current_node(&self.db, &graph_id)?;
+                // FR1: the directive clears the spec's execution limit before the run.
+                match spec {
+                    Some(spec) => reset_execution_limit(&self.db, &spec.id, &spec.name)?,
+                    None => String::new(),
+                }
             }
-            "skip_next_spec" => handle_skip_next_spec(&self.db, &graph_id)?,
+            "skip_next_spec" => {
+                handle_skip_next_spec(&self.db, &graph_id)?;
+                String::new()
+            }
             _ => {
                 return Ok(error_result(
                     "graph_continue action must be retry_current_node, skip_next_spec or run_from_node.",
                 ));
             }
-        }
+        };
 
         Arc::clone(&self.graph_engine).resume_background(graph_id.clone(), None);
 
         Ok(success_result(&format!(
-            "Graph '{}' resumed with action '{}'.",
+            "Graph '{}' resumed with action '{}'.{limit}",
             graph_id, params.action
         )))
     }
@@ -413,6 +435,8 @@ impl TaskTriggerHandler {
             Ok(plan) => plan,
             Err(message) => return Ok(error_result(&message)),
         };
+        // FR1: the engine zeroes the count when the directed run starts.
+        let limit = limit_reset_note(&spec.name);
         Arc::clone(&self.graph_engine).resume_background(
             graph_id.clone(),
             Some(crate::graph_engine::DirectedStart {
@@ -421,7 +445,7 @@ impl TaskTriggerHandler {
             }),
         );
         Ok(success_result(&format!(
-            "Graph '{}' resumed.{}",
+            "Graph '{}' resumed.{limit}{}",
             graph_id,
             directed_run_report(Some(&plan))
         )))

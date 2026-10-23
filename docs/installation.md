@@ -59,6 +59,12 @@ doesn't reach that message — see
 [Requirements: If no platform is installed](../README.md#if-no-platform-is-installed)
 in the README for the verified failure and where it comes from.
 
+The registry itself keeps changing after setup, and the TUI only refreshes it
+in the background at startup, and only when the last refresh is more than 24
+hours old. To apply the current registry right away, run
+`canopy registry refresh` — see
+[CLI Reference: Platform registry](cli-reference.md#platform-registry).
+
 ## Auto-update
 
 The daemon checks GitHub releases for new stable versions every 24 hours,

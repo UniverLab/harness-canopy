@@ -1,4 +1,5 @@
 use super::*;
+use check_command::execute_shell_command;
 use chrono::Utc;
 
 pub(crate) struct HookFireCtx<'a> {
@@ -441,6 +442,10 @@ impl GraphEngine {
             spec_id: None,
             blocker: None,
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         self.fire_hooks(lp, GraphHookEvent::OnCompleted, &ctx).await;
     }
@@ -470,6 +475,7 @@ mod tests {
             paused_by_reconciliation: false,
             infra_node_id: None,
             allow_dirty_start: false,
+            require_spec_type: false,
         }
     }
 
@@ -528,6 +534,10 @@ mod tests {
             spec_id: None,
             blocker: None,
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let fire = HookFireCtx {
             lp: &lp,

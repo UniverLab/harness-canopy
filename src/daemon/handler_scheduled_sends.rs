@@ -7,7 +7,7 @@ use crate::daemon::params::*;
 use crate::daemon::params_extract::Parameters;
 use crate::db::scheduled_sends::ScheduledSendProvenance;
 use axum::http::request::Parts;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::tool;
 use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
@@ -167,7 +167,7 @@ impl TaskTriggerHandler {
                 ellipsis
             )
         }));
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             lines.join("\n"),
         )]))
     }

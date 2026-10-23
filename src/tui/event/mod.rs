@@ -56,6 +56,7 @@ fn tick_duration(app: &App) -> Duration {
         | Focus::NewAgentDialog
         | Focus::LaunchpadDialog
         | Focus::KnowledgeDialog
+        | Focus::KnowledgeViewer
         | Focus::ContextTransfer
         | Focus::RagTransfer
         | Focus::PromptTemplateDialog
@@ -89,8 +90,8 @@ fn dispatch_event(app: &mut App, event: Event) -> Result<()> {
                 ratatui::crossterm::event::MouseEventKind::Down(
                     ratatui::crossterm::event::MouseButton::Left,
                 ) => {
+                    app.atmosphere_left_click(mouse.column, mouse.row);
                     app.atmosphere_hidden = true;
-                    app.atmosphere_ctx.mouse_clicked = true;
                 }
                 ratatui::crossterm::event::MouseEventKind::Down(_) => {
                     app.atmosphere_hidden = true;
@@ -126,10 +127,13 @@ mod context_transfer;
 pub(crate) mod ctrl_c;
 mod home_preview;
 pub(crate) mod knowledge_dialog;
+pub(crate) mod knowledge_viewer;
 mod launchpad;
 mod mouse;
 mod new_agent_dialog;
+pub(crate) mod new_agent_mode_step;
 mod paste;
+mod project_filter;
 mod prompt_template;
 mod rag_transfer;
 mod scroll;
@@ -137,6 +141,7 @@ mod search_picker;
 mod terminal_warp;
 
 use knowledge_dialog::handle_knowledge_dialog_key;
+use knowledge_viewer::handle_knowledge_viewer_key;
 mod crews_keys;
 mod graph_editor;
 mod graph_form;
@@ -163,10 +168,6 @@ use scroll::{
 };
 
 pub fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
-    if app.panel_picker_open {
-        handle_panel_picker_key(app, code);
-        return Ok(());
-    }
     // CT30: while the panel is focused on the Crews face (or one of its
     // dialogs is open) the key belongs to the face first; it reports
     // whether it consumed the key so global keys still work otherwise.
@@ -238,12 +239,6 @@ fn handle_global_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> b
         return true;
     }
 
-    // CT1 multi-face panel picker: pin any face, or back to automatic.
-    if code == KeyCode::F(6) {
-        app.open_panel_picker();
-        return true;
-    }
-
     if code == KeyCode::Char('f')
         && modifiers.contains(KeyModifiers::CONTROL)
         && matches!(app.focus, Focus::Agent)
@@ -302,6 +297,7 @@ fn dispatch_focus_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> 
         Focus::NewAgentDialog => handle_dialog_key(app, code, modifiers),
         Focus::LaunchpadDialog => handle_launchpad_key(app, code),
         Focus::KnowledgeDialog => handle_knowledge_dialog_key(app, code),
+        Focus::KnowledgeViewer => handle_knowledge_viewer_key(app, code),
         Focus::Agent => handle_agent_key(app, code, modifiers),
         Focus::ContextTransfer => handle_context_transfer_key(app, code),
         Focus::RagTransfer => handle_rag_transfer_key(app, code),
@@ -313,18 +309,6 @@ fn dispatch_focus_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> 
 }
 
 // ── Mouse: scroll wheel + Shift+Click to copy selection ─────────────
-
-/// CT1 face picker keys: ↑↓/jk move, Enter pins the highlighted row
-/// (Automatic unpins back to the switching rule), Esc closes.
-fn handle_panel_picker_key(app: &mut App, code: KeyCode) {
-    match code {
-        KeyCode::Up | KeyCode::Char('k') => app.move_panel_picker(false),
-        KeyCode::Down | KeyCode::Char('j') => app.move_panel_picker(true),
-        KeyCode::Enter => app.confirm_panel_picker(),
-        KeyCode::Esc => app.close_panel_picker(),
-        _ => {}
-    }
-}
 
 fn open_terminal_search(app: &mut App) {
     let Some((is_terminal, idx)) = selected_terminal_like(app) else {
@@ -836,6 +820,39 @@ mod sidebar_mouse_tests {
 
         assert_eq!(app.sidebar_layer, crate::tui::app::SidebarLayer::Knowledge);
     }
+
+    #[test]
+    fn f6_no_longer_opens_a_panel_picker_in_preview_or_agent_focus() {
+        // The F6 panel picker is retired: the pin lives in
+        // F1 → Settings → TUI Appearance now. In both surfaces where F6
+        // used to open the picker it must be a no-op — most visibly, the
+        // global handler no longer claims the key.
+        let mut preview = app_with_agents(1);
+        assert!(matches!(preview.focus, Focus::Preview));
+        assert!(
+            !handle_global_key(&mut preview, KeyCode::F(6), KeyModifiers::NONE),
+            "F6 must not be claimed by the global handler anymore"
+        );
+        handle_key(&mut preview, KeyCode::F(6), KeyModifiers::NONE).unwrap();
+        assert!(!preview.hub_open, "F6 must not open the hub in Preview");
+        assert!(
+            matches!(preview.focus, Focus::Preview),
+            "F6 must leave Preview untouched"
+        );
+
+        let mut agent = app_with_agents(1);
+        agent.focus = Focus::Agent;
+        assert!(
+            !handle_global_key(&mut agent, KeyCode::F(6), KeyModifiers::NONE),
+            "F6 must not be claimed by the global handler anymore"
+        );
+        handle_key(&mut agent, KeyCode::F(6), KeyModifiers::NONE).unwrap();
+        assert!(!agent.hub_open, "F6 must not open the hub in Agent focus");
+        assert!(
+            matches!(agent.focus, Focus::Agent),
+            "F6 must leave the focused session untouched"
+        );
+    }
 }
 
 /// Functional requirement 4's mouse surface: the project Focus tab bar and
@@ -878,6 +895,9 @@ mod project_panel_mouse_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         }
     }
 
@@ -1074,6 +1094,9 @@ mod graph_live_panel_mouse_tests {
             spec_name: format!("Spec {id}"),
             status,
             failure_reason: None,
+            spec_code: None,
+            spec_type: None,
+            spec_scope: None,
         }
     }
 
@@ -2277,6 +2300,96 @@ mod brain_seed_tests {
             on_count(&app),
             0,
             "a move outside both brain rects must change nothing"
+        );
+    }
+}
+
+// ── Firefly Catcher: the click itself is hit-tested ────────────────────
+#[cfg(test)]
+mod firefly_click_tests {
+    use super::*;
+    use crate::db::Database;
+    use crate::tui::gamification::MissionEvent;
+    use std::sync::Arc;
+    use tempfile::{tempdir, NamedTempFile};
+
+    fn night_app_with_fireflies() -> App {
+        let tmp = NamedTempFile::new().expect("create temp file");
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let db = Arc::new(Database::new(&path).expect("create test db"));
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        // Seed the night scene so live fireflies exist to click on.
+        app.atmosphere_ctx.hour = 23;
+        app.atmosphere.tick(
+            ratatui::layout::Rect::new(0, 0, 80, 24),
+            &mut app.atmosphere_ctx,
+        );
+        app.atmosphere_hidden = false;
+        app
+    }
+
+    fn find_hit_cell(app: &App) -> (u16, u16) {
+        for row in 0..24u16 {
+            for col in 0..80u16 {
+                if app.atmosphere.catch_at(col, row) {
+                    return (col, row);
+                }
+            }
+        }
+        panic!("seeded night scene must contain a live firefly");
+    }
+
+    fn click(app: &mut App, col: u16, row: u16) {
+        dispatch_event(
+            app,
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: col,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn firefly_click_near_queues_caught() {
+        let mut app = night_app_with_fireflies();
+        let (col, row) = find_hit_cell(&app);
+        click(&mut app, col, row);
+        assert!(
+            app.mission_pending_events
+                .contains(&MissionEvent::FireflyCaught),
+            "a click within 1.5 cells of a live firefly must queue FireflyCaught"
+        );
+    }
+
+    #[test]
+    fn firefly_click_far_queues_nothing() {
+        let mut app = night_app_with_fireflies();
+        let (hit_col, hit_row) = find_hit_cell(&app);
+        // Three cells away from the hit: outside the 1.5-cell catch range.
+        let miss = [
+            (hit_col.saturating_add(3), hit_row),
+            (hit_col.saturating_sub(3), hit_row),
+            (hit_col, hit_row.saturating_add(3)),
+            (hit_col, hit_row.saturating_sub(3)),
+        ]
+        .into_iter()
+        .find(|(col, row)| !app.atmosphere.catch_at(*col, *row))
+        .expect("a cell 3 away from the hit must miss every fly");
+        click(&mut app, miss.0, miss.1);
+        assert!(
+            !app.mission_pending_events
+                .contains(&MissionEvent::FireflyCaught),
+            "a click 3 cells away from every live firefly must not queue FireflyCaught"
         );
     }
 }

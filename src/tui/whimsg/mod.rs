@@ -1,16 +1,20 @@
+pub mod events;
 pub mod kaomojis;
+mod phrases;
 pub mod rng;
 
 pub use kaomojis::{WhimContext, TITLE};
 
 use std::time::{Duration, Instant};
 
+use events::{EventKind, WhimEvent};
 use kaomojis::{
-    ACT_ERROR, ACT_LOADING, ACT_SUCCESS, ACT_THINKING, BLANK_MS, ERASE_MS, EVENT_DECAY_SECS,
-    HOLD_MAX, HOLD_MIN, INTERVAL_MAX, INTERVAL_MIN, KAOMOJI_MS, KAO_ERROR, KAO_LOADING,
-    KAO_SUCCESS, KAO_THINKING, OBJ_ABSURD, OBJ_AI, OBJ_DEV, OBJ_NATURE, OBJ_SCIENCE, OBJ_SPACE,
-    PH_BUSY, PH_ERROR, PH_IDLE, PH_SCROLL, PH_SPAWN, PH_SUCCESS, TWIST_ADVICE, TWIST_CHILL,
-    TWIST_FUNNY, TWIST_POETIC, TYPE_MS,
+    BLANK_MS, ERASE_MS, EVENT_DECAY_SECS, HOLD_MAX, HOLD_MIN, INTERVAL_MAX, INTERVAL_MIN,
+    KAOMOJI_MS, KAO_ERROR, KAO_LOADING, KAO_MAX_LEN, KAO_SUCCESS, KAO_THINKING, TYPE_MS,
+};
+use phrases::{
+    BUSY, EVENT_AGENT_DONE, EVENT_AGENT_FAILED, EVENT_AGENT_SPAWNED, EVENT_GRAPH_COMPLETED,
+    EVENT_GRAPH_STOPPED, EVENT_HOOK_MESSAGE, EVENT_SPEC_COMPLETED, IDLE, JOKES, SCROLL,
 };
 use rng::{pick_no_repeat, DedupRing, Rng};
 
@@ -78,7 +82,48 @@ enum Phase {
     Blank,
 }
 
-// ── PRNG ──────────────────────────────────────────────────────────
+/// The template list for one event kind. Single-template kinds avoid the
+/// empty-list case the mission branch handles separately.
+fn event_templates(kind: EventKind) -> &'static [&'static str] {
+    match kind {
+        EventKind::AgentSpawned => EVENT_AGENT_SPAWNED,
+        EventKind::AgentDone => EVENT_AGENT_DONE,
+        EventKind::AgentFailed => EVENT_AGENT_FAILED,
+        EventKind::SpecCompleted => EVENT_SPEC_COMPLETED,
+        EventKind::GraphCompleted => EVENT_GRAPH_COMPLETED,
+        EventKind::GraphBlocked | EventKind::GraphFailed => EVENT_GRAPH_STOPPED,
+        EventKind::HookMessage => EVENT_HOOK_MESSAGE,
+        EventKind::MissionUnlocked => &[],
+    }
+}
+
+fn first_word(s: &str) -> &str {
+    s.split_whitespace().next().unwrap_or(s)
+}
+
+/// Whether a template asks for the event's detail (`{node}`/`{spec}`);
+/// `{agent}`/`{graph}` always have the subject to fall back on.
+fn needs_detail(template: &str) -> bool {
+    template.contains("{node}") || template.contains("{spec}")
+}
+
+/// Fill an event template's placeholders from the event. `{agent}`/`{graph}`
+/// become the subject, `{spec}` the first word of the detail (a spec's id),
+/// `{node}` the detail itself. Callers must have filtered out templates the
+/// event cannot fill (see [`needs_detail`]).
+fn fill_template(template: &str, ev: &WhimEvent) -> String {
+    let spec = ev
+        .detail
+        .as_deref()
+        .map(first_word)
+        .unwrap_or_else(|| first_word(&ev.subject));
+    let node = ev.detail.as_deref().unwrap_or(ev.subject.as_str());
+    template
+        .replace("{agent}", &ev.subject)
+        .replace("{graph}", &ev.subject)
+        .replace("{spec}", spec)
+        .replace("{node}", node)
+}
 
 pub struct Whimsg {
     rng: Rng,
@@ -88,14 +133,15 @@ pub struct Whimsg {
     active_kaomoji: String,
     active_text: String,
     active_hold_ms: u64,
-    event_context: Option<WhimContext>,
+    event_context: Option<WhimEvent>,
     event_at: Instant,
     ambient: WhimContext,
     seen_kaomoji: DedupRing,
-    seen_action: DedupRing,
-    seen_object: DedupRing,
-    seen_twist: DedupRing,
-    seen_phrase: DedupRing,
+    seen_idle: DedupRing,
+    seen_busy: DedupRing,
+    seen_scroll: DedupRing,
+    seen_joke: DedupRing,
+    seen_event: DedupRing,
     mission_title: Option<String>,
     celebration_remaining: u32,
 }
@@ -114,22 +160,31 @@ impl Whimsg {
             event_context: None,
             event_at: Instant::now() - Duration::from_secs(999),
             ambient: WhimContext::Idle,
-            seen_kaomoji: DedupRing::new(8),
-            seen_action: DedupRing::new(8),
-            seen_object: DedupRing::new(8),
-            seen_twist: DedupRing::new(8),
-            seen_phrase: DedupRing::new(8),
+            seen_kaomoji: DedupRing::new(KAO_MAX_LEN),
+            seen_idle: DedupRing::new(IDLE.len()),
+            seen_busy: DedupRing::new(BUSY.len()),
+            seen_scroll: DedupRing::new(SCROLL.len()),
+            seen_joke: DedupRing::new(JOKES.len()),
+            seen_event: DedupRing::new(1),
             mission_title: None,
             celebration_remaining: 0,
             rng,
         }
     }
 
+    /// Deterministic construction for tests.
+    #[cfg(test)]
+    pub(crate) fn with_seed(seed: u64) -> Self {
+        let mut w = Self::new();
+        w.rng = Rng::from_seed(seed);
+        w
+    }
+
     /// Celebrate a newly unlocked mission (one-shot, high priority).
     pub fn notify_mission_unlocked(&mut self, title: &str) {
         self.mission_title = Some(title.to_string());
         self.celebration_remaining = 3;
-        self.notify_event(WhimContext::MissionUnlocked);
+        self.notify_event(WhimEvent::new(EventKind::MissionUnlocked, title));
     }
 
     /// Set the ambient context (reflects ongoing state: idle, busy, etc.).
@@ -137,8 +192,9 @@ impl Whimsg {
         self.ambient = ctx;
     }
 
-    /// Push a one-shot event (spawn, exit, error). Triggers a sooner message.
-    pub fn notify_event(&mut self, event: WhimContext) {
+    /// Push a one-shot event carrying its real subject. Triggers a sooner
+    /// message.
+    pub fn notify_event(&mut self, event: WhimEvent) {
         self.event_context = Some(event);
         self.event_at = Instant::now();
         if matches!(self.phase, Phase::Idle) {
@@ -252,8 +308,10 @@ impl Whimsg {
         if elapsed >= blank_ms {
             if self.celebration_remaining > 0 {
                 self.celebration_remaining -= 1;
-                self.event_context = Some(WhimContext::MissionUnlocked);
-                self.event_at = Instant::now();
+                if let Some(title) = self.mission_title.clone() {
+                    self.event_context = Some(WhimEvent::new(EventKind::MissionUnlocked, title));
+                    self.event_at = Instant::now();
+                }
                 self.generate();
                 self.advance(Phase::ErasingTitle);
                 return (WhimFrame::empty_title(), None);
@@ -271,20 +329,34 @@ impl Whimsg {
         self.phase_start = Instant::now();
     }
 
-    fn active_context(&self) -> WhimContext {
-        if let Some(ctx) = self.event_context {
-            if self.event_at.elapsed() < Duration::from_secs(EVENT_DECAY_SECS) {
-                return ctx;
-            }
+    /// The live event, if one is fresh enough to override the ambient context.
+    fn active_event(&self) -> Option<WhimEvent> {
+        let ev = self.event_context.as_ref()?;
+        if self.event_at.elapsed() < Duration::from_secs(EVENT_DECAY_SECS) {
+            Some(ev.clone())
+        } else {
+            None
         }
-        self.ambient
     }
 
     fn generate(&mut self) {
-        let ctx = self.active_context();
-        let intent = self.pick_intent(ctx);
+        if let Some(ev) = self.active_event() {
+            let intent = if ev.kind.is_error() {
+                Intent::Error
+            } else {
+                Intent::Success
+            };
+            self.pick_kaomoji(intent);
+            self.active_text = self.render_event(&ev);
+        } else {
+            let intent = self.ambient_intent();
+            self.pick_kaomoji(intent);
+            self.active_text = self.ambient_text();
+        }
+        self.active_hold_ms = self.rng.between(HOLD_MIN, HOLD_MAX) * 1000;
+    }
 
-        // Always pick kaomoji (100%)
+    fn pick_kaomoji(&mut self, intent: Intent) {
         let kaomojis = match intent {
             Intent::Loading => KAO_LOADING,
             Intent::Success => KAO_SUCCESS,
@@ -294,98 +366,11 @@ impl Whimsg {
         let ki = pick_no_repeat(&mut self.rng, kaomojis.len(), &self.seen_kaomoji);
         self.seen_kaomoji.push(ki);
         self.active_kaomoji = kaomojis[ki].to_string();
-
-        // 30% chance of a direct context-driven phrase
-        if let Some(title) = self.mission_title.take() {
-            self.active_text = format!("( ^ω^) Achieved: {title}!");
-        } else if self.rng.chance(0.30) {
-            let phrases = match ctx {
-                WhimContext::Idle => PH_IDLE,
-                WhimContext::AgentSpawned => PH_SPAWN,
-                WhimContext::AgentDone => PH_SUCCESS,
-                WhimContext::AgentFailed => PH_ERROR,
-                WhimContext::TaskRunning => PH_BUSY,
-                WhimContext::Scrolling => PH_SCROLL,
-                WhimContext::Busy => PH_BUSY,
-                WhimContext::MissionUnlocked => kaomojis::PH_MISSION,
-            };
-            let pi = pick_no_repeat(&mut self.rng, phrases.len(), &self.seen_phrase);
-            self.seen_phrase.push(pi);
-            self.active_text = phrases[pi].to_string();
-        } else {
-            // Template: action + object + twist
-            let actions = match intent {
-                Intent::Loading => ACT_LOADING,
-                Intent::Success => ACT_SUCCESS,
-                Intent::Error => ACT_ERROR,
-                Intent::Thinking => ACT_THINKING,
-            };
-            let domain = self.rng.range(6);
-            let objects = match domain {
-                0 => OBJ_DEV,
-                1 => OBJ_SPACE,
-                2 => OBJ_SCIENCE,
-                3 => OBJ_NATURE,
-                4 => OBJ_AI,
-                _ => OBJ_ABSURD,
-            };
-            let style = self.rng.range(5);
-            let twists: &[&str] = match style {
-                0 => TWIST_FUNNY,
-                1 => TWIST_POETIC,
-                2 => TWIST_ADVICE,
-                3 => TWIST_CHILL,
-                _ => &["..."],
-            };
-
-            let ai = pick_no_repeat(&mut self.rng, actions.len(), &self.seen_action);
-            self.seen_action.push(ai);
-            let oi = pick_no_repeat(&mut self.rng, objects.len(), &self.seen_object);
-            self.seen_object.push(oi);
-            let ti = pick_no_repeat(&mut self.rng, twists.len(), &self.seen_twist);
-            self.seen_twist.push(ti);
-            self.active_text = format!("{} {} {}", actions[ai], objects[oi], twists[ti]);
-        }
-
-        self.active_hold_ms = self.rng.between(HOLD_MIN, HOLD_MAX) * 1000;
     }
 
-    fn pick_intent(&mut self, ctx: WhimContext) -> Intent {
-        match ctx {
-            WhimContext::Idle => match self.rng.range(10) {
-                0..=3 => Intent::Thinking,
-                4..=6 => Intent::Loading,
-                _ => Intent::Success,
-            },
-            WhimContext::AgentSpawned => {
-                if self.rng.chance(0.8) {
-                    Intent::Success
-                } else {
-                    Intent::Loading
-                }
-            }
-            WhimContext::AgentDone => {
-                if self.rng.chance(0.9) {
-                    Intent::Success
-                } else {
-                    Intent::Thinking
-                }
-            }
-            WhimContext::AgentFailed => {
-                // Balance errors: 40% error, 40% thinking (pondering), 20% hopeful/success
-                match self.rng.range(10) {
-                    0..=3 => Intent::Error,
-                    4..=7 => Intent::Thinking,
-                    _ => Intent::Success,
-                }
-            }
-            WhimContext::TaskRunning => {
-                if self.rng.chance(0.7) {
-                    Intent::Loading
-                } else {
-                    Intent::Thinking
-                }
-            }
+    fn ambient_intent(&mut self) -> Intent {
+        match self.ambient {
+            WhimContext::Busy(_) => Intent::Loading,
             WhimContext::Scrolling => {
                 if self.rng.chance(0.7) {
                     Intent::Thinking
@@ -393,15 +378,63 @@ impl Whimsg {
                     Intent::Loading
                 }
             }
-            WhimContext::Busy => {
-                if self.rng.chance(0.7) {
-                    Intent::Loading
-                } else {
+            WhimContext::Idle => {
+                if self.rng.chance(0.5) {
                     Intent::Thinking
+                } else {
+                    Intent::Loading
                 }
             }
-            WhimContext::MissionUnlocked => Intent::Success,
         }
+    }
+
+    /// Ambient text: a joke replaces the ambient pick with probability 0.25
+    /// (never during a live event — this branch only runs with no event).
+    fn ambient_text(&mut self) -> String {
+        if self.rng.chance(0.25) {
+            let i = pick_no_repeat(&mut self.rng, JOKES.len(), &self.seen_joke);
+            self.seen_joke.push(i);
+            return JOKES[i].to_string();
+        }
+        match self.ambient {
+            WhimContext::Idle => {
+                let i = pick_no_repeat(&mut self.rng, IDLE.len(), &self.seen_idle);
+                self.seen_idle.push(i);
+                IDLE[i].to_string()
+            }
+            WhimContext::Busy(n) => {
+                let i = pick_no_repeat(&mut self.rng, BUSY.len(), &self.seen_busy);
+                self.seen_busy.push(i);
+                BUSY[i].replace("{n}", &n.to_string())
+            }
+            WhimContext::Scrolling => {
+                let i = pick_no_repeat(&mut self.rng, SCROLL.len(), &self.seen_scroll);
+                self.seen_scroll.push(i);
+                SCROLL[i].to_string()
+            }
+        }
+    }
+
+    fn render_event(&mut self, ev: &WhimEvent) -> String {
+        if ev.kind == EventKind::MissionUnlocked {
+            return format!("( ^ω^) Achieved: {}!", ev.subject);
+        }
+        let templates = event_templates(ev.kind);
+        let i = pick_no_repeat(&mut self.rng, templates.len(), &self.seen_event);
+        self.seen_event.push(i);
+        // A template the event cannot fill would repeat the subject in its
+        // own place ("grove hit a rock at grove"), so fall back to the first
+        // template that only needs the subject.
+        let chosen = if ev.detail.is_some() || !needs_detail(templates[i]) {
+            templates[i]
+        } else {
+            templates
+                .iter()
+                .copied()
+                .find(|t| !needs_detail(t))
+                .unwrap_or(templates[i])
+        };
+        fill_template(chosen, ev)
     }
 }
 
@@ -409,6 +442,10 @@ impl Whimsg {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    fn text_has_placeholder(text: &str) -> bool {
+        text.contains('{')
+    }
 
     /// WhimFrame factory methods produce correct initial state
     #[test]
@@ -472,11 +509,11 @@ mod tests {
         let mut w = Whimsg::new();
         assert!(matches!(w.ambient, WhimContext::Idle));
 
-        w.set_ambient(WhimContext::AgentSpawned);
-        assert!(matches!(w.ambient, WhimContext::AgentSpawned));
+        w.set_ambient(WhimContext::Busy(3));
+        assert!(matches!(w.ambient, WhimContext::Busy(3)));
 
-        w.set_ambient(WhimContext::Busy);
-        assert!(matches!(w.ambient, WhimContext::Busy));
+        w.set_ambient(WhimContext::Scrolling);
+        assert!(matches!(w.ambient, WhimContext::Scrolling));
     }
 
     /// notify_event sets event context and updates trigger time
@@ -485,9 +522,9 @@ mod tests {
         let mut w = Whimsg::new();
         let old_trigger = w.next_trigger;
 
-        w.notify_event(WhimContext::AgentFailed);
+        w.notify_event(WhimEvent::new(EventKind::AgentFailed, "oak"));
         assert!(w.event_context.is_some());
-        assert!(matches!(w.event_context, Some(WhimContext::AgentFailed)));
+        assert_eq!(w.event_context.as_ref().unwrap().subject, "oak");
 
         // From Idle phase, trigger should be sooner
         assert!(w.next_trigger <= old_trigger);
@@ -498,13 +535,10 @@ mod tests {
     fn notify_event_when_already_triggered_keeps_early_trigger() {
         let mut w = Whimsg::new();
 
-        // First event
-        w.notify_event(WhimContext::AgentSpawned);
+        w.notify_event(WhimEvent::new(EventKind::AgentSpawned, "fern"));
         let first_trigger = w.next_trigger;
 
-        // Second event soon after (trigger is already soon)
-        w.notify_event(WhimContext::AgentFailed);
-        // Trigger shouldn't go further back since it's already set
+        w.notify_event(WhimEvent::new(EventKind::AgentFailed, "fern"));
         assert!(w.next_trigger <= first_trigger);
     }
 
@@ -525,7 +559,6 @@ mod tests {
         for _ in 0..100 {
             let frame = w.tick();
             assert!(frame.title_visible <= TITLE.len());
-            // text_visible is always >= 0 by construction (it's a usize)
         }
     }
 
@@ -538,153 +571,22 @@ mod tests {
         assert!(matches!(w.phase, Phase::Idle));
     }
 
-    /// pick_intent for Idle context returns reasonable distribution
+    /// Active event decays to None after the timeout
     #[test]
-    fn pick_intent_idle_returns_thinking_loading_or_success() {
+    fn active_event_decays_after_timeout() {
         let mut w = Whimsg::new();
-        w.ambient = WhimContext::Idle;
-
-        let mut found_thinking = false;
-        let mut found_loading = false;
-        let mut found_success = false;
-
-        for _ in 0..100 {
-            let intent = w.pick_intent(WhimContext::Idle);
-            match intent {
-                Intent::Thinking => found_thinking = true,
-                Intent::Loading => found_loading = true,
-                Intent::Success => found_success = true,
-                Intent::Error => panic!("Idle should not produce Error intent"),
-            }
-        }
-
-        // With 100 samples, we should see some variety
-        assert!(found_thinking, "should see some Thinking intents");
-        assert!(found_loading, "should see some Loading intents");
-        assert!(found_success, "should see some Success intents");
-    }
-
-    /// pick_intent for AgentSpawned heavily favors Success
-    #[test]
-    fn pick_intent_agent_spawned_favors_success() {
-        let mut w = Whimsg::new();
-
-        let mut success_count = 0;
-        for _ in 0..100 {
-            let intent = w.pick_intent(WhimContext::AgentSpawned);
-            if matches!(intent, Intent::Success) {
-                success_count += 1;
-            }
-        }
-
-        // With 80% probability, expect 70+ successes in 100 samples
-        assert!(
-            success_count >= 50,
-            "AgentSpawned should favor Success (got {success_count}/100)"
-        );
-    }
-
-    /// pick_intent for AgentDone heavily favors Success
-    #[test]
-    fn pick_intent_agent_done_favors_success() {
-        let mut w = Whimsg::new();
-
-        let mut success_count = 0;
-        for _ in 0..100 {
-            let intent = w.pick_intent(WhimContext::AgentDone);
-            if matches!(intent, Intent::Success) {
-                success_count += 1;
-            }
-        }
-
-        // With 90% probability, expect high success rate
-        assert!(
-            success_count >= 70,
-            "AgentDone should favor Success (got {success_count}/100)"
-        );
-    }
-
-    /// pick_intent for AgentFailed produces balanced distribution
-    #[test]
-    fn pick_intent_agent_failed_balanced() {
-        let mut w = Whimsg::new();
-
-        let mut error_count = 0;
-        let mut thinking_count = 0;
-        let mut success_count = 0;
-
-        for _ in 0..100 {
-            let intent = w.pick_intent(WhimContext::AgentFailed);
-            match intent {
-                Intent::Error => error_count += 1,
-                Intent::Thinking => thinking_count += 1,
-                Intent::Success => success_count += 1,
-                Intent::Loading => panic!("AgentFailed should not produce Loading intent"),
-            }
-        }
-
-        // Should see balanced spread (40% error, 40% thinking, 20% success)
-        assert!(error_count > 20, "should see some Error intents");
-        assert!(thinking_count > 20, "should see some Thinking intents");
-        assert!(success_count > 5, "should see some Success intents");
-    }
-
-    /// pick_intent for TaskRunning favors Loading
-    #[test]
-    fn pick_intent_task_running_favors_loading() {
-        let mut w = Whimsg::new();
-
-        let mut loading_count = 0;
-        for _ in 0..100 {
-            let intent = w.pick_intent(WhimContext::TaskRunning);
-            if matches!(intent, Intent::Loading) {
-                loading_count += 1;
-            }
-        }
-
-        // With 70% probability, expect 50+ loadings in 100 samples
-        assert!(
-            loading_count >= 40,
-            "TaskRunning should favor Loading (got {loading_count}/100)"
-        );
-    }
-
-    /// pick_intent for MissionUnlocked always returns Success
-    #[test]
-    fn pick_intent_mission_unlocked_always_success() {
-        let mut w = Whimsg::new();
-
-        for _ in 0..20 {
-            let intent = w.pick_intent(WhimContext::MissionUnlocked);
-            assert!(
-                matches!(intent, Intent::Success),
-                "MissionUnlocked must always produce Success"
-            );
-        }
-    }
-
-    /// Active context decays from event to ambient after timeout
-    #[test]
-    fn active_context_decays_after_event_timeout() {
-        let mut w = Whimsg::new();
-        w.ambient = WhimContext::Idle;
-        w.event_context = Some(WhimContext::AgentSpawned);
+        w.event_context = Some(WhimEvent::new(EventKind::AgentSpawned, "fern"));
         w.event_at = Instant::now() - Duration::from_secs(EVENT_DECAY_SECS + 1);
-
-        let ctx = w.active_context();
-        assert!(matches!(ctx, WhimContext::Idle));
+        assert!(w.active_event().is_none());
     }
 
-    /// Active context uses event while within timeout
+    /// Active event is used while within the timeout
     #[test]
-    fn active_context_uses_event_within_timeout() {
+    fn active_event_used_within_timeout() {
         let mut w = Whimsg::new();
-        w.ambient = WhimContext::Idle;
-        w.event_context = Some(WhimContext::AgentFailed);
+        w.event_context = Some(WhimEvent::new(EventKind::AgentFailed, "fern"));
         w.event_at = Instant::now() - Duration::from_secs(1);
-
-        let ctx = w.active_context();
-        assert!(matches!(ctx, WhimContext::AgentFailed));
+        assert_eq!(w.active_event().unwrap().kind, EventKind::AgentFailed);
     }
 
     /// WhimFrame doesn't panic when constructing with various text lengths
@@ -699,7 +601,6 @@ mod tests {
                 text: text.to_string(),
                 text_visible: text.chars().count(),
             };
-            // Just verify it constructs without panic
             assert_eq!(frame.text, text);
         }
     }
@@ -709,14 +610,14 @@ mod tests {
     fn sequential_notifications_maintain_state() {
         let mut w = Whimsg::new();
 
-        w.notify_event(WhimContext::AgentSpawned);
-        assert!(matches!(w.event_context, Some(WhimContext::AgentSpawned)));
+        w.notify_event(WhimEvent::new(EventKind::AgentSpawned, "leaf"));
+        assert_eq!(w.event_context.as_ref().unwrap().subject, "leaf");
 
-        w.notify_event(WhimContext::AgentFailed);
-        assert!(matches!(w.event_context, Some(WhimContext::AgentFailed)));
+        w.notify_event(WhimEvent::new(EventKind::AgentFailed, "bark"));
+        assert_eq!(w.event_context.as_ref().unwrap().subject, "bark");
 
-        w.set_ambient(WhimContext::Busy);
-        assert!(matches!(w.ambient, WhimContext::Busy));
+        w.set_ambient(WhimContext::Busy(2));
+        assert!(matches!(w.ambient, WhimContext::Busy(2)));
     }
 
     /// Celebration graph properly decrements counter during celebration phase
@@ -726,12 +627,142 @@ mod tests {
         w.notify_mission_unlocked("Test Mission");
         assert_eq!(w.celebration_remaining, 3);
         assert_eq!(w.mission_title, Some("Test Mission".to_string()));
-
-        // Verify that celebration_remaining can be decremented manually
         w.celebration_remaining = 2;
         assert_eq!(w.celebration_remaining, 2);
+    }
 
-        // The actual decrement happens during tick_blank when we've accumulated
-        // time in that phase. For this unit test, we just verify the state is set up correctly.
+    /// An agent-failed event renders one of its two templates with the subject
+    /// substituted, and never a joke.
+    #[test]
+    fn agent_failed_event_uses_subject_and_never_jokes() {
+        let mut w = Whimsg::with_seed(7);
+        let ev = WhimEvent::new(EventKind::AgentFailed, "taiwania");
+        w.notify_event(ev.clone());
+        let expected: Vec<String> = EVENT_AGENT_FAILED
+            .iter()
+            .map(|t| fill_template(t, &ev))
+            .collect();
+
+        for _ in 0..200 {
+            w.generate();
+            assert!(
+                expected.contains(&w.active_text),
+                "unexpected text: {}",
+                w.active_text
+            );
+            assert!(w.active_text.contains("taiwania"));
+            assert!(!JOKES.contains(&w.active_text.as_str()));
+        }
+    }
+
+    /// A spec-completed event renders the spec's first word (its id).
+    #[test]
+    fn spec_completed_event_renders_spec_id() {
+        let mut w = Whimsg::with_seed(11);
+        w.notify_event(WhimEvent::with_detail(
+            EventKind::SpecCompleted,
+            "canopy-tui-polish",
+            "CT32 minimal prompt protocol",
+        ));
+        for _ in 0..50 {
+            w.generate();
+            assert!(w.active_text.contains("CT32"), "text: {}", w.active_text);
+            assert!(!w.active_text.contains("minimal"));
+            assert!(!text_has_placeholder(&w.active_text));
+        }
+    }
+
+    /// A blocked/failed graph with no recorded node never repeats the graph's
+    /// own name as the node it hit.
+    #[test]
+    fn stopped_graph_without_a_node_never_names_itself() {
+        for kind in [EventKind::GraphBlocked, EventKind::GraphFailed] {
+            let mut w = Whimsg::with_seed(13);
+            w.notify_event(WhimEvent::new(kind, "grove"));
+            for _ in 0..100 {
+                w.generate();
+                assert_eq!(w.active_text, "grove is waiting for you");
+                assert!(!text_has_placeholder(&w.active_text));
+            }
+        }
+
+        // With a node in the detail, the rock template stays reachable.
+        let mut w = Whimsg::with_seed(23);
+        w.notify_event(WhimEvent::with_detail(
+            EventKind::GraphBlocked,
+            "grove",
+            "node7",
+        ));
+        let mut saw_rock = false;
+        for _ in 0..20 {
+            w.generate();
+            saw_rock |= w.active_text.contains("node7");
+        }
+        assert!(saw_rock, "the rock template should render for a known node");
+    }
+
+    /// With no event, roughly a quarter of ambient generations are jokes.
+    #[test]
+    fn ambient_generations_are_about_a_quarter_jokes() {
+        let mut w = Whimsg::with_seed(99);
+        w.set_ambient(WhimContext::Idle);
+        let mut jokes = 0;
+        for _ in 0..400 {
+            w.generate();
+            if JOKES.contains(&w.active_text.as_str()) {
+                jokes += 1;
+            }
+        }
+        assert!(
+            (60..=140).contains(&jokes),
+            "expected 15-35% jokes in 400, got {jokes}"
+        );
+    }
+
+    /// Every event kind renders a non-empty message with no placeholder left.
+    #[test]
+    fn every_event_kind_renders_cleanly() {
+        let kinds = [
+            EventKind::AgentSpawned,
+            EventKind::AgentDone,
+            EventKind::AgentFailed,
+            EventKind::SpecCompleted,
+            EventKind::GraphCompleted,
+            EventKind::GraphBlocked,
+            EventKind::GraphFailed,
+            EventKind::HookMessage,
+            EventKind::MissionUnlocked,
+        ];
+        for kind in kinds {
+            let mut w = Whimsg::with_seed(3);
+            let ev =
+                WhimEvent::with_detail(kind, "canopy-tui-polish", "CT32 minimal prompt protocol");
+            w.notify_event(ev);
+            for _ in 0..20 {
+                w.generate();
+                assert!(!w.active_text.is_empty(), "empty text for {kind:?}");
+                assert!(
+                    !text_has_placeholder(&w.active_text),
+                    "placeholder left for {kind:?}: {}",
+                    w.active_text
+                );
+            }
+        }
+    }
+
+    /// Busy ambient text fills the branch count.
+    #[test]
+    fn busy_ambient_fills_branch_count() {
+        let mut w = Whimsg::with_seed(5);
+        w.set_ambient(WhimContext::Busy(4));
+        let mut seen_count = false;
+        for _ in 0..400 {
+            w.generate();
+            assert!(!text_has_placeholder(&w.active_text), "{}", w.active_text);
+            if w.active_text.contains('4') {
+                seen_count = true;
+            }
+        }
+        assert!(seen_count, "a busy template should show the count");
     }
 }

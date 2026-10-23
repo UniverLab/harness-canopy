@@ -24,7 +24,7 @@ use crate::domain::models::Trigger;
 use crate::domain::models::{AgentAction, Cli};
 use crate::domain::validation::validate_id;
 use axum::http::request::Parts;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::tool;
 use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
@@ -180,7 +180,7 @@ impl TaskTriggerHandler {
 
         if let Err(e) = self.watcher_engine.start_watcher(&agent).await {
             tracing::warn!("Watcher '{}' saved but failed to start: {}", agent.id, e);
-            return Ok(CallToolResult::success(vec![Content::text(format!(
+            return Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                 "Watcher '{}' registered but could not start watching '{}': {}. It will be retried on daemon restart.",
                 agent.id, params.path, e
             ))]));
@@ -246,7 +246,7 @@ impl TaskTriggerHandler {
             ));
         }
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             lines.join("\n"),
         )]))
     }
@@ -316,7 +316,7 @@ impl TaskTriggerHandler {
             sessions.len()
         )];
         lines.extend(sessions.iter().map(format_session_info));
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             lines.join("\n"),
         )]))
     }
@@ -548,7 +548,7 @@ impl TaskTriggerHandler {
             status.push_str(&format!("\n  - {reason}"));
         }
 
-        Ok(CallToolResult::success(vec![Content::text(status)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(status)]))
     }
 
     /// Get log output for an agent.
@@ -576,10 +576,10 @@ impl TaskTriggerHandler {
             params.lines.unwrap_or(50),
         )?;
         let Some(run_info) = recent_runs_output(&self.db, &params.id) else {
-            return Ok(CallToolResult::success(vec![Content::text(output)]));
+            return Ok(CallToolResult::success(vec![ContentBlock::text(output)]));
         };
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
             "{output}{run_info}"
         ))]))
     }
@@ -779,7 +779,7 @@ impl TaskTriggerHandler {
             ))));
         };
 
-        Ok(Some(CallToolResult::success(vec![Content::text(format!(
+        Ok(Some(CallToolResult::success(vec![ContentBlock::text(format!(
             "Agent '{}' updated but watcher failed to restart: {}. It will be retried on daemon restart.",
             agent.id, e
         ))])))

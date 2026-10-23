@@ -37,6 +37,7 @@ use daemon::cli::{handle_daemon_action, DaemonAction};
 use daemon::crew_cli::{handle_crew_action, CrewAction};
 use daemon::doctor::run_doctor;
 use daemon::graph_cli::{handle_graph_action, GraphAction};
+use daemon::missions_cli::handle_missions_action;
 use daemon::models_cli::{handle_models_action, ModelsAction};
 use daemon::project_cli::{handle_project_action, ProjectAction};
 use daemon::prompts_cli::{handle_prompts_action, PromptsAction};
@@ -48,6 +49,7 @@ use daemon::server::{run_http_server, run_stdio_server};
 use daemon::settings_cli::{handle_settings_action, SettingsAction};
 use daemon::spec_cli::{handle_spec_action, SpecAction};
 use daemon::subagent_cli::{handle_subagent_action, SubagentAction};
+use setup_module::registry_cli::{handle_registry_action, RegistryAction};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -91,6 +93,11 @@ enum Commands {
         /// skipped with a WARN and left untouched.
         #[arg(long = "force-skills")]
         force_skills: bool,
+    },
+    /// Apply the platform registry to config.toml without the TUI.
+    Registry {
+        #[command(subcommand)]
+        action: RegistryAction,
     },
     /// Remove canopy and optionally delete all local data.
     Uninstall {
@@ -161,6 +168,13 @@ enum Commands {
     Models {
         #[command(subcommand)]
         action: ModelsAction,
+    },
+    /// List gamification missions with their unlock state (read-only, served
+    /// from the local database — no daemon required).
+    Missions {
+        /// Print the report as JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
     },
     /// Manage the project registry (path-derived identity).
     Project {
@@ -265,6 +279,10 @@ async fn main() -> Result<()> {
             tokio::task::block_in_place(mcp_wizard_module::run_mcp_wizard)?;
             Ok(())
         }
+        Some(Commands::Registry { action }) => {
+            tokio::task::block_in_place(|| handle_registry_action(action))?;
+            Ok(())
+        }
         Some(Commands::Uninstall {
             dry_run,
             purge,
@@ -285,6 +303,7 @@ async fn main() -> Result<()> {
         Some(Commands::Config { action }) => handle_settings_action(action, cli.port).await,
         Some(Commands::Queue { action }) => handle_queue_action(action, cli.port).await,
         Some(Commands::Models { action }) => handle_models_action(action).await,
+        Some(Commands::Missions { json }) => handle_missions_action(json).await,
         Some(Commands::Project { action }) => handle_project_action(action).await,
         Some(Commands::Clean {
             dry_run,

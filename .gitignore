@@ -60,7 +60,9 @@ Cargo.lock
 # Demo artifacts. The recording is tracked: it is the source of truth for
 # re-exporting the demo, and cargo already keeps the whole directory out of the
 # published crate via `exclude = ["demo/"]` in Cargo.toml — so crates.io is not
-# a reason to hide it from git. The rendered output is not tracked: this demo's
-# gif is ~36 MB (a TUI that redraws every frame compresses badly), and the
-# landing serves the mp4 at public/demos/canopy.mp4.
-demo/dist/
+# a reason to hide it from git. The rendered svg IS tracked (README.md links
+# to it): an animated terminal svg is ~3 MB where the gif is ~40 MB (a TUI that
+# redraws every frame compresses badly). The gif, mp4 and other exports in
+# dist/ are not tracked; the landing serves the mp4 at public/demos/canopy.mp4.
+demo/dist/*
+!demo/dist/demo.svg

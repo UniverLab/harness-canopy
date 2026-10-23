@@ -4,7 +4,7 @@
 use crate::daemon::handler::TaskTriggerHandler;
 use crate::daemon::handler_formatting::internal_error;
 use crate::daemon::handler_run_exec::{graph_run_blocker, graph_run_json};
-use crate::daemon::handler_specs::build_spec_run_info;
+use crate::daemon::handler_specs_helpers::build_spec_run_info;
 use crate::daemon::handler_validate::{parse_router_routes, resolve_prefix_or_error};
 use crate::daemon::helpers::error_result;
 use crate::daemon::params::*;
@@ -14,7 +14,7 @@ use crate::domain::graphs::{
     Graph, GraphDetails, GraphEdge, GraphNode, GraphNodeKind, GraphRunStatus, GraphSpec,
     GraphSpecStatus, GraphStatus,
 };
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::tool;
 use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
@@ -44,7 +44,7 @@ impl TaskTriggerHandler {
             Err(e) => return Err(internal_error(e.to_string())),
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(
                 &graph_details_json(&self.db, &lp).map_err(internal_error)?,
             )
@@ -70,7 +70,7 @@ impl TaskTriggerHandler {
 
         let out = build_graph_list_json(&self.db, &graphs)?;
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&out).unwrap_or_default(),
         )]))
     }
@@ -299,6 +299,21 @@ pub(crate) fn orphan_join_warning_json(node: &GraphNode) -> serde_json::Value {
     })
 }
 
+/// A graph reported as `running` must have a node run in progress or a
+/// scheduled resume; otherwise the caller surfaces this warning.
+fn running_graph_consistency_warning(db: &Database, graph: &Graph) -> Option<&'static str> {
+    if graph.status != GraphStatus::Running {
+        return None;
+    }
+    let has_running_run = !db
+        .list_running_graph_runs(&graph.id)
+        .unwrap_or_default()
+        .is_empty();
+    let scheduled_resume = graph.autorun_at.is_some() || graph.auto_continue_at.is_some();
+    (!has_running_run && !scheduled_resume)
+        .then_some("graph is running but has no node run in progress and no scheduled resume")
+}
+
 pub(crate) fn graph_details_json(
     db: &Database,
     lp: &GraphDetails,
@@ -372,6 +387,7 @@ pub(crate) fn graph_details_json(
         "completed_at": lp.lp.completed_at.map(|value| value.to_rfc3339()),
         "autorun_at": lp.lp.autorun_at.map(|value| value.to_rfc3339()),
         "archived": lp.lp.archived,
+        "require_spec_type": lp.lp.require_spec_type,
         "graph": {
             "nodes": lp.graph_nodes.iter().map(|node| graph_node_json(node, &lp.graph_edges)).collect::<Vec<_>>(),
             "edges": lp.graph_edges.iter().map(graph_edge_json).collect::<Vec<_>>(),
@@ -413,6 +429,9 @@ pub(crate) fn graph_details_json(
             }
         }
     }
+    let consistency_warning = running_graph_consistency_warning(db, &lp.lp);
+    out["consistency_warning"] = serde_json::json!(consistency_warning);
+    out["consistency_warnings"] = serde_json::json!(consistency_warning.iter().collect::<Vec<_>>());
     if matches!(ctx, ActiveGraphSpec::Idea { .. }) && out.get("queue").is_none() {
         out["mode"] = serde_json::json!("idea");
     }
@@ -549,6 +568,14 @@ pub(crate) fn graph_spec_details_json(
         "id": spec.spec.id,
         "graph_id": spec.spec.graph_id,
         "name": spec.spec.name,
+        "type": spec.spec.spec_type,
+        "scope": spec.spec.spec_scope,
+        "code": spec.spec.spec_code,
+        "commit_message": spec.spec.spec_type.map(|t| crate::domain::spec_type::commit_message(
+            t,
+            spec.spec.spec_scope.as_deref(),
+            &spec.spec.name,
+        )),
         "description": spec.spec.description,
         "position": spec.spec.position,
         "parallelizable": spec.spec.parallelizable,

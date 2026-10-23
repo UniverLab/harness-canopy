@@ -12,11 +12,11 @@ pub(crate) fn data_dir() -> Result<std::path::PathBuf, McpError> {
 }
 
 pub(crate) fn success_result(message: &str) -> CallToolResult {
-    CallToolResult::success(vec![rmcp::model::Content::text(message.to_string())])
+    CallToolResult::success(vec![rmcp::model::ContentBlock::text(message.to_string())])
 }
 
 pub(crate) fn error_result(message: &str) -> CallToolResult {
-    CallToolResult::error(vec![rmcp::model::Content::text(message.to_string())])
+    CallToolResult::error(vec![rmcp::model::ContentBlock::text(message.to_string())])
 }
 
 /// CB68 FR1: shape a deprecated alias tool's *successful* response so it

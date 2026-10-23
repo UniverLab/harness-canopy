@@ -87,6 +87,12 @@ pub(super) fn select_addable_section(
         "tools" => open_skills_picker(dialog, workdir),
         "project_context" => open_project_picker(dialog, db)?,
         "preset" => open_preset_picker(dialog),
+        // The manual protocol resend (FR4): insert the locked, pre-filled
+        // `Canopy protocol` section and close the picker like a plain add.
+        "canopy_protocol" => {
+            dialog.add_canopy_protocol_section();
+            dialog.picker_mode = SectionPickerMode::None;
+        }
         _ => {
             dialog.add_section(name);
             dialog.picker_mode = SectionPickerMode::None;
@@ -111,7 +117,12 @@ pub(super) fn open_preset_picker(dialog: &mut SimplePromptDialog) {
 }
 
 pub(super) fn open_skills_picker(dialog: &mut SimplePromptDialog, workdir: &Path) {
-    let entries = SimplePromptDialog::collect_skills_for_picker(workdir);
+    let dir = crate::domain::prompts::canopy_dir();
+    let store = crate::dynamic_skills::SkillStore::from_config(
+        &dir,
+        &crate::domain::canopy_config::CanopyConfig::load(&dir).skills,
+    );
+    let entries = SimplePromptDialog::collect_skills_for_picker(workdir, Some(&store));
     dialog.picker_mode = SectionPickerMode::SkillsPicker {
         selected: 0,
         scroll: 0,

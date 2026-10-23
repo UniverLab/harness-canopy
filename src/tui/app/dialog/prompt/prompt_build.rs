@@ -296,12 +296,15 @@ impl SimplePromptDialog {
     }
 
     /// The invisible system block, rendered so its operating protocol is the
-    /// first thing the agent reads. Empty when there is no system content.
+    /// first thing the agent reads — the session-start protocol once at the
+    /// top when it rides along, then the per-turn context (see
+    /// `system_text`). Empty when there is neither to send.
     pub(super) fn render_system_block(&self) -> String {
-        match &self.system_content {
-            Some(system) => format!("<system>\n{system}\n</system>\n\n"),
-            None => String::new(),
+        let system = self.system_text();
+        if system.is_empty() {
+            return String::new();
         }
+        format!("<system>\n{system}\n</system>\n\n")
     }
 
     /// Build the prompt body (every section except the system block).
@@ -342,9 +345,17 @@ impl SimplePromptDialog {
 }
 
 pub(super) fn append_tool_skill(result: &mut String, tool_line: &str) {
-    result.push_str("  <skill>\n");
-    result.push_str(&format!("    {tool_line}\n"));
-    result.push_str("  </skill>\n\n");
+    if let Some(name) = tool_line.strip_prefix("canopy:") {
+        result.push_str("  <skill>\n");
+        result.push_str(&format!(
+            "    canopy skill {name} — load it with skill_get(name=\"{name}\")\n"
+        ));
+        result.push_str("  </skill>\n\n");
+    } else {
+        result.push_str("  <skill>\n");
+        result.push_str(&format!("    {tool_line}\n"));
+        result.push_str("  </skill>\n\n");
+    }
 }
 
 pub(super) fn strip_resources_section(prompt: &str) -> String {

@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::domain::graphs::SpecType;
+
 // ── Graph tool parameter types ────────────────────────────────────────
 
 /// Optional automatic trigger for a graph, mirroring agent triggers. A graph can
@@ -40,6 +42,11 @@ pub struct GraphCreateParams {
     /// refusal to a warning instead of refusing to launch. Default false.
     #[serde(default)]
     pub allow_dirty_start: bool,
+    /// SPECCODE: opt-in enforcement. When true, adding a spec to this graph
+    /// (graph_add_spec, queue_add_spec) and graph_run refuse a spec without
+    /// a type, named. Default false — never enforced until asked.
+    #[serde(default)]
+    pub require_spec_type: bool,
 }
 
 /// Config for a graph hook — an agent-node-style payload
@@ -153,6 +160,10 @@ pub struct GraphUpdateParams {
     /// CM29: set to change whether graph_run/autorun downgrade the
     /// dirty-worktree refusal to a warning. Omit to leave unchanged.
     pub allow_dirty_start: Option<bool>,
+    /// SPECCODE: opt-in enforcement. When true, adding a spec to this graph
+    /// (graph_add_spec, queue_add_spec) and graph_run refuse a spec without
+    /// a type, named. Default false — never enforced until asked.
+    pub require_spec_type: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -170,6 +181,17 @@ pub struct GraphAddSpecParams {
     pub position: i64,
     /// Whether the spec is allowed to run in parallel in future engine phases.
     pub parallelizable: bool,
+    /// SPECCODE: Conventional Commits type of the change (`feat`, `fix`,
+    /// `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`,
+    /// `revert`). Optional — when omitted and the name is a conventional
+    /// title (`fix(tui): ...`), the type and scope are parsed from the name
+    /// and stored as the subject alone; the engine then numbers the spec
+    /// (`FIX-7`). A graph with `require_spec_type` refuses a spec without
+    /// one.
+    pub spec_type: Option<SpecType>,
+    /// SPECCODE: optional scope of that type (e.g. `tui`), part of the
+    /// prebuilt commit message `fix(tui): <name>`.
+    pub spec_scope: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -186,6 +208,14 @@ pub struct GraphUpdateSpecParams {
     pub position: Option<i64>,
     /// Whether the spec is allowed to run in parallel.
     pub parallelizable: Option<bool>,
+    /// SPECCODE: change the spec's Conventional Commits type. On a legacy
+    /// spec (no code yet) this consumes the next number for the type and
+    /// assigns the immutable code; an already-coded spec keeps its code
+    /// (never renumbered).
+    pub spec_type: Option<SpecType>,
+    /// SPECCODE: change the spec's scope (the parenthesised part of the
+    /// future commit message). Omit to leave unchanged.
+    pub spec_scope: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -200,6 +230,15 @@ pub struct SpecCreateParams {
     /// Optional absolute workdir tag, for backlog filtering only — it does
     /// not drive execution.
     pub workdir: Option<String>,
+    /// SPECCODE: Conventional Commits type of the change. When omitted and
+    /// the name is a conventional title (`fix(tui): ...`), type and scope
+    /// are parsed from the name and the name stored as the subject; when
+    /// both are absent the spec is created without a type/code/commit
+    /// message. An explicit type wins over the parsed one.
+    pub spec_type: Option<SpecType>,
+    /// SPECCODE: optional scope of that type; overridable even when the
+    /// scope was parsed from a conventional title.
+    pub spec_scope: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -210,6 +249,8 @@ pub struct SpecListParams {
     pub status: Option<String>,
     /// Only return specs not yet assigned to any graph.
     pub unassigned_only: Option<bool>,
+    /// SPECCODE: filter to specs carrying this Conventional Commits type.
+    pub spec_type: Option<SpecType>,
     /// Include full spec descriptions in the output. Default: false (compact — id, name, status, workdir, graph_id only).
     pub include_descriptions: Option<bool>,
     /// Maximum number of specs to return. Defaults to a value that fits the
@@ -232,6 +273,13 @@ pub struct SpecUpdateParams {
     pub description: Option<String>,
     /// New absolute workdir tag, or null to clear it.
     pub workdir: Option<Option<String>>,
+    /// SPECCODE: set the spec's Conventional Commits type. On a legacy spec
+    /// (no code yet) this assigns the immutable code at that moment; a
+    /// later type change keeps the existing code.
+    pub spec_type: Option<SpecType>,
+    /// SPECCODE: set (or clear with null) the scope part of the commit
+    /// message.
+    pub spec_scope: Option<Option<String>>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]

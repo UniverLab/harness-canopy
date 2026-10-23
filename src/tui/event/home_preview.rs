@@ -3,6 +3,8 @@ use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::tui::app::types::{AgentEntry, App, Focus, GraphLiveFocus, ProjectTab, SidebarLayer};
 
+use super::project_filter::preview_project_filter_key;
+
 // ── Home: screensaver — arrows enter Preview ────────────────────────
 
 // ── Home: screensaver — arrows enter Preview ────────────────────────
@@ -81,6 +83,12 @@ pub fn handle_preview_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers)
         return Ok(());
     }
 
+    // CT36: runs first so a plain letter types into the project type-ahead
+    // instead of triggering its command (j/k/h/l, R) on that one list.
+    if preview_project_filter_key(app, code, modifiers) {
+        return Ok(());
+    }
+
     let on_graph = app.sidebar_layer == SidebarLayer::Automation
         && app.automation_kind == crate::tui::app::AutomationKind::Graph;
 
@@ -117,7 +125,7 @@ pub fn handle_preview_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers)
     if preview_agent_misc_key(app, code, on_graph) {
         return Ok(());
     }
-    if preview_graph_meta_key(app, code, on_graph) {
+    if preview_graph_meta_key(app, code, modifiers, on_graph) {
         return Ok(());
     }
     if preview_function_key(app, code, modifiers, on_graph) {
@@ -355,6 +363,14 @@ fn preview_enter_key(app: &mut App, code: KeyCode, on_graph: bool) -> bool {
         return true;
     }
     if app.sidebar_layer == SidebarLayer::Knowledge {
+        // CT36: with a type-ahead that matches nothing there is no project to
+        // enter, so Enter is a no-op rather than entering a hidden one.
+        if !app
+            .visible_project_indices()
+            .contains(&app.selected_project)
+        {
+            return true;
+        }
         app.enter_project_focus(ProjectTab::Overview);
         app.focus = Focus::Agent;
         return true;
@@ -559,10 +575,27 @@ fn preview_agent_misc_key(app: &mut App, code: KeyCode, on_graph: bool) -> bool 
     true
 }
 
-fn preview_graph_meta_key(app: &mut App, code: KeyCode, on_graph: bool) -> bool {
+fn preview_graph_meta_key(
+    app: &mut App,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    on_graph: bool,
+) -> bool {
     match code {
-        KeyCode::Char('R') if app.sidebar_layer == SidebarLayer::Knowledge => {
-            let _ = app.open_project_relation_dialog();
+        // CT36: moved off plain `R`, which is now a type-ahead character on
+        // the project list.
+        KeyCode::Char('r')
+            if modifiers.contains(KeyModifiers::CONTROL)
+                && app.sidebar_layer == SidebarLayer::Knowledge =>
+        {
+            // CT36: a type-ahead that hides the selected project must not
+            // relate that hidden project — the keypress is consumed, nothing opens.
+            if app
+                .visible_project_indices()
+                .contains(&app.selected_project)
+            {
+                let _ = app.open_project_relation_dialog();
+            }
         }
         KeyCode::Char('R') if on_graph && app.graph_view_archived => {
             let _ = app.restore_selected_archived_graph();
@@ -1575,6 +1608,7 @@ mod preview_key_tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         }
     }
 
@@ -1817,6 +1851,7 @@ mod preview_key_tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         })
         .unwrap();
         db.insert_graph_spec(&crate::domain::graphs::GraphSpec {
@@ -1838,6 +1873,9 @@ mod preview_key_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         })
         .unwrap();
         for (i, id) in node_ids.iter().enumerate() {
@@ -2338,6 +2376,7 @@ mod preview_key_tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         })
         .unwrap();
         db.insert_graph_spec(&crate::domain::graphs::GraphSpec {
@@ -2359,6 +2398,9 @@ mod preview_key_tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         })
         .unwrap();
         for (position, id) in ["n1", "n2"].iter().enumerate() {

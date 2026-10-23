@@ -7,14 +7,18 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
 
-use super::{draw_dialog_left_wave, hub_keys, hub_legend, hub_settings};
+use super::{centered_rect, draw_dialog_left_wave, hub_keys, hub_legend, hub_settings};
 use crate::tui::app::hub::{HubTab, HUB_TABS};
+use crate::tui::app::hub_settings::SettingsFocus;
 use crate::tui::app::types::App;
 use crate::tui::ui::theme::Theme;
 
-/// Draw the full-screen hub.
+/// Draw the hub as a centered dialog (requirement 1): 80% of the frame's
+/// width and height, cleared only within its own area.
 pub fn draw_hub(frame: &mut Frame, app: &mut App, theme: &Theme) {
-    let area = frame.area();
+    let frame_area = frame.area();
+    let height = frame_area.height * 4 / 5;
+    let area = centered_rect(80, height, frame_area);
     frame.render_widget(Clear, area);
 
     let block = Block::default()
@@ -35,13 +39,13 @@ pub fn draw_hub(frame: &mut Frame, app: &mut App, theme: &Theme) {
         .split(inner);
         draw_tab_bar(frame, app, theme, rows[0]);
         draw_body(frame, app, theme, rows[1]);
-        draw_footer(frame, theme, rows[2]);
+        draw_footer(frame, app, theme, rows[2]);
     } else {
         // Narrow: no tab bar, so the Settings tab's own narrow rule (right
         // column only, with the group shown as a header) is what the body shows.
         let rows = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(inner);
         draw_body(frame, app, theme, rows[0]);
-        draw_footer(frame, theme, rows[1]);
+        draw_footer(frame, app, theme, rows[1]);
     }
 }
 
@@ -71,12 +75,26 @@ fn draw_body(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     }
 }
 
-fn draw_footer(frame: &mut Frame, theme: &Theme, area: Rect) {
+fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let text = Line::from(Span::styled(
-        "F1/Esc close   Tab/1·2·3 tabs",
+        footer_hint(app),
         Style::default().fg(theme.dim_text),
     ));
     frame.render_widget(Paragraph::new(text), area);
+}
+
+/// The keys of the current tab and focus level (requirement 5).
+fn footer_hint(app: &App) -> &'static str {
+    match app.hub.tab {
+        HubTab::Settings => match app.hub.settings.focus {
+            SettingsFocus::Categories => "↑↓ category · → open · Shift+←→ tab · Esc close",
+            SettingsFocus::Properties => {
+                "↑↓ setting · Enter edit · Space toggle · r reset · ← back"
+            }
+        },
+        HubTab::Keys => "↑↓ scroll · Shift+←→ tab · Esc close",
+        HubTab::Missions => "↑↓ mission · Shift+←→ tab · Esc close",
+    }
 }
 
 #[cfg(test)]
@@ -85,6 +103,7 @@ mod tests {
     use crate::db::Database;
     use crate::tui::app::hub_settings::SettingRow;
     use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
     use ratatui::Terminal;
     use std::sync::Arc;
 
@@ -152,7 +171,7 @@ mod tests {
             row("scheduler.retry_max", "5", "env", "ok"),
             row("temperature_unit", "\"fahrenheit\"", "file", "ok"),
         ];
-        let text = draw(&mut app, 80, 24);
+        let text = draw(&mut app, 120, 24);
 
         assert!(text.contains("General"), "group label: {text}");
         assert!(text.contains("theme"), "known key: {text}");
@@ -220,6 +239,137 @@ mod tests {
         assert!(
             !text.contains("TUI & appearance"),
             "left-column-only labels must not show when narrow: {text}"
+        );
+    }
+
+    /// Render without flattening, for style assertions on individual cells.
+    fn render_buffer(app: &mut App, width: u16, height: u16) -> Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = Theme::classic();
+        terminal
+            .draw(|frame| {
+                draw_hub(frame, app, &theme);
+            })
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn row_text(buffer: &Buffer, y: u16) -> String {
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect()
+    }
+
+    fn find_in_row(buffer: &Buffer, y: u16, needle: &str) -> Option<u16> {
+        let row = row_text(buffer, y);
+        row.find(needle)
+            .map(|byte| row[..byte].chars().count() as u16)
+    }
+
+    fn find_marker(buffer: &Buffer) -> (u16, u16) {
+        for y in 0..buffer.area.height {
+            if let Some(x) = find_in_row(buffer, y, "▸") {
+                return (x, y);
+            }
+        }
+        panic!("no ▸ marker in the buffer");
+    }
+
+    /// The hub is a centered dialog of 80% of the frame, so the frame's top
+    /// row is outside it and stays blank while the title renders inside.
+    #[test]
+    fn draw_hub_is_a_centered_dialog_not_full_screen() {
+        let mut app = test_app();
+        app.hub_open = true;
+        app.hub.tab = HubTab::Settings;
+
+        let text = draw(&mut app, 80, 24);
+        let first = text.lines().next().unwrap_or_default();
+        assert!(
+            first.chars().all(|cell| cell == ' '),
+            "the frame's top row is outside the hub: {first:?}"
+        );
+        assert!(
+            text.contains("Canopy Hub"),
+            "the dialog title renders inside it: {text}"
+        );
+    }
+
+    /// The footer names the keys of the tab and focus level on screen.
+    #[test]
+    fn footer_hint_follows_the_tab_and_focus_level() {
+        let mut app = test_app();
+        app.hub_open = true;
+        app.hub.tab = HubTab::Settings;
+
+        app.hub.settings.focus = SettingsFocus::Categories;
+        let text = draw(&mut app, 100, 24);
+        assert!(text.contains("→ open"), "categories footer: {text}");
+        assert!(text.contains("Esc close"), "categories footer: {text}");
+
+        app.hub.settings.focus = SettingsFocus::Properties;
+        let text = draw(&mut app, 100, 24);
+        assert!(text.contains("r reset"), "properties footer: {text}");
+        assert!(text.contains("← back"), "properties footer: {text}");
+    }
+
+    /// The focused column's header and selected row carry header_color on
+    /// selected_bg with the ▸ marker; the other column is dimmed.
+    #[test]
+    fn settings_focus_highlights_the_focused_column() {
+        let mut app = test_app();
+        app.hub_open = true;
+        app.hub.tab = HubTab::Settings;
+        app.hub.settings.rows = vec![row("theme", "\"classic\"", "file", "ok")];
+        let theme = Theme::classic();
+
+        // Categories focused: the marker sits on the selected category row.
+        app.hub.settings.focus = SettingsFocus::Categories;
+        let buffer = render_buffer(&mut app, 120, 24);
+        let (marker_x, marker_y) = find_marker(&buffer);
+        let grid = (0..buffer.area.height)
+            .map(|y| row_text(&buffer, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(buffer[(marker_x, marker_y)].bg, theme.selected_bg);
+        assert_eq!(buffer[(marker_x, marker_y)].fg, theme.header_color);
+        assert!(
+            row_text(&buffer, marker_y).contains("General"),
+            "marker at ({marker_x},{marker_y}) grid:\n{grid}"
+        );
+        let header_y = marker_y - 1;
+        let categories_x = find_in_row(&buffer, header_y, "Categories").unwrap();
+        let settings_x = find_in_row(&buffer, header_y, "Settings").unwrap();
+        assert_eq!(buffer[(categories_x, header_y)].fg, theme.header_color);
+        assert_eq!(
+            buffer[(settings_x, header_y)].fg,
+            theme.dim_text,
+            "the unfocused column header is dimmed"
+        );
+        let property_y = (0..buffer.area.height)
+            .find(|y| row_text(&buffer, *y).contains("theme"))
+            .expect("property row renders");
+        let key_x = find_in_row(&buffer, property_y, "theme").unwrap();
+        assert_eq!(
+            buffer[(key_x, property_y)].fg,
+            theme.dim_text,
+            "the unfocused property row is dimmed"
+        );
+
+        // Properties focused: the marker moves to the property row.
+        app.hub.settings.focus = SettingsFocus::Properties;
+        let buffer = render_buffer(&mut app, 120, 24);
+        let (marker_x, marker_y) = find_marker(&buffer);
+        assert_eq!(buffer[(marker_x, marker_y)].bg, theme.selected_bg);
+        assert_eq!(buffer[(marker_x, marker_y)].fg, theme.header_color);
+        assert!(row_text(&buffer, marker_y).contains("theme"));
+        let header_y = marker_y - 1;
+        let categories_x = find_in_row(&buffer, header_y, "Categories").unwrap();
+        assert_eq!(
+            buffer[(categories_x, header_y)].fg,
+            theme.dim_text,
+            "the unfocused categories header is dimmed"
         );
     }
 }

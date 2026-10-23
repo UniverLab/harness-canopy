@@ -488,7 +488,7 @@ impl GraphEngine {
         // still `Running`); every other case re-captures strictly before any
         // node of this attempt executes.
         //
-        // CM43: a directed run is a third case. It reuses the spec's recorded
+        // A directed run is a third case. It reuses the spec's recorded
         // start head when one exists — the earlier nodes it skipped already
         // established the baseline — and otherwise captures a fresh one, which
         // the response reports.
@@ -517,7 +517,7 @@ impl GraphEngine {
         };
         // C15: `spec_committed_head` follows the exact same
         // same-attempt-vs-fresh-attempt rule as `spec_start_head` above.
-        // CM43: a directed run reuses it for the same reason it reuses the
+        // A directed run reuses it for the same reason it reuses the
         // start head.
         let spec_committed_head =
             if directed || (is_resume && spec.status == GraphSpecStatus::Running) {
@@ -641,8 +641,10 @@ impl GraphEngine {
         }
         Ok(Some(format!(
             "Spec '{}' failed {} time(s) across separate graph executions (limit {}); last \
-             failure: {}",
-            spec.name, attempts, self.spec_attempt_limit, summary
+             failure: {}. To clear the limit: `graph_reset` with `specs: [{}]` clears this \
+             spec's execution count (the worktree is not touched); then `graph_run` or \
+             `run_from_node`.",
+            spec.name, attempts, self.spec_attempt_limit, summary, spec.id
         )))
     }
 }

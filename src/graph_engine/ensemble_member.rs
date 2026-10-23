@@ -257,9 +257,17 @@ impl GraphEngine {
                 );
                 execution
             } else {
+                // A self-reported member keeps its own output; carry the
+                // process record (ended_after_verdict / session_end) onto it.
+                let output = super::verdict_shutdown::merge_process_record(
+                    &ctx.db,
+                    &member_run_id,
+                    &run,
+                    &execution.output,
+                );
                 NodeExecution {
                     status: run.status,
-                    output: run.output.unwrap_or_else(|| serde_json::json!({})),
+                    output,
                     summary: execution.summary,
                 }
             };

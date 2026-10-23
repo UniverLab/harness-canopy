@@ -8,12 +8,13 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::domain::gamification::{MissionCategory, MISSIONS};
+use crate::domain::gamification::{MissionCategory, MissionId, MISSIONS};
 use crate::tui::app::types::App;
 use crate::tui::ui::theme::Theme;
 
 /// The Missions & stats tab: the same sections `draw_legend` drew, into the
-/// hub's body area instead of a self-owned centered modal.
+/// hub's body area instead of a self-owned centered modal. Shows all 28
+/// missions: unlocked in full colour, locked dimmed.
 pub(super) fn draw_missions_tab(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     let label_style = Style::default().fg(theme.dim_text);
     let value_style = Style::default()
@@ -21,26 +22,21 @@ pub(super) fn draw_missions_tab(frame: &mut Frame, app: &mut App, theme: &Theme,
         .add_modifier(Modifier::BOLD);
     let accent_style = Style::default().fg(theme.header_color);
 
-    let unlocked_indices: Vec<usize> = MISSIONS
-        .iter()
-        .enumerate()
-        .filter(|(_, def)| app.mission_manager.is_unlocked(def.id))
-        .map(|(i, _)| i)
-        .collect();
+    let all_indices: Vec<usize> = (0..MISSIONS.len()).collect();
 
-    let max_selected = unlocked_indices.len().saturating_sub(1);
+    let max_selected = all_indices.len().saturating_sub(1);
     if app.legend_selected > max_selected {
         app.legend_selected = max_selected;
     }
 
     let selected = app.legend_selected;
 
-    let has_missions = !unlocked_indices.is_empty();
+    let has_missions = !all_indices.is_empty();
     let sections = Layout::vertical([
         Constraint::Length(2),
         Constraint::Length(if has_missions { 1 } else { 0 }),
         Constraint::Length(if has_missions {
-            unlocked_indices.len().min(15) as u16
+            all_indices.len().min(15) as u16
         } else {
             0
         }),
@@ -59,8 +55,8 @@ pub(super) fn draw_missions_tab(frame: &mut Frame, app: &mut App, theme: &Theme,
         value_style,
         accent_style,
     );
-    draw_legend_missions(frame, &unlocked_indices, selected, theme, sections[2]);
-    draw_legend_detail(frame, app, &unlocked_indices, selected, sections[4]);
+    draw_legend_missions(frame, app, &all_indices, selected, theme, sections[2]);
+    draw_legend_detail(frame, app, &all_indices, selected, sections[4]);
     draw_legend_usage(frame, app, sections[5]);
     draw_legend_footer(frame, sections[6], label_style);
 }
@@ -79,14 +75,7 @@ fn format_uptime_precise(seconds: u64) -> String {
 }
 
 fn category_label(category: &MissionCategory) -> &'static str {
-    match category {
-        MissionCategory::Environment => "Environment",
-        MissionCategory::Intelligence => "Intelligence",
-        MissionCategory::Projects => "Projects",
-        MissionCategory::Graph => "Graph",
-        MissionCategory::Seeds => "Seeds",
-        MissionCategory::SysInfo => "System",
-    }
+    category.as_str()
 }
 
 fn mission_unlock_text(icon: &str, title: &str, category: &MissionCategory) -> String {
@@ -179,41 +168,52 @@ fn draw_legend_summary(
     );
 }
 
-/// Render the scrollable list of unlocked missions.
+/// Render the scrollable list of all missions: unlocked in full colour,
+/// locked dimmed. A locked Nuclear Winter on a system with no CPU temperature
+/// sensor carries a `not measurable on this system` note instead of reading
+/// as a normal locked mission.
 fn draw_legend_missions(
     frame: &mut Frame,
-    unlocked_indices: &[usize],
+    app: &App,
+    mission_indices: &[usize],
     selected: usize,
     theme: &Theme,
     area: Rect,
 ) {
     let mut mission_lines: Vec<Line> = Vec::new();
-    if !unlocked_indices.is_empty() {
+    if !mission_indices.is_empty() {
         let visible_rows = area.height as usize;
         let start = selected.saturating_sub(visible_rows.saturating_sub(1) / 2);
         let start = crate::tui::selection::clamp_scroll(
             selected,
             start,
-            unlocked_indices.len(),
+            mission_indices.len(),
             visible_rows,
         );
-        let end = (start + visible_rows).min(unlocked_indices.len());
+        let end = (start + visible_rows).min(mission_indices.len());
         let now_ms = chrono::Utc::now().timestamp_millis() as f64;
-        for (i, idx) in unlocked_indices[start..end].iter().enumerate() {
+        for (i, idx) in mission_indices[start..end].iter().enumerate() {
             let def = &MISSIONS[*idx];
+            let unlocked = app.mission_manager.is_unlocked(def.id);
             let mission_index = start + i;
             let is_selected = mission_index == selected;
             let base_color = category_color(&def.category);
-            let icon_color = dim_color(base_color, twinkle(now_ms, i));
+            let icon_color = if unlocked {
+                dim_color(base_color, twinkle(now_ms, i))
+            } else {
+                Color::Rgb(110, 110, 110)
+            };
             let marker = if is_selected { "▶" } else { "·" };
-            let title_style = if is_selected {
+            let title_style = if !unlocked {
+                Style::default().fg(Color::Rgb(110, 110, 110))
+            } else if is_selected {
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::Rgb(200, 200, 200))
             };
-            mission_lines.push(Line::from(vec![
+            let mut spans = vec![
                 Span::styled(marker, Style::default().fg(theme.header_color)),
                 Span::raw(" "),
                 Span::styled(
@@ -222,7 +222,15 @@ fn draw_legend_missions(
                 ),
                 Span::raw(" "),
                 Span::styled(def.title, title_style),
-            ]));
+            ];
+            if def.id == MissionId::NuclearWinter && !unlocked && !app.cpu_temperature_measurable()
+            {
+                spans.push(Span::styled(
+                    " — not measurable on this system",
+                    Style::default().fg(Color::Rgb(110, 110, 110)),
+                ));
+            }
+            mission_lines.push(Line::from(spans));
         }
     }
     frame.render_widget(
@@ -235,37 +243,42 @@ fn draw_legend_missions(
 fn draw_legend_detail(
     frame: &mut Frame,
     app: &App,
-    unlocked_indices: &[usize],
+    mission_indices: &[usize],
     selected: usize,
     area: Rect,
 ) {
-    let selected_detail_lines = if let Some(idx) = unlocked_indices.get(selected) {
+    let selected_detail_lines = if let Some(idx) = mission_indices.get(selected) {
         let selected_def = &MISSIONS[*idx];
-        let date_str = app
-            .mission_manager
-            .unlock_timestamp(selected_def.id)
-            .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
-            .map(|dt| dt.format("%Y-%m-%d").to_string())
-            .unwrap_or_else(|| "Unknown".to_string());
-
-        vec![
-            Line::from(Span::styled(
-                selected_def.challenge,
-                Style::default().fg(Color::Rgb(190, 190, 190)),
-            )),
-            Line::from(Span::styled(
+        let mut lines = vec![Line::from(Span::styled(
+            selected_def.challenge,
+            Style::default().fg(Color::Rgb(190, 190, 190)),
+        ))];
+        if app.mission_manager.is_unlocked(selected_def.id) {
+            let date_str = app
+                .mission_manager
+                .unlock_timestamp(selected_def.id)
+                .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+                .map(|dt| dt.format("%Y-%m-%d").to_string())
+                .unwrap_or_else(|| "Unknown".to_string());
+            lines.push(Line::from(Span::styled(
                 mission_unlock_text(
                     selected_def.icon,
                     selected_def.title,
                     &selected_def.category,
                 ),
                 Style::default().fg(Color::Rgb(140, 205, 140)),
-            )),
-            Line::from(Span::styled(
+            )));
+            lines.push(Line::from(Span::styled(
                 format!("Completed: {}", date_str),
                 Style::default().fg(Color::Rgb(100, 100, 100)),
-            )),
-        ]
+            )));
+        } else {
+            lines.push(Line::from(Span::styled(
+                "Locked",
+                Style::default().fg(Color::Rgb(110, 110, 110)),
+            )));
+        }
+        lines
     } else {
         vec![]
     };
@@ -485,6 +498,46 @@ mod tests {
         assert!(
             text.contains("Missions"),
             "Should show Missions title: {text}"
+        );
+    }
+
+    #[test]
+    fn nuclear_note_without_temp() {
+        let nuclear_idx = MISSIONS
+            .iter()
+            .position(|def| def.id == MissionId::NuclearWinter)
+            .expect("Nuclear Winter must be registered");
+        let mut app = test_app();
+        assert!(!app.mission_manager.is_unlocked(MissionId::NuclearWinter));
+        assert!(
+            !app.cpu_temperature_measurable(),
+            "a fresh test app must never have seen a CPU temperature"
+        );
+        app.legend_selected = nuclear_idx;
+
+        let render = |app: &mut App| {
+            let backend = TestBackend::new(100, 30);
+            let mut terminal = Terminal::new(backend).unwrap();
+            let theme = Theme::classic();
+            terminal
+                .draw(|frame| {
+                    draw_missions_tab(frame, app, &theme, frame.area());
+                })
+                .unwrap();
+            buffer_text(&terminal)
+        };
+
+        let text = render(&mut app);
+        assert!(
+            text.contains("not measurable on this system"),
+            "locked Nuclear Winter without a sensor must carry the note: {text}"
+        );
+
+        app.cpu_temperature_seen = true;
+        let text = render(&mut app);
+        assert!(
+            !text.contains("not measurable on this system"),
+            "once a temperature was seen the note must go away: {text}"
         );
     }
 }

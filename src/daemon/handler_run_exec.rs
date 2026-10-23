@@ -5,6 +5,7 @@ use crate::daemon::handler::TaskTriggerHandler;
 use crate::daemon::handler_formatting::internal_error;
 use crate::daemon::handler_queues::{validate_queue_exists, validate_queue_not_consumed};
 use crate::daemon::handler_read::build_graph_summary_json;
+use crate::daemon::handler_run_directive::{held_queue_spec, limit_reset_note};
 use crate::daemon::handler_validate::{resolve_prefix_or_error, validate_absolute_dir};
 use crate::daemon::helpers::{error_result, success_result};
 use crate::daemon::params::*;
@@ -51,7 +52,7 @@ impl TaskTriggerHandler {
             .map(str::trim)
             .filter(|value| !value.is_empty());
 
-        // CM43: a directed run is the operator's way into a completed/failed
+        // A directed run is the operator's way into a completed/failed
         // graph, so its status guard and blocked-graph refusal apply only to a
         // plain launch. The in-flight check below always applies.
         if start_node_id.is_none() {
@@ -134,6 +135,15 @@ impl TaskTriggerHandler {
             return Ok(error_result(&e));
         }
 
+        // SPECCODE: opt-in enforcement — a graph that demands spec types
+        // refuses to launch when a spec it would actually execute (a bound
+        // pending spec, or a pending queue member) still has none, naming it.
+        if lp.require_spec_type {
+            if let Err(message) = validate_specs_have_types_for_run(&self.db, &graph_id, queue_id) {
+                return Ok(error_result(&message));
+            }
+        }
+
         // (CB22) Synchronous launch validation: the same check the engine's
         // dispatch runs, so the TUI receives "what is missing" immediately
         // instead of a misleading successful background-launch response. A
@@ -149,7 +159,7 @@ impl TaskTriggerHandler {
         }
 
         let effective_workdir = workdir.unwrap_or(&lp.workdir);
-        // CM43: with `start_node_id`, the preview must be the first spec a
+        // With `start_node_id`, the preview must be the first spec a
         // FRESH dispatch executes (the directed target — see
         // [`GraphEngine::preview_directed_run_spec_id`]); without it, the
         // running-member-first preview keeps feeding the dirty-start
@@ -228,11 +238,12 @@ impl TaskTriggerHandler {
             None
         };
 
-        // CM43: resolve the directed start synchronously so a bad node or a
+        // Resolve the directed start synchronously so a bad node or a
         // missing reachable output refuses the launch before any dispatch. The
         // target spec is the first spec this run would execute (the same
         // preview the dirty-start check above used).
         let mut directed_plan = None;
+        let mut limit_note = String::new();
         let directed = match start_node_id {
             Some(start) => {
                 let Some(spec_id) = next_spec_preview.clone() else {
@@ -246,6 +257,9 @@ impl TaskTriggerHandler {
                     .plan_directed_run(&graph_id, &spec_id, start)
                 {
                     Ok(plan) => {
+                        // FR1: the engine zeroes the count when the directed run
+                        // starts; the response says so.
+                        limit_note = limit_reset_note(&plan.spec_name);
                         directed_plan = Some(plan);
                         Some(crate::graph_engine::DirectedStart {
                             spec_id,
@@ -266,7 +280,10 @@ impl TaskTriggerHandler {
             sandbox,
             directed,
         );
-        let report = directed_run_report(directed_plan.as_ref());
+        let report = format!(
+            "{limit_note}{}",
+            directed_run_report(directed_plan.as_ref())
+        );
         Ok(success_result(&match launch_warning {
             Some(warning) => format!(
                 "Graph '{}' launched in background. WARNING: {}{}",
@@ -477,14 +494,23 @@ pub(crate) fn handle_skip_next_spec(db: &Database, graph_id: &str) -> Result<(),
         .into_iter()
         .find(|spec| spec.status.is_resumable());
 
+    // FR6: a failed graph skips its current non-terminal spec, the one
+    // `run_from_node` names. A paused queue held back by the dirty-tree guard
+    // skips the member it held, never the `failed` predecessor before it.
     let current_spec = match bound_running {
         Some(spec) => spec,
-        None => queue_running_spec(db, graph_id)?.ok_or_else(|| {
-            McpError::invalid_params(
-                "No running spec found to skip from this paused graph.",
-                None,
-            )
-        })?,
+        None => match queue_running_spec(db, graph_id)? {
+            Some(spec) => spec,
+            None => match held_queue_spec(db, graph_id)? {
+                Some(spec) => spec,
+                None => resolve_directed_spec(db, graph_id, None).map_err(|_| {
+                    McpError::invalid_params(
+                        "No running spec found to skip from this paused graph.",
+                        None,
+                    )
+                })?,
+            },
+        },
     };
 
     db.update_graph_spec_status(
@@ -582,10 +608,13 @@ pub(crate) fn queue_running_spec(
 
 /// The current member of `graph_id`'s active queue: the first `Running` or
 /// `Interrupted` member (either is resumable — CB50), found in queue
-/// position order. If none is resumable, falls back to the first member not
-/// yet `Completed`/`Skipped`, purely so callers building an error message
-/// (FR5) have a spec to name instead of nothing. `None` if the graph isn't
-/// drawing from a queue, or every member is terminal.
+/// position order. If none is resumable, falls back to a non-terminal member
+/// — preferring `Failed` (the spec a directed `run_from_node` with no
+/// `spec_id` restarts, and the spec an FR5 error names) over a still `Pending`
+/// one — so callers choosing a directed default spec, or building an error
+/// message, always land on the spec worth acting on instead of nothing.
+/// `None` if the graph isn't drawing from a queue, or every member is
+/// terminal.
 pub(crate) fn queue_current_spec(
     db: &Database,
     graph_id: &str,
@@ -597,7 +626,8 @@ pub(crate) fn queue_current_spec(
     else {
         return Ok(None);
     };
-    let mut fallback: Option<GraphSpec> = None;
+    let mut failed: Option<GraphSpec> = None;
+    let mut pending: Option<GraphSpec> = None;
     for spec_id in db
         .list_queue_member_spec_ids(&queue_id)
         .map_err(internal_error)?
@@ -606,18 +636,19 @@ pub(crate) fn queue_current_spec(
             continue;
         };
         if spec.status.is_resumable() {
+            // Running or Interrupted — resume the in-flight spec.
             return Ok(Some(spec));
         }
-        if fallback.is_none()
-            && !matches!(
-                spec.status,
-                GraphSpecStatus::Completed | GraphSpecStatus::Skipped
-            )
-        {
-            fallback = Some(spec);
+        if spec.status == GraphSpecStatus::Failed {
+            failed.get_or_insert(spec);
+        } else if spec.status == GraphSpecStatus::Pending {
+            pending.get_or_insert(spec);
         }
     }
-    Ok(fallback)
+    // No live spec: a Failed member is a more useful "current" spec to name
+    // (and the default a directed run_from_node without spec_id targets) than
+    // a still-Pending one.
+    Ok(failed.or(pending))
 }
 
 /// The spec a `run_from_node` directed run targets: the explicit `spec_id` when
@@ -729,4 +760,39 @@ pub(crate) fn directed_run_report(plan: Option<&DirectedPlan>) -> String {
          iteration counters restarted at 1; {head}.",
         plan.spec_name, plan.start_label
     )
+}
+
+/// SPECCODE: `require_spec_type` support for `graph_run` — name every
+/// would-run spec (bound to the graph as `pending`, or a pending queue
+/// member) that still has no type. Empty list is a pass.
+fn validate_specs_have_types_for_run(
+    db: &Database,
+    graph_id: &str,
+    queue_id: Option<&str>,
+) -> Result<(), String> {
+    let untyped: Vec<String> = match queue_id {
+        Some(queue_id) => db
+            .queue_members_in_order(queue_id)
+            .map_err(|e| e.to_string())?
+            .iter()
+            .filter(|member| !member.locked)
+            .filter_map(|member| db.get_graph_spec(&member.spec_id).ok().flatten())
+            .filter(|spec| spec.spec_type.is_none())
+            .map(|spec| format!("'{}'", spec.name))
+            .collect(),
+        None => db
+            .list_graph_specs(graph_id)
+            .map_err(|e| e.to_string())?
+            .iter()
+            .filter(|spec| spec.status == GraphSpecStatus::Pending && spec.spec_type.is_none())
+            .map(|spec| format!("'{}'", spec.name))
+            .collect(),
+    };
+    if untyped.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "Graph '{graph_id}' requires every spec to have a type (require_spec_type); still untyped: {}. Set the type with spec_update before relaunching.",
+        untyped.join(", ")
+    ))
 }

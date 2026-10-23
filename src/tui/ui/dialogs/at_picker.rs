@@ -58,7 +58,7 @@ pub(crate) fn draw_at_picker_dropdown(
         .title(title)
         .borders(crate::tui::ui::dialog_borders_for(theme))
         .border_style(Style::default().fg(accent))
-        .style(Style::default().bg(Color::Rgb(10, 20, 10)));
+        .style(Style::default().bg(theme.dialog_bg));
     let inner = block.inner(drop_area);
     frame.render_widget(block, drop_area);
 

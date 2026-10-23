@@ -137,12 +137,13 @@ pub(super) fn scroll_state_with_offset(
 
 pub(super) fn render_brain_if_visible(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     if area.height < 3 || area.width < 6 {
-        return;
-    }
-    if app.sidebar_brain.is_none() {
+        app.sidebar_brain_rect = None;
         return;
     }
     app.sidebar_brain_rect = Some(area);
+    if app.sidebar_brain.is_none() {
+        return;
+    }
     if let Some(brain) = app.sidebar_brain.as_ref() {
         crate::tui::ui::panel::draw_brians_brain(frame, area, brain, theme.sidebar_bg);
     }

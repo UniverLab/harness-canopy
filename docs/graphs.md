@@ -37,6 +37,10 @@ Graph
     [ensemble](#ensembles), never created directly.
 - **Edges** — connect nodes with routing conditions: `pass`, `fail`,
   `always`.
+- **Node MCP profile** — agent and ensemble nodes launched by the graph
+  engine receive a fixed set of 18 tools in `tools/list`
+  (`CANOPY_MCP_PROFILE=node`); check nodes, hooks, and other sessions keep
+  the full list. See [MCP Tools](mcp-tools.md).
 
 ## Template variables
 
@@ -49,6 +53,10 @@ Agent node prompts support these placeholders:
 | `{{spec_id}}` | The spec's unique ID |
 | `{{spec_name}}` | The spec's name |
 | `{{spec_content}}` | The spec's description (falls back to name) |
+| `{{spec_code}}` | Engine-generated quick reference (e.g. `FIX-7`) — empty on legacy specs without a type |
+| `{{spec_type}}` | Conventional Commits type (`feat`, `fix`, etc.) — empty on legacy specs without a type |
+| `{{spec_scope}}` | Optional scope (e.g. `tui`) — empty when absent |
+| `{{spec_commit_message}}` | Prebuilt commit message (`fix(tui): open F1`) — empty on legacy specs without a type |
 | `{{node_id}}` | The node's unique ID |
 | `{{previous_feedback}}` | JSON output of the previous node (truncated if oversized) |
 
@@ -93,6 +101,10 @@ workdir):
 | `CANOPY_GRAPH_NAME` | The graph's name |
 | `CANOPY_SPEC_START_HEAD` | The same value as `{{spec_start_head}}`; the empty string when unknown |
 | `CANOPY_SPEC_FILE` | Absolute path of a file holding the spec's full description — the idea text on an idea run, an empty file for a spec with no description. The engine writes it just before the command runs and removes it once the node finishes, so read it inside the command (quote the expansion: `"$CANOPY_SPEC_FILE"`). There is deliberately no `{{spec_content}}` marker in check commands: a file has no quoting problem and no command-length limit |
+| `CANOPY_SPEC_CODE` | Engine-generated quick reference (e.g. `FIX-7`) — empty on legacy specs without a type |
+| `CANOPY_SPEC_TYPE` | Conventional Commits type (`feat`, `fix`, etc.) — empty on legacy specs without a type |
+| `CANOPY_SPEC_SCOPE` | Optional scope (e.g. `tui`) — empty when absent |
+| `CANOPY_SPEC_COMMIT_MESSAGE` | Prebuilt commit message (`fix(tui): open F1`) — empty on legacy specs without a type |
 
 `{{spec_start_head}}` only proves *some* commit landed since the spec
 began; it's satisfied just as well by a commit from outside this run
@@ -132,7 +144,8 @@ instead of telling you to set a flag. When it blocks, the message says
 `allow_dirty_start: true` via `graph_update` to downgrade a refusal to a
 warning. `graph_preflight` separately reports a dirty workdir as a warning
 unconditionally, with no "previous spec" logic — call it before `graph_run` to
-see this regardless of history.
+see this regardless of history. A queue run applies the same guard between
+its specs, not only at launch — see [Spec queues](#spec-queues).
 
 ```bash
 test -z "$(git status --porcelain -- src/)" \
@@ -207,6 +220,15 @@ with the source and member counts before `graph_run` spends probe quota.
 `graph_delete_ensemble` removes the whole unit. `graph_get` returns the
 ensemble as one unit (`ensemble_id`, members, quorum config, every entry
 source) alongside its expanded nodes.
+
+`on_fail_to = null` (the default when an ensemble is created without one)
+ends the spec when the quorum fails: a member that reports FAIL — even with
+partial work — leaves the quorum with nowhere to route, so the run stops
+there and the graph ends `failed` instead of routing the failure onward. This
+is sometimes deliberate, so it is never an error; `graph_preflight` warns
+about it in `graph_warnings` for every ensemble whose quorum has no
+`fail`/`always` exit. Set `on_fail_to` with `graph_update_ensemble`, or add
+the edge with `graph_add_edge`, when a failed quorum should route somewhere.
 
 The quorum's consolidated output is one document with a
 `## <platform/model> [pass|fail]` section per member, in member order. The
@@ -351,9 +373,14 @@ The engine records `git rev-parse HEAD` before and after every node it
 runs and compares the two. A node without `commit_rights` that moved
 HEAD is a deterministic **fail**, whatever the node itself reported —
 it routes through the `fail` edge like any other failure, and the
-reason (`Node 'X' committed but has no commit rights: HEAD moved
-a1b2c3 -> d4e5f6`) lands in the run output, in `canopy graph info`, and
-in the next node's `{{previous_feedback}}`.
+reason (`Node 'X': HEAD moved from a1b2c3 to d4e5f6 while it ran`,
+plus the new commits in that range, capped at 5) lands in the run
+output, in `canopy graph info`, and in the next node's
+`{{previous_feedback}}`. The engine cannot know *who* moved HEAD, so
+the message never claims the node committed: the commit may come from
+this node, another session, a hook, or a human — the listing shows
+each new commit as `a1b2c3d subject line (2026-10-16)` so you can tell
+at a glance when it belongs to something else entirely.
 
 Three things are deliberate:
 
@@ -460,6 +487,27 @@ told apart. `graph_audit_node_configs` lists every node/member whose
 effective budget differs from its platform's own under
 `infra_config_overrides`.
 
+## Execution limit
+
+A spec that fails with a genuine verdict in separate graph executions is
+counted per spec, across relaunches and daemon restarts. Once it reaches
+the limit (`spec_attempt_limit`, default 3) the graph pauses with a blocker
+instead of failing again. Infrastructure failures do not count.
+
+To clear the limit, do one of these:
+
+- **Reset the spec by id.** `graph_reset` with `specs: [<spec id>]` zeroes
+  that spec's execution count and leaves its worktree untouched. Then
+  `graph_run` or `graph_continue run_from_node` relaunches it. A `graph_reset`
+  without `specs` keeps every spec's count.
+- **Give an explicit directive.** `graph_run` with `start_node_id`,
+  `graph_continue` with `run_from_node`, or `graph_continue` with
+  `retry_current_node` (on a failed graph, or on a pending spec with a
+  recorded node) resets the targeted spec's count before its run starts. The
+  response says `Execution limit reset for spec '<name>'`.
+
+Automatic re-runs (cron auto-continue, autorun) never reset the count.
+
 ## Lifecycle
 
 Create → run → (pause / continue) → complete. `graph_continue`
@@ -485,7 +533,24 @@ When a node is terminated, canopy also ends the harness session that node
 started, for platforms that declare how to end a session (opencode does).
 Without that, a terminated opencode session could be resumed by the
 platform's background service after a restart and edit the repo beside the
-next attempt.
+next attempt. Every harness node runs with the node's workdir as its
+working directory, so the session list the end step searches is the same
+one the node created. The outcome is recorded on the run's output as
+`session_end` — `"ended <id>"`, `"not configured"` (the platform declares
+no way to end a session), `"not found"` (no id on the run and no title
+match), or `"failed: <reason>"` — readable via `graph_node_run_get`.
+
+An agent node that has filed its verdict must not keep running. Once the
+verdict is recorded, its process gets a grace period to exit on its own
+(`graphs.verdict_grace_seconds`, default 15; 0 disables the shutdown). If it
+is still alive when the grace period ends, canopy terminates its process
+group and ends its harness session as described above. The next node,
+ensemble member or join starts only after that process is gone; in a parallel
+ensemble each member gets the same grace period and is ended without waiting
+for the others. Termination never changes the verdict: a pass stays a pass.
+The node's output records `ended_after_verdict` — `"exited"` when the process
+left on its own, `"terminated"` when canopy ended it — readable via
+`graph_node_run_get`.
 
 A spec interrupted by a no-verdict ensemble block (see
 [No-verdict blocks](#no-verdict-blocks)) is resumed the same way:
@@ -498,15 +563,29 @@ the blocked spec from its entry node.
 When the work up to some node is already done and good — after a crash,
 a rewired ensemble, or a hand fix — a **directed run** starts a spec at
 a node you choose instead of at Start: `graph_continue run_from_node
---spec <spec>` (or `graph_run --from` for the first spec the run
-executes). It reuses every earlier node's most recent recorded output
-for that spec, sets the spec cursor to the start node, and then runs the
-graph with its normal edges, routers, ensembles and gates. The per-node
-iteration counters restart at 1 (earlier attempts stay in the run
-history). A directed run accepts a `pending`, `paused`, `interrupted`,
+[--spec <spec>]` (or `graph_run --from` for the first spec the run
+executes). `--spec` is optional: on a queue-driven graph it defaults to the
+graph's current spec — an in-flight member (`running` or `interrupted`)
+first, else a `failed` one, else the next `pending` one — so a bare directed
+run restarts the failed spec rather than the next fresh one. It reuses the
+most recent recorded output of each node upstream of the start node for that
+spec; the start node and everything downstream of it always run again, and
+its own old output is never reused. If an upstream node's latest run is
+`failed`, `error` or `interrupted`, the directed run is refused and that node
+is named: a failed prerequisite is never treated as passed. The spec cursor
+is set to the start node, and the graph then runs with its normal edges,
+routers, ensembles and gates. On a queue-driven graph the chosen spec is
+what runs first: queue members before it are marked `skipped`, members
+after it run in their usual order, and any other member left `running` by a
+stale or mistaken state is reset to `pending` and left for a later run. The
+per-node iteration counters restart at 1 (earlier attempts stay in the run
+history). A directed run accepts a `pending`, `running`, `interrupted`,
 `failed` or `completed` spec on a graph with no active run; a running
-graph refuses. An ensemble is targeted by its name (or its fan-out
-node); a join node or a single member is refused, naming the ensemble.
+graph refuses. An ensemble is targeted by its name; targeting the node the
+ensemble fans out from starts at that node itself, runs it, and fans out
+to the ensemble from there — the named node always runs first and is never
+reported as skipped. A join node or a single ensemble member is refused,
+naming the ensemble.
 If a reachable prompt or check references a node with no recorded output
 for the spec, the run is refused and the missing node is named.
 
@@ -680,6 +759,22 @@ Queue membership is unaffected by `graph_run` — specs stay standalone.
 The `graph info` CLI and `graph_get` MCP tool show queue-driven progress
 by reconstructing what ran from the run history.
 
+**Dirty-tree guard between specs.** The launch guard that refuses a dirty
+worktree at `graph_run` also runs every time a queue run moves from one spec
+to the next: after a completed, failed, skipped, interrupted or limit-blocked
+spec alike. A refusal pauses the graph (it does not fail it). The blocker
+lists the first 20 dirty paths and the ways out: `graph_continue run_from_node`
+on the next spec, cleaning the tree by hand and then `graph_continue
+skip_next_spec`, or `allow_dirty_start` on the graph. A directed start on that
+spec is not refused again by the guard. `allow_dirty_start` lets the run
+advance.
+
+When a queue run drains all runnable members, the graph settles on its own:
+`completed` if every member completed or was skipped, or `failed` — naming
+the failed members in its blocker/summary — if any member failed. A graph
+reported as `running` that has no node run in progress and no scheduled
+resume surfaces a `consistency_warning` in `graph_get`.
+
 ## The 36 MCP tools
 
 | Stage | Tools |
@@ -776,6 +871,19 @@ lists every unresolved binding under `missing_crews` (next to
 leaves the binding pending — a pending ensemble cannot dispatch until
 a crew of that name is created, and `graph_preflight` reports it as
 `would_fail`.
+
+A crew-bound ensemble travels without `members` (the crew supplies them)
+but *not* without its wiring: an absent `members` key is simply an empty
+list, and the ensemble's `entry_from_node`/`entry_condition`, every
+`extra_entry_sources` item, and any `on_pass_to`/`on_fail_to` exit
+chained into another ensemble are all recorded at import. They are wired
+through the same sync path the engine already uses the moment the crew's
+members are materialised — during the import when the crew exists
+locally, or on the crew's first sync (dispatch, or `crew_create`/
+`crew_update`) when it is created later. Either way the result is a fully
+wired ensemble, so a shared design reaching a machine that has the crews
+arrives runnable; a document that names neither a crew nor any members is
+still refused, naming the ensemble.
 
 An [ensemble](#ensembles) round-trips as one ensemble — not as its
 expanded member/quorum nodes — via its own `ensembles` array entry.
@@ -884,7 +992,8 @@ The CLI prints the most recent node runs in `canopy graph info <graph>`.
 Over MCP: `graph_node_runs_list { graph_id, node_id?, spec_id?, limit? }`
 returns the most recent runs first (default 20, capped at 200).
 `graph_node_run_get { run_id }` fetches one run's full stored input and
-output, including `infra_attempt`/`infra_crash` markers when present.
+output, including `infra_attempt`/`infra_crash` markers when present, and
+`ended_after_verdict`/`session_end` when an agent filed a verdict.
 Secret-shaped substrings are redacted before the output crosses the
 boundary.
 
@@ -926,6 +1035,59 @@ Ordinary logging hooks keep working; they simply stop being necessary.
 Unlike the shared activity stream (bounded per workdir, free text), this log
 is never pruned by count. `canopy clean` removes events older than
 `graph_event_retention_days` (default 90) for graphs that are not running.
+
+## Deterministic commits
+
+Canopy can build a deterministic commit message from a spec's type and
+scope, and number specs automatically per type — a short code that serves
+as a quick reference and counts features and bugs.
+
+1. **Number specs by change type.** Give each spec a `type` (one of the
+   Conventional Commits types: `feat`, `fix`, `docs`, `style`, `refactor`,
+   `perf`, `test`, `build`, `ci`, `chore`, `revert`). Canopy assigns
+   `code = <TYPE>-<n>` with TYPE upper-cased (`FEAT-12`, `FIX-7`, `DOCS-3`)
+   and `n` the next number for that type among the specs tagged with the
+   same workdir (counter persisted per workdir and type; never reused,
+   even after a spec is deleted). The code is immutable and never set by
+   callers. Setting `type` later on a legacy spec through `spec_update`
+   assigns its code at that moment; changing the type afterwards does not
+   renumber it.
+
+2. **Conventional titles.** When `spec_create`/`graph_add_spec` receive a
+   name of the form `<type>(<scope>)?!?: <subject>` and no explicit `type`,
+   canopy parses it and stores the subject as the name, with type and scope
+   extracted. An explicit `type` wins over the parsed one.
+
+3. **Commit message.** Every spec exposes `CANOPY_SPEC_COMMIT_MESSAGE`
+   to check nodes and `{{spec_commit_message}}` to agent prompts. The
+   message is `<type>(<scope>): <name>` (or `<type>: <name>` without scope).
+   A deterministic commit node uses `$CANOPY_SPEC_COMMIT_MESSAGE` as the
+   commit message and never guesses.
+
+4. **Opt-in enforcement.** A graph created or updated with
+   `require_spec_type: true` (default `false`) refuses a spec without a type
+   in `graph_add_spec`, and `graph_run` refuses a queue holding one, naming
+   the spec. `queue_add_spec` refuses an untyped spec while any graph has the
+   setting on, because queues are not tied to a single graph. Legacy specs
+   keep working everywhere else.
+
+**Recipe: deterministic commit node**
+
+Add a check node with `commit_rights: true` and use the prebuilt message:
+
+```json
+{
+  "name": "commit",
+  "kind": "check",
+  "command": "git add -A && git commit -m \"$CANOPY_SPEC_COMMIT_MESSAGE\"",
+  "success_condition": "exit_code_0",
+  "commit_rights": true
+}
+```
+
+When the spec has `type: fix` and `scope: tui`, and its name is
+`"open F1 from inside a session"`, the node commits with message
+`fix(tui): open F1 from inside a session`.
 
 ## Spec notes
 
@@ -1005,6 +1167,7 @@ retry budgets and caps. Each keeps its default until you set it.
 | `graphs.ensemble_max_members_parallel` | 8 (range 2–16) | Largest member count a `parallel` ensemble may have. Lowering it never edits an existing ensemble. |
 | `graphs.ensemble_max_members_sequential` | 16 (range 2–32) | Largest member count for a `cascade`/`round_robin` ensemble, and the largest crew. |
 | `graphs.check_output_max_kib` | 64 (range 16–4096) | Check-output tail kept, in KiB. |
+| `graphs.verdict_grace_seconds` | 15 (range 0–300) | Seconds an agent has to exit after filing its verdict before canopy terminates it. 0 disables the shutdown. |
 
 Two more engine settings sit outside the `graphs.` prefix (see
 [CLI reference](cli-reference.md#settings-reference)):

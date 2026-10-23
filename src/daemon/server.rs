@@ -926,6 +926,7 @@ mod hang_repro {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         })
         .unwrap();
         db.insert_graph_spec(&GraphSpec {
@@ -947,6 +948,9 @@ mod hang_repro {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         })
         .unwrap();
         db.insert_graph_node(&GraphNode {
@@ -1466,6 +1470,7 @@ mod stdio_startup_reconciliation_tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let spec = GraphSpec {
             id: format!("spec-stdio-startup-{suffix}"),
@@ -1486,6 +1491,9 @@ mod stdio_startup_reconciliation_tests {
             completed_via_reason: None,
             completed_via_at: None,
             spec_committed_head: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let node = GraphNode {
             id: format!("node-stdio-startup-{suffix}"),

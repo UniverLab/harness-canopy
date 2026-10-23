@@ -14,7 +14,7 @@ use crate::daemon::params::*;
 use crate::daemon::params_extract::Parameters;
 use crate::db::Database;
 use crate::domain::graphs::{GraphEdge, GraphNode};
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::tool;
 use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
@@ -103,7 +103,7 @@ impl TaskTriggerHandler {
         };
         self.db.insert_graph_edge(&edge).map_err(internal_error)?;
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&serde_json::json!({ "ok": true })).unwrap_or_default(),
         )]))
     }
@@ -274,7 +274,7 @@ pub(crate) fn resolve_graph_target(
         (None, None) => Err("Provide exactly one of spec_id or graph_id.".to_string()),
         (Some(spec_id), None) => {
             let resolved = db
-                .resolve_spec_id_by_prefix(spec_id)
+                .resolve_spec_id_by_prefix(spec_id, None)
                 .map_err(|e| e.to_string())?;
             let full_id = resolved.as_deref().unwrap_or(spec_id);
             validate_spec_exists(db, full_id)?;
@@ -311,7 +311,7 @@ pub(crate) fn resolve_copy_target(
         (Some(_), Some(_)) => Err("Provide at most one of spec_id or graph_id.".to_string()),
         (Some(spec_id), None) => {
             let resolved = db
-                .resolve_spec_id_by_prefix(spec_id)
+                .resolve_spec_id_by_prefix(spec_id, None)
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| format!("Spec '{spec_id}' not found."))?;
             validate_spec_exists(db, &resolved)?;

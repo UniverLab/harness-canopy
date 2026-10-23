@@ -10,7 +10,7 @@ use crate::domain::graphs::{
     ArchiveGraphOutcome, Graph, GraphCompletionHook, GraphCompletionHookRun, GraphDetails,
     GraphEdge, GraphEdgeCondition, GraphHookEvent, GraphNode, GraphNodeKind, GraphNodeRun,
     GraphResetOutcome, GraphRunStatus, GraphSpec, GraphSpecDetails, GraphSpecStatus, GraphStatus,
-    SpecAdminStatusOutcome,
+    SpecAdminStatusOutcome, SpecType,
 };
 use crate::domain::models::Trigger;
 
@@ -21,6 +21,7 @@ pub mod notes;
 mod queue;
 mod reconcile;
 mod runs;
+mod spec_codes;
 mod specs;
 mod telemetry;
 mod topology;
@@ -128,13 +129,13 @@ fn take_last_lines(text: &str, max_lines: usize) -> String {
 
 fn map_graph_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Graph> {
     let trigger = row
-        .get::<_, Option<String>>(5)?
+        .get::<_, Option<String>>(6)?
         .as_deref()
         .map(decode_graph_trigger)
         .transpose()?;
     let hooks = decode_graph_hooks(
-        row.get::<_, Option<String>>(17)?.as_deref(),
-        row.get::<_, Option<String>>(11)?.as_deref(),
+        row.get::<_, Option<String>>(18)?.as_deref(),
+        row.get::<_, Option<String>>(12)?.as_deref(),
     )?;
     Ok(Graph {
         id: row.get(0)?,
@@ -143,30 +144,31 @@ fn map_graph_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Graph> {
         workdir: row.get(3)?,
         status: GraphStatus::from_str(&row.get::<_, String>(4)?),
         trigger,
-        created_at: from_timestamp(row.get(6)?)?,
+        created_at: from_timestamp(row.get(7)?)?,
         started_at: row
-            .get::<_, Option<i64>>(7)?
-            .map(from_timestamp)
-            .transpose()?,
-        completed_at: row
             .get::<_, Option<i64>>(8)?
             .map(from_timestamp)
             .transpose()?,
-        autorun_at: row
+        completed_at: row
             .get::<_, Option<i64>>(9)?
             .map(from_timestamp)
             .transpose()?,
-        active_run_queue_id: row.get(10)?,
-        hooks,
-        auto_continue_at: row
-            .get::<_, Option<i64>>(12)?
+        autorun_at: row
+            .get::<_, Option<i64>>(10)?
             .map(from_timestamp)
             .transpose()?,
-        auto_continue_action: row.get(13)?,
-        archived: row.get(14)?,
-        paused_by_reconciliation: row.get(15)?,
-        infra_node_id: row.get(16)?,
-        allow_dirty_start: row.get(18)?,
+        active_run_queue_id: row.get(11)?,
+        hooks,
+        auto_continue_at: row
+            .get::<_, Option<i64>>(13)?
+            .map(from_timestamp)
+            .transpose()?,
+        auto_continue_action: row.get(14)?,
+        archived: row.get(15)?,
+        paused_by_reconciliation: row.get(16)?,
+        infra_node_id: row.get(17)?,
+        allow_dirty_start: row.get(19)?,
+        require_spec_type: row.get(20)?,
     })
 }
 
@@ -275,6 +277,11 @@ fn map_graph_spec_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GraphSpec> {
         spec_end_dirty_paths: row
             .get::<_, Option<String>>(17)?
             .map(|raw| raw.lines().map(str::to_string).collect()),
+        spec_type: row
+            .get::<_, Option<String>>(18)?
+            .and_then(|s| SpecType::parse(&s)),
+        spec_scope: row.get(19)?,
+        spec_code: row.get(20)?,
     })
 }
 
@@ -470,6 +477,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: BTreeMap::new(),
+            require_spec_type: false,
         }
     }
 
@@ -826,6 +834,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         };
         db.insert_graph_spec(&spec).unwrap();
 
@@ -886,6 +897,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         };
         // Completed shares the workdir but is never a candidate; Interrupted
         // sits on an unrelated workdir so it can never be mistaken for this
@@ -944,6 +958,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         })
         .unwrap();
         db.insert_graph_node(&crate::domain::graphs::GraphNode {
@@ -1006,6 +1023,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: BTreeMap::new(),
+            require_spec_type: false,
         })
         .unwrap();
         db.insert_graph_spec(&crate::domain::graphs::GraphSpec {
@@ -1027,6 +1045,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         })
         .unwrap();
         db.insert_graph_node(&crate::domain::graphs::GraphNode {
@@ -1220,6 +1241,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
         })
         .unwrap();
         db.insert_graph_node(&GraphNode {

@@ -1,4 +1,4 @@
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::fields::{
@@ -6,10 +6,9 @@ use super::fields::{
     append_sandbox_section, append_yolo_section, terminal_shell_row, DirSection,
 };
 use super::{
-    background_trigger_label, filter_row, focus_style, interactive_mode_row, model_value,
-    picker_detail_style, picker_item_style, push_spaced_row, selector_spans, truncate_str,
-    truncate_with_ellipsis, FieldLayout, PickerWindow, BACKGROUND_TRIGGER_FIELD,
-    CLI_PICKER_VISIBLE, MODEL_PICKER_VISIBLE, SESSION_PICKER_VISIBLE,
+    background_trigger_label, filter_row, focus_style, model_value, picker_detail_style,
+    picker_item_style, push_spaced_row, selector_spans, truncate_str, FieldLayout, PickerWindow,
+    BACKGROUND_TRIGGER_FIELD, CLI_PICKER_VISIBLE, MODEL_PICKER_VISIBLE, SESSION_PICKER_VISIBLE,
     SESSION_RESUME_PICKER_VISIBLE, TERMINAL_DIR_FIELD,
 };
 use crate::tui::app::dialog::new_agent::{BackgroundTrigger, NewAgentDialog};
@@ -33,15 +32,9 @@ pub(super) fn append_interactive_sections(
     section: SectionLayout,
 ) {
     let layout = section.fields;
-    if !dialog.is_edit_mode() {
-        push_spaced_row(lines, interactive_mode_row(dialog, accent, theme));
-        // Sits between choosing Resume and CLI selection: the harness
-        // follows from whichever session is picked here.
-        append_session_resume_picker_rows(lines, dialog, theme);
-    }
-
+    // CT34: no Session (Mode) row and no inline session lists on the form —
+    // the New/Resume choice moved to the Mode step that follows it.
     append_cli_section(lines, dialog, accent, filtered_clis, layout.cli, theme);
-    append_session_picker_rows(lines, dialog, theme);
     append_identity_section(lines, dialog, accent, layout.identity, theme);
     append_yolo_section(lines, dialog, accent, layout.yolo, theme);
     append_sandbox_section(lines, dialog, accent, layout.sandbox, theme);
@@ -116,25 +109,7 @@ pub(super) fn append_background_sections(
     );
 }
 
-/// Status text for the canopy-native resume picker: which session (and
-/// harness) is resolved, that none exist, or that the picker is open.
-pub(super) fn session_resume_label(dialog: &NewAgentDialog) -> String {
-    if dialog.resume_sessions_empty {
-        return "  (no resumable sessions)".to_string();
-    }
-    if dialog.session_resume_picker.is_some() {
-        return "  ↵/↑↓ choose session to resume".to_string();
-    }
-    match &dialog.selected_resume_session {
-        Some(session) => format!(
-            "  [{}] on {}",
-            truncate_with_ellipsis(&session.name, 32),
-            session.cli
-        ),
-        None => String::new(),
-    }
-}
-
+/// The background trigger row (Cron / Watch).
 fn append_trigger_section(
     lines: &mut Vec<Line<'static>>,
     dialog: &NewAgentDialog,
@@ -215,11 +190,22 @@ fn append_cli_section(
     cli_field: usize,
     theme: &Theme,
 ) {
+    // The harness name reads in its own accent; focus turns the name into a
+    // solid block of that accent with black text.
+    let cli_accent = dialog.cli_accent_color(dialog.cli_index, theme);
+    let value_style = if dialog.field == cli_field {
+        Style::default()
+            .fg(Color::Black)
+            .bg(cli_accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(cli_accent)
+    };
     lines.push(Line::from(vec![
         Span::styled("  Harness: ", Style::default().fg(theme.dim_text)),
         Span::styled(
             format!(" {} ", dialog.cli_display_label(dialog.cli_index)),
-            focus_style(dialog.field, cli_field, accent),
+            value_style,
         ),
         Span::styled(
             "  (◂▸ cycle · type/Space pick)",
@@ -268,13 +254,28 @@ fn append_cli_picker_rows(
             .take(CLI_PICKER_VISIBLE)
         {
             let is_selected = i == dialog.cli_picker_idx;
-            let style = picker_item_style(accent, is_selected);
+            let cli_accent = dialog.cli_accent_color(*cli_idx, theme);
+            // Each row names its own harness in that harness's accent. The
+            // selected row is a solid block of that accent with black text, so
+            // the marker and the label share one colour.
+            let (style, label_style) = if is_selected {
+                let block = Style::default()
+                    .fg(Color::Black)
+                    .bg(cli_accent)
+                    .add_modifier(Modifier::BOLD);
+                (block, block)
+            } else {
+                (
+                    picker_item_style(accent, false),
+                    Style::default().fg(cli_accent),
+                )
+            };
             lines.push(Line::from(vec![
                 Span::styled(
                     format!("    {} ", if is_selected { "›" } else { " " }),
                     style,
                 ),
-                Span::styled(dialog.cli_display_label(*cli_idx), style),
+                Span::styled(dialog.cli_display_label(*cli_idx), label_style),
             ]));
         }
     }
@@ -358,7 +359,9 @@ fn append_model_picker_rows(
     }
 }
 
-fn append_session_picker_rows(
+/// Rows for the CLI's own session list (`session_list_cmd`), shown on the
+/// Mode step's Resume branch.
+pub(super) fn append_session_picker_rows(
     lines: &mut Vec<Line<'static>>,
     dialog: &NewAgentDialog,
     theme: &Theme,
@@ -409,8 +412,9 @@ fn append_session_picker_rows(
 }
 
 /// Rows for the canopy-native session-resume picker (C12): each row shows
-/// name, harness and last-active, most-recent-first (FR 2, 3).
-fn append_session_resume_picker_rows(
+/// name, harness and last-active, most-recent-first (FR 2, 3). Reused by the
+/// Mode step (CT34), which now owns the list.
+pub(super) fn append_session_resume_picker_rows(
     lines: &mut Vec<Line<'static>>,
     dialog: &NewAgentDialog,
     theme: &Theme,

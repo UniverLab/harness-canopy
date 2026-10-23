@@ -20,10 +20,13 @@ use crate::domain::graphs::{
 };
 use crate::domain::models::Cli;
 use crate::domain::sandbox::Sandbox;
+use crate::domain::spec_type::{commit_message, SpecType};
 
 mod agent_exec;
 mod agent_spawn;
 mod check;
+mod check_command;
+mod check_render;
 mod crew_resolve;
 mod decision;
 mod directed;
@@ -38,6 +41,7 @@ mod gate_router;
 mod hooks_fire;
 mod hooks_graph;
 mod hooks_interactive;
+mod hooks_render;
 mod infra;
 mod launch_check;
 mod lifecycle;
@@ -51,10 +55,12 @@ mod routing;
 mod run_spec;
 mod shell_utils;
 mod spec_step;
+mod verdict_shutdown;
 
 pub(crate) use agent_exec::*;
 pub(crate) use agent_spawn::*;
 pub(crate) use check::*;
+pub(crate) use check_render::*;
 pub(crate) use decision::*;
 pub(crate) use directed::*;
 pub(crate) use dirty_commit::*;
@@ -73,6 +79,7 @@ pub(crate) use hooks_fire::*;
 pub(crate) use hooks_graph::*;
 #[allow(unused_imports)]
 pub(crate) use hooks_interactive::*;
+pub(crate) use hooks_render::*;
 pub(crate) use infra::*;
 #[allow(unused_imports)]
 pub(crate) use launch_check::*;
@@ -395,6 +402,10 @@ mod tests {
             spec_id: Some("spec-id"),
             blocker: None,
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
 
         assert_eq!(
@@ -428,7 +439,7 @@ mod tests {
             .into_owned()
     }
 
-    fn graph_fixture() -> Result<(TempDir, Arc<Database>, GraphEngine, String, String)> {
+    pub(crate) fn graph_fixture() -> Result<(TempDir, Arc<Database>, GraphEngine, String, String)> {
         let dir = tempdir()?;
         let db = Arc::new(Database::new(&dir.path().join(TEST_DB_FILENAME))?);
         let lp = crate::domain::graphs::Graph {
@@ -450,6 +461,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let spec = crate::domain::graphs::GraphSpec {
             id: "spec-test".to_string(),
@@ -472,6 +484,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
 
         db.insert_graph(&lp)?;
@@ -545,6 +560,10 @@ mod tests {
             spec_id: None,
             blocker: None,
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         engine
             .fire_hooks(&stale_lp, GraphHookEvent::OnCompleted, &ctx)
@@ -781,6 +800,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let spec = crate::domain::graphs::GraphSpec {
             id: "spec-test".to_string(),
@@ -801,6 +821,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
 
         db.insert_graph(&lp)?;
@@ -851,6 +874,37 @@ mod tests {
             .expect("git rev-parse failed to run");
         assert!(output.status.success(), "git rev-parse HEAD failed");
         String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// An empty commit at a fixed author/committer date, so a test can
+    /// assert on both the commit list's contents and its rendering.
+    fn empty_commit(path: &std::path::Path, subject: &str, date: &str) {
+        let status = std::process::Command::new("git")
+            .args(["commit", "--allow-empty", "-q", "-m", subject])
+            .current_dir(path)
+            .env("GIT_AUTHOR_DATE", date)
+            .env("GIT_COMMITTER_DATE", date)
+            .status()
+            .expect("git commit failed to run");
+        assert!(status.success(), "git commit --allow-empty failed");
+    }
+
+    /// The `<short hash> <subject> (<author date>)` line git should render
+    /// for `rev`, built from the same `git log` fields the blocker's commit
+    /// listing uses.
+    fn commit_line(path: &std::path::Path, rev: &str, subject: &str) -> String {
+        let log = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .output()
+                .expect("git log failed to run");
+            assert!(output.status.success(), "git log {:?} failed", args);
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        let hash = log(&["log", "-1", "--format=%h", rev]);
+        let date = log(&["log", "-1", "--format=%ad", "--date=short", rev]);
+        format!("{hash} {subject} ({date})")
     }
 
     #[tokio::test]
@@ -1355,6 +1409,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         }
     }
 
@@ -1375,7 +1432,7 @@ mod tests {
     /// run row is what `find_last_dirty_run_spec` joins. `graph_nodes` has a
     /// UNIQUE index on (graph_id, position) (`idx_graph_nodes_graph_position`
     /// in `src/db/mod.rs`) — pass a distinct `position` per node in a test.
-    fn insert_run_row(
+    pub(crate) fn insert_run_row(
         db: &Database,
         graph_id: &str,
         spec_id: &str,
@@ -1440,6 +1497,7 @@ mod tests {
             paused_by_reconciliation: false,
             infra_node_id: None,
             allow_dirty_start: false,
+            require_spec_type: false,
         })
         .unwrap();
 
@@ -2122,6 +2180,153 @@ mod tests {
 
         // The unauthorized commit is reported, never rewritten away.
         assert_ne!(git_head(dir.path()), head_before);
+    }
+
+    /// The commit-rights blocker states what canopy observed — HEAD moved
+    /// from h0 to h1 while the node ran — and lists the new commits so a
+    /// commit belonging to another process (a leftover session, a hook, a
+    /// human) is visible at once. It never claims the node committed: the
+    /// engine cannot know who moved HEAD.
+    #[tokio::test]
+    async fn commit_rights_blocker_lists_commits() {
+        let (dir, db, engine, _graph_id, spec_id) = graph_fixture().unwrap();
+        init_git_repo(dir.path());
+        let h0 = git_head(dir.path());
+        empty_commit(dir.path(), "alpha change", "2026-10-16T10:00:00Z");
+        empty_commit(dir.path(), "beta change", "2026-10-17T11:00:00Z");
+        let h1 = git_head(dir.path());
+
+        let exec = commit_rights_failure(
+            "Node 'worker'",
+            "node-1",
+            &h0,
+            &h1,
+            dir.path().to_str().unwrap(),
+            serde_json::json!({}),
+        )
+        .await;
+
+        db.insert_graph_node(&rights_node(&spec_id, "worker", "true", None, 1))
+            .unwrap();
+        let run_id = "run-head-move".to_string();
+        db.insert_graph_run(&GraphNodeRun {
+            id: run_id.clone(),
+            graph_id: "wf-test".to_string(),
+            spec_id,
+            node_id: "worker".to_string(),
+            status: GraphRunStatus::Fail,
+            input: None,
+            output: None,
+            started_at: chrono::Utc::now(),
+            completed_at: Some(chrono::Utc::now()),
+            iteration: 1,
+            pid: None,
+            boot_id: None,
+            session_id: None,
+            executed_platform: None,
+            executed_model: None,
+        })
+        .unwrap();
+        engine
+            .record_terminal_blocker(&run_id, "worker", &exec)
+            .unwrap();
+
+        let run = db.get_graph_run(&run_id).unwrap().unwrap();
+        let blocker = run
+            .output
+            .as_ref()
+            .and_then(|output| output.get("blocker"))
+            .and_then(Value::as_str)
+            .unwrap();
+        assert!(
+            blocker.contains(&commit_line(dir.path(), "HEAD~1", "alpha change")),
+            "blocker must list the first new commit: {blocker}"
+        );
+        assert!(
+            blocker.contains(&commit_line(dir.path(), "HEAD", "beta change")),
+            "blocker must list the second new commit: {blocker}"
+        );
+        assert!(
+            blocker.contains(&format!(
+                "Node 'worker': HEAD moved from {h0} to {h1} while it ran"
+            )),
+            "the blocker must state the observed move while that node ran: {blocker}"
+        );
+        assert!(
+            blocker.contains("may come from this node or from another process"),
+            "the blocker must leave open who moved HEAD: {blocker}"
+        );
+        assert!(
+            blocker.contains("commit_rights: true") && blocker.contains("left in place"),
+            "the existing guidance must stay: {blocker}"
+        );
+        assert!(
+            !blocker.contains("committed"),
+            "the blocker must not claim the node committed: {blocker}"
+        );
+
+        let message = exec
+            .output
+            .get("commit_rights_violation")
+            .and_then(|v| v.get("message"))
+            .and_then(Value::as_str)
+            .unwrap();
+        assert!(
+            message.contains(&format!(
+                "Node 'worker': HEAD moved from {h0} to {h1} while it ran"
+            )),
+            "the run's own output must state which node was running: {message}"
+        );
+        assert!(
+            !message.contains("committed"),
+            "the violation message must not claim the node committed: {message}"
+        );
+    }
+
+    /// Seven commits between the HEADs: the listing caps at 5 and reports
+    /// the remainder as `and 2 more`, so a long range never buries the
+    /// blocker — and the capped-out commits are never named.
+    #[tokio::test]
+    async fn commit_list_caps_at_five() {
+        let (dir, _db, _engine, _graph_id, _spec_id) = graph_fixture().unwrap();
+        init_git_repo(dir.path());
+        let h0 = git_head(dir.path());
+        for n in 1..=7 {
+            empty_commit(dir.path(), &format!("commit-{n}"), "2026-10-16T12:00:00Z");
+        }
+        let h1 = git_head(dir.path());
+
+        let exec = commit_rights_failure(
+            "Node 'worker'",
+            "node-1",
+            &h0,
+            &h1,
+            dir.path().to_str().unwrap(),
+            serde_json::json!({}),
+        )
+        .await;
+
+        let message = exec
+            .output
+            .get("commit_rights_violation")
+            .and_then(|v| v.get("message"))
+            .and_then(Value::as_str)
+            .unwrap();
+        assert!(message.contains("commit-7 ("), "newest listed: {message}");
+        assert!(
+            message.contains("commit-3 ("),
+            "5th newest listed: {message}"
+        );
+        assert!(
+            message.contains("and 2 more"),
+            "remainder reported: {message}"
+        );
+        assert!(!message.contains("commit-2"), "capped out: {message}");
+        assert!(!message.contains("commit-1"), "capped out: {message}");
+        assert!(
+            !message.contains("committed"),
+            "the message must not claim the node committed: {message}"
+        );
     }
 
     #[tokio::test]
@@ -3414,6 +3619,9 @@ mod tests {
             completed_via_reason: None,
             completed_via_at: None,
             spec_committed_head: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         db.insert_graph_spec(&spec_b).unwrap();
         db.insert_graph_node(&rights_node(
@@ -3785,6 +3993,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         })
         .unwrap();
         // An `on_failed` command hook that itself fails, so the recorded
@@ -3886,6 +4097,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let details = crate::domain::graphs::GraphSpecDetails {
             spec: spec.clone(),
@@ -3978,6 +4192,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let nodes = vec![
             GraphNode {
@@ -4084,6 +4301,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let nodes = vec![
             GraphNode {
@@ -4185,6 +4405,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let details = crate::domain::graphs::GraphSpecDetails {
             spec: spec.clone(),
@@ -4262,6 +4485,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let node = |id: &str, position: i64| GraphNode {
             id: id.to_string(),
@@ -4329,6 +4555,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let spec = GraphSpec {
             id: "spec".to_string(),
@@ -4349,6 +4576,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let node = GraphNode {
             id: "node-1".to_string(),
@@ -4405,6 +4635,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let spec = GraphSpec {
             id: "spec".to_string(),
@@ -4425,6 +4656,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let node = GraphNode {
             id: "node-1".to_string(),
@@ -4488,6 +4722,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let mut spec = GraphSpec {
             id: "spec".to_string(),
@@ -4508,6 +4743,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let node = GraphNode {
             id: "node-1".to_string(),
@@ -4684,6 +4922,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let spec = GraphSpec {
             id: "spec".to_string(),
@@ -4704,6 +4943,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let node = GraphNode {
             id: "node-1".to_string(),
@@ -7620,6 +7862,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         }
     }
 
@@ -7927,6 +8172,7 @@ echo done
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         db.insert_graph(&lp)?;
         Ok((
@@ -7961,6 +8207,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         }
     }
 
@@ -8062,7 +8311,7 @@ echo done
         );
     }
 
-    /// CM43: `graph_run --from` must target the spec a FRESH dispatch would
+    /// `graph_run --from` must target the spec a FRESH dispatch would
     /// actually execute. [`GraphEngine::preview_next_spec_id`] returns a
     /// queue's still-`running` member first (the resumed-queue path
     /// `graph_continue` takes), but a fresh pick loop never re-picks it — so
@@ -8240,6 +8489,772 @@ echo done
             next_final.spec_start_head.as_deref(),
             Some(initial_head.as_str()),
             "the next queued member must still run, but only after the interrupted one"
+        );
+    }
+
+    /// FR2 fixture: a queue whose first member `failed` on the graph's worktree
+    /// (dirty when `dirty`), followed by a pending `next` member that a passing
+    /// check node completes.
+    fn dirty_queue_fixture(
+        dirty: bool,
+        allow_dirty_start: bool,
+    ) -> Result<(TempDir, Arc<Database>, GraphEngine, String, String)> {
+        let (dir, db, engine, graph_id) = bare_graph_fixture()?;
+        // The fixture's database lives in the worktree: ignore it before the
+        // repo commits, or every write to it reads as a dirty tree.
+        std::fs::write(
+            dir.path().join(".gitignore"),
+            format!("{TEST_DB_FILENAME}*\n"),
+        )?;
+        init_git_repo(dir.path());
+        let workdir = dir.path().to_string_lossy().to_string();
+        db.insert_graph_spec(&dirty_predecessor_spec(
+            "pred-a",
+            &workdir,
+            GraphSpecStatus::Failed,
+        ))?;
+        let next = standalone_spec("queue-next", 2);
+        db.insert_graph_spec(&next)?;
+        insert_queue_with_members(&db, "queue-1", &["pred-a", &next.id]);
+        db.insert_graph_node(&GraphNode {
+            id: "graph-check".to_string(),
+            spec_id: None,
+            graph_id: Some(graph_id.clone()),
+            name: "check".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": "printf APPROVED",
+                "success_condition": "exit_code_0"
+            }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })?;
+        db.update_graph_allow_dirty_start(&graph_id, allow_dirty_start)?;
+        if dirty {
+            std::fs::write(dir.path().join("x.txt"), "x")?;
+        }
+        Ok((dir, db, engine, graph_id, next.id))
+    }
+
+    /// FR2: a queue run whose failed predecessor left the worktree dirty pauses
+    /// before the next member starts; the blocker names the dirty path and the
+    /// ways out, and the graph is paused rather than failed.
+    #[tokio::test]
+    async fn failed_dirty_queue_spec_pauses_before_next_spec() {
+        let (_dir, db, engine, graph_id, next_id) = dirty_queue_fixture(true, false).unwrap();
+        engine
+            .run_graph_dispatch(
+                graph_id.clone(),
+                Some("queue-1".to_string()),
+                None,
+                DispatchMode::fresh(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(
+            lp.status,
+            GraphStatus::Paused,
+            "the guard pauses, never fails"
+        );
+        assert_eq!(
+            db.get_graph_spec(&next_id).unwrap().unwrap().status,
+            GraphSpecStatus::Pending,
+            "the next spec must not start on a dirty tree"
+        );
+        let blocker = db
+            .list_recent_activity_log_entries(50)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.message)
+            .find(|message| message.starts_with("Blocked: "))
+            .unwrap_or_default();
+        assert!(
+            blocker.contains("x.txt"),
+            "blocker lists dirty paths: {blocker}"
+        );
+        for way_out in ["run_from_node", "skip_next_spec", "allow_dirty_start"] {
+            assert!(
+                blocker.contains(way_out),
+                "blocker names {way_out}: {blocker}"
+            );
+        }
+    }
+
+    /// FR2: with `allow_dirty_start` on the graph the same dirty queue run
+    /// advances and completes the next member.
+    #[tokio::test]
+    async fn dirty_queue_guard_allow_dirty_start_advances() {
+        let (_dir, db, engine, graph_id, next_id) = dirty_queue_fixture(true, true).unwrap();
+        engine
+            .run_graph_dispatch(
+                graph_id.clone(),
+                Some("queue-1".to_string()),
+                None,
+                DispatchMode::fresh(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            db.get_graph_spec(&next_id).unwrap().unwrap().status,
+            GraphSpecStatus::Completed,
+            "allow_dirty_start lets the next member run"
+        );
+    }
+
+    /// FR2: a failed predecessor that left a clean tree does not block the next
+    /// queue member.
+    #[tokio::test]
+    async fn failed_clean_queue_spec_advances() {
+        let (_dir, db, engine, graph_id, next_id) = dirty_queue_fixture(false, false).unwrap();
+        engine
+            .run_graph_dispatch(
+                graph_id.clone(),
+                Some("queue-1".to_string()),
+                None,
+                DispatchMode::fresh(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            db.get_graph_spec(&next_id).unwrap().unwrap().status,
+            GraphSpecStatus::Completed,
+            "a clean tree lets the next member run"
+        );
+    }
+
+    /// FR1: a directed run on a spec at its execution limit runs its first
+    /// node. The engine zeroes the count when the directed start begins, so the
+    /// node's failure is the first genuine verdict (count 1), not the one that
+    /// reaches the limit again (count 4, blocked).
+    #[tokio::test]
+    async fn directed_run_at_limit_resets_count_and_runs_first_node() {
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        init_git_repo(dir.path());
+        let spec = standalone_spec("limit-directed", 1);
+        db.insert_graph_spec(&spec).unwrap();
+        insert_queue_with_members(&db, "queue-1", &[&spec.id]);
+        db.insert_graph_node(&GraphNode {
+            id: "graph-check".to_string(),
+            spec_id: None,
+            graph_id: Some(graph_id.clone()),
+            name: "check".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": "exit 1",
+                "success_condition": "exit_code_0"
+            }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+        for _ in 0..3 {
+            db.increment_graph_spec_cross_run_attempts(&spec.id)
+                .unwrap();
+        }
+        assert_eq!(db.get_graph_spec_cross_run_attempts(&spec.id).unwrap(), 3);
+
+        engine
+            .run_graph_dispatch(
+                graph_id.clone(),
+                Some("queue-1".to_string()),
+                None,
+                DispatchMode::fresh_from(DirectedStart {
+                    spec_id: spec.id.clone(),
+                    node_arg: "graph-check".to_string(),
+                }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let runs = db.list_graph_runs_for_spec(&spec.id).unwrap();
+        assert_eq!(runs.len(), 1, "the first node ran: {runs:?}");
+        assert_eq!(runs[0].node_id, "graph-check");
+        assert_eq!(
+            db.get_graph_spec_cross_run_attempts(&spec.id).unwrap(),
+            1,
+            "the directed start zeroed the count before this failure"
+        );
+    }
+
+    /// FR2 way out: on a paused queue the dirty-tree guard held back the second
+    /// member, and `skip_next_spec` skips that held member. The `failed`
+    /// predecessor keeps its status.
+    #[test]
+    fn skip_next_spec_on_held_queue_skips_held_spec_not_failed_predecessor() {
+        let (_dir, db, _engine, graph_id) = bare_graph_fixture().unwrap();
+        let failed = standalone_spec("held-failed", 1);
+        let held = standalone_spec("held-next", 2);
+        db.insert_graph_spec(&failed).unwrap();
+        db.insert_graph_spec(&held).unwrap();
+        insert_queue_with_members(&db, "queue-1", &[&failed.id, &held.id]);
+        db.set_graph_active_run_queue(&graph_id, Some("queue-1"))
+            .unwrap();
+        db.update_graph_spec_status(&failed.id, GraphSpecStatus::Failed, None, None)
+            .unwrap();
+        db.update_graph_status(&graph_id, GraphStatus::Paused, None, None)
+            .unwrap();
+
+        crate::daemon::handler_run_exec::handle_skip_next_spec(&db, &graph_id).unwrap();
+
+        assert_eq!(
+            db.get_graph_spec(&held.id).unwrap().unwrap().status,
+            GraphSpecStatus::Skipped,
+            "the held member is skipped"
+        );
+        assert_eq!(
+            db.get_graph_spec(&failed.id).unwrap().unwrap().status,
+            GraphSpecStatus::Failed,
+            "the failed predecessor keeps its failure"
+        );
+    }
+
+    /// C19/FR3: the execution-limit blocker names the named-spec `graph_reset`
+    /// that clears the count, says the worktree is untouched, and gives the
+    /// relaunch verbs.
+    #[test]
+    fn execution_limit_blocker_names_graph_reset_and_spec_id() {
+        let (_dir, db, engine, _graph_id) = bare_graph_fixture().unwrap();
+        let spec = standalone_spec("limit-blocker", 1);
+        db.insert_graph_spec(&spec).unwrap();
+        let mut blocker = None;
+        for _ in 0..engine.spec_attempt_limit {
+            blocker = engine.record_spec_attempt(&spec, "boom", false).unwrap();
+        }
+        let blocker = blocker.expect("the limit is reached");
+        assert!(blocker.contains("graph_reset"), "{blocker}");
+        assert!(
+            blocker.contains(&format!("specs: [{}]", spec.id)),
+            "names the spec id: {blocker}"
+        );
+        assert!(blocker.contains("worktree is not touched"), "{blocker}");
+        assert!(
+            blocker.contains("`graph_run` or `run_from_node`"),
+            "{blocker}"
+        );
+    }
+
+    /// FR6: a completed graph's continue refusal names the status and the
+    /// `graph_reset` way out.
+    #[test]
+    fn completed_graph_continue_refusal_names_graph_reset() {
+        let refusal = crate::daemon::handler_run_directive::not_continuable_refusal(
+            "wf-test",
+            GraphStatus::Completed,
+        );
+        assert!(refusal.contains("'completed'"), "{refusal}");
+        assert!(refusal.contains("graph_reset"), "{refusal}");
+        assert!(refusal.contains("run_from_node"), "{refusal}");
+    }
+
+    /// FR2: the blocker lists at most the first 20 dirty paths and says how
+    /// many more there are.
+    #[test]
+    fn dirty_advance_blocker_caps_listed_paths() {
+        let paths: Vec<String> = (0..25).map(|i| format!("p{i}.txt")).collect();
+        let blocker = launch_check::dirty_advance_blocker("next", "dirty", &paths);
+        assert!(blocker.contains("p19.txt"), "{blocker}");
+        assert!(!blocker.contains("p20.txt"), "{blocker}");
+        assert!(blocker.contains("+5 more"), "{blocker}");
+    }
+
+    /// Seed the graph-level `graph-check` node (a passing check) and one
+    /// finished run of it for `spec_id`, as a spec that stopped on that node
+    /// leaves behind.
+    fn seed_stopped_at_check_node(db: &Database, graph_id: &str, spec_id: &str) {
+        db.insert_graph_node(&GraphNode {
+            id: "graph-check".to_string(),
+            spec_id: None,
+            graph_id: Some(graph_id.to_string()),
+            name: "check".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": "printf APPROVED",
+                "success_condition": "exit_code_0"
+            }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+        db.insert_graph_run(&GraphNodeRun {
+            id: format!("run-{spec_id}-seed"),
+            graph_id: graph_id.to_string(),
+            spec_id: spec_id.to_string(),
+            node_id: "graph-check".to_string(),
+            status: GraphRunStatus::Fail,
+            input: None,
+            output: None,
+            started_at: chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+            completed_at: None,
+            iteration: 1,
+            pid: None,
+            boot_id: None,
+            session_id: None,
+            executed_platform: None,
+            executed_model: None,
+        })
+        .unwrap();
+    }
+
+    /// The engine side of `graph_continue retry_current_node` where
+    /// `retry_restart_target` picks a directed restart: the same target the
+    /// handler resolves, dispatched synchronously (the handler backgrounds this
+    /// call via `restart_at_node`, so it uses the resume dispatch that
+    /// `resume_background` uses). Returns the node the restart named.
+    async fn run_retry_restart(
+        db: &Database,
+        engine: &GraphEngine,
+        graph_id: &str,
+    ) -> Option<String> {
+        let lp = db.get_graph(graph_id).unwrap().unwrap();
+        let (spec, node) =
+            crate::daemon::handler_run_directive::retry_restart_target(db, &lp).unwrap()?;
+        engine
+            .run_graph_dispatch(
+                graph_id.to_string(),
+                Some("queue-1".to_string()),
+                None,
+                DispatchMode::resume_from(DirectedStart {
+                    spec_id: spec.id.clone(),
+                    node_arg: node.clone(),
+                }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        Some(node)
+    }
+
+    /// FR6: `retry_current_node` on a failed graph restarts the failed spec at
+    /// the node it failed on, and that node runs again.
+    #[tokio::test]
+    async fn retry_current_node_failed_graph_retries_failed_node() {
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        init_git_repo(dir.path());
+        let spec = standalone_spec("retry-failed", 1);
+        db.insert_graph_spec(&spec).unwrap();
+        insert_queue_with_members(&db, "queue-1", &[&spec.id]);
+        db.set_graph_active_run_queue(&graph_id, Some("queue-1"))
+            .unwrap();
+        seed_stopped_at_check_node(&db, &graph_id, &spec.id);
+        db.update_graph_spec_status(&spec.id, GraphSpecStatus::Failed, None, None)
+            .unwrap();
+        db.update_graph_status(&graph_id, GraphStatus::Failed, None, None)
+            .unwrap();
+
+        let node = run_retry_restart(&db, &engine, &graph_id).await;
+        assert_eq!(
+            node.as_deref(),
+            Some("graph-check"),
+            "the failed node is the target"
+        );
+        assert_eq!(
+            db.get_graph_spec(&spec.id).unwrap().unwrap().status,
+            GraphSpecStatus::Completed,
+            "the failed node ran again and passed"
+        );
+        let runs = db.list_graph_runs_for_spec(&spec.id).unwrap();
+        assert_eq!(runs.len(), 2, "the seeded run plus the re-run: {runs:?}");
+    }
+
+    /// FR7: a paused graph whose current spec is `pending` with a recorded
+    /// current node resumes with `retry_current_node`: the current node runs
+    /// first and the spec goes through `running` to completion.
+    #[tokio::test]
+    async fn retry_pending_current_spec_with_cursor_resumes_at_current_node() {
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        init_git_repo(dir.path());
+        let spec = standalone_spec("pending-cursor", 1);
+        db.insert_graph_spec(&spec).unwrap();
+        insert_queue_with_members(&db, "queue-1", &[&spec.id]);
+        db.set_graph_active_run_queue(&graph_id, Some("queue-1"))
+            .unwrap();
+        seed_stopped_at_check_node(&db, &graph_id, &spec.id);
+        db.update_graph_spec_status(&spec.id, GraphSpecStatus::Pending, None, None)
+            .unwrap();
+        db.update_graph_status(&graph_id, GraphStatus::Paused, None, None)
+            .unwrap();
+
+        let node = run_retry_restart(&db, &engine, &graph_id).await;
+        assert_eq!(
+            node.as_deref(),
+            Some("graph-check"),
+            "current_node is the restart target"
+        );
+        let runs = db.list_graph_runs_for_spec(&spec.id).unwrap();
+        assert_eq!(runs.len(), 2, "current_node ran first: {runs:?}");
+        assert_eq!(runs.last().unwrap().node_id, "graph-check");
+        assert_eq!(
+            db.get_graph_spec(&spec.id).unwrap().unwrap().status,
+            GraphSpecStatus::Completed
+        );
+    }
+
+    /// FR7 guard: a spec that is `running` on a paused graph keeps the
+    /// resumable path, so no directed restart is chosen for it.
+    #[test]
+    fn running_spec_keeps_resumable_path_not_directed_restart() {
+        let (_dir, db, _engine, graph_id) = bare_graph_fixture().unwrap();
+        let spec = standalone_spec("running-spec", 1);
+        db.insert_graph_spec(&spec).unwrap();
+        insert_queue_with_members(&db, "queue-1", &[&spec.id]);
+        db.set_graph_active_run_queue(&graph_id, Some("queue-1"))
+            .unwrap();
+        seed_stopped_at_check_node(&db, &graph_id, &spec.id);
+        db.update_graph_spec_status(&spec.id, GraphSpecStatus::Running, None, None)
+            .unwrap();
+        db.update_graph_status(&graph_id, GraphStatus::Paused, None, None)
+            .unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert!(
+            crate::daemon::handler_run_directive::retry_restart_target(&db, &lp)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// End to end: a directed `graph_continue run_from_node` on a
+    /// queue-driven graph targets the operator-named spec even when another
+    /// member is mistakenly still `running` — it must not be displaced by the
+    /// queue's `running` cursor (`queue_running_spec_id`, which
+    /// `run_resumed_queue_spec` consulted first and resumed the wrong member).
+    /// The directed spec runs; the stale running member is reset to `Pending`
+    /// so the directed run takes over the graph.
+    #[tokio::test]
+    async fn directed_queue_resume_resets_stray_running_member() {
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        init_git_repo(dir.path());
+
+        let directed = {
+            let mut s = standalone_spec("queue-directed", 1);
+            s.status = GraphSpecStatus::Failed;
+            s
+        };
+        let stale = {
+            let mut s = standalone_spec("queue-stale-running", 2);
+            s.status = GraphSpecStatus::Running;
+            s
+        };
+        db.insert_graph_spec(&directed).unwrap();
+        db.insert_graph_spec(&stale).unwrap();
+        insert_queue_with_members(&db, "queue-1", &[&directed.id, &stale.id]);
+
+        db.insert_graph_node(&GraphNode {
+            id: "graph-check".to_string(),
+            spec_id: None,
+            graph_id: Some(graph_id.clone()),
+            name: "check".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": "printf APPROVED",
+                "success_condition": "exit_code_0"
+            }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+        db.update_graph_status(&graph_id, GraphStatus::Paused, None, None)
+            .unwrap();
+        db.set_graph_active_run_queue(&graph_id, Some("queue-1"))
+            .unwrap();
+
+        engine
+            .run_graph_dispatch(
+                graph_id.clone(),
+                Some("queue-1".to_string()),
+                None,
+                DispatchMode::resume_from(DirectedStart {
+                    spec_id: directed.id.clone(),
+                    node_arg: "check".to_string(),
+                }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let directed_after = db.get_graph_spec(&directed.id).unwrap().unwrap();
+        let stale_after = db.get_graph_spec(&stale.id).unwrap().unwrap();
+        assert_eq!(
+            directed_after.status,
+            GraphSpecStatus::Completed,
+            "the directed spec must be the one that ran, not the stale running member"
+        );
+        assert_eq!(
+            stale_after.status,
+            GraphSpecStatus::Pending,
+            "the stale running member must be reset to Pending so the directed run takes over"
+        );
+        assert!(
+            db.list_graph_runs_for_spec(&stale.id).unwrap().is_empty(),
+            "the stale member must get no new run row from this dispatch"
+        );
+        assert!(
+            !db.list_graph_runs_for_spec(&directed.id)
+                .unwrap()
+                .is_empty(),
+            "the directed spec must have run"
+        );
+    }
+
+    /// Regression: a queue-driven graph Start -> Check -> Reviewer, where
+    /// Check's last run failed. A directed dispatch at Check must re-execute
+    /// Check (a new run row), and Reviewer must not run unless the new Check
+    /// passes. The historical Check output must not be reused/reported, and
+    /// the start message must name Check as the first executed node.
+    #[tokio::test]
+    async fn directed_queue_resume_reruns_failed_check_and_gates_reviewer_fail() {
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        init_git_repo(dir.path());
+
+        let directed = {
+            let mut s = standalone_spec("queue-directed", 1);
+            s.status = GraphSpecStatus::Failed;
+            s
+        };
+        db.insert_graph_spec(&directed).unwrap();
+        insert_queue_with_members(&db, "queue-1", &[&directed.id]);
+
+        for (id, name, cmd) in [
+            ("graph-start", "Start", "printf START"),
+            ("graph-check", "Check", "printf FAIL; exit 1"),
+            ("graph-reviewer", "Reviewer", "printf REVIEWED"),
+        ] {
+            db.insert_graph_node(&GraphNode {
+                id: id.to_string(),
+                spec_id: None,
+                graph_id: Some(graph_id.clone()),
+                name: name.to_string(),
+                kind: GraphNodeKind::Check,
+                config: serde_json::json!({
+                    "command": cmd,
+                    "success_condition": "exit_code_0"
+                }),
+                position: match name {
+                    "Start" => 0,
+                    "Check" => 1,
+                    _ => 2,
+                },
+                created_at: chrono::Utc::now(),
+            })
+            .unwrap();
+        }
+        db.insert_graph_edge(&GraphEdge {
+            id: "e-start-check".to_string(),
+            spec_id: None,
+            graph_id: Some(graph_id.clone()),
+            from_node: "graph-start".to_string(),
+            to_node: "graph-check".to_string(),
+            condition: GraphEdgeCondition::Pass,
+        })
+        .unwrap();
+        db.insert_graph_edge(&GraphEdge {
+            id: "e-check-reviewer".to_string(),
+            spec_id: None,
+            graph_id: Some(graph_id.clone()),
+            from_node: "graph-check".to_string(),
+            to_node: "graph-reviewer".to_string(),
+            condition: GraphEdgeCondition::Pass,
+        })
+        .unwrap();
+
+        // Seed Check's historical Fail run (must not be reused).
+        db.insert_graph_run(&GraphNodeRun {
+            id: "run-check-old".to_string(),
+            graph_id: graph_id.clone(),
+            spec_id: directed.id.clone(),
+            node_id: "graph-check".to_string(),
+            status: GraphRunStatus::Fail,
+            input: None,
+            output: Some(serde_json::json!({"old": true})),
+            started_at: chrono::Utc::now(),
+            completed_at: Some(chrono::Utc::now()),
+            iteration: 1,
+            pid: None,
+            boot_id: None,
+            session_id: None,
+            executed_platform: None,
+            executed_model: None,
+        })
+        .unwrap();
+
+        db.update_graph_status(&graph_id, GraphStatus::Paused, None, None)
+            .unwrap();
+        db.set_graph_active_run_queue(&graph_id, Some("queue-1"))
+            .unwrap();
+
+        engine
+            .run_graph_dispatch(
+                graph_id.clone(),
+                Some("queue-1".to_string()),
+                None,
+                DispatchMode::resume_from(DirectedStart {
+                    spec_id: directed.id.clone(),
+                    node_arg: "Check".to_string(),
+                }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let runs = db.list_graph_runs_for_spec(&directed.id).unwrap();
+        let check_runs: Vec<_> = runs.iter().filter(|r| r.node_id == "graph-check").collect();
+        // Historical + new run.
+        assert!(
+            check_runs.len() >= 2,
+            "Check must be re-executed: {:?}",
+            check_runs
+        );
+        let reviewer_runs: Vec<_> = runs
+            .iter()
+            .filter(|r| r.node_id == "graph-reviewer")
+            .collect();
+        assert!(
+            reviewer_runs.is_empty(),
+            "Reviewer must not run when the new Check fails: {:?}",
+            reviewer_runs
+        );
+
+        // Start message names Check.
+        let events = db
+            .list_graph_events(&graph_id, None, None, None, 200)
+            .unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| { e.message.contains("starts at node 'Check'") }),
+            "start message must name Check: {:?}",
+            events.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        // Historical Check output must not be reported as reused.
+        assert!(
+            !events
+                .iter()
+                .any(|e| { e.message.contains("run-check-old") }),
+            "historical Check run must not be reported/reused: {:?}",
+            events.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    /// Regression (passing variant): when Check passes on rerun, Reviewer runs.
+    #[tokio::test]
+    async fn directed_queue_resume_reruns_failed_check_and_gates_reviewer_pass() {
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        init_git_repo(dir.path());
+
+        let directed = {
+            let mut s = standalone_spec("queue-directed", 1);
+            s.status = GraphSpecStatus::Failed;
+            s
+        };
+        db.insert_graph_spec(&directed).unwrap();
+        insert_queue_with_members(&db, "queue-1", &[&directed.id]);
+
+        for (id, name, cmd) in [
+            ("graph-start", "Start", "printf START"),
+            ("graph-check", "Check", "printf APPROVED"),
+            ("graph-reviewer", "Reviewer", "printf REVIEWED"),
+        ] {
+            db.insert_graph_node(&GraphNode {
+                id: id.to_string(),
+                spec_id: None,
+                graph_id: Some(graph_id.clone()),
+                name: name.to_string(),
+                kind: GraphNodeKind::Check,
+                config: serde_json::json!({
+                    "command": cmd,
+                    "success_condition": "exit_code_0"
+                }),
+                position: match name {
+                    "Start" => 0,
+                    "Check" => 1,
+                    _ => 2,
+                },
+                created_at: chrono::Utc::now(),
+            })
+            .unwrap();
+        }
+        db.insert_graph_edge(&GraphEdge {
+            id: "e-start-check".to_string(),
+            spec_id: None,
+            graph_id: Some(graph_id.clone()),
+            from_node: "graph-start".to_string(),
+            to_node: "graph-check".to_string(),
+            condition: GraphEdgeCondition::Pass,
+        })
+        .unwrap();
+        db.insert_graph_edge(&GraphEdge {
+            id: "e-check-reviewer".to_string(),
+            spec_id: None,
+            graph_id: Some(graph_id.clone()),
+            from_node: "graph-check".to_string(),
+            to_node: "graph-reviewer".to_string(),
+            condition: GraphEdgeCondition::Pass,
+        })
+        .unwrap();
+
+        db.insert_graph_run(&GraphNodeRun {
+            id: "run-check-old".to_string(),
+            graph_id: graph_id.clone(),
+            spec_id: directed.id.clone(),
+            node_id: "graph-check".to_string(),
+            status: GraphRunStatus::Fail,
+            input: None,
+            output: Some(serde_json::json!({"old": true})),
+            started_at: chrono::Utc::now(),
+            completed_at: Some(chrono::Utc::now()),
+            iteration: 1,
+            pid: None,
+            boot_id: None,
+            session_id: None,
+            executed_platform: None,
+            executed_model: None,
+        })
+        .unwrap();
+
+        db.update_graph_status(&graph_id, GraphStatus::Paused, None, None)
+            .unwrap();
+        db.set_graph_active_run_queue(&graph_id, Some("queue-1"))
+            .unwrap();
+
+        engine
+            .run_graph_dispatch(
+                graph_id.clone(),
+                Some("queue-1".to_string()),
+                None,
+                DispatchMode::resume_from(DirectedStart {
+                    spec_id: directed.id.clone(),
+                    node_arg: "Check".to_string(),
+                }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let runs = db.list_graph_runs_for_spec(&directed.id).unwrap();
+        let reviewer_runs: Vec<_> = runs
+            .iter()
+            .filter(|r| r.node_id == "graph-reviewer")
+            .collect();
+        assert!(
+            !reviewer_runs.is_empty(),
+            "Reviewer must run after the new Check passes: {:?}",
+            reviewer_runs
         );
     }
 
@@ -8471,6 +9486,7 @@ echo done
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         db.insert_graph(&lp).unwrap();
         let spec = standalone_spec("bound-spec", 1);
@@ -8709,6 +9725,188 @@ echo done
             Some("queue-1"),
             "the run context must survive so a later resume still knows the queue"
         );
+    }
+
+    #[tokio::test]
+    async fn graph_engine_queue_run_settles_failed_when_member_failed() {
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+
+        let spec_a = standalone_spec("queue-a", 1);
+        let mut spec_b = standalone_spec("queue-b", 2);
+        spec_b.status = GraphSpecStatus::Failed;
+        let spec_c = standalone_spec("queue-c", 3);
+        db.insert_graph_spec(&spec_a).unwrap();
+        db.insert_graph_spec(&spec_b).unwrap();
+        db.insert_graph_spec(&spec_c).unwrap();
+        insert_queue_with_members(&db, "queue-1", &[&spec_a.id, &spec_b.id, &spec_c.id]);
+
+        // A stored blocker summary for the already-failed member.
+        db.insert_graph_node(&GraphNode {
+            id: "graph-check".to_string(),
+            spec_id: None,
+            graph_id: Some(graph_id.clone()),
+            name: "check".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": "printf APPROVED",
+                "success_condition": "exit_code_0"
+            }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+        db.insert_graph_run(&GraphNodeRun {
+            id: "run-b".to_string(),
+            graph_id: graph_id.clone(),
+            spec_id: spec_b.id.clone(),
+            node_id: "graph-check".to_string(),
+            status: GraphRunStatus::Fail,
+            input: None,
+            output: Some(serde_json::json!({"blocker": "boom"})),
+            started_at: chrono::Utc::now(),
+            completed_at: Some(chrono::Utc::now()),
+            iteration: 1,
+            pid: None,
+            boot_id: None,
+            session_id: None,
+            executed_platform: None,
+            executed_model: None,
+        })
+        .unwrap();
+
+        let marker = dir.path().join("failed-hook.marker");
+        let hook = crate::domain::graphs::GraphCompletionHook {
+            platform: None,
+            model: None,
+            effort: None,
+            prompt: None,
+            command: Some(format!(
+                "printf '%s' '{{{{completed_specs}}}}' > '{}'",
+                marker.display()
+            )),
+            target_session_id: None,
+            target_session_name: None,
+            timeout_minutes: Some(1),
+            target_graph_id: None,
+            queue_id: None,
+            workdir_override: None,
+            idea: None,
+            crew: None,
+        };
+        let mut hooks = std::collections::BTreeMap::new();
+        hooks.insert(crate::domain::graphs::GraphHookEvent::OnFailed, vec![hook]);
+        db.update_graph_hooks(&graph_id, &hooks).unwrap();
+
+        engine
+            .run_graph(
+                graph_id.clone(),
+                Some("queue-1".to_string()),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Failed);
+
+        let blocker_text = std::fs::read_to_string(&marker).unwrap_or_default();
+        assert!(
+            blocker_text.contains("queue-a"),
+            "completed_specs must include A: {blocker_text}"
+        );
+        assert!(
+            blocker_text.contains("queue-c"),
+            "completed_specs must include C: {blocker_text}"
+        );
+
+        let hook_runs = db.list_graph_completion_hook_runs(&graph_id).unwrap();
+        assert_eq!(hook_runs.len(), 1);
+        assert_eq!(
+            hook_runs[0].event,
+            crate::domain::graphs::GraphHookEvent::OnFailed
+        );
+
+        // No dangling running node runs remain.
+        assert!(db.list_running_graph_runs(&graph_id).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn graph_engine_queue_run_settles_completed_when_all_done() {
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+
+        let spec_a = standalone_spec("queue-a", 1);
+        let spec_b = standalone_spec("queue-b", 2);
+        db.insert_graph_spec(&spec_a).unwrap();
+        db.insert_graph_spec(&spec_b).unwrap();
+        insert_queue_with_members(&db, "queue-1", &[&spec_a.id, &spec_b.id]);
+
+        db.insert_graph_node(&GraphNode {
+            id: "graph-check".to_string(),
+            spec_id: None,
+            graph_id: Some(graph_id.clone()),
+            name: "check".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": "printf APPROVED",
+                "success_condition": "exit_code_0"
+            }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+        let marker = dir.path().join("completed-hook.marker");
+        let hook = crate::domain::graphs::GraphCompletionHook {
+            platform: None,
+            model: None,
+            effort: None,
+            prompt: None,
+            command: Some(format!(
+                "printf '%s' '{{{{completed_specs}}}}' > '{}'",
+                marker.display()
+            )),
+            target_session_id: None,
+            target_session_name: None,
+            timeout_minutes: Some(1),
+            target_graph_id: None,
+            queue_id: None,
+            workdir_override: None,
+            idea: None,
+            crew: None,
+        };
+        let mut hooks = std::collections::BTreeMap::new();
+        hooks.insert(
+            crate::domain::graphs::GraphHookEvent::OnCompleted,
+            vec![hook],
+        );
+        db.update_graph_hooks(&graph_id, &hooks).unwrap();
+
+        engine
+            .run_graph(
+                graph_id.clone(),
+                Some("queue-1".to_string()),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Completed);
+
+        let hook_runs = db.list_graph_completion_hook_runs(&graph_id).unwrap();
+        assert_eq!(hook_runs.len(), 1);
+        assert_eq!(
+            hook_runs[0].event,
+            crate::domain::graphs::GraphHookEvent::OnCompleted
+        );
+
+        assert!(db.list_running_graph_runs(&graph_id).unwrap().is_empty());
     }
 
     // ── R6: live queues — append and reorder while running ────────────────
@@ -9016,6 +10214,7 @@ echo done
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let spec = GraphSpec {
             id: "spec".to_string(),
@@ -9036,6 +10235,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let node = GraphNode {
             id: "node-1".to_string(),
@@ -9932,6 +11134,7 @@ echo done
                 Some("spec"),
                 None,
                 "dispatch A's late failure",
+                &[],
             )
             .await
             .unwrap();
@@ -9996,6 +11199,7 @@ echo done
                 Some("spec"),
                 None,
                 "genuine failure",
+                &[],
             )
             .await
             .unwrap();
@@ -11229,13 +12433,13 @@ echo done
     /// shell out to git (git reads `HOME` for `user.name`/`user.email`),
     /// intermittently failing unrelated reviewer-commit tests under
     /// `cargo test`'s default parallel execution.
-    struct HomeGuard {
+    pub(crate) struct HomeGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
         prev: Option<String>,
     }
 
     impl HomeGuard {
-        fn set(path: &std::path::Path) -> Self {
+        pub(crate) fn set(path: &std::path::Path) -> Self {
             let lock = HOME_OVERRIDE_LOCK
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -11643,6 +12847,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         })
         .unwrap();
         db.insert_graph_node(&GraphNode {
@@ -11716,6 +12923,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         })
         .unwrap();
 
@@ -11754,6 +12964,9 @@ echo done
             completed_via: None,
             completed_via_at: None,
             completed_via_reason: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         })
         .unwrap();
         db.insert_graph_node(&GraphNode {
@@ -11805,6 +13018,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         })
         .unwrap();
 
@@ -11867,6 +13083,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         })
         .unwrap();
         insert_queue_with_members(&db, "queue-1", &["blank-member"]);
@@ -12062,6 +13281,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         })
         .unwrap();
         db.insert_graph_spec(&GraphSpec {
@@ -12085,6 +13307,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         })
         .unwrap();
         db.insert_graph_node(&GraphNode {
@@ -12143,6 +13368,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         })
         .unwrap();
         db.insert_graph_node(&GraphNode {
@@ -12458,6 +13686,7 @@ echo done
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let completed_specs = vec![
             ("Spec-A".to_string(), "summary A".to_string()),
@@ -12500,6 +13729,7 @@ echo done
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
 
         let result =
@@ -12520,6 +13750,10 @@ echo done
             spec_id: None,
             blocker: None,
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let result = render_hook_prompt(
             &GraphHookEvent::OnCompleted,
@@ -12540,6 +13774,10 @@ echo done
             spec_id: None,
             blocker: Some("quota exceeded"),
             node_name: Some("agent-1"),
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let result =
             render_hook_prompt(&GraphHookEvent::OnFailed, &ctx, "{{blocker}} on {{node}}").unwrap();
@@ -12556,6 +13794,10 @@ echo done
             spec_id: None,
             blocker: Some("needs human review"),
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let result =
             render_hook_prompt(&GraphHookEvent::OnBlocked, &ctx, "Blocked: {{blocker}}").unwrap();
@@ -12572,6 +13814,10 @@ echo done
             spec_id: None,
             blocker: None,
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let result =
             render_hook_prompt(&GraphHookEvent::OnFailed, &ctx, "{{blocker}}/{{node}}").unwrap();
@@ -12589,6 +13835,10 @@ echo done
             spec_id: None,
             blocker: Some("graph failed"),
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let result =
             render_hook_command(&GraphHookEvent::OnFailed, &ctx, "echo {{node}} {{blocker}}")
@@ -12606,6 +13856,10 @@ echo done
             spec_id: None,
             blocker: None,
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let result = render_hook_idea(
             &GraphHookEvent::OnCompleted,
@@ -12627,6 +13881,10 @@ echo done
             spec_id: Some("spec-abc"),
             blocker: None,
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let result = render_hook_prompt(
             &GraphHookEvent::OnSpecCompleted,
@@ -12647,6 +13905,10 @@ echo done
             spec_id: None,
             blocker: None,
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         // {{unknown}} is not supported by graph hooks.
         let result = render_hook_prompt(
@@ -12667,6 +13929,10 @@ echo done
             spec_id: None,
             blocker: None,
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let result = render_hook_prompt(
             &GraphHookEvent::OnFailed,
@@ -12686,6 +13952,10 @@ echo done
             spec_id: None,
             blocker: None,
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let result = render_hook_prompt(&GraphHookEvent::OnFailed, &ctx, "{{nodee}}");
         assert!(result.is_err());
@@ -13245,6 +14515,10 @@ echo done
             spec_id: None,
             blocker: Some("build broke"),
             node_name: Some("builder"),
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         engine
             .fire_hooks(&lp, crate::domain::graphs::GraphHookEvent::OnFailed, &ctx)
@@ -13309,6 +14583,10 @@ echo done
             spec_id: None,
             blocker: None,
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         engine
             .fire_hooks(
@@ -13354,6 +14632,10 @@ echo done
             spec_id: None,
             blocker: None,
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         engine
             .fire_hooks(
@@ -13418,6 +14700,10 @@ echo done
             spec_id: None,
             blocker: None,
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         // No TUI delivery object exists anywhere in this test — firing only
         // enqueues.
@@ -13496,6 +14782,10 @@ echo done
             spec_id: None,
             blocker: Some("build broke"),
             node_name: Some("builder"),
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         engine
             .fire_hooks(&lp, crate::domain::graphs::GraphHookEvent::OnFailed, &ctx)
@@ -13537,6 +14827,10 @@ echo done
             spec_id: None,
             blocker: None,
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         engine
             .fire_hooks(
@@ -13611,6 +14905,10 @@ echo done
             spec_id: None,
             blocker: None,
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         engine
             .fire_hooks(
@@ -13667,6 +14965,10 @@ echo done
             spec_id: None,
             blocker: Some("build broke"),
             node_name: Some("builder"),
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         engine
             .fire_hooks(&lp, crate::domain::graphs::GraphHookEvent::OnFailed, &ctx)
@@ -13713,6 +15015,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         db.insert_graph_spec(&spec2).unwrap();
 
@@ -13963,6 +15268,10 @@ echo done
             spec_id: None,
             blocker: Some("Reviewer join has ambiguous outgoing edges"),
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         engine
             .fire_hooks(&graph, GraphHookEvent::OnFailed, &ctx)
@@ -19010,6 +20319,7 @@ echo done
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         db.insert_graph(&lp).unwrap();
         let engine = GraphEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
@@ -20409,6 +21719,7 @@ echo done
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let spec_a = GraphSpec {
             id: "spec-graph-a".to_string(),
@@ -20429,6 +21740,9 @@ echo done
             completed_via_reason: None,
             completed_via_at: None,
             spec_committed_head: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let node_a = GraphNode {
             id: "node-graph-a".to_string(),
@@ -20492,6 +21806,7 @@ echo done
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let spec_b = GraphSpec {
             id: "spec-graph-b".to_string(),
@@ -20512,6 +21827,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         db.insert_graph(&graph_b).unwrap();
         db.insert_graph_spec(&spec_b).unwrap();
@@ -20641,6 +21959,7 @@ echo done
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let spec_a = GraphSpec {
             id: "spec-signal-a".to_string(),
@@ -20661,6 +21980,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let node_a = GraphNode {
             id: "node-signal-a".to_string(),
@@ -20719,6 +22041,7 @@ echo done
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let spec_b = GraphSpec {
             id: "spec-signal-b".to_string(),
@@ -20739,6 +22062,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         db.insert_graph(&graph_b).unwrap();
         db.insert_graph_spec(&spec_b).unwrap();
@@ -21612,6 +22938,7 @@ echo done
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let spec = GraphSpec {
             id: "spec".to_string(),
@@ -21632,6 +22959,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let node = GraphNode {
             id: "node-1".to_string(),
@@ -21694,6 +23024,7 @@ echo done
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let spec = GraphSpec {
             id: "spec".to_string(),
@@ -21714,6 +23045,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let node = GraphNode {
             id: "node-1".to_string(),
@@ -21777,6 +23111,7 @@ echo done
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let spec = GraphSpec {
             id: "spec".to_string(),
@@ -21797,6 +23132,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let node = GraphNode {
             id: "node-1".to_string(),
@@ -21868,6 +23206,7 @@ echo done
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let spec = GraphSpec {
             id: "spec".to_string(),
@@ -21888,6 +23227,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let node = GraphNode {
             id: "node-impl".to_string(),
@@ -21994,6 +23336,7 @@ echo done
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let spec = GraphSpec {
             id: "spec".to_string(),
@@ -22014,6 +23357,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let node = GraphNode {
             id: "node-impl".to_string(),
@@ -22079,6 +23425,7 @@ echo done
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let spec = GraphSpec {
             id: "spec".to_string(),
@@ -22099,6 +23446,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let node = GraphNode {
             id: "node-impl".to_string(),
@@ -22154,6 +23504,7 @@ echo done
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let spec = GraphSpec {
             id: "spec".to_string(),
@@ -22174,6 +23525,9 @@ echo done
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let node = GraphNode {
             id: "node-1".to_string(),
@@ -22560,6 +23914,7 @@ exit 0
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         let tagged_body = "<spec>\n  <objective>Ship it.</objective>\n  <functional_requirements>Does thing.</functional_requirements>\n  <non_functional_requirements>Fast.</non_functional_requirements>\n  <constraints>None.</constraints>\n  <guidelines>Style.</guidelines>\n  <in_scope>This.</in_scope>\n  <out_of_scope>Nothing.</out_of_scope>\n</spec>";
         let spec = GraphSpec {
@@ -22581,6 +23936,9 @@ exit 0
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let node = GraphNode {
             id: "node-1".to_string(),
@@ -22636,6 +23994,7 @@ exit 0
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         db.insert_graph(&lp)?;
         // Add a Check node so the graph can actually run specs.
@@ -22670,6 +24029,9 @@ exit 0
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         db.insert_graph_spec(&spec)?;
         Ok(id.to_string())
@@ -22695,6 +24057,7 @@ exit 0
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         db.insert_graph(&lp)?;
         let node = crate::domain::graphs::GraphNode {
@@ -22757,6 +24120,7 @@ exit 0
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks,
+            require_spec_type: false,
         };
         db.insert_graph(&lp)?;
         // Add a graph node so the graph can actually run specs.
@@ -22791,6 +24155,9 @@ exit 0
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         db.insert_graph_spec(&spec)?;
         Ok(())
@@ -23036,6 +24403,7 @@ exit 0
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: b_hooks,
+            require_spec_type: false,
         };
         db.insert_graph(&lp_b).unwrap();
         // Add a Check node so graph B can actually run specs.
@@ -23070,6 +24438,9 @@ exit 0
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         db.insert_graph_spec(&b_spec).unwrap();
 
@@ -23299,6 +24670,10 @@ exit 0
             spec_id: None,
             blocker: None,
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let result = render_hook_idea(
             &GraphHookEvent::OnCompleted,
@@ -23320,6 +24695,10 @@ exit 0
             spec_id: None,
             blocker: None,
             node_name: None,
+            spec_code: None,
+            spec_commit_message: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let result = render_hook_idea(&GraphHookEvent::OnCompleted, &ctx, "Blocker: {{blocker}}");
         assert_eq!(result.unwrap(), "Blocker: (none)");
@@ -23349,6 +24728,7 @@ exit 0
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         db.insert_graph(&lp).unwrap();
         let spec = crate::domain::graphs::GraphSpec {
@@ -23370,6 +24750,9 @@ exit 0
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         db.insert_graph_spec(&spec).unwrap();
         let specs = db.list_graph_specs("test-graph").unwrap();
@@ -23422,6 +24805,7 @@ exit 0
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks,
+            require_spec_type: false,
         };
         db.insert_graph(&lp).unwrap();
 
@@ -23445,6 +24829,9 @@ exit 0
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         db.insert_graph_spec(&spec).unwrap();
 
@@ -24591,7 +25978,7 @@ exit 0
         );
         assert!(
             blocker.contains("`graph_continue run_from_node`"),
-            "CM43: the blocked text names run_from_node as a way back in: {blocker}"
+            "the blocked text names run_from_node as a way back in: {blocker}"
         );
 
         // `graph_continue retry_current_node` must accept this spec…
@@ -24930,6 +26317,7 @@ exit 0
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         };
         assert_eq!(
             GraphEngine::resolve_dispatch_workdir(&lp, None, &None),
@@ -25636,6 +27024,207 @@ binary = "{}"
         );
     }
 
+    /// Fixture for the `session_end` recording tests: a `Running` node run on
+    /// platform `fake-end`, plus the graph workdir it is scoped to. Returns the
+    /// owners so the `TempDir`/`GraphEngine` outlive the detached task.
+    #[cfg(unix)]
+    fn session_end_run(
+        run_id: &str,
+        session_id: Option<&str>,
+    ) -> (TempDir, Arc<Database>, GraphEngine, GraphNodeRun, String) {
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        let spec = standalone_spec(&format!("sid-{run_id}"), 1);
+        db.insert_graph_spec(&spec).unwrap();
+        let mut node = sample_agent_node();
+        node.spec_id = Some(spec.id.clone());
+        db.insert_graph_node(&node).unwrap();
+        let run = GraphNodeRun {
+            id: run_id.to_string(),
+            graph_id,
+            spec_id: spec.id,
+            node_id: node.id,
+            status: GraphRunStatus::Running,
+            input: None,
+            output: None,
+            started_at: chrono::Utc::now(),
+            completed_at: None,
+            iteration: 1,
+            pid: None,
+            boot_id: None,
+            session_id: session_id.map(str::to_string),
+            executed_platform: Some("fake-end".to_string()),
+            executed_model: None,
+        };
+        db.insert_graph_run(&run).unwrap();
+        let workdir = workdir_for_run(&db, &run);
+        (dir, db, engine, run, workdir)
+    }
+
+    /// Poll the run row until `terminate_run_row`'s detached task has written
+    /// its `session_end` outcome, and return that value. Panics if it never
+    /// appears, so a test can then assert the exact string.
+    #[cfg(unix)]
+    async fn wait_for_session_end(db: &Database, run_id: &str) -> serde_json::Value {
+        for _ in 0..500 {
+            if let Ok(Some(run)) = db.get_graph_run(run_id) {
+                if let Some(value) = run.output.as_ref().and_then(|o| o.get("session_end")) {
+                    return value.clone();
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("session_end was never recorded on run {run_id}");
+    }
+
+    /// Writes a fake harness that answers `session list` with `list_json` and,
+    /// for an `end` invocation, appends every argv word plus a `done=1` marker
+    /// to `record`. Returns the binary path.
+    #[cfg(unix)]
+    fn write_fake_end_session_cli(
+        scratch: &std::path::Path,
+        list_json: &str,
+        record: &std::path::Path,
+    ) -> std::path::PathBuf {
+        let record_str = record.to_string_lossy().to_string();
+        let fake_bin = scratch.join("fake-end-cli");
+        let script = format!(
+            "#!/bin/sh\ncase \"$1\" in\n  session) printf '%s\\n' '{list_json}' ;;\n  end) for arg in \"$@\"; do echo \"arg=$arg\" >> '{record_str}'; done; echo \"done=1\" >> '{record_str}' ;;\nesac\nexit 0\n"
+        );
+        std::fs::write(&fake_bin, script).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fake_bin
+    }
+
+    /// CB84 outcome 1: when the id is not on the row, the title lookup finds the
+    /// session by `canopy-<run_id>` and the end command runs with that id — the
+    /// run output then carries `session_end: "ended <id>"`. Fails if the
+    /// detached task never records anything, or records a different outcome.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminate_run_row_records_session_ended_by_title() {
+        let home = tempdir().unwrap();
+        let canopy_dir = home.path().join(".canopy");
+        std::fs::create_dir_all(&canopy_dir).unwrap();
+
+        let scratch = tempdir().unwrap();
+        let record = scratch.path().join("end_record.txt");
+        let fake_bin = write_fake_end_session_cli(
+            scratch.path(),
+            r#"[{"id":"ses_found","title":"canopy-run-title-end"}]"#,
+            &record,
+        );
+        std::fs::write(
+            canopy_dir.join("config.toml"),
+            format!(
+                r#"[[clis]]
+name = "fake-end"
+binary = "{}"
+session_title_flag = "--title"
+session_list_args = ["session", "list", "--format", "json"]
+session_end_args = ["end", "--session-id", "{{session_id}}"]
+"#,
+                fake_bin.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let _home = HomeGuard::set(home.path());
+
+        // No session id on the row — the id must be discovered by title.
+        let (_dir, db, _engine, run, workdir) = session_end_run("run-title-end", None);
+        terminate_run_row(&db, &run, "test termination", &workdir);
+
+        let value = wait_for_session_end(&db, "run-title-end").await;
+        assert_eq!(
+            value,
+            serde_json::json!("ended ses_found"),
+            "the found session id must be reported as ended"
+        );
+        let recorded = std::fs::read_to_string(&record).unwrap();
+        assert!(
+            recorded.contains("arg=--session-id") && recorded.contains("arg=ses_found"),
+            "the end command must run with the id found by title: {recorded}"
+        );
+    }
+
+    /// CB84 outcome 2: a platform with no `session_end_args` records
+    /// `"not configured"` and never invokes its binary.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminate_run_row_records_not_configured_without_session_end_args() {
+        let home = tempdir().unwrap();
+        let canopy_dir = home.path().join(".canopy");
+        std::fs::create_dir_all(&canopy_dir).unwrap();
+
+        let scratch = tempdir().unwrap();
+        let record = scratch.path().join("end_record.txt");
+        let fake_bin = write_fake_end_session_cli(scratch.path(), "[]", &record);
+        std::fs::write(
+            canopy_dir.join("config.toml"),
+            format!(
+                r#"[[clis]]
+name = "fake-end"
+binary = "{}"
+"#,
+                fake_bin.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let _home = HomeGuard::set(home.path());
+
+        let (_dir, db, _engine, run, workdir) = session_end_run("run-not-configured", None);
+        terminate_run_row(&db, &run, "test termination", &workdir);
+
+        let value = wait_for_session_end(&db, "run-not-configured").await;
+        assert_eq!(value, serde_json::json!("not configured"));
+        assert!(
+            !record.exists(),
+            "no session-end command may run without session_end_args"
+        );
+    }
+
+    /// CB84 outcome 3: a title lookup that matches nothing records `"not found"`
+    /// and invokes no end command.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminate_run_row_records_not_found_for_unmatched_title() {
+        let home = tempdir().unwrap();
+        let canopy_dir = home.path().join(".canopy");
+        std::fs::create_dir_all(&canopy_dir).unwrap();
+
+        let scratch = tempdir().unwrap();
+        let record = scratch.path().join("end_record.txt");
+        // The list is empty, so no title can match.
+        let fake_bin = write_fake_end_session_cli(scratch.path(), "[]", &record);
+        std::fs::write(
+            canopy_dir.join("config.toml"),
+            format!(
+                r#"[[clis]]
+name = "fake-end"
+binary = "{}"
+session_title_flag = "--title"
+session_list_args = ["session", "list", "--format", "json"]
+session_end_args = ["end", "--session-id", "{{session_id}}"]
+"#,
+                fake_bin.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let _home = HomeGuard::set(home.path());
+
+        let (_dir, db, _engine, run, workdir) = session_end_run("run-no-title", None);
+        terminate_run_row(&db, &run, "test termination", &workdir);
+
+        let value = wait_for_session_end(&db, "run-no-title").await;
+        assert_eq!(value, serde_json::json!("not found"));
+        assert!(
+            !record.exists(),
+            "no end command may run when no session id is found"
+        );
+    }
+
     /// CB84 6e: a run that completes normally (pass/fail reported by the agent
     /// via `graph_complete_node`) never triggers `end_harness_session`.  The
     /// completion path only calls `update_graph_run_result` — neither
@@ -25754,6 +27343,9 @@ binary = "{}"
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         }
     }
 
@@ -25779,6 +27371,7 @@ binary = "{}"
             paused_by_reconciliation: false,
             infra_node_id: None,
             allow_dirty_start: false,
+            require_spec_type: false,
         }
     }
 
@@ -26662,6 +28255,8 @@ binary = "{}"
             None,
             |_pid| {},
             None,
+            None,
+            false,
         )
         .await
         {
@@ -26712,6 +28307,291 @@ binary = "{}"
         assert_eq!(
             old_stdout, "hello",
             "trailing whitespace is trimmed, as before"
+        );
+    }
+    #[tokio::test]
+    async fn directed_queue_resume_runs_spec2_from_named_check_with_spec_id() {
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        init_git_repo(dir.path());
+
+        let s1 = {
+            let mut s = standalone_spec("s1", 1);
+            s.status = GraphSpecStatus::Pending;
+            s
+        };
+        let s2 = {
+            let mut s = standalone_spec("s2", 2);
+            s.status = GraphSpecStatus::Failed;
+            s
+        };
+        let s3 = {
+            let mut s = standalone_spec("s3", 3);
+            s.status = GraphSpecStatus::Pending;
+            s
+        };
+        db.insert_graph_spec(&s1).unwrap();
+        db.insert_graph_spec(&s2).unwrap();
+        db.insert_graph_spec(&s3).unwrap();
+        insert_queue_with_members(&db, "queue-1", &[&s1.id, &s2.id, &s3.id]);
+
+        db.insert_graph_node(&GraphNode {
+            id: "graph-check".to_string(),
+            spec_id: None,
+            graph_id: Some(graph_id.clone()),
+            name: "check".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": "printf APPROVED",
+                "success_condition": "exit_code_0"
+            }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+        db.update_graph_status(&graph_id, GraphStatus::Paused, None, None)
+            .unwrap();
+        db.set_graph_active_run_queue(&graph_id, Some("queue-1"))
+            .unwrap();
+
+        engine
+            .run_graph_dispatch(
+                graph_id.clone(),
+                Some("queue-1".to_string()),
+                None,
+                DispatchMode::resume_from(DirectedStart {
+                    spec_id: s2.id.clone(),
+                    node_arg: "check".to_string(),
+                }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let events = db
+            .list_graph_events(&graph_id, None, None, None, 200)
+            .unwrap();
+        // The FIRST node_started of the whole dispatch is the operator-named
+        // check node on spec 2 — no earlier queue member may run first.
+        let first_node_started = events
+            .iter()
+            .find(|e| e.kind == "node_started")
+            .expect("the dispatch must start a node");
+        assert_eq!(
+            first_node_started.spec_id.as_deref(),
+            Some(s2.id.as_str()),
+            "the first node_started must be on the directed spec s2: {first_node_started:?}"
+        );
+        assert_eq!(
+            first_node_started.node_id.as_deref(),
+            Some("graph-check"),
+            "the first node_started must be the operator-named check node: {first_node_started:?}"
+        );
+        assert!(
+            !events.iter().any(|e| {
+                e.kind == "node_started" && e.spec_id.as_deref() == Some(s1.id.as_str())
+            }),
+            "s1 sits before the directed spec in the queue and must never run"
+        );
+    }
+
+    #[tokio::test]
+    async fn directed_queue_resume_runs_spec2_from_named_check_without_spec_id() {
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        init_git_repo(dir.path());
+
+        let s1 = {
+            let mut s = standalone_spec("s1", 1);
+            s.status = GraphSpecStatus::Pending;
+            s
+        };
+        let s2 = {
+            let mut s = standalone_spec("s2", 2);
+            s.status = GraphSpecStatus::Failed;
+            s
+        };
+        let s3 = {
+            let mut s = standalone_spec("s3", 3);
+            s.status = GraphSpecStatus::Pending;
+            s
+        };
+        db.insert_graph_spec(&s1).unwrap();
+        db.insert_graph_spec(&s2).unwrap();
+        db.insert_graph_spec(&s3).unwrap();
+        insert_queue_with_members(&db, "queue-1", &[&s1.id, &s2.id, &s3.id]);
+
+        db.insert_graph_node(&GraphNode {
+            id: "graph-check".to_string(),
+            spec_id: None,
+            graph_id: Some(graph_id.clone()),
+            name: "check".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": "printf APPROVED",
+                "success_condition": "exit_code_0"
+            }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+        db.update_graph_status(&graph_id, GraphStatus::Paused, None, None)
+            .unwrap();
+        db.set_graph_active_run_queue(&graph_id, Some("queue-1"))
+            .unwrap();
+
+        // No spec_id supplied: the directed default must be the Failed member
+        // (s2), not the first Pending one (s1), so a bare
+        // `graph_continue run_from_node <node>` restarts the failed spec.
+        let resolved = crate::daemon::handler_run_exec::resolve_directed_spec(&db, &graph_id, None)
+            .expect("resolve_directed_spec without spec_id returns the failed member");
+        assert_eq!(
+            resolved.id, s2.id,
+            "the directed default must be the failed member s2"
+        );
+
+        engine
+            .run_graph_dispatch(
+                graph_id.clone(),
+                Some("queue-1".to_string()),
+                None,
+                DispatchMode::resume_from(DirectedStart {
+                    spec_id: resolved.id,
+                    node_arg: "check".to_string(),
+                }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let events = db
+            .list_graph_events(&graph_id, None, None, None, 200)
+            .unwrap();
+        // The FIRST node_started of the whole dispatch is the operator-named
+        // check node on spec 2 — no earlier queue member may run first.
+        let first_node_started = events
+            .iter()
+            .find(|e| e.kind == "node_started")
+            .expect("the dispatch must start a node");
+        assert_eq!(
+            first_node_started.spec_id.as_deref(),
+            Some(s2.id.as_str()),
+            "the first node_started must be on the directed spec s2: {first_node_started:?}"
+        );
+        assert_eq!(
+            first_node_started.node_id.as_deref(),
+            Some("graph-check"),
+            "the first node_started must be the operator-named check node: {first_node_started:?}"
+        );
+        assert!(
+            !events.iter().any(|e| {
+                e.kind == "node_started" && e.spec_id.as_deref() == Some(s1.id.as_str())
+            }),
+            "s1 sits before the directed spec in the queue and must never run"
+        );
+    }
+
+    #[tokio::test]
+    async fn directed_queue_resume_runs_spec2_then_spec3_in_order() {
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        init_git_repo(dir.path());
+
+        let s1 = {
+            let mut s = standalone_spec("s1", 1);
+            s.status = GraphSpecStatus::Pending;
+            s
+        };
+        let s2 = {
+            let mut s = standalone_spec("s2", 2);
+            s.status = GraphSpecStatus::Failed;
+            s
+        };
+        let s3 = {
+            let mut s = standalone_spec("s3", 3);
+            s.status = GraphSpecStatus::Pending;
+            s
+        };
+        db.insert_graph_spec(&s1).unwrap();
+        db.insert_graph_spec(&s2).unwrap();
+        db.insert_graph_spec(&s3).unwrap();
+        insert_queue_with_members(&db, "queue-1", &[&s1.id, &s2.id, &s3.id]);
+
+        db.insert_graph_node(&GraphNode {
+            id: "graph-check".to_string(),
+            spec_id: None,
+            graph_id: Some(graph_id.clone()),
+            name: "check".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": "printf APPROVED",
+                "success_condition": "exit_code_0"
+            }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+        db.update_graph_status(&graph_id, GraphStatus::Paused, None, None)
+            .unwrap();
+        db.set_graph_active_run_queue(&graph_id, Some("queue-1"))
+            .unwrap();
+
+        engine
+            .run_graph_dispatch(
+                graph_id.clone(),
+                Some("queue-1".to_string()),
+                None,
+                DispatchMode::resume_from(DirectedStart {
+                    spec_id: s2.id.clone(),
+                    node_arg: "check".to_string(),
+                }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let events = db
+            .list_graph_events(&graph_id, None, None, None, 200)
+            .unwrap();
+        // s2 emits two spec_started events (the plain one and the
+        // directed-start one) — positions over the raw event list, so the
+        // assertion is about the real dispatch order.
+        let pos = |kind: &str, spec_id: &str| {
+            events
+                .iter()
+                .position(|e| e.kind == kind && e.spec_id.as_deref() == Some(spec_id))
+        };
+        let s2_started = pos("spec_started", &s2.id).expect("s2 must have a spec_started event");
+        let s3_started = pos("spec_started", &s3.id).expect("s3 must have a spec_started event");
+        assert!(s2_started < s3_started, "s2 must start before s3");
+        // Spec 3 starts only after spec 2 ENDS.
+        let s2_ended = pos("spec_completed", &s2.id).expect("s2 must complete");
+        assert!(
+            s2_ended < s3_started,
+            "spec 3 must start only after spec 2 ends: s2 completed at {s2_ended}, \
+             s3 started at {s3_started}"
+        );
+        assert!(
+            pos("spec_started", &s1.id).is_none(),
+            "s1 must be skipped, not started"
+        );
+
+        let s1_after = db.get_graph_spec(&s1.id).unwrap().unwrap();
+        assert_eq!(s1_after.status, GraphSpecStatus::Skipped);
+        // Later queue members keep their order and status: both run to
+        // completion, s2 first, s3 second.
+        assert_eq!(
+            db.get_graph_spec(&s2.id).unwrap().unwrap().status,
+            GraphSpecStatus::Completed,
+            "s2 must finish before the queue moves on"
+        );
+        assert_eq!(
+            db.get_graph_spec(&s3.id).unwrap().unwrap().status,
+            GraphSpecStatus::Completed,
+            "s3 must run after s2 and complete"
         );
     }
 }

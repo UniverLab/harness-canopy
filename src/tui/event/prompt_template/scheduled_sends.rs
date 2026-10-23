@@ -154,6 +154,19 @@ pub(super) fn schedule_send_prompt(app: &mut App, prompt: &str, when: chrono::Na
     let workdir = app.current_workdir();
     persist_last_prompt(app, &workdir, prompt);
 
+    // The scheduled prompt was composed with the protocol block if it rides
+    // along (automatic first turn or the `Canopy protocol` section) — record
+    // that now, exactly like an immediate send, so the session doesn't get
+    // the block again when the row fires (FR1). A verbatim Raw send carries
+    // no block and records nothing.
+    let sends_protocol = app
+        .simple_prompt_dialog
+        .as_ref()
+        .is_some_and(|d| d.sends_protocol());
+    if sends_protocol {
+        super::record_protocol_sent(app, &session_key);
+    }
+
     // Discard the dialog (don't persist builder session — prompt is scheduled).
     app.prompt_builder_sessions.remove(&session_key);
     app.discard_simple_prompt_dialog();

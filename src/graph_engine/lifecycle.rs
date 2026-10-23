@@ -47,7 +47,7 @@ impl GraphEngine {
                 } else {
                     tracing::error!("Graph '{}' failed to run: {error:#}", graph_id);
                     let _ = self
-                        .fail_graph(&graph_id, None, None, None, &error.to_string())
+                        .fail_graph(&graph_id, None, None, None, &error.to_string(), &[])
                         .await;
                 }
             }
@@ -292,7 +292,7 @@ impl GraphEngine {
                 } else {
                     tracing::error!("Graph '{}' failed to run: {error:#}", graph_id);
                     let _ = self
-                        .fail_graph(&graph_id, None, None, None, &error.to_string())
+                        .fail_graph(&graph_id, None, None, None, &error.to_string(), &[])
                         .await;
                 }
             }

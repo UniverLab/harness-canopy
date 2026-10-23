@@ -1,6 +1,6 @@
 [package]
 name = "harness-canopy"
-version = "3.1.0"
+version = "3.1.1"
 edition = "2021"
 rust-version = "1.91"
 description = "A self-contained MCP server for AI agent task scheduling and file watching"
@@ -22,7 +22,7 @@ path = "src/main.rs"
 
 [dependencies]
 # MCP SDK
-rmcp = { version = "1.3", features = ["server", "transport-io", "transport-streamable-http-server"] }
+rmcp = { version = "2.1", features = ["server", "transport-io", "transport-streamable-http-server"] }
 
 # Axum for Streamable HTTP transport
 axum = "0.8"
@@ -87,7 +87,11 @@ regex = "1"
 tokio-util = { version = "0.7", features = ["rt"] }
 
 # TUI
-ratatui = "0.30"
+# `unstable-rendered-line-info` is the only way to ask a `Paragraph` how many
+# *wrapped* lines it needs at a given width (`Paragraph::line_count`); the
+# knowledge viewer clamps its scroll against that, and a hard-`\n` count is not
+# the rendered line count (a 1-line body still wraps to dozens of rows).
+ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 
 # Display-width measurement for TUI box rendering (unicode-width is already
 # pulled in transitively by ratatui; this makes it a direct dependency so it

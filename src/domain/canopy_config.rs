@@ -231,6 +231,8 @@ pub struct GraphsConfig {
     pub ensemble_max_members_sequential: usize,
     #[serde(default = "default_check_output_max_kib")]
     pub check_output_max_kib: u64,
+    #[serde(default = "default_verdict_grace_seconds")]
+    pub verdict_grace_seconds: u64,
 }
 
 impl Default for GraphsConfig {
@@ -244,6 +246,7 @@ impl Default for GraphsConfig {
             ensemble_max_members_parallel: default_ensemble_max_members_parallel(),
             ensemble_max_members_sequential: default_ensemble_max_members_sequential(),
             check_output_max_kib: default_check_output_max_kib(),
+            verdict_grace_seconds: default_verdict_grace_seconds(),
         }
     }
 }
@@ -278,6 +281,10 @@ fn default_ensemble_max_members_sequential() -> usize {
 
 fn default_check_output_max_kib() -> u64 {
     settings::default_int("graphs.check_output_max_kib") as u64
+}
+
+fn default_verdict_grace_seconds() -> u64 {
+    settings::default_int("graphs.verdict_grace_seconds") as u64
 }
 
 /// Settings for agents and harnesses. Read from the `[agents]` table in

@@ -31,8 +31,8 @@ use crate::application::ports::StateRepository;
 use crate::db::Database;
 use crate::domain::db_paths::database_path;
 use crate::shared::sync_identity::{
-    CANOPY_AGENT_ID_ENV, CANOPY_AGENT_ID_HEADER, CANOPY_SEED_ID_ENV, CANOPY_SEED_ID_HEADER,
-    CANOPY_WORKDIR_ENV,
+    CANOPY_AGENT_ID_ENV, CANOPY_AGENT_ID_HEADER, CANOPY_MCP_PROFILE_ENV, CANOPY_MCP_PROFILE_HEADER,
+    CANOPY_SEED_ID_ENV, CANOPY_SEED_ID_HEADER, CANOPY_WORKDIR_ENV,
 };
 
 const MCP_SESSION_HEADER: &str = "mcp-session-id";
@@ -412,6 +412,9 @@ async fn forward_request(
     if let Some(sid) = seed_id {
         request = request.header(CANOPY_SEED_ID_HEADER, sid);
     }
+    if let Some(profile) = non_empty_env(CANOPY_MCP_PROFILE_ENV) {
+        request = request.header(CANOPY_MCP_PROFILE_HEADER, profile);
+    }
     if let Some(sid) = session_id {
         request = request.header(MCP_SESSION_HEADER, sid);
     }
@@ -697,6 +700,9 @@ async fn run_embedded_stdio(agent_id: &str, workdir: &str) -> Result<()> {
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit());
+    if let Some(profile) = non_empty_env(CANOPY_MCP_PROFILE_ENV) {
+        child.env(CANOPY_MCP_PROFILE_ENV, profile);
+    }
 
     let status = child
         .spawn()

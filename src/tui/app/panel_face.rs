@@ -20,15 +20,6 @@ use super::types::{App, PanelFace};
 use crate::application::ports::StateRepository;
 use crate::domain::graphs::GraphStatus;
 
-/// Picker rows: automatic first (the default), then one per face.
-pub(crate) const PANEL_PICKER_OPTIONS: [Option<PanelFace>; 5] = [
-    None,
-    Some(PanelFace::Activity),
-    Some(PanelFace::Knowledge),
-    Some(PanelFace::Graph),
-    Some(PanelFace::Crews),
-];
-
 impl App {
     /// STATE input: true while any graph is running, regardless of workdir.
     pub(crate) fn panel_graph_running(&self) -> bool {
@@ -47,10 +38,10 @@ impl App {
     }
 
     /// True while the user is interacting with the panel: scrolled recently,
-    /// scrolled over the panel this tick, focused inside it, or working the
-    /// picker. While true, automatic switches are dropped, not deferred.
+    /// scrolled over the panel this tick, or focused inside it. While true,
+    /// automatic switches are dropped, not deferred.
     pub(crate) fn panel_is_interacting(&self) -> bool {
-        self.panel_focused || self.panel_interacting || self.panel_picker_open
+        self.panel_focused || self.panel_interacting
     }
 
     /// Record a knowledge/backlog event: it takes the panel for a dwell of
@@ -239,11 +230,13 @@ impl App {
         }
     }
 
-    /// Pin a face from the picker (`None` = back to automatic) and persist
-    /// the choice so it survives restarts. Applies immediately.
+    /// Pin a face (`None` = back to automatic) and persist the choice so it
+    /// survives restarts. Applies immediately. Production pins go through
+    /// the daemon's `config_set` and the config reload (`refresh.rs`); this
+    /// direct-apply path is exercised by the persistence tests.
+    #[allow(dead_code)]
     pub(crate) fn pin_panel_face(&mut self, pin: Option<PanelFace>) {
         self.panel_pinned = pin;
-        self.panel_picker_open = false;
         if let Some(face) = pin {
             self.clear_panel_dwell();
             self.panel_face = face;
@@ -265,6 +258,7 @@ impl App {
     /// With the daemon down the pin still applies in memory for this session
     /// and the status banner says so. CT31 keeps this path unchanged: the
     /// hub's Settings tab writes through the same `config_set`.
+    #[allow(dead_code)]
     fn save_panel_pinned_face(&mut self) {
         let value = self
             .panel_pinned
@@ -290,6 +284,7 @@ impl App {
 
     /// Show a daemon response on the app's status banner (same shape and TTL
     /// as the graph-control banner).
+    #[allow(dead_code)]
     fn set_status_message(&mut self, is_error: bool, text: impl Into<String>) {
         self.graph_action_message = Some(crate::tui::app::dialog::GraphActionMessage {
             is_error,
@@ -301,42 +296,6 @@ impl App {
     /// Read the persisted pin back into a face, ignoring unknown values.
     pub(crate) fn load_panel_pinned_face(value: &Option<String>) -> Option<PanelFace> {
         value.as_deref().and_then(PanelFace::from_str)
-    }
-
-    pub(crate) fn open_panel_picker(&mut self) {
-        // The picker is automatic + every face, no more, no less.
-        debug_assert_eq!(PANEL_PICKER_OPTIONS.len(), PanelFace::ALL.len() + 1);
-        self.panel_picker_open = true;
-        self.panel_picker_idx = PANEL_PICKER_OPTIONS
-            .iter()
-            .position(|option| *option == self.panel_pinned)
-            .unwrap_or(0);
-    }
-
-    pub(crate) fn close_panel_picker(&mut self) {
-        self.panel_picker_open = false;
-    }
-
-    pub(crate) fn move_panel_picker(&mut self, forward: bool) {
-        if !self.panel_picker_open {
-            return;
-        }
-        self.panel_picker_idx = crate::tui::selection::move_index(
-            self.panel_picker_idx,
-            PANEL_PICKER_OPTIONS.len(),
-            forward,
-        );
-    }
-
-    pub(crate) fn confirm_panel_picker(&mut self) {
-        if !self.panel_picker_open {
-            return;
-        }
-        let pin = PANEL_PICKER_OPTIONS
-            .get(self.panel_picker_idx)
-            .copied()
-            .unwrap_or(None);
-        self.pin_panel_face(pin);
     }
 
     /// A mouse-wheel scroll over the panel: marks the interaction and drops
@@ -578,6 +537,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         }
     }
 
@@ -668,6 +630,7 @@ mod tests {
             paused_by_reconciliation: false,
             allow_dirty_start: false,
             infra_node_id: None,
+            require_spec_type: false,
         }
     }
 
@@ -845,12 +808,6 @@ mod tests {
         assert!(matches!(app.focus, Focus::Agent));
     }
 
-    #[test]
-    fn picker_has_five_rows() {
-        assert_eq!(PANEL_PICKER_OPTIONS.len(), 5);
-        assert_eq!(PANEL_PICKER_OPTIONS[4], Some(PanelFace::Crews));
-    }
-
     /// Crews is a management view: no combination of resting state, graph
     /// state or knowledge/backlog event may ever select it automatically.
     #[test]
@@ -880,9 +837,9 @@ mod tests {
         assert_eq!(PanelFace::Crews.label(), "crews");
     }
 
-    /// CT31 requirement 5: the F6 pin must go through the daemon's
-    /// `config_set`, never a direct `CanopyConfig::save` — the TUI must not
-    /// write `config.toml` itself.
+    /// CT31 requirement 5: the pin must go through the daemon's `config_set`,
+    /// never a direct `CanopyConfig::save` — the TUI must not write
+    /// `config.toml` itself.
     #[test]
     fn save_panel_pinned_face_calls_config_set() {
         use crate::application::ports::StateRepository;
@@ -904,35 +861,5 @@ mod tests {
             calls[0]["arguments"],
             serde_json::json!({ "key": "pinned_panel_face", "value": "knowledge" })
         );
-    }
-
-    #[test]
-    fn panel_picker_pins_and_unpins() {
-        let mut app = test_app();
-        // Pinning through the picker never touches the real home config in
-        // tests: restore automatic mode right away via the in-memory path.
-        app.open_panel_picker();
-        assert!(app.panel_picker_open);
-        // Options are [automatic, activity, knowledge, graph]; initial pin
-        // is None so the cursor starts on automatic.
-        assert_eq!(app.panel_picker_idx, 0);
-        app.move_panel_picker(true);
-        app.move_panel_picker(true);
-        assert_eq!(
-            PANEL_PICKER_OPTIONS[app.panel_picker_idx],
-            Some(PanelFace::Knowledge)
-        );
-
-        // Confirm would persist to ~/.canopy — exercise the selection
-        // without the disk write by pinning in memory instead.
-        app.close_panel_picker();
-        app.panel_pinned = PANEL_PICKER_OPTIONS[app.panel_picker_idx];
-        assert_eq!(app.panel_pinned, Some(PanelFace::Knowledge));
-        app.tick_panel_face();
-        assert_eq!(app.panel_face, PanelFace::Knowledge);
-
-        app.panel_pinned = None;
-        app.tick_panel_face();
-        assert_eq!(app.panel_face, PanelFace::Activity);
     }
 }

@@ -73,6 +73,12 @@ pub(crate) struct SpecQueueEntry {
     /// if it was administratively transitioned, else the output tail of its
     /// last run. `None` for every other status.
     pub failure_reason: Option<String>,
+    /// SPECCODE: engine-generated quick reference (`FIX-7`).
+    pub spec_code: Option<String>,
+    /// SPECCODE: Conventional Commits type.
+    pub spec_type: Option<crate::domain::spec_type::SpecType>,
+    /// SPECCODE: optional scope.
+    pub spec_scope: Option<String>,
 }
 
 /// One ensemble (F1) collapsed for the graph view: its join node id (so the
@@ -351,8 +357,25 @@ fn build_spec_queue(db: &Database, lp: &crate::domain::graphs::Graph) -> Vec<Spe
                 spec_name: spec.name,
                 status: spec.status,
                 failure_reason,
+                spec_code: spec.spec_code,
+                spec_type: spec.spec_type,
+                spec_scope: spec.spec_scope,
             })
         })
+        .collect()
+}
+
+/// Completed spec names for the header's graph events — queue members
+/// included, since it reads the same source `build_spec_queue` does. Callers
+/// bound this to running graphs so the per-tick query stays small.
+pub(crate) fn completed_spec_names(
+    db: &Database,
+    lp: &crate::domain::graphs::Graph,
+) -> Vec<String> {
+    build_spec_queue(db, lp)
+        .into_iter()
+        .filter(|e| e.status == GraphSpecStatus::Completed)
+        .map(|e| e.spec_name)
         .collect()
 }
 
@@ -692,6 +715,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         }
     }
 
@@ -715,6 +739,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         }
     }
 
@@ -878,6 +905,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         let ps2 = GraphSpec {
             id: "ps2".to_string(),
@@ -898,6 +928,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         };
         db.insert_graph_spec(&ps1).unwrap();
         db.insert_graph_spec(&ps2).unwrap();

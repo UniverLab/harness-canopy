@@ -17,6 +17,7 @@ pub use source::SkillFetchError;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use metadata::SkillMetadata;
+use source::CatalogEntry;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -116,6 +117,34 @@ impl SkillStore {
     /// described entry for the same name also exists upstream.
     pub fn list(&self) -> Vec<SkillListEntry> {
         let now = (self.now)();
+        let catalogs: Vec<Vec<CatalogEntry>> = self
+            .sources
+            .iter()
+            .map(|source| catalog_cache::catalog_for(&self.store_dir, source, self.ttl, now))
+            .collect();
+        self.list_with_catalogs(catalogs)
+    }
+
+    /// Same merged store-plus-catalog view as [`Self::list`], but built from
+    /// the on-disk catalog caches only — never clones, fetches, or refreshes
+    /// a source. Used by the Tools picker so listing canopy skills cannot
+    /// block the UI on the network. If a source's cache is missing or
+    /// unreadable, its catalog entries are simply absent (the store's own
+    /// installed skills still appear).
+    pub fn list_local(&self) -> Vec<SkillListEntry> {
+        let catalogs: Vec<Vec<CatalogEntry>> = self
+            .sources
+            .iter()
+            .map(|source| catalog_cache::cached_catalog(&self.store_dir, source))
+            .collect();
+        self.list_with_catalogs(catalogs)
+    }
+
+    /// Shared merge: fold the per-source catalogs (in order, later shadowing
+    /// earlier by name) and then overlay the store's installed skills on
+    /// top, marking store skills whose source no longer lists them as
+    /// orphaned.
+    fn list_with_catalogs(&self, catalogs: Vec<Vec<CatalogEntry>>) -> Vec<SkillListEntry> {
         let mut by_name: std::collections::BTreeMap<String, SkillListEntry> =
             std::collections::BTreeMap::new();
         let mut catalog_names_by_source: std::collections::HashMap<
@@ -123,8 +152,7 @@ impl SkillStore {
             std::collections::HashSet<String>,
         > = std::collections::HashMap::new();
 
-        for source in &self.sources {
-            let catalog = catalog_cache::catalog_for(&self.store_dir, source, self.ttl, now);
+        for (source, catalog) in self.sources.iter().zip(catalogs) {
             let names: std::collections::HashSet<String> =
                 catalog.iter().map(|e| e.name.clone()).collect();
             for entry in catalog {
@@ -742,5 +770,41 @@ mod tests {
         );
         let beta = entries.iter().find(|e| e.name == "beta").unwrap();
         assert!(!beta.orphaned);
+    }
+
+    #[test]
+    fn list_local_uses_cached_catalogs_when_registry_unreachable() {
+        let registry = TempDir::new().unwrap();
+        make_registry(
+            registry.path(),
+            &[("alpha", "Alpha skill."), ("beta", "Beta skill.")],
+        );
+
+        let store_dir = TempDir::new().unwrap();
+        let store = SkillStore::new(
+            store_dir.path().to_path_buf(),
+            vec![GitSource::new(
+                registry.path().to_string_lossy().to_string(),
+                None,
+            )],
+            15,
+        );
+
+        // Prime the cache by calling list() once while registry is reachable.
+        let entries_list = store.list();
+        assert_eq!(entries_list.len(), 2);
+        assert!(entries_list.iter().any(|e| e.name == "alpha"));
+        assert!(entries_list.iter().any(|e| e.name == "beta"));
+
+        // Move registry away so network access would fail.
+        let moved = registry.path().with_extension("moved");
+        std::fs::rename(registry.path(), &moved).unwrap();
+
+        let entries_local = store.list_local();
+        assert_eq!(entries_local.len(), 2);
+        assert!(entries_local.iter().any(|e| e.name == "alpha"));
+        assert!(entries_local.iter().any(|e| e.name == "beta"));
+
+        std::fs::rename(&moved, registry.path()).unwrap();
     }
 }

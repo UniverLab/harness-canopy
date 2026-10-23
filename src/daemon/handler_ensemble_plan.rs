@@ -3,7 +3,7 @@
 //! no DB writes). Moved verbatim; behaviour unchanged.
 
 use crate::daemon::handler_ensemble_core::{effective_member_prompt, member_node_config};
-use crate::daemon::handler_specs::validate_at_least_one_bool;
+use crate::daemon::handler_specs_helpers::validate_at_least_one_bool;
 use crate::daemon::helpers::error_result;
 use crate::daemon::params::GraphUpdateEnsembleParams;
 use crate::db::Database;

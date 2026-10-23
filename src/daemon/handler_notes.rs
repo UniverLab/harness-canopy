@@ -139,7 +139,7 @@ impl TaskTriggerHandler {
         let spec_id = match resolve_prefix_or_error(
             &self.db,
             params.spec_id.trim(),
-            Database::resolve_spec_id_by_prefix,
+            |db, id| db.resolve_spec_id_by_prefix(id, None),
             "spec",
         ) {
             Ok(id) => id,
@@ -238,7 +238,7 @@ pub(crate) fn spec_note_write_operator(
     let resolved = match resolve_prefix_or_error(
         db,
         spec_id.trim(),
-        Database::resolve_spec_id_by_prefix,
+        |db, id| db.resolve_spec_id_by_prefix(id, None),
         "spec",
     ) {
         Ok(id) => id,
@@ -306,6 +306,7 @@ mod tests {
             auto_continue_action: None,
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
         })
         .unwrap();
     }
@@ -330,6 +331,9 @@ mod tests {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
+            spec_code: None,
+            spec_scope: None,
+            spec_type: None,
         }
     }
 

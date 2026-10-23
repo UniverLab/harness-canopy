@@ -254,6 +254,7 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
                 autorun_at INTEGER,
                 spec_queue TEXT,
                 active_run_queue_id TEXT,
+                require_spec_type INTEGER NOT NULL DEFAULT 0,
                 on_completed TEXT,
                 auto_continue_at INTEGER,
                 auto_continue_action TEXT,
@@ -276,6 +277,9 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
                 spec_start_head TEXT,
                 spec_start_dirty INTEGER,
                 workdir TEXT,
+                spec_type TEXT,
+                spec_scope TEXT,
+                spec_code TEXT,
                 completed_via TEXT,
                 completed_via_reason TEXT,
                 completed_via_at INTEGER,
@@ -295,6 +299,13 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
 
             CREATE UNIQUE INDEX IF NOT EXISTS idx_graph_specs_position
                 ON graph_specs(graph_id, position);
+
+            CREATE TABLE IF NOT EXISTS spec_code_counters (
+                workdir TEXT NOT NULL,
+                spec_type TEXT NOT NULL,
+                next INTEGER NOT NULL,
+                PRIMARY KEY (workdir, spec_type)
+            );
 
             CREATE TABLE IF NOT EXISTS graph_nodes (
                 id TEXT PRIMARY KEY,
@@ -615,6 +626,18 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
                 infra_backoff_seconds INTEGER,
                 PRIMARY KEY (crew_id, position)
             );",
+    "
+            -- CM49 import: entry sources of a crew-bound ensemble whose member
+            -- nodes are not materialized yet (see
+            -- domain/graph_transfer/pending.rs). The sync path reads them
+            -- alongside the `ensembles` row and wires the fan-out once the crew
+            -- supplies members, then deletes them.
+            CREATE TABLE IF NOT EXISTS ensemble_pending_entry_sources (
+                ensemble_id TEXT NOT NULL REFERENCES ensembles(id) ON DELETE CASCADE,
+                from_node TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
+                condition TEXT NOT NULL,
+                PRIMARY KEY (ensemble_id, from_node, condition)
+            );",
 ];
 
 impl Database {
@@ -653,6 +676,7 @@ impl Database {
         Self::migrate_graph_roster_columns(&conn)?;
         Self::migrate_spec_commit_evidence_columns(&conn)?;
         Self::migrate_spec_cross_run_attempts_column(&conn)?;
+        Self::migrate_spec_type_columns(&conn)?;
         Self::migrate_intelligence_touch_columns(&conn)?;
         Self::migrate_ensemble_execution_columns(&conn)?;
         Self::migrate_graph_run_output_tails(&conn)?;

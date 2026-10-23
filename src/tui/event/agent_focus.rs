@@ -6,6 +6,7 @@ use super::context_transfer::{
 };
 use super::home_preview::handle_playground_key;
 use super::knowledge_dialog::{edit_knowledge_dialog, open_knowledge_dialog};
+use super::knowledge_viewer::open_knowledge_viewer;
 use super::search_picker::handle_suggestion_picker_key;
 #[cfg(test)]
 use super::terminal_warp::handle_terminal_direct_pty_key;
@@ -110,6 +111,9 @@ fn handle_project_focus_key(app: &mut App, code: KeyCode, modifiers: KeyModifier
         }
         KeyCode::Down => app.select_next(),
         KeyCode::Up => app.select_prev(),
+        KeyCode::Enter if app.project_focus == Some(ProjectTab::Knowledge) => {
+            open_knowledge_viewer(app);
+        }
         KeyCode::Char('/') if app.project_focus == Some(ProjectTab::Knowledge) => {
             app.enter_knowledge_filter_mode();
         }
@@ -248,6 +252,12 @@ const RESERVED_FOCUS_KEYS: &[(KeyCode, KeyModifiers)] = &[
     // thing everywhere and gives a claimed child a visible way out. Plain F4
     // is intentionally NOT reserved.
     (KeyCode::F(4), KeyModifiers::SHIFT),
+    // F1 (hub) — a third eyes-open exception in the style of Ctrl+T: the hub
+    // must be reachable from inside any session, so the key that opens it
+    // stays with canopy even when the child has claimed the keyboard. Without
+    // it, entering a claimed session was a one-way door for the hub: F1 went
+    // to the child and the user had to leave focus first.
+    (KeyCode::F(1), KeyModifiers::NONE),
 ];
 
 pub(crate) fn is_reserved_focus_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
@@ -794,6 +804,40 @@ mod tests {
         assert_eq!(app.project_focus, Some(ProjectTab::Backlog));
     }
 
+    fn knowledge_node(id: &str, title: &str) -> crate::db::intelligence::IntelligenceNodeRecord {
+        crate::db::intelligence::IntelligenceNodeRecord {
+            id: id.to_string(),
+            kind: "fact".to_string(),
+            status: "noted".to_string(),
+            title: title.to_string(),
+            body: format!("body of {title}"),
+            metadata: None,
+            project_hash: None,
+            session_id: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    /// FR2: `Enter` on a row of the Knowledge list opens the read-only viewer
+    /// for the selected entry.
+    #[test]
+    fn enter_on_a_knowledge_row_opens_the_viewer() {
+        let mut app = app_with_project_focus(ProjectTab::Knowledge);
+        app.project_knowledge = vec![
+            knowledge_node("n1", "Entry 1"),
+            knowledge_node("n2", "Entry 2"),
+        ];
+        app.selected_knowledge = 1;
+
+        handle_project_focus_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+        assert!(matches!(app.focus, Focus::KnowledgeViewer));
+        let viewer = app.knowledge_viewer.as_ref().expect("viewer must be open");
+        assert_eq!(viewer.title, "Entry 2");
+        assert_eq!(viewer.kind, "fact");
+    }
+
     #[test]
     fn shift_left_steps_project_tab_backward_and_wraps() {
         let mut app = app_with_project_focus(ProjectTab::Overview);
@@ -1286,10 +1330,10 @@ mod focus_shortcuts_keyboard_claim_tests {
 
     #[test]
     fn reserved_focus_keys_are_leave_focus_and_frame_navigation() {
-        // The list is frame navigation, plus one deliberate exception: leave
-        // focus, step between canopy's own panes, and Ctrl+T for context
-        // transfer. Everything else that acts on the session's content is
-        // the child's.
+        // The list is frame navigation, plus deliberate exceptions: leave
+        // focus, step between canopy's own panes, Ctrl+T for context
+        // transfer, and F1 for the hub. Everything else that acts on the
+        // session's content is the child's.
         assert_eq!(
             RESERVED_FOCUS_KEYS,
             [
@@ -1300,6 +1344,7 @@ mod focus_shortcuts_keyboard_claim_tests {
                 (KeyCode::Right, KeyModifiers::SHIFT),
                 (KeyCode::Char('t'), KeyModifiers::CONTROL),
                 (KeyCode::F(4), KeyModifiers::SHIFT),
+                (KeyCode::F(1), KeyModifiers::NONE),
             ]
         );
         assert!(is_reserved_focus_key(KeyCode::F(10), KeyModifiers::NONE));
@@ -1310,6 +1355,11 @@ mod focus_shortcuts_keyboard_claim_tests {
             KeyCode::Char('t'),
             KeyModifiers::CONTROL
         ));
+        // F1 is the hub key: it must stay with canopy from inside any
+        // session, claimed keyboard or not. F6 is retired (the panel pin
+        // lives in F1 → Settings → TUI Appearance) and was never reserved.
+        assert!(is_reserved_focus_key(KeyCode::F(1), KeyModifiers::NONE));
+        assert!(!is_reserved_focus_key(KeyCode::F(6), KeyModifiers::NONE));
     }
 
     #[test]
@@ -1424,6 +1474,55 @@ mod focus_shortcuts_keyboard_claim_tests {
         ));
         assert!(matches!(app.focus, Focus::Preview));
 
+        app.interactive_agents[0].kill();
+    }
+
+    /// F1 inside a focused session whose child has claimed the keyboard opens
+    /// the hub and is never forwarded to the PTY — the hub must be reachable
+    /// from inside any session (see `RESERVED_FOCUS_KEYS`). Consumption is
+    /// asserted directly; the session's own input state staying untouched is
+    /// the observable proof that nothing was written to the PTY.
+    #[test]
+    fn kitty_negotiated_child_opens_the_hub_with_f1() {
+        let agent = spawn_cat_agent("hub-claimed-kitty");
+        *agent.kitty_keyboard_flags.lock().expect("lock") = Some(7);
+        assert!(agent.kitty_keyboard_negotiated());
+        assert!(!agent.in_alternate_screen());
+        let mut app = app_with_interactive_agent(agent);
+
+        let handled = handle_focus_shortcuts(&mut app, KeyCode::F(1), KeyModifiers::NONE);
+
+        assert!(handled, "F1 is reserved: canopy keeps it even when claimed");
+        assert!(app.hub_open, "F1 inside a claimed session opens the hub");
+        assert!(
+            matches!(app.focus, Focus::Agent),
+            "opening the hub must not move focus"
+        );
+        let agent = &app.interactive_agents[0];
+        assert!(
+            agent.input_buffer.lock().expect("lock").is_empty(),
+            "F1 must not reach the session's input"
+        );
+        assert_eq!(agent.scroll_offset, 0, "F1 must not scroll the session");
+        app.interactive_agents[0].kill();
+    }
+
+    /// Same contract via the other claim signal: the alternate screen.
+    #[test]
+    fn alternate_screen_child_opens_the_hub_with_f1() {
+        let agent = spawn_cat_agent("hub-claimed-alt-screen");
+        agent.vt.lock().expect("vt lock").process(b"\x1b[?1049h");
+        assert!(agent.in_alternate_screen());
+        assert!(!agent.kitty_keyboard_negotiated());
+        let mut app = app_with_interactive_agent(agent);
+
+        let handled = handle_focus_shortcuts(&mut app, KeyCode::F(1), KeyModifiers::NONE);
+
+        assert!(handled, "F1 is reserved: canopy keeps it even when claimed");
+        assert!(app.hub_open, "F1 inside a claimed session opens the hub");
+        assert!(matches!(app.focus, Focus::Agent));
+        let agent = &app.interactive_agents[0];
+        assert!(agent.input_buffer.lock().expect("lock").is_empty());
         app.interactive_agents[0].kill();
     }
 

@@ -10,7 +10,7 @@ use crate::daemon::helpers::error_result;
 use crate::daemon::params::*;
 use crate::daemon::params_extract::Parameters;
 use crate::db::Database;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::tool;
 use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
@@ -46,7 +46,7 @@ impl TaskTriggerHandler {
             // rather than run `models_list_cmd` or fall through to models.dev.
             if let Some(msg) = crate::daemon::handler_helpers::interactive_only_rejection(platform)
             {
-                return Ok(CallToolResult::success(vec![Content::text(
+                return Ok(CallToolResult::success(vec![ContentBlock::text(
                     serde_json::to_string_pretty(&serde_json::json!({
                         "platform": platform,
                         "models": [],
@@ -128,7 +128,7 @@ impl TaskTriggerHandler {
         )
         .await;
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&serde_json::json!({
                 "timeout_seconds": timeout_secs,
                 "would_fail": crate::daemon::probe::would_fail_count(&reports),
@@ -162,7 +162,7 @@ impl TaskTriggerHandler {
         let max_pairs = clamp_max_recent_pairs(params.max_pairs);
         grouped.truncate(max_pairs);
         if grouped.is_empty() {
-            return Ok(CallToolResult::success(vec![Content::text(
+            return Ok(CallToolResult::success(vec![ContentBlock::text(
                 serde_json::json!({
                     "window_days": crate::db::graphs::RECENT_USAGE_WINDOW_DAYS,
                     "pairs_considered": 0,
@@ -213,7 +213,7 @@ impl TaskTriggerHandler {
                 value
             })
             .collect::<Vec<_>>();
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&serde_json::json!({
                 "window_days": crate::db::graphs::RECENT_USAGE_WINDOW_DAYS,
                 "pairs_considered": pairs_considered,
@@ -353,7 +353,7 @@ pub(crate) async fn native_models_result(
         );
         let fallback_text = catalogue_models_text(Some(platform), force_refresh, full).await;
         return match fallback_text {
-            Ok(text) => CallToolResult::success(vec![Content::text(format!("{note}{text}"))]),
+            Ok(text) => CallToolResult::success(vec![ContentBlock::text(format!("{note}{text}"))]),
             Err(_) => error_result(&format!(
                 "Could not enumerate '{platform}' models and no provider catalogue \
                  is available as fallback. Retry once the CLI is reachable."
@@ -375,7 +375,7 @@ pub(crate) async fn native_models_result(
     if let Some(warning) = platform_model_selection_warning(platform) {
         listing = format!("{warning}\n\n{listing}");
     }
-    CallToolResult::success(vec![Content::text(model_result_footer(
+    CallToolResult::success(vec![ContentBlock::text(model_result_footer(
         &listing,
         source,
         catalog.fetched_at,
@@ -459,7 +459,7 @@ pub(crate) async fn catalogue_models_result(
     full: bool,
 ) -> CallToolResult {
     match catalogue_models_text(platform, force_refresh, full).await {
-        Ok(text) => CallToolResult::success(vec![Content::text(text)]),
+        Ok(text) => CallToolResult::success(vec![ContentBlock::text(text)]),
         Err(CatalogTextError::NoProviderMapping) => error_result(&format!(
             "No known model providers are mapped for platform '{}'. \
              Omit `platform` to list all providers.",
@@ -549,7 +549,7 @@ pub(crate) fn prepend_recent_usage(result: &mut CallToolResult, section: &str) {
         .and_then(|content| content.as_text().map(|text| text.text.clone()));
     if let Some(existing) = existing {
         if !result.content.is_empty() {
-            result.content[0] = Content::text(format!("{section}\n\n{existing}"));
+            result.content[0] = ContentBlock::text(format!("{section}\n\n{existing}"));
         }
     }
 }

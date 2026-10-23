@@ -8,7 +8,7 @@ use crate::daemon::helpers::success_result;
 use crate::daemon::params::*;
 use crate::daemon::params_extract::Parameters;
 use axum::http::request::Parts;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::tool;
 use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
@@ -32,7 +32,7 @@ impl TaskTriggerHandler {
         let toml_str = identity
             .to_toml()
             .map_err(|e| McpError::internal_error(e, None))?;
-        Ok(CallToolResult::success(vec![Content::text(toml_str)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(toml_str)]))
     }
 
     #[tool(
@@ -75,7 +75,7 @@ impl TaskTriggerHandler {
                 }));
             }
         }
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&seeds_info).unwrap_or_default(),
         )]))
     }
@@ -99,7 +99,7 @@ impl TaskTriggerHandler {
         };
         crate::domain::seeds::save_seed(&seed_id, &identity)
             .map_err(|e| McpError::invalid_params(e, None))?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
             "Seed '{seed_id}' created successfully."
         ))]))
     }
@@ -114,7 +114,7 @@ impl TaskTriggerHandler {
     ) -> Result<CallToolResult, McpError> {
         crate::domain::seeds::remove_seed(&params.seed_id)
             .map_err(|e| McpError::invalid_params(e, None))?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
             "Seed '{}' removed successfully.",
             params.seed_id
         ))]))
@@ -136,7 +136,7 @@ impl TaskTriggerHandler {
         let entries = tokio::task::spawn_blocking(move || store.list())
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&entries).unwrap_or_default(),
         )]))
     }
@@ -160,7 +160,7 @@ impl TaskTriggerHandler {
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?
             .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&content).unwrap_or_default(),
         )]))
     }

@@ -61,7 +61,7 @@ impl Theme {
             header_color: rgb(brand::ESSENCE),
             dim_text: rgb(brand::INK_DIM),
             show_borders: true,
-            dialog_bg: rgb(brand::BG_RAISE),
+            dialog_bg: rgb(brand::BG_DEEP),
             text_primary: rgb(brand::INK),
             accent_fg: rgb(brand::BG_DEEP),
             muted_text: rgb(brand::INK_FAINT),
@@ -91,7 +91,7 @@ impl Theme {
             header_color: rgb(brand::ESSENCE),
             dim_text: Color::Rgb(140, 140, 155),
             show_borders: false,
-            dialog_bg: Color::Rgb(34, 34, 50),
+            dialog_bg: Color::Rgb(14, 14, 22),
             text_primary: Color::Rgb(225, 225, 230),
             accent_fg: Color::Rgb(18, 18, 24),
             muted_text: Color::Rgb(130, 130, 145),
@@ -150,7 +150,7 @@ mod tests {
         assert_eq!(theme.header_color, rgb(brand::ESSENCE));
         assert_eq!(theme.dim_text, Color::Rgb(188, 199, 198)); // INK_DIM
         assert!(theme.show_borders);
-        assert_eq!(theme.dialog_bg, rgb(brand::BG_RAISE));
+        assert_eq!(theme.dialog_bg, rgb(brand::BG_DEEP)); // sidebar_bg
         assert_eq!(theme.text_primary, Color::Rgb(237, 255, 254)); // INK
         assert_eq!(theme.accent_fg, rgb(brand::BG_DEEP));
         assert_eq!(theme.muted_text, Color::Rgb(154, 168, 167)); // INK_FAINT
@@ -168,6 +168,29 @@ mod tests {
     }
 
     #[test]
+    fn dialog_bg_matches_sidebar_bg() {
+        let classic = Theme::classic();
+        assert_eq!(classic.dialog_bg, classic.sidebar_bg);
+        let modern = Theme::modern();
+        assert_eq!(modern.dialog_bg, modern.sidebar_bg);
+    }
+
+    #[test]
+    fn dialog_bg_contrasts_from_selected_and_focused() {
+        for theme in [Theme::classic(), Theme::modern()] {
+            assert_eq!(theme.dialog_bg, theme.sidebar_bg);
+            assert_ne!(
+                theme.dialog_bg, theme.selected_bg,
+                "selected rows must stand out on the dialog background"
+            );
+            assert_ne!(
+                theme.dialog_bg, theme.field_bg_focused,
+                "focused fields must stand out on the dialog background"
+            );
+        }
+    }
+
+    #[test]
     fn modern_is_borderless() {
         assert!(!Theme::modern().show_borders);
     }
@@ -181,7 +204,7 @@ mod tests {
         assert_eq!(theme.selected_bg, Color::Rgb(44, 44, 62));
         assert_eq!(theme.header_color, rgb(brand::ESSENCE));
         assert_eq!(theme.dim_text, Color::Rgb(140, 140, 155));
-        assert_eq!(theme.dialog_bg, Color::Rgb(34, 34, 50));
+        assert_eq!(theme.dialog_bg, Color::Rgb(14, 14, 22)); // == sidebar_bg
         assert_eq!(theme.muted_text, Color::Rgb(130, 130, 145));
         assert_eq!(theme.field_bg, Color::Rgb(38, 38, 50));
         assert_eq!(theme.field_bg_focused, Color::Rgb(48, 48, 64));
