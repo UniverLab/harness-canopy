@@ -417,8 +417,9 @@ Three levers, from least to most intrusive:
   earlier nodes again. The run is refused, and names the offending node, when
   an upstream node's latest run is failed, error or interrupted, or when a
   prompt or check still needs output that was never recorded for the spec. On
-  a queue-driven graph the directed run restarts the spec you name — by default the graph's current
-  spec, a failed member before the next pending one — and the members queued
+  a queue-driven graph the directed run restarts the spec you name — by
+  default the graph's current spec, a failed member before the next pending
+  one — and the members queued
   before it are skipped, so the retry does not quietly turn into the next
   spec. The node you name always runs first, even when it is the node an
   ensemble fans out from.

@@ -109,7 +109,7 @@ was written, retry`. Nothing changed, so retry the same call.
 | `graph_reset` | Reset a graph's pending specs; `clear_notes: true` also deletes the reset specs' spec notes (kept by default) |
 | `graph_schedule_autorun` | Schedule a graph to resume or run |
 | `graph_pause` | Pause a running graph |
-| `graph_continue` | Continue a paused graph (retry/skip), or start a spec at a chosen node with `run_from_node` (`node_id` names the node the spec starts at; `spec_id` names the spec and defaults to the graph's current spec — in a queue-driven graph: a running/interrupted member, else a failed one, else the next pending one) |
+| `graph_continue` | Continue a paused graph (retry/skip), or start a spec at a chosen node with `run_from_node` (`node_id` names the node the spec starts at; `spec_id` names the spec and defaults to the graph's current spec — in a queue-driven graph: a running/interrupted member, else a failed one, else the next pending one). The launch is refused, naming the node, if an upstream node's latest run failed, errored or was interrupted |
 | `graph_complete_node` | Complete an active graph node |
 | `graph_report_blocker` | Report a blocker for an active graph node |
 | `graph_export` | Export a graph design |
