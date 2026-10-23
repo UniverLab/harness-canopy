@@ -8632,8 +8632,10 @@ echo done
         );
     }
 
-    /// FR1: a directed run on a spec at its execution limit still runs its
-    /// first node, and the directive reports the reset it applied.
+    /// FR1: a directed run on a spec at its execution limit runs its first
+    /// node. The engine zeroes the count when the directed start begins, so the
+    /// node's failure is the first genuine verdict (count 1), not the one that
+    /// reaches the limit again (count 4, blocked).
     #[tokio::test]
     async fn directed_run_at_limit_resets_count_and_runs_first_node() {
         let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
@@ -8648,7 +8650,7 @@ echo done
             name: "check".to_string(),
             kind: GraphNodeKind::Check,
             config: serde_json::json!({
-                "command": "printf APPROVED",
+                "command": "exit 1",
                 "success_condition": "exit_code_0"
             }),
             position: 1,
@@ -8660,15 +8662,6 @@ echo done
                 .unwrap();
         }
         assert_eq!(db.get_graph_spec_cross_run_attempts(&spec.id).unwrap(), 3);
-
-        let report =
-            crate::daemon::handler_run_directive::reset_execution_limit(&db, &spec.id, &spec.name)
-                .unwrap();
-        assert!(
-            report.contains("Execution limit reset for spec 'limit-directed'"),
-            "the directive reports the reset: {report}"
-        );
-        assert_eq!(db.get_graph_spec_cross_run_attempts(&spec.id).unwrap(), 0);
 
         engine
             .run_graph_dispatch(
@@ -8684,10 +8677,46 @@ echo done
             )
             .await
             .unwrap();
+
+        let runs = db.list_graph_runs_for_spec(&spec.id).unwrap();
+        assert_eq!(runs.len(), 1, "the first node ran: {runs:?}");
+        assert_eq!(runs[0].node_id, "graph-check");
         assert_eq!(
-            db.get_graph_spec(&spec.id).unwrap().unwrap().status,
-            GraphSpecStatus::Completed,
-            "the directed run executes its first node at the limit"
+            db.get_graph_spec_cross_run_attempts(&spec.id).unwrap(),
+            1,
+            "the directed start zeroed the count before this failure"
+        );
+    }
+
+    /// FR2 way out: on a paused queue the dirty-tree guard held back the second
+    /// member, and `skip_next_spec` skips that held member. The `failed`
+    /// predecessor keeps its status.
+    #[test]
+    fn skip_next_spec_on_held_queue_skips_held_spec_not_failed_predecessor() {
+        let (_dir, db, _engine, graph_id) = bare_graph_fixture().unwrap();
+        let failed = standalone_spec("held-failed", 1);
+        let held = standalone_spec("held-next", 2);
+        db.insert_graph_spec(&failed).unwrap();
+        db.insert_graph_spec(&held).unwrap();
+        insert_queue_with_members(&db, "queue-1", &[&failed.id, &held.id]);
+        db.set_graph_active_run_queue(&graph_id, Some("queue-1"))
+            .unwrap();
+        db.update_graph_spec_status(&failed.id, GraphSpecStatus::Failed, None, None)
+            .unwrap();
+        db.update_graph_status(&graph_id, GraphStatus::Paused, None, None)
+            .unwrap();
+
+        crate::daemon::handler_run_exec::handle_skip_next_spec(&db, &graph_id).unwrap();
+
+        assert_eq!(
+            db.get_graph_spec(&held.id).unwrap().unwrap().status,
+            GraphSpecStatus::Skipped,
+            "the held member is skipped"
+        );
+        assert_eq!(
+            db.get_graph_spec(&failed.id).unwrap().unwrap().status,
+            GraphSpecStatus::Failed,
+            "the failed predecessor keeps its failure"
         );
     }
 
@@ -8734,7 +8763,7 @@ echo done
     #[test]
     fn dirty_advance_blocker_caps_listed_paths() {
         let paths: Vec<String> = (0..25).map(|i| format!("p{i}.txt")).collect();
-        let blocker = dispatch::dirty_advance_blocker("next", "dirty", &paths);
+        let blocker = launch_check::dirty_advance_blocker("next", "dirty", &paths);
         assert!(blocker.contains("p19.txt"), "{blocker}");
         assert!(!blocker.contains("p20.txt"), "{blocker}");
         assert!(blocker.contains("+5 more"), "{blocker}");
@@ -8791,8 +8820,6 @@ echo done
         let lp = db.get_graph(graph_id).unwrap().unwrap();
         let (spec, node) =
             crate::daemon::handler_run_directive::retry_restart_target(db, &lp).unwrap()?;
-        crate::daemon::handler_run_directive::reset_execution_limit(db, &spec.id, &spec.name)
-            .unwrap();
         engine
             .run_graph_dispatch(
                 graph_id.to_string(),

@@ -123,6 +123,7 @@ impl GraphEngine {
             );
             return Ok(());
         }
+        self.clear_directed_spec_limit(directed.map(|d| d.spec_id.as_str()))?;
         self.db
             .set_graph_active_run_queue(&graph_id, queue_id.as_deref())?;
         let workdir = Self::resolve_dispatch_workdir(&lp, workdir_override, &sandbox);
@@ -516,10 +517,20 @@ impl GraphEngine {
         if !notice.refuse {
             return Ok(false);
         }
-        let blocker = dirty_advance_blocker(&spec.name, &notice.message, &notice.paths);
+        let blocker =
+            super::launch_check::dirty_advance_blocker(&spec.name, &notice.message, &notice.paths);
         self.block_graph(ctx.graph_id, Some(ctx.claimed_at), &blocker)
             .await?;
         Ok(true)
+    }
+
+    /// FR1: an explicit directive is the operator's ruling on the per-spec
+    /// execution limit; zero the directed spec's count before its run starts.
+    fn clear_directed_spec_limit(&self, spec_id: Option<&str>) -> Result<()> {
+        if let Some(spec_id) = spec_id {
+            self.db.clear_graph_spec_cross_run_attempts(spec_id)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn purge_terminal_placeholder_specs(&self, graph_id: &str) -> Result<()> {
@@ -770,25 +781,4 @@ impl GraphEngine {
             }
         }
     }
-}
-
-/// FR2: the blocker a queue run pauses on when the dirty-tree guard refuses the
-/// next spec. Keeps the guard's own text, lists the first 20 dirty paths, and
-/// names the ways out.
-pub(crate) fn dirty_advance_blocker(next_spec: &str, message: &str, paths: &[String]) -> String {
-    const LISTED: usize = 20;
-    let mut listed = paths
-        .iter()
-        .take(LISTED)
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(", ");
-    if paths.len() > LISTED {
-        listed.push_str(&format!(", ... (+{} more)", paths.len() - LISTED));
-    }
-    format!(
-        "{message}. Dirty paths: {listed}. Ways out: `graph_continue run_from_node` on spec \
-         '{next_spec}'; clean the tree by hand, then `graph_continue skip_next_spec`; or set \
-         `allow_dirty_start` on the graph."
-    )
 }

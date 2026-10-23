@@ -6,7 +6,7 @@
 use crate::daemon::handler_formatting::internal_error;
 use crate::daemon::handler_run_exec::{
     directed_run_report, find_in_flight_run, in_flight_run_error, node_name_for_error,
-    resolve_directed_spec,
+    queue_running_spec, resolve_directed_spec,
 };
 use crate::daemon::helpers::{error_result, success_result};
 use crate::db::Database;
@@ -16,9 +16,15 @@ use rmcp::model::CallToolResult;
 use rmcp::ErrorData as McpError;
 use std::sync::Arc;
 
-/// FR1: an explicit operator directive is the human ruling the per-spec
-/// execution limit waits for. Zero the spec's count before its run starts
-/// (the worktree and status are untouched) and say so in the response.
+/// FR1: the sentence every explicit operator directive's response carries.
+/// The zeroing itself happens where a directed run starts
+/// ([`GraphEngine::run_graph_dispatch`]), so every directed entry point gets it.
+pub(crate) fn limit_reset_note(spec_name: &str) -> String {
+    format!(" Execution limit reset for spec '{spec_name}'.")
+}
+
+/// FR1 for a non-directed directive (a plain `retry_current_node`): zero the
+/// spec's count now, then say so. The worktree and status are untouched.
 pub(crate) fn reset_execution_limit(
     db: &Database,
     spec_id: &str,
@@ -26,7 +32,33 @@ pub(crate) fn reset_execution_limit(
 ) -> Result<String, McpError> {
     db.clear_graph_spec_cross_run_attempts(spec_id)
         .map_err(internal_error)?;
-    Ok(format!(" Execution limit reset for spec '{spec_name}'."))
+    Ok(limit_reset_note(spec_name))
+}
+
+/// The member a paused queue-driven graph is held on when nothing is in flight:
+/// the spec its next dispatch would start, which is where the dirty-tree guard
+/// leaves it (`pending`). `None` unless the graph is paused, draws from a queue,
+/// and has no resumable member.
+pub(crate) fn held_queue_spec(
+    db: &Database,
+    graph_id: &str,
+) -> Result<Option<GraphSpec>, McpError> {
+    let Some(lp) = db.get_graph(graph_id).map_err(internal_error)? else {
+        return Ok(None);
+    };
+    let Some(queue_id) = lp.active_run_queue_id.as_deref() else {
+        return Ok(None);
+    };
+    if lp.status != GraphStatus::Paused || queue_running_spec(db, graph_id)?.is_some() {
+        return Ok(None);
+    }
+    let Some(spec_id) = db
+        .queue_next_pending_spec_id(queue_id)
+        .map_err(internal_error)?
+    else {
+        return Ok(None);
+    };
+    db.get_graph_spec(&spec_id).map_err(internal_error)
 }
 
 /// The node the spec's most recent recorded run sits on: where a pause, or
@@ -46,7 +78,11 @@ pub(crate) fn retry_restart_target(
     db: &Database,
     lp: &Graph,
 ) -> Result<Option<(GraphSpec, String)>, McpError> {
-    let Ok(spec) = resolve_directed_spec(db, &lp.id, None) else {
+    // On a paused queue the spec to restart is the member the guard held back;
+    // `resolve_directed_spec` would prefer a `failed` predecessor instead.
+    let Some(spec) =
+        held_queue_spec(db, &lp.id)?.or_else(|| resolve_directed_spec(db, &lp.id, None).ok())
+    else {
         return Ok(None);
     };
     let restart = lp.status == GraphStatus::Failed || spec.status == GraphSpecStatus::Pending;
@@ -79,7 +115,7 @@ pub(crate) fn restart_at_node(
         Ok(plan) => plan,
         Err(message) => return Ok(error_result(&message)),
     };
-    let limit = reset_execution_limit(db, &spec.id, &spec.name)?;
+    let limit = limit_reset_note(&spec.name);
     Arc::clone(engine).resume_background(
         graph_id.to_string(),
         Some(DirectedStart {

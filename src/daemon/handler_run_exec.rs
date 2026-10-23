@@ -5,7 +5,7 @@ use crate::daemon::handler::TaskTriggerHandler;
 use crate::daemon::handler_formatting::internal_error;
 use crate::daemon::handler_queues::{validate_queue_exists, validate_queue_not_consumed};
 use crate::daemon::handler_read::build_graph_summary_json;
-use crate::daemon::handler_run_directive::reset_execution_limit;
+use crate::daemon::handler_run_directive::{held_queue_spec, limit_reset_note};
 use crate::daemon::handler_validate::{resolve_prefix_or_error, validate_absolute_dir};
 use crate::daemon::helpers::{error_result, success_result};
 use crate::daemon::params::*;
@@ -257,9 +257,9 @@ impl TaskTriggerHandler {
                     .plan_directed_run(&graph_id, &spec_id, start)
                 {
                     Ok(plan) => {
-                        // FR1: the directed start is the operator's ruling on
-                        // the execution limit; clear it before the run starts.
-                        limit_note = reset_execution_limit(&self.db, &spec_id, &plan.spec_name)?;
+                        // FR1: the engine zeroes the count when the directed run
+                        // starts; the response says so.
+                        limit_note = limit_reset_note(&plan.spec_name);
                         directed_plan = Some(plan);
                         Some(crate::graph_engine::DirectedStart {
                             spec_id,
@@ -494,19 +494,22 @@ pub(crate) fn handle_skip_next_spec(db: &Database, graph_id: &str) -> Result<(),
         .into_iter()
         .find(|spec| spec.status.is_resumable());
 
-    // FR6: a failed graph, or a paused one whose current spec never started
-    // (a queue member held back by the dirty-tree guard), skips its current
-    // non-terminal spec — the same spec `run_from_node` would name.
+    // FR6: a failed graph skips its current non-terminal spec, the one
+    // `run_from_node` names. A paused queue held back by the dirty-tree guard
+    // skips the member it held, never the `failed` predecessor before it.
     let current_spec = match bound_running {
         Some(spec) => spec,
         None => match queue_running_spec(db, graph_id)? {
             Some(spec) => spec,
-            None => resolve_directed_spec(db, graph_id, None).map_err(|_| {
-                McpError::invalid_params(
-                    "No running spec found to skip from this paused graph.",
-                    None,
-                )
-            })?,
+            None => match held_queue_spec(db, graph_id)? {
+                Some(spec) => spec,
+                None => resolve_directed_spec(db, graph_id, None).map_err(|_| {
+                    McpError::invalid_params(
+                        "No running spec found to skip from this paused graph.",
+                        None,
+                    )
+                })?,
+            },
         },
     };
 

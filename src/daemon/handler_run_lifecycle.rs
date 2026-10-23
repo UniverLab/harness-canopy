@@ -4,7 +4,8 @@
 use crate::daemon::handler::TaskTriggerHandler;
 use crate::daemon::handler_formatting::internal_error;
 use crate::daemon::handler_run_directive::{
-    not_continuable_refusal, reset_execution_limit, restart_at_node, retry_restart_target,
+    limit_reset_note, not_continuable_refusal, reset_execution_limit, restart_at_node,
+    retry_restart_target,
 };
 use crate::daemon::handler_run_exec::{
     directed_run_report, find_in_flight_run, handle_retry_current_node, handle_skip_next_spec,
@@ -434,8 +435,8 @@ impl TaskTriggerHandler {
             Ok(plan) => plan,
             Err(message) => return Ok(error_result(&message)),
         };
-        // FR1: the directed run is the operator's ruling on the execution limit.
-        let limit = reset_execution_limit(&self.db, &spec.id, &spec.name)?;
+        // FR1: the engine zeroes the count when the directed run starts.
+        let limit = limit_reset_note(&spec.name);
         Arc::clone(&self.graph_engine).resume_background(
             graph_id.clone(),
             Some(crate::graph_engine::DirectedStart {
