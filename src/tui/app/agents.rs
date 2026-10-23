@@ -175,11 +175,18 @@ impl App {
     }
 
     pub fn ensure_sidebar_brain(&mut self) {
-        let (_tw, th) = ratatui::crossterm::terminal::size().unwrap_or((120, 40));
-        let sidebar_h = th.saturating_sub(2);
-        let cols = (30u16.saturating_sub(2)) as usize;
-        let dashboard_h = if sidebar_h >= 6 { 6 } else { 0 };
-        let rows = sidebar_h.saturating_sub(dashboard_h) as usize;
+        let (cols, rows) = match self.sidebar_brain_rect {
+            Some(rect) => (rect.width as usize, rect.height as usize),
+            None => {
+                let (_tw, th) = ratatui::crossterm::terminal::size().unwrap_or((120, 40));
+                let sidebar_h = th.saturating_sub(2);
+                let dashboard_h = if sidebar_h >= 6 { 6 } else { 0 };
+                (
+                    (crate::tui::ui::SIDEBAR_WIDTH.saturating_sub(1)) as usize,
+                    sidebar_h.saturating_sub(dashboard_h) as usize,
+                )
+            }
+        };
 
         if cols < 6 || rows < 3 {
             return;
@@ -799,6 +806,46 @@ mod tests {
     fn effective_brain_dims_height_exactly_minimum() {
         let (_cols, rows) = effective_brain_dims((100, 3));
         assert_eq!(rows, 3);
+    }
+
+    fn test_app() -> (App, tempfile::TempDir) {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let db = std::sync::Arc::new(crate::db::Database::new(&path).unwrap());
+        let data_dir = tempfile::tempdir().unwrap();
+        let app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
+        (app, data_dir)
+    }
+
+    #[test]
+    fn ensure_sidebar_brain_uses_the_drawn_rect() {
+        use ratatui::layout::Rect;
+        let (mut app, _data_dir) = test_app();
+        app.sidebar_brain_rect = Some(Rect::new(0, 10, 32, 20));
+        app.ensure_sidebar_brain();
+        let brain = app.sidebar_brain.as_ref().expect("brain should exist");
+        assert_eq!(brain.cols, 32);
+        assert_eq!(brain.rows, 20);
+        app.sidebar_brain_rect = Some(Rect::new(0, 10, 30, 20));
+        app.ensure_sidebar_brain();
+        let brain = app.sidebar_brain.as_ref().expect("brain should exist");
+        assert_eq!(brain.cols, 30);
+        assert_eq!(brain.rows, 20);
+    }
+
+    #[test]
+    fn ensure_sidebar_brain_without_a_rect_uses_the_sidebar_width() {
+        let (mut app, _data_dir) = test_app();
+        app.sidebar_brain_rect = None;
+        app.ensure_sidebar_brain();
+        let brain = app.sidebar_brain.as_ref().expect("brain should exist");
+        assert_eq!(brain.cols, crate::tui::ui::SIDEBAR_WIDTH as usize - 1);
     }
 }
 
