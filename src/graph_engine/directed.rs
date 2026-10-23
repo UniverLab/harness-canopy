@@ -583,6 +583,66 @@ mod tests {
     }
 
     #[test]
+    fn directed_start_excludes_target_from_reused_outputs() {
+        let (nodes, edges) = abc_graph();
+        let runs = vec![
+            run(
+                "A",
+                GraphRunStatus::Pass,
+                Some(serde_json::json!({"a": "out"})),
+                None,
+            ),
+            run(
+                "B",
+                GraphRunStatus::Pass,
+                Some(serde_json::json!({"b": "out"})),
+                None,
+            ),
+        ];
+        let reused = reused_output_records(&nodes, &edges, &["B".to_string()], &runs);
+        assert_eq!(reused, vec![("A".to_string(), "run-A".to_string())]);
+        assert!(!reused.iter().any(|(name, _)| name == "B"));
+    }
+
+    #[test]
+    fn directed_start_refuses_failed_upstream_prerequisite() {
+        let s = spec("spec-1");
+        let (nodes, edges) = abc_graph();
+        let runs = vec![run(
+            "A",
+            GraphRunStatus::Fail,
+            Some(serde_json::json!({"a": "out"})),
+            None,
+        )];
+        let directed = DirectedStart {
+            spec_id: s.id.clone(),
+            node_arg: "B".to_string(),
+        };
+        let err =
+            resolve_spec_start(&nodes, &edges, &s, &runs, &[], false, Some(&directed)).unwrap_err();
+        assert!(err.to_string().contains("prerequisite node 'A'"), "{err}");
+        assert!(err.to_string().contains("fail"), "{err}");
+    }
+
+    #[test]
+    fn directed_start_refuses_error_and_interrupted_upstream_prerequisites() {
+        for status in [GraphRunStatus::Error, GraphRunStatus::Interrupted] {
+            let s = spec("spec-1");
+            let (nodes, edges) = abc_graph();
+            let mut r = run("A", status, Some(serde_json::json!({"a": "out"})), None);
+            r.id = "run-A".to_string();
+            let runs = vec![r];
+            let directed = DirectedStart {
+                spec_id: s.id.clone(),
+                node_arg: "B".to_string(),
+            };
+            let err = resolve_spec_start(&nodes, &edges, &s, &runs, &[], false, Some(&directed))
+                .unwrap_err();
+            assert!(err.to_string().contains("prerequisite node 'A'"), "{err}");
+        }
+    }
+
+    #[test]
     fn directed_start_at_ensemble_resolves_to_ensemble_cursor() {
         let s = spec("spec-1");
         let nodes = vec![

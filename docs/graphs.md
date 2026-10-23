@@ -539,7 +539,6 @@ its own old output is never reused. If an upstream node's latest run is
 `failed`, `error` or `interrupted`, the directed run is refused and that node
 is named: a failed prerequisite is never treated as passed. The spec cursor
 is set to the start node, and the graph then runs with its normal edges,
-cursor to the start node, and then runs the graph with its normal edges,
 routers, ensembles and gates. On a queue-driven graph the chosen spec is
 what runs first: queue members before it are marked `skipped`, members
 after it run in their usual order, and any other member left `running` by a
