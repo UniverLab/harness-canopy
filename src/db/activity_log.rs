@@ -225,6 +225,9 @@ impl Database {
 
     /// Delete entries beyond `max_entries` for one workdir (oldest first).
     /// Returns the number of rows removed.
+    ///
+    /// Age is the AUTOINCREMENT id, not `created_at`: a wall clock that steps
+    /// back (WSL resyncs) would otherwise keep an old row and drop a newer one.
     pub fn prune_activity_log(&self, workdir: &str, max_entries: i64) -> Result<usize> {
         let conn = self
             .conn
@@ -234,7 +237,7 @@ impl Database {
             "DELETE FROM activity_log WHERE id IN (
                  SELECT id FROM activity_log
                  WHERE workdir = ?1
-                 ORDER BY created_at DESC, id DESC
+                 ORDER BY id DESC
                  LIMIT -1 OFFSET ?2
              )",
             rusqlite::params![workdir, max_entries],
