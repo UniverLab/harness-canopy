@@ -5,6 +5,7 @@ use crate::daemon::handler::TaskTriggerHandler;
 use crate::daemon::handler_formatting::internal_error;
 use crate::daemon::handler_queues::{validate_queue_exists, validate_queue_not_consumed};
 use crate::daemon::handler_read::build_graph_summary_json;
+use crate::daemon::handler_run_directive::reset_execution_limit;
 use crate::daemon::handler_validate::{resolve_prefix_or_error, validate_absolute_dir};
 use crate::daemon::helpers::{error_result, success_result};
 use crate::daemon::params::*;
@@ -242,6 +243,7 @@ impl TaskTriggerHandler {
         // target spec is the first spec this run would execute (the same
         // preview the dirty-start check above used).
         let mut directed_plan = None;
+        let mut limit_note = String::new();
         let directed = match start_node_id {
             Some(start) => {
                 let Some(spec_id) = next_spec_preview.clone() else {
@@ -255,6 +257,9 @@ impl TaskTriggerHandler {
                     .plan_directed_run(&graph_id, &spec_id, start)
                 {
                     Ok(plan) => {
+                        // FR1: the directed start is the operator's ruling on
+                        // the execution limit; clear it before the run starts.
+                        limit_note = reset_execution_limit(&self.db, &spec_id, &plan.spec_name)?;
                         directed_plan = Some(plan);
                         Some(crate::graph_engine::DirectedStart {
                             spec_id,
@@ -275,7 +280,10 @@ impl TaskTriggerHandler {
             sandbox,
             directed,
         );
-        let report = directed_run_report(directed_plan.as_ref());
+        let report = format!(
+            "{limit_note}{}",
+            directed_run_report(directed_plan.as_ref())
+        );
         Ok(success_result(&match launch_warning {
             Some(warning) => format!(
                 "Graph '{}' launched in background. WARNING: {}{}",
@@ -486,14 +494,20 @@ pub(crate) fn handle_skip_next_spec(db: &Database, graph_id: &str) -> Result<(),
         .into_iter()
         .find(|spec| spec.status.is_resumable());
 
+    // FR6: a failed graph, or a paused one whose current spec never started
+    // (a queue member held back by the dirty-tree guard), skips its current
+    // non-terminal spec — the same spec `run_from_node` would name.
     let current_spec = match bound_running {
         Some(spec) => spec,
-        None => queue_running_spec(db, graph_id)?.ok_or_else(|| {
-            McpError::invalid_params(
-                "No running spec found to skip from this paused graph.",
-                None,
-            )
-        })?,
+        None => match queue_running_spec(db, graph_id)? {
+            Some(spec) => spec,
+            None => resolve_directed_spec(db, graph_id, None).map_err(|_| {
+                McpError::invalid_params(
+                    "No running spec found to skip from this paused graph.",
+                    None,
+                )
+            })?,
+        },
     };
 
     db.update_graph_spec_status(

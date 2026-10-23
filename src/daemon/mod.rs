@@ -40,6 +40,7 @@ pub(crate) mod handler_queues;
 pub(crate) mod handler_read;
 pub(crate) mod handler_registry;
 pub(crate) mod handler_roster;
+pub(crate) mod handler_run_directive;
 pub(crate) mod handler_run_exec;
 pub(crate) mod handler_run_history;
 pub(crate) mod handler_run_lifecycle;

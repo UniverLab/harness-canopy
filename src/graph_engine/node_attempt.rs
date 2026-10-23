@@ -641,8 +641,10 @@ impl GraphEngine {
         }
         Ok(Some(format!(
             "Spec '{}' failed {} time(s) across separate graph executions (limit {}); last \
-             failure: {}",
-            spec.name, attempts, self.spec_attempt_limit, summary
+             failure: {}. To clear the limit: `graph_reset` with `specs: [{}]` clears this \
+             spec's execution count (the worktree is not touched); then `graph_run` or \
+             `run_from_node`.",
+            spec.name, attempts, self.spec_attempt_limit, summary, spec.id
         )))
     }
 }

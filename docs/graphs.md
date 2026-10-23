@@ -477,6 +477,27 @@ told apart. `graph_audit_node_configs` lists every node/member whose
 effective budget differs from its platform's own under
 `infra_config_overrides`.
 
+## Execution limit
+
+A spec that fails with a genuine verdict in separate graph executions is
+counted per spec, across relaunches and daemon restarts. Once it reaches
+the limit (`spec_attempt_limit`, default 3) the graph pauses with a blocker
+instead of failing again. Infrastructure failures do not count.
+
+To clear the limit, do one of these:
+
+- **Reset the spec by id.** `graph_reset` with `specs: [<spec id>]` zeroes
+  that spec's execution count and leaves its worktree untouched. Then
+  `graph_run` or `graph_continue run_from_node` relaunches it. A `graph_reset`
+  without `specs` keeps every spec's count.
+- **Give an explicit directive.** `graph_run` with `start_node_id`,
+  `graph_continue` with `run_from_node`, or `graph_continue` with
+  `retry_current_node` (on a failed graph, or on a pending spec with a
+  recorded node) resets the targeted spec's count before its run starts. The
+  response says `Execution limit reset for spec '<name>'`.
+
+Automatic re-runs (cron auto-continue, autorun) never reset the count.
+
 ## Lifecycle
 
 Create → run → (pause / continue) → complete. `graph_continue`
@@ -727,6 +748,16 @@ analysing the repo from cold. Ungrouped members never share a session.
 Queue membership is unaffected by `graph_run` — specs stay standalone.
 The `graph info` CLI and `graph_get` MCP tool show queue-driven progress
 by reconstructing what ran from the run history.
+
+**Dirty-tree guard between specs.** The launch guard that refuses a dirty
+worktree at `graph_run` also runs every time a queue run moves from one spec
+to the next: after a completed, failed, skipped, interrupted or limit-blocked
+spec alike. A refusal pauses the graph (it does not fail it). The blocker
+lists the first 20 dirty paths and the ways out: `graph_continue run_from_node`
+on the next spec, cleaning the tree by hand and then `graph_continue
+skip_next_spec`, or `allow_dirty_start` on the graph. A directed start on that
+spec is not refused again by the guard. `allow_dirty_start` lets the run
+advance.
 
 When a queue run drains all runnable members, the graph settles on its own:
 `completed` if every member completed or was skipped, or `failed` — naming

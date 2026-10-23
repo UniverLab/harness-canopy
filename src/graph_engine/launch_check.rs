@@ -279,7 +279,7 @@ impl GraphEngine {
         if predecessor.is_none() && !resuming {
             return Ok(None);
         }
-        let (dirty, _paths) = capture_workdir_dirty_with_paths(workdir).await;
+        let (dirty, paths) = capture_workdir_dirty_with_paths(workdir).await;
         let Some(count) = dirty.filter(|n| *n > 0) else {
             return Ok(None);
         };
@@ -318,7 +318,11 @@ impl GraphEngine {
         } else {
             format!("{head} — {attribution} — launched: the next spec is the one that left the dirt, resuming its own work.")
         };
-        Ok(Some(DirtyStartNotice { refuse, message }))
+        Ok(Some(DirtyStartNotice {
+            refuse,
+            message,
+            paths,
+        }))
     }
 
     /// CM29: called once at daemon boot, right after

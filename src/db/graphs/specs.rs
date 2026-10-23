@@ -41,6 +41,23 @@ impl Database {
         Ok(rows > 0)
     }
 
+    /// FR1: zero one spec's cross-run attempt count and nothing else — the
+    /// status, heads and worktree stay as they are. An explicit operator
+    /// directive (`graph_continue` / `graph_run` with a start node) calls this
+    /// before its run starts, so the human ruling clears the limit the same way
+    /// a named `graph_reset` does.
+    pub fn clear_graph_spec_cross_run_attempts(&self, spec_id: &str) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let rows = conn.execute(
+            "UPDATE graph_specs SET cross_run_attempts = 0, updated_at = ?2 WHERE id = ?1",
+            params![spec_id, Utc::now().timestamp_millis()],
+        )?;
+        Ok(rows > 0)
+    }
+
     /// C19: the spec's persisted cross-run attempt count — how many separate
     /// graph executions it has failed with a genuine (non-infrastructure)
     /// verdict. `0` for a spec that has never failed this way (including

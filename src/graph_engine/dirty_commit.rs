@@ -68,6 +68,9 @@ pub(crate) async fn capture_workdir_dirty_with_paths(workdir: &str) -> (Option<i
 pub struct DirtyStartNotice {
     pub refuse: bool,
     pub message: String,
+    /// The dirty paths the worktree reported (`git status --porcelain`),
+    /// so a refusal can list what blocks the launch.
+    pub paths: Vec<String>,
 }
 
 /// CM29: the one-line dirty-tree note folded onto a failed/interrupted

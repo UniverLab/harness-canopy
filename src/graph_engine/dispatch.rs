@@ -455,6 +455,13 @@ impl GraphEngine {
                     continue;
                 }
             }
+            // FR2: a directed spec is the operator's named start, so the
+            // advance guard does not second-guess it; every other pick is a
+            // move from one queue spec to the next and must pass the guard.
+            let directed_here = ctx.directed.is_some_and(|d| d.spec_id == spec.id);
+            if !directed_here && self.refuse_dirty_queue_advance(ctx, &spec).await? {
+                return Ok(DispatchFlow::Stop);
+            }
             let outcome = self
                 .run_spec(
                     ctx.lp,
@@ -481,6 +488,38 @@ impl GraphEngine {
             }
         }
         Ok(DispatchFlow::Continue)
+    }
+
+    /// FR2: the dirty-tree guard between the specs of one queue run. Before the
+    /// pick loop starts `spec` — after a completed, failed, skipped, interrupted
+    /// or limit-blocked predecessor alike — it runs the launch guard
+    /// ([`Self::dirty_start_check`]) against the worktree. A refusal pauses the
+    /// graph with the guard's text, the dirty paths and the ways out; it never
+    /// fails the graph. Returns `true` when the graph was paused and the loop
+    /// must stop.
+    async fn refuse_dirty_queue_advance(
+        &self,
+        ctx: &DispatchCtx<'_>,
+        spec: &GraphSpec,
+    ) -> Result<bool> {
+        let Some(notice) = self
+            .dirty_start_check(
+                ctx.graph_id,
+                ctx.workdir,
+                Some(&spec.id),
+                ctx.lp.allow_dirty_start,
+            )
+            .await?
+        else {
+            return Ok(false);
+        };
+        if !notice.refuse {
+            return Ok(false);
+        }
+        let blocker = dirty_advance_blocker(&spec.name, &notice.message, &notice.paths);
+        self.block_graph(ctx.graph_id, Some(ctx.claimed_at), &blocker)
+            .await?;
+        Ok(true)
     }
 
     pub(crate) fn purge_terminal_placeholder_specs(&self, graph_id: &str) -> Result<()> {
@@ -731,4 +770,25 @@ impl GraphEngine {
             }
         }
     }
+}
+
+/// FR2: the blocker a queue run pauses on when the dirty-tree guard refuses the
+/// next spec. Keeps the guard's own text, lists the first 20 dirty paths, and
+/// names the ways out.
+pub(crate) fn dirty_advance_blocker(next_spec: &str, message: &str, paths: &[String]) -> String {
+    const LISTED: usize = 20;
+    let mut listed = paths
+        .iter()
+        .take(LISTED)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if paths.len() > LISTED {
+        listed.push_str(&format!(", ... (+{} more)", paths.len() - LISTED));
+    }
+    format!(
+        "{message}. Dirty paths: {listed}. Ways out: `graph_continue run_from_node` on spec \
+         '{next_spec}'; clean the tree by hand, then `graph_continue skip_next_spec`; or set \
+         `allow_dirty_start` on the graph."
+    )
 }

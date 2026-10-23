@@ -8492,6 +8492,412 @@ echo done
         );
     }
 
+    /// FR2 fixture: a queue whose first member `failed` on the graph's worktree
+    /// (dirty when `dirty`), followed by a pending `next` member that a passing
+    /// check node completes.
+    fn dirty_queue_fixture(
+        dirty: bool,
+        allow_dirty_start: bool,
+    ) -> Result<(TempDir, Arc<Database>, GraphEngine, String, String)> {
+        let (dir, db, engine, graph_id) = bare_graph_fixture()?;
+        // The fixture's database lives in the worktree: ignore it before the
+        // repo commits, or every write to it reads as a dirty tree.
+        std::fs::write(
+            dir.path().join(".gitignore"),
+            format!("{TEST_DB_FILENAME}*\n"),
+        )?;
+        init_git_repo(dir.path());
+        let workdir = dir.path().to_string_lossy().to_string();
+        db.insert_graph_spec(&dirty_predecessor_spec(
+            "pred-a",
+            &workdir,
+            GraphSpecStatus::Failed,
+        ))?;
+        let next = standalone_spec("queue-next", 2);
+        db.insert_graph_spec(&next)?;
+        insert_queue_with_members(&db, "queue-1", &["pred-a", &next.id]);
+        db.insert_graph_node(&GraphNode {
+            id: "graph-check".to_string(),
+            spec_id: None,
+            graph_id: Some(graph_id.clone()),
+            name: "check".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": "printf APPROVED",
+                "success_condition": "exit_code_0"
+            }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })?;
+        db.update_graph_allow_dirty_start(&graph_id, allow_dirty_start)?;
+        if dirty {
+            std::fs::write(dir.path().join("x.txt"), "x")?;
+        }
+        Ok((dir, db, engine, graph_id, next.id))
+    }
+
+    /// FR2: a queue run whose failed predecessor left the worktree dirty pauses
+    /// before the next member starts; the blocker names the dirty path and the
+    /// ways out, and the graph is paused rather than failed.
+    #[tokio::test]
+    async fn failed_dirty_queue_spec_pauses_before_next_spec() {
+        let (_dir, db, engine, graph_id, next_id) = dirty_queue_fixture(true, false).unwrap();
+        engine
+            .run_graph_dispatch(
+                graph_id.clone(),
+                Some("queue-1".to_string()),
+                None,
+                DispatchMode::fresh(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(
+            lp.status,
+            GraphStatus::Paused,
+            "the guard pauses, never fails"
+        );
+        assert_eq!(
+            db.get_graph_spec(&next_id).unwrap().unwrap().status,
+            GraphSpecStatus::Pending,
+            "the next spec must not start on a dirty tree"
+        );
+        let blocker = db
+            .list_recent_activity_log_entries(50)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.message)
+            .find(|message| message.starts_with("Blocked: "))
+            .unwrap_or_default();
+        assert!(
+            blocker.contains("x.txt"),
+            "blocker lists dirty paths: {blocker}"
+        );
+        for way_out in ["run_from_node", "skip_next_spec", "allow_dirty_start"] {
+            assert!(
+                blocker.contains(way_out),
+                "blocker names {way_out}: {blocker}"
+            );
+        }
+    }
+
+    /// FR2: with `allow_dirty_start` on the graph the same dirty queue run
+    /// advances and completes the next member.
+    #[tokio::test]
+    async fn dirty_queue_guard_allow_dirty_start_advances() {
+        let (_dir, db, engine, graph_id, next_id) = dirty_queue_fixture(true, true).unwrap();
+        engine
+            .run_graph_dispatch(
+                graph_id.clone(),
+                Some("queue-1".to_string()),
+                None,
+                DispatchMode::fresh(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            db.get_graph_spec(&next_id).unwrap().unwrap().status,
+            GraphSpecStatus::Completed,
+            "allow_dirty_start lets the next member run"
+        );
+    }
+
+    /// FR2: a failed predecessor that left a clean tree does not block the next
+    /// queue member.
+    #[tokio::test]
+    async fn failed_clean_queue_spec_advances() {
+        let (_dir, db, engine, graph_id, next_id) = dirty_queue_fixture(false, false).unwrap();
+        engine
+            .run_graph_dispatch(
+                graph_id.clone(),
+                Some("queue-1".to_string()),
+                None,
+                DispatchMode::fresh(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            db.get_graph_spec(&next_id).unwrap().unwrap().status,
+            GraphSpecStatus::Completed,
+            "a clean tree lets the next member run"
+        );
+    }
+
+    /// FR1: a directed run on a spec at its execution limit still runs its
+    /// first node, and the directive reports the reset it applied.
+    #[tokio::test]
+    async fn directed_run_at_limit_resets_count_and_runs_first_node() {
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        init_git_repo(dir.path());
+        let spec = standalone_spec("limit-directed", 1);
+        db.insert_graph_spec(&spec).unwrap();
+        insert_queue_with_members(&db, "queue-1", &[&spec.id]);
+        db.insert_graph_node(&GraphNode {
+            id: "graph-check".to_string(),
+            spec_id: None,
+            graph_id: Some(graph_id.clone()),
+            name: "check".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": "printf APPROVED",
+                "success_condition": "exit_code_0"
+            }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+        for _ in 0..3 {
+            db.increment_graph_spec_cross_run_attempts(&spec.id)
+                .unwrap();
+        }
+        assert_eq!(db.get_graph_spec_cross_run_attempts(&spec.id).unwrap(), 3);
+
+        let report =
+            crate::daemon::handler_run_directive::reset_execution_limit(&db, &spec.id, &spec.name)
+                .unwrap();
+        assert!(
+            report.contains("Execution limit reset for spec 'limit-directed'"),
+            "the directive reports the reset: {report}"
+        );
+        assert_eq!(db.get_graph_spec_cross_run_attempts(&spec.id).unwrap(), 0);
+
+        engine
+            .run_graph_dispatch(
+                graph_id.clone(),
+                Some("queue-1".to_string()),
+                None,
+                DispatchMode::fresh_from(DirectedStart {
+                    spec_id: spec.id.clone(),
+                    node_arg: "graph-check".to_string(),
+                }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            db.get_graph_spec(&spec.id).unwrap().unwrap().status,
+            GraphSpecStatus::Completed,
+            "the directed run executes its first node at the limit"
+        );
+    }
+
+    /// C19/FR3: the execution-limit blocker names the named-spec `graph_reset`
+    /// that clears the count, says the worktree is untouched, and gives the
+    /// relaunch verbs.
+    #[test]
+    fn execution_limit_blocker_names_graph_reset_and_spec_id() {
+        let (_dir, db, engine, _graph_id) = bare_graph_fixture().unwrap();
+        let spec = standalone_spec("limit-blocker", 1);
+        db.insert_graph_spec(&spec).unwrap();
+        let mut blocker = None;
+        for _ in 0..engine.spec_attempt_limit {
+            blocker = engine.record_spec_attempt(&spec, "boom", false).unwrap();
+        }
+        let blocker = blocker.expect("the limit is reached");
+        assert!(blocker.contains("graph_reset"), "{blocker}");
+        assert!(
+            blocker.contains(&format!("specs: [{}]", spec.id)),
+            "names the spec id: {blocker}"
+        );
+        assert!(blocker.contains("worktree is not touched"), "{blocker}");
+        assert!(
+            blocker.contains("`graph_run` or `run_from_node`"),
+            "{blocker}"
+        );
+    }
+
+    /// FR6: a completed graph's continue refusal names the status and the
+    /// `graph_reset` way out.
+    #[test]
+    fn completed_graph_continue_refusal_names_graph_reset() {
+        let refusal = crate::daemon::handler_run_directive::not_continuable_refusal(
+            "wf-test",
+            GraphStatus::Completed,
+        );
+        assert!(refusal.contains("'completed'"), "{refusal}");
+        assert!(refusal.contains("graph_reset"), "{refusal}");
+        assert!(refusal.contains("run_from_node"), "{refusal}");
+    }
+
+    /// FR2: the blocker lists at most the first 20 dirty paths and says how
+    /// many more there are.
+    #[test]
+    fn dirty_advance_blocker_caps_listed_paths() {
+        let paths: Vec<String> = (0..25).map(|i| format!("p{i}.txt")).collect();
+        let blocker = dispatch::dirty_advance_blocker("next", "dirty", &paths);
+        assert!(blocker.contains("p19.txt"), "{blocker}");
+        assert!(!blocker.contains("p20.txt"), "{blocker}");
+        assert!(blocker.contains("+5 more"), "{blocker}");
+    }
+
+    /// Seed the graph-level `graph-check` node (a passing check) and one
+    /// finished run of it for `spec_id`, as a spec that stopped on that node
+    /// leaves behind.
+    fn seed_stopped_at_check_node(db: &Database, graph_id: &str, spec_id: &str) {
+        db.insert_graph_node(&GraphNode {
+            id: "graph-check".to_string(),
+            spec_id: None,
+            graph_id: Some(graph_id.to_string()),
+            name: "check".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": "printf APPROVED",
+                "success_condition": "exit_code_0"
+            }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+        db.insert_graph_run(&GraphNodeRun {
+            id: format!("run-{spec_id}-seed"),
+            graph_id: graph_id.to_string(),
+            spec_id: spec_id.to_string(),
+            node_id: "graph-check".to_string(),
+            status: GraphRunStatus::Fail,
+            input: None,
+            output: None,
+            started_at: chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+            completed_at: None,
+            iteration: 1,
+            pid: None,
+            boot_id: None,
+            session_id: None,
+            executed_platform: None,
+            executed_model: None,
+        })
+        .unwrap();
+    }
+
+    /// The engine side of `graph_continue retry_current_node` where
+    /// `retry_restart_target` picks a directed restart: the same target the
+    /// handler resolves, dispatched synchronously (the handler backgrounds this
+    /// call via `restart_at_node`, so it uses the resume dispatch that
+    /// `resume_background` uses). Returns the node the restart named.
+    async fn run_retry_restart(
+        db: &Database,
+        engine: &GraphEngine,
+        graph_id: &str,
+    ) -> Option<String> {
+        let lp = db.get_graph(graph_id).unwrap().unwrap();
+        let (spec, node) =
+            crate::daemon::handler_run_directive::retry_restart_target(db, &lp).unwrap()?;
+        crate::daemon::handler_run_directive::reset_execution_limit(db, &spec.id, &spec.name)
+            .unwrap();
+        engine
+            .run_graph_dispatch(
+                graph_id.to_string(),
+                Some("queue-1".to_string()),
+                None,
+                DispatchMode::resume_from(DirectedStart {
+                    spec_id: spec.id.clone(),
+                    node_arg: node.clone(),
+                }),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        Some(node)
+    }
+
+    /// FR6: `retry_current_node` on a failed graph restarts the failed spec at
+    /// the node it failed on, and that node runs again.
+    #[tokio::test]
+    async fn retry_current_node_failed_graph_retries_failed_node() {
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        init_git_repo(dir.path());
+        let spec = standalone_spec("retry-failed", 1);
+        db.insert_graph_spec(&spec).unwrap();
+        insert_queue_with_members(&db, "queue-1", &[&spec.id]);
+        db.set_graph_active_run_queue(&graph_id, Some("queue-1"))
+            .unwrap();
+        seed_stopped_at_check_node(&db, &graph_id, &spec.id);
+        db.update_graph_spec_status(&spec.id, GraphSpecStatus::Failed, None, None)
+            .unwrap();
+        db.update_graph_status(&graph_id, GraphStatus::Failed, None, None)
+            .unwrap();
+
+        let node = run_retry_restart(&db, &engine, &graph_id).await;
+        assert_eq!(
+            node.as_deref(),
+            Some("graph-check"),
+            "the failed node is the target"
+        );
+        assert_eq!(
+            db.get_graph_spec(&spec.id).unwrap().unwrap().status,
+            GraphSpecStatus::Completed,
+            "the failed node ran again and passed"
+        );
+        let runs = db.list_graph_runs_for_spec(&spec.id).unwrap();
+        assert_eq!(runs.len(), 2, "the seeded run plus the re-run: {runs:?}");
+    }
+
+    /// FR7: a paused graph whose current spec is `pending` with a recorded
+    /// current node resumes with `retry_current_node`: the current node runs
+    /// first and the spec goes through `running` to completion.
+    #[tokio::test]
+    async fn retry_pending_current_spec_with_cursor_resumes_at_current_node() {
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        init_git_repo(dir.path());
+        let spec = standalone_spec("pending-cursor", 1);
+        db.insert_graph_spec(&spec).unwrap();
+        insert_queue_with_members(&db, "queue-1", &[&spec.id]);
+        db.set_graph_active_run_queue(&graph_id, Some("queue-1"))
+            .unwrap();
+        seed_stopped_at_check_node(&db, &graph_id, &spec.id);
+        db.update_graph_spec_status(&spec.id, GraphSpecStatus::Pending, None, None)
+            .unwrap();
+        db.update_graph_status(&graph_id, GraphStatus::Paused, None, None)
+            .unwrap();
+
+        let node = run_retry_restart(&db, &engine, &graph_id).await;
+        assert_eq!(
+            node.as_deref(),
+            Some("graph-check"),
+            "current_node is the restart target"
+        );
+        let runs = db.list_graph_runs_for_spec(&spec.id).unwrap();
+        assert_eq!(runs.len(), 2, "current_node ran first: {runs:?}");
+        assert_eq!(runs.last().unwrap().node_id, "graph-check");
+        assert_eq!(
+            db.get_graph_spec(&spec.id).unwrap().unwrap().status,
+            GraphSpecStatus::Completed
+        );
+    }
+
+    /// FR7 guard: a spec that is `running` on a paused graph keeps the
+    /// resumable path, so no directed restart is chosen for it.
+    #[test]
+    fn running_spec_keeps_resumable_path_not_directed_restart() {
+        let (_dir, db, _engine, graph_id) = bare_graph_fixture().unwrap();
+        let spec = standalone_spec("running-spec", 1);
+        db.insert_graph_spec(&spec).unwrap();
+        insert_queue_with_members(&db, "queue-1", &[&spec.id]);
+        db.set_graph_active_run_queue(&graph_id, Some("queue-1"))
+            .unwrap();
+        seed_stopped_at_check_node(&db, &graph_id, &spec.id);
+        db.update_graph_spec_status(&spec.id, GraphSpecStatus::Running, None, None)
+            .unwrap();
+        db.update_graph_status(&graph_id, GraphStatus::Paused, None, None)
+            .unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert!(
+            crate::daemon::handler_run_directive::retry_restart_target(&db, &lp)
+                .unwrap()
+                .is_none()
+        );
+    }
+
     /// End to end: a directed `graph_continue run_from_node` on a
     /// queue-driven graph targets the operator-named spec even when another
     /// member is mistakenly still `running` — it must not be displaced by the
