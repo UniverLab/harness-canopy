@@ -808,6 +808,9 @@ mod tests {
 
     /// B7 A1 frozen snapshot: per-tool `name|sha256(description)|sha256(input_schema JSON)`.
     /// Any byte drift in a description or schema fails `tool_inventory_is_byte_identical`.
+    /// The schema hashes were re-pinned for rmcp 2.x, whose `validate_and_strip` drops the
+    /// root `title`/`description` of each input schema (rmcp 1.6 kept them). Properties,
+    /// required fields and tool descriptions are unchanged by that.
     const EXPECTED_TOOL_ROWS: &[&str] = &[
                 "agent_add|dce812557e165d8d06b92ab956bafaf4c4eccd29acd4216074adbce66d116570|dbbb12a5bbe342e026592882ae703d056cf0804f60271060da1195e4a167acd9",
                 "agent_disable|a5d3befdd0358cdb34f4cbceba2ad730b8cb7968bea1f4d5af15095cfc3e5d16|aaaa4591bf27eb54bc4052fa58a07a3b5af8a671b8595c525bfe323462c90387",
