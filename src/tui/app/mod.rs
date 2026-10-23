@@ -939,7 +939,17 @@ mod tests {
             &crate::domain::canopy_config::CanopyConfig::default(),
         )
         .expect("create app");
-        assert_eq!(app.selected_project, 0);
+        // Projects are ranked by recency with second-resolution timestamps, so
+        // two upserts may land in either order: select by hash, never by index.
+        let index_of = |app: &App, hash: &str| {
+            app.projects
+                .iter()
+                .position(|p| p.hash == hash)
+                .expect("project listed")
+        };
+
+        app.selected_project = index_of(&app, "hash0");
+        app.refresh_backlog_specs().expect("refresh backlog");
         assert_eq!(
             app.backlog_specs
                 .iter()
@@ -949,7 +959,7 @@ mod tests {
             "backlog should be tag-filtered to the selected project's workdir"
         );
 
-        app.selected_project = 1;
+        app.selected_project = index_of(&app, "hash1");
         app.refresh_backlog_specs().expect("refresh backlog");
         assert_eq!(
             app.backlog_specs
