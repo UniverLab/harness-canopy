@@ -37,6 +37,10 @@ Graph
     [ensemble](#ensembles), never created directly.
 - **Edges** — connect nodes with routing conditions: `pass`, `fail`,
   `always`.
+- **Node MCP profile** — agent and ensemble nodes launched by the graph
+  engine receive a fixed set of 18 tools in `tools/list`
+  (`CANOPY_MCP_PROFILE=node`); check nodes, hooks, and other sessions keep
+  the full list. See [MCP Tools](mcp-tools.md).
 
 ## Template variables
 
