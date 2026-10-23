@@ -110,8 +110,8 @@ missing.
 | `canopy graph run <id-or-name> --workdir <path>` | Override the graph's workdir for this run only |
 | `canopy graph run <id-or-name> --from <node>` | Start the first spec this run executes at a chosen node (id, id prefix, node name, or ensemble name), reusing the recorded outputs of upstream nodes; refused, naming the node, if an upstream node's latest run failed, errored or was interrupted |
 | `canopy graph pause <id-or-name>` | Pause a running graph after the current node finishes |
-| `canopy graph continue <id-or-name> --retry-current-node` | Resume a paused graph by retrying the current node |
-| `canopy graph continue <id-or-name> --skip-next-spec` | Resume a paused graph by skipping to the next spec |
+| `canopy graph continue <id-or-name> --retry-current-node` | Resume a paused or failed graph by retrying the current node (also resumes a paused graph whose current spec is pending with a recorded node; clears that spec's execution count and the reply says so) |
+| `canopy graph continue <id-or-name> --skip-next-spec` | Resume a paused or failed graph by skipping to the next spec |
 | `canopy graph continue <id-or-name> --from <node> [--spec <spec>]` | Start a spec at a chosen node, reusing the recorded outputs of upstream nodes (refused, naming the node, if one failed, errored or was interrupted; defaults to the graph's current spec: a running/interrupted member, else a failed one, else the next pending one) |
 | `canopy graph reset <id-or-name>` | Reset a completed/failed graph back to pending (prompts for confirmation) |
 | `canopy graph reset <id-or-name> --specs <id>...` | Reset specific spec ids, even if already completed |

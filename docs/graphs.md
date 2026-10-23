@@ -144,7 +144,8 @@ instead of telling you to set a flag. When it blocks, the message says
 `allow_dirty_start: true` via `graph_update` to downgrade a refusal to a
 warning. `graph_preflight` separately reports a dirty workdir as a warning
 unconditionally, with no "previous spec" logic — call it before `graph_run` to
-see this regardless of history.
+see this regardless of history. A queue run applies the same guard between
+its specs, not only at launch — see [Spec queues](#spec-queues).
 
 ```bash
 test -z "$(git status --porcelain -- src/)" \

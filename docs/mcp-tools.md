@@ -110,11 +110,11 @@ any other tool still work. All other sessions keep the full list.
 | `graph_get` | Get a graph with its specs, nodes, and edges |
 | `graph_list` | List graphs |
 | `graph_crew` | List every graph's harness/model assignments — agent nodes outside ensembles, ensemble members and agent hooks with platform, model, timeout, crew and availability; `group_by: "pair"` summarises per platform/model pair. No prompt text is returned |
-| `graph_run` | Run a graph (optionally `start_node_id` to start the first spec at a chosen node) |
-| `graph_reset` | Reset a graph's pending specs; `clear_notes: true` also deletes the reset specs' spec notes (kept by default) |
+| `graph_run` | Run a graph (optionally `start_node_id` to start the first spec at a chosen node — a directed start clears that spec's execution count before it runs and the reply says `Execution limit reset for spec '<name>'`) |
+| `graph_reset` | Reset a graph's pending specs; with `specs: [<id>, …]` exactly those specs are reset and each named spec's execution count (the per-spec failure limit) is zeroed, while a reset without `specs` keeps every count — the worktree is never touched. `clear_notes: true` also deletes the reset specs' spec notes (kept by default) |
 | `graph_schedule_autorun` | Schedule a graph to resume or run |
 | `graph_pause` | Pause a running graph |
-| `graph_continue` | Continue a paused graph (retry/skip), or start a spec at a chosen node with `run_from_node` (`node_id` names the node the spec starts at; `spec_id` names the spec and defaults to the graph's current spec — in a queue-driven graph: a running/interrupted member, else a failed one, else the next pending one). The launch is refused, naming the node, if an upstream node's latest run failed, errored or was interrupted |
+| `graph_continue` | Continue a paused **or failed** graph (retry/skip), or start a spec at a chosen node with `run_from_node` (`node_id` names the node the spec starts at; `spec_id` names the spec and defaults to the graph's current spec — in a queue-driven graph: a running/interrupted member, else a failed one, else the next pending one). `retry_current_node` also resumes a paused graph whose current spec is `pending` with a recorded node (the state daemon recovery leaves after a reboot mid-node). `retry_current_node` and `run_from_node` (like `graph_run`'s `start_node_id`) clear the targeted spec's execution count before it runs and the reply says `Execution limit reset for spec '<name>'`; automatic re-runs keep the count. Any other graph status is refused naming the status and the ways out (`run_from_node` with `spec_id`, or `graph_reset` with `specs: [<spec id>]` then `graph_run`). The launch is refused, naming the node, if an upstream node's latest run failed, errored or was interrupted |
 | `graph_complete_node` | Complete an active graph node |
 | `graph_report_blocker` | Report a blocker for an active graph node |
 | `graph_export` | Export a graph design |
