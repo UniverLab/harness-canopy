@@ -13532,6 +13532,30 @@ mod endpoint_tests {
         )
     }
 
+    /// Run `graph_preflight` and return the `graph_warnings` array. Shared by
+    /// the quorum tests so each can assert the baseline warning first: a
+    /// negative test that only checks for silence would still pass if the
+    /// warning never existed at all.
+    async fn preflight_warnings(
+        handler: &TaskTriggerHandler,
+        graph_id: &str,
+    ) -> Vec<serde_json::Value> {
+        let result = handler
+            .graph_preflight(Parameters(GraphPreflightParams {
+                graph_id: graph_id.to_string(),
+                timeout_seconds: Some(5),
+                reviewer: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&result), "{}", text(&result));
+        let body: serde_json::Value = serde_json::from_str(&raw_text(&result)).unwrap();
+        body["graph_warnings"]
+            .as_array()
+            .unwrap_or_else(|| panic!("preflight must include graph_warnings: {body}"))
+            .clone()
+    }
+
     /// (FR1/FR4-a) An ensemble with `on_pass_to` and no `on_fail_to`, whose
     /// quorum has no `fail`/`always` edge, produces exactly one advisory
     /// `graph_warnings` entry naming the ensemble and its quorum node.
@@ -13594,12 +13618,20 @@ mod endpoint_tests {
         );
     }
 
-    /// (FR2/FR4-b) The same ensemble with `on_fail_to` set is silent.
+    /// (FR2/FR4-b) The same ensemble with `on_fail_to` set is silent — while
+    /// the identical graph without it warns first, so silence cannot be the
+    /// absence of the check.
     #[tokio::test]
     async fn graph_preflight_quiet_with_on_fail_to() {
         let (dir, db, handler) = endpoint_test_handler();
         let (lp, ensemble_id, _join_id, arbiter_id) =
             graph_with_unexited_quorum(&dir, &db, &handler).await;
+
+        assert_eq!(
+            preflight_warnings(&handler, &lp.id).await.len(),
+            1,
+            "baseline: the null-on_fail_to graph must warn before the update"
+        );
 
         let updated = handler
             .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
@@ -13628,30 +13660,27 @@ mod endpoint_tests {
             .unwrap();
         assert!(!is_err(&updated), "{}", text(&updated));
 
-        let result = handler
-            .graph_preflight(Parameters(GraphPreflightParams {
-                graph_id: lp.id.clone(),
-                timeout_seconds: Some(5),
-                reviewer: None,
-            }))
-            .await
-            .unwrap();
-        assert!(!is_err(&result), "{}", text(&result));
-        let body: serde_json::Value = serde_json::from_str(&raw_text(&result)).unwrap();
-        let warnings = body["graph_warnings"].as_array().unwrap();
+        let warnings = preflight_warnings(&handler, &lp.id).await;
         assert!(
             warnings.is_empty(),
-            "on_fail_to must silence the quorum warning: {body}"
+            "on_fail_to must silence the quorum warning: {warnings:?}"
         );
     }
 
     /// (FR2/FR4-c) No `on_fail_to` but a hand-added `always` edge from the
-    /// quorum routes a failed quorum onward, so there is nothing to warn about.
+    /// quorum routes a failed quorum onward, so there is nothing to warn about
+    /// — while the same graph without that edge warns first.
     #[tokio::test]
     async fn graph_preflight_quiet_with_manual_always_edge() {
         let (dir, db, handler) = endpoint_test_handler();
         let (lp, _ensemble_id, join_id, arbiter_id) =
             graph_with_unexited_quorum(&dir, &db, &handler).await;
+
+        assert_eq!(
+            preflight_warnings(&handler, &lp.id).await.len(),
+            1,
+            "baseline: the quorum must warn before the manual edge is added"
+        );
 
         db.insert_graph_edge(&GraphEdge {
             id: uuid::Uuid::new_v4().to_string(),
@@ -13663,21 +13692,109 @@ mod endpoint_tests {
         })
         .unwrap();
 
-        let result = handler
-            .graph_preflight(Parameters(GraphPreflightParams {
-                graph_id: lp.id.clone(),
-                timeout_seconds: Some(5),
-                reviewer: None,
+        let warnings = preflight_warnings(&handler, &lp.id).await;
+        assert!(
+            warnings.is_empty(),
+            "a manual 'always' edge is a fail exit: {warnings:?}"
+        );
+    }
+
+    /// A spec-owned ensemble (not the graph's top-level one) is the case this
+    /// warning exists for: a round-robin member reports FAIL and the spec ends
+    /// at the quorum. The spec's own graph reaches preflight through the
+    /// per-spec branch, so assert it there rather than only on the top level.
+    #[tokio::test]
+    async fn graph_preflight_warns_spec_quorum_without_fail_exit() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+
+        let mk_node =
+            |name: &str, kind: GraphNodeKind, config: serde_json::Value, position: i64| GraphNode {
+                id: uuid::Uuid::new_v4().to_string(),
+                spec_id: Some(spec.id.clone()),
+                graph_id: None,
+                name: name.to_string(),
+                kind,
+                config,
+                position,
+                created_at: chrono::Utc::now(),
+            };
+        let kickoff = mk_node(
+            "kickoff",
+            GraphNodeKind::Check,
+            serde_json::json!({"command": "true", "success_condition": "exit_code_0"}),
+            1,
+        );
+        let arbiter = mk_node(
+            "arbiter",
+            GraphNodeKind::Agent,
+            serde_json::json!({"platform": "cm19-unconfigured-platform"}),
+            2,
+        );
+        db.insert_graph_node(&kickoff).unwrap();
+        db.insert_graph_node(&arbiter).unwrap();
+
+        let added = handler
+            .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                spec_id: Some(spec.id.clone()),
+                graph_id: None,
+                name: "Implementer".to_string(),
+                kind: None,
+                prompt_template: Some("Review".to_string()),
+                members: Some(vec![
+                    EnsembleMemberParams {
+                        platform: "cm19-unconfigured-platform".to_string(),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
+                    },
+                    EnsembleMemberParams {
+                        platform: "cm19-unconfigured-platform".to_string(),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
+                    },
+                ]),
+                blueprint: None,
+                from_node: kickoff.id.clone(),
+                condition: "always".to_string(),
+                min_pass: None,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+                on_pass_to: arbiter.id.clone(),
+                on_fail_to: None,
+                commit_rights: None,
+                crew: None,
             }))
             .await
             .unwrap();
-        assert!(!is_err(&result), "{}", text(&result));
-        let body: serde_json::Value = serde_json::from_str(&raw_text(&result)).unwrap();
-        let warnings = body["graph_warnings"].as_array().unwrap();
-        assert!(
-            warnings.is_empty(),
-            "a manual 'always' edge is a fail exit: {body}"
+        assert!(!is_err(&added), "{}", text(&added));
+
+        let ensembles = db.list_ensembles_for_spec(&spec.id).unwrap();
+        assert_eq!(ensembles.len(), 1, "expected one spec ensemble");
+        let ensemble = &ensembles[0].ensemble;
+
+        let warnings = preflight_warnings(&handler, &lp.id).await;
+        assert_eq!(
+            warnings.len(),
+            1,
+            "the spec's quorum must warn: {warnings:?}"
         );
+        assert_eq!(warnings[0]["node_id"], ensemble.join_node_id);
+        assert_eq!(warnings[0]["ensemble_id"], ensemble.id);
+        assert_eq!(warnings[0]["ensemble_name"], "Implementer");
+        assert_eq!(warnings[0]["kind"], "join");
     }
 
     #[tokio::test]
