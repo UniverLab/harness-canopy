@@ -13448,6 +13448,238 @@ mod endpoint_tests {
         );
     }
 
+    /// Build a graph whose only ensemble has a pass exit but no `on_fail_to`
+    /// and no manual fail/always edge from its quorum. Returns the graph, the
+    /// ensemble id, the quorum node id and the arbiter (pass target) id.
+    async fn graph_with_unexited_quorum(
+        dir: &tempfile::TempDir,
+        db: &Database,
+        handler: &TaskTriggerHandler,
+    ) -> (Graph, String, String, String) {
+        let lp = insert_test_graph(db, dir.path());
+
+        let mk_node = |name: &str, position: i64| GraphNode {
+            id: uuid::Uuid::new_v4().to_string(),
+            spec_id: None,
+            graph_id: Some(lp.id.clone()),
+            name: name.to_string(),
+            kind: GraphNodeKind::Agent,
+            // Unconfigured platform -> probe returns NotConfigured instantly,
+            // no quota spent, preflight still succeeds.
+            config: serde_json::json!({"platform": "cm19-unconfigured-platform"}),
+            position,
+            created_at: chrono::Utc::now(),
+        };
+        let entry = mk_node("entry", 1);
+        let arbiter = mk_node("arbiter", 2);
+        db.insert_graph_node(&entry).unwrap();
+        db.insert_graph_node(&arbiter).unwrap();
+
+        let added = handler
+            .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                spec_id: None,
+                graph_id: Some(lp.id.clone()),
+                name: "Implementer".to_string(),
+                kind: None,
+                prompt_template: Some("Review".to_string()),
+                members: Some(vec![
+                    EnsembleMemberParams {
+                        platform: "cm19-unconfigured-platform".to_string(),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
+                    },
+                    EnsembleMemberParams {
+                        platform: "cm19-unconfigured-platform".to_string(),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
+                    },
+                ]),
+                blueprint: None,
+                from_node: entry.id.clone(),
+                condition: "always".to_string(),
+                min_pass: None,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+                on_pass_to: arbiter.id.clone(),
+                on_fail_to: None,
+                commit_rights: None,
+                crew: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&added), "{}", text(&added));
+
+        let ensembles = db.list_ensembles_for_graph(&lp.id).unwrap();
+        assert_eq!(ensembles.len(), 1, "expected one ensemble");
+        let ensemble = &ensembles[0].ensemble;
+        (
+            lp,
+            ensemble.id.clone(),
+            ensemble.join_node_id.clone(),
+            arbiter.id.clone(),
+        )
+    }
+
+    /// (FR1/FR4-a) An ensemble with `on_pass_to` and no `on_fail_to`, whose
+    /// quorum has no `fail`/`always` edge, produces exactly one advisory
+    /// `graph_warnings` entry naming the ensemble and its quorum node.
+    #[tokio::test]
+    async fn graph_preflight_warns_quorum_without_fail_exit() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let (lp, ensemble_id, join_id, _arbiter_id) =
+            graph_with_unexited_quorum(&dir, &db, &handler).await;
+
+        let result = handler
+            .graph_preflight(Parameters(GraphPreflightParams {
+                graph_id: lp.id.clone(),
+                timeout_seconds: Some(5),
+                reviewer: None,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            !is_err(&result),
+            "a quorum warning must not be a tool error: {}",
+            text(&result)
+        );
+        let body: serde_json::Value = serde_json::from_str(&raw_text(&result)).unwrap();
+        let warnings = body["graph_warnings"]
+            .as_array()
+            .unwrap_or_else(|| panic!("preflight must include graph_warnings: {body}"));
+        println!(
+            "{}",
+            serde_json::to_string_pretty(warnings).unwrap_or_default()
+        );
+        assert_eq!(
+            warnings.len(),
+            1,
+            "expected exactly one quorum warning: {body}"
+        );
+        let warning = &warnings[0];
+        let details = db.get_graph_details(&lp.id).unwrap().unwrap();
+        let join_name = details
+            .graph_nodes
+            .iter()
+            .find(|n| n.id == join_id)
+            .map(|n| n.name.clone())
+            .unwrap();
+        assert_eq!(warning["node_id"], join_id);
+        assert_eq!(warning["node_name"], join_name);
+        assert_eq!(warning["kind"], "join");
+        assert_eq!(warning["ensemble_id"], ensemble_id);
+        assert_eq!(warning["ensemble_name"], "Implementer");
+        assert_eq!(warning["missing_edge"], "fail");
+        let warn_text = warning["warning"].as_str().unwrap_or_default();
+        assert!(
+            warn_text.contains("Ensemble 'Implementer'")
+                && warn_text.contains(&ensemble_id)
+                && warn_text.contains("no on_fail_to"),
+            "warning must name the ensemble and the missing exit: {body}"
+        );
+        assert!(
+            body.get("would_fail").is_some(),
+            "verdict fields intact: {body}"
+        );
+    }
+
+    /// (FR2/FR4-b) The same ensemble with `on_fail_to` set is silent.
+    #[tokio::test]
+    async fn graph_preflight_quiet_with_on_fail_to() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let (lp, ensemble_id, _join_id, arbiter_id) =
+            graph_with_unexited_quorum(&dir, &db, &handler).await;
+
+        let updated = handler
+            .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                ensemble_id: ensemble_id.clone(),
+                kind: None,
+                prompt_template: None,
+                members: None,
+                crew: None,
+                min_pass: None,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+                on_pass_to: None,
+                on_fail_to: Some(Some(arbiter_id)),
+                from_node: None,
+                condition: None,
+                add_entry_from: None,
+                add_entry_condition: None,
+                remove_entry_from: None,
+                commit_rights: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&updated), "{}", text(&updated));
+
+        let result = handler
+            .graph_preflight(Parameters(GraphPreflightParams {
+                graph_id: lp.id.clone(),
+                timeout_seconds: Some(5),
+                reviewer: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&result), "{}", text(&result));
+        let body: serde_json::Value = serde_json::from_str(&raw_text(&result)).unwrap();
+        let warnings = body["graph_warnings"].as_array().unwrap();
+        assert!(
+            warnings.is_empty(),
+            "on_fail_to must silence the quorum warning: {body}"
+        );
+    }
+
+    /// (FR2/FR4-c) No `on_fail_to` but a hand-added `always` edge from the
+    /// quorum routes a failed quorum onward, so there is nothing to warn about.
+    #[tokio::test]
+    async fn graph_preflight_quiet_with_manual_always_edge() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let (lp, _ensemble_id, join_id, arbiter_id) =
+            graph_with_unexited_quorum(&dir, &db, &handler).await;
+
+        db.insert_graph_edge(&GraphEdge {
+            id: uuid::Uuid::new_v4().to_string(),
+            spec_id: None,
+            graph_id: Some(lp.id.clone()),
+            from_node: join_id,
+            to_node: arbiter_id,
+            condition: GraphEdgeCondition::Always,
+        })
+        .unwrap();
+
+        let result = handler
+            .graph_preflight(Parameters(GraphPreflightParams {
+                graph_id: lp.id.clone(),
+                timeout_seconds: Some(5),
+                reviewer: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&result), "{}", text(&result));
+        let body: serde_json::Value = serde_json::from_str(&raw_text(&result)).unwrap();
+        let warnings = body["graph_warnings"].as_array().unwrap();
+        assert!(
+            warnings.is_empty(),
+            "a manual 'always' edge is a fail exit: {body}"
+        );
+    }
+
     #[tokio::test]
     async fn graph_update_rejects_unknown_graph_and_requires_a_field() {
         let (dir, db, handler) = endpoint_test_handler();

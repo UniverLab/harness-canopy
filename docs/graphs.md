@@ -221,6 +221,15 @@ with the source and member counts before `graph_run` spends probe quota.
 ensemble as one unit (`ensemble_id`, members, quorum config, every entry
 source) alongside its expanded nodes.
 
+`on_fail_to = null` (the default when an ensemble is created without one)
+ends the spec when the quorum fails: a member that reports FAIL — even with
+partial work — leaves the quorum with nowhere to route, so the run stops
+there and the graph ends `failed` instead of trying another member. This is
+sometimes deliberate, so it is never an error; `graph_preflight` warns about
+it in `graph_warnings` for every ensemble whose quorum has no `fail`/`always`
+exit. Set `on_fail_to` with `graph_update_ensemble`, or add the edge with
+`graph_add_edge`, when a failed quorum should route somewhere.
+
 The quorum's consolidated output is one document with a
 `## <platform/model> [pass|fail]` section per member, in member order. The
 quorum reports pass when at least `min_pass` members passed. Member
