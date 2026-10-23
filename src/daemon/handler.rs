@@ -334,6 +334,36 @@ const HIDDEN_DEPRECATED_TOOLS: &[&str] = &[
     "loop_schedule_autorun",
 ];
 
+/// Fixed toolset handed to graph-node sessions so they stay far under the
+/// 128-tool provider cap regardless of how many tools canopy adds later.
+pub const NODE_TOOLS: &[&str] = &[
+    "spec_section_get",
+    "spec_notes_get",
+    "spec_note_write",
+    "graph_complete_node",
+    "graph_report_blocker",
+    "intelligence_get_context",
+    "intelligence_search",
+    "intelligence_upsert",
+    "intelligence_graph_walk",
+    "rag_search",
+    "skill_get",
+    "skill_list",
+    "sync_get_context",
+    "sync_declare_intent",
+    "sync_report_status",
+    "sync_broadcast",
+    "get_tools",
+    "get_identity",
+];
+
+fn node_tool_list() -> Vec<Tool> {
+    visible_tool_list()
+        .into_iter()
+        .filter(|t| NODE_TOOLS.contains(&t.name.as_ref()))
+        .collect()
+}
+
 fn visible_tool_list() -> Vec<Tool> {
     TaskTriggerHandler::tool_router()
         .list_all()
@@ -347,10 +377,32 @@ impl ServerHandler for TaskTriggerHandler {
     async fn list_tools(
         &self,
         _request: Option<rmcp::model::PaginatedRequestParams>,
-        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
+        // Header-then-env resolution, mirroring resolve_sync_agent_id: an HTTP
+        // transport carries the profile in a header; the stdio path (including
+        // the embedded server) carries it in the environment.
+        let profile = (|| {
+            if let Some(parts) = context.extensions.get::<axum::http::request::Parts>() {
+                if let Some(value) = crate::shared::sync_identity::header_str(
+                    parts,
+                    crate::shared::sync_identity::CANOPY_MCP_PROFILE_HEADER,
+                ) {
+                    return Some(value.to_string());
+                }
+            }
+            std::env::var(crate::shared::sync_identity::CANOPY_MCP_PROFILE_ENV)
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        })();
+        let tools = if profile.as_deref() == Some("node") {
+            node_tool_list()
+        } else {
+            visible_tool_list()
+        };
         Ok(rmcp::model::ListToolsResult {
-            tools: visible_tool_list(),
+            tools,
             meta: None,
             next_cursor: None,
         })
@@ -680,6 +732,34 @@ mod tests {
             "properties with no declared type at the property level — a client that doesn't \
              resolve $ref can't tell these apart from an untyped string parameter: {violations:?}"
         );
+    }
+
+    #[test]
+    fn node_tools_all_registered_and_small() {
+        use std::collections::BTreeSet;
+        let registered: BTreeSet<String> = TaskTriggerHandler::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        for name in super::NODE_TOOLS {
+            assert!(
+                registered.contains(*name),
+                "NODE_TOOLS entry not registered: {name}"
+            );
+        }
+        assert!(super::NODE_TOOLS.len() <= 32);
+    }
+
+    #[test]
+    fn node_tool_list_matches_node_tools() {
+        use std::collections::BTreeSet;
+        let names: BTreeSet<String> = super::node_tool_list()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        let expected: BTreeSet<String> = super::NODE_TOOLS.iter().map(|s| s.to_string()).collect();
+        assert_eq!(names, expected);
     }
 
     /// B7 A1 frozen inventory: sorted MCP tool names. Any added, removed, or

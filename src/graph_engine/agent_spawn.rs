@@ -161,6 +161,9 @@ pub(crate) async fn spawn_and_wait_cli_process(
             .build_command_with_session(prompt, model, Some(workdir), session_id, effort, run_id)
             .map_err(|error| SpawnError::from_build(&error))?,
     };
+    // Graph agent/ensemble nodes run with the node MCP tool profile so their
+    // session stays far under the 128-tool provider cap.
+    command.env(crate::shared::sync_identity::CANOPY_MCP_PROFILE_ENV, "node");
     // Set the child process cwd to the node's workdir, whether or not the
     // platform supports a working-dir flag. The flag behaviour for platforms
     // that have one is unchanged.
@@ -862,5 +865,62 @@ mod tests {
                 "child cwd must be the node workdir, not the daemon's: {recorded}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn spawn_sets_node_mcp_profile_env() {
+        let workdir = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let record = scratch.path().join("profile_record.txt");
+        let record_str = record.to_string_lossy().to_string();
+
+        let fake_bin = scratch.path().join("fake-profile-cli");
+        std::fs::write(
+            &fake_bin,
+            format!("#!/bin/sh\nprintf '%s' \"$CANOPY_MCP_PROFILE\" > '{record_str}'\n"),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let cli_config = CliConfig {
+            name: "fake-profile".to_string(),
+            binary: fake_bin.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        let strategy = CliStrategy::from_cli_config(&cli_config);
+        let workdir_str = workdir.path().to_string_lossy().to_string();
+
+        let outcome = spawn_and_wait_cli_process(
+            &strategy,
+            "prompt",
+            None,
+            None,
+            &workdir_str,
+            5,
+            None,
+            None,
+            false,
+            Some("run-profile"),
+            |_| {},
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            matches!(
+                outcome,
+                Ok(CliProcessOutcome::Finished { exit_code: 0, .. })
+            ),
+            "spawn must succeed"
+        );
+
+        let recorded = std::fs::read_to_string(&record).unwrap_or_default();
+        assert_eq!(
+            recorded, "node",
+            "agent node spawn must set CANOPY_MCP_PROFILE=node"
+        );
     }
 }

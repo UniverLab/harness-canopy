@@ -202,6 +202,8 @@ docs/ is published at univerlab.org/canopy/docs and holds user documentation onl
 
 ## MCP Tools (116)
 
+Graph-node sessions (agent and ensemble nodes launched by the graph engine) receive a fixed node profile of 18 tools via `CANOPY_MCP_PROFILE=node`, so every node stays well under the 128-tool cap of OpenAI-compatible providers. All other sessions — the orchestrator, check nodes, hooks, TUI, subagents, and background agents — keep the full tool list.
+
 | Tools | Category |
 |---|---|
 | `agent_add`, `agent_watch`, `agent_list`, `agent_get`, `agent_remove`, `agent_enable`, `agent_schedule_enable`, `agent_disable`, `agent_run`, `agent_status`, `agent_models`, `agent_logs`, `agent_update`, `agent_report`, `agent_probe`, `agent_probe_recent`, `subagent_spawn`, `subagent_collect` | **Agent management** (18) |

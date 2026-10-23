@@ -4,12 +4,16 @@ pub const CANOPY_WORKDIR_ENV: &str = "CANOPY_WORKDIR";
 pub const CANOPY_CLIENT_NAME_ENV: &str = "CANOPY_CLIENT_NAME";
 /// Optional env var for seed-bound sessions.
 pub const CANOPY_SEED_ID_ENV: &str = "CANOPY_SEED_ID";
+/// Optional env var selecting the MCP tool profile for a session.
+pub const CANOPY_MCP_PROFILE_ENV: &str = "CANOPY_MCP_PROFILE";
 
 pub const CANOPY_AGENT_ID_HEADER: &str = "x-canopy-agent-id";
 /// Static header injected by the MCP client config with the harness name (e.g. "copilot", "opencode").
 pub const CANOPY_CLIENT_NAME_HEADER: &str = "x-canopy-client-name";
 /// Optional header for seed-bound sessions.
 pub const CANOPY_SEED_ID_HEADER: &str = "x-canopy-seed-id";
+/// HTTP header forwarding the MCP tool profile for a session.
+pub const CANOPY_MCP_PROFILE_HEADER: &str = "x-canopy-mcp-profile";
 
 /// Read a header value from an HTTP request, trimmed and non-empty.
 pub(crate) fn header_str<'a>(parts: &'a axum::http::request::Parts, name: &str) -> Option<&'a str> {
