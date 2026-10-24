@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+message: "If you use canopy, please cite it using the concept DOI below, which always resolves to the latest version."
+title: "canopy (harness-canopy)"
+type: software
+authors:
+  - family-names: "Martinez Bolivar"
+    given-names: "Jheison"
+    affiliation: "UniverLab"
+    orcid: "https://orcid.org/0009-0007-3668-102X"
+  - family-names: "Solorzano"
+    given-names: "Lina"
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.23607434
+    description: "Concept DOI (all versions)"
+repository-code: "https://github.com/UniverLab/harness-canopy"
+url: "https://univerlab.org/canopy/"
+license:
+  - MIT
+  - Apache-2.0
+version: 3.1.1
+date-released: 2026-10-24
+keywords:
+  - AI agents
+  - agent orchestration
+  - Model Context Protocol
+  - developer tools

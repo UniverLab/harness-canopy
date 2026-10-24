@@ -1,0 +1,16 @@
+{
+  "upload_type": "software",
+  "title": "canopy (harness-canopy)",
+  "description": "<p><strong>canopy</strong> (crate <code>harness-canopy</code>) is an agent operations center served over MCP: one Rust binary that orchestrates headless coding agents from different CLIs as graphs of agent, check and gate nodes, with spec queues, reviewer ensembles, persistent project memory, scheduling and a terminal UI.</p><p>Dual-licensed MIT OR Apache-2.0.</p>",
+  "creators": [
+    { "name": "Martinez Bolivar, Jheison", "affiliation": "UniverLab", "orcid": "0009-0007-3668-102X" },
+    { "name": "Solorzano, Lina" }
+  ],
+  "license": "apache-2.0",
+  "access_right": "open",
+  "keywords": ["AI agents", "agent orchestration", "Model Context Protocol", "MCP", "multi-agent systems", "developer tools", "Rust", "TUI"],
+  "related_identifiers": [
+    { "identifier": "https://univerlab.org/canopy/", "relation": "isDocumentedBy", "scheme": "url" }
+  ],
+  "language": "eng"
+}
