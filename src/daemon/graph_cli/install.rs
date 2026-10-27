@@ -242,4 +242,33 @@ mod tests {
         assert!(calls[0]["arguments"].get("name").is_none());
         assert!(calls[0]["arguments"].get("overwrite_presets").is_none());
     }
+
+    /// Without `--workdir`, the install targets the directory the command was
+    /// run from — absolute, so the daemon's absolute-and-exists check passes.
+    #[test]
+    fn install_defaults_the_workdir_to_the_current_directory() {
+        let fake = spawn_fake_daemon(serde_json::json!({
+            "content": [{"type": "text", "text": "{}"}],
+            "isError": false
+        }));
+        let port: u16 = fake.port.parse().unwrap();
+        handle_graph_install(
+            Some(port),
+            InstallArgs {
+                reference: "my-graph".to_string(),
+                workdir: None,
+                name: None,
+                overwrite_presets: false,
+                json: true,
+            },
+        )
+        .unwrap();
+        let expected = std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        assert!(std::path::Path::new(&expected).is_absolute());
+        let calls = fake.recorded_calls();
+        assert_eq!(calls[0]["arguments"]["workdir"], expected);
+    }
 }

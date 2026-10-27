@@ -1,12 +1,12 @@
 ---
 title: MCP Tools
-description: All 118 MCP tools exposed by the canopy daemon, by category.
+description: All 119 MCP tools exposed by the canopy daemon, by category.
 order: 11
 ---
 
 # MCP Tools
 
-The daemon exposes **118 MCP tools** over Streamable HTTP (port 7755) and
+The daemon exposes **119 MCP tools** over Streamable HTTP (port 7755) and
 stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 
 Writes wait up to 5 seconds for a concurrent writer. If the database is still
@@ -149,7 +149,7 @@ See [Graphs](graphs.md).
 
 Kept callable for the whole 3.x line, but excluded from tool listings
 (`tools/list`) so nothing new adopts them — call the 3.x name instead. Not
-counted in the 118 tools above.
+counted in the 119 tools above.
 
 | Deprecated name | Renamed to (3.0.0) |
 |---|---|

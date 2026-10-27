@@ -132,7 +132,8 @@ pub(crate) struct PreparedInstall {
     /// Preset names whose files this install wrote (new or overwritten);
     /// files already present with identical content are not listed.
     pub presets_written: Vec<String>,
-    /// The catalogue URL the document was fetched from.
+    /// The catalogue URL the document body was finally read from (after any
+    /// redirects).
     pub source_url: String,
 }
 

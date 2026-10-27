@@ -134,6 +134,32 @@ async fn install_imports_through_the_catalogue_and_lists_nodes_without_harness()
     assert_eq!(stored.workdir, workdir);
 }
 
+/// A community ref with a version fetches the scoped install-counting path
+/// with the version as the `ref` query parameter, then imports as usual.
+#[tokio::test]
+async fn install_supports_a_community_ref_with_a_version() {
+    let (dir, _db, handler) = endpoint_test_handler();
+    let workdir = dir.path().to_string_lossy().to_string();
+    let stub = StubCatalogue::start(
+        [(
+            "/i/acme/widgets/graph/my-graph".to_string(),
+            StubRoute::ok(&install_doc().to_string()),
+        )]
+        .into_iter()
+        .collect(),
+    );
+    let (_home, _guard, _prompts) = install_home(&stub.base_url());
+
+    let installed = install(&handler, "acme/widgets/my-graph@v1.2", &workdir, None, None).await;
+    assert!(!is_err(&installed), "{}", text(&installed));
+    let report: serde_json::Value = serde_json::from_str(&raw_text(&installed)).unwrap();
+    assert_eq!(report["name"], "shared");
+    assert_eq!(report["ref"], "acme/widgets/my-graph@v1.2");
+    let hits = stub.hits();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].target, "/i/acme/widgets/graph/my-graph?ref=v1.2");
+}
+
 /// `--name` overrides the document's name, exactly as `graph_import`.
 #[tokio::test]
 async fn install_honors_the_name_override() {
@@ -235,4 +261,91 @@ async fn install_reports_a_catalogue_404_as_not_found() {
         "{}",
         text(&installed)
     );
+}
+
+/// An invalid ref is refused before any fetch, with the accepted forms in the
+/// message.
+#[tokio::test]
+async fn install_refuses_an_invalid_ref_with_the_accepted_forms() {
+    let (dir, _db, handler) = endpoint_test_handler();
+    let workdir = dir.path().to_string_lossy().to_string();
+    let stub = StubCatalogue::start(std::collections::HashMap::new());
+    let (_home, _guard, _prompts) = install_home(&stub.base_url());
+
+    let installed = install(&handler, "Not A Ref", &workdir, None, None).await;
+    assert!(is_err(&installed), "{}", text(&installed));
+    assert!(
+        text(&installed).contains("Accepted forms"),
+        "{}",
+        text(&installed)
+    );
+    assert!(stub.hits().is_empty(), "refused before any fetch");
+}
+
+/// A fetched document that fails validation is refused with every problem
+/// listed, and no graph is created.
+#[tokio::test]
+async fn install_refuses_an_invalid_document_and_creates_no_graph() {
+    let (dir, db, handler) = endpoint_test_handler();
+    let workdir = dir.path().to_string_lossy().to_string();
+    let mut doc = install_doc();
+    doc["nodes"][0]["config"]["bogus"] = serde_json::json!(1);
+    doc["nodes"][1]["config"]["bogus"] = serde_json::json!(2);
+    let stub = StubCatalogue::start(
+        [(
+            "/i/graph/my-graph".to_string(),
+            StubRoute::ok(&doc.to_string()),
+        )]
+        .into_iter()
+        .collect(),
+    );
+    let (_home, _guard, _prompts) = install_home(&stub.base_url());
+
+    let installed = install(&handler, "my-graph", &workdir, None, None).await;
+    assert!(is_err(&installed), "{}", text(&installed));
+    let message = text(&installed);
+    assert!(message.contains("nodes[0].config"), "{message}");
+    assert!(message.contains("nodes[1].config"), "{message}");
+    assert!(
+        db.list_graphs(None, true).unwrap().is_empty(),
+        "an invalid document aborts before anything is written"
+    );
+}
+
+/// `--overwrite-presets` replaces a differing local preset file and reports it
+/// as written, then imports the graph.
+#[tokio::test]
+async fn install_overwrite_presets_replaces_a_conflicting_file() {
+    let (dir, db, handler) = endpoint_test_handler();
+    let workdir = dir.path().to_string_lossy().to_string();
+    let mut doc = install_doc();
+    doc["nodes"][0]["config"]["prompt_preset"] = serde_json::json!("custom");
+    doc["prompt_presets"] = serde_json::json!([
+        {"name": "custom", "content": "new content"},
+    ]);
+    let stub = StubCatalogue::start(
+        [(
+            "/i/graph/my-graph".to_string(),
+            StubRoute::ok(&doc.to_string()),
+        )]
+        .into_iter()
+        .collect(),
+    );
+    let (_home, _guard, prompts) = install_home(&stub.base_url());
+    std::fs::write(prompts.join("custom.md"), "old content").unwrap();
+
+    let installed = install(&handler, "my-graph", &workdir, None, Some(true)).await;
+    assert!(!is_err(&installed), "{}", text(&installed));
+    let report: serde_json::Value = serde_json::from_str(&raw_text(&installed)).unwrap();
+    assert_eq!(
+        report["presets_written"],
+        serde_json::json!(["custom"]),
+        "the replaced preset is reported"
+    );
+    assert_eq!(
+        std::fs::read_to_string(prompts.join("custom.md")).unwrap(),
+        "new content"
+    );
+    let graph_id = report["graph_id"].as_str().unwrap();
+    assert!(db.get_graph(graph_id).unwrap().is_some(), "graph imported");
 }

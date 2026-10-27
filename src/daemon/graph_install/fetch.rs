@@ -13,7 +13,8 @@ const MAX_REDIRECTS: usize = 3;
 /// Request timeout, in seconds.
 const FETCH_TIMEOUT_SECS: u64 = 15;
 
-/// A fetched catalogue document: the raw body plus the URL it came from.
+/// A fetched catalogue document: the raw body plus the URL the body was
+/// finally read from (after any redirects).
 #[derive(Debug)]
 pub(crate) struct FetchedDocument {
     pub body: String,
@@ -58,6 +59,7 @@ pub(crate) fn fetch_document(base: &str, reference: &GraphRef) -> Result<Fetched
             "Could not fetch '{display}' from the catalogue (GET {attempted} returned {status})."
         ));
     }
+    let source_url = response.url().to_string();
     let mut body = Vec::new();
     use std::io::Read;
     response
@@ -76,10 +78,7 @@ pub(crate) fn fetch_document(base: &str, reference: &GraphRef) -> Result<Fetched
     let body = String::from_utf8(body).map_err(|_| {
         format!("The catalogue response for '{display}' is not valid UTF-8 (GET {attempted}).")
     })?;
-    Ok(FetchedDocument {
-        body,
-        source_url: attempted,
-    })
+    Ok(FetchedDocument { body, source_url })
 }
 
 /// The catalogue URL for a ref: the install-counting endpoint, not the raw
@@ -104,15 +103,18 @@ enum RedirectDecision {
     Refuse(String),
 }
 
-/// One redirect decision: at most [`MAX_REDIRECTS`] followed, and never to
-/// `http` unless the catalogue base itself is `http` (local testing).
+/// One redirect decision: at most [`MAX_REDIRECTS`] followed, and only to
+/// `https` — plus plain `http` when the catalogue base itself is `http` (the
+/// local test stub; a production `https` base can never be downgraded, and a
+/// redirect to any other scheme is refused rather than left to the client).
 /// `previous` counts every URL visited so far, including the original
 /// request — so 3 redirects have been followed when it reaches 4.
 fn redirect_decision(previous: usize, target: &reqwest::Url, allow_http: bool) -> RedirectDecision {
     if previous.saturating_sub(1) >= MAX_REDIRECTS {
         return RedirectDecision::Refuse("too many redirects (max 3)".to_string());
     }
-    if target.scheme() == "http" && !allow_http {
+    let allowed = target.scheme() == "https" || (allow_http && target.scheme() == "http");
+    if !allowed {
         return RedirectDecision::Refuse(format!("refusing redirect to non-https URL: {target}"));
     }
     RedirectDecision::Follow
@@ -180,7 +182,37 @@ mod tests {
         let reference = super::super::parse_ref("my-graph").unwrap();
         let fetched = fetch_document(&stub.base_url(), &reference).unwrap();
         assert_eq!(fetched.body, "{\"ok\":true}");
+        assert_eq!(
+            fetched.source_url,
+            format!("{}/doc", stub.base_url()),
+            "the report names the URL the body was read from, not the counting endpoint"
+        );
         assert_eq!(stub.hits().len(), 2);
+    }
+
+    #[test]
+    fn fetch_refuses_more_than_three_redirects_end_to_end() {
+        // A redirect chain longer than the 3-follow budget must fail through
+        // the real client, proving the custom policy is wired in (reqwest
+        // follows up to 10 redirects by default, so unwiring it would pass
+        // a single redirect through and only this test would catch it).
+        let stub = StubCatalogue::start(routes(vec![
+            ("/i/graph/my-graph", StubRoute::redirect_to("/r1")),
+            ("/r1", StubRoute::redirect_to("/r2")),
+            ("/r2", StubRoute::redirect_to("/r3")),
+            ("/r3", StubRoute::redirect_to("/r4")),
+            ("/r4", StubRoute::ok("{\"ok\":true}")),
+        ]));
+        let reference = super::super::parse_ref("my-graph").unwrap();
+        let error =
+            fetch_document(&stub.base_url(), &reference).expect_err("redirect chain must fail");
+        assert!(error.contains("redirect"), "{error}");
+        assert!(error.contains("/i/graph/my-graph"), "{error}");
+        assert_eq!(
+            stub.hits().len(),
+            4,
+            "three redirects followed, then refused"
+        );
     }
 
     #[test]
@@ -213,8 +245,12 @@ mod tests {
         reqwest::Url::parse(text).unwrap()
     }
 
+    /// The downgrade half of the policy is unit-tested: the stub speaks plain
+    /// `http`, so its base can never be `https`, and `allow_http` is true for
+    /// every request it serves. The wiring of the custom policy itself is
+    /// proven end to end by the redirect-cap test below.
     #[test]
-    fn redirect_to_http_is_refused_unless_the_base_is_http() {
+    fn redirect_to_a_non_https_target_is_refused_unless_the_base_is_http() {
         assert!(matches!(
             redirect_decision(1, &url("http://x/graph"), false),
             RedirectDecision::Refuse(_)
@@ -232,6 +268,16 @@ mod tests {
             redirect_decision(1, &url("https://x/graph"), false),
             RedirectDecision::Follow
         ));
+        // Any scheme that is not https is refused, not passed to the client.
+        for target in ["ftp://x/graph", "file:///etc/passwd", "data:text/plain,x"] {
+            assert!(
+                matches!(
+                    redirect_decision(1, &url(target), false),
+                    RedirectDecision::Refuse(_)
+                ),
+                "{target} must be refused"
+            );
+        }
     }
 
     #[test]
