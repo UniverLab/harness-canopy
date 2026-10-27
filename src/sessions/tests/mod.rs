@@ -177,6 +177,12 @@ fn terminal_spawn(cli: &str, workdir: &str) -> SpawnRequest {
         workdir: workdir.to_string(),
         name: None,
         prompt: None,
+        interactive_args: None,
+        fallback_args: None,
+        model_flag: None,
+        id: None,
+        seed_id: None,
+        accent: None,
     }
 }
 
@@ -188,5 +194,11 @@ fn agent_spawn(cli: &str, workdir: &str) -> SpawnRequest {
         workdir: workdir.to_string(),
         name: None,
         prompt: None,
+        interactive_args: None,
+        fallback_args: None,
+        model_flag: None,
+        id: None,
+        seed_id: None,
+        accent: None,
     }
 }

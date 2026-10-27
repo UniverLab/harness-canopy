@@ -20,8 +20,10 @@ use crate::sessions::client::{
     new_req, proto_mismatch_message, with_active, SessionEvent, SessionOpenError, SessionSend,
     SessionStream,
 };
-use crate::sessions::protocol::{list_frame, spawn_frame, HostFrame, SessionItem};
-use crate::sessions::{preserve_rows_on_shrink, VT_SCROLLBACK_LINES};
+use crate::sessions::protocol::{
+    list_frame, spawn_frame, spawn_frame_full, HostFrame, SessionItem, SpawnExt, SpawnFrameArgs,
+};
+use crate::sessions::{format_accent_rgb, preserve_rows_on_shrink, VT_SCROLLBACK_LINES};
 
 pub mod input;
 pub mod naming;
@@ -123,6 +125,11 @@ pub struct InteractiveAgent {
     pid: Option<i64>,
     /// Last output `seq` applied; frames at or below it are duplicates.
     last_seq: Arc<AtomicU64>,
+    /// Bumped when a reattach replaces the stream. A reader from an older
+    /// generation stops feeding the parser and stops touching `connected`,
+    /// so a stale socket can neither garble the fresh snapshot nor mark the
+    /// live connection disconnected.
+    stream_gen: Arc<AtomicU64>,
     /// Exit code from the `exited` frame; `EXIT_UNKNOWN` while running.
     exit_code: Arc<AtomicI32>,
     /// False once the stream drops; the session keeps running in the hub.
@@ -181,9 +188,9 @@ impl InteractiveAgent {
     /// Spawn a new interactive agent as a hub session and attach to it.
     ///
     /// `cols` and `rows` should match the panel area where the agent will render.
-    /// `interactive_args`, `fallback_args`, `model_flag` and `id` are not
-    /// carried by the spawn frame: the hub builds the child from the registry
-    /// and assigns a fresh id (resume identity is the next spec's).
+    /// `interactive_args` (resume/yolo included), `fallback_args`, `model_flag`,
+    /// `id` (resume identity), `seed_id` and the accent travel in the spawn
+    /// frame so the hub builds the same child the TUI built before.
     /// `name` is an optional user-provided session name (random if None).
     /// `existing_ids` is used to avoid name collisions.
     /// `model` selects the model (e.g. `gpt-4`).
@@ -203,11 +210,26 @@ impl InteractiveAgent {
         model_flag: Option<&str>,
         seed_id: Option<&str>,
     ) -> Result<Self> {
-        let _ = (interactive_args, fallback_args, model_flag, id);
+        let accent = match accent_color {
+            Color::Rgb(r, g, b) => Some(format_accent_rgb((r, g, b))),
+            _ => None,
+        };
         let name = name
             .map(str::to_owned)
             .unwrap_or_else(|| naming::pick_random_name(existing_ids));
-        let item = spawn_on_hub("agent", cli.as_str(), model, working_dir, &name)?;
+        let item = spawn_on_hub(&HubSpawnArgs {
+            kind: "agent",
+            cli: cli.as_str(),
+            model,
+            workdir: working_dir,
+            name: &name,
+            interactive_args,
+            fallback_args,
+            model_flag,
+            id,
+            seed_id,
+            accent: accent.as_deref(),
+        })?;
         Self::attach_item(&item, cli, accent_color, seed_id, cols, rows)
     }
 
@@ -227,7 +249,7 @@ impl InteractiveAgent {
         let name = name
             .map(str::to_owned)
             .unwrap_or_else(|| naming::pick_terminal_name(existing_ids));
-        let item = spawn_on_hub("terminal", shell, None, working_dir, &name)?;
+        let item = spawn_on_hub_terminal("terminal", shell, working_dir, &name)?;
         Self::attach_item(&item, Cli::new(shell), accent_color, None, cols, rows)
     }
 
@@ -266,6 +288,10 @@ impl InteractiveAgent {
             }
             Err(e) => anyhow::bail!("cannot reattach to session '{}': {e}", self.id),
         };
+        // Retire the old reader before its socket goes away: it must not feed
+        // the parser the snapshot is about to replace, and its shutdown must
+        // not mark this new connection disconnected.
+        self.stream_gen.fetch_add(1, Ordering::SeqCst);
         self.wait_for_snapshot(&rx)?;
         self.stream = stream;
         self.connected.store(true, Ordering::Relaxed);
@@ -325,6 +351,7 @@ impl InteractiveAgent {
             ))),
             pid: item.pid,
             last_seq: Arc::new(AtomicU64::new(0)),
+            stream_gen: Arc::new(AtomicU64::new(0)),
             exit_code: Arc::new(AtomicI32::new(EXIT_UNKNOWN)),
             connected: Arc::new(AtomicBool::new(true)),
             proto_error: None,
@@ -491,8 +518,15 @@ impl InteractiveAgent {
         let last_seq = Arc::clone(&self.last_seq);
         let exit_code = Arc::clone(&self.exit_code);
         let connected = Arc::clone(&self.connected);
+        let stream_gen = Arc::clone(&self.stream_gen);
+        let my_gen = stream_gen.load(Ordering::SeqCst);
         std::thread::spawn(move || {
             for event in rx {
+                // A reattach bumped the generation: this reader belongs to the
+                // replaced socket, so it drops its frames and stops.
+                if !reader_is_current(&stream_gen, my_gen) {
+                    return;
+                }
                 match event {
                     SessionEvent::Snapshot {
                         cols,
@@ -523,12 +557,12 @@ impl InteractiveAgent {
                         exit_code.store(code, Ordering::Relaxed);
                     }
                     SessionEvent::Closed => {
-                        connected.store(false, Ordering::Relaxed);
-                        break;
+                        mark_disconnected(&stream_gen, my_gen, &connected);
+                        return;
                     }
                 }
             }
-            connected.store(false, Ordering::Relaxed);
+            mark_disconnected(&stream_gen, my_gen, &connected);
         });
     }
 
@@ -634,20 +668,82 @@ impl InteractiveAgent {
     }
 }
 
+/// Whether a stream reader still belongs to the agent's current socket.
+fn reader_is_current(stream_gen: &AtomicU64, my_gen: u64) -> bool {
+    stream_gen.load(Ordering::SeqCst) == my_gen
+}
+
+/// Clear `connected` only while this reader still owns the connection: a
+/// reattach may already have replaced it, and its reader is live.
+fn mark_disconnected(stream_gen: &AtomicU64, my_gen: u64, connected: &AtomicBool) {
+    if reader_is_current(stream_gen, my_gen) {
+        connected.store(false, Ordering::Relaxed);
+    }
+}
+
+/// Launch fields for one hub spawn; a struct so the spawn helper stays
+/// under the argument-count lint without silencing it.
+struct HubSpawnArgs<'a> {
+    kind: &'a str,
+    cli: &'a str,
+    model: Option<&'a str>,
+    workdir: &'a str,
+    name: &'a str,
+    interactive_args: Option<&'a str>,
+    fallback_args: Option<&'a str>,
+    model_flag: Option<&'a str>,
+    id: Option<&'a str>,
+    seed_id: Option<&'a str>,
+    accent: Option<&'a str>,
+}
+
 /// Spawn a hub session and return its metadata row: `spawn` answers the id,
 /// then `list` finds the row the hub announced for it.
-fn spawn_on_hub(
-    kind: &str,
-    cli: &str,
-    model: Option<&str>,
-    workdir: &str,
-    name: &str,
-) -> Result<SessionItem> {
+fn spawn_on_hub(args: &HubSpawnArgs<'_>) -> Result<SessionItem> {
+    let ext = SpawnExt {
+        interactive_args: args.interactive_args.map(str::to_owned),
+        fallback_args: args.fallback_args.map(str::to_owned),
+        model_flag: args.model_flag.map(str::to_owned),
+        id: args.id.map(str::to_owned),
+        seed_id: args.seed_id.map(str::to_owned),
+        accent: args.accent.map(str::to_owned),
+    };
+    let req = new_req();
+    let frame_args = SpawnFrameArgs {
+        req: &req,
+        kind: args.kind,
+        cli: args.cli,
+        model: args.model,
+        workdir: args.workdir,
+        name: Some(args.name),
+        prompt: None,
+        ext: &ext,
+    };
+    let spawned = with_active(|active| active.client.request(&req, spawn_frame_full(&frame_args)))
+        .ok_or_else(|| anyhow::anyhow!("not connected to the session hub"))??;
+    let HostFrame::Spawned { id, .. } = spawned else {
+        anyhow::bail!("hub answered spawn with an unexpected frame");
+    };
+    let req = new_req();
+    let listed = with_active(|active| active.client.request(&req, list_frame(&req)))
+        .ok_or_else(|| anyhow::anyhow!("not connected to the session hub"))??;
+    let HostFrame::Sessions { items, .. } = listed else {
+        anyhow::bail!("hub answered list with an unexpected frame");
+    };
+    items
+        .into_iter()
+        .find(|item| item.id == id)
+        .ok_or_else(|| anyhow::anyhow!("hub has no session '{id}' it just spawned"))
+}
+
+/// Terminal spawn through the short frame: terminals carry no agent launch
+/// fields, so the 7-arg builder stays the non-test caller of `spawn_frame`.
+fn spawn_on_hub_terminal(kind: &str, cli: &str, workdir: &str, name: &str) -> Result<SessionItem> {
     let req = new_req();
     let spawned = with_active(|active| {
         active.client.request(
             &req,
-            spawn_frame(&req, kind, cli, model, workdir, Some(name), None),
+            spawn_frame(&req, kind, cli, None, workdir, Some(name), None),
         )
     })
     .ok_or_else(|| anyhow::anyhow!("not connected to the session hub"))??;

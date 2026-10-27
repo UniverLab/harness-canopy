@@ -65,9 +65,16 @@ step instead of launching straight away:
   including output an inline TUI scrolled off the top of the screen, so
   scrolling up shows the transcript instead of stale rows.
 - **Surviving restarts** — sessions live in the daemon, not the TUI:
-  quitting (`F10`, closing the window) leaves every session running, and
-  reopening the TUI reattaches to them live, with screen and scrollback
-  intact. Only closing a session explicitly ends it.
+  quitting (`F10`, closing the window) leaves every running session running,
+  and reopening the TUI reattaches to them live, with screen and scrollback
+  intact; a session that ended while the TUI was closed is not reopened.
+  Only closing a session explicitly ends it. While the TUI runs, a dropped
+  daemon connection is retried on its own (0.5 s doubling up to 5 s) and
+  the sidebar re-lists what the daemon still has; sessions started or
+  closed from another TUI appear in, or leave, the sidebar live. When the
+  daemon speaks an incompatible session protocol the footer shows
+  `canopy daemon speaks session protocol <n>; restart the daemon (canopy
+  daemon restart)` and nothing attaches until the restarted daemon matches.
 
 ## Monitoring
 

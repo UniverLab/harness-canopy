@@ -34,8 +34,9 @@ fn send_sighup_to_group(child: &mut dyn portable_pty::Child) {
 
 use super::protocol::SessionItem;
 use super::{
-    agent_args_string, build_agent_cmd, build_terminal_cmd, preserve_rows_on_shrink,
-    spawn_identity, write_submitted_prompt, AgentSpawnSpec, TerminalSpawnSpec, VT_SCROLLBACK_LINES,
+    agent_args_string, build_agent_cmd, build_terminal_cmd, parse_accent_rgb,
+    preserve_rows_on_shrink, spawn_identity, write_submitted_prompt, AgentSpawnSpec,
+    TerminalSpawnSpec, VT_SCROLLBACK_LINES,
 };
 
 /// Hub parser: vt100 with the unit no-op callbacks (the daemon forwards
@@ -164,6 +165,16 @@ pub struct SpawnRequest {
     pub workdir: String,
     pub name: Option<String>,
     pub prompt: Option<String>,
+    /// Explicit launch args from the New dialog (resume/yolo included);
+    /// when `None` the hub falls back to the registry.
+    pub interactive_args: Option<String>,
+    pub fallback_args: Option<String>,
+    pub model_flag: Option<String>,
+    /// Resume identity: reuse this id instead of minting a fresh uuid.
+    pub id: Option<String>,
+    pub seed_id: Option<String>,
+    /// Canopy accent as `"r,g,b"`.
+    pub accent: Option<String>,
 }
 
 impl HubSession {
@@ -426,13 +437,23 @@ impl SessionHub {
             .map(|map| map.values().map(|s| s.name.clone()).collect())
             .unwrap_or_default();
         let existing_refs: Vec<&str> = existing.iter().map(String::as_str).collect();
+        let live_ids: std::collections::HashSet<String> = self
+            .inner
+            .sessions
+            .lock()
+            .map(|map| map.keys().cloned().collect())
+            .unwrap_or_default();
+        let wanted_id = req.id.as_deref().filter(|id| !live_ids.contains(*id));
         let (id, name) = match req.kind {
-            SessionKind::Agent => spawn_identity(None, req.name.as_deref(), &existing_refs),
+            SessionKind::Agent => spawn_identity(wanted_id, req.name.as_deref(), &existing_refs),
             SessionKind::Terminal => {
                 let name = req.name.clone().unwrap_or_else(|| {
                     crate::tui::agent::naming::pick_terminal_name(&existing_refs)
                 });
-                (uuid::Uuid::new_v4().to_string(), name)
+                let id = wanted_id
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                (id, name)
             }
         };
 
@@ -500,6 +521,8 @@ impl SessionHub {
     }
 
     /// Build the spawn command and the args string recorded in the DB row.
+    /// Explicit launch fields from the New dialog win; when absent the hub
+    /// falls back to the registry, so older clients keep working.
     fn build_spawn_command(
         &self,
         req: &SpawnRequest,
@@ -511,13 +534,20 @@ impl SessionHub {
                 let cli = Cli::new(req.cli.as_str());
                 let command = cli.command_name();
                 let registry = cli.registry_config();
-                let interactive_args = registry
-                    .as_ref()
-                    .and_then(|c| c.interactive_args.as_deref());
-                let fallback_args = registry
-                    .as_ref()
-                    .and_then(|c| c.fallback_interactive_args.as_deref());
-                let model_flag = registry.as_ref().and_then(|c| c.model_flag.as_deref());
+                let interactive_args = req.interactive_args.as_deref().or_else(|| {
+                    registry
+                        .as_ref()
+                        .and_then(|c| c.interactive_args.as_deref())
+                });
+                let fallback_args = req.fallback_args.as_deref().or_else(|| {
+                    registry
+                        .as_ref()
+                        .and_then(|c| c.fallback_interactive_args.as_deref())
+                });
+                let model_flag = req
+                    .model_flag
+                    .as_deref()
+                    .or_else(|| registry.as_ref().and_then(|c| c.model_flag.as_deref()));
                 let args = agent_args_string(
                     interactive_args,
                     fallback_args,
@@ -531,10 +561,10 @@ impl SessionHub {
                     fallback_args,
                     model: req.model.as_deref(),
                     model_flag,
-                    accent_rgb: None,
+                    accent_rgb: parse_accent_rgb(req.accent.as_deref()),
                     id,
                     name,
-                    seed_id: None,
+                    seed_id: req.seed_id.as_deref(),
                 });
                 (cmd, args)
             }

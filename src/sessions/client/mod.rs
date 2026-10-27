@@ -87,18 +87,18 @@ struct Inbox {
 
 /// One control connection to the hub. [`Clone`] shares the connection:
 /// clones read from the same inbox, so a control client held by both the
-/// app poll and a request never loses a frame to the other.
+/// app poll and a request never loses a frame to the other, and closing any
+/// clone closes the one WebSocket they all write to.
 pub struct HubClient {
-    tx: Mutex<Option<UnboundedSender<String>>>,
+    tx: Arc<Mutex<Option<UnboundedSender<String>>>>,
     inbox: Arc<Mutex<Inbox>>,
     proto: u32,
 }
 
 impl Clone for HubClient {
     fn clone(&self) -> Self {
-        let tx = self.tx.lock().map(|tx| tx.clone()).unwrap_or(None);
         Self {
-            tx: Mutex::new(tx),
+            tx: Arc::clone(&self.tx),
             inbox: Arc::clone(&self.inbox),
             proto: self.proto,
         }
@@ -118,7 +118,7 @@ impl HubClient {
             Ok(HubRecv::Frame(HostFrame::Hello { proto, host_label })) => {
                 tracing::debug!("Connected to the session hub on {host_label}");
                 Ok(Self {
-                    tx: Mutex::new(Some(out_tx)),
+                    tx: Arc::new(Mutex::new(Some(out_tx))),
                     inbox: Arc::new(Mutex::new(Inbox {
                         rx: in_rx,
                         pending: VecDeque::new(),

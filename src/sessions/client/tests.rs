@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use ratatui::style::Color;
 
 use crate::domain::models::Cli;
-use crate::sessions::client::test_client;
-use crate::sessions::protocol::{parse_client_frame, spawn_frame, ClientFrame};
+use crate::sessions::client::{test_client, HubClient};
+use crate::sessions::protocol::{parse_client_frame, spawn_frame, spawn_frame_full, ClientFrame};
 use crate::tui::agent::InteractiveAgent;
 
 fn spawn_cat(name: &str) -> InteractiveAgent {
@@ -105,16 +105,46 @@ fn snapshot_rebuilds_the_parser_at_the_snapshot_size() {
 }
 
 #[test]
-fn spawn_frame_carries_every_field() {
-    let frame = spawn_frame(
-        "r1",
-        "agent",
-        "claude",
-        Some("opus"),
-        "/work/dir",
-        Some("bibi"),
-        Some("hello"),
+fn closing_any_clone_closes_the_shared_connection() {
+    // Quitting the TUI closes the control WebSocket through one handle while
+    // the shared `ActiveHub` holds another: if a clone kept its own sender,
+    // the socket would outlive the quit and every later frame would go into
+    // a connection nobody reads.
+    let test = test_client();
+    let client = HubClient::connect(&test.url, &test.token).expect("control connection");
+    let clone = client.clone();
+    clone.close();
+    assert!(
+        client.tx.lock().expect("client tx").is_none(),
+        "closing a clone left the shared connection open"
     );
+    assert!(
+        clone.tx.lock().expect("clone tx").is_none(),
+        "the closed clone still holds the sender"
+    );
+}
+
+#[test]
+fn spawn_frame_carries_every_field() {
+    use crate::sessions::protocol::{SpawnExt, SpawnFrameArgs};
+    let ext = SpawnExt {
+        interactive_args: Some("--tui --yolo".to_string()),
+        fallback_args: Some("chat".to_string()),
+        model_flag: Some("-m".to_string()),
+        id: Some("sess-1".to_string()),
+        seed_id: Some("seed-1".to_string()),
+        accent: Some("1,2,3".to_string()),
+    };
+    let frame = spawn_frame_full(&SpawnFrameArgs {
+        req: "r1",
+        kind: "agent",
+        cli: "claude",
+        model: Some("opus"),
+        workdir: "/work/dir",
+        name: Some("bibi"),
+        prompt: Some("hello"),
+        ext: &ext,
+    });
     match parse_client_frame(&frame).expect("spawn frame parses") {
         ClientFrame::Spawn {
             req,
@@ -124,6 +154,7 @@ fn spawn_frame_carries_every_field() {
             workdir,
             name,
             prompt,
+            ext,
         } => {
             assert_eq!(req, "r1");
             assert_eq!(kind, "agent");
@@ -132,6 +163,12 @@ fn spawn_frame_carries_every_field() {
             assert_eq!(workdir, "/work/dir");
             assert_eq!(name.as_deref(), Some("bibi"));
             assert_eq!(prompt.as_deref(), Some("hello"));
+            assert_eq!(ext.interactive_args.as_deref(), Some("--tui --yolo"));
+            assert_eq!(ext.fallback_args.as_deref(), Some("chat"));
+            assert_eq!(ext.model_flag.as_deref(), Some("-m"));
+            assert_eq!(ext.id.as_deref(), Some("sess-1"));
+            assert_eq!(ext.seed_id.as_deref(), Some("seed-1"));
+            assert_eq!(ext.accent.as_deref(), Some("1,2,3"));
         }
         other => panic!("spawn frame parsed as {other:?}"),
     }
@@ -142,11 +179,18 @@ fn spawn_frame_carries_every_field() {
             model,
             name,
             prompt,
+            ext,
             ..
         } => {
             assert_eq!(model, None);
             assert_eq!(name, None);
             assert_eq!(prompt, None);
+            assert_eq!(ext.interactive_args, None);
+            assert_eq!(ext.fallback_args, None);
+            assert_eq!(ext.model_flag, None);
+            assert_eq!(ext.id, None);
+            assert_eq!(ext.seed_id, None);
+            assert_eq!(ext.accent, None);
         }
         other => panic!("spawn frame parsed as {other:?}"),
     }

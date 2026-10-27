@@ -151,3 +151,43 @@ fn agent_spawn_writes_interactive_session_row() {
         .expect("db read");
     assert_eq!(status.as_deref(), Some("active"));
 }
+
+/// Explicit launch fields from the New dialog survive the hub spawn: the
+/// resume identity is reused and the dialog's args land in the DB row, so a
+/// resume keeps its id and its yolo/resume flags instead of a fresh session.
+#[test]
+fn agent_spawn_preserves_dialog_launch_fields() {
+    use crate::sessions::{SessionKind, SpawnRequest};
+    let (db, _db_dir) = test_db();
+    let workdir = tempfile::tempdir().expect("workdir");
+    let hub = test_hub(&db);
+    let req = SpawnRequest {
+        kind: SessionKind::Agent,
+        cli: "cat".to_string(),
+        model: Some("opus".to_string()),
+        workdir: workdir.path().to_string_lossy().to_string(),
+        name: Some("resume-name".to_string()),
+        prompt: None,
+        interactive_args: Some("--tui --yolo".to_string()),
+        fallback_args: Some("chat".to_string()),
+        model_flag: Some("-m".to_string()),
+        id: Some("sess-resume-1".to_string()),
+        seed_id: Some("seed-1".to_string()),
+        accent: Some("1,2,3".to_string()),
+    };
+    let (session, _guard) = KillGuard::spawn(&hub, &req);
+    assert_eq!(session.id, "sess-resume-1");
+    assert_eq!(session.name, "resume-name");
+    let args = db
+        .get_interactive_session_args(&session.id)
+        .expect("db read")
+        .unwrap_or_default();
+    assert!(
+        args.contains("--tui --yolo"),
+        "dialog args lost from the DB row: {args:?}"
+    );
+    assert!(
+        args.contains("-m") && args.contains("opus"),
+        "model flag lost from the DB row: {args:?}"
+    );
+}

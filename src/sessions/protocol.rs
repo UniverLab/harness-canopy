@@ -71,11 +71,24 @@ pub enum ClientFrame {
         workdir: String,
         name: Option<String>,
         prompt: Option<String>,
+        ext: Box<SpawnExt>,
     },
     Kill {
         req: String,
         id: String,
     },
+}
+
+/// Explicit agent launch fields from the New dialog (boxed so the `Spawn`
+/// variant stays small). `None` falls back to the registry hub-side.
+#[derive(Debug, Default)]
+pub struct SpawnExt {
+    pub interactive_args: Option<String>,
+    pub fallback_args: Option<String>,
+    pub model_flag: Option<String>,
+    pub id: Option<String>,
+    pub seed_id: Option<String>,
+    pub accent: Option<String>,
 }
 
 /// A rejected client frame: the request id to echo (when the frame carried
@@ -139,6 +152,12 @@ pub fn parse_client_frame(text: &str) -> Result<ClientFrame, FrameError> {
             let workdir = str_field(&value, &frame, "workdir")?;
             let name = opt_str_field(&value, &frame, "name")?;
             let prompt = opt_str_field(&value, &frame, "prompt")?;
+            let interactive_args = opt_str_field(&value, &frame, "interactive_args")?;
+            let fallback_args = opt_str_field(&value, &frame, "fallback_args")?;
+            let model_flag = opt_str_field(&value, &frame, "model_flag")?;
+            let id = opt_str_field(&value, &frame, "id")?;
+            let seed_id = opt_str_field(&value, &frame, "seed_id")?;
+            let accent = opt_str_field(&value, &frame, "accent")?;
             Ok(ClientFrame::Spawn {
                 req,
                 kind,
@@ -147,6 +166,14 @@ pub fn parse_client_frame(text: &str) -> Result<ClientFrame, FrameError> {
                 workdir,
                 name,
                 prompt,
+                ext: Box::new(SpawnExt {
+                    interactive_args,
+                    fallback_args,
+                    model_flag,
+                    id,
+                    seed_id,
+                    accent,
+                }),
             })
         }
         "kill" => {
@@ -318,8 +345,12 @@ pub fn resize_frame(id: &str, cols: u16, rows: u16) -> String {
     serde_json::json!({"t": "resize", "id": id, "cols": cols, "rows": rows}).to_string()
 }
 
-/// `spawn{req,kind,cli,model?,workdir,name?,prompt?}`: spawn a hub session.
-/// `None` values serialize as `null`, which the hub reads as absent.
+/// `spawn{req,kind,cli,model?,workdir,name?,prompt?,interactive_args?,fallback_args?,model_flag?,id?,seed_id?,accent?}`:
+/// spawn a hub session. The agent launch fields mirror what the TUI passes to
+/// `InteractiveAgent::spawn` today: explicit args (resume/yolo included),
+/// the resume identity, the seed and the accent (`"r,g,b"`). `None` values
+/// serialize as `null`, which the hub reads as absent and falls back to the
+/// registry for.
 pub fn spawn_frame(
     req: &str,
     kind: &str,
@@ -329,9 +360,38 @@ pub fn spawn_frame(
     name: Option<&str>,
     prompt: Option<&str>,
 ) -> String {
+    spawn_frame_full(&SpawnFrameArgs {
+        req,
+        kind,
+        cli,
+        model,
+        workdir,
+        name,
+        prompt,
+        ext: &SpawnExt::default(),
+    })
+}
+
+/// All fields of a `spawn` frame; the launch extras travel boxed in `ext`.
+pub struct SpawnFrameArgs<'a> {
+    pub req: &'a str,
+    pub kind: &'a str,
+    pub cli: &'a str,
+    pub model: Option<&'a str>,
+    pub workdir: &'a str,
+    pub name: Option<&'a str>,
+    pub prompt: Option<&'a str>,
+    pub ext: &'a SpawnExt,
+}
+
+/// Full `spawn` frame with the agent launch fields.
+pub fn spawn_frame_full(args: &SpawnFrameArgs<'_>) -> String {
+    let ext = args.ext;
     serde_json::json!({
-        "t": "spawn", "req": req, "kind": kind, "cli": cli,
-        "model": model, "workdir": workdir, "name": name, "prompt": prompt,
+        "t": "spawn", "req": args.req, "kind": args.kind, "cli": args.cli,
+        "model": args.model, "workdir": args.workdir, "name": args.name, "prompt": args.prompt,
+        "interactive_args": ext.interactive_args, "fallback_args": ext.fallback_args,
+        "model_flag": ext.model_flag, "id": ext.id, "seed_id": ext.seed_id, "accent": ext.accent,
     })
     .to_string()
 }

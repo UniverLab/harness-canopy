@@ -16,8 +16,9 @@ pub use hub::{
     HubEvent, HubSession, OutputReceiver, SessionHub, SessionKind, SessionStatus, SpawnRequest,
 };
 pub use spawn::{
-    agent_args_string, build_agent_cmd, build_terminal_cmd, preserve_rows_on_shrink,
-    spawn_identity, write_submitted_prompt, AgentSpawnSpec, TerminalSpawnSpec, VT_SCROLLBACK_LINES,
+    agent_args_string, build_agent_cmd, build_terminal_cmd, format_accent_rgb, parse_accent_rgb,
+    preserve_rows_on_shrink, spawn_identity, write_submitted_prompt, AgentSpawnSpec,
+    TerminalSpawnSpec, VT_SCROLLBACK_LINES,
 };
 
 #[cfg(test)]

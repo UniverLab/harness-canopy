@@ -196,6 +196,7 @@ fn handle_client_text(
             workdir,
             name,
             prompt,
+            ext,
         } => {
             let Some(kind) = SessionKind::parse(&kind) else {
                 let _ = out_tx.send(error_frame(
@@ -216,6 +217,12 @@ fn handle_client_text(
                     workdir,
                     name,
                     prompt,
+                    interactive_args: ext.interactive_args,
+                    fallback_args: ext.fallback_args,
+                    model_flag: ext.model_flag,
+                    id: ext.id,
+                    seed_id: ext.seed_id,
+                    accent: ext.accent,
                 },
             );
         }

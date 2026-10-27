@@ -164,6 +164,24 @@ pub fn build_terminal_cmd(spec: &TerminalSpawnSpec<'_>) -> CommandBuilder {
     cmd
 }
 
+/// Parse a `"r,g,b"` accent into RGB; `None` when absent or malformed.
+pub fn parse_accent_rgb(raw: Option<&str>) -> Option<(u8, u8, u8)> {
+    let raw = raw?;
+    let mut parts = raw.split(',');
+    let r: u8 = parts.next()?.trim().parse().ok()?;
+    let g: u8 = parts.next()?.trim().parse().ok()?;
+    let b: u8 = parts.next()?.trim().parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((r, g, b))
+}
+
+/// Format RGB as the `"r,g,b"` accent a spawn frame carries.
+pub fn format_accent_rgb((r, g, b): (u8, u8, u8)) -> String {
+    format!("{r},{g},{b}")
+}
+
 /// The launch-args string recorded in the session's database row: the
 /// interactive (or fallback) args plus the model flag and model, in the same
 /// order [`build_agent_cmd`] passes them to the child.

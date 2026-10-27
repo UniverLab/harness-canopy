@@ -348,11 +348,13 @@ fn hub_session_status_color(agent: &InteractiveAgent, live: Color) -> Color {
 /// * Interactive agents pulse on **recent output activity** (`recent_activity`)
 ///   — the long-standing B21 behavior, kept exactly as is.
 /// * Terminal (plain shell) sessions pulse on **command execution**
-///   (`command_executing`, from `InteractiveAgent::foreground_app_active` — the
-///   same PTY foreground-process-group check warp uses to gate input) and go
-///   solid green the moment the shell returns to its prompt, *regardless* of
-///   output activity. A finished command whose output just scrolled by stops
+///   (`command_executing`, from `InteractiveAgent::foreground_app_active`) and
+///   go solid green the moment the shell returns to its prompt, *regardless*
+///   of output activity. A finished command whose output just scrolled by stops
 ///   pulsing immediately; a still-running `watch`/`tail -f` keeps pulsing.
+///   Since the hub took the PTYs over (protocol v1 exposes no foreground
+///   process group), `foreground_app_active` is a constant `false`, so this
+///   signal stays off until the hub can report it.
 ///
 /// Whichever signal isn't selected for a kind is ignored, so callers pass
 /// `false` for it.

@@ -8,6 +8,7 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
+use crate::application::ports::StateRepository;
 use crate::domain::models::Cli;
 use crate::sessions::client::{
     new_req, proto_mismatch_message, read_token, set_active, ws_url, HubClient, HubRecv,
@@ -30,7 +31,6 @@ pub(crate) struct SessionHubState {
     token: String,
     next_retry_at: Option<Instant>,
     backoff: Duration,
-    proto_error: bool,
 }
 
 impl Default for SessionHubState {
@@ -41,7 +41,6 @@ impl Default for SessionHubState {
             token: String::new(),
             next_retry_at: None,
             backoff: INITIAL_BACKOFF,
-            proto_error: false,
         }
     }
 }
@@ -78,8 +77,20 @@ impl App {
                 return;
             }
         };
-        let url = ws_url(crate::resolve_port(None));
+        let url = ws_url(self.hub_port());
         self.connect_session_hub_to(&url, &token);
+    }
+
+    /// The daemon's session-hub port: the one the daemon recorded when it
+    /// started (it may have been launched with `--port`, so the configured
+    /// default is only the fallback every other daemon call uses too).
+    pub(crate) fn hub_port(&self) -> u16 {
+        self.db
+            .get_state("port")
+            .ok()
+            .flatten()
+            .and_then(|value| value.parse::<u16>().ok())
+            .unwrap_or_else(|| crate::resolve_port(None))
     }
 
     /// Core of [`App::connect_session_hub`] against an explicit endpoint
@@ -91,6 +102,11 @@ impl App {
             Ok(client) => {
                 if self.adopt_hub_client(client) {
                     self.attach_all_hub_sessions();
+                } else {
+                    // Only a daemon restart can fix a protocol mismatch; keep
+                    // the notice up and retry so that restart heals this TUI
+                    // instead of leaving it stuck until it is restarted too.
+                    self.session_hub.arm_retry();
                 }
             }
             Err(e) => {
@@ -106,8 +122,10 @@ impl App {
     fn adopt_hub_client(&mut self, client: HubClient) -> bool {
         if client.proto() != PROTO_VERSION {
             self.hub_notice = Some(proto_mismatch_message(client.proto()));
-            self.session_hub.proto_error = true;
-            self.session_hub.client = None;
+            client.close();
+            if let Some(previous) = self.session_hub.client.take() {
+                previous.close();
+            }
             return false;
         }
         set_active(
@@ -118,7 +136,6 @@ impl App {
         self.session_hub.client = Some(client);
         self.session_hub.backoff = INITIAL_BACKOFF;
         self.session_hub.next_retry_at = None;
-        self.session_hub.proto_error = false;
         self.hub_notice = None;
         true
     }
@@ -126,9 +143,6 @@ impl App {
     /// Poll the hub connection: dispatch frames, reconnect with backoff.
     /// Runs first on every refresh tick.
     pub(crate) fn poll_session_hub(&mut self) {
-        if self.session_hub.proto_error {
-            return;
-        }
         if self.session_hub.client.is_none() {
             self.retry_hub_connect();
             return;
@@ -190,6 +204,8 @@ impl App {
             Ok(client) => {
                 if self.adopt_hub_client(client) {
                     self.reconcile_after_reconnect();
+                } else {
+                    self.session_hub.arm_retry();
                 }
             }
             Err(e) => {
@@ -229,9 +245,13 @@ impl App {
         }
     }
 
-    /// Attach every live session, oldest first.
+    /// Attach every live session, in the order the sidebar shows them
+    /// (see [`Self::attach_new_hub_sessions`]).
     fn attach_all_hub_sessions(&mut self) {
         let Some(items) = self.list_hub_sessions() else {
+            // The connection accepted `list` and never answered: drop it and
+            // retry cleanly instead of leaving every session invisible.
+            self.note_hub_dropped();
             return;
         };
         self.attach_new_hub_sessions(&items);
@@ -289,10 +309,13 @@ impl App {
         }
     }
 
-    /// Attach the listed sessions the sidebar does not have yet, oldest first.
+    /// Attach the listed sessions the sidebar does not have yet, in the
+    /// order the sidebar shows them: newest first — the `started_at DESC`
+    /// order `get_active_sessions` resumed them in before this change, so a
+    /// restart does not reorder the section (FR6).
     fn attach_new_hub_sessions(&mut self, items: &[SessionItem]) {
         let mut items: Vec<&SessionItem> = items.iter().collect();
-        items.sort_by(|a, b| a.started_at.cmp(&b.started_at));
+        items.sort_by(|a, b| b.started_at.cmp(&a.started_at));
         for item in items {
             self.attach_hub_item(item);
         }
@@ -301,6 +324,14 @@ impl App {
     /// Attach one hub session into its sidebar list, unless attached.
     fn attach_hub_item(&mut self, item: &SessionItem) {
         if self.hub_session_attached(&item.id) {
+            return;
+        }
+        // Only a *live* session is attached. One that already exited before
+        // this TUI attached is not: attaching it would replay its exit
+        // handling (a failure notification, mission closing) for work that
+        // ended in an earlier run, and would put a finished card back in the
+        // sidebar on every start. The hub keeps it for whoever was attached.
+        if item.status != "running" {
             return;
         }
         let is_terminal = item.kind == "terminal";
@@ -425,9 +456,138 @@ mod tests {
         assert_eq!(app.hub_notice.as_deref(), Some(expected.as_str()));
         assert!(app.interactive_agents.is_empty());
         assert!(app.terminal_agents.is_empty());
-        // No retry either: only a daemon restart can fix the protocol.
+        // The notice names a daemon restart, so the TUI keeps trying: the
+        // restart has to heal it, not a second TUI restart.
+        assert!(
+            app.session_hub.next_retry_at.is_some(),
+            "a protocol mismatch left no retry armed"
+        );
+        // Polling before the backoff is due attaches nothing and keeps the
+        // notice up.
         app.poll_session_hub();
         assert!(app.interactive_agents.is_empty());
         assert!(app.terminal_agents.is_empty());
+        assert_eq!(app.hub_notice.as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn hub_port_prefers_the_recorded_daemon_port() {
+        // A daemon started with `--port` records it; the configured default
+        // would point the hub client at a socket nobody is listening on.
+        let data_dir = tempfile::tempdir().expect("data dir");
+        let db = Arc::new(Database::new(&data_dir.path().join("test.db")).expect("test database"));
+        db.set_state("port", "8123").expect("record the port");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("test app");
+
+        assert_eq!(app.hub_port(), 8123);
+
+        // A malformed value falls back to the configured port.
+        db.set_state("port", "not-a-port")
+            .expect("record a bad port");
+        assert_eq!(app.hub_port(), crate::resolve_port(None));
+    }
+
+    /// A session the hub still lists after it exited — the hub keeps it for
+    /// whoever was attached — must not be re-attached on a later start:
+    /// attaching it replays its exit handling (a failure notification, mission
+    /// closing) for work that ended in an earlier run, and puts a finished
+    /// card back in the sidebar.
+    #[test]
+    fn list_attach_skips_sessions_that_already_exited() {
+        let hub = &crate::sessions::client::test_client().hub;
+        let agent = InteractiveAgent::spawn_terminal(
+            "cat",
+            "/tmp",
+            80,
+            24,
+            Some("exited-before-attach"),
+            &[],
+            ratatui::style::Color::White,
+        )
+        .expect("spawn cat on the test hub");
+        let session = hub.get(&agent.id).expect("the hub holds the spawn");
+        hub.record_natural_exit(&session, 7);
+        drop(agent);
+        let item = session.item();
+        assert_eq!(item.status, "exited");
+
+        let data_dir = tempfile::tempdir().expect("data dir");
+        let db = Arc::new(Database::new(&data_dir.path().join("test.db")).expect("test database"));
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("test app");
+
+        app.attach_new_hub_sessions(&[item]);
+
+        assert!(app.interactive_agents.is_empty());
+        assert!(app.terminal_agents.is_empty());
+    }
+
+    /// FR6: start attaches the live sessions in the order the sidebar shows
+    /// them today — newest first, the `started_at DESC` order the pre-hub
+    /// `get_active_sessions` resume pushed them in — so restarting does not
+    /// reorder the section.
+    #[test]
+    fn start_attaches_sessions_newest_first_like_the_sidebar_today() {
+        let hub = &crate::sessions::client::test_client().hub;
+        let older = InteractiveAgent::spawn_terminal(
+            "cat",
+            "/tmp",
+            80,
+            24,
+            Some("order-older"),
+            &[],
+            ratatui::style::Color::White,
+        )
+        .expect("spawn the older cat session");
+        let older_item = hub.get(&older.id).expect("the hub holds the spawn").item();
+        let newer = InteractiveAgent::spawn_terminal(
+            "cat",
+            "/tmp",
+            80,
+            24,
+            Some("order-newer"),
+            &[],
+            ratatui::style::Color::White,
+        )
+        .expect("spawn the newer cat session");
+        let newer_item = hub.get(&newer.id).expect("the hub holds the spawn").item();
+        drop(older);
+        drop(newer);
+
+        let data_dir = tempfile::tempdir().expect("data dir");
+        let db = Arc::new(Database::new(&data_dir.path().join("test.db")).expect("test database"));
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("test app");
+
+        // Deliberately oldest-first, as a `list` answer can arrive: the
+        // attach order must still come out newest-first.
+        app.attach_new_hub_sessions(&[older_item, newer_item]);
+
+        let order: Vec<&str> = app
+            .terminal_agents
+            .iter()
+            .map(|agent| agent.name.as_str())
+            .collect();
+        assert_eq!(
+            order,
+            vec!["order-newer", "order-older"],
+            "startup attach order differs from the sidebar's order today"
+        );
+        for agent in &mut app.terminal_agents {
+            agent.kill();
+        }
     }
 }
