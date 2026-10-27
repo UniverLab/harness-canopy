@@ -213,6 +213,10 @@ pub struct App {
     /// this, the first refresh (before sessions resume) would see zero live
     /// sessions and prematurely treat every due schedule as dead.
     pub(crate) scheduled_sends_restored: bool,
+    /// The daemon session hub connection plus reconnect state.
+    pub(crate) session_hub: super::session_hub::SessionHubState,
+    /// Notice about the hub connection (e.g. protocol mismatch), if any.
+    pub(crate) hub_notice: Option<String>,
 
     // Split group state
     pub(crate) split_groups: Vec<crate::domain::models::SplitGroup>,

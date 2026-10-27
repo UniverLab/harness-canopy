@@ -4,6 +4,7 @@ use super::*;
 
 impl App {
     pub fn refresh(&mut self) -> Result<()> {
+        self.poll_session_hub();
         self.animation_tick = self.animation_tick.wrapping_add(1);
         // The project type-ahead only ever applies to the Knowledge layer's
         // list, so it is dropped here — the one place every way of leaving

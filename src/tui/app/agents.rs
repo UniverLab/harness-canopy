@@ -517,12 +517,9 @@ impl App {
     }
 
     pub fn cleanup(&mut self) {
-        for agent in &mut self.interactive_agents {
-            agent.kill();
-        }
-        for agent in &mut self.terminal_agents {
-            agent.kill();
-        }
+        // Quitting the TUI only closes the hub WebSocket; every session keeps
+        // running in the daemon and reattaches on the next start.
+        self.close_session_hub();
         // Clear any lingering toast notifications from the Windows Action Center
         crate::domain::notification::clear_notifications_on_exit();
     }

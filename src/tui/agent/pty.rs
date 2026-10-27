@@ -27,14 +27,6 @@ pub(crate) fn install_signal_handlers() {
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
     });
 }
-#[cfg(unix)]
-pub(crate) fn send_sighup_to_group(child: &mut dyn portable_pty::Child) {
-    let Some(pid) = child.process_id().map(|pid| pid as i32) else {
-        return;
-    };
-    let _ = crate::daemon::process::send_signal_to_group(pid, libc::SIGHUP);
-}
-
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;

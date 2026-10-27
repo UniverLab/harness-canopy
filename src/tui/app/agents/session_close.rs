@@ -227,7 +227,7 @@ impl App {
         Ok(())
     }
 
-    pub(super) fn dissolve_groups_for_session(&mut self, session_name: &str) {
+    pub(crate) fn dissolve_groups_for_session(&mut self, session_name: &str) {
         let ids_to_dissolve: Vec<String> = self
             .split_groups
             .iter()

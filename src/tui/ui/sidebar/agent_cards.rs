@@ -1,4 +1,5 @@
 use super::*;
+use crate::tui::agent::InteractiveAgent;
 
 pub(super) fn agent_section_border_style(
     app: &App,
@@ -237,12 +238,15 @@ pub(super) fn agent_card_meta<'a>(
             AgentCardMeta {
                 accent: agent.accent_color,
                 // Interactive agents pulse on recent output activity (unchanged).
-                status_color: pty_session_status_color(
-                    false,
-                    &agent.status,
-                    agent.has_recent_activity(),
-                    false,
-                    app.animation_tick,
+                status_color: hub_session_status_color(
+                    agent,
+                    pty_session_status_color(
+                        false,
+                        &agent.status,
+                        agent.has_recent_activity(),
+                        false,
+                        app.animation_tick,
+                    ),
                 ),
                 agent_type: "pty",
                 type_detail: agent.cli.as_str(),
@@ -258,12 +262,15 @@ pub(super) fn agent_card_meta<'a>(
                 // deliberately ignored (a scrolled-by finished command must
                 // not keep pulsing; a `watch`/`tail -f` still counts as
                 // executing). Same source of truth warp uses to gate input.
-                status_color: pty_session_status_color(
-                    true,
-                    &agent.status,
-                    false,
-                    agent.foreground_app_active(),
-                    app.animation_tick,
+                status_color: hub_session_status_color(
+                    agent,
+                    pty_session_status_color(
+                        true,
+                        &agent.status,
+                        false,
+                        agent.foreground_app_active(),
+                        app.animation_tick,
+                    ),
                 ),
                 agent_type: "term",
                 type_detail: agent.shell.as_str(),
@@ -321,6 +328,17 @@ pub(super) fn session_status_color(
         AgentStatus::Running => STATUS_RUNNING,
         AgentStatus::Exited(0) => STATUS_OK,
         AgentStatus::Exited(_) => STATUS_FAIL,
+    }
+}
+
+/// A running session whose hub stream dropped reads as disconnected
+/// (dim gray) instead of its live color; an exited session keeps its exit
+/// color — that is the terminal truth about it.
+fn hub_session_status_color(agent: &InteractiveAgent, live: Color) -> Color {
+    if !agent.is_connected() && agent.status == AgentStatus::Running {
+        STATUS_DISABLED
+    } else {
+        live
     }
 }
 

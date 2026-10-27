@@ -64,12 +64,17 @@ step instead of launching straight away:
 - **Scrolling up** — the scrollback keeps everything the session wrote,
   including output an inline TUI scrolled off the top of the screen, so
   scrolling up shows the transcript instead of stale rows.
+- **Surviving restarts** — sessions live in the daemon, not the TUI:
+  quitting (`F10`, closing the window) leaves every session running, and
+  reopening the TUI reattaches to them live, with screen and scrollback
+  intact. Only closing a session explicitly ends it.
 
 ## Monitoring
 
 - **Agent status colors** — teal for working (recent output), blue for
-  idle, red for failed, gray for exited. The sidebar shows a colored
-  gutter bar per agent.
+  idle, red for failed, gray for exited. A running session whose daemon
+  connection dropped shows dim gray until it reconnects. The sidebar shows
+  a colored gutter bar per agent.
 - **Split groups** — side-by-side horizontal/vertical views to watch
   multiple agents simultaneously.
 - **System dashboard** — CPU, memory, disk, GPU (NVIDIA/Linux/macOS) and

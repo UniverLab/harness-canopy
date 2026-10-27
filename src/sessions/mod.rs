@@ -6,6 +6,7 @@
 //! children and handle their parsers identically.
 
 pub mod auth;
+pub mod client;
 pub mod hub;
 pub mod protocol;
 pub mod spawn;

@@ -15,6 +15,8 @@ macro_rules! app_new_fields {
             terminal_agents: Vec::new(),
             orphaned_sessions: Vec::new(),
             scheduled_sends_restored: false,
+            session_hub: crate::tui::app::session_hub::SessionHubState::default(),
+            hub_notice: None,
             split_groups: Vec::new(),
             active_split_id: None,
             split_right_focused: false,

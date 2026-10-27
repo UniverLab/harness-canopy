@@ -15,6 +15,9 @@ impl App {
             .collect()
     }
 
+    // Unused in both builds now (only the terminal auto-resume path read
+    // it); kept for the daemon move.
+    #[allow(dead_code)]
     pub(crate) fn terminal_agent_names(&self) -> Vec<&str> {
         self.terminal_agents
             .iter()
@@ -156,6 +159,9 @@ impl App {
         self.scheduled_sends_restored = true;
     }
 
+    // The TUI attaches hub sessions instead of resuming (the next spec moves
+    // this path to the daemon); kept for the daemon move.
+    #[allow(dead_code)]
     pub(crate) fn resume_terminal_session(
         &mut self,
         session: &crate::db::session::TerminalSession,
@@ -217,6 +223,7 @@ impl App {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn auto_resume_sessions(&mut self) {
         self.sweep_orphaned_sessions();
 
@@ -256,6 +263,7 @@ impl App {
     /// session is not resumed, so it never joins `interactive_agents`, and
     /// `restore_scheduled_sends`'s missing-target drop then discards any
     /// `scheduled_sends` that still pointed at it.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn sweep_orphaned_sessions(&self) {
         match self.db.close_orphaned_interactive_sessions() {
             Ok(n) if n > 0 => {
@@ -266,6 +274,7 @@ impl App {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn resume_scanned_session(
         &mut self,
         session: &crate::db::session::InteractiveSession,
@@ -287,6 +296,7 @@ impl App {
         );
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn resume_or_defer_conflicting_session(
         &mut self,
         session: &crate::db::session::InteractiveSession,
@@ -331,6 +341,7 @@ impl App {
         // from this run's sidebar.
     }
 
+    #[allow(dead_code)]
     pub fn auto_resume_terminal_sessions(&mut self) {
         let Ok(sessions) = self.db.get_active_terminal_sessions() else {
             return;
@@ -378,6 +389,7 @@ pub(crate) fn process_is_alive(_pid: i64) -> bool {
 /// if it doesn't match, the PID was recycled by an unrelated process and the
 /// session it came from is long gone.
 #[cfg(target_os = "linux")]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn process_matches_cli(pid: i64, cli: &str) -> bool {
     let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) else {
         return false;
@@ -389,6 +401,7 @@ pub(crate) fn process_matches_cli(pid: i64, cli: &str) -> bool {
 /// Without procfs there is no cheap identity check — assume the PID is the
 /// CLI so the conservative (grace-then-orphan) path handles it.
 #[cfg(not(target_os = "linux"))]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn process_matches_cli(_pid: i64, _cli: &str) -> bool {
     true
 }
@@ -397,6 +410,7 @@ pub(crate) fn process_matches_cli(_pid: i64, _cli: &str) -> bool {
 /// and it outlives a short grace window. A quick TUI close→reopen leaves the
 /// old CLI mid-death for well under a second — waiting briefly turns what
 /// used to be a permanent orphaning into a normal resume.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn process_outlives_grace(pid: i64, cli: &str) -> bool {
     if pid <= 0 || !process_matches_cli(pid, cli) {
         return false;
@@ -421,6 +435,7 @@ pub(crate) fn process_outlives_grace(pid: i64, cli: &str) -> bool {
 /// Only when the stored boot_id matches the current one do we fall back to
 /// the PID-aliveness check: a live PID means the CLI is still running and
 /// resuming would fight it for the session lock.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn should_resume_session(
     pid: Option<i64>,
     session_boot_id: Option<&str>,
@@ -439,6 +454,7 @@ pub(crate) fn should_resume_session(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) enum ResumeDecision {
     Resume,
     SkipHeldByLiveProcess,
@@ -449,6 +465,7 @@ pub(crate) enum ResumeDecision {
 /// outlive the grace window in `process_outlives_grace` was mid-death or
 /// recycled, so resuming is safe. A PID that survives the full window is a
 /// genuine session-lock conflict and must be skipped for this start.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn resume_decision(pid_alive_same_boot: bool, outlives_grace: bool) -> ResumeDecision {
     if pid_alive_same_boot && outlives_grace {
         ResumeDecision::SkipHeldByLiveProcess

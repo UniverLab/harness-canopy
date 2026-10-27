@@ -79,17 +79,21 @@ pub fn run_tui() -> Result<()> {
     let canopy_config = crate::domain::canopy_config::CanopyConfig::load(&home.join(".canopy"));
     let mut app = App::new(Arc::clone(&db), &data_dir, &canopy_config)?;
 
+    // The hub owns every session now: closing the TUI only closes the
+    // WebSocket (see `App::cleanup`), so install the SIGHUP handler here —
+    // spawns no longer do it — and attach the live sessions.
+    #[cfg(unix)]
+    crate::tui::agent::pty::install_signal_handlers();
     // Reap bridge sidecars whose owning process died without cleaning up
     app.reconcile_bridge_sessions();
-    // Auto-resume previously active interactive sessions
-    app.auto_resume_sessions();
+    // Attach the daemon hub's live sessions (replaces both auto-resume calls;
+    // the harness-resume path moves to the daemon in the next spec).
+    app.connect_session_hub();
     // Load orphaned sessions for TUI visibility
     if let Ok(orphaned) = app.db.get_orphaned_sessions() {
         app.orphaned_sessions = orphaned;
     }
-    // Auto-resume previously active terminal sessions
-    app.auto_resume_terminal_sessions();
-    // Now that sessions are resumed (and their schedules reassigned), open the
+    // Now that sessions are attached (and their schedules reassigned), open the
     // scheduled-send delivery gate and drop schedules whose session is gone.
     app.restore_scheduled_sends();
 

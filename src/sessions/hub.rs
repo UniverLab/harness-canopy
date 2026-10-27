@@ -20,7 +20,17 @@ use crate::db::Database;
 use crate::domain::models::Cli;
 
 #[cfg(unix)]
-use crate::tui::agent::pty::{install_signal_handlers, send_sighup_to_group};
+use crate::tui::agent::pty::install_signal_handlers;
+
+/// Send `SIGHUP` to the child process group the way closing a session in
+/// the TUI does, so the shell and its children all observe the hangup.
+#[cfg(unix)]
+fn send_sighup_to_group(child: &mut dyn portable_pty::Child) {
+    let Some(pid) = child.process_id().map(|pid| pid as i32) else {
+        return;
+    };
+    let _ = crate::daemon::process::send_signal_to_group(pid, libc::SIGHUP);
+}
 
 use super::protocol::SessionItem;
 use super::{

@@ -5,7 +5,7 @@
 //! An unknown `t` or a missing field answers `error{code:"bad_request"}`
 //! naming the frame and the field.
 
-use serde::Serialize;
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 /// Protocol version the hub speaks.
@@ -20,7 +20,7 @@ pub const ERR_DELIVERY_FAILED: &str = "delivery_failed";
 pub const ERR_INTERNAL: &str = "internal";
 
 /// Session metadata row for `sessions` / `session_added` frames.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionItem {
     pub id: String,
     pub name: String,
@@ -80,6 +80,7 @@ pub enum ClientFrame {
 
 /// A rejected client frame: the request id to echo (when the frame carried
 /// a usable one) and the `bad_request` message naming frame and field.
+#[derive(Debug)]
 pub struct FrameError {
     pub req: Option<String>,
     pub message: String,
@@ -281,4 +282,212 @@ pub fn error_frame(req: Option<&str>, code: &str, message: &str) -> String {
         frame["req"] = Value::String(req.to_string());
     }
     frame.to_string()
+}
+
+// ── Client frame builders ─────────────────────────────────────────────
+// The TUI builds its outbound frames with these; each one round-trips
+// through `parse_client_frame`.
+
+/// `list{req}`: ask for the `sessions` listing.
+pub fn list_frame(req: &str) -> String {
+    serde_json::json!({"t": "list", "req": req}).to_string()
+}
+
+/// `attach{id}`: subscribe to one session's snapshot plus `out` frames.
+pub fn attach_frame(id: &str) -> String {
+    serde_json::json!({"t": "attach", "id": id}).to_string()
+}
+
+/// `detach{id}`: drop one session subscription.
+pub fn detach_frame(id: &str) -> String {
+    serde_json::json!({"t": "detach", "id": id}).to_string()
+}
+
+/// `input{id,data}`: raw bytes for one session's PTY stdin.
+pub fn input_frame(id: &str, data: &[u8]) -> String {
+    serde_json::json!({"t": "input", "id": id, "data": encode_b64(data)}).to_string()
+}
+
+/// `prompt{req,id,text}`: one submitted prompt through the paste path.
+pub fn prompt_frame(req: &str, id: &str, text: &str) -> String {
+    serde_json::json!({"t": "prompt", "req": req, "id": id, "text": text}).to_string()
+}
+
+/// `resize{id,cols,rows}`: resize one session's PTY and parser.
+pub fn resize_frame(id: &str, cols: u16, rows: u16) -> String {
+    serde_json::json!({"t": "resize", "id": id, "cols": cols, "rows": rows}).to_string()
+}
+
+/// `spawn{req,kind,cli,model?,workdir,name?,prompt?}`: spawn a hub session.
+/// `None` values serialize as `null`, which the hub reads as absent.
+pub fn spawn_frame(
+    req: &str,
+    kind: &str,
+    cli: &str,
+    model: Option<&str>,
+    workdir: &str,
+    name: Option<&str>,
+    prompt: Option<&str>,
+) -> String {
+    serde_json::json!({
+        "t": "spawn", "req": req, "kind": kind, "cli": cli,
+        "model": model, "workdir": workdir, "name": name, "prompt": prompt,
+    })
+    .to_string()
+}
+
+/// `kill{req,id}`: end one session.
+pub fn kill_frame(req: &str, id: &str) -> String {
+    serde_json::json!({"t": "kill", "req": req, "id": id}).to_string()
+}
+
+// ── Host frames ───────────────────────────────────────────────────────
+
+/// One frame sent by the hub, parsed by [`parse_host_frame`].
+#[derive(Debug)]
+pub enum HostFrame {
+    Hello {
+        proto: u32,
+        host_label: String,
+    },
+    Sessions {
+        req: String,
+        items: Vec<SessionItem>,
+    },
+    Snapshot {
+        id: String,
+        cols: u16,
+        rows: u16,
+        seq: u64,
+        data: Vec<u8>,
+    },
+    Out {
+        id: String,
+        seq: u64,
+        data: Vec<u8>,
+    },
+    Exited {
+        id: String,
+        code: i32,
+    },
+    SessionAdded {
+        item: Box<SessionItem>,
+    },
+    SessionRemoved {
+        id: String,
+    },
+    Spawned {
+        req: String,
+        id: String,
+    },
+    Ok {
+        req: String,
+    },
+    Error {
+        req: Option<String>,
+        code: String,
+        message: String,
+    },
+}
+
+impl HostFrame {
+    /// The request id this frame answers, when it answers one.
+    pub fn req(&self) -> Option<&str> {
+        match self {
+            HostFrame::Sessions { req, .. }
+            | HostFrame::Spawned { req, .. }
+            | HostFrame::Ok { req } => Some(req),
+            HostFrame::Error { req, .. } => req.as_deref(),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "t", rename_all = "snake_case")]
+enum HostFrameWire {
+    Hello {
+        proto: u32,
+        host_label: String,
+    },
+    Sessions {
+        req: String,
+        items: Vec<SessionItem>,
+    },
+    Snapshot {
+        id: String,
+        cols: u16,
+        rows: u16,
+        seq: u64,
+        #[serde(deserialize_with = "de_b64")]
+        data: Vec<u8>,
+    },
+    Out {
+        id: String,
+        seq: u64,
+        #[serde(deserialize_with = "de_b64")]
+        data: Vec<u8>,
+    },
+    Exited {
+        id: String,
+        code: i32,
+    },
+    SessionAdded {
+        item: SessionItem,
+    },
+    SessionRemoved {
+        id: String,
+    },
+    Spawned {
+        req: String,
+        id: String,
+    },
+    Ok {
+        req: String,
+    },
+    Error {
+        req: Option<String>,
+        code: String,
+        message: String,
+    },
+}
+
+fn de_b64<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+    use base64::Engine as _;
+    let encoded = String::deserialize(deserializer)?;
+    base64::engine::general_purpose::STANDARD
+        .decode(encoded.as_bytes())
+        .map_err(serde::de::Error::custom)
+}
+
+/// Parse one hub text frame; `Err` carries the serde message.
+pub fn parse_host_frame(text: &str) -> Result<HostFrame, String> {
+    let wire: HostFrameWire =
+        serde_json::from_str(text).map_err(|e| format!("invalid host frame: {e}"))?;
+    Ok(match wire {
+        HostFrameWire::Hello { proto, host_label } => HostFrame::Hello { proto, host_label },
+        HostFrameWire::Sessions { req, items } => HostFrame::Sessions { req, items },
+        HostFrameWire::Snapshot {
+            id,
+            cols,
+            rows,
+            seq,
+            data,
+        } => HostFrame::Snapshot {
+            id,
+            cols,
+            rows,
+            seq,
+            data,
+        },
+        HostFrameWire::Out { id, seq, data } => HostFrame::Out { id, seq, data },
+        HostFrameWire::Exited { id, code } => HostFrame::Exited { id, code },
+        HostFrameWire::SessionAdded { item } => HostFrame::SessionAdded {
+            item: Box::new(item),
+        },
+        HostFrameWire::SessionRemoved { id } => HostFrame::SessionRemoved { id },
+        HostFrameWire::Spawned { req, id } => HostFrame::Spawned { req, id },
+        HostFrameWire::Ok { req } => HostFrame::Ok { req },
+        HostFrameWire::Error { req, code, message } => HostFrame::Error { req, code, message },
+    })
 }
