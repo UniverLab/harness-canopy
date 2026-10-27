@@ -772,3 +772,14 @@ pub struct GraphImportParams {
     /// Graph name to use instead of the document's own `name`.
     pub name: Option<String>,
 }
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GraphValidateParams {
+    /// Path to a graph or node JSON document to validate. Provide exactly
+    /// one of `path` or `document`.
+    pub path: Option<String>,
+    /// The graph or node document itself. Provide exactly one of `path` or
+    /// `document`.
+    #[schemars(schema_with = "arbitrary_json_value_schema")]
+    pub document: Option<serde_json::Value>,
+}

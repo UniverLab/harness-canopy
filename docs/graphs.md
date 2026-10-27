@@ -896,12 +896,12 @@ the failed members in its blocker/summary — if any member failed. A graph
 reported as `running` that has no node run in progress and no scheduled
 resume surfaces a `consistency_warning` in `graph_get`.
 
-## The 36 MCP tools
+## The 37 MCP tools
 
 | Stage | Tools |
 |---|---|
 | Authoring | `graph_create`, `graph_update`, `graph_add_spec`, `graph_update_spec`, `graph_remove_spec`, `graph_add_node`, `graph_update_node`, `graph_add_edge`, `graph_update_edge`, `graph_delete_edge`, `graph_delete_node`, `graph_add_ensemble`, `graph_update_ensemble`, `graph_delete_ensemble`, `graph_copy_node`, `graph_copy_ensemble`, `graph_audit_node_configs` |
-| Sharing | `graph_export`, `graph_import`, `graph_archive`, `graph_restore` |
+| Sharing | `graph_export`, `graph_import`, `graph_validate`, `graph_archive`, `graph_restore` |
 | Inspection | `graph_get`, `graph_list`, `graph_crew`, `graph_node_runs_list`, `graph_node_run_get`, `graph_events` |
 | Runtime | `graph_run`, `graph_reset`, `graph_schedule_autorun`, `graph_schedule_continue`, `graph_pause`, `graph_continue`, `graph_complete_node`, `graph_report_blocker`, `graph_preflight` |
 
@@ -1115,6 +1115,54 @@ with `{}` members still imports, with every unbound node reported as
 a time, first usable verdict wins. `reviewers` has a single entry source, so
 `extra_entry_sources` is omitted; an ensemble entered from several nodes carries
 each additional one there.
+
+## Validate before you share
+
+Before sending a file — or installing one you received — check it without
+touching the database:
+
+```
+canopy graph validate <path> [--json]
+```
+
+The same check exists as the MCP tool
+`graph_validate { path?, document? }` (exactly one of the two). Both
+detect the document kind on their own: an object with `nodes` is a graph
+document, one with `kind` plus `config` is a node document. Neither needs
+a workdir, and neither writes anything.
+
+A graph document runs every structural check `import` runs —
+`format_version`, known config keys per node kind, ensemble shape, and
+template bindings — through the same code, plus one sharing rule of its
+own: every `prompt_preset` a node names must be bundled in the document
+(`prompt_presets`, version 6) or a builtin (`implementer`, `reviewer`,
+`resilience`). What your machine happens to have installed does not
+matter; a file that validates here installs anywhere.
+
+A node document is one shareable node:
+
+```json
+{
+  "format_version": 1,
+  "name": "my-check",
+  "kind": "check",
+  "config": { "command": "true" }
+}
+```
+
+Its rules: `name` is a slug (`[a-z0-9-]{1,48}`), `kind` is a known
+authorable kind (`join` is engine-managed and refused), the config holds
+only keys that kind reads, no `platform`, `model`, or `cli` key appears
+anywhere in the config (harnesses are chosen by the installer, never the
+author), and a bundled `preset` carries the same name as the config's
+`prompt_preset`.
+
+On success the report carries `ok`, the kind, the name, the
+node/edge/ensemble counts, and the agent nodes that will still need a
+harness (`needs_harness`). On failure it carries every problem found —
+not only the first — each with a JSON path
+(`nodes[3].config.prompt_preset`) and a message. The CLI exits 0 on
+success and 1 on failure; `--json` prints the machine-readable report.
 
 ## Archive and restore
 

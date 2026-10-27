@@ -26,6 +26,7 @@ use crew::handle_graph_crew;
 use format::{current_spec_name, format_autorun_compact, graph_progress, short_id, status_icon};
 use info::handle_graph_info;
 use resolve::resolve_graph;
+use validate::handle_graph_validate;
 
 #[cfg(test)]
 use crate::daemon::handler::{active_graph_spec_context, ActiveGraphSpec};
@@ -50,6 +51,7 @@ mod crew;
 pub(crate) mod format;
 mod info;
 mod resolve;
+mod validate;
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum GraphAction {
@@ -86,6 +88,15 @@ pub(crate) enum GraphAction {
         /// Graph name to use instead of the file's own name.
         #[arg(long)]
         name: Option<String>,
+    },
+    /// Validate a shared graph or node document without importing it —
+    /// no database access, no workdir needed.
+    Validate {
+        /// Path to the graph or node JSON file.
+        path: String,
+        /// Print the report as JSON instead of human-readable lines.
+        #[arg(long)]
+        json: bool,
     },
     /// Run a graph in the background, spec by spec.
     Run {
@@ -218,10 +229,16 @@ pub(crate) async fn handle_graph_action(
     action: GraphAction,
     port_override: Option<u16>,
 ) -> Result<()> {
+    // Validate touches neither the database nor the daemon — handle it
+    // before the data dir (and its side effects) come into play.
+    if let GraphAction::Validate { path, json } = &action {
+        return handle_graph_validate(path, *json);
+    }
     let data_dir = crate::ensure_data_dir()?;
     let db = Database::new_safe(&database_path(&data_dir), &data_dir)?;
 
     match action {
+        GraphAction::Validate { .. } => unreachable!("handled above"),
         GraphAction::List { workdir } => handle_graph_list(&db, workdir.as_deref()),
         GraphAction::Info { id_or_name } => handle_graph_info(&db, &id_or_name),
         GraphAction::Export { id_or_name, output } => {
@@ -1960,6 +1977,48 @@ mod tests {
         let err =
             handle_graph_import(Some(65535), file_path.to_str().unwrap(), None, None).unwrap_err();
         assert!(err.to_string().contains("format_version"));
+    }
+
+    /// Validate is fully local: no database, no daemon — a valid file
+    /// succeeds with no fake daemon spawned.
+    #[test]
+    fn handle_graph_validate_accepts_valid_document_without_a_daemon() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("node.json");
+        std::fs::write(
+            &file_path,
+            serde_json::json!({
+                "format_version": 1,
+                "name": "auditor",
+                "kind": "agent",
+                "config": {"prompt_template": "audit this"},
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        handle_graph_validate(file_path.to_str().unwrap(), false).expect("valid doc passes");
+        handle_graph_validate(file_path.to_str().unwrap(), true).expect("json mode passes");
+    }
+
+    #[test]
+    fn handle_graph_validate_rejects_invalid_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("node.json");
+        std::fs::write(
+            &file_path,
+            serde_json::json!({
+                "format_version": 1,
+                "name": "Not A Slug!",
+                "kind": "agent",
+                "config": {"prompt_template": "audit this"},
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let err = handle_graph_validate(file_path.to_str().unwrap(), false).unwrap_err();
+        assert!(err.to_string().contains("not a valid shared document"));
     }
 
     #[test]

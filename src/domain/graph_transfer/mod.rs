@@ -40,6 +40,8 @@ mod export;
 pub use export::*;
 mod import;
 pub use import::*;
+mod assemble;
+pub use assemble::*;
 mod pending;
 mod presets;
 pub use presets::*;

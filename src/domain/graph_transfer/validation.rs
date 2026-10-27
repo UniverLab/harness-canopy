@@ -216,7 +216,7 @@ pub fn agent_nodes_missing_platform(plan: &GraphImportPlan) -> Vec<String> {
 
 /// Mirrors `daemon::handler::config_has_agent_harness` by design: an agent
 /// node's config carries a non-empty `platform`, `cli`, or `crew` (CM49).
-pub(super) fn node_config_has_harness(config: &Value) -> bool {
+pub fn node_config_has_harness(config: &Value) -> bool {
     let has_non_empty_str = |field: &str| {
         config
             .get(field)

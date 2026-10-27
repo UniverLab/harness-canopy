@@ -1,12 +1,12 @@
 ---
 title: MCP Tools
-description: All 117 MCP tools exposed by the canopy daemon, by category.
+description: All 118 MCP tools exposed by the canopy daemon, by category.
 order: 11
 ---
 
 # MCP Tools
 
-The daemon exposes **117 MCP tools** over Streamable HTTP (port 7755) and
+The daemon exposes **118 MCP tools** over Streamable HTTP (port 7755) and
 stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 
 Writes wait up to 5 seconds for a concurrent writer. If the database is still
@@ -80,7 +80,7 @@ any other tool still work. All other sessions keep the full list.
 | `skill_list` | List skills available from the dynamic skill store and configured catalogs; an installed skill that its git source no longer lists is marked `orphaned`, and its description starts with `[removed upstream]` |
 | `skill_get` | Fetch a skill's full instructions by name, cloning or refreshing it on demand |
 
-## Graph engine (45)
+## Graph engine (46)
 
 | Tool | Description |
 |---|---|
@@ -119,6 +119,7 @@ any other tool still work. All other sessions keep the full list.
 | `graph_report_blocker` | Report a blocker for an active graph node |
 | `graph_export` | Export a graph design |
 | `graph_import` | Import a graph design |
+| `graph_validate` | Validate a shared graph or node document without importing it |
 | `graph_archive` | Archive a graph |
 | `graph_restore` | Restore an archived graph |
 | `graph_node_runs_list` | List a graph's node run history |
@@ -147,7 +148,7 @@ See [Graphs](graphs.md).
 
 Kept callable for the whole 3.x line, but excluded from tool listings
 (`tools/list`) so nothing new adopts them — call the 3.x name instead. Not
-counted in the 117 tools above.
+counted in the 118 tools above.
 
 | Deprecated name | Renamed to (3.0.0) |
 |---|---|

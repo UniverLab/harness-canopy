@@ -246,4 +246,18 @@ impl TaskTriggerHandler {
             "terminals": plan.terminals,
         })))
     }
+
+    #[tool(
+        name = "graph_validate",
+        description = "Validate a shared graph or node document without importing it — no database access, no workdir needed. Provide exactly one of `path` (a JSON file) or `document` (the object itself). A graph document (has `nodes`) runs every structural check `graph_import` runs — format_version, known config keys, ensemble shape, template bindings — plus the sharing rule that every `prompt_preset` a node names is bundled in the document or a builtin (implementer, reviewer, resilience). A node document (`format_version`, `name`, `kind`, `config`, optional `description`/`preset`) checks the slug name, a known authorable kind, known config keys, no harness keys (`platform`/`model`/`cli`) anywhere in the config, and a bundled preset name matching the config's `prompt_preset`. Returns `ok` with the kind, name, node/edge/ensemble counts and the agent nodes that will need a harness — or `ok: false` with every problem found, each with a JSON path and a message."
+    )]
+    pub(crate) async fn graph_validate(
+        &self,
+        Parameters(params): Parameters<GraphValidateParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match crate::daemon::graph_validate::validate_request(params.path, params.document) {
+            Ok(report) => Ok(build_json_result(&report)),
+            Err(e) => Ok(error_result(&e)),
+        }
+    }
 }
