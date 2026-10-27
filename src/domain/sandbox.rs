@@ -674,10 +674,13 @@ pub async fn discard_sandbox_in(
 /// End-of-run teardown. Never returns `Err`: every failure is recorded on
 /// the sandbox row (`cleanup_failed` + `cleanup_error`), never silent.
 /// A branch with unique commits is kept (`kept` — the path is already on
-/// the row, so it stays findable); only a provably-empty branch is removed
-/// (`cleaned`). An uncertain unique-commit answer keeps everything but
-/// records `cleanup_failed`, since a cleanup that cannot prove the branch
-/// is empty is a failure to clean, not a clean keep.
+/// the row, so it stays findable), and so is a worktree holding any
+/// uncommitted path of its own (tracked or untracked, the instruction file
+/// canopy materialised excluded) — only a sandbox proven empty on both
+/// counts is removed (`cleaned`). An uncertain answer to either check
+/// keeps everything but records `cleanup_failed`, since a cleanup that
+/// cannot prove the sandbox is empty is a failure to clean, not a clean
+/// keep.
 pub async fn teardown_sandbox_at_end(
     db: &crate::db::Database,
     run: &crate::db::sandbox::SandboxRun,
@@ -1512,6 +1515,10 @@ mod tests {
 
     // ── Uncommitted work keeps the sandbox ─────────────────────────────
 
+    /// A completed run that leaves uncommitted work keeps the worktree and
+    /// branch with a note naming the count and the paths. (A failed run
+    /// never reaches teardown at all — it keeps its sandbox whatever it
+    /// holds; the end-to-end case lives in the graph-engine tests.)
     #[tokio::test]
     async fn teardown_dirty_worktree_keeps_both_and_names_paths() {
         let repo = init_test_repo();
@@ -1528,7 +1535,7 @@ mod tests {
         let row = insert_test_row(&db, &sandbox, "graph-dirty");
         assert_eq!(has_unique_commits(&row), Some(false));
 
-        teardown_sandbox_at_end_in(&base, &db, &row, "failed: x").await;
+        teardown_sandbox_at_end_in(&base, &db, &row, "completed").await;
 
         let row = db.get_sandbox_run(&sandbox.id).unwrap().unwrap();
         assert_eq!(row.status, "kept");
