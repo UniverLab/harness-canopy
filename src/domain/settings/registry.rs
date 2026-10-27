@@ -331,6 +331,15 @@ pub static REGISTRY: &[SettingDef] = &[
         wizard: false,
     },
     SettingDef {
+        key: "graphs.catalogue_url",
+        kind: Kind::String,
+        default: DefaultValue::Literal("\"https://graphs.univerlab.org\""),
+        group: Group::GraphsEngine,
+        description: "Base URL of the graph catalogue `canopy graph install` fetches from.",
+        apply: Apply::NextRun,
+        wizard: false,
+    },
+    SettingDef {
         key: "agents.probe_timeout_seconds",
         kind: Kind::Int { min: 5, max: 300 },
         default: DefaultValue::Literal("30"),
@@ -456,7 +465,7 @@ mod tests {
 
     #[test]
     fn registry_has_one_entry_per_setting_and_they_are_unique() {
-        assert_eq!(REGISTRY.len(), 45);
+        assert_eq!(REGISTRY.len(), 46);
         for def in REGISTRY {
             assert_eq!(find(def.key).map(|d| d.key), Some(def.key));
         }

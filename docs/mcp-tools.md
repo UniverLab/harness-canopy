@@ -80,7 +80,7 @@ any other tool still work. All other sessions keep the full list.
 | `skill_list` | List skills available from the dynamic skill store and configured catalogs; an installed skill that its git source no longer lists is marked `orphaned`, and its description starts with `[removed upstream]` |
 | `skill_get` | Fetch a skill's full instructions by name, cloning or refreshing it on demand |
 
-## Graph engine (46)
+## Graph engine (47)
 
 | Tool | Description |
 |---|---|
@@ -119,6 +119,7 @@ any other tool still work. All other sessions keep the full list.
 | `graph_report_blocker` | Report a blocker for an active graph node |
 | `graph_export` | Export a graph design |
 | `graph_import` | Import a graph design |
+| `graph_install` | Install a graph from the catalogue in one command — `ref`, `workdir`, `name?`, `overwrite_presets?` |
 | `graph_validate` | Validate a shared graph or node document without importing it — `path` or `document`, exactly one |
 | `graph_archive` | Archive a graph |
 | `graph_restore` | Restore an archived graph |

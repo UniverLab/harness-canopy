@@ -192,7 +192,7 @@ docs/ is published at univerlab.org/canopy/docs and holds user documentation onl
 
 ---
 
-## MCP Tools (118)
+## MCP Tools (119)
 
 Graph-node sessions (agent and ensemble nodes launched by the graph engine) receive a fixed node profile of 18 tools via `CANOPY_MCP_PROFILE=node`, so every node stays well under the 128-tool cap of OpenAI-compatible providers. All other sessions — the orchestrator, check nodes, hooks, TUI, subagents, and background agents — keep the full tool list.
 
@@ -203,7 +203,7 @@ Graph-node sessions (agent and ensemble nodes launched by the graph engine) rece
 | `intelligence_get_context`, `intelligence_upsert`, `intelligence_search`, `intelligence_graph_walk`, `intelligence_list_projects`, `intelligence_link_projects`, `intelligence_delete_node`, `intelligence_delete_relation` | **Intelligence** (8) |
 | `get_identity`, `evolve_identity`, `create_seed`, `list_seeds`, `remove_seed` | **Seed identity** (5) |
 | `skill_list`, `skill_get` | **Skills** (2) |
-| `graph_create`, `graph_update`, `graph_add_spec`, `graph_update_spec`, `graph_remove_spec`, `graph_add_node`, `graph_update_node`, `graph_add_edge`, `graph_update_edge`, `graph_delete_edge`, `graph_delete_node`, `graph_add_ensemble`, `graph_update_ensemble`, `graph_delete_ensemble`, `crew_list`, `crew_get`, `crew_create`, `crew_update`, `crew_delete`, `config_list`, `config_get`, `config_set`, `config_reset`, `graph_get`, `graph_list`, `graph_crew`, `graph_run`, `graph_reset`, `graph_schedule_autorun`, `graph_pause`, `graph_continue`, `graph_complete_node`, `graph_report_blocker`, `graph_export`, `graph_import`, `graph_validate`, `graph_archive`, `graph_restore`, `graph_node_runs_list`, `graph_node_run_get`, `graph_events`, `graph_copy_node`, `graph_copy_ensemble`, `graph_audit_node_configs`, `graph_schedule_continue`, `graph_preflight` | **Graph engine** (46) |
+| `graph_create`, `graph_update`, `graph_add_spec`, `graph_update_spec`, `graph_remove_spec`, `graph_add_node`, `graph_update_node`, `graph_add_edge`, `graph_update_edge`, `graph_delete_edge`, `graph_delete_node`, `graph_add_ensemble`, `graph_update_ensemble`, `graph_delete_ensemble`, `crew_list`, `crew_get`, `crew_create`, `crew_update`, `crew_delete`, `config_list`, `config_get`, `config_set`, `config_reset`, `graph_get`, `graph_list`, `graph_crew`, `graph_run`, `graph_reset`, `graph_schedule_autorun`, `graph_pause`, `graph_continue`, `graph_complete_node`, `graph_report_blocker`, `graph_export`, `graph_import`, `graph_install`, `graph_validate`, `graph_archive`, `graph_restore`, `graph_node_runs_list`, `graph_node_run_get`, `graph_events`, `graph_copy_node`, `graph_copy_ensemble`, `graph_audit_node_configs`, `graph_schedule_continue`, `graph_preflight` | **Graph engine** (47) |
 | `roster_set`, `roster_clear`, `roster_list`, `roster_check` | **Availability roster** (4) |
 | `mutex` | **Named mutexes** (1) |
 | `spec_create`, `spec_list`, `spec_update`, `spec_delete`, `spec_set_status`, `spec_section_get`, `spec_convert`, `spec_note_write`, `spec_notes_get` | **Spec backlog** (9) |
@@ -300,6 +300,11 @@ Graph-node sessions (agent and ensemble nodes launched by the graph engine) rece
    canopy rag auto-index start   # Start background watcher
    canopy rag auto-index stop    # Stop
    canopy rag report             # Per-file indexing report
+   ```
+
+7. **Install a graph from the catalogue:**
+   ```bash
+   canopy graph install my-graph   # Fetch a published graph and import it as a new local graph
    ```
 
 All state persists in `~/.canopy/`. The TUI shows an update notice at most every 24 hours — `canopy update` installs it.

@@ -90,6 +90,8 @@ refresh also restarts that 24-hour window.
 | `canopy graph crew --json` | Print the MCP `graph_crew` JSON shape instead of tables |
 | `canopy graph validate <path>` | Check a shared graph or node JSON document without importing it: every structural check `import` runs plus the sharing rules. Prints each problem with its JSON path; exits 0 when the document is valid, 1 when it is not |
 | `canopy graph validate <path> --json` | Print the machine-readable report instead: `ok` with the kind, name and counts, or `problems` |
+| `canopy graph install <ref>` | Install a graph from the catalogue in one command: `<slug>` or `<owner>/<repo>/<slug>`, each with an optional `@<ref>` suffix. Validates the fetched document, installs its bundled presets, and imports it as a new graph |
+| `canopy graph install <ref> [--workdir <dir>] [--name <name>] [--overwrite-presets] [--json]` | Install into another workdir (default: the current directory), under another name, overwriting differing local preset files instead of refusing, or print the machine-readable report |
 
 `canopy graph validate` runs entirely locally — no daemon, no database,
 no workdir — so it works before anything is installed. The rules it
@@ -337,7 +339,7 @@ it came from. **Apply** says when a change takes effect: `applied` (at once),
 | `scheduler.retry_max` | 3 | 0–20 | next run | Retries of a failed scheduled run |
 | `spec_attempt_limit` | 3 | 1–20 | restart the daemon | Separate graph executions a spec may fail with a verdict before it is blocked |
 | `ensemble_concurrency_cap` | 4 | 1–64 | restart the daemon | Ensemble members that run at once across every graph |
-| `graphs.*` | see [Tuning the engine](graphs.md#tuning-the-engine) | see there | see there | Graph engine retry budgets, ensemble member caps and check output |
+| `graphs.*` | see [Tuning the engine](graphs.md#tuning-the-engine) | see there | see there | Graph engine retry budgets, ensemble member caps, check output, and the graph catalogue URL |
 | `clean.retention_days` | 7 | 1–3650 days | next run | Days kept before `canopy clean` removes sessions and files |
 | `graph_event_retention_days` | 90 | 1–3650 days | next run | Days a graph's event log is kept before `canopy clean` prunes it |
 | `clean.reclaim_min_deleted_rows` | 50 | 0–100000 | applied | Deleted rows that trigger VACUUM during `canopy clean` |

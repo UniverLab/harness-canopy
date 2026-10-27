@@ -774,6 +774,21 @@ pub struct GraphImportParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GraphInstallParams {
+    /// Catalogue ref: `<slug>` or `<owner>/<repo>/<slug>`, each with an
+    /// optional `@<ref>` suffix selecting a version.
+    #[serde(rename = "ref")]
+    pub reference: String,
+    /// Absolute workdir for the new graph.
+    pub workdir: String,
+    /// Graph name to use instead of the document's own `name`.
+    pub name: Option<String>,
+    /// Overwrite a local preset file whose content differs from the bundled
+    /// one instead of refusing the install. Default false.
+    pub overwrite_presets: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GraphValidateParams {
     /// Path to a graph or node JSON document to validate. Provide exactly
     /// one of `path` or `document`.

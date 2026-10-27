@@ -896,12 +896,12 @@ the failed members in its blocker/summary — if any member failed. A graph
 reported as `running` that has no node run in progress and no scheduled
 resume surfaces a `consistency_warning` in `graph_get`.
 
-## The 37 MCP tools
+## The 38 MCP tools
 
 | Stage | Tools |
 |---|---|
 | Authoring | `graph_create`, `graph_update`, `graph_add_spec`, `graph_update_spec`, `graph_remove_spec`, `graph_add_node`, `graph_update_node`, `graph_add_edge`, `graph_update_edge`, `graph_delete_edge`, `graph_delete_node`, `graph_add_ensemble`, `graph_update_ensemble`, `graph_delete_ensemble`, `graph_copy_node`, `graph_copy_ensemble`, `graph_audit_node_configs` |
-| Sharing | `graph_export`, `graph_import`, `graph_validate`, `graph_archive`, `graph_restore` |
+| Sharing | `graph_export`, `graph_import`, `graph_install`, `graph_validate`, `graph_archive`, `graph_restore` |
 | Inspection | `graph_get`, `graph_list`, `graph_crew`, `graph_node_runs_list`, `graph_node_run_get`, `graph_events` |
 | Runtime | `graph_run`, `graph_reset`, `graph_schedule_autorun`, `graph_schedule_continue`, `graph_pause`, `graph_continue`, `graph_complete_node`, `graph_report_blocker`, `graph_preflight` |
 
@@ -911,9 +911,9 @@ validation. The `canopy graph` CLI subcommands mirror the runtime tools
 from the terminal: `list`/`info`/`crew`/`export` are read-only
 inspection, `validate` runs entirely locally (no daemon, no database —
 see [Validate before you share](#validate-before-you-share)), and
-`import`/`run`/`pause`/`continue`/`reset`/`autorun` delegate the
-matching MCP tool to the daemon — a second way to drive a graph when an
-MCP client can't reach it. See the
+`import`/`install`/`run`/`pause`/`continue`/`reset`/`autorun` delegate
+the matching MCP tool to the daemon — a second way to drive a graph when
+an MCP client can't reach it. See the
 [CLI reference](cli-reference.md#graph-control).
 
 ## Export and import
@@ -1173,6 +1173,50 @@ first — each with a JSON path (`nodes[3].config.prompt_preset`) and a
 message. The CLI exits 0 on success and 1 on failure; `--json` prints
 the machine-readable report.
 
+## Install a graph
+
+A published graph becomes a local graph in one command, through the
+graph catalogue at `graphs.univerlab.org` — fetching through the
+catalogue is what counts the install:
+
+```
+canopy graph install <ref> [--workdir <dir>] [--name <name>] [--overwrite-presets] [--json]
+```
+
+The ref is `<slug>` for an official graph or `<owner>/<repo>/<slug>`
+for a community one, each with an optional `@<ref>` suffix selecting a
+version (`my-graph`, `acme/widgets/my-graph`,
+`acme/widgets/my-graph@v1.2`). The slug is 1–48 lowercase letters,
+digits, or `-`; owner and repo follow GitHub's naming rules. Anything
+else is refused with the accepted forms in the message.
+
+The fetch is one GET with a `canopy/<version>` User-Agent, following
+redirects (at most 3, https only) with a 15 s timeout and the body
+capped at 1 MiB — no other network traffic. HTTP errors are reported
+with the status and the URL tried; a 404 says the graph was not found
+in the catalogue.
+
+The fetched document goes through the same validation as
+[`validate`](#validate-before-you-share): any problem aborts the
+install and lists every problem. Its bundled presets (version 6) are
+written to `~/.canopy/prompts/` — a file already there with identical
+content is a no-op, while one with different content aborts the whole
+install before anything is written, naming the file, unless
+`--overwrite-presets` is passed. The import itself is the
+[`import`](#export-and-import) path: always a new graph (a numeric
+suffix when the name is taken), `--name` overriding the document's
+name, `--workdir` defaulting to the current directory (which must be
+absolute and exist).
+
+The report carries the graph id and name, the workdir, the presets
+written, and the agent nodes still needing a platform/model, with the
+next command to assign them (`--json` prints the machine-readable
+report). The same operation exists as the MCP tool
+`graph_install { ref, workdir, name?, overwrite_presets? }`. The
+catalogue base URL is the `graphs.catalogue_url` setting (default
+`https://graphs.univerlab.org`, see
+[Tuning the engine](#tuning-the-engine)).
+
 ## Archive and restore
 
 Graphs can be archived instead of deleted — they leave the main
@@ -1375,6 +1419,7 @@ retry budgets and caps. Each keeps its default until you set it.
 | `graphs.ensemble_max_members_sequential` | 16 (range 2–32) | Largest member count for a `cascade`/`round_robin` ensemble, and the largest crew. |
 | `graphs.check_output_max_kib` | 64 (range 16–4096) | Check-output tail kept, in KiB. |
 | `graphs.verdict_grace_seconds` | 15 (range 0–300) | Seconds an agent has to exit after filing its verdict before canopy terminates it. 0 disables the shutdown. |
+| `graphs.catalogue_url` | `https://graphs.univerlab.org` | Base URL of the graph catalogue `canopy graph install` fetches from. |
 
 Two more engine settings sit outside the `graphs.` prefix (see
 [CLI reference](cli-reference.md#settings-reference)):

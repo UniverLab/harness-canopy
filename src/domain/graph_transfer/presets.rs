@@ -197,6 +197,44 @@ pub fn install(
     Ok(())
 }
 
+/// Install the bundled presets like [`install`], but overwrite a local file
+/// whose content differs instead of refusing — the `--overwrite-presets`
+/// path of `canopy graph install`. Entry rules still apply (safe name, not
+/// a builtin, not repeated, non-empty content); a file with identical
+/// content is still skipped as a no-op.
+pub fn install_overwriting(
+    presets: &[GraphExportPromptPreset],
+    prompts_dir: &std::path::Path,
+) -> Result<(), String> {
+    if presets.is_empty() {
+        return Ok(());
+    }
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for preset in presets {
+        validate_entry(preset, &mut seen)?;
+    }
+    std::fs::create_dir_all(prompts_dir).map_err(|error| {
+        format!(
+            "Could not create prompts dir {}: {error}.",
+            prompts_dir.display()
+        )
+    })?;
+    for preset in presets {
+        let path = prompts_dir.join(format!("{}.md", preset.name));
+        match std::fs::read_to_string(&path) {
+            Ok(existing) if existing == preset.content => {}
+            _ => std::fs::write(&path, &preset.content).map_err(|error| {
+                format!(
+                    "Could not write bundled prompt preset '{}' to {}: {error}.",
+                    preset.name,
+                    path.display()
+                )
+            })?,
+        }
+    }
+    Ok(())
+}
+
 /// The builtin preset names (`implementer`, `reviewer`, `resilience` —
 /// seeded on daemon start, never bundled or installed from a document).
 fn builtin_preset_names() -> Vec<&'static str> {

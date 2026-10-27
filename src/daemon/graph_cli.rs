@@ -25,6 +25,7 @@ use crate::domain::graphs::GraphStatus;
 use crew::handle_graph_crew;
 use format::{current_spec_name, format_autorun_compact, graph_progress, short_id, status_icon};
 use info::handle_graph_info;
+use install::{handle_graph_install, InstallArgs};
 use resolve::resolve_graph;
 use validate::handle_graph_validate;
 
@@ -50,6 +51,7 @@ use resolve::{ambiguous_error, candidate_list, not_found_error};
 mod crew;
 pub(crate) mod format;
 mod info;
+mod install;
 mod resolve;
 mod validate;
 
@@ -88,6 +90,12 @@ pub(crate) enum GraphAction {
         /// Graph name to use instead of the file's own name.
         #[arg(long)]
         name: Option<String>,
+    },
+    /// Install a graph from the catalogue in one command — fetch the
+    /// published document for the ref and import it as a new graph.
+    Install {
+        #[command(flatten)]
+        args: InstallArgs,
     },
     /// Validate a shared graph or node document without importing it —
     /// no database access, no workdir needed.
@@ -249,6 +257,7 @@ pub(crate) async fn handle_graph_action(
             workdir,
             name,
         } => handle_graph_import(port_override, &path, workdir, name),
+        GraphAction::Install { args } => handle_graph_install(port_override, args),
         GraphAction::Run {
             id_or_name,
             queue,

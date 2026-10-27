@@ -97,106 +97,134 @@ impl TaskTriggerHandler {
                 Err(e) => return Ok(error_result(&e)),
             };
 
-        for node in &document.nodes {
-            if let Some(map) = node.config.as_object() {
-                if let Err(e) = validate_known_config_keys(node.kind, map) {
-                    return Ok(error_result(&e));
-                }
-            }
-            if let Err(e) = crate::daemon::handler_validate::validate_node_mutex_config(
-                &node.name,
-                &node.config,
-            ) {
-                return Ok(error_result(&e));
-            }
+        match self
+            .import_document_value(&document, workdir, params.name.as_deref(), "graph_import")
+            .await
+        {
+            ImportedDocument::Done(value) => Ok(build_json_result(&value)),
+            ImportedDocument::Rejected(result) => Ok(result),
+            ImportedDocument::Failed(error) => Err(error),
         }
+    }
 
-        let desired_name = params
-            .name
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or(document.name.trim());
-        if let Err(e) = validate_non_empty(desired_name, "Graph name") {
+    #[tool(
+        name = "graph_install",
+        description = "Install a graph from the catalogue in one command: fetch the published export document for `ref` — `<slug>` for an official graph or `<owner>/<repo>/<slug>` for a community one, each with an optional `@<ref>` version suffix — through `graphs.catalogue_url` (default https://graphs.univerlab.org), so the catalogue counts the install. The fetched document is validated exactly as `graph_validate` would (any problem aborts the install), its bundled `prompt_presets` are installed into the prompts dir (a local file with different content aborts the install unless `overwrite_presets` is true), and it is imported exactly as `graph_import` would: always a new graph in `workdir` (an absolute existing directory), a numeric suffix when the name is taken. The response carries the graph id and name, the workdir, the presets written, the agent nodes still needing a platform, and the next command to assign them."
+    )]
+    pub(crate) async fn graph_install(
+        &self,
+        Parameters(params): Parameters<GraphInstallParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let workdir = params.workdir.trim();
+        if let Err(e) = validate_non_empty(workdir, "Graph workdir") {
+            return Ok(error_result(&e));
+        }
+        if let Err(e) = validate_absolute_dir(workdir) {
             return Ok(error_result(&e));
         }
 
-        let graph_id = uuid::Uuid::new_v4().to_string();
-        let plan = match crate::domain::graph_transfer::build_import_plan(&document, &graph_id) {
-            Ok(plan) => plan,
-            Err(e) => return Ok(error_result(&e)),
+        // The fetch is blocking I/O, so it runs off the async runtime.
+        let reference = params.reference.clone();
+        let overwrite = params.overwrite_presets.unwrap_or(false);
+        let prepared = tokio::task::spawn_blocking(move || {
+            let canopy_dir = crate::domain::prompts::canopy_dir();
+            crate::daemon::graph_install::prepare_install(
+                &crate::daemon::graph_install::catalogue_url(),
+                &reference,
+                overwrite,
+                &crate::domain::prompts::prompts_dir(&canopy_dir),
+            )
+        })
+        .await
+        .map_err(|error| internal_error(error.to_string()))?;
+        let prepared = match prepared {
+            Ok(prepared) => prepared,
+            Err(message) => return Ok(error_result(&message)),
         };
-        // Same write-time binding check as the node/ensemble authoring paths,
-        // before anything is persisted (all-or-nothing): every document node,
-        // ensemble shared prompt and member override. The domain plan builder
-        // is untouched — this lives in the handler like the other import-time
-        // validations above.
+
+        let name = params.name.clone();
+        match self
+            .import_document_value(
+                &prepared.document,
+                workdir,
+                name.as_deref(),
+                "graph_install",
+            )
+            .await
         {
-            let mut node_names: Vec<String> =
-                document.nodes.iter().map(|n| n.name.clone()).collect();
-            for ensemble_plan in &plan.ensembles {
-                node_names.extend(ensemble_plan.member_nodes.iter().map(|n| n.name.clone()));
-                node_names.push(ensemble_plan.join_node.name.clone());
+            ImportedDocument::Done(mut value) => {
+                value["workdir"] = serde_json::json!(workdir);
+                value["ref"] = serde_json::json!(params.reference);
+                value["source_url"] = serde_json::json!(prepared.source_url);
+                value["presets_written"] = serde_json::json!(prepared.presets_written);
+                value["next"] = serde_json::json!(install_next_step(&value));
+                Ok(build_json_result(&value))
             }
-            let ensembles: Vec<(String, Option<String>)> = document
-                .ensembles
-                .iter()
-                .zip(plan.ensembles.iter())
-                .map(|(doc, ensemble_plan)| {
-                    (doc.name.clone(), Some(ensemble_plan.join_node.name.clone()))
-                })
-                .collect();
-            for doc_node in &document.nodes {
-                if let Err(e) = crate::daemon::handler_templates::check_node_templates(
-                    doc_node.kind,
-                    &doc_node.config,
-                    &doc_node.name,
-                    &node_names,
-                    &ensembles,
-                ) {
-                    return Ok(error_result(&e));
-                }
-            }
-            for doc_ensemble in &document.ensembles {
-                let owner = format!("Ensemble '{}' shared prompt template", doc_ensemble.name);
-                if let Err(e) = crate::daemon::handler_templates::check_template_bindings(
-                    &owner,
-                    &doc_ensemble.prompt_template,
-                    crate::graph_engine::AGENT_PROMPT_BINDINGS,
-                    &node_names,
-                    &ensembles,
-                ) {
-                    return Ok(error_result(&e));
-                }
-                for (index, member) in doc_ensemble.members.iter().enumerate() {
-                    if let Some(template) = member.prompt_override.as_deref() {
-                        let member_owner = format!(
-                            "Ensemble '{}' member {} prompt override",
-                            doc_ensemble.name,
-                            index + 1
-                        );
-                        if let Err(e) = crate::daemon::handler_templates::check_template_bindings(
-                            &member_owner,
-                            template,
-                            crate::graph_engine::AGENT_PROMPT_BINDINGS,
-                            &node_names,
-                            &ensembles,
-                        ) {
-                            return Ok(error_result(&e));
-                        }
-                    }
-                }
-            }
+            ImportedDocument::Rejected(result) => Ok(result),
+            ImportedDocument::Failed(error) => Err(error),
+        }
+    }
+
+    #[tool(
+        name = "graph_validate",
+        description = "Validate a shared graph or node document without importing it — no database access, no workdir needed. Provide exactly one of `path` (a JSON file) or `document` (the object itself). A graph document (has `nodes`) runs every structural check `graph_import` runs — format_version, known config keys, ensemble shape, template bindings — plus the sharing rule that every `prompt_preset` a node names is bundled in the document or a builtin (implementer, reviewer, resilience). A node document (`format_version`, `name`, `kind`, `config`, optional `description`/`preset`) checks the slug name, a known authorable kind, known config keys, no harness keys (`platform`/`model`/`cli`) anywhere in the config, and a bundled preset name matching the config's `prompt_preset`. Returns `ok` with the kind, name, node/edge/ensemble counts and the agent nodes that will need a harness — or `ok: false` with every problem found, each with a JSON path and a message."
+    )]
+    pub(crate) async fn graph_validate(
+        &self,
+        Parameters(params): Parameters<GraphValidateParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match crate::daemon::graph_validate::validate_request(params.path, params.document) {
+            Ok(report) => Ok(build_json_result(&report)),
+            Err(e) => Ok(error_result(&e)),
+        }
+    }
+}
+
+/// The outcome of importing one parsed document: a success payload, a
+/// caller-facing refusal, or an infrastructure failure.
+enum ImportedDocument {
+    Done(serde_json::Value),
+    Rejected(CallToolResult),
+    Failed(McpError),
+}
+
+impl TaskTriggerHandler {
+    /// Import one parsed export document: the body `graph_import` and
+    /// `graph_install` share — same plan, same pending crews, same
+    /// unique-name resolution. `operation` names the caller for errors.
+    async fn import_document_value(
+        &self,
+        document: &crate::domain::graph_transfer::GraphExportDocument,
+        workdir: &str,
+        name: Option<&str>,
+        operation: &str,
+    ) -> ImportedDocument {
+        if let Err(message) = check_import_node_configs(document) {
+            return ImportedDocument::Rejected(error_result(&message));
+        }
+
+        let desired_name = name
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| document.name.trim());
+        if let Err(message) = validate_non_empty(desired_name, "Graph name") {
+            return ImportedDocument::Rejected(error_result(&message));
+        }
+
+        let graph_id = uuid::Uuid::new_v4().to_string();
+        let plan = match crate::domain::graph_transfer::build_import_plan(document, &graph_id) {
+            Ok(plan) => plan,
+            Err(message) => return ImportedDocument::Rejected(error_result(&message)),
+        };
+        if let Err(message) = check_import_templates(document, &plan) {
+            return ImportedDocument::Rejected(error_result(&message));
         }
         let missing_platform = crate::domain::graph_transfer::agent_nodes_missing_platform(&plan);
 
-        let existing_names: Vec<String> = self
-            .db
-            .list_graphs(Some(workdir), true)
-            .map_err(internal_error)?
-            .into_iter()
-            .map(|lp| lp.name)
-            .collect();
+        let existing_names: Vec<String> = match self.db.list_graphs(Some(workdir), true) {
+            Ok(graphs) => graphs.into_iter().map(|lp| lp.name).collect(),
+            Err(error) => return ImportedDocument::Failed(internal_error(error)),
+        };
         let final_name =
             crate::domain::graph_transfer::resolve_unique_graph_name(&existing_names, desired_name);
 
@@ -225,10 +253,10 @@ impl TaskTriggerHandler {
             require_spec_type: false,
         };
 
-        let missing_crews = self
-            .db
-            .import_graph(&lp, &plan)
-            .map_err(|e| write_error("graph_import", &e))?;
+        let missing_crews = match self.db.import_graph(&lp, &plan) {
+            Ok(missing) => missing,
+            Err(error) => return ImportedDocument::Failed(write_error(operation, &error)),
+        };
         if crate::domain::project::should_auto_register(std::path::Path::new(workdir)) {
             if let Err(error) = self.db.register_project_path(std::path::Path::new(workdir)) {
                 tracing::debug!(
@@ -238,26 +266,113 @@ impl TaskTriggerHandler {
         }
         self.activate_graph_trigger(&lp).await;
 
-        Ok(build_json_result(&serde_json::json!({
+        ImportedDocument::Done(serde_json::json!({
             "graph_id": lp.id,
             "name": lp.name,
             "nodes_missing_platform": missing_platform,
             "missing_crews": missing_crews,
             "terminals": plan.terminals,
-        })))
+        }))
     }
+}
 
-    #[tool(
-        name = "graph_validate",
-        description = "Validate a shared graph or node document without importing it — no database access, no workdir needed. Provide exactly one of `path` (a JSON file) or `document` (the object itself). A graph document (has `nodes`) runs every structural check `graph_import` runs — format_version, known config keys, ensemble shape, template bindings — plus the sharing rule that every `prompt_preset` a node names is bundled in the document or a builtin (implementer, reviewer, resilience). A node document (`format_version`, `name`, `kind`, `config`, optional `description`/`preset`) checks the slug name, a known authorable kind, known config keys, no harness keys (`platform`/`model`/`cli`) anywhere in the config, and a bundled preset name matching the config's `prompt_preset`. Returns `ok` with the kind, name, node/edge/ensemble counts and the agent nodes that will need a harness — or `ok: false` with every problem found, each with a JSON path and a message."
-    )]
-    pub(crate) async fn graph_validate(
-        &self,
-        Parameters(params): Parameters<GraphValidateParams>,
-    ) -> Result<CallToolResult, McpError> {
-        match crate::daemon::graph_validate::validate_request(params.path, params.document) {
-            Ok(report) => Ok(build_json_result(&report)),
-            Err(e) => Ok(error_result(&e)),
+/// The per-node config checks import runs before building its plan: known
+/// keys for the kind, plus the `mutex` shape.
+fn check_import_node_configs(
+    document: &crate::domain::graph_transfer::GraphExportDocument,
+) -> Result<(), String> {
+    for node in &document.nodes {
+        if let Some(map) = node.config.as_object() {
+            validate_known_config_keys(node.kind, map)?;
         }
+        crate::daemon::handler_validate::validate_node_mutex_config(&node.name, &node.config)?;
+    }
+    Ok(())
+}
+
+/// Same write-time binding check as the node/ensemble authoring paths,
+/// before anything is persisted (all-or-nothing): every document node,
+/// ensemble shared prompt and member override. The domain plan builder
+/// is untouched — this lives in the handler like the other import-time
+/// validations above.
+fn check_import_templates(
+    document: &crate::domain::graph_transfer::GraphExportDocument,
+    plan: &crate::domain::graph_transfer::GraphImportPlan,
+) -> Result<(), String> {
+    let mut node_names: Vec<String> = document.nodes.iter().map(|n| n.name.clone()).collect();
+    for ensemble_plan in &plan.ensembles {
+        node_names.extend(ensemble_plan.member_nodes.iter().map(|n| n.name.clone()));
+        node_names.push(ensemble_plan.join_node.name.clone());
+    }
+    let ensembles: Vec<(String, Option<String>)> = document
+        .ensembles
+        .iter()
+        .zip(plan.ensembles.iter())
+        .map(|(doc, ensemble_plan)| (doc.name.clone(), Some(ensemble_plan.join_node.name.clone())))
+        .collect();
+    for doc_node in &document.nodes {
+        crate::daemon::handler_templates::check_node_templates(
+            doc_node.kind,
+            &doc_node.config,
+            &doc_node.name,
+            &node_names,
+            &ensembles,
+        )?;
+    }
+    for doc_ensemble in &document.ensembles {
+        let owner = format!("Ensemble '{}' shared prompt template", doc_ensemble.name);
+        crate::daemon::handler_templates::check_template_bindings(
+            &owner,
+            &doc_ensemble.prompt_template,
+            crate::graph_engine::AGENT_PROMPT_BINDINGS,
+            &node_names,
+            &ensembles,
+        )?;
+        check_import_member_overrides(doc_ensemble, &node_names, &ensembles)?;
+    }
+    Ok(())
+}
+
+fn check_import_member_overrides(
+    doc_ensemble: &crate::domain::graph_transfer::GraphExportEnsemble,
+    node_names: &[String],
+    ensembles: &[(String, Option<String>)],
+) -> Result<(), String> {
+    for (index, member) in doc_ensemble.members.iter().enumerate() {
+        let Some(template) = member.prompt_override.as_deref() else {
+            continue;
+        };
+        let owner = format!(
+            "Ensemble '{}' member {} prompt override",
+            doc_ensemble.name,
+            index + 1
+        );
+        crate::daemon::handler_templates::check_template_bindings(
+            &owner,
+            template,
+            crate::graph_engine::AGENT_PROMPT_BINDINGS,
+            node_names,
+            ensembles,
+        )?;
+    }
+    Ok(())
+}
+
+/// The `next` step of a `graph_install` response: which nodes still need a
+/// harness assigned, and the command to assign them.
+fn install_next_step(value: &serde_json::Value) -> String {
+    let graph_id = value.get("graph_id").and_then(|id| id.as_str());
+    let missing: Vec<&str> = value
+        .get("nodes_missing_platform")
+        .and_then(serde_json::Value::as_array)
+        .map(|nodes| nodes.iter().filter_map(serde_json::Value::as_str).collect())
+        .unwrap_or_default();
+    match (graph_id, missing.as_slice()) {
+        (Some(id), []) => format!("All agent nodes have a harness; start the graph with graph_run (graph_id {id})."),
+        (Some(id), missing) => format!(
+            "Assign a platform/model to {} with graph_update_node, then start the graph with graph_run (graph_id {id}).",
+            missing.join(", ")
+        ),
+        _ => "Assign every node a platform/model with graph_update_node, then start the graph with graph_run.".to_string(),
     }
 }

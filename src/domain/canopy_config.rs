@@ -233,6 +233,8 @@ pub struct GraphsConfig {
     pub check_output_max_kib: u64,
     #[serde(default = "default_verdict_grace_seconds")]
     pub verdict_grace_seconds: u64,
+    #[serde(default = "default_catalogue_url")]
+    pub catalogue_url: String,
 }
 
 impl Default for GraphsConfig {
@@ -247,6 +249,7 @@ impl Default for GraphsConfig {
             ensemble_max_members_sequential: default_ensemble_max_members_sequential(),
             check_output_max_kib: default_check_output_max_kib(),
             verdict_grace_seconds: default_verdict_grace_seconds(),
+            catalogue_url: default_catalogue_url(),
         }
     }
 }
@@ -285,6 +288,10 @@ fn default_check_output_max_kib() -> u64 {
 
 fn default_verdict_grace_seconds() -> u64 {
     settings::default_int("graphs.verdict_grace_seconds") as u64
+}
+
+fn default_catalogue_url() -> String {
+    settings::default_string("graphs.catalogue_url")
 }
 
 /// Settings for agents and harnesses. Read from the `[agents]` table in

@@ -329,6 +329,7 @@ pub fn config_value(config: &CanopyConfig, key: &str) -> Value {
         }
         "graphs.check_output_max_kib" => Value::from(config.graphs.check_output_max_kib as i64),
         "graphs.verdict_grace_seconds" => Value::from(config.graphs.verdict_grace_seconds as i64),
+        "graphs.catalogue_url" => Value::from(config.graphs.catalogue_url.clone()),
         "agents.probe_timeout_seconds" => Value::from(config.agents.probe_timeout_seconds as i64),
         "clean.reclaim_min_deleted_rows" => {
             Value::from(config.clean.reclaim_min_deleted_rows as i64)
