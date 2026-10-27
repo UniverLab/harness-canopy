@@ -121,6 +121,10 @@ async fn nudge_retry_passes_when_agent_reports() {
     assert_eq!(runs[0].output.as_ref().unwrap()["infra_attempt"], 0);
     assert_eq!(runs[1].status, GraphRunStatus::Pass);
     assert_eq!(
+        runs[0].iteration, runs[1].iteration,
+        "the nudge retry is the same node run chain: iteration is not reset"
+    );
+    assert_eq!(
         db.get_graph_spec(&spec_id).unwrap().unwrap().status,
         GraphSpecStatus::Completed
     );

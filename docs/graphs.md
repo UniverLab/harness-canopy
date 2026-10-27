@@ -467,9 +467,10 @@ infra_crash_max_seconds: 60
 infra_backoff_seconds: 30
 ```
 
-`infra_retry_limit: 0` means one attempt and no retry: a member that
-exits with the infra-crash signature falls through to the next cascade
-member immediately.
+`infra_retry_limit: 0` means one attempt and no retry on the crash
+budget: a member that exits with the infra-crash signature falls through
+to the next cascade member immediately. (The one `# [REPORT REQUIRED]`
+re-dispatch above is outside this budget, so it still applies once.)
 
 Precedence, most specific first: **member → ensemble → node config →
 platform config → engine default.** A member's own value wins over the
