@@ -14,6 +14,13 @@ Each interactive agent runs your chosen AI CLI in a dedicated
 pseudo-terminal with full vt100 emulation, 24-bit color and cursor
 positioning — anything that works in a terminal works inside canopy.
 
+The daemon hosts those pseudo-terminals, so an interactive session outlives
+the TUI that started it: quitting the TUI (`F10` or closing the window) keeps
+every running session alive, and the next TUI attaches to it with its screen
+and scrollback intact. Restarting the daemon does end its sessions, and a
+session that ended while no TUI was open is not reopened. Closing a session
+in the TUI ends it.
+
 ## Background agents
 
 Background agents run unattended, triggered by:

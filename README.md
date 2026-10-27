@@ -165,6 +165,7 @@ docs/ is published at univerlab.org/canopy/docs and holds user documentation onl
 ### 🖥️ Interactive TUI (Canopy Hub)
 
 - **NewAgentDialog** — Three modes (Interactive, Background Cron/Watch, Terminal) with CLI picker, model picker, seed identity selector (`◀ None / SeedName ▶`), directory browser, and yolo mode toggle.
+- **Detachable Sessions** — Sessions run in the daemon, not the TUI: quitting the TUI leaves them running, reopening it reattaches to them live with screen and scrollback, sessions started or closed elsewhere update the sidebar live, and a dropped daemon connection reconnects on its own (0.5 s doubling to 5 s) and re-lists what the daemon still has.
 - **Scheduled Delivery** — `Shift+Enter` (Kitty keyboard protocol) sends prompts at a chosen time instead of immediately.
 - **Split Groups** — Side-by-side horizontal/vertical views for monitoring multiple agents simultaneously.
 - **System Dashboard** — CPU, memory, disk, GPU (NVIDIA/Linux/macOS), temperatures with amber/red alert thresholds. WSL queries Windows host metrics via PowerShell.

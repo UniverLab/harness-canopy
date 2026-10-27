@@ -283,7 +283,7 @@ readable until `spec_convert` migrates them.
 
 | Tool | Description |
 |---|---|
-| `session_list` | List live interactive sessions with the exact ids an interactive graph hook's `target_session_id` accepts, each with platform, workdir, name, and whether a TUI is attached; pass `session_id` to look one up. A conversation resumed under a harness conversation id canopy knows appears once, with the id and name it already had — never a dead row plus a freshly-named one |
+| `session_list` | List live interactive sessions with the exact ids an interactive graph hook's `target_session_id` accepts, each with platform, workdir, name, and `attached` — whether the session's CLI process is still alive on this host, which stays `yes` for a daemon-hosted session even while no TUI is open; pass `session_id` to look one up. A conversation resumed under a harness conversation id canopy knows appears once, with the id and name it already had — never a dead row plus a freshly-named one |
 
 ## Scheduled sends (3)
 
