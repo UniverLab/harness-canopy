@@ -1332,3 +1332,42 @@ async fn graph_run_refuses_a_paused_graph_with_an_active_blocker() {
         "the refusal must not itself change the graph's status"
     );
 }
+
+/// FR3: `graph_continue run_from_node` on an idea-driven graph that has
+/// never run (top-level graph, no specs, no stored idea) is refused with an
+/// error that names `graph_run` with an `idea` as the way to start it —
+/// instead of leaking the bare "no spec to target" from spec resolution.
+#[tokio::test]
+async fn graph_continue_run_from_node_refuses_never_run_idea_graph() {
+    let (dir, db, handler) = endpoint_test_handler();
+    let lp = insert_test_graph(&db, dir.path());
+    // The idea-graph shape: a top-level graph, zero bound specs.
+    db.insert_graph_node(&GraphNode {
+        id: "node-check".to_string(),
+        spec_id: None,
+        graph_id: Some(lp.id.clone()),
+        name: "Check".to_string(),
+        kind: GraphNodeKind::Check,
+        config: serde_json::json!({
+            "command": "true",
+            "success_condition": "exit_code_0"
+        }),
+        position: 1,
+        created_at: chrono::Utc::now(),
+    })
+    .unwrap();
+
+    let refused = handler
+        .graph_continue(Parameters(GraphContinueParams {
+            graph_id: lp.id.clone(),
+            action: "run_from_node".to_string(),
+            node_id: Some("Check".to_string()),
+            spec_id: None,
+        }))
+        .await
+        .unwrap();
+    assert!(is_err(&refused), "{}", text(&refused));
+    let msg = text(&refused);
+    assert!(msg.contains("graph_run"), "must name graph_run: {msg}");
+    assert!(msg.contains("idea"), "must name the idea: {msg}");
+}

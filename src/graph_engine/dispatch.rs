@@ -109,6 +109,11 @@ impl GraphEngine {
         let Some(lp) = self.db.get_graph(&graph_id)? else {
             bail!("Graph '{}' not found.", graph_id);
         };
+        // FR1/FR2: a resume (or directed start) of an idea graph resumes the
+        // idea it last ran with — before the emptiness guard below and before
+        // the placeholder is (re)created, so both see the stored idea exactly
+        // as they would an explicit one.
+        let idea = self.effective_idea(&lp, idea, is_resume || directed.is_some())?;
         if let Some(message) =
             self.empty_launch_check(&graph_id, queue_id.as_deref(), idea.as_deref())?
         {
@@ -126,6 +131,7 @@ impl GraphEngine {
         self.clear_directed_spec_limit(directed.map(|d| d.spec_id.as_str()))?;
         self.db
             .set_graph_active_run_queue(&graph_id, queue_id.as_deref())?;
+        self.persist_run_idea(&graph_id, idea.as_deref())?;
         let workdir = Self::resolve_dispatch_workdir(&lp, workdir_override, &sandbox);
         self.announce_dispatch_start(&lp, &graph_id, queue_id.as_deref(), &workdir, is_resume)?;
         let mut completed_specs: Vec<(String, String)> = Vec::new();
@@ -163,7 +169,13 @@ impl GraphEngine {
                 }
             }
             None => {
-                self.purge_terminal_placeholder_specs(&graph_id)?;
+                // FR4: a resumed (or directed) run keeps the failed idea
+                // placeholder — its spec id and node runs carry
+                // `{{previous_feedback}}`. Only a fresh, undirected launch
+                // purges a prior attempt's terminal bookkeeping row.
+                if ctx.directed.is_none() && !ctx.is_resume {
+                    self.purge_terminal_placeholder_specs(&graph_id)?;
+                }
                 let specs = self.ensure_placeholder_spec(&ctx, &graph_id, idea).await?;
                 if self
                     .run_bound_spec_loop(&ctx, specs, &mut completed_specs)
@@ -177,32 +189,11 @@ impl GraphEngine {
         if self.warn_incomplete_queue_members(&graph_id, queue_id.as_deref())? {
             return Ok(());
         }
-        if let Some(qid) = queue_id.as_deref() {
-            let failed = self.db.queue_failed_members(qid)?;
-            if !failed.is_empty() {
-                let blocker = failed
-                    .iter()
-                    .map(|(_, name, summary)| {
-                        format!(
-                            "{}: {}",
-                            name,
-                            summary.clone().unwrap_or_else(|| "failed".to_string())
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                let blocker = format!("Queue run failed: {}", blocker);
-                self.fail_graph(
-                    &graph_id,
-                    Some(ctx.claimed_at),
-                    None,
-                    None,
-                    &blocker,
-                    &completed_specs,
-                )
-                .await?;
-                return Ok(());
-            }
+        if self
+            .fail_dispatch_on_queue_failures(&ctx, queue_id.as_deref(), &completed_specs)
+            .await?
+        {
+            return Ok(());
         }
         self.finish_dispatch(&ctx, queue_id.as_deref(), sandbox, &completed_specs)
             .await?;
@@ -662,79 +653,6 @@ impl GraphEngine {
         Ok(DispatchFlow::Continue)
     }
 
-    pub(crate) fn warn_incomplete_queue_members(
-        &self,
-        graph_id: &str,
-        queue_id: Option<&str>,
-    ) -> Result<bool> {
-        let Some(queue_id) = queue_id else {
-            return Ok(false);
-        };
-        if !self.db.queue_has_incomplete_members(queue_id)? {
-            return Ok(false);
-        }
-        tracing::warn!(
-            "Graph '{}' queue run against '{}' found no pending member to pick, but the \
-             queue still has incomplete (non completed/skipped) member(s); leaving the \
-             graph as-is rather than marking it completed. Reset the stuck member(s) via \
-             graph_reset to resume.",
-            graph_id,
-            queue_id
-        );
-        Ok(true)
-    }
-
-    pub(crate) async fn finish_dispatch(
-        &self,
-        ctx: &DispatchCtx<'_>,
-        queue_id: Option<&str>,
-        sandbox: Option<Sandbox>,
-        completed_specs: &[(String, String)],
-    ) -> Result<()> {
-        self.db.update_graph_status(
-            ctx.graph_id,
-            GraphStatus::Completed,
-            None,
-            Some(chrono::Utc::now()),
-        )?;
-        let (done, total) = self.spec_progress(ctx.graph_id, queue_id)?;
-        activity::record(
-            &self.db,
-            activity::GraphEvent {
-                graph_id: ctx.graph_id,
-                graph_name: &ctx.lp.name,
-                workdir: ctx.workdir,
-                spec_id: None,
-                node_id: None,
-                run_id: None,
-                kind: activity::GraphEventKind::GraphCompleted,
-                message: format!("Completed ({done}/{total} specs)."),
-                payload: None,
-            },
-        );
-        let executed_any_spec = !completed_specs.is_empty();
-        let hook_launched = executed_any_spec
-            && ctx
-                .lp
-                .hooks
-                .get(&GraphHookEvent::OnCompleted)
-                .is_some_and(|hooks| !hooks.is_empty());
-        self.notification_service.notify_graph_finished(
-            &ctx.lp.name,
-            GraphFinishOutcome::Completed {
-                done,
-                total,
-                hook_launched,
-            },
-        );
-        if executed_any_spec {
-            self.fire_completion_hook(ctx.lp, ctx.workdir, completed_specs)
-                .await;
-        }
-        self.teardown_sandbox_after_final_status(sandbox, "completed".into())
-            .await;
-        Ok(())
-    }
     /// Build the actionable error text for [`Self::empty_launch_check`].
     ///
     /// Queue membership doesn't record which graph(s) normally draw from it

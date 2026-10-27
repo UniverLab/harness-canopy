@@ -215,6 +215,39 @@ impl Database {
         Ok(rows > 0)
     }
 
+    /// The idea an idea-driven run of `graph_id` last ran with (`None` for a
+    /// graph that never ran with an idea, or is spec-driven). Read straight
+    /// from the row — there is deliberately no `Graph` field for it (cf.
+    /// `is_graph_hook_launched`), so only the resume paths that need it pay
+    /// for the read.
+    pub fn graph_active_run_idea(&self, graph_id: &str) -> Result<Option<String>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let mut stmt = conn.prepare("SELECT active_run_idea FROM graphs WHERE id = ?1")?;
+        let mut rows = stmt.query(params![graph_id])?;
+        match rows.next()? {
+            Some(row) => Ok(row.get::<_, Option<String>>(0)?),
+            None => Ok(None),
+        }
+    }
+
+    /// Persist the idea a run against `graph_id` is executing (called once
+    /// when the run starts — a resumed run re-persists the same value).
+    /// Returns whether the graph row existed.
+    pub fn set_graph_active_run_idea(&self, graph_id: &str, idea: Option<&str>) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let rows = conn.execute(
+            "UPDATE graphs SET active_run_idea = ?1 WHERE id = ?2",
+            params![idea, graph_id],
+        )?;
+        Ok(rows > 0)
+    }
+
     /// Reset a graph back to `Draft` (the status `graph_run` accepts) and clear
     /// `completed_at`, so a `failed` or `completed` graph can be relaunched via
     /// `graph_reset` + `graph_run` instead of being stuck forever.

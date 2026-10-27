@@ -586,6 +586,14 @@ ensemble fans out from starts at that node itself, runs it, and fans out
 to the ensemble from there — the named node always runs first and is never
 reported as skipped. A join node or a single ensemble member is refused,
 naming the ensemble.
+On a graph that ran with an `idea` (a spec-less idea run), the directed run
+resumes *that* run: the graph remembers the idea it last ran with,
+`{{spec_content}}` renders the stored idea, and the failed run's
+blank-name bookkeeping spec plus its node history (so `{{previous_feedback}}`
+still carries the failed run's feedback) are kept rather than purged — no
+`spec_id` is needed. An idea graph that has never run has nothing to resume:
+`graph_continue` with `run_from_node` (and `retry_current_node`) refuses it,
+naming `graph_run` with an `idea` as the way to start one.
 If a reachable prompt or check references a node with no recorded output
 for the spec, the run is refused and the missing node is named.
 

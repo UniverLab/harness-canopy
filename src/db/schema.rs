@@ -119,6 +119,26 @@ impl Database {
         Ok(())
     }
 
+    /// Add graph `active_run_idea`: the idea an idea-driven run last ran
+    /// with, persisted the moment that run starts so every resume path
+    /// (`graph_continue run_from_node`, `retry_current_node`, plain resume)
+    /// can re-render `{{spec_content}}` from it. `NULL` on pre-existing rows
+    /// and on spec-driven graphs (never written for them).
+    pub(in crate::db) fn migrate_graph_active_run_idea(conn: &Connection) -> Result<()> {
+        let has_active_run_idea: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('graphs') WHERE name = 'active_run_idea'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if !has_active_run_idea {
+            conn.execute("ALTER TABLE graphs ADD COLUMN active_run_idea TEXT", [])
+                .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+        }
+        Ok(())
+    }
+
     /// Add graph-spec `spec_committed_head`/`spec_end_dirty*` columns.
     pub(in crate::db) fn migrate_spec_commit_evidence_columns(conn: &Connection) -> Result<()> {
         // `spec_committed_head` (C15): the workdir's git HEAD immediately

@@ -805,3 +805,4 @@ mod part16_tests;
 mod part17_tests;
 mod part18_tests;
 mod part19_tests;
+mod part20_tests;

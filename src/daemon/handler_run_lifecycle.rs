@@ -346,6 +346,14 @@ impl TaskTriggerHandler {
                         node_id,
                     );
                 }
+                // FR3: same never-run idea-graph refusal as run_from_node.
+                if let Some(refusal) = self
+                    .graph_engine
+                    .idea_resume_ready(&lp)
+                    .map_err(internal_error)?
+                {
+                    return Ok(error_result(&refusal));
+                }
                 let spec = resolve_directed_spec(&self.db, &graph_id, None).ok();
                 handle_retry_current_node(&self.db, &graph_id)?;
                 // FR1: the directive clears the spec's execution limit before the run.
@@ -413,6 +421,16 @@ impl TaskTriggerHandler {
                 "graph_continue run_from_node requires a non-empty node_id.",
             ));
         };
+        // FR3: an idea graph that never ran has no stored idea to resume —
+        // refuse it here, naming the way to start one, instead of letting
+        // `resolve_directed_spec` fail with a bare "no spec to target".
+        if let Some(refusal) = self
+            .graph_engine
+            .idea_resume_ready(&lp)
+            .map_err(internal_error)?
+        {
+            return Ok(error_result(&refusal));
+        }
         let spec = match resolve_directed_spec(&self.db, &graph_id, spec_id.as_deref()) {
             Ok(spec) => spec,
             Err(message) => return Ok(error_result(&message)),
