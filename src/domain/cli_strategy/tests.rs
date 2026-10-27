@@ -77,3 +77,4 @@ fn write_identity_script(dir: &tempfile::TempDir, name: &str, body: &str) -> Pat
 
 mod part01_tests;
 mod part02_tests;
+mod part03_workdir_tests;

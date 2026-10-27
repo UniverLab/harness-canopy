@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -56,6 +57,22 @@ impl SubagentResult {
             platform: record.platform,
             model: record.model,
         }
+    }
+}
+
+/// Validate a requested subagent workdir before anything is spawned or
+/// recorded. A missing path, or one that exists but is not a directory,
+/// is refused here with an error naming the path — the handler surfaces
+/// the message to the caller verbatim. Symlinks are resolved the strict
+/// way (the link itself must be a directory entry that `symlink_metadata`
+/// reports as a directory), so a dangling link is refused like any other
+/// missing directory.
+fn validate_workdir(raw: &str) -> Result<String> {
+    let path = Path::new(raw);
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => Ok(raw.to_string()),
+        Ok(_) => Err(anyhow::anyhow!("workdir is not a directory: {raw}")),
+        Err(e) => Err(anyhow::anyhow!("workdir does not exist ({e}): {raw}")),
     }
 }
 
@@ -163,6 +180,10 @@ pub async fn spawn_subagent(
     ttl_minutes: u64,
     effort: Option<&str>,
 ) -> Result<(String, Option<String>)> {
+    // FR2: refuse a missing/non-directory workdir before anything else
+    // runs — no effort resolution, no binary resolution, no DB row.
+    validate_workdir(workdir)?;
+
     let cli = Cli::resolve(Some(platform_name)).map_err(|e| anyhow::anyhow!(e))?;
     let strategy = cli.strategy();
     let effort_not_applied = resolve_effort_for_spawn(&strategy, platform_name, effort)?;
@@ -288,6 +309,10 @@ pub async fn spawn_subagent_blocking(
     ttl_minutes: u64,
     effort: Option<&str>,
 ) -> Result<BlockingSpawnResult> {
+    // FR2: refuse a missing/non-directory workdir before anything else
+    // runs — no effort resolution, no binary resolution, no DB row.
+    validate_workdir(workdir)?;
+
     let cli = Cli::resolve(Some(platform_name)).map_err(|e| anyhow::anyhow!(e))?;
     let strategy = cli.strategy();
     let effort_not_applied = resolve_effort_for_spawn(&strategy, platform_name, effort)?;
@@ -643,6 +668,40 @@ mod tests {
         assert_ne!(
             delivered, "Subagent run 'run-1' not found",
             "delivered must never equal the generic missing text"
+        );
+    }
+
+    // ── workdir validation (FR2) ────────────────────────────────────────
+
+    #[test]
+    fn validate_workdir_accepts_a_real_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_string_lossy().into_owned();
+        assert_eq!(
+            validate_workdir(&dir).unwrap(),
+            dir,
+            "an existing directory must be accepted unchanged"
+        );
+    }
+
+    #[test]
+    fn validate_workdir_refuses_missing_path_naming_it() {
+        let missing = "/nonexistent-subagent-workdir-check";
+        let err = validate_workdir(missing).unwrap_err().to_string();
+        assert!(
+            err.contains(missing),
+            "refusal must name the path, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_workdir_refuses_a_file_naming_it() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let path = file.path().to_string_lossy().into_owned();
+        let err = validate_workdir(&path).unwrap_err().to_string();
+        assert!(
+            err.contains(&path) && err.contains("not a directory"),
+            "a file must be refused naming the path, got: {err}"
         );
     }
 }

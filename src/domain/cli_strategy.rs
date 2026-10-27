@@ -499,6 +499,18 @@ impl CliStrategy {
             cmd.env(key, value);
         }
 
+        // The spawned process must RUN in `working_dir` (cwd), regardless of
+        // how the directory also reaches its argv: some CLIs resolve relative
+        // paths from their cwd instead of the `--dir`-style flag, and a CLI
+        // with no working-dir flag at all has no other way to be pointed at
+        // `working_dir`. Set here — once, before the template/legacy split —
+        // so every platform shares the same behaviour with no special-casing
+        // at the call sites. `None` leaves the command inheriting the
+        // caller's cwd.
+        if let Some(dir) = working_dir {
+            cmd.current_dir(dir);
+        }
+
         if let Some(ref template) = self.invocation_template {
             // Template-driven argv assembly (CB2).
             let argv = self.build_argv_from_template(
