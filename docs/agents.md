@@ -17,7 +17,9 @@ positioning — anything that works in a terminal works inside canopy.
 The daemon hosts those pseudo-terminals, so an interactive session outlives
 the TUI that started it: quitting the TUI (`F10` or closing the window) keeps
 every running session alive, and the next TUI attaches to it with its screen
-and scrollback intact. Restarting the daemon does end its sessions, and a
+and scrollback intact. Restarting the daemon does end its sessions — they
+are its children — but as soon as the new daemon starts it brings back every
+session the database still lists as active, under the same id and name; a
 session that ended while no TUI was open is not reopened. Closing a session
 in the TUI ends it.
 
