@@ -197,10 +197,17 @@ line. `←`/`→` never change a value.
   agents have sent — the host shelf plus one per session, merged newest
   first — with arrival time, sender, name, size and caption per row.
 - **Opening** — `Enter` (or `Space`) opens the selected file with the
-  system viewer, `c` copies its absolute path, and `d` deletes it after a
-  `y`/`n` confirmation.
+  system viewer — `open` on macOS, `xdg-open` on Linux, `wslview` (or
+  `explorer.exe` with the path translated by `wslpath`) under WSL. `c`
+  copies its absolute path, and `d` deletes it after a `y`/`n`
+  confirmation. A viewer that fails or is missing raises a toast naming the
+  file and the error — which carries the path — instead of crashing the TUI.
+- **Confirming** — while the `y`/`n` prompt is armed every key answers it:
+  `y` or `Enter` deletes, `n` or `Esc` cancels, and nothing else moves — not
+  even a tab switch.
 - **Arrivals** — a file sent while the TUI runs joins the list live and
-  shows a `📎` toast for five seconds.
+  shows a `📎 <name> — <from>` toast for five seconds, wherever you are in
+  the TUI.
 - **Lifetime** — a session's files are kept until 7 days after the session
   is removed, and the whole shelf is capped at 1 GiB: when a new file
   would exceed it, the oldest files are pruned first.
