@@ -220,6 +220,47 @@ fn reconcile_does_not_resume_bridge_rows() {
 }
 
 #[test]
+fn reconcile_preserves_the_harness_conversation_id() {
+    let (db, dir) = test_db();
+    db.insert_interactive_session(
+        "resume-harness",
+        "harness-name",
+        "sh",
+        "/tmp",
+        None,
+        None,
+        "interactive",
+        None,
+    )
+    .unwrap();
+    db.set_session_harness_conversation_id("resume-harness", "conv-abc")
+        .unwrap();
+
+    let hub = test_hub(&db);
+    reconcile_at_startup(&hub, dir.path());
+
+    assert!(
+        hub.get("resume-harness").is_some(),
+        "the active row is resumed"
+    );
+    // The hub's spawn re-records the row; the harness identifier the
+    // previous daemon stored must survive so a later registration for the
+    // same harness conversation still resolves to this id and name.
+    let row = db
+        .get_hookable_session("resume-harness")
+        .expect("read resumed row")
+        .expect("resumed row exists");
+    assert_eq!(row.harness_conversation_id.as_deref(), Some("conv-abc"));
+    assert_eq!(
+        db.find_session_by_harness_id("conv-abc")
+            .expect("lookup by harness id")
+            .map(|s| s.id),
+        Some("resume-harness".to_string())
+    );
+    let _ = hub.kill("resume-harness");
+}
+
+#[test]
 fn reconcile_sweeps_orphaned_rows_to_completed() {
     let (db, dir) = test_db();
     db.insert_interactive_session(

@@ -222,6 +222,17 @@ fn finalize_resumed_session(
             session.name
         );
     }
+    // The hub's spawn recorded its row with `INSERT OR REPLACE` and no
+    // harness identifier, which nulls the conversation id the previous daemon
+    // recorded. Restore it so a later registration carrying the same harness
+    // conversation still resolves to this row (FIX-21).
+    if let Some(harness_id) = session.harness_conversation_id.as_deref() {
+        if !harness_id.is_empty() {
+            let _ = hub
+                .db()
+                .set_session_harness_conversation_id(&session.id, harness_id);
+        }
+    }
 }
 
 /// The accent a resumed agent advertises to its child CLI: the platform's
