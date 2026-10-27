@@ -185,6 +185,8 @@ pub fn build_import_plan_with_prompts(
         .as_deref()
         .map(|name| maps.resolve_node_name(name))
         .transpose()?;
+    // v6: install bundled presets now the document fully validated (no overwrites).
+    install(&document.prompt_presets, prompts_dir)?;
 
     Ok(GraphImportPlan {
         nodes,
@@ -700,7 +702,6 @@ pub(super) fn import_ensemble_record(
         commit_rights: doc_ensemble.commit_rights,
         mutex: doc_ensemble.mutex.clone(),
         created_at: now,
-
         // CM49: the crew reference travels by name. `crew_id` and the applied
         // version are resolved against the local crews at persist time.
         crew_id: None,

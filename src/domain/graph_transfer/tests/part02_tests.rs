@@ -26,6 +26,7 @@ fn import_round_robin_names_kind_when_over_16() {
 #[test]
 fn import_plan_rejects_negative_quorum_grace() {
     let doc = GraphExportDocument {
+        prompt_presets: Vec::new(),
         format_version: 1,
         name: "x".to_string(),
         description: None,
@@ -93,6 +94,7 @@ fn import_plan_rejects_negative_quorum_grace() {
 #[test]
 fn import_plan_round_trips_quorum_grace_minutes() {
     let doc = GraphExportDocument {
+        prompt_presets: Vec::new(),
         format_version: 1,
         name: "x".to_string(),
         description: None,
@@ -158,6 +160,7 @@ fn import_plan_round_trips_quorum_grace_minutes() {
 #[test]
 fn import_plan_bakes_member_timeout_override_into_node_config() {
     let doc = GraphExportDocument {
+        prompt_presets: Vec::new(),
         format_version: 1,
         name: "x".to_string(),
         description: None,
@@ -230,6 +233,7 @@ fn import_plan_bakes_member_timeout_override_into_node_config() {
 fn import_plan_rejects_unreachable_node() {
     // A -> B, C self-graph (single entry A, C unreachable)
     let doc = GraphExportDocument {
+        prompt_presets: Vec::new(),
         format_version: 1,
         name: "x".to_string(),
         description: None,
@@ -282,6 +286,7 @@ fn import_plan_rejects_unreachable_node() {
 fn import_plan_rejects_multiple_entry_points() {
     // A and B both with no incoming => multiple entries
     let doc = GraphExportDocument {
+        prompt_presets: Vec::new(),
         format_version: 1,
         name: "x".to_string(),
         description: None,
@@ -326,6 +331,7 @@ fn import_plan_accepts_agent_missing_fail_edge_as_terminal() {
     // Resilience node with only pass edge -> fail is a terminal exit,
     // not an error (same verdict as graph_preflight).
     let doc = GraphExportDocument {
+        prompt_presets: Vec::new(),
         format_version: 1,
         name: "x".to_string(),
         description: None,
@@ -367,6 +373,7 @@ fn import_plan_accepts_agent_missing_fail_edge_as_terminal() {
 #[test]
 fn build_import_plan_rejects_unknown_node_reference() {
     let doc = GraphExportDocument {
+        prompt_presets: Vec::new(),
         format_version: GRAPH_EXPORT_FORMAT_VERSION,
         name: "test".to_string(),
         description: None,
@@ -395,6 +402,7 @@ fn build_import_plan_rejects_unknown_node_reference() {
 #[test]
 fn build_import_plan_accepts_valid_node_reference() {
     let doc = GraphExportDocument {
+        prompt_presets: Vec::new(),
         format_version: GRAPH_EXPORT_FORMAT_VERSION,
         name: "test".to_string(),
         description: None,
@@ -652,6 +660,7 @@ fn import_restores_each_ensemble_kind() {
 #[test]
 fn import_rejects_unknown_ensemble_kind() {
     let doc = GraphExportDocument {
+        prompt_presets: Vec::new(),
         format_version: 2,
         name: "x".to_string(),
         description: None,

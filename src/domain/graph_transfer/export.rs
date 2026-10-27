@@ -39,6 +39,29 @@ pub fn build_export_document_with_pending(
     ensembles: &[EnsembleDetails],
     pending_entry_sources: &HashMap<String, Vec<(String, GraphEdgeCondition)>>,
 ) -> Result<GraphExportDocument, String> {
+    build_export_document_with_pending_and_prompts(
+        lp,
+        graph_nodes,
+        graph_edges,
+        ensembles,
+        pending_entry_sources,
+        &crate::domain::prompts::prompts_dir(&crate::domain::prompts::canopy_dir()),
+    )
+}
+
+/// [`build_export_document_with_pending`] with the prompts directory
+/// injected: the document bundles the full content of every custom
+/// `prompt_preset` its agent nodes reference, read from `<prompts_dir>
+/// /<name>.md`. Production uses the wrapper (the daemon's real prompts
+/// dir); tests inject a temp dir.
+pub fn build_export_document_with_pending_and_prompts(
+    lp: &Graph,
+    graph_nodes: &[GraphNode],
+    graph_edges: &[GraphEdge],
+    ensembles: &[EnsembleDetails],
+    pending_entry_sources: &HashMap<String, Vec<(String, GraphEdgeCondition)>>,
+    prompts_dir: &std::path::Path,
+) -> Result<GraphExportDocument, String> {
     let owned_ids: std::collections::HashSet<&str> = ensembles
         .iter()
         .flat_map(|details| {
@@ -59,7 +82,7 @@ pub fn build_export_document_with_pending(
     reject_duplicate_export_names(lp, &plain_nodes, ensembles)?;
     let name_map = ExportNameMap::new(lp, &plain_nodes, ensembles);
 
-    let export_nodes = plain_nodes
+    let export_nodes: Vec<GraphExportNode> = plain_nodes
         .iter()
         .map(|node| GraphExportNode {
             name: node.name.clone(),
@@ -100,6 +123,8 @@ pub fn build_export_document_with_pending(
         .map(|id| name_map.node_name(id))
         .transpose()?;
 
+    let prompt_presets = collect(&export_nodes, prompts_dir);
+
     Ok(GraphExportDocument {
         format_version: GRAPH_EXPORT_FORMAT_VERSION,
         name: lp.name.clone(),
@@ -109,6 +134,7 @@ pub fn build_export_document_with_pending(
         ensembles: export_ensembles,
         infra_node,
         hooks: lp.hooks.clone(),
+        prompt_presets,
     })
 }
 

@@ -258,6 +258,7 @@ fn import_v2_break_condition_is_error() {
 #[test]
 fn import_plan_rejects_edge_naming_nonexistent_node() {
     let doc = GraphExportDocument {
+        prompt_presets: Vec::new(),
         format_version: 1,
         name: "x".to_string(),
         description: None,
@@ -284,6 +285,7 @@ fn import_plan_rejects_edge_naming_nonexistent_node() {
 #[test]
 fn import_plan_rejects_join_kind_node() {
     let doc = GraphExportDocument {
+        prompt_presets: Vec::new(),
         format_version: 1,
         name: "x".to_string(),
         description: None,
@@ -322,6 +324,7 @@ fn agent_nodes_missing_platform_reports_unbound_v1_nodes() {
     // A v1-style document carries no bindings: every agent node is
     // reported. Built by hand (not via export, which always binds).
     let doc = GraphExportDocument {
+        prompt_presets: Vec::new(),
         format_version: 1,
         name: "x".to_string(),
         description: None,
@@ -700,6 +703,7 @@ fn export_omits_extra_entry_sources_when_there_are_none() {
 #[test]
 fn import_refuses_duplicate_extra_entry_source() {
     let document = GraphExportDocument {
+        prompt_presets: Vec::new(),
         format_version: GRAPH_EXPORT_FORMAT_VERSION,
         name: "duplicate-entry-source".to_string(),
         description: None,
@@ -769,6 +773,7 @@ fn import_refuses_duplicate_extra_entry_source() {
 #[test]
 fn import_refuses_extra_entry_source_naming_unknown_node() {
     let document = GraphExportDocument {
+        prompt_presets: Vec::new(),
         format_version: GRAPH_EXPORT_FORMAT_VERSION,
         name: "unknown-entry-source".to_string(),
         description: None,
@@ -967,6 +972,7 @@ fn export_refuses_duplicate_ensemble_names() {
 #[test]
 fn import_rejects_unknown_ensemble_target() {
     let document = GraphExportDocument {
+        prompt_presets: Vec::new(),
         format_version: 3,
         name: "unknown-target".to_string(),
         description: None,
@@ -1142,6 +1148,7 @@ fn v2_export_import_export_preserves_bindings() {
 #[test]
 fn import_v2_with_unconfigured_platform_succeeds() {
     let doc = GraphExportDocument {
+        prompt_presets: Vec::new(),
         format_version: 2,
         name: "x".to_string(),
         description: None,
@@ -1306,6 +1313,7 @@ fn docs_worked_example_parses_and_imports_cleanly() {
 #[test]
 fn import_plan_rejects_ensemble_with_too_few_members() {
     let doc = GraphExportDocument {
+        prompt_presets: Vec::new(),
         format_version: 1,
         name: "x".to_string(),
         description: None,

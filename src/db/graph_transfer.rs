@@ -366,6 +366,7 @@ mod tests {
     fn simple_document() -> GraphExportDocument {
         use crate::domain::graph_transfer::{GraphExportEdge, GraphExportNode};
         GraphExportDocument {
+            prompt_presets: Vec::new(),
             format_version: 2,
             name: "shared-graph".to_string(),
             description: Some("A shared design".to_string()),
@@ -447,6 +448,7 @@ mod tests {
         };
         let db = test_db();
         let document = GraphExportDocument {
+            prompt_presets: Vec::new(),
             format_version: 2,
             name: "ensemble-graph".to_string(),
             description: None,
@@ -532,6 +534,7 @@ mod tests {
         use crate::domain::graph_transfer::{GraphExportEdge, GraphExportNode};
         let db = test_db();
         let document = GraphExportDocument {
+            prompt_presets: Vec::new(),
             format_version: 2,
             name: "infra-graph".to_string(),
             description: None,
@@ -595,6 +598,7 @@ mod tests {
             timeout_minutes: None,
         };
         let document = GraphExportDocument {
+            prompt_presets: Vec::new(),
             format_version: 2,
             name: "kinds-graph".to_string(),
             description: None,
@@ -689,6 +693,7 @@ mod tests {
         };
         let db = test_db();
         let document = GraphExportDocument {
+            prompt_presets: Vec::new(),
             format_version: GRAPH_EXPORT_FORMAT_VERSION,
             name: "cb71-committer".to_string(),
             description: None,
@@ -834,6 +839,7 @@ mod tests {
         };
         let db = test_db();
         let doc = GraphExportDocument {
+            prompt_presets: Vec::new(),
             format_version: 2,
             name: "cb62-full".to_string(),
             description: Some("all fields".to_string()),
@@ -1051,6 +1057,7 @@ mod tests {
             GraphExportEnsemble, GraphExportEnsembleTarget, GraphExportNode,
         };
         GraphExportDocument {
+            prompt_presets: Vec::new(),
             format_version: 5,
             name: "crew-graph".to_string(),
             description: None,

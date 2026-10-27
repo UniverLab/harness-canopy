@@ -141,6 +141,7 @@ fn make_ensemble_details(
 /// members, so the per-kind ceiling can be exercised at import.
 fn make_twelve_member_doc(kind: Option<&str>) -> GraphExportDocument {
     GraphExportDocument {
+        prompt_presets: Vec::new(),
         format_version: 1,
         name: "x".to_string(),
         description: None,
@@ -193,6 +194,7 @@ fn make_twelve_member_doc(kind: Option<&str>) -> GraphExportDocument {
 
 fn import_kind_fixture(kind: Option<&str>) -> GraphImportPlan {
     let doc = GraphExportDocument {
+        prompt_presets: Vec::new(),
         format_version: 2,
         name: "x".to_string(),
         description: None,
@@ -253,3 +255,4 @@ fn import_kind_fixture(kind: Option<&str>) -> GraphImportPlan {
 mod part01_tests;
 mod part02_tests;
 mod part03_tests;
+mod part04_tests;

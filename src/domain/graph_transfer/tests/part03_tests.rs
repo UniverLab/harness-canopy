@@ -7,6 +7,7 @@ use tempfile::tempdir;
 /// enough structure that a successful import is a real two-node graph.
 fn doc_with_agent_preset(preset: &str) -> GraphExportDocument {
     GraphExportDocument {
+        prompt_presets: Vec::new(),
         format_version: 1,
         name: "shared".to_string(),
         description: None,
@@ -146,6 +147,7 @@ fn error_names_every_unknown_preset() {
 fn nodes_without_a_preset_are_not_checked() {
     let dir = tempdir().unwrap();
     let doc = GraphExportDocument {
+        prompt_presets: Vec::new(),
         format_version: 1,
         name: "shared".to_string(),
         description: None,

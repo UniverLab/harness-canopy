@@ -41,14 +41,18 @@ pub use export::*;
 mod import;
 pub use import::*;
 mod pending;
+mod presets;
+pub use presets::*;
 mod validation;
 pub use validation::*;
 
 /// The latest `format_version` this build writes. `graph_import` accepts `1`
 /// (members with no binding), `2` (bindings included), `3` (graph/error
 /// vocabulary, `break` still read as `error` on import), `4` (every ensemble
-/// entry source), `5`, and `6` (current: ensemble `mutex`). An unrecognized
-/// or missing version is a refusal, never a best-effort parse (decision 6).
+/// entry source), `5`, and `6` (current: ensemble `mutex` plus the bundled
+/// `prompt_presets` every custom preset the document's agent nodes
+/// reference travels with). An unrecognized or missing version is a
+/// refusal, never a best-effort parse (decision 6).
 pub const GRAPH_EXPORT_FORMAT_VERSION: i64 = 6;
 
 // Ensemble member count bounds live in `member_bounds` (the single shared
@@ -77,6 +81,24 @@ pub struct GraphExportDocument {
     /// `crew`-bound agent hook round-trips. Omitted when the graph has none.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub hooks: BTreeMap<GraphHookEvent, Vec<GraphCompletionHook>>,
+    /// The full text of every custom `prompt_preset` the document's agent
+    /// nodes reference (v6), so installing the document on another machine
+    /// produces working nodes instead of name-only references. Builtin
+    /// presets (`implementer`, `reviewer`, `resilience`) are never bundled;
+    /// import installs each entry into the prompts dir when no file with
+    /// that name exists locally (see [`presets`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prompt_presets: Vec<GraphExportPromptPreset>,
+}
+
+/// One bundled custom prompt preset: the name an agent node's
+/// `prompt_preset` config key references (resolved as
+/// `<prompts_dir>/<name>.md` at spawn time) and its full content.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphExportPromptPreset {
+    pub name: String,
+    pub content: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

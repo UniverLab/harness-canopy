@@ -59,11 +59,24 @@ pub(super) fn reject_unknown_output_references(
 ///
 /// Only plain agent nodes are inspected: an ensemble member carries no preset
 /// field — its prompt is the ensemble's own template — so there is nothing to
-/// check there until preset bundling lands.
+/// check there.
+///
+/// The document's bundled `prompt_presets` (v6) count as known references:
+/// they are installed into the prompts dir by import before any node spawns.
+/// Each bundled entry is validated first (safe name, no overwrite of a
+/// differing local file), before the empty-reference early return — a
+/// document may bundle zero presets, but every preset it does bundle must be
+/// installable.
 pub(super) fn reject_unknown_prompt_presets(
     document: &GraphExportDocument,
     prompts_dir: &std::path::Path,
 ) -> Result<(), String> {
+    validate(&document.prompt_presets, prompts_dir)?;
+    let bundled: BTreeSet<&str> = document
+        .prompt_presets
+        .iter()
+        .map(|preset| preset.name.as_str())
+        .collect();
     let mut referenced: BTreeSet<&str> = document
         .nodes
         .iter()
@@ -80,7 +93,9 @@ pub(super) fn reject_unknown_prompt_presets(
         .collect();
     let builtins: BTreeSet<&str> = builtin_names.iter().copied().collect();
     referenced.retain(|name| {
-        !builtins.contains(name) && !prompts_dir.join(format!("{name}.md")).is_file()
+        !builtins.contains(name)
+            && !bundled.contains(name)
+            && !prompts_dir.join(format!("{name}.md")).is_file()
     });
     if referenced.is_empty() {
         return Ok(());

@@ -975,26 +975,32 @@ absent `kind` means on import. Import refuses a `kind` value it does
 not know — naming the ensemble and the value — and refuses a document
 that carries any field it does not know how to restore, as part of
 its all-or-nothing contract. `format_version` 6 remains the newest
-accepted version; 1, 2, 3, 4 and 5 documents import unchanged (they carry
+accepted version (it also carries the bundled `prompt_presets`, below);
+1, 2, 3, 4 and 5 documents import unchanged (they carry
 fewer fields, never more).
 
-A node's `prompt_preset` travels as a **name**, not as its text, so
-import checks every preset the document references against this
-machine: a file `<canopy_dir>/prompts/<name>.md` (the same file the
-engine reads at spawn time) or one of the builtins (`implementer`,
+A node's `prompt_preset` names a preset that must exist on the
+importing machine: a file `<canopy_dir>/prompts/<name>.md` (the same
+file the engine reads at spawn time) or one of the builtins (`implementer`,
 `reviewer`, `resilience`, which are seeded on daemon start and fall back
-to embedded constants). If any referenced preset is unknown, the whole
-import is refused — naming **every** unknown preset and writing nothing
-— rather than importing a graph whose agent would silently run on an
-empty prompt:
+to embedded constants). Since version 6 the document **bundles** every
+custom preset its agent nodes reference — a `prompt_presets` array of
+`{"name", "content"}` entries carrying the full text, so a shared
+recipe arrives with everything its nodes need. On import, each bundled
+preset is installed into the prompts dir when no file with that name
+exists locally; a local file with identical content is a no-op, and one
+with different content **refuses the import** — naming the preset — so a
+preset you edited locally is never overwritten. Builtin presets are
+never bundled. A preset the document references but neither bundles nor
+has locally still refuses the whole import — naming **every** unknown
+preset and writing nothing — rather than importing a graph whose agent
+would silently run on an empty prompt:
 
 ```
 Unknown prompt preset(s): my-auditor, my-reviewer. Add file(s) under /home/you/.canopy/prompts or use a builtin (implementer, reviewer, resilience).
 ```
 
-A custom preset you rely on must therefore be copied to the importing
-machine's prompts dir first: a shared document carries the preset's
-name, never its text. Ensemble members are not checked — a member
+Ensemble members are not checked — a member
 carries no preset of its own. Nothing else about prompt resolution
 changes: at spawn time an explicit `prompt_template` still wins, then
 `prompt_preset`, then the fallback template, and a blank

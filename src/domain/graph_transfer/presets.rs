@@ -1,0 +1,189 @@
+//! Bundling custom `prompt_preset` files into a graph export document, and
+//! installing them back on import (v6): a shared recipe must carry the full
+//! text of every custom preset its agent nodes reference, so installing it
+//! on another machine produces working nodes instead of name-only
+//! references that fail `reject_unknown_prompt_presets`.
+//!
+//! Safety rules, shared by every function here: nothing outside the prompts
+//! dir is ever bundled or installed, and an existing preset file is never
+//! overwritten — a user's edited preset always wins, by refusal rather than
+//! by clobbering.
+
+use std::collections::BTreeSet;
+
+use super::*;
+
+/// The full content of every custom `prompt_preset` referenced by `nodes`
+/// (agent nodes only — an ensemble member carries no preset field), for
+/// bundling into an export document. Builtins are skipped: they are seeded
+/// on every daemon start and need no file. A referenced preset whose file
+/// cannot be read (missing locally, e.g. the node names a preset that does
+/// not exist) is skipped rather than failing the whole export — export
+/// stays "the design as it is", and the import-side refusal is the safety
+/// net for a reference that travelled without content. Names are compared
+/// verbatim, exactly as the spawn path joins them; a name that could point
+/// outside the prompts dir (path separators, `.`, `..`) is skipped, never
+/// bundled. A `BTreeMap` underneath: sorted by name and deduplicated when
+/// several nodes share one preset.
+pub fn collect(
+    nodes: &[GraphExportNode],
+    prompts_dir: &std::path::Path,
+) -> Vec<GraphExportPromptPreset> {
+    let builtins = builtin_preset_names();
+    let mut by_name: BTreeMap<String, String> = BTreeMap::new();
+    for node in nodes {
+        if node.kind != GraphNodeKind::Agent {
+            continue;
+        }
+        let Some(name) = node
+            .config
+            .get("prompt_preset")
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+        else {
+            continue;
+        };
+        if builtins.contains(&name) || !is_safe_name(name) {
+            continue;
+        }
+        if by_name.contains_key(name) {
+            continue;
+        }
+        if let Ok(content) = std::fs::read_to_string(prompts_dir.join(format!("{name}.md"))) {
+            by_name.insert(name.to_string(), content);
+        }
+    }
+    by_name
+        .into_iter()
+        .map(|(name, content)| GraphExportPromptPreset { name, content })
+        .collect()
+}
+
+/// Validate the bundled presets of a document about to be imported, before
+/// any of them is installed: every entry must be installable into the
+/// prompts dir (a safe, non-builtin, non-blank name and non-empty content)
+/// and must not overwrite anything. A name that exists locally with
+/// identical content is a no-op; one that exists with DIFFERENT content —
+/// or whose file cannot be read — is a refusal naming the preset and its
+/// path, never a silent overwrite of a user's edited preset file.
+pub fn validate(
+    presets: &[GraphExportPromptPreset],
+    prompts_dir: &std::path::Path,
+) -> Result<(), String> {
+    let builtins = builtin_preset_names();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for preset in presets {
+        let name = preset.name.as_str();
+        if name.trim() != name || name.is_empty() {
+            return Err(format!(
+                "Bundled prompt preset '{name}' must be a plain non-blank name (no surrounding whitespace)."
+            ));
+        }
+        if !is_safe_name(name) {
+            return Err(format!(
+                "Bundled prompt preset '{name}' must be a plain file name: no path separators, not '.' or '..'."
+            ));
+        }
+        if builtins.contains(&name) {
+            return Err(format!(
+                "Bundled prompt preset '{name}' is a builtin ({}); builtins are never bundled or installed from a document.",
+                builtins.join(", ")
+            ));
+        }
+        if !seen.insert(name) {
+            return Err(format!(
+                "Bundled prompt preset '{name}' appears more than once in the document."
+            ));
+        }
+        if preset.content.is_empty() {
+            return Err(format!("Bundled prompt preset '{name}' has empty content."));
+        }
+        let path = prompts_dir.join(format!("{name}.md"));
+        match std::fs::read_to_string(&path) {
+            Ok(existing) if existing == preset.content => {}
+            Ok(_) => {
+                return Err(format!(
+                    "Prompt preset '{name}' already exists at {} with different content; refusing to overwrite it.",
+                    path.display()
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "Prompt preset '{name}' exists at {} but could not be read ({error}); refusing to overwrite it.",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Install the bundled presets into the prompts dir, called once the whole
+/// import validated (all-or-nothing). An entry whose file already exists is
+/// skipped — never overwritten; [`validate`] already refused a differing
+/// one, so an existing file here is byte-identical. A racing writer between
+/// the existence check and the create is also skipped (`create_new`
+/// reports `AlreadyExists`).
+pub fn install(
+    presets: &[GraphExportPromptPreset],
+    prompts_dir: &std::path::Path,
+) -> Result<(), String> {
+    if presets.is_empty() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(prompts_dir).map_err(|error| {
+        format!(
+            "Could not create prompts dir {}: {error}.",
+            prompts_dir.display()
+        )
+    })?;
+    for preset in presets {
+        let path = prompts_dir.join(format!("{}.md", preset.name));
+        if path.exists() {
+            continue;
+        }
+        let created = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path);
+        match created {
+            Ok(mut file) => {
+                use std::io::Write;
+                file.write_all(preset.content.as_bytes()).map_err(|error| {
+                    format!(
+                        "Could not write bundled prompt preset '{}' to {}: {error}.",
+                        preset.name,
+                        path.display()
+                    )
+                })?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(format!(
+                    "Could not create bundled prompt preset '{}' at {}: {error}.",
+                    preset.name,
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The builtin preset names (`implementer`, `reviewer`, `resilience` —
+/// seeded on daemon start, never bundled or installed from a document).
+fn builtin_preset_names() -> Vec<&'static str> {
+    crate::domain::prompts::builtin_prompt_preset_specs()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// A preset name that stays inside the prompts dir when joined as
+/// `<dir>/<name>.md`: no path separators, not `.` or `..`. The join is
+/// verbatim (as the spawn path joins it), so this is the one place that
+/// decides a name is a plain file name.
+fn is_safe_name(name: &str) -> bool {
+    !name.contains('/') && !name.contains('\\') && name != "." && name != ".."
+}
