@@ -63,13 +63,13 @@ impl SubagentResult {
 /// Validate a requested subagent workdir before anything is spawned or
 /// recorded. A missing path, or one that exists but is not a directory,
 /// is refused here with an error naming the path — the handler surfaces
-/// the message to the caller verbatim. Symlinks are resolved the strict
-/// way (the link itself must be a directory entry that `symlink_metadata`
-/// reports as a directory), so a dangling link is refused like any other
-/// missing directory.
+/// the message to the caller verbatim. The lookup follows symlinks
+/// (`std::fs::metadata`), so a link pointing at a real directory is
+/// accepted, while a dangling link fails the lookup and is refused like
+/// any other missing directory.
 fn validate_workdir(raw: &str) -> Result<String> {
     let path = Path::new(raw);
-    match std::fs::symlink_metadata(path) {
+    match std::fs::metadata(path) {
         Ok(meta) if meta.is_dir() => Ok(raw.to_string()),
         Ok(_) => Err(anyhow::anyhow!("workdir is not a directory: {raw}")),
         Err(e) => Err(anyhow::anyhow!("workdir does not exist ({e}): {raw}")),
@@ -702,6 +702,86 @@ mod tests {
         assert!(
             err.contains(&path) && err.contains("not a directory"),
             "a file must be refused naming the path, got: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_workdir_accepts_a_symlink_to_a_real_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let link = tmp.path().join("link-to-dir");
+        std::os::unix::fs::symlink(tmp.path(), &link).unwrap();
+        let err = validate_workdir(&link.to_string_lossy()).unwrap();
+        assert_eq!(
+            err,
+            link.to_string_lossy(),
+            "a symlink pointing at a real directory must be accepted unchanged"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_workdir_refuses_a_dangling_symlink_naming_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let link = tmp.path().join("dangling");
+        std::os::unix::fs::symlink("/nonexistent-subagent-symlink-target", &link).unwrap();
+        let err = validate_workdir(&link.to_string_lossy())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("dangling"),
+            "refusal must name the path, got: {err}"
+        );
+    }
+
+    // ── workdir validation wiring (FR2) ────────────────────────────────
+    // The unit tests above pin `validate_workdir` itself; these two pin that
+    // the spawn functions actually CALL it before anything else runs.
+    // Removing the `validate_workdir(workdir)?` call makes the spawn walk
+    // past it, so the explicit refusal (and the inline unit tests) alone
+    // cannot keep the feature alive. Going through the full handler is
+    // unnecessary: the handler's own default resolution (omit => caller's
+    // project) sits in handler_meta and is unchanged here.
+
+    #[tokio::test]
+    async fn spawn_subagent_refuses_a_missing_workdir_naming_the_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::new(&tmp.path().join("test.db")).unwrap());
+        let missing = "/nonexistent-subagent-spawn-cwd-check";
+        let err = spawn_subagent(&db, "opencode", "prompt", None, missing, &[], 15, 60, None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("does not exist") && err.contains(missing),
+            "spawn must refuse before touching the registry, config, DB or process, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_subagent_blocking_refuses_a_missing_workdir_naming_the_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::new(&tmp.path().join("test.db")).unwrap());
+        let missing = "/nonexistent-subagent-blocking-cwd-check";
+        let err = match spawn_subagent_blocking(
+            &db,
+            "opencode",
+            "prompt",
+            None,
+            missing,
+            &[],
+            15,
+            60,
+            None,
+        )
+        .await
+        {
+            Ok(_) => panic!("blocking spawn must refuse the missing workdir, not spawn through it"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("does not exist") && err.contains(missing),
+            "blocking spawn must refuse before touching the registry, config, DB or process, got: {err}"
         );
     }
 }
