@@ -343,7 +343,8 @@ async fn session_send_file_explicit_session_id_wins() {
     assert_eq!(out["items"][0]["mime"], "image/png");
     let other = handler.shelf.list(Some("other"));
     assert_eq!(other.len(), 1, "the file lands on the named shelf");
-    assert_eq!(other[0].from_label, "other-name");
+    // FR1: the label is the sender's session (`caller`), not the target's.
+    assert_eq!(other[0].from_label, "caller-name");
     assert!(handler.shelf.list(Some("caller")).is_empty());
     assert!(handler.shelf.list(None).is_empty());
 }

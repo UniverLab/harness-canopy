@@ -61,8 +61,8 @@ fn json_body(result: &CallToolResult) -> serde_json::Value {
 }
 
 /// FR2 case 1: an explicit `session_id` wins even when the identity
-/// header names a different, existing session — and the target session's
-/// own name is the `from` label.
+/// header names a different, existing session — while FR1 still labels the
+/// file with the *sender's* name, not the receiving shelf's.
 #[tokio::test]
 async fn session_send_file_explicit_session_id_wins_over_identity_header() {
     let (dir, db, handler) = endpoint_test_handler();
@@ -106,7 +106,10 @@ async fn session_send_file_explicit_session_id_wins_over_identity_header() {
         db.list_shelf_files(Some("caller")).unwrap().is_empty(),
         "the header-named session must receive nothing"
     );
-    assert_eq!(on_other[0].from_label, "other-name");
+    assert_eq!(
+        on_other[0].from_label, "caller-name",
+        "FR1: `from` is the sender's session name, not the target shelf's"
+    );
 }
 
 /// FR2 case 2: no explicit id — the session the caller runs in (identity

@@ -137,15 +137,16 @@ impl Database {
         Ok(deleted > 0)
     }
 
-    /// Session ids that are still live (active interactive rows and idle
-    /// terminal rows) — the set the 7-day shelf retention checks membership
-    /// against. A finished, killed or deleted session drops out, which is
-    /// when its files start their 7-day clock.
+    /// Session ids that are still live (`active` and `resumed` interactive
+    /// rows, `idle` terminal rows) — the same live set `canopy clean` uses
+    /// and the one the 7-day shelf retention checks membership against. A
+    /// finished, killed or deleted session drops out, which is when its
+    /// files start their 7-day clock.
     pub fn live_session_ids(&self) -> Result<std::collections::HashSet<String>> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         let mut ids = std::collections::HashSet::new();
         for sql in [
-            "SELECT id FROM interactive_sessions WHERE status = 'active'",
+            "SELECT id FROM interactive_sessions WHERE status IN ('active', 'resumed')",
             "SELECT id FROM terminal_sessions WHERE status = 'idle'",
         ] {
             let mut stmt = conn.prepare(sql)?;
@@ -155,6 +156,32 @@ impl Database {
             }
         }
         Ok(ids)
+    }
+
+    /// Every session row canopy still knows, with the instant it ended when
+    /// it recorded one (`interactive_sessions.exited_at`, or
+    /// `terminal_sessions.last_active` for a finished terminal). This is the
+    /// anchor of the shelf's retention clock: a removed session's files are
+    /// kept for 7 days **after the removal**, not after their own creation.
+    /// A row deleted outright (`canopy clean`), or one that went away
+    /// without recording an end (`orphaned`), maps to `None` — callers fall
+    /// back to the file's own age, which keeps it at least as long.
+    pub fn session_end_times(&self) -> Result<std::collections::HashMap<String, Option<String>>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mut ends = std::collections::HashMap::new();
+        for sql in [
+            "SELECT id, exited_at FROM interactive_sessions",
+            "SELECT id, last_active FROM terminal_sessions",
+        ] {
+            let mut stmt = conn.prepare(sql)?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })?;
+            for (id, ended) in rows.flatten() {
+                ends.entry(id).or_insert(ended);
+            }
+        }
+        Ok(ends)
     }
 
     /// Test-only: age a shelf row's `created_at`, so retention and pruning

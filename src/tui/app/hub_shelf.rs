@@ -35,10 +35,10 @@ pub(crate) struct ShelfToast {
 
 impl App {
     /// Re-list every shelf the TUI tracks — the host shelf plus one per
-    /// sidebar session — and replace the merged list with the answers. Ids
-    /// that error (an unknown shelf answers `not_found`) are skipped, and
-    /// when no shelf answers at all the current list is kept, so one failed
-    /// request never loses what was already fetched.
+    /// sidebar session — and replace the merged list with the answers. A
+    /// shelf whose request fails (a dropped connection, a timeout) is
+    /// skipped, and when no shelf answers at all the current list is kept,
+    /// so one failed request never loses what was already fetched.
     pub(crate) fn refresh_shelf(&mut self) {
         let Some(client) = self.session_hub.client.clone() else {
             return;

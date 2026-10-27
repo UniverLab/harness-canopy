@@ -392,16 +392,35 @@ impl ShelfStore {
         let mut removed = Vec::new();
         let rows = self.db.all_shelf_files_oldest_first().unwrap_or_default();
 
-        // Retention: a removed session's files live at least 7 days.
+        // Retention: a removed session's files live at least 7 days — the
+        // clock starts when the session ended, not when the file arrived.
         let existing = self.db.live_session_ids().unwrap_or_default();
+        let has_removed = rows.iter().any(|row| {
+            row.session_id
+                .as_deref()
+                .is_some_and(|id| !existing.contains(id))
+        });
+        // Only a removed session needs its end instant looked up; a shelf
+        // with no such row never pays for the session scan.
+        let ends = if has_removed {
+            self.db.session_end_times().unwrap_or_default()
+        } else {
+            std::collections::HashMap::new()
+        };
         let cutoff = Utc::now() - Duration::days(SESSION_RETENTION_DAYS);
         for row in &rows {
-            let gone = row
-                .session_id
-                .as_ref()
-                .is_some_and(|id| !existing.contains(id));
-            let old = parse_created(&row.created_at).is_some_and(|created| created <= cutoff);
-            if gone && old {
+            let Some(session_id) = row.session_id.as_deref() else {
+                continue;
+            };
+            if existing.contains(session_id) {
+                continue;
+            }
+            // A session row that never recorded an end (`orphaned`), or one
+            // canopy no longer has at all (`canopy clean`), falls back to the
+            // file's own age, so the file is kept at least as long.
+            let ended = ends.get(session_id).cloned().flatten();
+            let anchor = ended.as_deref().unwrap_or(&row.created_at);
+            if parse_created(anchor).is_some_and(|at| at <= cutoff) {
                 self.drop_row(row, &mut removed);
             }
         }

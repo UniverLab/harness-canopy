@@ -37,6 +37,12 @@ pub(super) fn handle_hub_key(app: &mut App, code: KeyCode, modifiers: KeyModifie
         hub_filter_key(app, code);
         return true;
     }
+    // An armed shelf delete owns every key: Esc cancels it instead of
+    // closing the hub, and no tab switch escapes mid-confirm.
+    if app.hub.tab == HubTab::Shelf && app.hub.shelf.delete_confirm {
+        hub_shelf_key(app, code);
+        return true;
+    }
 
     match code {
         KeyCode::Esc => hub_escape(app),
@@ -51,9 +57,7 @@ pub(super) fn handle_hub_key(app: &mut App, code: KeyCode, modifiers: KeyModifie
         }
         _ if app.hub.tab == HubTab::Settings => hub_settings_key(app, code),
         _ if app.hub.tab == HubTab::Keys => hub_keys_key(app, code),
-        _ if app.hub.tab == HubTab::Shelf => {
-            hub_shelf_key(app, code);
-        }
+        _ if app.hub.tab == HubTab::Shelf => hub_shelf_key(app, code),
         _ => hub_missions_key(app, code),
     }
     true
@@ -196,16 +200,17 @@ fn hub_keys_key(app: &mut App, code: KeyCode) {
 }
 
 /// The Shelf tab: ↑↓/jk move, Enter/Space open, `d` deletes behind a `y`/`n`
-/// confirmation, `c` copies the path. Returns whether the key was handled;
-/// the confirm level swallows every key so nothing escapes mid-confirm.
-fn hub_shelf_key(app: &mut App, code: KeyCode) -> bool {
+/// confirmation, `c` copies the path. While the confirmation is armed it
+/// owns every key — `handle_hub_key` routes them here before the tab/digit/
+/// `Esc` arms, so only `y`/Enter confirm and `n`/`Esc` cancel.
+fn hub_shelf_key(app: &mut App, code: KeyCode) {
     if app.hub.shelf.delete_confirm {
         match code {
             KeyCode::Char('y') | KeyCode::Enter => app.delete_shelf_selection(),
             KeyCode::Char('n') | KeyCode::Esc => app.hub.shelf.delete_confirm = false,
             _ => {}
         }
-        return true;
+        return;
     }
     match code {
         KeyCode::Down | KeyCode::Char('j') => app.move_shelf_selection(true),
@@ -219,7 +224,6 @@ fn hub_shelf_key(app: &mut App, code: KeyCode) -> bool {
         KeyCode::Char('c') => app.copy_shelf_selection_path(),
         _ => {}
     }
-    true
 }
 
 /// The PathList add picker: Esc cancels; ↑↓ move; Enter descends into the
@@ -363,10 +367,23 @@ mod tests {
 
         handle_hub_key(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
         assert!(app.hub.shelf.delete_confirm, "d arms the confirmation");
-        // Any other key mid-confirm is swallowed and changes nothing.
+        // Any other key mid-confirm is swallowed and changes nothing — the
+        // tab shortcuts included, so the hub cannot switch tabs under it.
         handle_hub_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
         assert_eq!(app.hub.shelf.sel, 0, "movement is off while confirming");
         assert!(app.hub.shelf.delete_confirm);
+        handle_hub_key(&mut app, KeyCode::Char('2'), KeyModifiers::NONE);
+        assert_eq!(app.hub.tab, HubTab::Shelf, "digits do not switch tabs");
+        assert!(app.hub.shelf.delete_confirm);
+        handle_hub_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(
+            !app.hub.shelf.delete_confirm,
+            "Esc cancels the confirmation"
+        );
+        assert!(app.hub_open, "Esc must not close the hub mid-confirm");
+        assert_eq!(app.hub.shelf.items.len(), 2, "Esc deletes nothing");
+
+        handle_hub_key(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
         handle_hub_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE);
         assert!(!app.hub.shelf.delete_confirm, "n cancels the confirmation");
         assert_eq!(app.hub.shelf.items.len(), 2, "n deletes nothing");
@@ -376,6 +393,10 @@ mod tests {
         assert!(!app.hub.shelf.delete_confirm, "y confirms and clears");
         assert_eq!(app.hub.shelf.items.len(), 1, "y deletes the selected item");
         assert_eq!(app.hub.shelf.items[0].name, "b.png", "the top item went");
+
+        // Without a pending confirmation Esc closes the hub as everywhere.
+        handle_hub_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!app.hub_open, "Esc closes the hub at the top level");
     }
 
     #[test]

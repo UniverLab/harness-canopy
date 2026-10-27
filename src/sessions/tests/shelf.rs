@@ -226,7 +226,8 @@ fn retention_keeps_files_for_seven_days_after_the_session_is_gone() {
     let src = scratch_dir();
     let aged = |days: i64| (Utc::now() - Duration::days(days)).to_rfc3339();
 
-    // A live session's files are kept no matter how old.
+    // A live session's files are kept no matter how old — `resumed` counts
+    // as live, like `canopy clean` treats it.
     db.insert_interactive_session(
         "sess-live",
         "live",
@@ -238,6 +239,7 @@ fn retention_keeps_files_for_seven_days_after_the_session_is_gone() {
         None,
     )
     .unwrap();
+    db.mark_session_resumed("sess-live").unwrap();
     let live = store
         .insert(
             &write_src(&src, "live.png", &png_bytes(32)),
@@ -248,7 +250,24 @@ fn retention_keeps_files_for_seven_days_after_the_session_is_gone() {
         .unwrap();
     db.set_shelf_created_at(&live.file_id, &aged(30)).unwrap();
 
-    // A removed session's files stay until the 7-day mark…
+    // A session that ended just now keeps even its oldest file: the clock
+    // starts at the removal, not at the file's creation.
+    db.insert_terminal_session("sess-ended", "ended", "bash", "/tmp")
+        .unwrap();
+    db.finish_terminal_session("sess-ended").unwrap();
+    let recently_ended = store
+        .insert(
+            &write_src(&src, "recent.png", &png_bytes(32)),
+            Some("sess-ended"),
+            None,
+            "ended",
+        )
+        .unwrap();
+    db.set_shelf_created_at(&recently_ended.file_id, &aged(30))
+        .unwrap();
+
+    // A session whose file is young stays, and one whose removal is past
+    // the 7-day mark is reaped.
     let young = store
         .insert(
             &write_src(&src, "young.png", &png_bytes(32)),
@@ -259,7 +278,6 @@ fn retention_keeps_files_for_seven_days_after_the_session_is_gone() {
         .unwrap();
     db.set_shelf_created_at(&young.file_id, &aged(6)).unwrap();
 
-    // …and are reaped after it.
     let old = store
         .insert(
             &write_src(&src, "old.png", &png_bytes(32)),
@@ -275,6 +293,10 @@ fn retention_keeps_files_for_seven_days_after_the_session_is_gone() {
     assert!(
         store.get(&live.file_id).is_some(),
         "live session keeps its files"
+    );
+    assert!(
+        store.get(&recently_ended.file_id).is_some(),
+        "a just-removed session keeps even its oldest file for 7 more days"
     );
     assert!(store.get(&young.file_id).is_some(), "under 7 days is kept");
     assert!(store.get(&old.file_id).is_none(), "over 7 days is reaped");
@@ -522,8 +544,8 @@ fn unknown_host_frames_parse_as_ignored_not_errors() {
 }
 
 /// Kill-time reap (FR4): ending a hub session does not delete its files —
-/// they stay until the 7-day mark, then go on the next maintenance pass,
-/// which `kill` itself runs.
+/// the 7-day clock starts at the removal, so even an old file survives the
+/// kill, and a later pass reaps once the clock has run out.
 #[test]
 fn killing_a_session_keeps_then_reaps_its_shelf_files() {
     use super::{terminal_spawn, KillGuard};
@@ -563,12 +585,25 @@ fn killing_a_session_keeps_then_reaps_its_shelf_files() {
     drop(guard); // second kill is a no-op
 
     assert!(
-        store.get(&old.file_id).is_none(),
-        "past the 7-day mark, kill's reap removes the file"
+        store.get(&old.file_id).is_some(),
+        "kill starts the 7-day clock; it deletes nothing"
     );
-    assert!(!store.dir().join(&old.file_id).exists(), "and its bytes");
     assert!(
         store.get(&young.file_id).is_some(),
         "under 7 days the files stay after the session is removed"
+    );
+
+    // Age the session's own end past the 7-day mark: the next pass reaps
+    // both files, whatever their creation age.
+    db.set_terminal_last_active(&session.id, &aged(8)).unwrap();
+    store.maintenance();
+    assert!(
+        store.get(&old.file_id).is_none(),
+        "past the 7-day mark after the removal, the file goes"
+    );
+    assert!(!store.dir().join(&old.file_id).exists(), "and its bytes");
+    assert!(
+        store.get(&young.file_id).is_none(),
+        "the clock runs from the removal, not the file's age"
     );
 }

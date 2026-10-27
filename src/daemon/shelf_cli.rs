@@ -73,8 +73,9 @@ fn handle_list(port_override: Option<u16>, json: bool) -> Result<()> {
 
     // Session ids come from the local database, read-only — the CLI only
     // learns which shelves exist; the daemon serves their contents. A
-    // session whose shelf request fails (e.g. `not_found`) is skipped, not
-    // fatal: one broken shelf must not hide every other shelf.
+    // session whose shelf request fails (a dropped connection, a timeout)
+    // is skipped, not fatal: one broken shelf must not hide every other
+    // shelf (an unknown id simply answers an empty shelf).
     for session_id in session_ids_from_db()? {
         match request_shelf(&client, Some(&session_id)) {
             Ok(mut more) => items.append(&mut more),

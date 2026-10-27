@@ -61,30 +61,21 @@ impl TaskTriggerHandler {
         // ── Session resolution (FR2): an explicit id wins, else the
         // session this caller runs in (header/env identity mapped to its
         // session row — a mapping failure falls through), else the host
-        // shelf (`None`). ────────────────────────────────────────────
-        let session_id: Option<String> = match params
+        // shelf (`None`). The `from` label is the *sender's* session name
+        // (FR1): the caller's own session, even when `session_id` names
+        // another shelf; `host` when the caller has no session. ─────────
+        let caller_session = self
+            .resolve_sync_agent_id(parts.as_ref())
+            .ok()
+            .and_then(|id| self.db.get_hookable_session(&id).ok().flatten());
+        let session_id: Option<String> = params
             .session_id
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
-        {
-            Some(id) => Some(id.to_string()),
-            None => self
-                .resolve_sync_agent_id(parts.as_ref())
-                .ok()
-                .and_then(|id| {
-                    self.db
-                        .get_hookable_session(&id)
-                        .ok()
-                        .flatten()
-                        .map(|s| s.id)
-                }),
-        };
-        // The sending session's name, or `host` for the host shelf or an
-        // id with no session row.
-        let from_label = session_id
-            .as_deref()
-            .and_then(|id| self.db.get_hookable_session(id).ok().flatten())
+            .map(str::to_owned)
+            .or_else(|| caller_session.as_ref().map(|s| s.id.clone()));
+        let from_label = caller_session
             .map(|s| s.name)
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| "host".to_string());
