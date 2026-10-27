@@ -951,16 +951,28 @@ fn update_ensemble_join_config_leaves_omitted_fields_unchanged() {
         .unwrap();
 
     // Only min_pass changes; straggler_timeout_minutes/timeout_minutes omitted.
-    db.update_ensemble_join_config("ens1", Some(1), None, None, None, None, None, None)
-        .unwrap();
+    db.update_ensemble_join_config(
+        "ens1",
+        crate::db::ensembles::EnsembleJoinConfigPatch {
+            min_pass: Some(1),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let after = db.get_ensemble("ens1").unwrap().unwrap();
     assert_eq!(after.min_pass, 1);
     assert_eq!(after.straggler_timeout_minutes, Some(15));
     assert_eq!(after.timeout_minutes, 30);
 
     // Explicitly clear straggler_timeout_minutes back to "defer to timeout_minutes".
-    db.update_ensemble_join_config("ens1", None, Some(None), None, None, None, None, None)
-        .unwrap();
+    db.update_ensemble_join_config(
+        "ens1",
+        crate::db::ensembles::EnsembleJoinConfigPatch {
+            straggler_timeout_minutes: Some(None),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let cleared = db.get_ensemble("ens1").unwrap().unwrap();
     assert_eq!(cleared.straggler_timeout_minutes, None);
     assert_eq!(

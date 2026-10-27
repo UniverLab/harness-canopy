@@ -7,6 +7,21 @@ use rusqlite::params;
 use crate::db::Database;
 use crate::domain::graphs::EnsembleKind;
 
+/// One patch for [`Database::update_ensemble_join_config`]: each field is
+/// "leave unchanged" when absent, following the same convention as
+/// [`Database::update_graph_node_details`]. Bundled so the setter stays
+/// within the argument-count gate instead of silencing it.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EnsembleJoinConfigPatch {
+    pub min_pass: Option<i64>,
+    pub straggler_timeout_minutes: Option<Option<i64>>,
+    pub quorum_grace_minutes: Option<Option<i64>>,
+    pub timeout_minutes: Option<i64>,
+    pub infra_retry_limit: Option<Option<i64>>,
+    pub infra_crash_max_seconds: Option<Option<i64>>,
+    pub infra_backoff_seconds: Option<Option<i64>>,
+}
+
 impl Database {
     /// Update the shared prompt on the `ensembles` row itself. Propagating it
     /// onto every member node's `config` is the caller's job (via
@@ -27,17 +42,10 @@ impl Database {
     /// Update the join's own config: pass threshold, straggler timeout, and
     /// shared member timeout. `None` means "leave unchanged" for each field —
     /// same convention as [`Self::update_graph_node_details`].
-    #[allow(clippy::too_many_arguments)]
     pub fn update_ensemble_join_config(
         &self,
         ensemble_id: &str,
-        min_pass: Option<i64>,
-        straggler_timeout_minutes: Option<Option<i64>>,
-        quorum_grace_minutes: Option<Option<i64>>,
-        timeout_minutes: Option<i64>,
-        infra_retry_limit: Option<Option<i64>>,
-        infra_crash_max_seconds: Option<Option<i64>>,
-        infra_backoff_seconds: Option<Option<i64>>,
+        patch: EnsembleJoinConfigPatch,
     ) -> Result<bool> {
         let conn = self
             .conn
@@ -54,18 +62,18 @@ impl Database {
                  infra_backoff_seconds = CASE WHEN ?11 IS NULL THEN infra_backoff_seconds ELSE ?12 END
              WHERE id = ?13",
             params![
-                min_pass,
-                straggler_timeout_minutes.map(|_| 1),
-                straggler_timeout_minutes.flatten(),
-                quorum_grace_minutes.map(|_| 1),
-                quorum_grace_minutes.flatten(),
-                timeout_minutes,
-                infra_retry_limit.map(|_| 1),
-                infra_retry_limit.flatten(),
-                infra_crash_max_seconds.map(|_| 1),
-                infra_crash_max_seconds.flatten(),
-                infra_backoff_seconds.map(|_| 1),
-                infra_backoff_seconds.flatten(),
+                patch.min_pass,
+                patch.straggler_timeout_minutes.map(|_| 1),
+                patch.straggler_timeout_minutes.flatten(),
+                patch.quorum_grace_minutes.map(|_| 1),
+                patch.quorum_grace_minutes.flatten(),
+                patch.timeout_minutes,
+                patch.infra_retry_limit.map(|_| 1),
+                patch.infra_retry_limit.flatten(),
+                patch.infra_crash_max_seconds.map(|_| 1),
+                patch.infra_crash_max_seconds.flatten(),
+                patch.infra_backoff_seconds.map(|_| 1),
+                patch.infra_backoff_seconds.flatten(),
                 ensemble_id,
             ],
         )?;

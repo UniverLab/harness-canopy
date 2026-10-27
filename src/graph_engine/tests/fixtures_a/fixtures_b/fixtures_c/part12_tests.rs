@@ -243,8 +243,14 @@ async fn ensemble_quorum_grace_ignored_for_cascade() {
         crate::domain::graphs::EnsembleKind::Cascade,
         &[("m-crash", "m-crash"), ("m-ok", "m-ok")],
     );
-    db.update_ensemble_join_config("ens1", None, None, Some(Some(0)), None, None, None, None)
-        .unwrap();
+    db.update_ensemble_join_config(
+        "ens1",
+        crate::db::ensembles::EnsembleJoinConfigPatch {
+            quorum_grace_minutes: Some(Some(0)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     let _home = HomeGuard::set(fake_home.path());
     engine
@@ -1175,8 +1181,14 @@ async fn parallel_below_min_pass_blocks_the_spec_before_dispatch() {
         crate::domain::graphs::EnsembleKind::Parallel,
         &[("pb-ok", "pb-ok"), ("pb-out", "pb-out")],
     );
-    db.update_ensemble_join_config("ens1", Some(2), None, None, None, None, None, None)
-        .unwrap();
+    db.update_ensemble_join_config(
+        "ens1",
+        crate::db::ensembles::EnsembleJoinConfigPatch {
+            min_pass: Some(2),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     mark_member_platform_unavailable(&db, "pb-out");
 
     let _home = HomeGuard::set(fake_home.path());

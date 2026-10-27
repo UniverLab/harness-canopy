@@ -444,8 +444,14 @@ async fn graph_preflight_reports_ensemble_with_invalid_min_pass() {
         .unwrap();
     assert!(!is_err(&created), "{}", text(&created));
     let ensemble_id = extract_id(&created, "ensemble_id");
-    db.update_ensemble_join_config(&ensemble_id, Some(3), None, None, None, None, None, None)
-        .unwrap();
+    db.update_ensemble_join_config(
+        &ensemble_id,
+        crate::db::ensembles::EnsembleJoinConfigPatch {
+            min_pass: Some(3),
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     let result = handler
         .graph_preflight(Parameters(GraphPreflightParams {

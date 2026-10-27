@@ -18,6 +18,7 @@ use crate::daemon::handler_validate::{
 use crate::daemon::helpers::{error_result, success_result};
 use crate::daemon::params::*;
 use crate::daemon::params_extract::Parameters;
+use crate::db::ensembles::EnsembleJoinConfigPatch;
 use crate::db::Database;
 use crate::domain::graphs::{Ensemble, EnsembleDetails, EnsembleKind, GraphNode};
 use rmcp::model::CallToolResult;
@@ -315,13 +316,11 @@ impl TaskTriggerHandler {
                     self.db
                         .update_ensemble_join_config(
                             ensemble_id,
-                            None,
-                            clear_straggler.then_some(None),
-                            clear_grace.then_some(None),
-                            None,
-                            None,
-                            None,
-                            None,
+                            EnsembleJoinConfigPatch {
+                                straggler_timeout_minutes: clear_straggler.then_some(None),
+                                quorum_grace_minutes: clear_grace.then_some(None),
+                                ..Default::default()
+                            },
                         )
                         .map_err(internal_error)?;
                     clear_stale_kind_fields(&mut details.ensemble, clear_straggler, clear_grace);
@@ -504,13 +503,15 @@ impl TaskTriggerHandler {
             self.db
                 .update_ensemble_join_config(
                     ensemble_id,
-                    params.min_pass,
-                    params.straggler_timeout_minutes,
-                    params.quorum_grace_minutes,
-                    params.timeout_minutes,
-                    params.infra_retry_limit,
-                    params.infra_crash_max_seconds,
-                    params.infra_backoff_seconds,
+                    EnsembleJoinConfigPatch {
+                        min_pass: params.min_pass,
+                        straggler_timeout_minutes: params.straggler_timeout_minutes,
+                        quorum_grace_minutes: params.quorum_grace_minutes,
+                        timeout_minutes: params.timeout_minutes,
+                        infra_retry_limit: params.infra_retry_limit,
+                        infra_crash_max_seconds: params.infra_crash_max_seconds,
+                        infra_backoff_seconds: params.infra_backoff_seconds,
+                    },
                 )
                 .map_err(internal_error)?;
         }

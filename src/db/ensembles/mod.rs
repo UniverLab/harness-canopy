@@ -19,6 +19,7 @@ mod entry_wiring;
 pub use entry_wiring::*;
 mod blueprints;
 mod update;
+pub use update::EnsembleJoinConfigPatch;
 use update::{decode_ensemble_mutex, encode_ensemble_mutex};
 // Blueprint persistence lives entirely in `blueprints` (its `impl Database`
 // methods are inherent, so no re-export is needed for callers); the only
