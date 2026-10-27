@@ -113,8 +113,9 @@ impl GraphEngine {
     /// `run_was_terminated_out_of_band` check is what keeps a stale run's
     /// completion from reaching either of those paths in the first place.
     /// CB42: tear down a sandboxed run's worktree/branch after its final
-    /// status is written. Takes `Option` so the completed and failed paths
-    /// share it; `None` is a no-op. A teardown failure never changes the
+    /// status is written. Only the completed path uses it — a failed graph
+    /// keeps its sandbox for the operator (see `fail_graph`). Takes
+    /// `Option`; `None` is a no-op. A teardown failure never changes the
     /// graph's status — it is recorded on the sandbox row by
     /// `teardown_sandbox_at_end`, never silent.
     pub(crate) async fn teardown_sandbox_after_final_status(
@@ -200,12 +201,19 @@ impl GraphEngine {
                 spec_name: spec_name.unwrap_or(summary),
             },
         );
-        // CB42: same teardown as the completed path, after the final status
-        // and after hooks/notifications. `Paused`/`blocked` runs keep their
-        // sandbox (a resumed graph reuses it).
-        if let Ok(sb) = self.db.get_active_sandbox_for_owner("graph", graph_id) {
-            self.teardown_sandbox_after_final_status(sb, format!("failed: {summary}"))
-                .await;
+        // A failed graph never tears down its sandbox automatically,
+        // whatever its contents: the operator lands, continues or discards
+        // it explicitly. Mark the row `kept` (the worktree and branch stay
+        // in place) so a later `graph_continue` resumes inside it.
+        if let Ok(Some(sb)) = self.db.get_active_sandbox_for_owner("graph", graph_id) {
+            let _ = self.db.update_sandbox_run_status(&sb.id, "kept");
+            let _ = self.db.set_sandbox_cleanup_error(
+                &sb.id,
+                &format!(
+                    "{}: failed: {summary}: kept for the operator",
+                    sb.worktree_path.display()
+                ),
+            );
         }
         Ok(())
     }

@@ -164,9 +164,14 @@ pub(crate) async fn spawn_and_wait_cli_process(
     };
     // Graph agent/ensemble nodes run with the node MCP tool profile so their
     // session stays far under the 128-tool provider cap. Hooks and other
-    // callers pass `node_profile = false` and keep the full tool list.
+    // callers pass `node_profile = false` and keep the full tool list — the
+    // variable is scrubbed rather than left alone because the daemon itself
+    // may run with CANOPY_MCP_PROFILE set (e.g. spawned from a node-profile
+    // session), which the child would otherwise inherit.
     if node_profile {
         command.env(crate::shared::sync_identity::CANOPY_MCP_PROFILE_ENV, "node");
+    } else {
+        command.env_remove(crate::shared::sync_identity::CANOPY_MCP_PROFILE_ENV);
     }
     // Set the child process cwd to the node's workdir, whether or not the
     // platform supports a working-dir flag. The flag behaviour for platforms

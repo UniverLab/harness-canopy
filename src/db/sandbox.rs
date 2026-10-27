@@ -90,9 +90,10 @@ impl Database {
         Ok(result)
     }
 
-    /// Reconstruct the live [`Sandbox`] for a still-`active` run, so a
-    /// resumed graph (or a reopened session) keeps operating in its worktree
-    /// instead of silently falling back to the user's real checkout.
+    /// Reconstruct the live [`Sandbox`] for a still-`active` — or
+    /// operator-`kept` — run, so a resumed graph (or a reopened session)
+    /// keeps operating in its worktree instead of silently falling back
+    /// to the user's real checkout.
     pub fn get_active_sandbox_for_owner(
         &self,
         owner_type: &str,
@@ -103,7 +104,7 @@ impl Database {
             .query_row(
                 "SELECT id, project_hash, base_branch, sandbox_branch, worktree_path, cli_name, original_workdir, created_at
                  FROM sandbox_runs
-                 WHERE owner_type = ?1 AND owner_id = ?2 AND status = 'active'
+                 WHERE owner_type = ?1 AND owner_id = ?2 AND status IN ('active','kept')
                  ORDER BY created_at DESC LIMIT 1",
                 params![owner_type, owner_id],
                 |row| {
@@ -300,6 +301,42 @@ mod tests {
             .unwrap();
         let active = db.list_active_sandbox_runs().unwrap();
         assert_eq!(active.len(), 0);
+    }
+
+    #[test]
+    fn test_active_lookup_returns_kept_row() {
+        let db = test_db();
+        let sandbox = test_sandbox();
+        db.insert_sandbox_run(&sandbox, "graph", "graph-123")
+            .unwrap();
+
+        let found = db
+            .get_active_sandbox_for_owner("graph", "graph-123")
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.id, "test-sandbox-id");
+
+        // A failed graph's sandbox is `kept` for the operator — a resume
+        // must still find it, never silently fall back to the real checkout.
+        db.update_sandbox_run_status("test-sandbox-id", "kept")
+            .unwrap();
+        let found = db
+            .get_active_sandbox_for_owner("graph", "graph-123")
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.id, "test-sandbox-id");
+        assert_eq!(
+            found.worktree_path,
+            std::path::PathBuf::from("/tmp/test-worktree")
+        );
+
+        // Terminal non-kept rows stay invisible to the resume lookup.
+        db.update_sandbox_run_status("test-sandbox-id", "cleaned")
+            .unwrap();
+        assert!(db
+            .get_active_sandbox_for_owner("graph", "graph-123")
+            .unwrap()
+            .is_none());
     }
 
     #[test]

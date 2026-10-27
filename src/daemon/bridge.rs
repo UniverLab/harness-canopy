@@ -778,12 +778,31 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    /// A port that nothing is listening on: bind then drop, so a connect is refused.
-    async fn free_port() -> u16 {
+    /// A port that refuses connections for the test's whole duration.
+    ///
+    /// A bind-then-drop "free port" is racy under parallel tests: another test's
+    /// fake daemon can bind the same port between our drop and our connect, and a
+    /// request that then gets an HTTP answer exits the reconnect loop early
+    /// without backing off. Holding the listener prevents the steal, and dropping
+    /// each accepted connection without a response makes `request.send()` fail,
+    /// so the bridge still classifies every attempt as daemon-unreachable.
+    struct RefusedPort {
+        port: u16,
+        _handle: tokio::task::JoinHandle<()>,
+    }
+
+    async fn refused_port() -> RefusedPort {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        port
+        let handle = tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                drop(socket);
+            }
+        });
+        RefusedPort {
+            port,
+            _handle: handle,
+        }
     }
 
     struct FakeInner {
@@ -1816,7 +1835,8 @@ mod tests {
     /// Covers spec guideline test #2.
     #[tokio::test]
     async fn bridge_error_while_daemon_down_names_daemon_and_retry() {
-        let port = free_port().await;
+        let refused = refused_port().await;
+        let port = refused.port;
         let endpoint = format!("http://127.0.0.1:{port}/mcp");
         let policy = ReconnectPolicy {
             max_attempts: 3,
@@ -1865,7 +1885,8 @@ mod tests {
     /// Covers spec guideline test #4.
     #[tokio::test]
     async fn bridge_reports_bounded_failure_when_daemon_never_returns() {
-        let port = free_port().await;
+        let refused = refused_port().await;
+        let port = refused.port;
         let endpoint = format!("http://127.0.0.1:{port}/mcp");
         let policy = ReconnectPolicy {
             max_attempts: 3,
@@ -1937,7 +1958,8 @@ mod tests {
     /// Covers spec guideline test #5.
     #[tokio::test]
     async fn bridge_backs_off_between_reconnect_attempts() {
-        let port = free_port().await;
+        let refused = refused_port().await;
+        let port = refused.port;
         let endpoint = format!("http://127.0.0.1:{port}/mcp");
         let policy = ReconnectPolicy {
             max_attempts: 4,
@@ -1946,7 +1968,7 @@ mod tests {
         };
 
         let start = Instant::now();
-        let _ = serve_one_request(
+        let result = serve_one_request(
             &Client::new(),
             &endpoint,
             port,
@@ -1960,6 +1982,10 @@ mod tests {
         .await;
         let elapsed = start.elapsed();
 
+        assert!(
+            matches!(result, Err(ServeError::DaemonUnreachable(_))),
+            "all attempts must fail as daemon-unreachable, got {result:?}"
+        );
         // Sleeps after attempts 1, 2, 3 (not after 4th): 50ms + 100ms + 200ms = 350ms
         assert!(
             elapsed >= Duration::from_millis(300),

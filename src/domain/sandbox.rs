@@ -466,6 +466,38 @@ fn working_tree_clean_blocking(workdir: &str) -> Result<bool> {
     Ok(output.status.success() && output.stdout.is_empty())
 }
 
+/// Uncommitted paths in the sandbox worktree — tracked modifications
+/// plus untracked files — excluding the instruction file canopy itself
+/// materialised. `Err` when git cannot answer; callers treat that as
+/// "uncertain, keep", like `has_unique_commits == None`.
+fn dirty_paths_blocking(run: &SandboxRun) -> Result<Vec<String>> {
+    let output = git_blocking(
+        &["status", "--porcelain", "--untracked-files=all"],
+        &run.worktree_path,
+    )?;
+    if !output.status.success() {
+        bail!(
+            "git status in '{}' failed: {}",
+            run.worktree_path,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let worktree = Path::new(&run.worktree_path);
+    let spec = crate::domain::instruction_file::instruction_spec_for_cli(&run.cli_name);
+    let target = crate::domain::instruction_file::resolve_target(worktree, &spec);
+    let ignored = target
+        .strip_prefix(worktree)
+        .unwrap_or(&target)
+        .to_string_lossy();
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.get(3..))
+        .map(str::trim)
+        .filter(|path| !path.is_empty() && *path != ignored)
+        .map(str::to_string)
+        .collect())
+}
+
 fn remove_worktree_blocking(run: &SandboxRun) -> Result<()> {
     // `--force`: the worktree always holds at least the uncommitted
     // instruction file, so a plain `remove` would refuse. This only ever
@@ -681,6 +713,39 @@ pub async fn teardown_sandbox_at_end_in(
             let _ = db.update_sandbox_run_status(&run.id, "kept");
         }
         Some(false) => {
+            // No unique commits — but the worktree may still hold
+            // uncommitted work. Only a provably-empty worktree is removed;
+            // anything else (or an unanswerable git) keeps everything.
+            if Path::new(&run.worktree_path).is_dir() {
+                match dirty_paths_blocking(run) {
+                    Ok(paths) if paths.is_empty() => {}
+                    Ok(paths) => {
+                        let first: Vec<&str> = paths.iter().take(20).map(String::as_str).collect();
+                        let _ = db.update_sandbox_run_status(&run.id, "kept");
+                        let _ = db.set_sandbox_cleanup_error(
+                            &run.id,
+                            &format!(
+                                "{}: {reason}: kept - {} uncommitted, first 20: {}",
+                                run.worktree_path,
+                                paths.len(),
+                                first.join(", ")
+                            ),
+                        );
+                        return;
+                    }
+                    Err(e) => {
+                        let _ = db.update_sandbox_run_status(&run.id, "cleanup_failed");
+                        let _ = db.set_sandbox_cleanup_error(
+                            &run.id,
+                            &format!(
+                                "{}: {reason}: could not check for uncommitted changes ({e:#}); keeping worktree and branch",
+                                run.worktree_path
+                            ),
+                        );
+                        return;
+                    }
+                }
+            }
             let mut detail: Option<String> = None;
             if detail.is_none() && worktree_is_registered(run) {
                 if let Err(e) = remove_worktree_blocking(run) {
@@ -1441,6 +1506,111 @@ mod tests {
 
         assert_eq!(c1, c2);
         assert_eq!(c1.matches(PROTOCOL_BEGIN).count(), 1);
+
+        remove_sandbox_in(&base, &sandbox).await.ok();
+    }
+
+    // ── Uncommitted work keeps the sandbox ─────────────────────────────
+
+    #[tokio::test]
+    async fn teardown_dirty_worktree_keeps_both_and_names_paths() {
+        let repo = init_test_repo();
+        let repo_path = repo.path().to_string_lossy().to_string();
+        let root = tempfile::tempdir().expect("worktrees root");
+        let base = root.path().join("worktrees");
+        let sandbox = create_sandbox_in(&base, &repo_path, "opencode", "protocol")
+            .await
+            .expect("create sandbox");
+
+        std::fs::write(sandbox.worktree_path.join("wip.txt"), "uncommitted work").unwrap();
+
+        let (_dbdir, db) = test_db();
+        let row = insert_test_row(&db, &sandbox, "graph-dirty");
+        assert_eq!(has_unique_commits(&row), Some(false));
+
+        teardown_sandbox_at_end_in(&base, &db, &row, "failed: x").await;
+
+        let row = db.get_sandbox_run(&sandbox.id).unwrap().unwrap();
+        assert_eq!(row.status, "kept");
+        let note = row.cleanup_error.expect("cleanup note recorded");
+        assert!(
+            note.contains("wip.txt"),
+            "note must name the dirty path: {note}"
+        );
+        assert!(
+            note.contains("1 uncommitted"),
+            "note must carry the count: {note}"
+        );
+        assert!(sandbox.worktree_path.exists());
+        assert!(branch_exists(repo.path(), &sandbox.sandbox_branch));
+
+        remove_sandbox_in(&base, &sandbox).await.ok();
+    }
+
+    #[tokio::test]
+    async fn teardown_instruction_file_only_still_cleans() {
+        let repo = init_test_repo();
+        commit_file(repo.path(), "AGENTS.md", "# Agents\n", "add agents");
+        let repo_path = repo.path().to_string_lossy().to_string();
+        let root = tempfile::tempdir().expect("worktrees root");
+        let base = root.path().join("worktrees");
+        let sandbox = create_sandbox_in(&base, &repo_path, "opencode", "protocol")
+            .await
+            .expect("create sandbox");
+
+        // Reveal the protocol amend: without skip-worktree the instruction
+        // file shows up as a real modification — teardown must still treat
+        // the worktree as empty because that file is canopy's own.
+        run_git(
+            &sandbox.worktree_path,
+            &["update-index", "--no-skip-worktree", "AGENTS.md"],
+        );
+        let status = git_stdout(&sandbox.worktree_path, &["status", "--porcelain"]);
+        assert!(
+            status.contains("AGENTS.md"),
+            "porcelain must list the revealed instruction file: {status}"
+        );
+
+        let (_dbdir, db) = test_db();
+        let row = insert_test_row(&db, &sandbox, "graph-instr");
+        assert_eq!(has_unique_commits(&row), Some(false));
+
+        teardown_sandbox_at_end_in(&base, &db, &row, "completed").await;
+
+        let row = db.get_sandbox_run(&sandbox.id).unwrap().unwrap();
+        assert_eq!(row.status, "cleaned");
+        assert!(!sandbox.worktree_path.exists());
+        assert!(!branch_exists(repo.path(), &sandbox.sandbox_branch));
+    }
+
+    #[tokio::test]
+    async fn teardown_unanswerable_status_keeps_and_records_failure() {
+        let repo = init_test_repo();
+        let repo_path = repo.path().to_string_lossy().to_string();
+        let root = tempfile::tempdir().expect("worktrees root");
+        let base = root.path().join("worktrees");
+        let sandbox = create_sandbox_in(&base, &repo_path, "opencode", "protocol")
+            .await
+            .expect("create sandbox");
+
+        // Without its .git link the worktree is unanswerable: git status
+        // fails, so teardown must keep (uncertain means keep).
+        std::fs::remove_file(sandbox.worktree_path.join(".git")).expect("remove gitlink");
+
+        let (_dbdir, db) = test_db();
+        let row = insert_test_row(&db, &sandbox, "graph-unanswerable");
+
+        teardown_sandbox_at_end_in(&base, &db, &row, "completed").await;
+
+        let row = db.get_sandbox_run(&sandbox.id).unwrap().unwrap();
+        assert_eq!(row.status, "cleanup_failed");
+        let note = row.cleanup_error.expect("cleanup note recorded");
+        assert!(
+            note.contains("could not check for uncommitted changes"),
+            "note must name the failed check: {note}"
+        );
+        assert!(sandbox.worktree_path.exists());
+        assert!(branch_exists(repo.path(), &sandbox.sandbox_branch));
 
         remove_sandbox_in(&base, &sandbox).await.ok();
     }

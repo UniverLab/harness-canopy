@@ -267,15 +267,23 @@ impl GraphEngine {
             .ok()
             .flatten()
             .and_then(|lp| lp.active_run_queue_id);
-        // A sandboxed graph that was paused (daemon restart, `graph_pause`) must
-        // resume inside its worktree and still merge back on completion —
-        // otherwise the remaining nodes run against the user's real repo and
-        // the sandbox is stranded.
-        let sandbox = self
-            .db
-            .get_active_sandbox_for_owner("graph", &graph_id)
-            .ok()
-            .flatten();
+        // A sandboxed graph that was paused (daemon restart, `graph_pause`)
+        // or failed must resume inside its worktree and still merge back on
+        // completion — otherwise the remaining nodes run against the user's
+        // real repo and the sandbox is stranded. A resume that cannot find
+        // its sandbox refuses outright instead of falling back.
+        let sandbox = match resolve_resume_sandbox(&self.db, &graph_id) {
+            Ok(sandbox) => sandbox,
+            Err(msg) => {
+                tokio::spawn(async move {
+                    tracing::error!("Graph '{graph_id}' resume refused: {msg}");
+                    let _ = self
+                        .fail_graph(&graph_id, None, None, None, &msg, &[])
+                        .await;
+                });
+                return;
+            }
+        };
         let mode = match directed {
             Some(d) => DispatchMode::resume_from(d),
             None => DispatchMode::resume(),
@@ -297,5 +305,94 @@ impl GraphEngine {
                 }
             }
         });
+    }
+}
+
+/// The sandbox a resumed graph must run inside: the `active` — or
+/// operator-`kept` — row whose worktree still exists. `Ok(None)` when the
+/// graph was never sandboxed. `Err`, naming the sandbox id, when the row
+/// exists but its worktree is gone (or the lookup itself failed), so the
+/// resume refuses instead of silently running against the user's real
+/// checkout.
+pub(crate) fn resolve_resume_sandbox(
+    db: &Database,
+    graph_id: &str,
+) -> Result<Option<Sandbox>, String> {
+    let row = db
+        .get_active_sandbox_for_owner("graph", graph_id)
+        .map_err(|e| format!("could not look up the sandbox for graph '{graph_id}': {e:#}"))?;
+    let Some(sandbox) = row else {
+        return Ok(None);
+    };
+    if sandbox.worktree_path.is_dir() {
+        return Ok(Some(sandbox));
+    }
+    Err(format!(
+        "sandbox '{}' for graph '{graph_id}' has no worktree at '{}'; refusing to resume against the original workdir",
+        sandbox.id,
+        sandbox.worktree_path.display()
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_db() -> (tempfile::TempDir, Database) {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let db = Database::new(&dir.path().join("test.db")).expect("open db");
+        (dir, db)
+    }
+
+    fn test_sandbox(id: &str, worktree: &std::path::Path) -> Sandbox {
+        Sandbox {
+            id: id.to_string(),
+            project_hash: "abcd1234".to_string(),
+            base_branch: "main".to_string(),
+            sandbox_branch: "canopy/sandbox-test".to_string(),
+            worktree_path: worktree.to_path_buf(),
+            cli_name: "opencode".to_string(),
+            original_workdir: "/home/user/project".to_string(),
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn none_without_row() {
+        let (_dir, db) = test_db();
+        assert!(resolve_resume_sandbox(&db, "graph-1").unwrap().is_none());
+    }
+
+    #[test]
+    fn finds_kept() {
+        let (_dir, db) = test_db();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        let sandbox = test_sandbox("sb-kept", worktree.path());
+        db.insert_sandbox_run(&sandbox, "graph", "graph-1")
+            .expect("insert sandbox run");
+        db.update_sandbox_run_status("sb-kept", "kept")
+            .expect("mark kept");
+
+        let found = resolve_resume_sandbox(&db, "graph-1")
+            .expect("kept sandbox resolves")
+            .expect("some sandbox");
+        assert_eq!(found.id, "sb-kept");
+        assert_eq!(found.worktree_path, worktree.path());
+    }
+
+    #[test]
+    fn refuses_missing_worktree() {
+        let (_dir, db) = test_db();
+        let dir = tempfile::tempdir().expect("parent dir");
+        let gone = dir.path().join("gone");
+        let sandbox = test_sandbox("sb-gone", &gone);
+        db.insert_sandbox_run(&sandbox, "graph", "graph-1")
+            .expect("insert sandbox run");
+
+        let err = resolve_resume_sandbox(&db, "graph-1").expect_err("missing worktree refuses");
+        assert!(
+            err.contains("sb-gone"),
+            "refusal must name the sandbox id: {err}"
+        );
     }
 }
