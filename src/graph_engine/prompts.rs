@@ -111,13 +111,6 @@ pub(crate) fn agent_prompt_source(config: &Value) -> &'static str {
     }
 }
 
-/// Refuse to render `template` when it carries a `{{name}}` marker not in
-/// `supported` — the CP1 contract: a prompt builder must never emit a
-/// template presented as an instruction. Mirrors
-/// [`crate::domain::prompts::render_preset`]'s refusal, but for the engine's
-/// own `.replace()`-based renderers, and checks the *template* (not the
-/// rendered output) so a `{{...}}` sequence inside a bound value — a spec
-/// body, prior feedback — is treated as data, not a leftover marker.
 /// The `{{...}}` markers in `template` that neither `supported` nor
 /// `{{output:<name>}}` for a name in `node_names` can bind. This is the one
 /// binding check shared by the spawn path ([`refuse_unbindable_template`]),
@@ -143,6 +136,13 @@ pub(crate) fn unbindable_placeholders_in(
     crate::domain::prompts::unbindable_placeholders(template, &extended)
 }
 
+/// Refuse to render `template` when [`unbindable_placeholders_in`] finds a
+/// marker no binding covers — the CP1 contract: a prompt builder must never
+/// emit a template presented as an instruction. Mirrors
+/// [`crate::domain::prompts::render_preset`]'s refusal, but for the engine's
+/// own `.replace()`-based renderers, and checks the *template* (not the
+/// rendered output) so a `{{...}}` sequence inside a bound value — a spec
+/// body, prior feedback — is treated as data, not a leftover marker.
 pub(crate) fn refuse_unbindable_template(
     node_name: &str,
     template: &str,

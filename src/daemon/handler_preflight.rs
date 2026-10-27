@@ -322,26 +322,23 @@ impl TaskTriggerHandler {
             Err(e) => return Ok(error_result(&e)),
         }
 
-        // CM1: validate {{output:NodeName}} references
+        // CM1: validate {{output:NodeName}} references. The scan is the
+        // shared escape-aware one, so a literal `\{{output:X}}` — accepted at
+        // write time since it binds nothing — is not mistaken for a reference.
         {
             let node_names: Vec<String> =
                 details.graph_nodes.iter().map(|n| n.name.clone()).collect();
             for node in &details.graph_nodes {
                 if let Some(prompt) = node.config.get("prompt_template").and_then(|v| v.as_str()) {
-                    let mut rest = prompt;
-                    while let Some(start) = rest.find("{{output:") {
-                        let after_prefix = &rest[start + 9..];
-                        if let Some(end) = after_prefix.find("}}") {
-                            let referenced_name = &after_prefix[..end];
-                            if !node_names.iter().any(|n| n == referenced_name) {
-                                return Ok(error_result(&format!(
-                                    "Node '{}' references unknown node '{}' in {{{{output:{}}}}}.",
-                                    node.name, referenced_name, referenced_name
-                                )));
-                            }
-                            rest = &after_prefix[end + 2..];
-                        } else {
-                            break;
+                    for referenced_name in crate::domain::prompts::placeholder_names(prompt)
+                        .iter()
+                        .filter_map(|name| name.strip_prefix("output:"))
+                    {
+                        if !node_names.iter().any(|n| n == referenced_name) {
+                            return Ok(error_result(&format!(
+                                "Node '{}' references unknown node '{}' in {{{{output:{}}}}}.",
+                                node.name, referenced_name, referenced_name
+                            )));
                         }
                     }
                 }

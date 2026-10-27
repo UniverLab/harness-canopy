@@ -50,14 +50,17 @@ fn part13_member(platform: &str, prompt_override: Option<String>) -> EnsembleMem
     }
 }
 
-async fn part13_ensemble(
+/// Add a two-member ensemble with `prompt_template`, returning the raw result
+/// (so a test can assert either the success or the refusal).
+async fn part13_try_ensemble(
     handler: &TaskTriggerHandler,
     graph_id: &str,
     name: &str,
+    prompt_template: &str,
     from_node: &str,
     on_pass_to: &str,
-) -> String {
-    let added = handler
+) -> rmcp::model::CallToolResult {
+    handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
@@ -65,7 +68,7 @@ async fn part13_ensemble(
             graph_id: Some(graph_id.to_string()),
             kind: None,
             name: name.to_string(),
-            prompt_template: Some("draft it".to_string()),
+            prompt_template: Some(prompt_template.to_string()),
             blueprint: None,
             members: Some(vec![
                 part13_member("openrouter", None),
@@ -85,7 +88,18 @@ async fn part13_ensemble(
             crew: None,
         }))
         .await
-        .unwrap();
+        .unwrap()
+}
+
+async fn part13_ensemble(
+    handler: &TaskTriggerHandler,
+    graph_id: &str,
+    name: &str,
+    from_node: &str,
+    on_pass_to: &str,
+) -> String {
+    let added =
+        part13_try_ensemble(handler, graph_id, name, "draft it", from_node, on_pass_to).await;
     assert!(!is_err(&added), "{}", text(&added));
     extract_id(&added, "ensemble_id")
 }
@@ -195,6 +209,56 @@ async fn add_ensemble_refuses_bad_override() {
     let ensembles = db.list_ensembles_for_graph(&graph_id).unwrap();
     assert!(
         ensembles.is_empty(),
+        "refused write must store nothing: {msg}"
+    );
+}
+
+/// The reported incident's own path: `graph_add_ensemble` with a shared
+/// prompt reading `{{output:<ensemble>}}` is refused — outputs are read from
+/// nodes, and the message names the ensemble's quorum node — instead of
+/// accepting the write and having every member refuse to spawn later. Nothing
+/// is stored.
+#[tokio::test]
+async fn add_ensemble_refuses_ensemble_output() {
+    let (dir, db, handler) = endpoint_test_handler();
+    let workdir = dir.path().to_string_lossy().to_string();
+    let graph_id = part13_graph(&handler, &workdir, "Add Ensemble Refuses Output").await;
+    let kickoff_id = part13_agent_node(&handler, &graph_id, "kickoff").await;
+    let downstream_id = part13_agent_node(&handler, &graph_id, "downstream").await;
+    part13_ensemble(&handler, &graph_id, "Designer", &kickoff_id, &downstream_id).await;
+
+    let result = part13_try_ensemble(
+        &handler,
+        &graph_id,
+        "Impl",
+        "Implement {{output:Designer}}",
+        &kickoff_id,
+        &downstream_id,
+    )
+    .await;
+    assert!(
+        is_err(&result),
+        "expected a refusal, got: {}",
+        text(&result)
+    );
+    let msg = text(&result);
+    assert!(
+        msg.contains("outputs are read from nodes"),
+        "refusal must say outputs come from nodes: {msg}"
+    );
+    assert!(
+        msg.contains("Designer (quorum)"),
+        "refusal must name the quorum node: {msg}"
+    );
+    let names: Vec<String> = db
+        .list_ensembles_for_graph(&graph_id)
+        .unwrap()
+        .into_iter()
+        .map(|d| d.ensemble.name)
+        .collect();
+    assert_eq!(
+        names,
+        vec!["Designer".to_string()],
         "refused write must store nothing: {msg}"
     );
 }
@@ -379,20 +443,14 @@ async fn import_refuses_unbindable() {
     );
 }
 
-/// `graph_preflight` reports a pre-existing template with an unbindable
-/// placeholder as a `graph_warnings` entry naming node and placeholder —
-/// advisory, not a tool error. The row is inserted straight into the DB:
-/// the write path now refuses such a template, so only a graph written
+/// Seed `alpha` (no prompt) → `beta` with `prompt`, straight into the DB:
+/// the write path now refuses an unbindable template, so only a graph written
 /// before the fix can carry one.
-#[tokio::test]
-async fn preflight_warns_preexisting_bad() {
-    let (dir, db, handler) = endpoint_test_handler();
-    let lp = insert_test_graph(&db, dir.path());
-
+fn part13_seed_prompt_graph(db: &Database, graph_id: &str, prompt: &str) {
     let mk_node = |name: &str, position: i64, prompt: Option<&str>| GraphNode {
         id: uuid::Uuid::new_v4().to_string(),
         spec_id: None,
-        graph_id: Some(lp.id.clone()),
+        graph_id: Some(graph_id.to_string()),
         name: name.to_string(),
         kind: GraphNodeKind::Agent,
         // Unconfigured platform -> probe returns NotConfigured instantly,
@@ -408,14 +466,14 @@ async fn preflight_warns_preexisting_bad() {
         created_at: chrono::Utc::now(),
     };
     let alpha = mk_node("alpha", 1, None);
-    let beta = mk_node("beta", 2, Some("Do {{bogus_marker}} now"));
+    let beta = mk_node("beta", 2, Some(prompt));
     db.insert_graph_node(&alpha).unwrap();
     db.insert_graph_node(&beta).unwrap();
 
     let mk_edge = |from: &str, to: &str, cond: GraphEdgeCondition| GraphEdge {
         id: uuid::Uuid::new_v4().to_string(),
         spec_id: None,
-        graph_id: Some(lp.id.clone()),
+        graph_id: Some(graph_id.to_string()),
         from_node: from.to_string(),
         to_node: to.to_string(),
         condition: cond,
@@ -424,6 +482,18 @@ async fn preflight_warns_preexisting_bad() {
         .unwrap();
     db.insert_graph_edge(&mk_edge(&alpha.id, &beta.id, GraphEdgeCondition::Fail))
         .unwrap();
+}
+
+/// `graph_preflight` reports a pre-existing template with an unbindable
+/// placeholder as a `graph_warnings` entry naming node and placeholder —
+/// advisory, not a tool error. The row is inserted straight into the DB:
+/// the write path now refuses such a template, so only a graph written
+/// before the fix can carry one.
+#[tokio::test]
+async fn preflight_warns_preexisting_bad() {
+    let (dir, db, handler) = endpoint_test_handler();
+    let lp = insert_test_graph(&db, dir.path());
+    part13_seed_prompt_graph(&db, &lp.id, "Do {{bogus_marker}} now");
 
     let result = handler
         .graph_preflight(Parameters(GraphPreflightParams {
@@ -450,4 +520,33 @@ async fn preflight_warns_preexisting_bad() {
         warn_text.contains("beta") && warn_text.contains("bogus_marker"),
         "warning must name the node and placeholder: {body}"
     );
+}
+
+/// An escaped `\{{output:Ghost}}` is literal text, not a reference: the write
+/// path accepts it (FR1), and `graph_preflight` must neither refuse it as an
+/// unknown node reference (CM1 scans escape-aware) nor warn about it.
+#[tokio::test]
+async fn preflight_accepts_escaped_output_marker() {
+    let (dir, db, handler) = endpoint_test_handler();
+    let lp = insert_test_graph(&db, dir.path());
+    part13_seed_prompt_graph(&db, &lp.id, "Literal \\{{output:Ghost}} stays literal.");
+
+    let result = handler
+        .graph_preflight(Parameters(GraphPreflightParams {
+            graph_id: lp.id.clone(),
+            timeout_seconds: Some(5),
+            reviewer: None,
+        }))
+        .await
+        .unwrap();
+    assert!(
+        !is_err(&result),
+        "an escaped marker is not a reference: {}",
+        text(&result)
+    );
+    let body: serde_json::Value = serde_json::from_str(&raw_text(&result)).unwrap();
+    let warnings = body["graph_warnings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("preflight must include graph_warnings: {body}"));
+    assert!(warnings.is_empty(), "escaped marker must not warn: {body}");
 }
