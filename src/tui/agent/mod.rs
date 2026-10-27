@@ -7,7 +7,7 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use portable_pty::{native_pty_system, PtySize};
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
@@ -16,8 +16,9 @@ use std::time::Duration;
 use ratatui::style::Color;
 
 use crate::domain::models::Cli;
-use crate::shared::sync_identity::{
-    CANOPY_AGENT_ID_ENV, CANOPY_SEED_ID_ENV, CANOPY_SESSION_NAME_ENV, CANOPY_WORKDIR_ENV,
+use crate::sessions::{
+    build_agent_cmd, build_terminal_cmd, preserve_rows_on_shrink, spawn_identity, AgentSpawnSpec,
+    TerminalSpawnSpec, VT_SCROLLBACK_LINES,
 };
 
 #[cfg(unix)]
@@ -49,7 +50,6 @@ pub struct PromptEntry {
 
 /// Maximum number of prompt entries to keep in the ring buffer.
 const MAX_PROMPT_HISTORY: usize = 20;
-const VT_SCROLLBACK_LINES: usize = 5_000;
 
 /// How recently a session must have produced PTY output to count as
 /// "working" (blinking green) rather than merely "healthy but idle" (solid
@@ -88,70 +88,6 @@ fn decode_osc52_payload(data: &[u8]) -> Option<String> {
 
 /// vt100 parser wired with our clipboard-forwarding callbacks.
 pub(crate) type Vt = vt100::Parser<ClipboardForwarder>;
-
-/// Before shrinking a vt100 screen from `old_rows` to `new_rows`, move the rows
-/// that would fall off the bottom into the scrollback.
-///
-/// vt100's `set_size` shrink path ends in `Vec::resize`, which truncates the
-/// tail rows — the newest output — and never hands them to the scrollback. A
-/// Scroll Up first routes them through `scroll_up`, which does push evicted rows
-/// onto the scrollback deque; the matching Cursor Up keeps the shell's prompt on
-/// its logical line so it does not appear to jump. A grow (or an unchanged
-/// height, e.g. a cols-only resize) is a no-op.
-///
-/// The scroll is anchored at the cursor (what xterm does): only the overflow
-/// of the cursor past the new bottom is scrolled, so a shrink of a
-/// mostly-blank screen — cursor near the top, blanks below — scrolls nothing
-/// and keeps the newest output (the just-finished command's) on screen. A
-/// blind `old_rows - new_rows` scroll anchored at the top would discard the
-/// oldest rows first and push the newest content off into scrollback or drop
-/// it (CT15); when the screen is full the cursor sits at the bottom and both
-/// computations agree (CT9).
-fn preserve_rows_on_shrink<C: vt100::Callbacks>(
-    parser: &mut vt100::Parser<C>,
-    old_rows: u16,
-    new_rows: u16,
-) {
-    if new_rows >= old_rows {
-        return;
-    }
-    let cursor_row = parser.screen().cursor_position().0;
-    let needed = (cursor_row + 1).saturating_sub(new_rows);
-    if needed == 0 {
-        return;
-    }
-    parser.process(format!("\x1b[{needed}S\x1b[{needed}A").as_bytes());
-}
-
-/// The session id and display name a spawned agent runs under: a resumed
-/// harness conversation passes both, so it keeps its canopy session id and
-/// name (hooks and scheduled sends addressed to them keep resolving);
-/// otherwise the id is a fresh uuid and the name a random one that avoids
-/// `existing_ids`.
-fn spawn_identity(id: Option<&str>, name: Option<&str>, existing_ids: &[&str]) -> (String, String) {
-    let id = id
-        .map(str::to_owned)
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let name = name
-        .map(str::to_owned)
-        .unwrap_or_else(|| naming::pick_random_name(existing_ids));
-    (id, name)
-}
-
-fn apply_canopy_session_env(
-    cmd: &mut CommandBuilder,
-    agent_id: &str,
-    session_name: &str,
-    working_dir: &str,
-    seed_id: Option<&str>,
-) {
-    cmd.env(CANOPY_AGENT_ID_ENV, agent_id);
-    cmd.env(CANOPY_SESSION_NAME_ENV, session_name);
-    cmd.env(CANOPY_WORKDIR_ENV, working_dir);
-    if let Some(sid) = seed_id {
-        cmd.env(CANOPY_SEED_ID_ENV, sid);
-    }
-}
 
 /// An interactive agent with a virtual terminal screen.
 pub struct InteractiveAgent {
@@ -278,38 +214,23 @@ impl InteractiveAgent {
             pixel_height: 0,
         })?;
 
-        let mut cmd = CommandBuilder::new(cli.command_name());
-        // Apply registry-driven interactive args (e.g. "--tui", "-c", etc.)
-        // If primary args fail and fallback is available, try that instead.
-        let args_to_use = interactive_args.or(fallback_args);
-        if let Some(args) = args_to_use {
-            for arg in args.split_whitespace().filter(|a| !a.is_empty()) {
-                cmd.arg(arg);
-            }
-        }
-        if let (Some(flag), Some(m)) = (model_flag, model) {
-            if !m.is_empty() {
-                cmd.arg(flag);
-                cmd.arg(m);
-            }
-        }
-        cmd.cwd(working_dir);
-        apply_canopy_session_env(&mut cmd, &id, &name, working_dir, seed_id);
-
-        // Advertise truecolor capability so child CLIs (Kiro, etc.) use
-        // 24-bit RGB color sequences for their accent colors instead of
-        // limited 16-color ANSI codes that get mapped to wrong hues.
-        cmd.env("TERM", "xterm-256color");
-        cmd.env("COLORTERM", "truecolor");
-
-        // Pass Canopy's UX accent color to child CLIs so they respect
-        // the original color scheme instead of using their own ANSI color map.
-        // Extract RGB components from ratatui::style::Color
-        if let Color::Rgb(r, g, b) = accent_color {
-            cmd.env("CANOPY_ACCENT_R", r.to_string());
-            cmd.env("CANOPY_ACCENT_G", g.to_string());
-            cmd.env("CANOPY_ACCENT_B", b.to_string());
-        }
+        let command = cli.command_name();
+        let accent_rgb = match accent_color {
+            Color::Rgb(r, g, b) => Some((r, g, b)),
+            _ => None,
+        };
+        let cmd = build_agent_cmd(&AgentSpawnSpec {
+            command: &command,
+            working_dir,
+            interactive_args,
+            fallback_args,
+            model,
+            model_flag,
+            accent_rgb,
+            id: &id,
+            name: &name,
+            seed_id,
+        });
 
         let child = pair.slave.spawn_command(cmd)?;
         // Drop slave so the PTY closes when the child exits
@@ -404,14 +325,12 @@ impl InteractiveAgent {
             pixel_height: 0,
         })?;
 
-        let mut cmd = CommandBuilder::new(shell);
-        cmd.cwd(working_dir);
-        apply_canopy_session_env(&mut cmd, &id, &session_name, working_dir, None);
-        // Compact prompt since warp mode shows its own prompt line
-        cmd.env("PS1", "$ ");
-        cmd.env("PROMPT_COMMAND", "");
-        cmd.env("TERM", "xterm-256color");
-        cmd.env("COLORTERM", "truecolor");
+        let cmd = build_terminal_cmd(&TerminalSpawnSpec {
+            shell,
+            working_dir,
+            id: &id,
+            name: &session_name,
+        });
 
         let child = pair.slave.spawn_command(cmd)?;
         drop(pair.slave);

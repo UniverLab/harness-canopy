@@ -112,6 +112,7 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
     );
 
     let ct = tokio_util::sync::CancellationToken::new();
+    let sessions_state = crate::sessions::ws::SessionsState::ensure(&data_dir, Arc::clone(&db))?;
     let router = build_mcp_router(
         HandlerDeps {
             db: Arc::clone(&db),
@@ -127,6 +128,7 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
             port,
         },
         &ct,
+        sessions_state,
     );
 
     bind_and_serve(router, port, ct).await?;
@@ -286,8 +288,13 @@ fn start_background_tasks(
 /// Builds the `/mcp` router: the streamable-HTTP service (one
 /// `TaskTriggerHandler` per session), the session manager, and the server
 /// config wired to the shutdown cancellation token, layered with the
-/// error-status logger.
-fn build_mcp_router(deps: HandlerDeps, ct: &tokio_util::sync::CancellationToken) -> axum::Router {
+/// error-status logger. Also serves the daemon session hub at
+/// `/sessions/ws` (see `crate::sessions::ws`).
+fn build_mcp_router(
+    deps: HandlerDeps,
+    ct: &tokio_util::sync::CancellationToken,
+    sessions: Arc<crate::sessions::ws::SessionsState>,
+) -> axum::Router {
     let HandlerDeps {
         db: handler_db,
         executor: handler_executor,
@@ -337,7 +344,12 @@ fn build_mcp_router(deps: HandlerDeps, ct: &tokio_util::sync::CancellationToken)
 
     axum::Router::new()
         .nest_service("/mcp", service)
+        .route(
+            "/sessions/ws",
+            axum::routing::get(crate::sessions::ws::sessions_ws_handler),
+        )
         .layer(axum::middleware::from_fn(log_mcp_error_responses))
+        .with_state(sessions)
 }
 
 /// Frees the port (a stale occupant from a previous daemon), binds, logs the
@@ -408,13 +420,15 @@ async fn log_mcp_error_responses(
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     let session_id_present = request.headers().contains_key("mcp-session-id");
+    let path = request.uri().path().to_string();
     let response = next.run(request).await;
     let status = response.status();
     if status.as_u16() >= 400 {
         tracing::warn!(
             status = %status,
             session_id_present,
-            "/mcp request failed"
+            path = %path,
+            "request failed"
         );
     }
     response

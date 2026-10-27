@@ -5,7 +5,6 @@ use crate::tui::agent::{
 };
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use std::io::Write;
 use std::time::Duration;
 
 impl InteractiveAgent {
@@ -519,40 +518,9 @@ fn recently_active(last_output_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
     now.signed_duration_since(last_output_at).num_milliseconds() < ACTIVITY_IDLE_THRESHOLD_MS
 }
 
-/// Write `prompt` to `writer` as a SUBMITTED message: the paste lands as one
-/// block (bracketed only when the target actually enabled bracketed-paste
-/// mode — see [`InteractiveAgent::bracketed_paste_enabled`]), then the
-/// submit keystroke is written as a SEPARATE event after `spec.settle`.
-///
-/// This separation matters: writing the submit key immediately after the
-/// paste (zero delay, same logical write) lets the two coalesce into one
-/// chunk at the pty/kernel level. A target CLI with bracketed-paste
-/// handling that reads a `\r` inside (or immediately trailing, same-chunk)
-/// the paste event can fold it into the pasted text as a literal newline
-/// instead of parsing it as a distinct Enter keypress — the prompt lands in
-/// the input box but is never submitted.
-pub fn write_submitted_prompt(
-    writer: &mut impl Write,
-    prompt: &str,
-    bracketed: bool,
-    spec: PasteSubmitSpec,
-) -> std::io::Result<()> {
-    if bracketed {
-        writer.write_all(format!("\x1b[200~{prompt}\x1b[201~").as_bytes())?;
-    } else {
-        writer.write_all(prompt.as_bytes())?;
-    }
-    writer.flush()?;
-
-    for _ in 0..spec.presses.max(1) {
-        if spec.settle > Duration::ZERO {
-            std::thread::sleep(spec.settle);
-        }
-        writer.write_all(spec.submit_key)?;
-        writer.flush()?;
-    }
-    Ok(())
-}
+/// Shared paste+submit path (moved to [`crate::sessions::spawn`]): re-exported
+/// here so existing callers keep working unchanged.
+pub use crate::sessions::write_submitted_prompt;
 
 #[cfg(test)]
 mod activity_tests {

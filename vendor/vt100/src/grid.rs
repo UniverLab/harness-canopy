@@ -214,6 +214,34 @@ impl Grid {
         }
     }
 
+    /// Render every scrollback row oldest-first for snapshot streams:
+    /// each row inline with its attributes, followed by `\r\n`. A trailing
+    /// home + Scroll Up parks exactly those rows back into a fresh parser's
+    /// scrollback, so feeding the result to one reproduces this scrollback
+    /// (a plain row dump would leave a short scrollback sitting on the
+    /// visible screen instead, where the snapshot's visible part wipes it).
+    pub(crate) fn write_scrollback_formatted(&self, contents: &mut Vec<u8>) {
+        if self.scrollback.is_empty() {
+            return;
+        }
+        crate::term::ClearAttrs.write_buf(contents);
+        let mut prev_attrs = crate::attrs::Attrs::default();
+        for row in self.scrollback.iter() {
+            row.write_contents_linear(contents, &mut prev_attrs);
+            contents.extend(b"\r\n");
+        }
+        // After the dump the rows sit on the visible screen (short ones) or
+        // partly in scrollback already (long ones); scroll exactly the
+        // visible content rows up so all of them land in scrollback.
+        let rows = usize::from(self.size.rows);
+        let parked = self
+            .scrollback
+            .len()
+            .min(rows.saturating_sub(1).max(1));
+        contents.extend(b"\x1b[H");
+        contents.extend(format!("\x1b[{parked}S").as_bytes());
+    }
+
     pub fn write_contents_formatted(
         &self,
         contents: &mut Vec<u8>,

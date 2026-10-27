@@ -4,7 +4,7 @@
 //! concurrent readers) and displays background_agents, watchers, and their logs
 //! in a card-based sidebar with a live log panel.
 
-mod agent;
+pub(crate) mod agent;
 mod app;
 mod atmosphere;
 mod brians_brain;

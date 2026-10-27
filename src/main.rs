@@ -20,6 +20,7 @@ mod graph_engine;
 mod mcp_wizard_module;
 mod rag;
 mod scheduler;
+mod sessions;
 mod setup_module;
 mod shared;
 mod skills_module;
