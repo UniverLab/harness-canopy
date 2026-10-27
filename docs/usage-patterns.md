@@ -407,7 +407,12 @@ Three levers, from least to most intrusive:
 
 - **Retry or skip the stuck node.** `graph_continue` with
   `retry_current_node` re-runs the node the run stopped on; `skip_next_spec`
-  moves past the spec. Use these first.
+  moves past the spec. Use these first. `retry_current_node` (and a directed
+  run, below) also work on an idea-driven graph — one run with an `idea`
+  instead of specs: the run resumes with the idea it last ran with, so a
+  failed idea graph no longer has to be relaunched from Start. An idea graph
+  that has never run is refused, naming `graph_run` with an `idea` as the
+  way to start one.
 - **Start a spec at a node you choose.** When everything before a node is
   already right, a directed run (`graph_continue run_from_node`, or
   `canopy graph run <graph> --from <node>`) begins at that node and reuses the
