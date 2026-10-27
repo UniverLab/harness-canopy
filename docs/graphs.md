@@ -863,12 +863,22 @@ machine: a file `<canopy_dir>/prompts/<name>.md` (the same file the
 engine reads at spawn time) or one of the builtins (`implementer`,
 `reviewer`, `resilience`, which are seeded on daemon start and fall back
 to embedded constants). If any referenced preset is unknown, the whole
-import is refused with an error naming **every** unknown preset — nothing
-is written — rather than importing a graph whose agent would silently
-run on an empty prompt. A custom preset you rely on must therefore be
-copied to the importing machine's prompts dir first. Nothing else about
-prompt resolution changes: at spawn time an explicit `prompt_template`
-still wins, then `prompt_preset`, then the fallback template.
+import is refused — naming **every** unknown preset and writing nothing
+— rather than importing a graph whose agent would silently run on an
+empty prompt:
+
+```
+Unknown prompt preset(s): my-auditor, my-reviewer. Add file(s) under /home/you/.canopy/prompts or use a builtin (implementer, reviewer, resilience).
+```
+
+A custom preset you rely on must therefore be copied to the importing
+machine's prompts dir first: a shared document carries the preset's
+name, never its text. Ensemble members are not checked — a member
+carries no preset of its own. Nothing else about prompt resolution
+changes: at spawn time an explicit `prompt_template` still wins, then
+`prompt_preset`, then the fallback template, and a blank
+`prompt_preset` names no preset and takes that fallback exactly as
+before.
 
 A [crew](#crews)-bound design travels by name, never by its members:
 `graph_export` writes `crew: "<name>"` on a bound ensemble (with no
