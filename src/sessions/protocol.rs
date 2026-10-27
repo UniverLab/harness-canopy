@@ -19,6 +19,22 @@ pub const ERR_SPAWN_FAILED: &str = "spawn_failed";
 pub const ERR_DELIVERY_FAILED: &str = "delivery_failed";
 pub const ERR_INTERNAL: &str = "internal";
 
+/// One shelf file, as carried by `shelf` / `shelf_added` (FR3).
+/// `session_id: null` is the host shelf; the wire key for the sender label
+/// is `from`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ShelfItem {
+    pub file_id: String,
+    pub session_id: Option<String>,
+    pub name: String,
+    pub mime: String,
+    pub size: i64,
+    pub caption: Option<String>,
+    #[serde(rename = "from")]
+    pub from_label: String,
+    pub created_at: String,
+}
+
 /// Session metadata row for `sessions` / `session_added` frames.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionItem {
@@ -76,6 +92,22 @@ pub enum ClientFrame {
     Kill {
         req: String,
         id: String,
+    },
+    /// `shelf_list{req,id?}`: one shelf's items (`id` absent = host shelf).
+    ShelfList {
+        req: String,
+        id: Option<String>,
+    },
+    /// `shelf_get{req,file_id}`: stream one file back as `file` parts.
+    ShelfGet {
+        req: String,
+        file_id: String,
+    },
+    /// `shelf_delete{req,file_id}`: remove one file from its shelf; the host
+    /// answers `ok` and broadcasts `shelf_removed`.
+    ShelfDelete {
+        req: String,
+        file_id: String,
     },
 }
 
@@ -181,6 +213,21 @@ pub fn parse_client_frame(text: &str) -> Result<ClientFrame, FrameError> {
             let id = id_field(&value, &frame)?;
             Ok(ClientFrame::Kill { req, id })
         }
+        "shelf_list" => {
+            let req = req_field(&value, &frame)?;
+            let id = opt_str_field(&value, &frame, "id")?;
+            Ok(ClientFrame::ShelfList { req, id })
+        }
+        "shelf_get" => {
+            let req = req_field(&value, &frame)?;
+            let file_id = str_field(&value, &frame, "file_id")?;
+            Ok(ClientFrame::ShelfGet { req, file_id })
+        }
+        "shelf_delete" => {
+            let req = req_field(&value, &frame)?;
+            let file_id = str_field(&value, &frame, "file_id")?;
+            Ok(ClientFrame::ShelfDelete { req, file_id })
+        }
         _ => Err(bad_request(None, format!("unknown frame '{frame}'"))),
     }
 }
@@ -254,9 +301,16 @@ fn encode_b64(data: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(data)
 }
 
-/// `hello{proto,host_label}`, sent on connect.
+/// `hello{proto,host_label,features}`, sent on connect. `features`
+/// advertises the optional extensions this host speaks — currently just
+/// `shelf` — so a client can tell an older host from a newer one without
+/// probing.
 pub fn hello_frame(host_label: &str) -> String {
-    serde_json::json!({"t": "hello", "proto": PROTO_VERSION, "host_label": host_label}).to_string()
+    serde_json::json!({
+        "t": "hello", "proto": PROTO_VERSION, "host_label": host_label,
+        "features": ["shelf"],
+    })
+    .to_string()
 }
 
 /// `sessions{req,items}`, the answer to `list`.
@@ -309,6 +363,35 @@ pub fn error_frame(req: Option<&str>, code: &str, message: &str) -> String {
         frame["req"] = Value::String(req.to_string());
     }
     frame.to_string()
+}
+
+/// `shelf{req,id?,items}`: the answer to `shelf_list`, newest first.
+pub fn shelf_frame(req: &str, id: Option<&str>, items: &[ShelfItem]) -> String {
+    serde_json::json!({"t": "shelf", "req": req, "id": id, "items": items}).to_string()
+}
+
+/// `shelf_added{item}`, broadcast to every connection when a shelf gains a
+/// file.
+pub fn shelf_added_frame(item: &ShelfItem) -> String {
+    serde_json::json!({"t": "shelf_added", "item": item}).to_string()
+}
+
+/// `shelf_removed{file_id}`, broadcast to every connection when a shelf
+/// loses a file (delete, prune, retention or orphan sweep).
+pub fn shelf_removed_frame(file_id: &str) -> String {
+    serde_json::json!({"t": "shelf_removed", "file_id": file_id}).to_string()
+}
+
+/// `file{req,file_id,part,data,last}`: one base64 chunk of a `shelf_get`
+/// answer, at most [`crate::sessions::shelf::READ_CHUNK_BYTES`] raw bytes
+/// per part; `last` marks the final chunk (an empty file is one empty part
+/// with `last: true`).
+pub fn file_frame(req: &str, file_id: &str, part: u32, data: &[u8], last: bool) -> String {
+    serde_json::json!({
+        "t": "file", "req": req, "file_id": file_id, "part": part,
+        "data": encode_b64(data), "last": last,
+    })
+    .to_string()
 }
 
 // ── Client frame builders ─────────────────────────────────────────────
@@ -401,6 +484,22 @@ pub fn kill_frame(req: &str, id: &str) -> String {
     serde_json::json!({"t": "kill", "req": req, "id": id}).to_string()
 }
 
+/// `shelf_list{req,id?}`: ask for one shelf's items; `id` absent asks for
+/// the host shelf.
+pub fn shelf_list_frame(req: &str, id: Option<&str>) -> String {
+    serde_json::json!({"t": "shelf_list", "req": req, "id": id}).to_string()
+}
+
+/// `shelf_get{req,file_id}`: ask for one file's bytes as `file` parts.
+pub fn shelf_get_frame(req: &str, file_id: &str) -> String {
+    serde_json::json!({"t": "shelf_get", "req": req, "file_id": file_id}).to_string()
+}
+
+/// `shelf_delete{req,file_id}`: ask the host to remove one shelf file.
+pub fn shelf_delete_frame(req: &str, file_id: &str) -> String {
+    serde_json::json!({"t": "shelf_delete", "req": req, "file_id": file_id}).to_string()
+}
+
 // ── Host frames ───────────────────────────────────────────────────────
 
 /// One frame sent by the hub, parsed by [`parse_host_frame`].
@@ -448,6 +547,33 @@ pub enum HostFrame {
         code: String,
         message: String,
     },
+    /// `shelf{req,id?,items}`: one shelf's listing, newest first.
+    Shelf {
+        req: String,
+        id: Option<String>,
+        items: Vec<ShelfItem>,
+    },
+    /// `shelf_added{item}`: broadcast when any shelf gains a file.
+    ShelfAdded {
+        item: Box<ShelfItem>,
+    },
+    /// `shelf_removed{file_id}`: broadcast when any shelf loses a file
+    /// (delete, prune, retention, orphan sweep).
+    ShelfRemoved {
+        file_id: String,
+    },
+    /// `file{req,file_id,part,data,last}`: one base64 chunk of a `shelf_get`
+    /// response, at most 12 KiB raw per part.
+    File {
+        req: String,
+        file_id: String,
+        part: u32,
+        data: Vec<u8>,
+        last: bool,
+    },
+    /// Any frame this build does not know: parsed so a newer host can talk
+    /// to an older client (and vice versa), then ignored.
+    Unknown,
 }
 
 impl HostFrame {
@@ -456,6 +582,8 @@ impl HostFrame {
         match self {
             HostFrame::Sessions { req, .. }
             | HostFrame::Spawned { req, .. }
+            | HostFrame::Shelf { req, .. }
+            | HostFrame::File { req, .. }
             | HostFrame::Ok { req } => Some(req),
             HostFrame::Error { req, .. } => req.as_deref(),
             _ => None,
@@ -510,6 +638,31 @@ enum HostFrameWire {
         code: String,
         message: String,
     },
+    Shelf {
+        req: String,
+        #[serde(default)]
+        id: Option<String>,
+        items: Vec<ShelfItem>,
+    },
+    ShelfAdded {
+        item: ShelfItem,
+    },
+    ShelfRemoved {
+        file_id: String,
+    },
+    File {
+        req: String,
+        file_id: String,
+        part: u32,
+        #[serde(deserialize_with = "de_b64")]
+        data: Vec<u8>,
+        last: bool,
+    },
+    /// Any `t` this build does not recognise: matches everything else, so
+    /// an unknown frame from a newer peer parses (and is ignored) instead
+    /// of failing the whole text.
+    #[serde(other)]
+    Unknown,
 }
 
 fn de_b64<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
@@ -549,5 +702,24 @@ pub fn parse_host_frame(text: &str) -> Result<HostFrame, String> {
         HostFrameWire::Spawned { req, id } => HostFrame::Spawned { req, id },
         HostFrameWire::Ok { req } => HostFrame::Ok { req },
         HostFrameWire::Error { req, code, message } => HostFrame::Error { req, code, message },
+        HostFrameWire::Shelf { req, id, items } => HostFrame::Shelf { req, id, items },
+        HostFrameWire::ShelfAdded { item } => HostFrame::ShelfAdded {
+            item: Box::new(item),
+        },
+        HostFrameWire::ShelfRemoved { file_id } => HostFrame::ShelfRemoved { file_id },
+        HostFrameWire::File {
+            req,
+            file_id,
+            part,
+            data,
+            last,
+        } => HostFrame::File {
+            req,
+            file_id,
+            part,
+            data,
+            last,
+        },
+        HostFrameWire::Unknown => HostFrame::Unknown,
     })
 }

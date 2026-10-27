@@ -131,6 +131,7 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
             sync_manager: Arc::clone(&sync_manager),
             ingestion: Arc::clone(&ingestion),
             dynamic_skills: Arc::clone(&dynamic_skills),
+            shelf: sessions_state.shelf.clone(),
             start_time: daemon_start,
             port,
         },
@@ -322,6 +323,7 @@ fn build_mcp_router(
         sync_manager: handler_sync_manager,
         ingestion: handler_ingestion,
         dynamic_skills: handler_dynamic_skills,
+        shelf: handler_shelf,
         start_time,
         port,
     } = deps;
@@ -338,6 +340,7 @@ fn build_mcp_router(
                 sync_manager: Arc::clone(&handler_sync_manager),
                 ingestion: Arc::clone(&handler_ingestion),
                 dynamic_skills: Arc::clone(&handler_dynamic_skills),
+                shelf: Arc::clone(&handler_shelf),
                 start_time,
                 port,
             }))
@@ -551,8 +554,16 @@ pub(crate) async fn run_stdio_server() -> Result<()> {
 
 /// The MCP handler over the startup dependencies — port 0, because stdio
 /// has no port of its own to report.
-fn build_stdio_handler(db: &Arc<Database>, startup: &StdioServerStartup) -> TaskTriggerHandler {
-    TaskTriggerHandler::with_deps(HandlerDeps {
+fn build_stdio_handler(
+    db: &Arc<Database>,
+    startup: &StdioServerStartup,
+) -> anyhow::Result<TaskTriggerHandler> {
+    let shelf = crate::sessions::shelf::ShelfStore::new(
+        Arc::clone(db),
+        crate::sessions::shelf::default_shelf_dir(),
+    )?;
+    shelf.maintenance();
+    Ok(TaskTriggerHandler::with_deps(HandlerDeps {
         db: Arc::clone(db),
         executor: Arc::clone(&startup.executor),
         watcher_engine: Arc::clone(&startup.watcher_engine),
@@ -562,16 +573,17 @@ fn build_stdio_handler(db: &Arc<Database>, startup: &StdioServerStartup) -> Task
         sync_manager: Arc::clone(&startup.sync_manager),
         ingestion: Arc::clone(&startup.ingestion),
         dynamic_skills: Arc::clone(&startup.dynamic_skills),
+        shelf,
         start_time: startup.start_time,
         port: 0,
-    })
+    }))
 }
 
 /// Serves JSON-RPC over the stdio transport until the client closes it:
 /// build the handler, serve, log the started line, then wait for the
 /// transport to end.
 async fn serve_stdio_transport(db: &Arc<Database>, startup: &StdioServerStartup) -> Result<()> {
-    let handler = build_stdio_handler(db, startup);
+    let handler = build_stdio_handler(db, startup)?;
 
     let transport = rmcp::transport::stdio();
     let server = handler.serve(transport).await?;
@@ -859,6 +871,7 @@ mod hang_repro {
                     sync_manager: Arc::clone(&handler_sync_manager),
                     ingestion: Arc::clone(&handler_ingestion),
                     dynamic_skills: Arc::clone(&handler_dynamic_skills),
+                    shelf: crate::sessions::shelf::ShelfStore::for_test(&handler_db),
                     start_time: std::time::Instant::now(),
                     port: 0,
                 }))

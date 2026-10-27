@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
 
-use super::{centered_rect, draw_dialog_left_wave, hub_keys, hub_legend, hub_settings};
+use super::{centered_rect, draw_dialog_left_wave, hub_keys, hub_legend, hub_settings, hub_shelf};
 use crate::tui::app::hub::{HubTab, HUB_TABS};
 use crate::tui::app::hub_settings::SettingsFocus;
 use crate::tui::app::types::App;
@@ -72,6 +72,7 @@ fn draw_body(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         HubTab::Settings => hub_settings::draw_settings_tab(frame, app, theme, area),
         HubTab::Keys => hub_keys::draw_keys_tab(frame, app, theme, area),
         HubTab::Missions => hub_legend::draw_missions_tab(frame, app, theme, area),
+        HubTab::Shelf => hub_shelf::draw_shelf_tab(frame, app, theme, area),
     }
 }
 
@@ -94,6 +95,7 @@ fn footer_hint(app: &App) -> &'static str {
         },
         HubTab::Keys => "↑↓ scroll · Shift+←→ tab · Esc close",
         HubTab::Missions => "↑↓ mission · Shift+←→ tab · Esc close",
+        HubTab::Shelf => "Enter open   d delete   c copy path",
     }
 }
 

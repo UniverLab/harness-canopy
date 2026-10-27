@@ -24,35 +24,46 @@ use crate::db::Database;
 
 use super::auth::{bearer_token, ensure_token, token_valid};
 use super::protocol::{
-    error_frame, exited_frame, hello_frame, ok_frame, out_frame, parse_client_frame,
-    session_added_frame, session_removed_frame, sessions_frame, snapshot_frame, spawned_frame,
-    ClientFrame, SessionItem, ERR_BAD_REQUEST, ERR_DELIVERY_FAILED, ERR_FORBIDDEN, ERR_INTERNAL,
-    ERR_NOT_FOUND, ERR_SPAWN_FAILED,
+    error_frame, exited_frame, file_frame, hello_frame, ok_frame, out_frame, parse_client_frame,
+    session_added_frame, session_removed_frame, sessions_frame, shelf_added_frame, shelf_frame,
+    shelf_removed_frame, snapshot_frame, spawned_frame, ClientFrame, SessionItem, ERR_BAD_REQUEST,
+    ERR_DELIVERY_FAILED, ERR_FORBIDDEN, ERR_INTERNAL, ERR_NOT_FOUND, ERR_SPAWN_FAILED,
 };
+use super::shelf::{ShelfStore, READ_CHUNK_BYTES};
 use super::{
     HubEvent, HubSession, OutputReceiver, SessionHub, SessionKind, SessionStatus, SpawnRequest,
 };
 
-/// Shared state for the sessions endpoint: the hub plus the bearer token.
-/// The token value is never logged.
+/// Shared state for the sessions endpoint: the hub, the shelf it broadcasts
+/// on, and the bearer token. The token value is never logged.
 pub struct SessionsState {
     pub hub: SessionHub,
+    pub shelf: std::sync::Arc<ShelfStore>,
     token: String,
 }
 
 impl SessionsState {
     /// Create the endpoint state for a daemon start: ensure the token file
-    /// exists and build the hub. Fails when the token cannot be read or
-    /// created — the daemon must never serve without auth.
+    /// exists, build the hub, wire the shelf to it (so insert/delete broadcast
+    /// `shelf_added`/`shelf_removed` here and `kill` reaps), create the shelf
+    /// directory and run the startup lifecycle checks (retention, cap,
+    /// orphans — FR1/FR4). Fails when the token cannot be read or created —
+    /// the daemon must never serve without auth.
     pub fn ensure(data_dir: &Path, db: Arc<Database>) -> anyhow::Result<Arc<Self>> {
         let token = ensure_token(data_dir)?;
-        let hub = SessionHub::new(db, host_label());
-        Ok(Arc::new(Self { hub, token }))
+        let hub = SessionHub::new(db.clone(), host_label());
+        let shelf = ShelfStore::new(db, data_dir.join("shelf"))?;
+        hub.wire_shelf(shelf.clone());
+        shelf.maintenance();
+        Ok(Arc::new(Self { hub, shelf, token }))
     }
 
     #[cfg(test)]
     pub fn for_test(hub: SessionHub, token: String) -> Arc<Self> {
-        Arc::new(Self { hub, token })
+        let shelf = ShelfStore::for_test(hub.db());
+        hub.wire_shelf(shelf.clone());
+        shelf.maintenance();
+        Arc::new(Self { hub, shelf, token })
     }
 }
 
@@ -227,7 +238,95 @@ fn handle_client_text(
             );
         }
         ClientFrame::Kill { req, id } => handle_kill(state, out_tx, req, id),
+        ClientFrame::ShelfList { req, id } => handle_shelf_list(state, out_tx, req, id),
+        ClientFrame::ShelfGet { req, file_id } => handle_shelf_get(state, out_tx, req, file_id),
+        ClientFrame::ShelfDelete { req, file_id } => {
+            handle_shelf_delete(state, out_tx, req, file_id);
+        }
     }
+}
+
+/// `shelf_list`: one shelf's items (host shelf when `id` is absent), newest
+/// first. The query runs off the executor like every other blocking hub call.
+fn handle_shelf_list(state: &Arc<SessionsState>, out_tx: &OutTx, req: String, id: Option<String>) {
+    let shelf = state.shelf.clone();
+    let out_tx = out_tx.clone();
+    let echo = id.clone();
+    tokio::spawn(async move {
+        let listed = tokio::task::spawn_blocking(move || shelf.list(id.as_deref())).await;
+        match listed {
+            Ok(items) => {
+                let _ = out_tx.send(shelf_frame(&req, echo.as_deref(), &items));
+            }
+            Err(_) => {
+                let _ = out_tx.send(error_frame(Some(&req), ERR_INTERNAL, "shelf list failed"));
+            }
+        }
+    });
+}
+
+/// `shelf_get`: stream one file back as `file` parts of at most 12 KiB raw.
+/// The id is matched against rows first, so nothing outside the shelf
+/// directory is ever read (FR: `shelf_get` takes a `file_id` only).
+fn handle_shelf_get(state: &Arc<SessionsState>, out_tx: &OutTx, req: String, file_id: String) {
+    let shelf = state.shelf.clone();
+    let out_tx = out_tx.clone();
+    tokio::spawn(async move {
+        let read = tokio::task::spawn_blocking({
+            let file_id = file_id.clone();
+            move || shelf.read_file(&file_id)
+        })
+        .await;
+        match read {
+            Ok(Some(bytes)) => {
+                if bytes.is_empty() {
+                    let _ = out_tx.send(file_frame(&req, &file_id, 0, &[], true));
+                    return;
+                }
+                let total = bytes.len().div_ceil(READ_CHUNK_BYTES);
+                for (index, chunk) in bytes.chunks(READ_CHUNK_BYTES).enumerate() {
+                    let last = index + 1 == total;
+                    let _ = out_tx.send(file_frame(&req, &file_id, index as u32, chunk, last));
+                }
+            }
+            Ok(None) => {
+                let _ = out_tx.send(error_frame(
+                    Some(&req),
+                    ERR_NOT_FOUND,
+                    &format!("no shelf file '{file_id}'"),
+                ));
+            }
+            Err(_) => {
+                let _ = out_tx.send(error_frame(Some(&req), ERR_INTERNAL, "shelf read failed"));
+            }
+        }
+    });
+}
+
+/// `shelf_delete`: remove one file; the store broadcasts `shelf_removed` to
+/// every connection (including the requester) when it did.
+fn handle_shelf_delete(state: &Arc<SessionsState>, out_tx: &OutTx, req: String, file_id: String) {
+    let shelf = state.shelf.clone();
+    let out_tx = out_tx.clone();
+    let id_for_error = file_id.clone();
+    tokio::spawn(async move {
+        let deleted = tokio::task::spawn_blocking(move || shelf.delete(&file_id)).await;
+        match deleted {
+            Ok(true) => {
+                let _ = out_tx.send(ok_frame(&req));
+            }
+            Ok(false) => {
+                let _ = out_tx.send(error_frame(
+                    Some(&req),
+                    ERR_NOT_FOUND,
+                    &format!("no shelf file '{id_for_error}'"),
+                ));
+            }
+            Err(_) => {
+                let _ = out_tx.send(error_frame(Some(&req), ERR_INTERNAL, "shelf delete failed"));
+            }
+        }
+    });
 }
 
 fn handle_list(state: &Arc<SessionsState>, out_tx: &OutTx, req: &str) {
@@ -406,6 +505,12 @@ fn handle_hub_event(out_tx: &OutTx, attached: &mut Attached, event: HubEvent) {
             if to_all || attached.contains_key(&id) {
                 let _ = out_tx.send(exited_frame(&id, code));
             }
+        }
+        HubEvent::ShelfAdded(item) => {
+            let _ = out_tx.send(shelf_added_frame(&item));
+        }
+        HubEvent::ShelfRemoved { file_id } => {
+            let _ = out_tx.send(shelf_removed_frame(&file_id));
         }
     }
 }

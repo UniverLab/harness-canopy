@@ -298,6 +298,35 @@ fn draw_copied_badge(frame: &mut Frame, theme: &Theme) {
     }
 }
 
+/// The `📎 <name> — <from>` shelf toast (and the shelf open-failure line),
+/// drawn just below the header like the `▒ COPIED ▒` badge for the 5 s its
+/// TTL holds. The refresh loop dismisses it too; checking the age here
+/// keeps a paused loop from freezing it on screen.
+fn draw_shelf_toast(frame: &mut Frame, app: &App, theme: &Theme) {
+    let Some(toast) = app.hub.shelf.toast.as_ref() else {
+        return;
+    };
+    if toast.at.elapsed() > crate::tui::app::hub_shelf::TOAST_TTL {
+        return;
+    }
+    let full = frame.area();
+    if full.width <= 4 || full.height <= 2 {
+        return;
+    }
+    let text = format!(" {} ", toast.text);
+    let width = (text.chars().count() as u16).min(full.width - 2);
+    let area = Rect::new(full.x + 1, full.y + 1, width, 1);
+    frame.render_widget(
+        ratatui::widgets::Paragraph::new(crate::tui::ui::truncate_str(&text, width as usize))
+            .style(
+                ratatui::style::Style::default()
+                    .fg(theme.header_color)
+                    .bg(Color::Black),
+            ),
+        area,
+    );
+}
+
 /// CT26: the copy-reflex guard's one-line sentence, drawn on the pane's bottom
 /// row (directly above the key-hint footer) while its TTL holds. It names the
 /// key the user reflexively pressed, so it belongs in the same eye line as the
@@ -334,6 +363,7 @@ fn draw_top_overlays(frame: &mut Frame, app: &mut App, theme: &Theme) {
     if app.show_copied {
         draw_copied_badge(frame, theme);
     }
+    draw_shelf_toast(frame, app, theme);
 
     // Atmosphere particles — absolute top layer, drawn last over everything.
     // CM52: `tui.atmosphere = false` skips both the scene tick and the draw.

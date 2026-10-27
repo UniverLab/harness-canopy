@@ -193,7 +193,7 @@ docs/ is published at univerlab.org/canopy/docs and holds user documentation onl
 
 ---
 
-## MCP Tools (117)
+## MCP Tools (118)
 
 Graph-node sessions (agent and ensemble nodes launched by the graph engine) receive a fixed node profile of 18 tools via `CANOPY_MCP_PROFILE=node`, so every node stays well under the 128-tool cap of OpenAI-compatible providers. All other sessions — the orchestrator, check nodes, hooks, TUI, subagents, and background agents — keep the full tool list.
 
@@ -216,6 +216,7 @@ Graph-node sessions (agent and ensemble nodes launched by the graph engine) rece
 | `get_tools` | **Protocol** (1) |
 | `session_list` | **Interactive sessions** (1) |
 | `scheduled_send_create`, `scheduled_send_list`, `scheduled_send_cancel` | **Scheduled sends** (3) |
+| `session_send_file` | **Session shelf** (1) |
 
 ---
 

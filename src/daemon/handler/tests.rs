@@ -169,6 +169,7 @@ const EXPECTED_TOOL_NAMES: &[&str] = &[
     "scheduled_send_create",
     "scheduled_send_list",
     "session_list",
+    "session_send_file",
     "skill_get",
     "skill_list",
     "spec_convert",
@@ -297,6 +298,7 @@ const EXPECTED_TOOL_ROWS: &[&str] = &[
                 "scheduled_send_create|e6defc41d6d01fe133056562efc3aba3b50b6d1e2a06fe278894cbbbcb65a165|959aa8850eee97391ca1529377085f07115c926742f575ceac2d01e143b80880",
                 "scheduled_send_list|946cdf95ebf54570fe9566aa69f8f5e7a18f08ea7b29a6be390bd9ce66a4df63|db1ee418b59faad9b3fae002b3f21eb04fa7f25097f3a595c26e7bc54f700d0f",
                 "session_list|f983db33c96519c95584055f90c807dda350a17e9b12d402c0551590e772532b|adae59573f649012ccb3856be07ea7740581587cfeb6e9caba07ab66ca88ec84",
+                "session_send_file|93da0ac3f05d1272b9d2655352a1b6dccdf20724d589476b704396682b0bc914|164c349fdc53ee0b35afdfe6d750e6c23e8622f1426bc8c3aa84ff6e93f9c613",
                 "skill_get|11bb4551bb0cf314b47867061fdb6ecc35812780d98808cd2f1e134d098bc8b9|ffa1d0d446d446ba220972aac074b9d9d386caa3a92df3b710eadbc7cdfa0b59",
                 "skill_list|970ee8acf69615b521eaca0b1b27b8555a7fdc96b5655ebf435f4667418d290b|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
                 "spec_convert|dcabb9d52877782e47ac4fed3582e63e4c1cc6324c25b3079d6c25ef06552b16|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
@@ -472,6 +474,7 @@ fn queue_test_handler() -> (
         sync_manager,
         ingestion,
         dynamic_skills,
+        shelf: crate::sessions::shelf::ShelfStore::for_test(&db),
         start_time: std::time::Instant::now(),
         port: 0,
     });

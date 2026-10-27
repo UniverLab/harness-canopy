@@ -26,7 +26,9 @@ const MAX_BACKOFF: Duration = Duration::from_secs(5);
 /// idle: [`App::poll_session_hub`] only retries after an explicit connect
 /// attempt (or a drop) armed `next_retry_at`, so `App::new` never dials.
 pub(crate) struct SessionHubState {
-    client: Option<HubClient>,
+    /// The live control connection, shared with the Shelf tab's listing
+    /// and delete calls (`hub_shelf.rs`).
+    pub(super) client: Option<HubClient>,
     url: String,
     token: String,
     next_retry_at: Option<Instant>,
@@ -181,6 +183,9 @@ impl App {
             HostFrame::SessionAdded { item } => self.attach_hub_item(&item),
             HostFrame::SessionRemoved { id } => self.remove_hub_session(&id),
             HostFrame::Exited { id, code } => self.note_hub_session_exited(&id, code),
+            HostFrame::ShelfAdded { item } => self.note_shelf_added(*item),
+            HostFrame::ShelfRemoved { file_id } => self.note_shelf_removed(&file_id),
+            HostFrame::Shelf { .. } | HostFrame::File { .. } | HostFrame::Unknown => {}
             HostFrame::Error {
                 req: None,
                 code,

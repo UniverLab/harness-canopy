@@ -75,6 +75,7 @@ fn endpoint_test_handler() -> (
         sync_manager,
         ingestion,
         dynamic_skills,
+        shelf: crate::sessions::shelf::ShelfStore::for_test(&db),
         start_time: std::time::Instant::now(),
         port: 0,
     });
@@ -1248,3 +1249,4 @@ mod part09_tests;
 mod part10_tests;
 mod part11_tests;
 mod part12_tests;
+mod part13_tests;

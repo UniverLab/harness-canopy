@@ -208,6 +208,17 @@ A crew is a named, ordered member list ensembles and agent nodes/hooks bind
 to; member editing is MCP/TUI only (see
 [MCP tools](mcp-tools.md)).
 
+## Shelf
+
+| Command | Description |
+|---|---|
+| `canopy shelf list [--json]` | List every shelf file (the host shelf plus every session's), newest first, through the daemon; `--json` prints the items with their file ids |
+| `canopy shelf open <file_id>` | Open one shelf file with the system viewer, via the daemon |
+
+Both subcommands go through the running daemon over the session-protocol
+WebSocket — the CLI never writes the shelf itself. `file_id` is the
+16-lowercase-hex id printed by `canopy shelf list --json`.
+
 ## Settings
 
 Every setting in `~/.canopy/config.toml` is declared once, in a typed

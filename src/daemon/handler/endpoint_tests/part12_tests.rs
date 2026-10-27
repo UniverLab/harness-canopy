@@ -285,3 +285,121 @@ async fn crew_list_reports_crews_members_and_bindings_without_arguments() {
         "the bound ensemble is counted"
     );
 }
+
+// ── `session_send_file`: session resolution + partial success (FR2) ─────
+
+/// A file that sniffs as PNG: the 8-byte magic plus tail.
+fn shelf_png(path: &std::path::Path) {
+    let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    bytes.resize(64, 0x42);
+    std::fs::write(path, bytes).unwrap();
+}
+
+fn shelf_session(db: &std::sync::Arc<Database>, id: &str, name: &str) {
+    db.insert_interactive_session(id, name, "claude", "/proj", None, None, "interactive", None)
+        .unwrap();
+}
+
+async fn send_file(
+    handler: &TaskTriggerHandler,
+    paths: Vec<String>,
+    session_id: Option<String>,
+) -> serde_json::Value {
+    let result = handler
+        .session_send_file(
+            Parameters(SessionSendFileParams {
+                paths,
+                caption: None,
+                session_id,
+            }),
+            OptionalExtension(None),
+        )
+        .await
+        .unwrap();
+    assert!(!is_err(&result), "{}", text(&result));
+    serde_json::from_str(&raw_text(&result)).unwrap()
+}
+
+/// FR2 case 1 via the env identity transport (the header transport is in
+/// part13): an explicit `session_id` wins over the caller's own session.
+#[tokio::test]
+async fn session_send_file_explicit_session_id_wins() {
+    let (dir, db, handler) = endpoint_test_handler();
+    shelf_session(&db, "caller", "caller-name");
+    shelf_session(&db, "other", "other-name");
+    let _guard = AgentIdVar::set("caller");
+
+    let shot = dir.path().join("shot.png");
+    shelf_png(&shot);
+    let out = send_file(
+        &handler,
+        vec![shot.to_string_lossy().into_owned()],
+        Some("other".to_string()),
+    )
+    .await;
+
+    assert_eq!(out["items"].as_array().unwrap().len(), 1);
+    assert_eq!(out["errors"].as_array().unwrap().len(), 0);
+    assert_eq!(out["items"][0]["mime"], "image/png");
+    let other = handler.shelf.list(Some("other"));
+    assert_eq!(other.len(), 1, "the file lands on the named shelf");
+    assert_eq!(other[0].from_label, "other-name");
+    assert!(handler.shelf.list(Some("caller")).is_empty());
+    assert!(handler.shelf.list(None).is_empty());
+}
+
+/// FR2 case 2 via the env identity transport (the header transport is in
+/// part13): no explicit id — the caller's identity maps to its session.
+#[tokio::test]
+async fn session_send_file_resolves_caller_session_from_identity() {
+    let (dir, db, handler) = endpoint_test_handler();
+    shelf_session(&db, "me", "me-name");
+    let _guard = AgentIdVar::set("me");
+
+    let shot = dir.path().join("shot.png");
+    shelf_png(&shot);
+    let out = send_file(&handler, vec![shot.to_string_lossy().into_owned()], None).await;
+
+    assert_eq!(out["items"].as_array().unwrap().len(), 1);
+    let mine = handler.shelf.list(Some("me"));
+    assert_eq!(mine.len(), 1, "the file lands on the caller's shelf");
+    assert_eq!(mine[0].from_label, "me-name");
+    assert!(handler.shelf.list(None).is_empty());
+}
+
+/// FR2: one bad path never blocks the others — each failure is a coded
+/// entry in `errors` alongside the accepted `items`.
+#[tokio::test]
+async fn session_send_file_partial_success_reports_per_path_errors() {
+    let (dir, db, handler) = endpoint_test_handler();
+    shelf_session(&db, "me", "me-name");
+    let _guard = AgentIdVar::set("me");
+
+    let good = dir.path().join("good.png");
+    shelf_png(&good);
+    let fake = dir.path().join("fake.png");
+    std::fs::write(&fake, b"just some text, not an image").unwrap();
+    let missing = dir.path().join("missing.png");
+    let paths = vec![
+        good.to_string_lossy().into_owned(),
+        missing.to_string_lossy().into_owned(),
+        dir.path().to_string_lossy().into_owned(),
+        fake.to_string_lossy().into_owned(),
+    ];
+    let out = send_file(&handler, paths, None).await;
+
+    assert_eq!(out["items"].as_array().unwrap().len(), 1);
+    assert_eq!(out["items"][0]["name"], "good.png");
+    let errors = out["errors"].as_array().unwrap();
+    assert_eq!(errors.len(), 3, "three bad paths, three errors: {out}");
+    let codes: Vec<&str> = errors
+        .iter()
+        .map(|e| e["code"].as_str().expect("a code per error"))
+        .collect();
+    assert_eq!(codes, vec!["not_found", "not_a_file", "unsupported_type"]);
+    for error in errors {
+        assert!(!error["message"].as_str().unwrap_or("").is_empty());
+        assert!(!error["path"].as_str().unwrap_or("").is_empty());
+    }
+    assert_eq!(handler.shelf.list(Some("me")).len(), 1);
+}

@@ -49,6 +49,7 @@ use daemon::roster_cli::{handle_roster_action, RosterAction};
 use daemon::sandbox_cli::{handle_sandbox_action, SandboxAction};
 use daemon::server::{run_http_server, run_stdio_server};
 use daemon::settings_cli::{handle_settings_action, SettingsAction};
+use daemon::shelf_cli::{handle_shelf_action, ShelfAction};
 use daemon::spec_cli::{handle_spec_action, SpecAction};
 use daemon::subagent_cli::{handle_subagent_action, SubagentAction};
 use setup_module::registry_cli::{handle_registry_action, RegistryAction};
@@ -236,6 +237,11 @@ enum Commands {
         #[command(subcommand)]
         action: SandboxAction,
     },
+    /// List or open session-shelf files through the daemon.
+    Shelf {
+        #[command(subcommand)]
+        action: ShelfAction,
+    },
     /// Run a stdio sidecar proxy that injects canopy identity headers.
     Bridge {
         /// Agent session ID to bind this bridge process.
@@ -324,6 +330,7 @@ async fn main() -> Result<()> {
         Some(Commands::Prompts { action }) => handle_prompts_action(action).await,
         Some(Commands::Subagent { action }) => handle_subagent_action(action, cli.port).await,
         Some(Commands::Sandbox { action }) => handle_sandbox_action(action).await,
+        Some(Commands::Shelf { action }) => handle_shelf_action(action, cli.port).await,
         Some(Commands::Bridge {
             agent_id,
             port,

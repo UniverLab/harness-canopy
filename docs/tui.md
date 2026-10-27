@@ -167,9 +167,10 @@ WSL), **Nuclear Winter** shows as `not measurable on this system`.
 Press **F1** to open the **Canopy hub**, a centered tabbed dialog:
 **Settings** edits every registry setting in place (with the value's apply
 mode and status), **Keys** is a grouped reference of every shortcut the TUI
-handles, and **Missions & stats** lists all the missions above — unlocked
-ones in full colour, locked ones dimmed. `Shift+←`/`Shift+→`
-switch tabs, as everywhere else in Canopy; `Tab`/`Shift+Tab` and `1`/`2`/`3`
+handles, **Missions & stats** lists all the missions above — unlocked
+ones in full colour, locked ones dimmed — and **Shelf** lists the files
+agents have sent (see below). `Shift+←`/`Shift+→`
+switch tabs, as everywhere else in Canopy; `Tab`/`Shift+Tab` and `1`/`2`/`3`/`4`
 also switch. `F1` closes the hub from any state; `Esc` closes it from the top
 level of every tab. `F1` works everywhere — including inside a focused
 interactive session whose harness has claimed the keyboard (alternate screen
@@ -185,6 +186,21 @@ with `a` (add a folder), `d` (delete) and `Shift+↑`/`Shift+↓` (reorder). `/`
 filters every group by key or description. Each change goes through the daemon;
 a refused value keeps the old one and the daemon's message shows in the status
 line. `←`/`→` never change a value.
+
+### Session shelf
+
+- **Sending** — an agent delivers files to its session with the MCP tool
+  `session_send_file`: 1..10 absolute paths per call, up to 20 MiB each.
+  PNG, JPEG, WebP, GIF and SVG are recognised from the file's content, not
+  its extension.
+- **Listing** — the hub's **Shelf** tab (`F1`, then `4`) lists the files
+  agents have sent — the host shelf plus one per session, merged newest
+  first — with arrival time, sender, name, size and caption per row.
+- **Opening** — `Enter` (or `Space`) opens the selected file with the
+  system viewer, `c` copies its absolute path, and `d` deletes it after a
+  `y`/`n` confirmation.
+- **Arrivals** — a file sent while the TUI runs joins the list live and
+  shows a `📎` toast for five seconds.
 
 ## Projects sidebar
 

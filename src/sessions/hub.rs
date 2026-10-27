@@ -113,15 +113,10 @@ impl SessionStatus {
     }
 }
 
-/// Hub lifecycle event, broadcast to every connection. `Exited` from a
-/// natural child exit goes to attached connections only (`to_all: false`);
-/// `kill` sends its `Exited` to every connection (`to_all: true`).
-#[derive(Debug, Clone)]
-pub enum HubEvent {
-    SessionAdded(Box<SessionItem>),
-    SessionRemoved(String),
-    Exited { id: String, code: i32, to_all: bool },
-}
+/// The hub's lifecycle event bus, defined in [`super::hub_event`] so this
+/// file stays under the file-size cap; re-exported to keep the
+/// `crate::sessions::hub::HubEvent` path stable.
+pub use super::hub_event::HubEvent;
 
 /// Everything under the parser lock: the authoritative screen, the output
 /// sequence number, and the dimensions the screen was sized to. Snapshot and
@@ -456,6 +451,7 @@ struct HubInner {
     db: Arc<Database>,
     bcast_capacity: usize,
     host_label: String,
+    shelf: super::hub_shelf::ShelfLink,
 }
 
 impl SessionHub {
@@ -476,8 +472,12 @@ impl SessionHub {
                 db,
                 bcast_capacity: bcast_capacity.max(1),
                 host_label,
+                shelf: super::hub_shelf::ShelfLink::default(),
             }),
         }
+    }
+    pub fn wire_shelf(&self, shelf: Arc<super::shelf::ShelfStore>) {
+        self.inner.shelf.wire(self.inner.events.clone(), shelf);
     }
 
     pub fn host_label(&self) -> &str {
@@ -747,6 +747,7 @@ impl SessionHub {
             to_all: true,
         });
         self.emit(HubEvent::SessionRemoved(id.to_string()));
+        self.inner.shelf.reap_and_emit(self);
         Some(code)
     }
 }

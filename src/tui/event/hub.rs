@@ -51,6 +51,9 @@ pub(super) fn handle_hub_key(app: &mut App, code: KeyCode, modifiers: KeyModifie
         }
         _ if app.hub.tab == HubTab::Settings => hub_settings_key(app, code),
         _ if app.hub.tab == HubTab::Keys => hub_keys_key(app, code),
+        _ if app.hub.tab == HubTab::Shelf => {
+            hub_shelf_key(app, code);
+        }
         _ => hub_missions_key(app, code),
     }
     true
@@ -192,6 +195,33 @@ fn hub_keys_key(app: &mut App, code: KeyCode) {
     }
 }
 
+/// The Shelf tab: ↑↓/jk move, Enter/Space open, `d` deletes behind a `y`/`n`
+/// confirmation, `c` copies the path. Returns whether the key was handled;
+/// the confirm level swallows every key so nothing escapes mid-confirm.
+fn hub_shelf_key(app: &mut App, code: KeyCode) -> bool {
+    if app.hub.shelf.delete_confirm {
+        match code {
+            KeyCode::Char('y') | KeyCode::Enter => app.delete_shelf_selection(),
+            KeyCode::Char('n') | KeyCode::Esc => app.hub.shelf.delete_confirm = false,
+            _ => {}
+        }
+        return true;
+    }
+    match code {
+        KeyCode::Down | KeyCode::Char('j') => app.move_shelf_selection(true),
+        KeyCode::Up | KeyCode::Char('k') => app.move_shelf_selection(false),
+        KeyCode::Enter | KeyCode::Char(' ') => app.open_shelf_selection(),
+        KeyCode::Char('d') => {
+            if !app.hub.shelf.items.is_empty() {
+                app.hub.shelf.delete_confirm = true;
+            }
+        }
+        KeyCode::Char('c') => app.copy_shelf_selection_path(),
+        _ => {}
+    }
+    true
+}
+
 /// The PathList add picker: Esc cancels; ↑↓ move; Enter descends into the
 /// highlighted directory; ←/Backspace go up; Space **selects the current
 /// directory** into the PathList being edited (the picker closes).
@@ -278,6 +308,8 @@ mod tests {
         handle_hub_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
         assert_eq!(app.hub.tab, HubTab::Missions);
         handle_hub_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(app.hub.tab, HubTab::Shelf);
+        handle_hub_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
         assert_eq!(app.hub.tab, HubTab::Settings, "Tab wraps forward");
 
         handle_hub_key(&mut app, KeyCode::Char('2'), KeyModifiers::NONE);
@@ -298,6 +330,52 @@ mod tests {
 
         assert!(handled, "the hub consumes the key");
         assert!(app.running, "q must not reach the agent-focus quit arm");
+    }
+
+    /// The Shelf tab's keys: ↑↓/jk move over the items, `d` arms the
+    /// confirmation, `n` cancels it and `y` deletes the selected item.
+    #[test]
+    fn shelf_tab_moves_and_deletes_behind_a_confirmation() {
+        use crate::sessions::protocol::ShelfItem;
+
+        let mut app = test_app();
+        let item = |file_id: &str, name: &str| ShelfItem {
+            file_id: file_id.to_string(),
+            session_id: None,
+            name: name.to_string(),
+            mime: "image/png".to_string(),
+            size: 1024,
+            caption: None,
+            from_label: "host".to_string(),
+            created_at: "2026-01-01T10:00:00Z".to_string(),
+        };
+        app.open_hub();
+        app.set_hub_tab(HubTab::Shelf);
+        app.hub.shelf.items = vec![
+            item("0000000000000001", "a.png"),
+            item("0000000000000002", "b.png"),
+        ];
+
+        handle_hub_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_eq!(app.hub.shelf.sel, 1, "j moves down the shelf");
+        handle_hub_key(&mut app, KeyCode::Char('k'), KeyModifiers::NONE);
+        assert_eq!(app.hub.shelf.sel, 0, "k moves back up");
+
+        handle_hub_key(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert!(app.hub.shelf.delete_confirm, "d arms the confirmation");
+        // Any other key mid-confirm is swallowed and changes nothing.
+        handle_hub_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_eq!(app.hub.shelf.sel, 0, "movement is off while confirming");
+        assert!(app.hub.shelf.delete_confirm);
+        handle_hub_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE);
+        assert!(!app.hub.shelf.delete_confirm, "n cancels the confirmation");
+        assert_eq!(app.hub.shelf.items.len(), 2, "n deletes nothing");
+
+        handle_hub_key(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
+        handle_hub_key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
+        assert!(!app.hub.shelf.delete_confirm, "y confirms and clears");
+        assert_eq!(app.hub.shelf.items.len(), 1, "y deletes the selected item");
+        assert_eq!(app.hub.shelf.items[0].name, "b.png", "the top item went");
     }
 
     #[test]

@@ -18,7 +18,8 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 use super::protocol::{
     attach_frame, detach_frame, input_frame, kill_frame, parse_host_frame, prompt_frame,
-    resize_frame, HostFrame, PROTO_VERSION,
+    resize_frame, shelf_delete_frame, shelf_get_frame, shelf_list_frame, HostFrame, ShelfItem,
+    PROTO_VERSION,
 };
 
 #[cfg(test)]
@@ -210,6 +211,114 @@ impl HubClient {
         let mut inbox = self.inbox.lock().ok()?;
         let pos = inbox.pending.iter().position(|f| f.req() == Some(req))?;
         inbox.pending.remove(pos)
+    }
+
+    // ── Shelf helpers (session shelf, FR3) ─────────────────────────────
+
+    /// `shelf_list`: one shelf's items, newest first. `None` asks for the
+    /// host shelf; `Some(id)` for one session's shelf. The host echoes the
+    /// shelf id back; a mismatch is logged and tolerated, never fatal.
+    pub fn shelf_list(&self, id: Option<&str>) -> anyhow::Result<Vec<ShelfItem>> {
+        let req = new_req();
+        match self.request(&req, shelf_list_frame(&req, id))? {
+            HostFrame::Shelf {
+                id: echoed, items, ..
+            } => {
+                if echoed.as_deref() != id {
+                    tracing::debug!("hub answered shelf_list for {id:?} with shelf {echoed:?}");
+                }
+                Ok(items)
+            }
+            other => anyhow::bail!("unexpected shelf_list answer: {other:?}"),
+        }
+    }
+
+    /// `shelf_delete`: remove one file from its shelf; the host broadcasts
+    /// `shelf_removed` to every connection when it did.
+    pub fn shelf_delete(&self, file_id: &str) -> anyhow::Result<()> {
+        let req = new_req();
+        match self.request(&req, shelf_delete_frame(&req, file_id))? {
+            HostFrame::Ok { .. } => Ok(()),
+            other => anyhow::bail!("unexpected shelf_delete answer: {other:?}"),
+        }
+    }
+
+    /// `shelf_get`: the file's bytes, reassembled from the `file` parts.
+    /// An unknown id comes back as the hub's `not_found` error (`Err`).
+    /// Every part must name this `file_id` and arrive in sequence (`part`
+    /// 0, 1, …); a part for another file or out of order is an error, not
+    /// silent corruption.
+    pub fn shelf_get(&self, file_id: &str) -> anyhow::Result<Vec<u8>> {
+        let req = new_req();
+        let first = self.request(&req, shelf_get_frame(&req, file_id))?;
+        let mut bytes = Vec::new();
+        let mut next_part = 0u32;
+        let mut frame = first;
+        let deadline = Instant::now() + REQUEST_TIMEOUT;
+        loop {
+            match frame {
+                HostFrame::File {
+                    file_id: got,
+                    part,
+                    data,
+                    last,
+                    ..
+                } => {
+                    if got != file_id {
+                        anyhow::bail!("hub sent file parts for '{got}', asked for '{file_id}'");
+                    }
+                    if part != next_part {
+                        anyhow::bail!("hub sent file part {part}, expected {next_part}");
+                    }
+                    next_part += 1;
+                    bytes.extend(data);
+                    if last {
+                        return Ok(bytes);
+                    }
+                }
+                HostFrame::Error { code, message, .. } => {
+                    anyhow::bail!("hub error {code}: {message}");
+                }
+                other => anyhow::bail!("unexpected shelf_get answer: {other:?}"),
+            }
+            frame = self.recv_matching(&req, deadline)?;
+        }
+    }
+
+    /// Wait until `deadline` for the next frame carrying `req`, stashed or
+    /// inbound. Frames for other requests are stashed for [`Self::try_recv`].
+    fn recv_matching(&self, req: &str, deadline: Instant) -> anyhow::Result<HostFrame> {
+        loop {
+            if let Some(frame) = self.take_matching(req) {
+                return Ok(frame);
+            }
+            if Instant::now() >= deadline {
+                anyhow::bail!("hub request '{req}' timed out");
+            }
+            let event = self
+                .inbox
+                .lock()
+                .map_err(|_| anyhow::anyhow!("hub inbox lock poisoned"))?
+                .rx
+                .recv_timeout(REQUEST_POLL);
+            match event {
+                Ok(HubRecv::Frame(frame)) => {
+                    if frame.req() == Some(req) {
+                        return Ok(frame);
+                    }
+                    if let Ok(mut inbox) = self.inbox.lock() {
+                        inbox.pending.push_back(frame);
+                    }
+                }
+                Ok(HubRecv::Closed) => {
+                    anyhow::bail!("hub connection closed during request '{req}'");
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    anyhow::bail!("hub connection closed during request '{req}'");
+                }
+            }
+        }
     }
 }
 

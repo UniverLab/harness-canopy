@@ -7,6 +7,7 @@ mod badframe;
 mod resize_kill;
 mod resume;
 mod roundtrip;
+mod shelf;
 mod snapshot;
 
 use std::sync::Arc;

@@ -15,6 +15,7 @@ pub mod hub;
 pub mod hub_keys;
 pub mod hub_legend;
 pub mod hub_settings;
+pub mod hub_shelf;
 pub mod knowledge_dialog;
 pub mod knowledge_viewer;
 pub mod launchpad;

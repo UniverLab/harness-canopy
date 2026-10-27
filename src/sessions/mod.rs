@@ -9,8 +9,11 @@ pub mod auth;
 pub mod client;
 pub mod history;
 pub mod hub;
+pub mod hub_event;
+pub mod hub_shelf;
 pub mod protocol;
 pub mod resume;
+pub mod shelf;
 pub mod spawn;
 pub mod ws;
 

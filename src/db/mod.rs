@@ -645,6 +645,9 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
                 condition TEXT NOT NULL,
                 PRIMARY KEY (ensemble_id, from_node, condition)
             );",
+    // The session shelf: one row per file (`shelf::SHELF_FILES_SCHEMA`).
+    // No FK on `session_id` — files outlive the session by design.
+    shelf::SHELF_FILES_SCHEMA,
     mutex_store::MUTEX_TABLES_SCHEMA,
 ];
 
@@ -703,6 +706,7 @@ impl Database {
         Self::migrate_agent_action_columns(&conn)?;
         Self::migrate_ensemble_mutex_column(&conn)?;
         Self::migrate_graph_events_mutex_kinds(&conn)?;
+        Self::migrate_shelf_files(&conn)?;
 
         Self::set_schema_version(&conn)?;
 
@@ -774,6 +778,7 @@ mod schema;
 pub mod seeds;
 pub mod session;
 pub mod session_target;
+pub mod shelf;
 pub mod state;
 mod subagent_runs;
 pub mod sync;

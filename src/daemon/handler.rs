@@ -225,6 +225,8 @@ pub struct TaskTriggerHandler {
     /// Backing store for `skill_list`/`skill_get` (`~/.canopy/skills/`).
     /// Git operations block, so callers run it via `spawn_blocking`.
     pub dynamic_skills: Arc<crate::dynamic_skills::SkillStore>,
+    /// The session shelf's bytes + rows owner (`session_send_file`).
+    pub(crate) shelf: Arc<crate::sessions::shelf::ShelfStore>,
     pub start_time: std::time::Instant,
     pub port: u16,
     #[allow(dead_code)]
@@ -242,6 +244,7 @@ pub struct HandlerDeps {
     pub sync_manager: Arc<SyncManager>,
     pub ingestion: Arc<crate::rag::ingestion::IngestionManager>,
     pub dynamic_skills: Arc<crate::dynamic_skills::SkillStore>,
+    pub shelf: Arc<crate::sessions::shelf::ShelfStore>,
     /// CB83: the daemon process start instant, captured once when the
     /// daemon starts (see `run_http_server` / `stdio_server_startup` in
     /// `server.rs`) and handed to every handler. `agent_status` `Uptime`
@@ -262,6 +265,7 @@ impl TaskTriggerHandler {
             sync_manager,
             ingestion,
             dynamic_skills,
+            shelf,
             start_time,
             port,
         } = deps;
@@ -277,6 +281,7 @@ impl TaskTriggerHandler {
             ingestion,
             rag_limiters: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             dynamic_skills,
+            shelf,
             start_time,
             port,
             tool_router: Self::tool_router(),
@@ -291,6 +296,7 @@ impl TaskTriggerHandler {
         let mut router = ToolRouter::new();
         router.merge(TaskTriggerHandler::tool_router_agents());
         router.merge(TaskTriggerHandler::tool_router_scheduled_sends());
+        router.merge(TaskTriggerHandler::tool_router_shelf());
         router.merge(TaskTriggerHandler::tool_router_models_probes());
         router.merge(TaskTriggerHandler::tool_router_sync());
         router.merge(TaskTriggerHandler::tool_router_intel());

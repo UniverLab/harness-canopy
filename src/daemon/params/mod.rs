@@ -23,6 +23,8 @@ mod crew;
 pub use crew::*;
 mod settings;
 pub use settings::*;
+mod shelf;
+pub use shelf::*;
 
 #[cfg(test)]
 mod tests {
