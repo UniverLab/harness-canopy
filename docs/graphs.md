@@ -62,12 +62,26 @@ Agent node prompts support these placeholders:
 | `{{output:<node>}}` | The recorded output of another node in the same graph, by node name |
 
 Outputs are read from nodes, never from ensembles: `{{output:<name>}}`
-naming an ensemble is refused — reference its quorum node instead. A
-template carrying any other placeholder nothing can bind is refused when it
-is written (`graph_add_node`, `graph_update_node`, `graph_add_ensemble`,
-`graph_update_ensemble`, `graph_import`), not at run time; a marker meant
-as literal text stays accepted when escaped as `\{{...}}`. Templates stored
-before this validation surface in `graph_preflight` as `graph_warnings`.
+naming an ensemble is refused, and the message names the ensemble's quorum
+node when one exists — that node is the source meant instead. Any other
+placeholder nothing can bind is refused when the template is **written** —
+`graph_add_node`, `graph_update_node`, `graph_add_ensemble` and
+`graph_update_ensemble` (the shared prompt and every member
+`prompt_override`), and `graph_import` (all-or-nothing) — naming the node
+or ensemble and the placeholder, plus the forms it accepts when the fix is
+a different marker, instead of failing member by member at run time. A
+marker meant as literal text stays
+accepted when escaped as `\{{...}}`. A `prompt_preset` is a file name, not
+text, so it keeps its spawn-time check. A `router`'s `prompt_template` binds
+only `{{previous_feedback}}`, `{{previous_output}}`, `{{spec_content}}`
+and `{{spec_name}}`: it reads no node output, so an `{{output:…}}` marker
+there is refused as well.
+
+A template stored before this validation is reported by `graph_preflight`
+in `graph_warnings`, one entry per offending placeholder naming the node or
+ensemble — advisory only, since the spawn-time refusal still applies. The
+exception is an unknown `{{output:…}}` target in a graph node's
+`prompt_template`, which preflight has always refused as an error.
 
 ### Check node commands
 

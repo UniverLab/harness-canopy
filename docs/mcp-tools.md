@@ -130,6 +130,15 @@ any other tool still work. All other sessions keep the full list.
 | `graph_schedule_continue` | Schedule a paused graph to continue |
 | `graph_preflight` | Probe graph agent platforms and models before running |
 
+Every authoring tool that stores prompt text — `graph_add_node`,
+`graph_update_node`, `graph_add_ensemble`, `graph_update_ensemble`,
+`graph_import` — refuses a template whose `{{…}}` placeholder nothing can
+bind, naming the node or ensemble, the placeholder and the forms accepted;
+`{{output:<name>}}` must name a node in the same graph, never an ensemble
+(use its quorum node), and a literal marker must be escaped as `\{{...}}`.
+`graph_preflight` reports templates written before this validation as
+`graph_warnings`.
+
 See [Graphs](graphs.md).
 
 <!-- RETIRED-VOCAB-BEGIN: 2.x alias history — this subsection names the retired term on purpose. -->
