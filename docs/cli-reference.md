@@ -88,6 +88,12 @@ refresh also restarts that 24-hour window.
 | `canopy graph crew --all` | Include archived graphs |
 | `canopy graph crew --group-by-pair` | Summarise per platform/model pair: graph, ensemble, node and hook counts plus the graph names |
 | `canopy graph crew --json` | Print the MCP `graph_crew` JSON shape instead of tables |
+| `canopy graph validate <path>` | Check a shared graph or node JSON document without importing it: every structural check `import` runs plus the sharing rules. Prints each problem with its JSON path; exits 0 when the document is valid, 1 when it is not |
+| `canopy graph validate <path> --json` | Print the machine-readable report instead: `ok` with the kind, name and counts, or `problems` |
+
+`canopy graph validate` runs entirely locally — no daemon, no database,
+no workdir — so it works before anything is installed. The rules it
+enforces are in [Graphs](graphs.md#validate-before-you-share).
 
 Graph ids can be specified by exact id, exact name, or unambiguous id
 prefix. Ambiguous references list the candidates.

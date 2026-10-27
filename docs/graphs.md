@@ -909,7 +909,8 @@ Graphs can be authored programmatically by agents through these tools,
 or edited in the [TUI graph editor](tui.md) with inline JSON config
 validation. The `canopy graph` CLI subcommands mirror the runtime tools
 from the terminal: `list`/`info`/`crew`/`export` are read-only
-inspection, and
+inspection, `validate` runs entirely locally (no daemon, no database —
+see [Validate before you share](#validate-before-you-share)), and
 `import`/`run`/`pause`/`continue`/`reset`/`autorun` delegate the
 matching MCP tool to the daemon — a second way to drive a graph when an
 MCP client can't reach it. See the
@@ -1132,15 +1133,18 @@ document, one with `kind` plus `config` is a node document. Neither needs
 a workdir, and neither writes anything.
 
 A graph document runs every structural check `import` runs —
-`format_version`, known config keys per node kind, ensemble shape, and
+`format_version`, no unknown field anywhere in the document, known
+config keys per node kind, the `mutex` shape, ensemble shape, and
 template bindings — through the same code, plus one sharing rule of its
 own: every `prompt_preset` a node names must be bundled in the document
 (`prompt_presets`, version 6) or a builtin (`implementer`, `reviewer`,
 `resilience`). A bundled entry itself must be installable anywhere too —
 a plain non-blank name, not a path, not a builtin, not repeated, with
 non-empty content — the same entry rules `import` enforces before
-writing anything. What your machine happens to have installed does not
-matter; a file that validates here installs anywhere.
+writing anything. Validation ignores what this machine happens to have
+installed, so a green report means the document itself carries
+everything its nodes need; `import` can still refuse to overwrite a
+locally edited preset file whose content differs from the bundled one.
 
 A node document is one shareable node:
 
@@ -1153,19 +1157,21 @@ A node document is one shareable node:
 }
 ```
 
-Its rules: `name` is a slug (`[a-z0-9-]{1,48}`), `kind` is a known
-authorable kind (`join` is engine-managed and refused), the config holds
-only keys that kind reads, no `platform`, `model`, or `cli` key appears
-anywhere in the config (harnesses are chosen by the installer, never the
-author), and a bundled `preset` carries the same name as the config's
-`prompt_preset`.
+Its rules: `format_version` is `1`, `name` is a slug (`[a-z0-9-]{1,48}`),
+`kind` is a known authorable kind (`join` is engine-managed and refused),
+the config holds only keys that kind reads, no `platform`, `model`, or
+`cli` key appears anywhere in the config (harnesses are chosen by the
+installer, never the author), and a bundled `preset` carries the same
+name as the config's `prompt_preset` when both are present.
 
 On success the report carries `ok`, the kind, the name, the
 node/edge/ensemble counts, and the agent nodes that will still need a
-harness (`needs_harness`). On failure it carries every problem found —
-not only the first — each with a JSON path
-(`nodes[3].config.prompt_preset`) and a message. The CLI exits 0 on
-success and 1 on failure; `--json` prints the machine-readable report.
+harness (`needs_harness`); a node document also carries `node_kind`
+(`agent`, `check`, `gate`, `router`) and reports one node, no edges and
+no ensembles. On failure it carries every problem found — not only the
+first — each with a JSON path (`nodes[3].config.prompt_preset`) and a
+message. The CLI exits 0 on success and 1 on failure; `--json` prints
+the machine-readable report.
 
 ## Archive and restore
 

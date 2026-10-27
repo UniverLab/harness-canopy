@@ -119,7 +119,7 @@ any other tool still work. All other sessions keep the full list.
 | `graph_report_blocker` | Report a blocker for an active graph node |
 | `graph_export` | Export a graph design |
 | `graph_import` | Import a graph design |
-| `graph_validate` | Validate a shared graph or node document without importing it |
+| `graph_validate` | Validate a shared graph or node document without importing it — `path` or `document`, exactly one |
 | `graph_archive` | Archive a graph |
 | `graph_restore` | Restore an archived graph |
 | `graph_node_runs_list` | List a graph's node run history |
