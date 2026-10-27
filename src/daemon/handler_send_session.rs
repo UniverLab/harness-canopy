@@ -143,6 +143,7 @@ impl TaskTriggerHandler {
         params: &TaskAddParams,
         parts: Option<&Parts>,
     ) -> Result<CallToolResult, McpError> {
+        self.record_harness_id(parts);
         let caller = caller_session_id(parts, self);
         let action = match build_send_action(
             params.action.as_deref(),
@@ -202,6 +203,7 @@ impl TaskTriggerHandler {
         params: &TaskWatchParams,
         parts: Option<&Parts>,
     ) -> Result<CallToolResult, McpError> {
+        self.record_harness_id(parts);
         let caller = caller_session_id(parts, self);
         let action = match build_send_action(
             params.action.as_deref(),

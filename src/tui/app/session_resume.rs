@@ -53,6 +53,10 @@ pub(crate) struct ResumableSession {
     pub last_active: String,
     pub working_dir: String,
     pub args: Option<String>,
+    /// The harness's own conversation identifier for this session, when it was
+    /// recorded. Relaunching it reports this value, so the resume is matched
+    /// back to the same canopy row instead of minting a new id and name.
+    pub harness_conversation_id: Option<String>,
 }
 
 impl From<&InteractiveSession> for ResumableSession {
@@ -64,6 +68,7 @@ impl From<&InteractiveSession> for ResumableSession {
             last_active: session.started_at.clone(),
             working_dir: session.working_dir.clone(),
             args: session.args.clone(),
+            harness_conversation_id: session.harness_conversation_id.clone(),
         }
     }
 }
@@ -156,6 +161,7 @@ mod resume_picker_tests {
             session_type: "interactive".to_string(),
             pid: None,
             boot_id: None,
+            harness_conversation_id: None,
         }
     }
 
@@ -186,6 +192,7 @@ mod resume_picker_tests {
                 last_active: "2026-08-19T12:00:00Z".into(),
                 working_dir: "/tmp".into(),
                 args: None,
+                harness_conversation_id: None,
             },
             ResumableSession {
                 id: "s2".into(),
@@ -194,6 +201,7 @@ mod resume_picker_tests {
                 last_active: "2026-08-19T11:00:00Z".into(),
                 working_dir: "/tmp".into(),
                 args: None,
+                harness_conversation_id: None,
             },
         ];
         let mut picker = SessionResumePicker::new(rows);
@@ -213,6 +221,7 @@ mod resume_picker_tests {
                 last_active: "2026-08-19T12:00:00Z".into(),
                 working_dir: "/tmp".into(),
                 args: None,
+                harness_conversation_id: None,
             },
             ResumableSession {
                 id: "s2".into(),
@@ -221,6 +230,7 @@ mod resume_picker_tests {
                 last_active: "2026-08-19T11:00:00Z".into(),
                 working_dir: "/tmp".into(),
                 args: None,
+                harness_conversation_id: None,
             },
         ];
         let mut picker = SessionResumePicker::new(rows);

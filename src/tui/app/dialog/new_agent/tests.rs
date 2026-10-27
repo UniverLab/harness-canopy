@@ -59,6 +59,7 @@ fn resumable_session(cli: &str, working_dir: &str, args: Option<&str>) -> Resuma
         last_active: "2026-08-19T10:00:00Z".to_string(),
         working_dir: working_dir.to_string(),
         args: args.map(str::to_string),
+        harness_conversation_id: None,
     }
 }
 

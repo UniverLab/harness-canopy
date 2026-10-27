@@ -12,6 +12,7 @@ fn spawn_cat_agent() -> InteractiveAgent {
         None,
         Color::Reset,
         Some("scroll-test-agent"),
+        None,
         &[],
         None,
         None,

@@ -14,6 +14,7 @@ fn spawn_cat_interactive(name: &str) -> InteractiveAgent {
         None,
         Color::Reset,
         Some(name),
+        None,
         &[],
         None,
         None,

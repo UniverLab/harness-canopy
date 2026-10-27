@@ -12,6 +12,7 @@ use crate::db::Database;
 use crate::domain::sync::MessageKind;
 use crate::domain::sync::MissionImpact;
 use crate::domain::sync::WorkspaceStatus;
+use crate::shared::sync_identity::harness_conversation_id;
 use crate::shared::sync_identity::header_str;
 use crate::shared::sync_identity::CANOPY_AGENT_ID_ENV;
 use crate::shared::sync_identity::CANOPY_AGENT_ID_HEADER;
@@ -37,6 +38,7 @@ impl TaskTriggerHandler {
         OptionalExtension(parts): OptionalExtension<Parts>,
     ) -> Result<CallToolResult, McpError> {
         self.reject_if_nursery(parts.as_ref())?;
+        self.record_harness_id(parts.as_ref());
         let Some(impact) = MissionImpact::from_str(&params.impact) else {
             return Ok(error_result(
                 "Invalid impact. Must be: low, high, breaking.",
@@ -72,6 +74,7 @@ impl TaskTriggerHandler {
         OptionalExtension(parts): OptionalExtension<Parts>,
     ) -> Result<CallToolResult, McpError> {
         self.reject_if_nursery(parts.as_ref())?;
+        self.record_harness_id(parts.as_ref());
         let Some(status) = WorkspaceStatus::from_str(&params.status) else {
             return Ok(error_result(
                 "Invalid status. Must be: stable, unstable, testing.",
@@ -107,6 +110,7 @@ impl TaskTriggerHandler {
         OptionalExtension(parts): OptionalExtension<Parts>,
     ) -> Result<CallToolResult, McpError> {
         self.reject_if_nursery(parts.as_ref())?;
+        self.record_harness_id(parts.as_ref());
         let Some(kind) = MessageKind::from_str(&params.kind) else {
             return Ok(error_result("Invalid kind. Must be: info, query, answer."));
         };
@@ -329,6 +333,26 @@ impl TaskTriggerHandler {
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
+    }
+
+    /// Record the harness conversation identifier this caller reports on its
+    /// session row, so a later resume of the same conversation is matched to
+    /// it and keeps the session's id and name. Best-effort: a caller with no
+    /// identifier, or no session row, changes nothing and is never failed —
+    /// identity bookkeeping must not break a sync, send or schedule call.
+    pub(crate) fn record_harness_id(&self, parts: Option<&Parts>) {
+        let Some(harness_id) = harness_conversation_id(parts) else {
+            return;
+        };
+        let Ok(session_id) = self.resolve_sync_agent_id(parts) else {
+            return;
+        };
+        if let Err(e) = self
+            .db
+            .set_session_harness_conversation_id(&session_id, &harness_id)
+        {
+            tracing::debug!("Could not record harness conversation id for {session_id}: {e}");
+        }
     }
 
     pub(crate) fn reject_if_nursery(&self, parts: Option<&Parts>) -> Result<(), McpError> {

@@ -54,6 +54,7 @@ fn test_yolo_mode_preservation_in_session_relaunch() {
         session_type: "interactive".to_string(),
         pid: None,
         boot_id: None,
+        harness_conversation_id: None,
     };
 
     assert!(
@@ -76,6 +77,7 @@ fn test_yolo_flag_not_duplicated_when_falling_back_to_original_args() {
         session_type: "interactive".to_string(),
         pid: None,
         boot_id: None,
+        harness_conversation_id: None,
     };
 
     let args =
@@ -97,6 +99,7 @@ fn test_original_resume_args_preserved_over_reconstructed_args() {
         session_type: "interactive".to_string(),
         pid: None,
         boot_id: None,
+        harness_conversation_id: None,
     };
 
     let args = build_resumed_session_args(
@@ -125,6 +128,7 @@ fn test_rebuilds_resume_args_for_fresh_session() {
         session_type: "interactive".to_string(),
         pid: None,
         boot_id: None,
+        harness_conversation_id: None,
     };
 
     let args = build_resumed_session_args(
@@ -152,6 +156,7 @@ fn test_appends_resume_args_to_original_interactive_command() {
         session_type: "interactive".to_string(),
         pid: None,
         boot_id: None,
+        harness_conversation_id: None,
     };
 
     let args = build_resumed_session_args(

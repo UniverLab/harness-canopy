@@ -370,6 +370,7 @@ impl App {
             .get(dialog.cli_index)
             .and_then(|c| c.as_ref())
             .and_then(|c| c.model_flag.clone());
+        let (harness_conversation_id, known_session) = self.resolve_launch_identity(dialog);
         let (cols, rows) = pty_dimensions(self.last_panel_inner);
         let existing_refs: Vec<&str> = self
             .interactive_agents
@@ -383,6 +384,11 @@ impl App {
             dialog.selected_seed_id()
         };
         let agent_name = if is_nursery { Some("Gardener") } else { None };
+        let spawn_name = known_session
+            .as_ref()
+            .map(|session| session.name.clone())
+            .or_else(|| agent_name.map(str::to_string));
+        let spawn_id = known_session.as_ref().map(|session| session.id.clone());
         let agent = InteractiveAgent::spawn(
             cli,
             &dir,
@@ -391,7 +397,8 @@ impl App {
             args.as_deref(),
             fallback.as_deref(),
             accent,
-            agent_name,
+            spawn_name.as_deref(),
+            spawn_id.as_deref(),
             &existing_refs,
             model.as_deref(),
             model_flag.as_deref(),
@@ -399,15 +406,12 @@ impl App {
         )?;
         // Persist session in registry
         let session_type = if is_nursery { "nursery" } else { "interactive" };
-        let _ = self.db.insert_interactive_session(
-            &agent.id,
-            &agent.name,
-            agent.cli.as_str(),
+        self.persist_launched_session(
+            &agent,
             &dir,
             args.as_deref(),
-            agent.pid(),
             session_type,
-            crate::system::boot_id().as_deref(),
+            harness_conversation_id.as_deref(),
         );
         // Don't register nursery temp dir as a project — it's ephemeral
         if !is_nursery && crate::domain::project::should_auto_register(Path::new(&dir)) {
@@ -428,6 +432,77 @@ impl App {
                 spawned_name,
             ));
         Ok(())
+    }
+
+    /// The harness conversation id a launch reports, paired with the canopy
+    /// session that conversation already belongs to (if any).
+    ///
+    /// It comes from the canopy session being resumed, or from the entry the
+    /// user picked out of the CLI's own session list. When canopy already knows
+    /// that conversation, the launch adopts that session's id and name, so a
+    /// resume stays one session — never inferred from workdir, model or timing.
+    fn resolve_launch_identity(
+        &self,
+        dialog: &NewAgentDialog,
+    ) -> (
+        Option<String>,
+        Option<crate::db::session::InteractiveSession>,
+    ) {
+        let harness_conversation_id = dialog
+            .selected_resume_session
+            .as_ref()
+            .and_then(|session| session.harness_conversation_id.clone())
+            .or_else(|| {
+                dialog
+                    .selected_session
+                    .as_ref()
+                    .map(|(id, _label)| id.clone())
+            });
+        let known_session = harness_conversation_id.as_deref().and_then(|harness_id| {
+            self.db
+                .find_session_by_harness_id(harness_id)
+                .ok()
+                .flatten()
+        });
+        (harness_conversation_id, known_session)
+    }
+
+    /// Register the launched session in the registry, reusing an earlier row
+    /// when the harness conversation id matches one canopy has seen (see
+    /// `Database::register_interactive_session`).
+    fn persist_launched_session(
+        &self,
+        agent: &crate::tui::agent::InteractiveAgent,
+        dir: &str,
+        args: Option<&str>,
+        session_type: &str,
+        harness_conversation_id: Option<&str>,
+    ) {
+        let boot_id = crate::system::boot_id();
+        let registration = crate::db::session::SessionRegistration {
+            id: &agent.id,
+            name: &agent.name,
+            cli: agent.cli.as_str(),
+            working_dir: dir,
+            args,
+            pid: agent.pid(),
+            session_type,
+            boot_id: boot_id.as_deref(),
+            harness_conversation_id,
+        };
+        match self.db.register_interactive_session(&registration) {
+            Ok(crate::db::session::RegistrationOutcome::Reactivated { id, .. })
+                if id != agent.id =>
+            {
+                tracing::warn!(
+                    "Harness conversation matched session '{id}' but the launched process has \
+                     id '{}'; the registry keeps the matched session",
+                    agent.id
+                );
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("Failed to register interactive session: {e}"),
+        }
     }
 
     pub(super) fn launch_scheduled(

@@ -123,6 +123,21 @@ fn preserve_rows_on_shrink<C: vt100::Callbacks>(
     parser.process(format!("\x1b[{needed}S\x1b[{needed}A").as_bytes());
 }
 
+/// The session id and display name a spawned agent runs under: a resumed
+/// harness conversation passes both, so it keeps its canopy session id and
+/// name (hooks and scheduled sends addressed to them keep resolving);
+/// otherwise the id is a fresh uuid and the name a random one that avoids
+/// `existing_ids`.
+fn spawn_identity(id: Option<&str>, name: Option<&str>, existing_ids: &[&str]) -> (String, String) {
+    let id = id
+        .map(str::to_owned)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let name = name
+        .map(str::to_owned)
+        .unwrap_or_else(|| naming::pick_random_name(existing_ids));
+    (id, name)
+}
+
 fn apply_canopy_session_env(
     cmd: &mut CommandBuilder,
     agent_id: &str,
@@ -221,6 +236,7 @@ impl InteractiveAgent {
     /// `interactive_args` come from the registry (e.g. `--tui`, `-c`, etc.).
     /// `fallback_args` are tried if the primary args fail (e.g. kiro `chat`).
     /// `name` is an optional user-provided session name (random if None).
+    /// `id` is an existing session id to keep (a resumed conversation), else a fresh uuid.
     /// `existing_ids` is used to avoid name collisions.
     /// `model` and `model_flag` allow passing a model selection (e.g. `-m gpt-4`).
     #[allow(clippy::too_many_arguments)]
@@ -233,6 +249,7 @@ impl InteractiveAgent {
         fallback_args: Option<&str>,
         accent_color: Color,
         name: Option<&str>,
+        id: Option<&str>,
         existing_ids: &[&str],
         model: Option<&str>,
         model_flag: Option<&str>,
@@ -241,10 +258,7 @@ impl InteractiveAgent {
         #[cfg(unix)]
         install_signal_handlers();
 
-        let id = uuid::Uuid::new_v4().to_string();
-        let name = name
-            .map(str::to_owned)
-            .unwrap_or_else(|| naming::pick_random_name(existing_ids));
+        let (id, name) = spawn_identity(id, name, existing_ids);
         let (seed_id_owned, seed_name) = match seed_id {
             Some(sid) => {
                 let resolved = crate::domain::seeds::load_seed(sid)

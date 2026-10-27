@@ -1304,6 +1304,7 @@ mod focus_shortcuts_keyboard_claim_tests {
             None,
             Color::Reset,
             Some(name),
+            None,
             &[],
             None,
             None,

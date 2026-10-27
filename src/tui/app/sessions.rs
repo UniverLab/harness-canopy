@@ -53,7 +53,7 @@ impl App {
         else {
             return;
         };
-        self.finalize_resumed_session(session, &cli, used_args.as_ref(), agent, current_boot_id);
+        self.finalize_resumed_session(session, used_args.as_ref(), agent, current_boot_id);
     }
 
     fn spawn_resumed_or_fresh(
@@ -76,6 +76,7 @@ impl App {
                 cli_config.and_then(|config| config.fallback_interactive_args.as_deref()),
                 Self::resume_session_accent(cli_config),
                 Some(&session.name),
+                Some(&session.id),
                 &existing_ids,
                 None,
                 cli_config.and_then(|config| config.model_flag.as_deref()),
@@ -107,35 +108,34 @@ impl App {
         }
     }
 
+    /// Persist the resumed session after its PTY is up.
+    ///
+    /// A resumed harness conversation keeps its canopy session id and name:
+    /// the earlier row is reactivated in place — only its liveness fields
+    /// move — instead of being superseded by a second, freshly-named row. That
+    /// is what keeps hooks and scheduled sends addressed to the session's name
+    /// or id delivered to the resumed process (FR2, FR4, FR5), and why there is
+    /// nothing to reassign or inherit: the sends and the persisted
+    /// protocol flag already point at this same id.
     fn finalize_resumed_session(
         &mut self,
         session: &crate::db::session::InteractiveSession,
-        cli: &crate::domain::models::Cli,
         used_args: Option<&String>,
         agent: InteractiveAgent,
         current_boot_id: Option<&str>,
     ) {
-        let _ = self.db.mark_session_resumed(&session.id);
-        let _ = self.db.insert_interactive_session(
-            &agent.id,
-            &agent.name,
-            cli.as_str(),
+        if let Err(e) = self.db.reactivate_interactive_session(
+            &session.id,
+            agent.pid(),
             &session.working_dir,
             used_args.map(String::as_str),
-            agent.pid(),
-            &session.session_type,
             current_boot_id,
-        );
-        if let Err(e) = self.db.reassign_scheduled_sends(&session.id, &agent.id) {
+        ) {
             tracing::warn!(
-                "Failed to reassign scheduled sends for resumed session '{}': {e}",
+                "Failed to reactivate resumed session '{}': {e}",
                 session.name
             );
         }
-        // Resuming mints a fresh agent id (a new uuid per spawn), so the
-        // source session's persisted "protocol sent" flag has to follow the
-        // new id — the resumed conversation already carries the block.
-        self.inherit_protocol_flag(&session.id, &agent.id);
         self.interactive_agents.push(agent);
     }
 

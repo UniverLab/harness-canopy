@@ -35,6 +35,11 @@ step instead of launching straight away:
   skipping the mission step; a harness with nothing to resume shows
   `No sessions to resume for <harness> in <dir>` and `New session` stays
   usable.
+  - Resuming the same harness conversation (a harness conversation id canopy
+    has already recorded) reuses that session: it keeps its id and its name,
+    so hooks and scheduled sends addressed to it still reach it afterwards,
+    and `session_list` shows one row — never the old one plus a newly-named
+    one.
   - `↑↓` selects, `Enter` confirms, and `Esc` returns to the form with every
   value kept. **Background** and **Terminal** launch from the form as
   before — the Mode step is Interactive-only.
@@ -234,8 +239,8 @@ row: `/` filters, `n` creates, `e` edits and `F4` deletes.
   interactive session, never to the ones that follow. That fact is stored
   with the session id in the database, so it survives restarting canopy
   and resuming the session: a conversation that already carries the
-  protocol does not receive it again, and a session resumed under a new
-  id inherits the flag from the one it continues. When the protocol is
+  protocol does not receive it again, and a resumed conversation keeps its
+  session id, so the flag travels with it. When the protocol is
   *not* due, the builder shows nothing extra about it — to resend the
   block on purpose, add the **Canopy protocol** section from the section
   picker (`Ctrl+A`): it inserts a locked, read-only section holding the

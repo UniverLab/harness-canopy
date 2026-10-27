@@ -6,6 +6,10 @@ pub const CANOPY_CLIENT_NAME_ENV: &str = "CANOPY_CLIENT_NAME";
 pub const CANOPY_SEED_ID_ENV: &str = "CANOPY_SEED_ID";
 /// Optional env var selecting the MCP tool profile for a session.
 pub const CANOPY_MCP_PROFILE_ENV: &str = "CANOPY_MCP_PROFILE";
+/// Optional env var carrying the harness's own conversation identifier
+/// (Claude Code session / transcript id, opencode session id, muse resume id).
+/// A later registration with the same value is the same conversation resumed.
+pub const CANOPY_HARNESS_SESSION_ID_ENV: &str = "CANOPY_HARNESS_SESSION_ID";
 
 pub const CANOPY_AGENT_ID_HEADER: &str = "x-canopy-agent-id";
 /// Static header injected by the MCP client config with the harness name (e.g. "copilot", "opencode").
@@ -14,6 +18,27 @@ pub const CANOPY_CLIENT_NAME_HEADER: &str = "x-canopy-client-name";
 pub const CANOPY_SEED_ID_HEADER: &str = "x-canopy-seed-id";
 /// HTTP header forwarding the MCP tool profile for a session.
 pub const CANOPY_MCP_PROFILE_HEADER: &str = "x-canopy-mcp-profile";
+/// Optional header carrying the harness's own conversation identifier, the
+/// header twin of [`CANOPY_HARNESS_SESSION_ID_ENV`].
+pub const CANOPY_HARNESS_SESSION_ID_HEADER: &str = "x-canopy-harness-session-id";
+
+/// The harness conversation identifier a request reports, header first then
+/// env — the same precedence the agent-id/client-name resolution uses. `None`
+/// when the caller carries neither, which keeps today's behaviour (a new
+/// session id and name on registration).
+pub(crate) fn harness_conversation_id(
+    parts: Option<&axum::http::request::Parts>,
+) -> Option<String> {
+    if let Some(parts) = parts {
+        if let Some(harness_id) = header_str(parts, CANOPY_HARNESS_SESSION_ID_HEADER) {
+            return Some(harness_id.to_string());
+        }
+    }
+    std::env::var(CANOPY_HARNESS_SESSION_ID_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
 
 /// Read a header value from an HTTP request, trimmed and non-empty.
 pub(crate) fn header_str<'a>(parts: &'a axum::http::request::Parts, name: &str) -> Option<&'a str> {
@@ -103,5 +128,23 @@ mod tests {
     fn header_str_returns_none_for_whitespace_only_value() {
         let parts = make_request_with_header("x-canopy-agent-id", "   ");
         assert_eq!(header_str(&parts, "x-canopy-agent-id"), None);
+    }
+
+    #[test]
+    fn harness_conversation_id_is_read_from_its_header() {
+        let parts = make_request_with_header("x-canopy-harness-session-id", " conv-42 ");
+        assert_eq!(
+            harness_conversation_id(Some(&parts)),
+            Some("conv-42".to_string())
+        );
+    }
+
+    #[test]
+    fn harness_conversation_id_constant_values_match_expected() {
+        assert_eq!(
+            CANOPY_HARNESS_SESSION_ID_HEADER,
+            "x-canopy-harness-session-id"
+        );
+        assert_eq!(CANOPY_HARNESS_SESSION_ID_ENV, "CANOPY_HARNESS_SESSION_ID");
     }
 }

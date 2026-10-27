@@ -488,6 +488,38 @@ impl Database {
         Ok(())
     }
 
+    /// Adds `interactive_sessions.harness_conversation_id`: the harness's own
+    /// conversation identifier (Claude Code session/transcript id, opencode
+    /// session id, muse resume id). A resume of the same harness conversation
+    /// is matched on this column, so the session keeps its canopy id and name
+    /// instead of appearing as a second, newly-named row. Guarded on
+    /// `pragma_table_info` and `CREATE INDEX IF NOT EXISTS`, so it is safe on
+    /// both a fresh database (the `CREATE TABLE` batch already has the column)
+    /// and an already-migrated one.
+    pub(super) fn migrate_interactive_harness_column(conn: &Connection) -> Result<()> {
+        let has_harness_id: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('interactive_sessions') WHERE name = 'harness_conversation_id'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if !has_harness_id {
+            conn.execute(
+                "ALTER TABLE interactive_sessions ADD COLUMN harness_conversation_id TEXT",
+                [],
+            )
+            .map_err(|e| anyhow::anyhow!("interactive harness column migration failed: {e}"))?;
+        }
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_interactive_sessions_harness
+                ON interactive_sessions(harness_conversation_id)",
+            [],
+        )
+        .map_err(|e| anyhow::anyhow!("interactive harness column migration failed: {e}"))?;
+        Ok(())
+    }
+
     /// Fail the migration when any foreign-key violation remains, naming the
     /// step in the message (observable via `canopy doctor`).
     fn assert_no_foreign_key_violations(conn: &Connection, migration_label: &str) -> Result<()> {

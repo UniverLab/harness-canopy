@@ -366,6 +366,7 @@ fn spawn_cat_agent(name: &str) -> crate::tui::agent::InteractiveAgent {
         None,
         ratatui::style::Color::Reset,
         Some(name),
+        None,
         &[],
         None,
         None,

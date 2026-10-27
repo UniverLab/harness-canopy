@@ -220,11 +220,15 @@ impl Database {
             .map_err(Into::into)
     }
 
-    /// Re-point every scheduled send from `old_target` to `new_target`. Called
-    /// when an interactive session is auto-resumed after a TUI restart: the
-    /// resumed session gets a fresh runtime id, so pending schedules must be
-    /// moved onto it or they would look orphaned and never fire. Returns the
-    /// number of rows moved.
+    /// Re-point every scheduled send from `old_target` to `new_target`.
+    ///
+    /// Retained as a test-only fixture: this used to be called when a session
+    /// was auto-resumed after a TUI restart, because the resumed process got a
+    /// fresh runtime id. A resumed harness conversation now reactivates its own
+    /// row and keeps its id (see `Database::reactivate_interactive_session`),
+    /// so pending schedules already point at the live session and nothing is
+    /// moved. Returns the number of rows moved.
+    #[cfg(test)]
     pub fn reassign_scheduled_sends(&self, old_target: &str, new_target: &str) -> Result<usize> {
         let conn = self
             .conn

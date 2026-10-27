@@ -30,6 +30,7 @@ impl TaskTriggerHandler {
         OptionalExtension(parts): OptionalExtension<Parts>,
     ) -> Result<CallToolResult, McpError> {
         self.reject_if_nursery(parts.as_ref())?;
+        self.record_harness_id(parts.as_ref());
         let agent_id = self.resolve_sync_agent_id(parts.as_ref())?;
 
         if let Err(e) = crate::domain::validation::validate_prompt(&params.prompt) {
