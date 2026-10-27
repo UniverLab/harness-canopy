@@ -1,11 +1,8 @@
 //! `tests` tests (split from `src/tui/app/mod.rs`, pure move).
-#[cfg(target_os = "linux")]
-use super::process_matches_cli;
 use super::{
     adaptive_change_score, adaptive_poll_interval_ms, blend_optional_f32, blend_optional_f64,
     build_resumed_session_args, calculate_log_hash, lerp_f32, lerp_u64, log_contains_error,
-    log_contains_spawn, log_contains_success, process_is_alive, process_outlives_grace,
-    resume_decision, sample_from, should_resume_session, ResumeDecision, SystemSample,
+    log_contains_spawn, log_contains_success, sample_from, SystemSample,
 };
 use crate::db::session::InteractiveSession;
 use crate::db::Database;

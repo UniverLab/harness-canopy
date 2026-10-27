@@ -5,6 +5,7 @@
 mod auth;
 mod badframe;
 mod resize_kill;
+mod resume;
 mod roundtrip;
 mod snapshot;
 

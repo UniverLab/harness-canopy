@@ -69,7 +69,12 @@ step instead of launching straight away:
   and reopening the TUI reattaches to them live, with screen and scrollback
   intact; a session that ended while the TUI was closed is not reopened.
   Only closing a session explicitly ends it. Restarting the daemon itself
-  (`canopy daemon restart`) does end its sessions — they are its children.
+  (`canopy daemon restart`) does end its sessions — they are its children —
+  but the new daemon respawns every session the database still lists as
+  active as soon as it starts, under the same id and name, resuming the
+  harness conversation where the platform supports it. A terminal comes back
+  in its working directory with the scrollback it had when the daemon shut
+  down, above a `--- restored session history above ---` divider.
   While the TUI runs, a dropped daemon connection is retried on its own
   (0.5 s doubling up to 5 s) and the sidebar re-lists what the daemon still
   has; sessions started or closed from another TUI appear in, or leave, the

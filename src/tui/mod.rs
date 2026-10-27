@@ -21,6 +21,9 @@ pub(crate) mod ui;
 mod whimsg;
 
 pub(crate) use ui::truncate_str_keep_tail;
+// The daemon resumes sessions on its own (see `crate::sessions::resume`), so
+// the resume-args builder is re-exported for that one non-TUI consumer.
+pub(crate) use app::session_resume::build_resumed_session_args;
 // CH3: the graph engine enqueues interactive hook messages with a canonical
 // promptbuilder-equivalent state — the builder types live here, so they are
 // re-exported for that one non-TUI consumer rather than making `app` public.
@@ -86,16 +89,13 @@ pub fn run_tui() -> Result<()> {
     crate::tui::agent::pty::install_signal_handlers();
     // Reap bridge sidecars whose owning process died without cleaning up
     app.reconcile_bridge_sessions();
-    // Attach the daemon hub's live sessions (replaces both auto-resume calls;
-    // the harness-resume path moves to the daemon in the next spec).
+    // Attach the daemon hub's live sessions: the daemon resumes them and
+    // delivers scheduled sends, the TUI only shows what the hub runs.
     app.connect_session_hub();
     // Load orphaned sessions for TUI visibility
     if let Ok(orphaned) = app.db.get_orphaned_sessions() {
         app.orphaned_sessions = orphaned;
     }
-    // Now that sessions are attached (and their schedules reassigned), open the
-    // scheduled-send delivery gate and drop schedules whose session is gone.
-    app.restore_scheduled_sends();
 
     // Setup terminal
     enable_raw_mode()?;

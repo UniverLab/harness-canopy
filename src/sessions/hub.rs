@@ -39,6 +39,10 @@ use super::{
     TerminalSpawnSpec, VT_SCROLLBACK_LINES,
 };
 
+/// Divider written after replayed scrollback, shared with the TUI so a
+/// restored terminal reads the same whoever replays it.
+use crate::tui::agent::screen::{read_abs_range, HISTORY_REPLAY_MARKER};
+
 /// Hub parser: vt100 with the unit no-op callbacks (the daemon forwards
 /// nothing to any clipboard; attached clients handle OSC 52 themselves).
 pub type HubVt = vt100::Parser<()>;
@@ -357,6 +361,63 @@ impl HubSession {
         })
     }
 
+    /// Whether the child process is using alternate screen mode. A
+    /// full-screen program's frame is not scrollback history, so shutdown
+    /// capture skips a terminal still in it (see `save_terminal_histories`).
+    pub fn in_alternate_screen(&self) -> bool {
+        self.state
+            .try_lock()
+            .map(|out| out.parser.screen().alternate_screen())
+            .unwrap_or(false)
+    }
+
+    /// Replay persisted plain-text scrollback into the session's parser, the
+    /// way `InteractiveAgent::replay_scrollback_lines` restores a TUI
+    /// terminal: each line as output with CRLF separators, then a dim marker
+    /// line so the operator sees where the replay ends and live output
+    /// begins.
+    ///
+    /// `last_output_at` is deliberately left alone: a replay is history
+    /// reconstruction, not fresh PTY output, and stamping it would make a
+    /// restored session look actively working.
+    pub fn replay_scrollback_lines(&self, lines: &[String]) {
+        if lines.is_empty() {
+            return;
+        }
+        let Ok(mut out) = self.state.lock() else {
+            return;
+        };
+        let mut replay = Vec::new();
+        for line in lines {
+            replay.extend_from_slice(line.as_bytes());
+            replay.extend_from_slice(b"\r\n");
+        }
+        replay.extend_from_slice(HISTORY_REPLAY_MARKER);
+        out.parser.process(&replay);
+    }
+
+    /// The last `n` lines of the whole buffer (scrollback + visible screen),
+    /// as the text that gets persisted at shutdown.
+    pub fn last_lines(&self, n: usize) -> String {
+        if n == 0 {
+            return String::new();
+        }
+        let Ok(mut out) = self.state.lock() else {
+            return String::new();
+        };
+        let rows = usize::from(out.rows);
+        if rows == 0 {
+            return String::new();
+        }
+        out.parser.screen_mut().set_scrollback(usize::MAX);
+        let max_sb = out.parser.screen().scrollback();
+        let total_lines = max_sb + rows;
+        let from_abs = total_lines.saturating_sub(n);
+        let result = read_abs_range(&mut out.parser, max_sb, rows, from_abs, total_lines);
+        out.parser.screen_mut().set_scrollback(0);
+        result.join("\n")
+    }
+
     /// One non-blocking exit poll; `None` while the child is still alive.
     fn poll_exit_code(&self) -> Option<i32> {
         self.child
@@ -421,6 +482,12 @@ impl SessionHub {
 
     pub fn host_label(&self) -> &str {
         &self.inner.host_label
+    }
+
+    /// The database the hub records its session rows in. Startup
+    /// reconciliation reads the rows it resumes through this.
+    pub fn db(&self) -> &Arc<Database> {
+        &self.inner.db
     }
 
     /// Spawn a hub session: build the child exactly like the TUI does, open

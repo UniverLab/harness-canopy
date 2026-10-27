@@ -769,9 +769,10 @@ as structure alongside the prompt, so the recipient, and the delivery
 history, can tell both that it came from a hook and which session actually
 received it, without that origin being buried in the prompt text.
 
-A message enqueued while no TUI is running is queued, not lost: it stays
-pending and is delivered when a TUI later attaches. The session itself
-keeps running in the daemon in the meantime.
+A message is delivered by the daemon: the scheduler fires it on its next tick
+whether or not a TUI is attached. A message whose target session is gone by
+then is not lost either — the prompt is preserved for recall and a
+notification reports that the session was not found.
 
 ## Standalone spec backlog
 

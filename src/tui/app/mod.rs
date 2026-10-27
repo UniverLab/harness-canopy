@@ -53,11 +53,6 @@ use system_monitor::{
 
 // ── pub(crate) re-exports for tests (use super::{…} in #[cfg(test)] mods) ─
 #[cfg(test)]
-pub(crate) use sessions::{
-    process_is_alive, process_matches_cli, process_outlives_grace, resume_decision,
-    should_resume_session, ResumeDecision,
-};
-#[cfg(test)]
 pub(crate) use system_monitor::{
     adaptive_change_score, adaptive_poll_interval_ms, blend_optional_f32, blend_optional_f64,
     lerp_f32, lerp_u64, sample_from, SystemSample,

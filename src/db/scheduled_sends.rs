@@ -199,6 +199,19 @@ impl Database {
         Ok(rows > 0)
     }
 
+    /// The earliest `fire_at` among pending scheduled sends, if any. The
+    /// daemon scheduler folds it into its next wake-up so a send is delivered
+    /// close to when it is due, with no TUI attached.
+    pub fn next_scheduled_send_at(&self) -> Result<Option<DateTime<Utc>>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let mut stmt = conn.prepare("SELECT MIN(fire_at) FROM scheduled_sends")?;
+        let earliest: Option<i64> = stmt.query_row([], |row| row.get(0))?;
+        Ok(earliest.and_then(|ts| DateTime::from_timestamp(ts, 0)))
+    }
+
     /// List all pending (not yet fired) scheduled sends for a given session,
     /// ordered by fire time (soonest first).
     pub fn list_pending_scheduled_sends_for_session(
@@ -242,9 +255,13 @@ impl Database {
     }
 
     /// Silently delete every scheduled send whose target session is not in
-    /// `live_targets`. Used on startup, after auto-resume, to drop schedules
-    /// whose session no longer exists (never resumed). Returns rows deleted.
-    /// An empty `live_targets` drops all pending scheduled sends.
+    /// `live_targets`. Returns rows deleted. An empty `live_targets` drops all
+    /// pending scheduled sends.
+    ///
+    /// Test-only since the deliverer moved to the daemon: a send whose target
+    /// is gone is preserved for recall (`scheduler::scheduled_sends`), not
+    /// dropped silently.
+    #[cfg(test)]
     pub fn drop_scheduled_sends_missing_targets(&self, live_targets: &[String]) -> Result<usize> {
         let conn = self
             .conn
@@ -323,9 +340,10 @@ impl Database {
 
     /// List failed scheduled sends preserved for a given project workdir,
     /// most recent first. Not yet called from production code — the
-    /// dead-target recovery path (see `data::deliver_due_scheduled_sends`)
-    /// surfaces failures via `last_prompts` instead; this stays as the read
-    /// side of `failed_scheduled_sends` for a future history browser.
+    /// dead-target recovery path (see
+    /// `scheduler::cron_scheduler::scheduled_sends`) surfaces failures via
+    /// `last_prompts` instead; this stays as the read side of
+    /// `failed_scheduled_sends` for a future history browser.
     #[allow(dead_code)]
     pub fn list_failed_scheduled_sends_for_workdir(
         &self,

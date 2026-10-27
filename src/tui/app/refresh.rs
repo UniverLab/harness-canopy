@@ -28,7 +28,6 @@ impl App {
         self.refresh_active_runs()?;
         self.poll_interactive_agents();
         self.poll_terminal_agents();
-        self.deliver_due_scheduled_sends();
         self.tick_banner_animation();
         self.ensure_sidebar_brain();
         self.refresh_log();

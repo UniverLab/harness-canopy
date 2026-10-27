@@ -25,8 +25,8 @@ fn read_screen_line(screen: &vt100::Screen, row: u16, cols: u16) -> Option<Strin
 /// non-overlapping pages.  `next_expected` ensures each absolute index is
 /// emitted exactly once even when the final clamped page overlaps with the
 /// previous one.
-fn read_abs_range(
-    vt: &mut super::Vt,
+pub(crate) fn read_abs_range<C: vt100::Callbacks>(
+    vt: &mut vt100::Parser<C>,
     max_sb: usize,
     rows: usize,
     from_abs: usize,
@@ -104,7 +104,8 @@ fn push_stripped_response_line(collected: &mut Vec<String>, sanitized: String) {
 /// mistaken for a fresh one, or for the boundary where live output resumes.
 /// Dim SGR (`\x1b[2m`)/reset so it reads as chrome, not as something the
 /// previous session printed.
-const HISTORY_REPLAY_MARKER: &[u8] = b"\x1b[2m--- restored session history above ---\x1b[0m\r\n";
+pub(crate) const HISTORY_REPLAY_MARKER: &[u8] =
+    b"\x1b[2m--- restored session history above ---\x1b[0m\r\n";
 
 impl InteractiveAgent {
     /// Replay persisted plain-text scrollback into the VT100 parser.

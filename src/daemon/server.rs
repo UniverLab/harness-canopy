@@ -102,6 +102,13 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
     // `startup_personal_rag` runs; the periodic tick continues from `start()`.
     ingestion.run_rag_maintenance().await;
 
+    // The session endpoint's state comes up before anything serves: the hub
+    // owns every PTY, so reconciliation has to respawn the previous daemon's
+    // sessions before the first client can connect, and the scheduler gets
+    // the hub to deliver scheduled sends through.
+    let sessions_state = crate::sessions::ws::SessionsState::ensure(&data_dir, Arc::clone(&db))?;
+    crate::sessions::resume::reconcile_at_startup(&sessions_state.hub, &data_dir);
+
     let background = start_background_tasks(
         &db,
         &executor,
@@ -109,10 +116,10 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
         &notification_service,
         &data_dir,
         canopy_config.announcements_enabled,
+        &sessions_state.hub,
     );
 
     let ct = tokio_util::sync::CancellationToken::new();
-    let sessions_state = crate::sessions::ws::SessionsState::ensure(&data_dir, Arc::clone(&db))?;
     let router = build_mcp_router(
         HandlerDeps {
             db: Arc::clone(&db),
@@ -128,12 +135,20 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
             port,
         },
         &ct,
-        sessions_state,
+        Arc::clone(&sessions_state),
     );
 
     bind_and_serve(router, port, ct).await?;
 
-    shutdown_http_server(background, watcher_engine, &db, &data_dir, &graph_engine).await;
+    shutdown_http_server(
+        background,
+        watcher_engine,
+        &db,
+        &data_dir,
+        &graph_engine,
+        &sessions_state.hub,
+    )
+    .await;
 
     Ok(())
 }
@@ -247,6 +262,7 @@ fn start_background_tasks(
     notification_service: &Arc<dyn NotificationService>,
     data_dir: &std::path::Path,
     announcements_enabled: bool,
+    sessions: &crate::sessions::SessionHub,
 ) -> HttpBackgroundTasks {
     let cron_scheduler = Arc::new(
         CronScheduler::with_graphs(
@@ -254,6 +270,7 @@ fn start_background_tasks(
             Arc::clone(executor),
             Arc::clone(graph_engine),
         )
+        .with_hub(sessions.clone())
         .with_retry(crate::scheduler::cron_scheduler::RetryPolicy::from_config(
             &crate::domain::canopy_config::CanopyConfig::load(data_dir).scheduler,
         )),
@@ -391,7 +408,12 @@ async fn shutdown_http_server(
     db: &Arc<Database>,
     data_dir: &std::path::Path,
     graph_engine: &Arc<GraphEngine>,
+    sessions: &crate::sessions::SessionHub,
 ) {
+    // Terminals first: the PTYs die with this process, so their scrollback has
+    // to be persisted while the hub's parsers still hold it, before anything
+    // below stops or terminates work.
+    crate::sessions::save_terminal_histories(sessions, data_dir);
     // CB82: FIRST — before the scheduler/health cancels and before
     // `terminate_all_...` sends SIGTERM — so the engine finalizes in-flight
     // runs as interrupted instead of routing the fail edge of a killed node.

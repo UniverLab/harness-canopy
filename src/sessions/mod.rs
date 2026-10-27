@@ -7,10 +7,14 @@
 
 pub mod auth;
 pub mod client;
+pub mod history;
 pub mod hub;
 pub mod protocol;
+pub mod resume;
 pub mod spawn;
 pub mod ws;
+
+pub use history::save_terminal_histories;
 
 pub use hub::{
     HubEvent, HubSession, OutputReceiver, SessionHub, SessionKind, SessionStatus, SpawnRequest,
