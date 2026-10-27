@@ -393,6 +393,31 @@ pub(crate) fn render_resume_prompt(
     ))
 }
 
+/// Tag heading the reporting-nudge section: an agent attempt that exited
+/// without filing a verdict is re-dispatched once with this appended, so a
+/// test (or a human reading the prompt) can tell a nudged retry apart from
+/// an ordinary attempt.
+pub(crate) const REPORT_NUDGE_TAG: &str = "# [REPORT REQUIRED]";
+
+/// The reporting-nudge section: the previous attempt exited without a
+/// verdict, printed text is never a verdict, and the agent must call
+/// `graph_complete_node` exactly once now. Appended by
+/// [`with_report_nudge`] to the retry's prompt (cold or resumed).
+pub(crate) fn report_nudge_section(run_id: &str, node_id: &str) -> String {
+    format!(
+        "{REPORT_NUDGE_TAG}\nYour previous attempt exited without reporting a verdict: no verdict was recorded for that run. Printed text is never a verdict — only a graph_complete_node call counts. Call graph_complete_node exactly once now with run_id=\"{run_id}\", node_id=\"{node_id}\", your verdict (status=\"pass\"|\"fail\"), a concise summary, and your output.\n"
+    )
+}
+
+/// Append the [`report_nudge_section`] to `prompt` when `on` (a spent
+/// reporting nudge), else return the prompt unchanged.
+pub(crate) fn with_report_nudge(prompt: String, on: bool, run_id: &str, node_id: &str) -> String {
+    if !on {
+        return prompt;
+    }
+    format!("{prompt}\n\n{}", report_nudge_section(run_id, node_id))
+}
+
 /// The only `{{...}}` markers [`render_resume_prompt`] can bind — the
 /// same-spec ([`RESUME_PROMPT_DEFAULT`]) and cross-spec
 /// ([`RESUME_PROMPT_CROSS_SPEC_DEFAULT`]) defaults, and any per-node

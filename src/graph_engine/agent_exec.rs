@@ -29,6 +29,7 @@ pub(crate) async fn execute_agent_node(
     workdir: &str,
     resume_session_id: Option<&str>,
     resume_crosses_spec: bool,
+    report_nudge: bool,
     dynamic_skills: Option<&Arc<crate::dynamic_skills::SkillStore>>,
     node_outputs: &HashMap<String, Value>,
     all_node_names: &[String],
@@ -72,6 +73,7 @@ pub(crate) async fn execute_agent_node(
                 previous_output,
                 run_id,
                 workdir,
+                report_nudge,
                 dynamic_skills,
                 node_outputs,
                 all_node_names,
@@ -112,6 +114,7 @@ pub(crate) async fn execute_agent_node(
         Err(e) => return Ok(invalid_template_execution(node, &e)),
     };
     let prompt = append_pinned_skills(prompt, node, dynamic_skills).await;
+    let prompt = with_report_nudge(prompt, report_nudge, run_id, &node.id);
     let strategy = sized_strategy(&base_strategy, &prompt);
     let execution = run_agent_process(
         db,
@@ -254,6 +257,7 @@ pub(crate) struct AgentRunCtx<'a> {
     pub(crate) previous_output: Option<&'a Value>,
     pub(crate) run_id: &'a str,
     pub(crate) workdir: &'a str,
+    pub(crate) report_nudge: bool,
     pub(crate) dynamic_skills: Option<&'a Arc<crate::dynamic_skills::SkillStore>>,
     pub(crate) node_outputs: &'a HashMap<String, Value>,
     pub(crate) all_node_names: &'a [String],
@@ -298,6 +302,8 @@ pub(crate) async fn try_resume_agent_node(
         }
     };
     let resume_prompt = append_pinned_skills(resume_prompt, ctx.node, ctx.dynamic_skills).await;
+    let resume_prompt =
+        with_report_nudge(resume_prompt, ctx.report_nudge, ctx.run_id, &ctx.node.id);
     let strategy = sized_strategy(ctx.base_strategy, &resume_prompt);
     let execution = run_agent_process(
         ctx.db,

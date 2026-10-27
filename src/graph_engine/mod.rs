@@ -33,6 +33,7 @@ mod directed;
 mod dirty_commit;
 mod dispatch;
 mod dispatch_finish;
+mod ensemble_attempt;
 mod ensemble_cascade;
 mod ensemble_exec;
 mod ensemble_member;
@@ -69,6 +70,7 @@ pub(crate) use directed::*;
 pub(crate) use dirty_commit::*;
 #[allow(unused_imports)]
 pub(crate) use dispatch::*;
+pub(crate) use ensemble_attempt::*;
 pub(crate) use ensemble_cascade::*;
 #[allow(unused_imports)]
 pub(crate) use ensemble_exec::*;

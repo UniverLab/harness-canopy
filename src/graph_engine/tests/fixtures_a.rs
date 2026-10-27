@@ -1006,6 +1006,7 @@ async fn run_resume_agent_node(
         dir.path().to_str().unwrap(),
         resume_session_id,
         cross_spec,
+        false,
         None,
         &HashMap::new(),
         &[],

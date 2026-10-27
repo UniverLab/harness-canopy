@@ -480,9 +480,9 @@ async fn cascade_falls_back_to_next_member_when_first_produces_no_verdict() {
 
     let join = join_run(&db, &spec_id, "join1");
     // CM13: m-crash exhausts infra retries → no verdict → cascade falls
-    // through to m-ok. m-ok is also unreported infra → exhausts retries
-    // → no verdict → join is Error with no_verdict (CB66: a reviewer
-    // that could not run is not a reviewer that rejected).
+    // through to m-ok. m-ok is also unreported infra → nudged once, then
+    // settles with no verdict → join is Error with no_verdict (CB66: a
+    // reviewer that could not run is not a reviewer that rejected).
     assert_eq!(
         join.status,
         GraphRunStatus::Error,
@@ -499,8 +499,8 @@ async fn cascade_falls_back_to_next_member_when_first_produces_no_verdict() {
     );
     assert_eq!(
         member_runs(&db, &spec_id, "m-ok").len(),
-        3,
-        "CM13: fallback member is also unreported infra; exhausts retries"
+        2,
+        "CM13: fallback member exits 0 with output unreported; nudged once"
     );
 }
 
@@ -540,9 +540,9 @@ async fn cascade_falls_through_unreported_member_then_exhausts_retries() {
     let join = join_run(&db, &spec_id, "join1");
     // CM13: m-noout is unreported infra → exhausts retries → no verdict.
     // Cascade falls through to m-ok. m-ok is also unreported infra →
-    // exhausts retries → no verdict → join is Error with no_verdict
-    // (CB66: a reviewer that could not run is not a reviewer that
-    // rejected).
+    // nudged once, then settles with no verdict → join is Error with
+    // no_verdict (CB66: a reviewer that could not run is not a reviewer
+    // that rejected).
     assert_eq!(
         join.status,
         GraphRunStatus::Error,
@@ -552,7 +552,8 @@ async fn cascade_falls_through_unreported_member_then_exhausts_retries() {
     assert_eq!(out["kind"], "cascade");
     assert_eq!(out["no_verdict"], serde_json::json!(true));
 
-    // Both members exhaust retries (3 runs each with default retry_limit=2).
+    // m-noout (no output) exhausts the crash budget (3 runs with default
+    // retry_limit=2); m-ok (exit 0 with output) is nudged once (2 runs).
     let m_noout_runs = member_runs(&db, &spec_id, "m-noout");
     assert_eq!(
         m_noout_runs.len(),
@@ -560,7 +561,7 @@ async fn cascade_falls_through_unreported_member_then_exhausts_retries() {
         "CM13: m-noout exhausts infra retries"
     );
     let m_ok_runs = member_runs(&db, &spec_id, "m-ok");
-    assert_eq!(m_ok_runs.len(), 3, "CM13: m-ok exhausts infra retries");
+    assert_eq!(m_ok_runs.len(), 2, "CM13: m-ok is nudged once");
 }
 
 /// CM3: round-robin runs exactly one member per invocation, rotating

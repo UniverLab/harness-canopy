@@ -234,8 +234,7 @@ impl GraphEngine {
         state: &SpecRunState,
         retry: &mut NodeRetryCtx<'_>,
     ) -> Result<(NodeExecution, GraphNodeRun, bool)> {
-        let (retry_limit, crash_max_secs, backoff_secs) = read_infra_config(retry.node);
-        let mut attempt: u32 = 0;
+        let mut chain = AttemptChain::from_node(retry.node);
         // CM49: for a crew-bound node the pair for the NEXT attempt is chosen
         // as soon as the current attempt infra-fails, so the retry run row
         // records the member it will actually run. Cached here and consumed at
@@ -244,10 +243,12 @@ impl GraphEngine {
         let mut pending: Option<GraphNode> = None;
         loop {
             let node_owned: GraphNode = match retry.crew.clone() {
-                Some(crew) => match self.crew_attempt_node(&crew, retry, &mut pending, attempt)? {
-                    Some(next) => next,
-                    None => return self.crew_exhausted_return(retry, &crew),
-                },
+                Some(crew) => {
+                    match self.crew_attempt_node(&crew, retry, &mut pending, chain.attempt)? {
+                        Some(next) => next,
+                        None => return self.crew_exhausted_return(retry, &crew),
+                    }
+                }
                 None => retry.node.clone(),
             };
             let node: &GraphNode = &node_owned;
@@ -266,6 +267,7 @@ impl GraphEngine {
                     ctx.workdir,
                     retry.resume_candidate.as_deref(),
                     retry.resume_crosses_spec,
+                    chain.nudged,
                     &state.node_outputs,
                     ctx.all_node_names,
                 )
@@ -274,73 +276,83 @@ impl GraphEngine {
                 anyhow!("Graph run '{}' not found after execution.", retry.run_id)
             })?;
 
-            if is_infra_crash(node, &execution, &run, attempt, retry_limit, crash_max_secs) {
-                // CB82: a shutdown kill must take no edge at all (via the
-                // run_spec/spec_step guards) — never the `Error` edge. Settle
-                // the attempt as interrupted without inserting a new retry row.
-                if self.is_shutting_down() {
-                    return self.settle_interrupted_attempt(&retry.run_id, node);
+            match chain.decide(node, &execution, &run) {
+                AttemptRetry::Settle => {
+                    // CM2: the graph is settling on this attempt (no more
+                    // retries). Route `Error` only if this final attempt is
+                    // itself a no-verdict infra crash — a retry that
+                    // recovered (Pass) or a genuine negative verdict (Fail)
+                    // must NOT take the `Error` edge.
+                    let mut execution = execution;
+                    let mut run = run;
+                    let had_infra_crash = finalize_infra_crash_shape(
+                        &self.db,
+                        &retry.run_id,
+                        node,
+                        &mut execution,
+                        &mut run,
+                        chain.attempt,
+                        chain.retry_limit,
+                        chain.crash_max_secs,
+                    )
+                    .await?;
+
+                    return Ok((execution, run, had_infra_crash));
                 }
-                // B19: retry resuming the crashed attempt's own
-                // session if it managed to create one before dying;
-                // an infra crash at spawn usually created none, so
-                // this is normally `None` → the retry cold-starts.
-                // If the crashed attempt was itself a cross-spec
-                // (RS3) resume and it continued the SAME foreign
-                // session before dying, the retry is still that
-                // same cross-spec resume; any other outcome (a
-                // fresh session captured on cold fallback, or none
-                // at all) means the retry is not, and the next
-                // `execute_node` call renders normally for
-                // whichever case it's in.
-                let new_candidate = run.session_id.clone();
-                retry.resume_crosses_spec = retry.resume_crosses_spec
-                    && new_candidate.is_some()
-                    && new_candidate == retry.resume_candidate;
-                retry.resume_candidate = new_candidate;
-                // CM49: pick the next crew member for the retry now, so the
-                // retry run row records the pair it will run.
-                self.pick_next_crew_member(retry, &mut pending)?;
-                let retry_node = pending.as_ref().unwrap_or(node);
-                let retry_mutex = node_mutex_resources(retry_node);
-                retry.run_id = begin_infra_retry(
-                    &self.db,
-                    ctx.lp,
-                    ctx.spec,
-                    retry_node,
-                    retry.previous_output,
-                    retry.iteration_value as i64,
-                    &retry.run_id,
-                    &execution.output,
-                    attempt,
-                    backoff_secs,
-                    &retry_mutex,
-                )
-                .await?;
-                attempt += 1;
-                continue;
+                kind => {
+                    // CB82: a shutdown kill must take no edge at all (via the
+                    // run_spec/spec_step guards) — never the `Error` edge. Settle
+                    // the attempt as interrupted without inserting a new retry row.
+                    if self.is_shutting_down() {
+                        return self.settle_interrupted_attempt(&retry.run_id, node);
+                    }
+                    // B19: retry resuming the crashed attempt's own
+                    // session if it managed to create one before dying;
+                    // an infra crash at spawn usually created none, so
+                    // this is normally `None` → the retry cold-starts.
+                    // If the crashed attempt was itself a cross-spec
+                    // (RS3) resume and it continued the SAME foreign
+                    // session before dying, the retry is still that
+                    // same cross-spec resume; any other outcome (a
+                    // fresh session captured on cold fallback, or none
+                    // at all) means the retry is not, and the next
+                    // `execute_node` call renders normally for
+                    // whichever case it's in.
+                    let new_candidate = run.session_id.clone();
+                    retry.resume_crosses_spec = retry.resume_crosses_spec
+                        && new_candidate.is_some()
+                        && new_candidate == retry.resume_candidate;
+                    retry.resume_candidate = new_candidate;
+                    // CM49: pick the next crew member for an infra retry
+                    // now, so the retry run row records the pair it will
+                    // run. A reporting nudge never rotates: it re-runs
+                    // the same member (and resumes its session), so the
+                    // current node is cached as-is for the next attempt.
+                    if kind == AttemptRetry::InfraCrash {
+                        self.pick_next_crew_member(retry, &mut pending)?;
+                    } else if retry.crew.is_some() {
+                        pending = Some(node.clone());
+                    }
+                    let retry_node = pending.as_ref().unwrap_or(node);
+                    let retry_mutex = node_mutex_resources(retry_node);
+                    retry.run_id = begin_infra_retry(
+                        &self.db,
+                        ctx.lp,
+                        ctx.spec,
+                        retry_node,
+                        retry.previous_output,
+                        retry.iteration_value as i64,
+                        &retry.run_id,
+                        &execution.output,
+                        chain.attempt,
+                        chain.backoff_secs,
+                        &retry_mutex,
+                    )
+                    .await?;
+                    chain.advance(kind);
+                    continue;
+                }
             }
-
-            // CM2: the graph is settling on this attempt (no more
-            // retries). Route `Error` only if this final attempt is
-            // itself a no-verdict infra crash — a retry that
-            // recovered (Pass) or a genuine negative verdict (Fail)
-            // must NOT take the `Error` edge.
-            let mut execution = execution;
-            let mut run = run;
-            let had_infra_crash = finalize_infra_crash_shape(
-                &self.db,
-                &retry.run_id,
-                node,
-                &mut execution,
-                &mut run,
-                attempt,
-                retry_limit,
-                crash_max_secs,
-            )
-            .await?;
-
-            return Ok((execution, run, had_infra_crash));
         }
     }
 

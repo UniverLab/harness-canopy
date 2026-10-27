@@ -633,8 +633,8 @@ async fn ensemble_member_empty_output_zero_exit_counts_as_fail_not_pass() {
 /// REAL stdout (unlike the no-output member above) — the shape
 /// `zero_exit_no_output` cannot catch — and neither self-reports, so with
 /// `require_report: true` on the ensemble's shared member config, both
-/// must still fail the quorum, deterministically on the first attempt
-/// (never infra-retried).
+/// must still fail the quorum. Each is nudged once (the exit-0-with-output
+/// shape), then settles — never retried on the crash budget.
 #[tokio::test]
 async fn ensemble_member_require_report_true_without_self_report_counts_as_fail() {
     let (dir, db, engine, _graph_id, spec_id) = graph_fixture().unwrap();
@@ -681,12 +681,12 @@ async fn ensemble_member_require_report_true_without_self_report_counts_as_fail(
     assert_eq!(join.output.as_ref().unwrap()["passed"], 0);
 
     let runs = member_runs(&db, &spec_id, "m-silent-1");
-    // CM13: unreported runs are infra, so require_report members get retried.
-    // retry_limit=2 (default) → initial + 2 retries = 3 runs.
+    // CM13: unreported runs are infra. Exit 0 with real stdout earns the one
+    // reporting nudge instead of the crash budget: initial + nudge = 2 runs.
     assert_eq!(
         runs.len(),
-        3,
-        "CM13: unreported infra runs are retried; initial + 2 retries = 3 rows"
+        2,
+        "CM13: unreported exit-0-with-output is nudged once; initial + nudge = 2 rows"
     );
     for run in &runs {
         assert_eq!(run.status, GraphRunStatus::Fail);
@@ -705,8 +705,8 @@ async fn ensemble_member_require_report_true_without_self_report_counts_as_fail(
                     == Some(true)
             })
             .count()
-            >= 2,
-        "retried runs must carry infra_crash marker"
+            == 1,
+        "the nudged-away first attempt must carry the infra_crash marker"
     );
 }
 

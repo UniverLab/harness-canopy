@@ -201,6 +201,7 @@ async fn execute_node_injects_pinned_skill_into_composed_prompt_end_to_end() {
             dir.path().to_str().unwrap(),
             None,
             false,
+            false,
             &HashMap::new(),
             &[],
         )
@@ -654,9 +655,10 @@ async fn bounce_resumes_second_visit_after_cold_first_visit() {
         .unwrap();
     drop(guard);
 
-    // CM13: the agent never self-reports, so every run is infra.
-    // With retry_limit=2, the agent runs 3 times (initial + 2 retries).
-    // After exhaustion, had_infra_crash=true, no pass edge → spec fails.
+    // CM13: the agent never self-reports, so every run is infra. The
+    // script exits 0 with output, so the first run earns the one reporting
+    // nudge and the second settles: 2 runs, then had_infra_crash=true, no
+    // pass edge → spec fails.
     let mut impl_runs: Vec<GraphNodeRun> = db
         .list_graph_runs_for_spec(&spec_id)
         .unwrap()
@@ -666,8 +668,8 @@ async fn bounce_resumes_second_visit_after_cold_first_visit() {
     impl_runs.sort_by_key(|r| r.started_at);
     assert_eq!(
         impl_runs.len(),
-        3,
-        "CM13: unreported agent exhausts infra retries (initial + 2 retries)"
+        2,
+        "CM13: unreported exit-0-with-output agent is nudged once (initial + 1 nudge retry)"
     );
     for run in &impl_runs {
         assert_eq!(

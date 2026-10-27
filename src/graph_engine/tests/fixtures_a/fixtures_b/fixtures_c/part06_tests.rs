@@ -952,23 +952,23 @@ async fn graph_engine_resume_redispatches_full_ensemble_after_interrupt() {
         .filter(|r| r.node_id == "m-b")
         .collect();
     // The member scripts are unreported (CM13: script-backed test doubles
-    // never call `graph_complete_node`), so each fresh dispatch is an
-    // infra crash that exhausts the default retry_limit (2) before the
-    // ensemble gives up on it: 3 rows (attempts 0, 1, 2) per member, all
-    // sharing the resumed dispatch's one iteration (`begin_infra_retry`
-    // passes the same `iteration` through every retry).
+    // never call `graph_complete_node`) and exit 0 with output, so each
+    // fresh dispatch earns the one reporting nudge before the ensemble
+    // gives up on it: 2 rows (initial + nudge) per member, all sharing the
+    // resumed dispatch's one iteration (`begin_infra_retry` passes the same
+    // `iteration` through every retry).
     assert_eq!(
         m_a_runs.len(),
-        4,
+        3,
         "m-a already had one Pass run before the crash — resume must dispatch the whole \
-             ensemble (FR3), so it gets 3 fresh (retry-exhausted) runs even though it wasn't the \
+             ensemble (FR3), so it gets 2 fresh (nudged) runs even though it wasn't the \
              member that was still running when the daemon died"
     );
     assert_eq!(
         m_b_runs.len(),
-        4,
-        "m-b's run count: the original (now Fail, from reconcile) plus 3 fresh \
-             (retry-exhausted) runs from the resumed dispatch"
+        3,
+        "m-b's run count: the original (now Fail, from reconcile) plus 2 fresh \
+             (nudged) runs from the resumed dispatch"
     );
     let new_m_a_iteration = m_a_runs.last().unwrap().iteration;
     let new_m_b_iteration = m_b_runs.last().unwrap().iteration;

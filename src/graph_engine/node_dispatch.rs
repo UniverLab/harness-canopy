@@ -14,6 +14,7 @@ impl GraphEngine {
         workdir: &str,
         resume_session_id: Option<&str>,
         resume_crosses_spec: bool,
+        report_nudge: bool,
         node_outputs: &HashMap<String, Value>,
         all_node_names: &[String],
     ) -> Result<NodeExecution> {
@@ -43,6 +44,7 @@ impl GraphEngine {
                     workdir,
                     resume_session_id,
                     resume_crosses_spec,
+                    report_nudge,
                     self.dynamic_skills.as_ref(),
                     node_outputs,
                     all_node_names,

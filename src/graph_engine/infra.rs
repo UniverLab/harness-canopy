@@ -153,6 +153,111 @@ pub(crate) fn merge_attempt_marker(output: &Value, attempt: u32, is_crash: bool)
     obj
 }
 
+/// What one agent attempt's outcome asks the retry loop to do next: settle
+/// on this attempt (`Settle`), re-dispatch once with the reporting nudge
+/// (`ReportNudge`), or re-dispatch on the infra-crash budget (`InfraCrash`).
+/// See [`AttemptChain::decide`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AttemptRetry {
+    Settle,
+    ReportNudge,
+    InfraCrash,
+}
+
+/// The retry state of one node dispatch: the zero-based `attempt` index of
+/// the attempt currently running, whether the one reporting nudge was already
+/// spent (`nudged`), and the node's resolved infra budget. Every retry loop
+/// (sequential, cascade/round-robin member, parallel member) drives one of
+/// these so the nudge-vs-crash-vs-settle decision is identical everywhere.
+pub(crate) struct AttemptChain {
+    pub attempt: u32,
+    pub nudged: bool,
+    pub retry_limit: u32,
+    pub crash_max_secs: u64,
+    pub backoff_secs: u64,
+}
+
+impl AttemptChain {
+    pub(crate) fn from_node(node: &GraphNode) -> Self {
+        let (retry_limit, crash_max_secs, backoff_secs) = read_infra_config(node);
+        Self {
+            attempt: 0,
+            nudged: false,
+            retry_limit,
+            crash_max_secs,
+            backoff_secs,
+        }
+    }
+
+    /// Classify one finished attempt: an unreported clean exit is nudged
+    /// exactly once (no retry-limit gate — the nudge is outside the crash
+    /// budget), then settled; anything else follows the infra-crash rule.
+    pub(crate) fn decide(
+        &self,
+        node: &GraphNode,
+        exec: &NodeExecution,
+        run: &GraphNodeRun,
+    ) -> AttemptRetry {
+        if unreported_exit(node, exec, run) {
+            if self.nudged {
+                AttemptRetry::Settle
+            } else {
+                AttemptRetry::ReportNudge
+            }
+        } else if is_infra_crash(
+            node,
+            exec,
+            run,
+            self.attempt,
+            self.retry_limit,
+            self.crash_max_secs,
+        ) {
+            AttemptRetry::InfraCrash
+        } else {
+            AttemptRetry::Settle
+        }
+    }
+
+    /// Record a retry: the next attempt's index, and the spent nudge.
+    pub(crate) fn advance(&mut self, kind: AttemptRetry) {
+        self.attempt += 1;
+        if kind == AttemptRetry::ReportNudge {
+            self.nudged = true;
+        }
+    }
+}
+
+/// The reporting-nudge shape: an AGENT run whose process exited 0 with real
+/// output but never filed a verdict — the agent plainly ran to completion
+/// and intended to report, so one re-dispatch with an explicit reporting
+/// instruction is warranted. A self-reported run, a permanent spawn failure,
+/// a nonzero (or missing) exit code, and the `no_output` shape are never
+/// this: crashes keep the infra budget, silence keeps it too.
+pub(crate) fn unreported_exit(
+    node: &GraphNode,
+    execution: &NodeExecution,
+    run: &GraphNodeRun,
+) -> bool {
+    if node.kind != GraphNodeKind::Agent || run_self_reported(run) {
+        return false;
+    }
+    let output = &execution.output;
+    if output
+        .get("spawn_permanent")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    if output.get("exit_code").and_then(Value::as_i64) != Some(0) {
+        return false;
+    }
+    !output
+        .get("no_output")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 /// B19/B39/CM13 infra-crash decision for one agent attempt: a
 /// non-self-reported failure of an AGENT node with retry budget still left.
 /// A self-reported result, a Check/Gate node, or a permanent spawn failure

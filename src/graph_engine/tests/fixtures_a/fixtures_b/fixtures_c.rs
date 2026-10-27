@@ -809,3 +809,4 @@ mod part18_tests;
 mod part19_tests;
 mod part20_tests;
 mod part21_tests;
+mod part22_tests;

@@ -436,10 +436,13 @@ require_report: true
 
 With the flag set, an agent run that exits 0 but never calls
 `graph_complete_node` itself is recorded as a deterministic **fail**
-(`failure_kind: "no_report"`) and routes down the node's `fail` edge —
-it is never retried as an infra crash, since nothing actually crashed.
-An explicit self-report always wins regardless of this flag, pass or
-fail; `require_report` only judges the case where none was ever made.
+(`failure_kind: "no_report"`) and routes down the node's `fail` edge.
+It is re-dispatched exactly once with an explicit reporting instruction
+(the `# [REPORT REQUIRED]` nudge) rather than retried on the
+infra-crash budget, since nothing actually crashed; a second unreported
+exit fails the node as usual. An explicit self-report always wins
+regardless of this flag, pass or fail; `require_report` only judges the
+case where none was ever made.
 
 Whether or not the flag is set, every agent run that finishes without
 calling `graph_complete_node` carries `"unreported": true` in its output
@@ -452,7 +455,10 @@ are judged individually, exactly like a lone node.
 
 An agent attempt that never files a verdict (no `graph_complete_node`,
 no `graph_report_blocker`) is an infrastructure crash, retried with a
-doubling backoff. Three keys control the budget, with engine defaults
+doubling backoff. One exception: an attempt whose process exited 0 with
+real output is re-dispatched exactly once with a `# [REPORT REQUIRED]`
+instruction first — only if that retry also exits unreported does the
+node settle as failed. Three keys control the budget, with engine defaults
 of **2 retries / 60 s crash-shape window / 30 s backoff**:
 
 ```

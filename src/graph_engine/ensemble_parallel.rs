@@ -290,8 +290,7 @@ pub(crate) async fn run_parallel_member_task(task: ParallelMemberTask) -> Member
 async fn drive_parallel_member_attempts(
     task: &ParallelMemberTask,
 ) -> Result<(NodeExecution, GraphNodeRun, String, bool)> {
-    let (retry_limit, crash_max_secs, backoff_secs) = read_infra_config(&task.node);
-    let mut attempt: u32 = 0;
+    let mut chain = AttemptChain::from_node(&task.node);
     let mut member_run_id = task.run_id.clone();
     let mut resume_candidate: Option<String> = task.resume_candidate_seed.clone();
     loop {
@@ -335,6 +334,7 @@ async fn drive_parallel_member_attempts(
             &task.workdir,
             resume_candidate.as_deref(),
             false,
+            chain.nudged,
             task.dynamic_skills.as_ref(),
             &task.node_outputs,
             &task.all_node_names,
@@ -344,46 +344,43 @@ async fn drive_parallel_member_attempts(
             .db
             .get_graph_run(&member_run_id)?
             .ok_or_else(|| anyhow!("Graph run '{member_run_id}' not found after execution."))?;
-        if is_infra_crash(
-            &task.node,
-            &execution,
-            &run,
-            attempt,
-            retry_limit,
-            crash_max_secs,
-        ) {
-            resume_candidate = run.session_id.clone();
-            member_run_id = begin_infra_retry(
-                &task.db,
-                &task.lp,
-                &task.spec,
-                &task.node,
-                task.previous_output.as_ref(),
-                task.iteration as i64,
-                &member_run_id,
-                &execution.output,
-                attempt,
-                backoff_secs,
-                &task.mutex_resources,
-            )
-            .await?;
-            attempt += 1;
-            continue;
+        match chain.decide(&task.node, &execution, &run) {
+            AttemptRetry::Settle => {
+                let mut execution = execution;
+                let mut run = run;
+                let member_had_no_verdict = finalize_infra_crash_shape(
+                    &task.db,
+                    &member_run_id,
+                    &task.node,
+                    &mut execution,
+                    &mut run,
+                    chain.attempt,
+                    chain.retry_limit,
+                    chain.crash_max_secs,
+                )
+                .await?;
+                break Ok((execution, run, member_run_id.clone(), member_had_no_verdict));
+            }
+            kind => {
+                resume_candidate = run.session_id.clone();
+                member_run_id = begin_infra_retry(
+                    &task.db,
+                    &task.lp,
+                    &task.spec,
+                    &task.node,
+                    task.previous_output.as_ref(),
+                    task.iteration as i64,
+                    &member_run_id,
+                    &execution.output,
+                    chain.attempt,
+                    chain.backoff_secs,
+                    &task.mutex_resources,
+                )
+                .await?;
+                chain.advance(kind);
+                continue;
+            }
         }
-        let mut execution = execution;
-        let mut run = run;
-        let member_had_no_verdict = finalize_infra_crash_shape(
-            &task.db,
-            &member_run_id,
-            &task.node,
-            &mut execution,
-            &mut run,
-            attempt,
-            retry_limit,
-            crash_max_secs,
-        )
-        .await?;
-        break Ok((execution, run, member_run_id.clone(), member_had_no_verdict));
     }
 }
 
