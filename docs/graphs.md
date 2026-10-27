@@ -1136,7 +1136,10 @@ A graph document runs every structural check `import` runs —
 template bindings — through the same code, plus one sharing rule of its
 own: every `prompt_preset` a node names must be bundled in the document
 (`prompt_presets`, version 6) or a builtin (`implementer`, `reviewer`,
-`resilience`). What your machine happens to have installed does not
+`resilience`). A bundled entry itself must be installable anywhere too —
+a plain non-blank name, not a path, not a builtin, not repeated, with
+non-empty content — the same entry rules `import` enforces before
+writing anything. What your machine happens to have installed does not
 matter; a file that validates here installs anywhere.
 
 A node document is one shareable node:

@@ -65,6 +65,47 @@ pub fn collect(
         .collect()
 }
 
+/// The machine-independent half of [`validate`]: every rule about the entry
+/// itself — a plain non-blank name that stays inside the prompts dir, not a
+/// builtin, not a repeat of an earlier entry, non-empty content. Import runs
+/// it through [`validate`] (followed by the target-machine overwrite checks);
+/// `graph_validate` runs it alone, since a share-check has no installer's
+/// prompts dir to read — so a document that validates on one machine is
+/// installable on every machine. `seen` carries the names already accepted,
+/// so a duplicate refuses with the same message in both paths.
+pub fn validate_entry<'a>(
+    preset: &'a GraphExportPromptPreset,
+    seen: &mut BTreeSet<&'a str>,
+) -> Result<(), String> {
+    let name = preset.name.as_str();
+    if name.trim() != name || name.is_empty() {
+        return Err(format!(
+            "Bundled prompt preset '{name}' must be a plain non-blank name (no surrounding whitespace)."
+        ));
+    }
+    if !is_safe_name(name) {
+        return Err(format!(
+            "Bundled prompt preset '{name}' must be a plain file name: no path separators, not '.' or '..'."
+        ));
+    }
+    let builtins = builtin_preset_names();
+    if builtins.contains(&name) {
+        return Err(format!(
+            "Bundled prompt preset '{name}' is a builtin ({}); builtins are never bundled or installed from a document.",
+            builtins.join(", ")
+        ));
+    }
+    if !seen.insert(name) {
+        return Err(format!(
+            "Bundled prompt preset '{name}' appears more than once in the document."
+        ));
+    }
+    if preset.content.is_empty() {
+        return Err(format!("Bundled prompt preset '{name}' has empty content."));
+    }
+    Ok(())
+}
+
 /// Validate the bundled presets of a document about to be imported, before
 /// any of them is installed: every entry must be installable into the
 /// prompts dir (a safe, non-builtin, non-blank name and non-empty content)
@@ -76,34 +117,10 @@ pub fn validate(
     presets: &[GraphExportPromptPreset],
     prompts_dir: &std::path::Path,
 ) -> Result<(), String> {
-    let builtins = builtin_preset_names();
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     for preset in presets {
+        validate_entry(preset, &mut seen)?;
         let name = preset.name.as_str();
-        if name.trim() != name || name.is_empty() {
-            return Err(format!(
-                "Bundled prompt preset '{name}' must be a plain non-blank name (no surrounding whitespace)."
-            ));
-        }
-        if !is_safe_name(name) {
-            return Err(format!(
-                "Bundled prompt preset '{name}' must be a plain file name: no path separators, not '.' or '..'."
-            ));
-        }
-        if builtins.contains(&name) {
-            return Err(format!(
-                "Bundled prompt preset '{name}' is a builtin ({}); builtins are never bundled or installed from a document.",
-                builtins.join(", ")
-            ));
-        }
-        if !seen.insert(name) {
-            return Err(format!(
-                "Bundled prompt preset '{name}' appears more than once in the document."
-            ));
-        }
-        if preset.content.is_empty() {
-            return Err(format!("Bundled prompt preset '{name}' has empty content."));
-        }
         let path = prompts_dir.join(format!("{name}.md"));
         match std::fs::read_to_string(&path) {
             Ok(existing) if existing == preset.content => {}

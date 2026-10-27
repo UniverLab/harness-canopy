@@ -20,7 +20,8 @@ use crate::daemon::handler_templates::{check_node_templates, check_template_bind
 use crate::daemon::handler_validate::validate_node_mutex_config;
 use crate::domain::graph_transfer::{
     agent_nodes_missing_platform, assemble_import_plan, node_config_has_harness,
-    parse_export_document_value, GraphExportDocument, GraphImportPlan, GRAPH_EXPORT_FORMAT_VERSION,
+    parse_export_document_value, validate_entry as validate_preset_entry, GraphExportDocument,
+    GraphImportPlan, GRAPH_EXPORT_FORMAT_VERSION,
 };
 use crate::domain::graphs::GraphNodeKind;
 
@@ -105,6 +106,7 @@ fn validate_graph_document(value: &Value) -> Value {
 
     let mut problems = Vec::new();
     validate_graph_node_configs(&document, &mut problems);
+    validate_bundled_preset_entries(&document, &mut problems);
     validate_shared_presets(&document, &mut problems);
 
     let plan = match assemble_import_plan(&document, "validate", None) {
@@ -134,20 +136,28 @@ fn validate_graph_document(value: &Value) -> Value {
 /// The version pre-check `parse_export_document_value` would refuse anyway,
 /// reported at its own path instead of `document`.
 fn reject_bad_graph_format_version(value: &Value) -> Option<Value> {
-    match value.get("format_version").and_then(Value::as_i64) {
-        Some(version) if (1..=GRAPH_EXPORT_FORMAT_VERSION).contains(&version) => None,
-        Some(other) => Some(fail(&[problem(
-            "format_version",
-            format!(
-                "Graph export document has format_version {other}, but this build only supports 1 through {GRAPH_EXPORT_FORMAT_VERSION}."
-            ),
-        )])),
+    match value.get("format_version") {
         None => Some(fail(&[problem(
             "format_version",
             format!(
                 "Graph export document is missing format_version; refusing to guess. Expected format_version: {GRAPH_EXPORT_FORMAT_VERSION}."
             ),
         )])),
+        Some(raw) => match raw.as_i64() {
+            Some(version) if (1..=GRAPH_EXPORT_FORMAT_VERSION).contains(&version) => None,
+            Some(other) => Some(fail(&[problem(
+                "format_version",
+                format!(
+                    "Graph export document has format_version {other}, but this build only supports 1 through {GRAPH_EXPORT_FORMAT_VERSION}."
+                ),
+            )])),
+            None => Some(fail(&[problem(
+                "format_version",
+                format!(
+                    "Graph export document has a format_version that is not an integer; refusing to guess. Expected format_version: {GRAPH_EXPORT_FORMAT_VERSION}."
+                ),
+            )])),
+        },
     }
 }
 
@@ -163,6 +173,23 @@ fn validate_graph_node_configs(document: &GraphExportDocument, problems: &mut Ve
         }
         if let Err(message) = validate_node_mutex_config(&node.name, &node.config) {
             problems.push(problem(path, message));
+        }
+    }
+}
+
+/// The machine-independent half of import's bundled-preset check
+/// (`graph_transfer::validate_entry`, the same function): every bundled entry
+/// must be installable on any machine — a plain non-blank name inside the
+/// prompts dir, not a builtin, not repeated, non-empty content. The other
+/// half of import's check — refusing to overwrite a differing local file —
+/// needs the installer's prompts dir and belongs to import alone; without
+/// this half a document bundling, say, the builtin `reviewer` would validate
+/// here and then be refused by `graph_import` on every machine.
+fn validate_bundled_preset_entries(document: &GraphExportDocument, problems: &mut Vec<Problem>) {
+    let mut seen = BTreeSet::new();
+    for (index, preset) in document.prompt_presets.iter().enumerate() {
+        if let Err(message) = validate_preset_entry(preset, &mut seen) {
+            problems.push(problem(format!("prompt_presets[{index}]"), message));
         }
     }
 }
@@ -675,6 +702,69 @@ mod tests {
         doc["nodes"][0]["config"]["prompt_preset"] = json!("reviewer");
         let report = validate_document_value(&doc);
         assert_eq!(report["ok"], true);
+    }
+
+    #[test]
+    fn graph_with_non_integer_format_version_reports_format_version() {
+        let mut doc = valid_graph();
+        doc["format_version"] = json!("6");
+        let report = validate_document_value(&doc);
+        assert_eq!(report["ok"], false);
+        assert_eq!(first_path(&report), "format_version");
+        let message = report["problems"][0]["message"].as_str().expect("message");
+        assert!(message.contains("not an integer"), "got: {message}");
+    }
+
+    #[test]
+    fn graph_bundling_a_builtin_preset_reports_preset_path() {
+        let mut doc = valid_graph();
+        doc["prompt_presets"] = json!([{"name": "reviewer", "content": "audit well"}]);
+        let report = validate_document_value(&doc);
+        assert_eq!(report["ok"], false);
+        assert_eq!(first_path(&report), "prompt_presets[0]");
+        let message = report["problems"][0]["message"].as_str().expect("message");
+        assert!(message.contains("reviewer"), "names the preset: {message}");
+        assert!(message.contains("builtin"), "names the rule: {message}");
+    }
+
+    #[test]
+    fn graph_bundling_an_empty_preset_reports_preset_path() {
+        let mut doc = valid_graph();
+        doc["prompt_presets"] = json!([{"name": "my-auditor", "content": ""}]);
+        let report = validate_document_value(&doc);
+        assert_eq!(report["ok"], false);
+        assert_eq!(first_path(&report), "prompt_presets[0]");
+        let message = report["problems"][0]["message"].as_str().expect("message");
+        assert!(
+            message.contains("my-auditor"),
+            "names the preset: {message}"
+        );
+    }
+
+    #[test]
+    fn graph_bundling_an_unsafe_preset_name_reports_preset_path() {
+        let mut doc = valid_graph();
+        doc["prompt_presets"] = json!([{"name": "../escape", "content": "outside"}]);
+        let report = validate_document_value(&doc);
+        assert_eq!(report["ok"], false);
+        assert_eq!(first_path(&report), "prompt_presets[0]");
+        let message = report["problems"][0]["message"].as_str().expect("message");
+        assert!(message.contains("../escape"), "names the preset: {message}");
+    }
+
+    #[test]
+    fn graph_bundling_a_duplicate_preset_reports_the_second_entry() {
+        let mut doc = valid_graph();
+        doc["nodes"][0]["config"]["prompt_preset"] = json!("my-auditor");
+        doc["prompt_presets"] = json!([
+            {"name": "my-auditor", "content": "one"},
+            {"name": "my-auditor", "content": "two"},
+        ]);
+        let report = validate_document_value(&doc);
+        assert_eq!(report["ok"], false);
+        assert_eq!(first_path(&report), "prompt_presets[1]");
+        let message = report["problems"][0]["message"].as_str().expect("message");
+        assert!(message.contains("more than once"), "got: {message}");
     }
 
     #[test]
