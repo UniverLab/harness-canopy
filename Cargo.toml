@@ -207,6 +207,9 @@ fastembed = { version = "5", optional = true, default-features = false, features
 ] }
 
 
+[patch.crates-io]
+vt100 = { path = "vendor/vt100" }
+
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3.8"

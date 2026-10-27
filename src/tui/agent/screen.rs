@@ -983,4 +983,51 @@ mod tests {
         assert!(is_trash_response_line("┌────┐"));
         assert!(!is_trash_response_line("ordinary output"));
     }
+
+    // ── inline-TUI scroll-region scrollback ─────────────────────────
+    // With an inline-TUI stream fed in and the scroll offset at max, the
+    // rendered rows must hold the oldest numbered lines, not the input box.
+
+    /// Byte stream mimicking an inline TUI on a 24-row screen: per line,
+    /// set region 1..=22, move to the region's bottom row, write the
+    /// numbered line, newline, reset the region.
+    fn inline_tui_stream(count: usize) -> Vec<u8> {
+        let mut stream = Vec::new();
+        for i in 1..=count {
+            stream.extend_from_slice(b"\x1b[1;22r");
+            stream.extend_from_slice(b"\x1b[22;1H");
+            stream.extend_from_slice(format!("line {i}").as_bytes());
+            stream.extend_from_slice(b"\r\n");
+            stream.extend_from_slice(b"\x1b[r");
+        }
+        stream
+    }
+
+    #[test]
+    fn scroll_offset_max_shows_oldest_not_input_box() {
+        let mut agent = spawn_test_terminal("inline-tui-scrollback");
+        agent.vt.lock().unwrap().process(&inline_tui_stream(72));
+        assert!(
+            agent.max_scroll() > 0,
+            "top-anchored region scroll saved nothing"
+        );
+        agent.scroll_offset = agent.max_scroll();
+        let snapshot = agent.screen_snapshot().expect("snapshot");
+        let text = snapshot
+            .cells
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.as_ref().map(|cell| cell.ch.as_str()).unwrap_or(""))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        for line in ["line 1", "line 2", "line 3"] {
+            assert!(
+                text.lines().any(|l| l.trim() == line),
+                "{line:?} missing at max scroll offset: {text:?}"
+            );
+        }
+    }
 }

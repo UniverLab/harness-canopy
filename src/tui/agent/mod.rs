@@ -960,4 +960,79 @@ mod tests {
         let after = *last_output.lock().unwrap();
         assert!(after > before);
     }
+
+    // ── inline-TUI scroll-region scrollback ─────────────────────────────
+    // Reproduces Muse Code's pattern: pin an input box at the bottom with
+    // a top-anchored scroll region (1..N-2), write a numbered line at the
+    // region's bottom, newline, reset the region, repeat.
+
+    /// Byte stream mimicking an inline TUI: per line, set region
+    /// `top..=bottom` (1-based, as the terminal sees them), move to the
+    /// region's bottom row, write `line {i}`, newline, reset the region.
+    fn muse_stream(rows: u16, count: usize, top: u16, bottom: u16) -> Vec<u8> {
+        let mut stream = Vec::new();
+        for i in 1..=count {
+            stream.extend_from_slice(format!("\x1b[{top};{bottom}r").as_bytes());
+            stream.extend_from_slice(format!("\x1b[{bottom};1H").as_bytes());
+            stream.extend_from_slice(format!("line {i}").as_bytes());
+            stream.extend_from_slice(b"\r\n");
+            stream.extend_from_slice(b"\x1b[r");
+        }
+        let _ = rows;
+        stream
+    }
+
+    /// Every numbered line must be reachable by paging from the newest row
+    /// back to the oldest. Pre-patch the region scrolls saved nothing.
+    #[test]
+    fn inline_tui_region_top_saves_every_line() {
+        use std::collections::HashSet;
+        let rows = 10u16;
+        let count = 3 * rows as usize;
+        let mut parser = agent_parser(rows);
+        parser.process(&muse_stream(rows, count, 1, rows - 2));
+        let max = scrollback_len(&mut parser);
+        assert!(max > 0, "top-anchored region scroll saved nothing");
+        let mut found = HashSet::new();
+        let mut s = max;
+        loop {
+            parser.screen_mut().set_scrollback(s);
+            for line in parser.screen().contents().lines() {
+                found.insert(line.trim().to_string());
+            }
+            if s == 0 {
+                break;
+            }
+            s = s.saturating_sub(rows as usize);
+        }
+        parser.screen_mut().set_scrollback(0);
+        for i in 1..=count {
+            assert!(
+                found.contains(&format!("line {i}")),
+                "line {i} unreachable by scrolling (checked {max} back)"
+            );
+        }
+    }
+
+    /// A region whose top is not row 0 keeps upstream behaviour: nothing
+    /// is saved, matching xterm.
+    #[test]
+    fn region_not_top_anchored_saves_nothing() {
+        let rows = 10u16;
+        let mut parser = agent_parser(rows);
+        parser.process(&muse_stream(rows, 3 * rows as usize, 2, rows - 2));
+        assert_eq!(scrollback_len(&mut parser), 0);
+    }
+
+    /// A full-screen scroll with no region still saves as before.
+    #[test]
+    fn plain_scroll_no_region_still_saves() {
+        let rows = 10u16;
+        let count = 3 * rows as usize;
+        let mut parser = agent_parser(rows);
+        for i in 1..=count {
+            parser.process(format!("line {i}\r\n").as_bytes());
+        }
+        assert_eq!(scrollback_len(&mut parser), count - rows as usize + 1);
+    }
 }
