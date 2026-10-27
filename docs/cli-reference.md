@@ -132,6 +132,12 @@ missing.
 and goes through the daemon like the other `graph` subcommands. See the
 [Event log](graphs.md#event-log) section.
 
+A `continue` on a sandboxed graph resumes inside that run's sandbox worktree;
+when the worktree is gone the continue is refused, naming the sandbox id,
+rather than running the graph against the original workdir. A failed
+sandboxed graph always keeps its worktree — see
+[Sandboxes](graphs.md#sandboxes).
+
 ## Agents
 
 Read-only inspection of registered agents, served from the local database
@@ -248,6 +254,24 @@ hand.
 | `canopy rag backfill` | Index every configured file that is not in the vector store yet |
 | `canopy rag purge [--yes]` | Delete the entire vector store and reset all RAG state; asks for confirmation unless `--yes` (`-y`) is given |
 | `canopy rag model retry` | Clear a failed local embedding-model download so the daemon retries it in the background, without re-running setup |
+
+## Sandboxes
+
+Sandboxed graph runs (`graph_run` with `sandbox: true`) leave their worktree
+behind whenever it holds work; see [Sandboxes](graphs.md#sandboxes). These
+commands are how you deal with them, and none of them guesses.
+
+| Command | Description |
+|---|---|
+| `canopy sandbox list` | Read-only: every sandbox worktree canopy created — id, path, graph/run that made it, branch, whether the branch holds commits that exist nowhere else, how far behind its base it is, and its status (`active`, `kept`, `cleaned`, `cleanup_failed`, `merged`, `discarded`). Directories under canopy's worktrees root with no sandbox row are listed as `untracked` and never touched |
+| `canopy sandbox list --json` | The same list as JSON |
+| `canopy sandbox land <id-or-prefix>` | Merge one sandbox's branch onto its base branch; refuses rather than forcing when the workdir is on another branch, has uncommitted changes, or the merge conflicts (naming the conflicting paths), and leaves the sandbox in place. On success it removes the worktree, deletes the branch and marks the sandbox `merged` |
+| `canopy sandbox discard <id-or-prefix>` | Remove one sandbox's worktree and delete its branch; refuses when the branch holds commits that exist nowhere else (or when that is uncertain) |
+| `canopy sandbox discard <id-or-prefix> --discard-unique-commits` | Explicit consent to delete commits that exist only in this sandbox, in that same call |
+
+`canopy clean` also reclaims sandboxes it considers finished once their branch
+holds no commits that exist nowhere else — it does not look at uncommitted
+files. Land or discard a `kept` sandbox you care about before running it.
 
 ## Clean
 

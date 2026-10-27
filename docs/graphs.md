@@ -600,6 +600,36 @@ as the way to start one.
 If a reachable prompt or check references a node with no recorded output
 for the spec, the run is refused and the missing node is named.
 
+## Sandboxes
+
+`graph_run` accepts `sandbox: true`: canopy creates a temporary git worktree
+under `~/.canopy/worktrees/<project-hash>/<sandbox-id>`, on a new
+`canopy/sandbox-*` branch cut from the workdir's current branch, and runs
+every node of that run inside it — your checkout is never edited. The canopy
+protocol goes into the worktree's instruction file rather than the prompt.
+
+A sandbox is temporary, but never at the cost of work:
+
+- A **completed** run removes its sandbox only when it provably holds
+  nothing: no commits that exist nowhere else **and** no uncommitted path —
+  tracked or untracked — other than the instruction file canopy itself wrote.
+  A sandbox holding anything is kept, and the reason is recorded with it
+  (how many uncommitted paths, and the first 20).
+- A **failed** graph never tears its sandbox down, whatever it holds. Only a
+  completed run cleans up; landing, continuing or discarding a failed run's
+  sandbox is your call.
+- When the check itself fails — git cannot say whether the worktree is dirty
+  — the sandbox is kept too. Uncertain means keep, like an unknown commit
+  count.
+
+`graph_continue` on a failed sandboxed graph resumes **inside the kept
+worktree**, so a retry keeps the work that is already there. If that worktree
+is gone, the continue is refused, naming the sandbox id, instead of quietly
+running the graph against your original workdir.
+
+Leftover sandboxes are listed, landed or discarded explicitly — see
+[Sandboxes](cli-reference.md#sandboxes) in the CLI reference.
+
 ## Concurrency
 
 Running many graphs at once, against different working directories, is
