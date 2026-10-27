@@ -166,6 +166,68 @@ impl TaskTriggerHandler {
             return Ok(error_result(&e));
         }
 
+        // Same write-time binding check as `graph_add_ensemble`, against the
+        // resulting shared prompt and member overrides: the scope already
+        // holds this ensemble (with its quorum name, so a self-reference gets
+        // the FR2 message) and its current member and quorum nodes.
+        if params.prompt_template.is_some() || params.members.is_some() {
+            let scope = crate::daemon::handler_templates::TemplateScope::load(
+                &self.db,
+                details.ensemble.spec_id.as_deref(),
+                details.ensemble.graph_id.as_deref(),
+            )
+            .map_err(internal_error)?;
+            let shared = params
+                .prompt_template
+                .as_deref()
+                .unwrap_or(&details.ensemble.prompt_template);
+            let owner = format!(
+                "Ensemble '{}' shared prompt template",
+                details.ensemble.name
+            );
+            if let Err(e) = crate::daemon::handler_templates::check_template_bindings(
+                &owner,
+                shared,
+                crate::graph_engine::AGENT_PROMPT_BINDINGS,
+                &scope.nodes,
+                &scope.ensembles,
+            ) {
+                return Ok(error_result(&e));
+            }
+            // The resulting overrides: the replacement set when members are
+            // resized, else the stored ones (a shared-prompt change still has
+            // to leave every override member spawnable).
+            let overrides: Vec<(usize, &str)> = match &params.members {
+                Some(new_members) => new_members
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, m)| m.prompt_override.as_deref().map(|t| (i, t)))
+                    .collect(),
+                None => details
+                    .members
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, m)| m.prompt_override.as_deref().map(|t| (i, t)))
+                    .collect(),
+            };
+            for (index, template) in overrides {
+                let member_owner = format!(
+                    "Ensemble '{}' member {} prompt override",
+                    details.ensemble.name,
+                    index + 1
+                );
+                if let Err(e) = crate::daemon::handler_templates::check_template_bindings(
+                    &member_owner,
+                    template,
+                    crate::graph_engine::AGENT_PROMPT_BINDINGS,
+                    &scope.nodes,
+                    &scope.ensembles,
+                ) {
+                    return Ok(error_result(&e));
+                }
+            }
+        }
+
         let cleared_grace_fields_for_kind_change = self
             .apply_ensemble_kind_change(&ensemble_id, &params, &mut details, new_kind)
             .await?;

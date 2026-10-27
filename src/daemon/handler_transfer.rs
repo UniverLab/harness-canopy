@@ -126,6 +126,68 @@ impl TaskTriggerHandler {
             Ok(plan) => plan,
             Err(e) => return Ok(error_result(&e)),
         };
+        // Same write-time binding check as the node/ensemble authoring paths,
+        // before anything is persisted (all-or-nothing): every document node,
+        // ensemble shared prompt and member override. The domain plan builder
+        // is untouched — this lives in the handler like the other import-time
+        // validations above.
+        {
+            let mut node_names: Vec<String> =
+                document.nodes.iter().map(|n| n.name.clone()).collect();
+            for ensemble_plan in &plan.ensembles {
+                node_names.extend(ensemble_plan.member_nodes.iter().map(|n| n.name.clone()));
+                node_names.push(ensemble_plan.join_node.name.clone());
+            }
+            let ensembles: Vec<(String, Option<String>)> = document
+                .ensembles
+                .iter()
+                .zip(plan.ensembles.iter())
+                .map(|(doc, ensemble_plan)| {
+                    (doc.name.clone(), Some(ensemble_plan.join_node.name.clone()))
+                })
+                .collect();
+            for doc_node in &document.nodes {
+                if let Err(e) = crate::daemon::handler_templates::check_node_templates(
+                    doc_node.kind,
+                    &doc_node.config,
+                    &doc_node.name,
+                    &node_names,
+                    &ensembles,
+                ) {
+                    return Ok(error_result(&e));
+                }
+            }
+            for doc_ensemble in &document.ensembles {
+                let owner = format!("Ensemble '{}' shared prompt template", doc_ensemble.name);
+                if let Err(e) = crate::daemon::handler_templates::check_template_bindings(
+                    &owner,
+                    &doc_ensemble.prompt_template,
+                    crate::graph_engine::AGENT_PROMPT_BINDINGS,
+                    &node_names,
+                    &ensembles,
+                ) {
+                    return Ok(error_result(&e));
+                }
+                for (index, member) in doc_ensemble.members.iter().enumerate() {
+                    if let Some(template) = member.prompt_override.as_deref() {
+                        let member_owner = format!(
+                            "Ensemble '{}' member {} prompt override",
+                            doc_ensemble.name,
+                            index + 1
+                        );
+                        if let Err(e) = crate::daemon::handler_templates::check_template_bindings(
+                            &member_owner,
+                            template,
+                            crate::graph_engine::AGENT_PROMPT_BINDINGS,
+                            &node_names,
+                            &ensembles,
+                        ) {
+                            return Ok(error_result(&e));
+                        }
+                    }
+                }
+            }
+        }
         let missing_platform = crate::domain::graph_transfer::agent_nodes_missing_platform(&plan);
 
         let existing_names: Vec<String> = self

@@ -59,6 +59,15 @@ Agent node prompts support these placeholders:
 | `{{spec_commit_message}}` | Prebuilt commit message (`fix(tui): open F1`) — empty on legacy specs without a type |
 | `{{node_id}}` | The node's unique ID |
 | `{{previous_feedback}}` | JSON output of the previous node (truncated if oversized) |
+| `{{output:<node>}}` | The recorded output of another node in the same graph, by node name |
+
+Outputs are read from nodes, never from ensembles: `{{output:<name>}}`
+naming an ensemble is refused — reference its quorum node instead. A
+template carrying any other placeholder nothing can bind is refused when it
+is written (`graph_add_node`, `graph_update_node`, `graph_add_ensemble`,
+`graph_update_ensemble`, `graph_import`), not at run time; a marker meant
+as literal text stays accepted when escaped as `\{{...}}`. Templates stored
+before this validation surface in `graph_preflight` as `graph_warnings`.
 
 ### Check node commands
 

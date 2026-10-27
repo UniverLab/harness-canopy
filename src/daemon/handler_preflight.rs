@@ -314,6 +314,14 @@ impl TaskTriggerHandler {
             out
         };
 
+        // Templates stored before write-time template validation that carry a
+        // placeholder nothing can bind are reported as warnings (FR3) — the
+        // graph was writable then, so this stays advisory, never a refusal.
+        match crate::daemon::handler_templates::unbindable_template_warnings(&self.db, &details) {
+            Ok(warnings) => graph_warnings.extend(warnings),
+            Err(e) => return Ok(error_result(&e)),
+        }
+
         // CM1: validate {{output:NodeName}} references
         {
             let node_names: Vec<String> =

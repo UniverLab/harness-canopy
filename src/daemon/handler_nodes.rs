@@ -8,6 +8,7 @@ use crate::daemon::handler_formatting::{
 };
 use crate::daemon::handler_helpers::record_config_change_if_running;
 use crate::daemon::handler_specs_helpers::validate_at_least_one_bool;
+use crate::daemon::handler_templates::{check_new_node, check_updated_node};
 use crate::daemon::handler_validate::{
     config_has_agent_harness, json_value_kind_name, parse_router_routes,
     reject_interactive_only_platform, resolve_prefix_or_error, validate_agent_crew_exclusive,
@@ -74,6 +75,9 @@ impl TaskTriggerHandler {
         }
         if let Some(msg) = reject_interactive_only_platform(&config) {
             return Ok(error_result(&msg));
+        }
+        if let Err(e) = check_new_node(&self.db, &target, kind, &config, name) {
+            return Ok(error_result(&e));
         }
 
         let (spec_id, graph_id, next_position) = match &target {
@@ -280,6 +284,13 @@ impl TaskTriggerHandler {
                 if let Err(e) = validate_router_route_coverage(&routes, &node_id, &edges) {
                     return Ok(error_result(&e));
                 }
+            }
+        }
+
+        if params.config.is_some() {
+            let refused = check_updated_node(&self.db, &node, kind, name, &effective_config);
+            if let Err(e) = refused {
+                return Ok(error_result(&e));
             }
         }
 

@@ -638,7 +638,9 @@ async fn graph_preflight_rejects_unknown_named_output_reference() {
     // prompt references `{{output:Ghost}}` — a node that isn't in the
     // graph. Preflight must reject it before spending any probe quota,
     // not leave the marker to surface unsubstituted at runtime (CM1).
-    let (dir, _db, handler) = endpoint_test_handler();
+    // Inserted straight into the DB: `graph_add_node` now refuses such a
+    // template at write time, so only a pre-existing row can carry it.
+    let (dir, db, handler) = endpoint_test_handler();
     let workdir = dir.path().to_string_lossy().to_string();
     let created = handler
         .graph_create(Parameters(GraphCreateParams {
@@ -673,19 +675,18 @@ async fn graph_preflight_rejects_unknown_named_output_reference() {
         "prompt_template".to_string(),
         serde_json::Value::String("Follow the plan: {{output:Ghost}}".to_string()),
     );
-    let beta = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
-            spec_id: None,
-            graph_id: Some(graph_id.clone()),
-            name: "beta".to_string(),
-            kind: Some("agent".to_string()),
-            config: Some(beta_config),
-            blueprint: None,
-            config_overrides: None,
-        }))
-        .await
-        .unwrap();
-    let beta_id = extract_id(&beta, "node_id");
+    let beta_id = uuid::Uuid::new_v4().to_string();
+    db.insert_graph_node(&GraphNode {
+        id: beta_id.clone(),
+        spec_id: None,
+        graph_id: Some(graph_id.clone()),
+        name: "beta".to_string(),
+        kind: GraphNodeKind::Agent,
+        config: serde_json::Value::Object(beta_config),
+        position: 2,
+        created_at: chrono::Utc::now(),
+    })
+    .unwrap();
 
     let edge = handler
         .graph_add_edge(Parameters(GraphAddEdgeParams {

@@ -118,15 +118,21 @@ pub(crate) fn agent_prompt_source(config: &Value) -> &'static str {
 /// own `.replace()`-based renderers, and checks the *template* (not the
 /// rendered output) so a `{{...}}` sequence inside a bound value — a spec
 /// body, prior feedback — is treated as data, not a leftover marker.
-pub(crate) fn refuse_unbindable_template(
-    node_name: &str,
+/// The `{{...}}` markers in `template` that neither `supported` nor
+/// `{{output:<name>}}` for a name in `node_names` can bind. This is the one
+/// binding check shared by the spawn path ([`refuse_unbindable_template`]),
+/// the write-time validators (`daemon::handler_templates`) and the preflight
+/// warnings, so the three can never disagree on what is bindable — a template
+/// refused here is exactly one the spawn path would refuse member by member.
+/// Escaped `\{{...}}` markers are literal text, never hits.
+pub(crate) fn unbindable_placeholders_in(
     template: &str,
     supported: &[&str],
-    available_node_names: Option<&[String]>,
-) -> Result<()> {
+    node_names: Option<&[String]>,
+) -> Vec<String> {
     let mut extended: Vec<&str> = supported.to_vec();
     let mut owned: Vec<String> = Vec::new();
-    if let Some(node_names) = available_node_names {
+    if let Some(node_names) = node_names {
         for name in node_names {
             owned.push(format!("output:{name}"));
         }
@@ -134,7 +140,16 @@ pub(crate) fn refuse_unbindable_template(
             extended.push(s.as_str());
         }
     }
-    let unbindable = crate::domain::prompts::unbindable_placeholders(template, &extended);
+    crate::domain::prompts::unbindable_placeholders(template, &extended)
+}
+
+pub(crate) fn refuse_unbindable_template(
+    node_name: &str,
+    template: &str,
+    supported: &[&str],
+    available_node_names: Option<&[String]>,
+) -> Result<()> {
+    let unbindable = unbindable_placeholders_in(template, supported, available_node_names);
     if unbindable.is_empty() {
         return Ok(());
     }

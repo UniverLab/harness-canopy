@@ -388,6 +388,53 @@ impl TaskTriggerHandler {
             mutex: params.mutex.clone().unwrap_or_default(),
         });
 
+        // The shared prompt and every member override are refused here when
+        // they carry a placeholder nothing can bind — the write that used to
+        // be accepted and then fail member by member at spawn time. The new
+        // member and quorum nodes are already bindable: at spawn they are part
+        // of the graph's node names.
+        {
+            let scope = crate::daemon::handler_templates::TemplateScope::load(
+                &self.db,
+                built.ensemble.spec_id.as_deref(),
+                built.ensemble.graph_id.as_deref(),
+            )
+            .map_err(internal_error)?;
+            let mut node_names = scope.nodes;
+            node_names.extend(built.member_nodes.iter().map(|n| n.name.clone()));
+            node_names.push(built.join_node.name.clone());
+            let mut ensembles = scope.ensembles;
+            ensembles.push((
+                built.ensemble.name.clone(),
+                Some(built.join_node.name.clone()),
+            ));
+            let owner = format!("Ensemble '{}' shared prompt template", built.ensemble.name);
+            if let Err(e) = crate::daemon::handler_templates::check_template_bindings(
+                &owner,
+                prompt_template,
+                crate::graph_engine::AGENT_PROMPT_BINDINGS,
+                &node_names,
+                &ensembles,
+            ) {
+                return Ok(error_result(&e));
+            }
+            for (index, member) in members.iter().enumerate() {
+                if let Some(template) = member.2.as_deref() {
+                    let member_owner =
+                        format!("Ensemble '{}' member {} prompt override", name, index + 1);
+                    if let Err(e) = crate::daemon::handler_templates::check_template_bindings(
+                        &member_owner,
+                        template,
+                        crate::graph_engine::AGENT_PROMPT_BINDINGS,
+                        &node_names,
+                        &ensembles,
+                    ) {
+                        return Ok(error_result(&e));
+                    }
+                }
+            }
+        }
+
         self.db
             .insert_ensemble_unit(
                 &built.ensemble,
