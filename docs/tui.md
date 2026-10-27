@@ -201,6 +201,9 @@ line. `←`/`→` never change a value.
   `y`/`n` confirmation.
 - **Arrivals** — a file sent while the TUI runs joins the list live and
   shows a `📎` toast for five seconds.
+- **Lifetime** — a session's files are kept until 7 days after the session
+  is removed, and the whole shelf is capped at 1 GiB: when a new file
+  would exceed it, the oldest files are pruned first.
 
 ## Projects sidebar
 
