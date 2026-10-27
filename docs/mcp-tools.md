@@ -38,7 +38,7 @@ any other tool still work. All other sessions keep the full list.
 | `agent_report` | Report execution status for scheduled tasks |
 | `agent_probe` | Test platform+model liveness before graph_run |
 | `agent_probe_recent` | Sweep recently-used platform+model pairs before a run |
-| `subagent_spawn` | Launch an ephemeral subagent, asynchronously or blocking; `workdir` must exist and be a directory (its absence is refused, naming the path) |
+| `subagent_spawn` | Launch an ephemeral subagent, asynchronously or blocking; the subagent runs with the given `workdir` as its working directory (default: the caller's project), and a missing or non-directory `workdir` is refused before anything spawns, naming the path |
 | `subagent_collect` | Collect an ephemeral subagent result and mark it for cleanup |
 
 ## Multi-agent sync (4)
