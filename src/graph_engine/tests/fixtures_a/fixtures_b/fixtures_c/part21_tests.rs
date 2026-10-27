@@ -568,3 +568,129 @@ async fn the_completion_message_never_reports_fewer_done_than_total() {
         "a pending bound spec must never be counted into a completion line: {messages:?}"
     );
 }
+
+// ── A directed run keeps the verdicts it does not touch ──────────────
+//
+// `graph_continue run_from_node` / `graph_run --from` accept a `completed`
+// spec (docs/graphs.md) and start past the bound specs before their target.
+// The live pick must therefore run the target whatever its status, and must
+// not rewrite an earlier `completed` into `skipped` — that erases the
+// verdict, drops the spec out of the done count, and re-creates the
+// `Completed (n/m)` line with n < m that FR4 exists to make impossible.
+
+/// FR2/directed: the directed target runs even when its spec is already
+/// `completed` — the documented `graph_continue run_from_node` on a graph
+/// whose specs are done. Handing a completed target to the terminal skip
+/// makes the operator's directed run silently do nothing.
+#[tokio::test]
+async fn a_directed_run_at_a_completed_bound_spec_still_runs_it() {
+    let (dir, db, engine, graph_id, spec_a) = graph_fixture().unwrap();
+    let log = dir.path().join("order.log");
+    db.insert_graph_node(&record_node("a-check", &spec_a, &log, "A"))
+        .unwrap();
+
+    engine
+        .run_graph(graph_id.clone(), None, None, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        logged_lines(&log),
+        vec!["A".to_string()],
+        "the first run completes the spec"
+    );
+    assert_eq!(
+        db.get_graph_spec(&spec_a).unwrap().unwrap().status,
+        GraphSpecStatus::Completed
+    );
+
+    // The operator re-runs that same, now completed, spec from its node.
+    engine
+        .run_graph_dispatch(
+            graph_id.clone(),
+            None,
+            None,
+            DispatchMode::resume_from(DirectedStart {
+                spec_id: spec_a.clone(),
+                node_arg: "a-check".to_string(),
+            }),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        logged_lines(&log),
+        vec!["A".to_string(), "A".to_string()],
+        "the directed target must run again even though its spec is completed"
+    );
+    let lp = db.get_graph(&graph_id).unwrap().unwrap();
+    assert_eq!(
+        lp.status,
+        GraphStatus::Completed,
+        "the directed run settles the graph"
+    );
+}
+
+/// FR4: a directed run that starts past an already-`completed` bound spec
+/// keeps that spec's verdict — and the completion line keeps reporting
+/// n == m. Rewriting the earlier `completed` to `skipped` erases the
+/// completion, drops it out of `spec_progress`'s done count, and produces
+/// exactly the `Completed (n/m)` line with n < m FR4 forbids.
+#[tokio::test]
+async fn a_directed_run_keeps_an_earlier_completed_bound_spec_completed() {
+    let (dir, db, engine, graph_id, spec_a) = graph_fixture().unwrap();
+    let log = dir.path().join("order.log");
+    db.insert_graph_node(&record_node("a-check", &spec_a, &log, "A"))
+        .unwrap();
+
+    engine
+        .run_graph(graph_id.clone(), None, None, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(logged_lines(&log), vec!["A".to_string()]);
+
+    // Spec B is bound only after A completed: A already sits before the
+    // directed target and is terminal when the directed run starts.
+    let spec_b = second_spec(&graph_id, "spec-b", 2);
+    db.insert_graph_spec(&spec_b).unwrap();
+    db.insert_graph_node(&record_node("b-check", &spec_b.id, &log, "B"))
+        .unwrap();
+
+    engine
+        .run_graph_dispatch(
+            graph_id.clone(),
+            None,
+            None,
+            DispatchMode::resume_from(DirectedStart {
+                spec_id: spec_b.id.clone(),
+                node_arg: "b-check".to_string(),
+            }),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        logged_lines(&log),
+        vec!["A".to_string(), "B".to_string()],
+        "the directed target runs past the completed spec, which does not re-run"
+    );
+    let a = db.get_graph_spec(&spec_a).unwrap().unwrap();
+    assert_eq!(
+        a.status,
+        GraphSpecStatus::Completed,
+        "a completed spec before the directed target keeps its verdict"
+    );
+    let messages = activity_messages(&db, &dir.path().to_string_lossy());
+    let counts = completion_counts(&messages);
+    assert!(
+        counts.contains(&(2, 2)),
+        "the run reports every spec completed: {counts:?} / {messages:?}"
+    );
+    assert!(
+        counts.iter().all(|(done, total)| done == total),
+        "no completion line may report fewer done than total: {counts:?}"
+    );
+}

@@ -635,10 +635,11 @@ impl GraphEngine {
     }
 
     /// FR1/FR2: the next spec to run out of a live read of the graph's bound
-    /// specs (position order) — the first non-terminal one this dispatch has
-    /// not settled yet. A directed run first deals with every spec before its
-    /// target ([`Self::skip_bound_spec_before_directed`]), so the target is the
-    /// first thing that runs.
+    /// specs (position order) — the first one this dispatch has not settled
+    /// yet, skipping specs that are already terminal (announced once). A
+    /// directed run first deals with every spec before its target
+    /// ([`Self::skip_bound_spec_before_directed`]), so the target is the first
+    /// thing that runs — whatever its own status, unlike every other spec.
     fn pick_next_bound_spec(
         &self,
         ctx: &DispatchCtx<'_>,
@@ -653,6 +654,16 @@ impl GraphEngine {
                     continue;
                 }
                 *reached_directed = true;
+                // The directed target runs whatever its status: a directed run
+                // accepts a `completed` spec (`graph_continue run_from_node`,
+                // docs/graphs.md), and the queue path's resumed target runs
+                // unconditionally the same way. Falling through to the
+                // terminal skip would swallow the run the operator just asked
+                // for with an "already completed; skipping" line.
+                if settled.contains(&spec.id) {
+                    continue;
+                }
+                return Ok(Some(spec.clone()));
             }
             if settled.contains(&spec.id) {
                 continue;
@@ -671,10 +682,19 @@ impl GraphEngine {
     }
 
     /// FR2 (directed): a bound spec before the directed target does not run in
-    /// this dispatch. Announce it once and materialize it `Skipped` — the same
-    /// status the queue pick loop gives a member before its directed target.
-    /// Leaving it `Pending` would put it back at the head of the next live read
-    /// of this very dispatch, and then leave a pending spec behind at finish.
+    /// this dispatch. Announce it once and — for a spec still runnable —
+    /// materialize it `Skipped`, the same status the queue pick loop gives a
+    /// member before its directed target. A `pending` row left as-is would come
+    /// back at the head of this very dispatch's next live read and then leave a
+    /// pending spec behind at finish.
+    ///
+    /// A spec that already reached a verdict keeps it: rewriting
+    /// `completed`/`failed` to `skipped` erases the verdict and drops the spec
+    /// out of `spec_progress`'s done count, turning the completion line into
+    /// `Completed (n/m)` with n < m — the message FR4 exists to make
+    /// impossible. A stale `running` row is left alone too (the queue path
+    /// defers its strays rather than skipping them); the finish guard names it
+    /// instead of letting the graph report completion over in-flight work.
     fn skip_bound_spec_before_directed(
         &self,
         ctx: &DispatchCtx<'_>,
@@ -695,12 +715,17 @@ impl GraphEngine {
                 payload: None,
             },
         );
-        self.db.update_graph_spec_status(
-            &spec.id,
-            GraphSpecStatus::Skipped,
-            None,
-            Some(chrono::Utc::now()),
-        )?;
+        if matches!(
+            spec.status,
+            GraphSpecStatus::Pending | GraphSpecStatus::Interrupted
+        ) {
+            self.db.update_graph_spec_status(
+                &spec.id,
+                GraphSpecStatus::Skipped,
+                None,
+                Some(chrono::Utc::now()),
+            )?;
+        }
         settled.push(spec.id.clone());
         Ok(())
     }

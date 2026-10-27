@@ -607,7 +607,12 @@ is set to the start node, and the graph then runs with its normal edges,
 routers, ensembles and gates. On a queue-driven graph the chosen spec is
 what runs first: queue members before it are marked `skipped`, members
 after it run in their usual order, and any other member left `running` by a
-stale or mistaken state is reset to `pending` and left for a later run. The
+stale or mistaken state is reset to `pending` and left for a later run. On a
+graph running its own bound specs the same rule holds: bound specs before
+the chosen one are marked `skipped` — one that already `completed` or
+`failed` keeps its status, and one left `running` is named in the
+`graph_failed` event instead — the chosen spec runs first whatever its own
+status, and the bound specs after it run in their usual order. The
 per-node iteration counters restart at 1 (earlier attempts stay in the run
 history). A directed run accepts a `pending`, `running`, `interrupted`,
 `failed` or `completed` spec on a graph with no active run; a running
