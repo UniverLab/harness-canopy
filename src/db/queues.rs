@@ -569,7 +569,7 @@ impl Database {
              WHERE pm.queue_id = ?1 AND ls.status = ?2
              AND NOT EXISTS (
                  SELECT 1 FROM graph_runs lr
-                 WHERE lr.spec_id = pm.spec_id AND lr.status = 'running' AND lr.boot_id = ?3
+                 WHERE lr.spec_id = pm.spec_id AND lr.status IN ('running', 'waiting') AND lr.boot_id = ?3
              )
              ORDER BY pm.position ASC",
         )?;

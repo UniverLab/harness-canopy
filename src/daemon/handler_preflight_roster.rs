@@ -248,6 +248,7 @@ mod tests {
             created_at: now_ts,
         };
         let ensemble = Ensemble {
+            mutex: Vec::new(),
             commit_rights: false,
             id: "ens-dead".to_string(),
             spec_id: None,
@@ -323,6 +324,7 @@ mod tests {
         })
         .unwrap();
         let spec_ensemble = Ensemble {
+            mutex: Vec::new(),
             commit_rights: false,
             id: "ens-spec".to_string(),
             spec_id: Some("spec-1".to_string()),

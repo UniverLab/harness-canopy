@@ -466,6 +466,7 @@ mod tests {
             ],
             edges: vec![],
             ensembles: vec![GraphExportEnsemble {
+                mutex: Vec::new(),
                 commit_rights: false,
                 name: "Proposers".to_string(),
                 kind: None,
@@ -614,6 +615,7 @@ mod tests {
             edges: vec![],
             ensembles: vec![
                 GraphExportEnsemble {
+                    mutex: Vec::new(),
                     commit_rights: false,
                     name: "Cascade Team".to_string(),
                     kind: Some("cascade".to_string()),
@@ -632,6 +634,7 @@ mod tests {
                     crew: None,
                 },
                 GraphExportEnsemble {
+                    mutex: Vec::new(),
                     commit_rights: false,
                     name: "RR Team".to_string(),
                     kind: Some("round_robin".to_string()),
@@ -711,6 +714,7 @@ mod tests {
             ],
             edges: vec![],
             ensembles: vec![GraphExportEnsemble {
+                mutex: Vec::new(),
                 commit_rights: true,
                 name: "Committer".to_string(),
                 kind: Some("cascade".to_string()),
@@ -854,6 +858,7 @@ mod tests {
             }],
             ensembles: vec![
                 GraphExportEnsemble {
+                    mutex: Vec::new(),
                     commit_rights: true,
                     name: "Alpha".to_string(),
                     kind: Some("cascade".to_string()),
@@ -892,6 +897,7 @@ mod tests {
                     crew: None,
                 },
                 GraphExportEnsemble {
+                    mutex: Vec::new(),
                     commit_rights: false,
                     name: "Beta".to_string(),
                     kind: Some("round_robin".to_string()),
@@ -1064,6 +1070,7 @@ mod tests {
             ],
             edges: vec![],
             ensembles: vec![GraphExportEnsemble {
+                mutex: Vec::new(),
                 commit_rights: false,
                 name: "Proposers".to_string(),
                 kind: None,
@@ -1221,6 +1228,7 @@ mod tests {
             ("B", EnsembleKind::Cascade, 20, Some("joinA")),
         ] {
             let ensemble = Ensemble {
+                mutex: Vec::new(),
                 id: format!("ens{suffix}"),
                 spec_id: None,
                 graph_id: Some("graph-1".to_string()),

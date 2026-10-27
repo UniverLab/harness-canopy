@@ -290,6 +290,7 @@ pub(super) fn export_one_ensemble(
         quorum_grace_minutes: ensemble.quorum_grace_minutes,
         crew,
         members,
+        mutex: ensemble.mutex.clone(),
     })
 }
 
@@ -431,7 +432,7 @@ pub(super) fn edge_sort_key(edge: &GraphExportEdge) -> String {
 /// (decision 6).
 pub fn parse_export_document_value(value: &Value) -> Result<GraphExportDocument, String> {
     match value.get("format_version").and_then(Value::as_i64) {
-        Some(version) if (1..=5).contains(&version) => {}
+        Some(version) if (1..=6).contains(&version) => {}
         Some(other) => {
             return Err(format!(
                 "Graph export document has format_version {other}, but this build only supports 1 through {GRAPH_EXPORT_FORMAT_VERSION}."

@@ -4,6 +4,7 @@ use rusqlite::{Connection, OptionalExtension};
 use super::{Database, SCHEMA_VERSION};
 
 mod late;
+mod mutex_schema;
 
 impl Database {
     /// Refuses to open a database stamped with a schema version newer than
@@ -447,7 +448,8 @@ impl Database {
                         'node_started','node_finished',
                         'hook_fired',
                         'config_changed',
-                        'note'
+                        'note',
+                        'mutex_waiting','mutex_acquired'
                     )),
                 message TEXT NOT NULL,
                 payload TEXT,

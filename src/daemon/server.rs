@@ -89,6 +89,7 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
 
     reconcile_orphaned_graphs_on_startup(&db, &data_dir);
     reconcile_stranded_queue_specs_on_startup(&db);
+    reconcile_mutex_leases_on_startup(&db);
     // CT28: drop live-output chunks whose run is finished — leftovers from a
     // crash, since completion paths delete their own chunks.
     if let Err(e) = db.delete_graph_run_output_for_non_running() {
@@ -192,6 +193,23 @@ fn reconcile_stranded_queue_specs_on_startup(db: &Database) {
         }
         Ok(_) => {}
         Err(e) => tracing::error!("Failed to reconcile stranded queue specs: {}", e),
+    }
+}
+
+/// Startup reconciliation 3/3: mutex leases a previous daemon left behind.
+/// Runs after the graph reconciliations above (which finalize the dangling
+/// runs whose leases this then frees).
+fn reconcile_mutex_leases_on_startup(db: &Database) {
+    match db.reconcile_mutex_leases() {
+        Ok((leases, waiters)) if leases > 0 || waiters > 0 => {
+            tracing::warn!(
+                "Reconciled {} stale mutex lease(s) and {} orphaned waiter(s) left by a previous daemon",
+                leases,
+                waiters
+            );
+        }
+        Ok(_) => {}
+        Err(e) => tracing::error!("Failed to reconcile mutex leases: {}", e),
     }
 }
 

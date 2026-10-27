@@ -1,7 +1,7 @@
 use super::*;
 
 impl Database {
-    /// Node runs still `running` for a graph.
+    /// Node runs still `running` (or `waiting` for a mutex) for a graph.
     pub fn list_running_graph_runs(&self, graph_id: &str) -> Result<Vec<GraphNodeRun>> {
         let conn = self
             .conn
@@ -9,7 +9,7 @@ impl Database {
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
             "SELECT id, graph_id, spec_id, node_id, status, input, output, started_at, completed_at, iteration, pid, boot_id, session_id, executed_platform, executed_model
-             FROM graph_runs WHERE graph_id = ?1 AND status = 'running'",
+             FROM graph_runs WHERE graph_id = ?1 AND status IN ('running', 'waiting')",
         )?;
         let rows = stmt.query_map(params![graph_id], map_graph_run_row)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -97,7 +97,7 @@ impl Database {
             let dangling_runs: Vec<GraphNodeRun> = {
                 let mut stmt = tx.prepare(
                     "SELECT id, graph_id, spec_id, node_id, status, input, output, started_at, completed_at, iteration, pid, boot_id, session_id, executed_platform, executed_model
-                      FROM graph_runs WHERE graph_id = ?1 AND status = 'running'",
+                      FROM graph_runs WHERE graph_id = ?1 AND status IN ('running', 'waiting')",
                 )?;
                 let rows = stmt.query_map(params![lp.id], map_graph_run_row)?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()?
@@ -205,6 +205,9 @@ impl Database {
                 run.id,
             ],
         )?;
+        // The dead run's mutex leases die with it (this raw UPDATE bypasses
+        // `update_graph_run_result`'s own release).
+        Self::release_mutexes_locked(tx, &run.id)?;
         Self::mark_spec_interrupted(tx, &run.spec_id)?;
         Ok(())
     }
@@ -357,7 +360,7 @@ impl Database {
                      AND NOT EXISTS (
                          SELECT 1 FROM graph_runs lr
                          WHERE lr.spec_id = pm.spec_id
-                         AND lr.status = 'running'
+                         AND lr.status IN ('running', 'waiting')
                          AND lr.boot_id = ?3
                      )
                      ORDER BY pm.position ASC",
@@ -425,7 +428,7 @@ impl Database {
         let stale_run: Option<(String, Option<i64>, Option<String>)> = tx
             .query_row(
                 "SELECT id, pid, boot_id FROM graph_runs
-                 WHERE spec_id = ?1 AND status = 'running'
+                 WHERE spec_id = ?1 AND status IN ('running', 'waiting')
                  ORDER BY started_at DESC LIMIT 1",
                 params![spec_id],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -466,6 +469,7 @@ impl Database {
                         run_id,
                     ],
                 )?;
+                Self::release_mutexes_locked(tx, &run_id)?;
             }
         }
 

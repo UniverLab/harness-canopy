@@ -179,6 +179,11 @@ pub struct Ensemble {
     /// per-member flag is deliberately never stored: the right belongs to
     /// the role (the ensemble), not to whichever CLI happens to fill it.
     pub commit_rights: bool,
+    /// Named mutexes (e.g. `["cpu"]`) held per member run: every member run
+    /// acquires the union of these and its node's own `mutex` before it
+    /// executes. Empty means none.
+    #[serde(default)]
+    pub mutex: Vec<String>,
     pub created_at: DateTime<Utc>,
     /// CM49: the crew this ensemble is bound to, by id — the join key every
     /// binding query uses. `None` means literal members (or a pending import

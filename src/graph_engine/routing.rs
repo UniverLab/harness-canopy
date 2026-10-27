@@ -83,7 +83,7 @@ pub(crate) fn select_next_step(
                     || edge.condition == GraphEdgeCondition::Always
             }
             GraphRunStatus::Error => edge.condition == GraphEdgeCondition::Error,
-            GraphRunStatus::Running => false,
+            GraphRunStatus::Running | GraphRunStatus::Waiting => false,
         })
         .collect::<Vec<_>>();
 
@@ -661,7 +661,7 @@ pub(crate) fn should_advance_to_next_spec(node: &GraphNode, status: GraphRunStat
     let route_key = match status {
         GraphRunStatus::Pass => "pass_route",
         GraphRunStatus::Fail | GraphRunStatus::Interrupted => "fail_route",
-        GraphRunStatus::Running | GraphRunStatus::Error => return false,
+        GraphRunStatus::Running | GraphRunStatus::Waiting | GraphRunStatus::Error => return false,
     };
 
     node.kind == GraphNodeKind::Gate

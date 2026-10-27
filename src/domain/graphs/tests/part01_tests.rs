@@ -87,6 +87,7 @@ fn graph_node_kind_display_str() {
 #[test]
 fn ensemble_straggler_timeout_defaults_to_member_timeout() {
     let ensemble = super::Ensemble {
+        mutex: Vec::new(),
         commit_rights: false,
         id: "ens1".to_string(),
         spec_id: Some("spec1".to_string()),
@@ -125,6 +126,7 @@ fn ensemble_straggler_timeout_defaults_to_member_timeout() {
 #[test]
 fn ensemble_quorum_grace_none_by_default() {
     let ensemble = super::Ensemble {
+        mutex: Vec::new(),
         commit_rights: false,
         id: "ens1".to_string(),
         spec_id: Some("spec1".to_string()),

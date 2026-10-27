@@ -570,6 +570,7 @@ async fn graph_delete_node_refuses_extra_entry_source() {
 
     let added = handler
         .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+            mutex: None,
             ensemble_id: ensemble_id.clone(),
             kind: None,
             prompt_template: None,
@@ -690,6 +691,7 @@ async fn after_remove_entry_from_primary_repoints_and_allows_deletion() {
 
     let added = handler
         .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+            mutex: None,
             ensemble_id: ensemble_id.clone(),
             kind: None,
             prompt_template: None,
@@ -718,6 +720,7 @@ async fn after_remove_entry_from_primary_repoints_and_allows_deletion() {
 
     let detached = handler
         .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+            mutex: None,
             ensemble_id: ensemble_id.clone(),
             kind: None,
             prompt_template: None,

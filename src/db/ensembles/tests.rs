@@ -130,6 +130,7 @@ fn insert_cb52_ensemble(db: &Database) {
         condition: GraphEdgeCondition::Fail,
     });
     let ensemble = Ensemble {
+        mutex: Vec::new(),
         commit_rights: false,
         id: "ens1".to_string(),
         spec_id: Some("spec-1".to_string()),

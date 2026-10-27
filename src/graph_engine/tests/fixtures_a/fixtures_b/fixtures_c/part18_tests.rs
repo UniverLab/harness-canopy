@@ -1363,3 +1363,46 @@ async fn agent_stdout_trim_matches_previous_semantics() {
         "trailing whitespace is trimmed, as before"
     );
 }
+
+/// Invalid mutex names on a node config are refused naming the node and the
+/// value — uppercase, leading digits, bad characters, and empties alike —
+/// while valid lists (and an absent key) pass.
+#[test]
+fn invalid_mutex_names_node_refused_naming_node_and_value() {
+    use crate::daemon::handler_validate::validate_node_mutex_config;
+
+    for bad in [
+        "CPU",
+        "9lives",
+        "has space",
+        "under_score",
+        "",
+        "way-too-long-resource-name-for-a-mutex",
+    ] {
+        let config = serde_json::json!({
+            "command": "true",
+            "success_condition": "exit_code_0",
+            "mutex": [bad],
+        });
+        let err = validate_node_mutex_config("gates", &config).unwrap_err();
+        assert!(
+            err.contains("gates") && err.contains(bad),
+            "refusal must name the node and the value: {err}"
+        );
+    }
+    // A misshaped `mutex` (not a list of strings) is refused the same way.
+    let err =
+        validate_node_mutex_config("gates", &serde_json::json!({"mutex": "cpu"})).unwrap_err();
+    assert!(err.contains("gates"), "refusal must name the node: {err}");
+
+    // Valid names pass, alone and combined; absent stays valid.
+    for good in [
+        serde_json::json!({"mutex": ["cpu"]}),
+        serde_json::json!({"mutex": ["cpu", "gpu-1", "a", "z9-0-x"]}),
+        serde_json::json!({"mutex": []}),
+        serde_json::json!({}),
+    ] {
+        validate_node_mutex_config("gates", &good)
+            .unwrap_or_else(|err| panic!("valid mutex config refused: {err}"));
+    }
+}

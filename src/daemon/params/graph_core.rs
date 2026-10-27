@@ -524,6 +524,10 @@ pub struct GraphAddEnsembleParams {
     /// members become this ensemble's members, and later `crew_update` calls
     /// reach it at its next dispatch.
     pub crew: Option<String>,
+    /// Named mutexes (e.g. `["cpu"]`) every member run holds while it
+    /// executes — one member run per resource at a time across all graphs.
+    /// Each name must match `^[a-z][a-z0-9-]{0,31}$`. Omit for none.
+    pub mutex: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -592,6 +596,9 @@ pub struct GraphUpdateEnsembleParams {
     pub remove_entry_from: Option<String>,
     /// New commit_rights value, or omit to leave unchanged.
     pub commit_rights: Option<bool>,
+    /// New named mutex list (`["cpu"]`), `[]` to clear, or omit to leave
+    /// unchanged. Each name must match `^[a-z][a-z0-9-]{0,31}$`.
+    pub mutex: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]

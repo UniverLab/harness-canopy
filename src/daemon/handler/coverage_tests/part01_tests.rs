@@ -332,6 +332,7 @@ fn run_json_fail() {
 fn ensemble_json_full() {
     let details = EnsembleDetails {
         ensemble: Ensemble {
+            mutex: Vec::new(),
             commit_rights: false,
             id: "ens1".into(),
             spec_id: Some("s1".into()),
@@ -405,6 +406,7 @@ fn ensemble_json_full() {
 fn ensemble_json_no_straggler() {
     let details = EnsembleDetails {
         ensemble: Ensemble {
+            mutex: Vec::new(),
             commit_rights: false,
             id: "ens2".into(),
             spec_id: None,
@@ -669,6 +671,7 @@ fn ensemble_unit_with_fail_to() {
         ),
     ];
     let built = build_ensemble_unit(&EnsembleUnitSpec {
+        mutex: Vec::new(),
         spec_id: Some("s1".into()),
         graph_id: None,
         name: "failing",
@@ -705,6 +708,7 @@ fn ensemble_unit_with_fail_to() {
 fn ensemble_unit_no_fail_to() {
     let members = vec![("claude".into(), None, None, None, None, None, None)];
     let built = build_ensemble_unit(&EnsembleUnitSpec {
+        mutex: Vec::new(),
         spec_id: None,
         graph_id: Some("l1".into()),
         name: "no-fail",
@@ -744,6 +748,7 @@ fn ensemble_unit_positions_sequential() {
         ("p3".into(), None, None, None, None, None, None),
     ];
     let built = build_ensemble_unit(&EnsembleUnitSpec {
+        mutex: Vec::new(),
         spec_id: None,
         graph_id: Some("l1".into()),
         name: "pos",

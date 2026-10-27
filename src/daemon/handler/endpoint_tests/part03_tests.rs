@@ -149,6 +149,7 @@ async fn graph_export_import_v2_round_trip_preserves_ensemble() {
 
     let ensemble = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: None,
             graph_id: Some(graph_id.clone()),
@@ -322,6 +323,7 @@ async fn graph_export_import_round_trip_preserves_all_ensemble_kinds() {
 
     let cascade = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: None,
             graph_id: Some(graph_id.clone()),
@@ -370,6 +372,7 @@ async fn graph_export_import_round_trip_preserves_all_ensemble_kinds() {
 
     let round_robin = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: None,
             graph_id: Some(graph_id.clone()),
@@ -417,6 +420,7 @@ async fn graph_export_import_round_trip_preserves_all_ensemble_kinds() {
 
     let second_source = handler
         .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+            mutex: None,
             ensemble_id: cascade_id.clone(),
             kind: None,
             prompt_template: None,
@@ -550,6 +554,7 @@ async fn graph_export_import_round_trip_preserves_ensemble_commit_rights() {
 
     let ensemble = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: Some(true),
             spec_id: None,
             graph_id: Some(graph_id.clone()),
@@ -1062,6 +1067,7 @@ async fn graph_preflight_quiet_with_on_fail_to() {
 
     let updated = handler
         .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+            mutex: None,
             ensemble_id: ensemble_id.clone(),
             kind: None,
             prompt_template: None,
@@ -1164,6 +1170,7 @@ async fn graph_preflight_warns_spec_quorum_without_fail_exit() {
 
     let added = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Implementer".to_string(),

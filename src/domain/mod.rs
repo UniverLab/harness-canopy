@@ -38,6 +38,7 @@ pub mod subagent_mcp;
 pub mod sync;
 pub mod usage_stats;
 pub mod validation;
+pub mod validation_mutex;
 
 #[cfg(test)]
 mod domain_tests;

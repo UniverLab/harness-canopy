@@ -60,6 +60,8 @@ pub fn validate_watch_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub use super::validation_mutex::validate_mutex_list;
+
 /// Returns `Err` when `min_pass` is out of the [1, member_count] range.
 /// Applies to every ensemble kind. Used by every write site so the writer
 /// and the importer (`graph_transfer.rs`) cannot drift apart.

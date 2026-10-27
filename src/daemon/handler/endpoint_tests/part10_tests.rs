@@ -1135,6 +1135,7 @@ async fn graph_add_ensemble_with_cascade_kind_rejects_single_member() {
 
     let result = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
@@ -1189,6 +1190,7 @@ async fn graph_add_ensemble_with_parallel_kind_rejects_single_member() {
 
     let result = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
@@ -1237,6 +1239,7 @@ async fn graph_add_ensemble_rejects_straggler_timeout_on_cascade() {
 
     let result = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
@@ -1301,6 +1304,7 @@ async fn graph_update_ensemble_rejects_quorum_grace_on_round_robin() {
 
     let created = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
@@ -1348,6 +1352,7 @@ async fn graph_update_ensemble_rejects_quorum_grace_on_round_robin() {
 
     let result = handler
         .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+            mutex: None,
             commit_rights: None,
             ensemble_id: ensemble_id.clone(),
             kind: None,

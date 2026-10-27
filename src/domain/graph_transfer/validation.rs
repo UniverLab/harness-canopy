@@ -5,7 +5,7 @@ use super::*;
 /// A missing/unsupported `format_version` is refused with its own clear
 /// message rather than falling through to a generic serde error (decision 6).
 pub(super) fn ensure_import_format_version(document: &GraphExportDocument) -> Result<(), String> {
-    if !matches!(document.format_version, 1..=5) {
+    if !matches!(document.format_version, 1..=6) {
         return Err(format!(
             "Graph export document has format_version {}, but this build only supports 1 through {}.",
             document.format_version, GRAPH_EXPORT_FORMAT_VERSION
@@ -173,7 +173,10 @@ pub(super) fn validate_import_ensemble_shape(
             ));
         }
     }
-    Ok(())
+    crate::domain::validation::validate_mutex_list(
+        &format!("Ensemble '{}'", doc_ensemble.name),
+        Some(doc_ensemble.mutex.as_slice()),
+    )
 }
 
 /// Names of every agent node (plain or ensemble member) left without a

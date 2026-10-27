@@ -303,6 +303,7 @@ impl TaskTriggerHandler {
         router.merge(TaskTriggerHandler::tool_router_nodes());
         router.merge(TaskTriggerHandler::tool_router_notes());
         router.merge(TaskTriggerHandler::tool_router_roster());
+        router.merge(TaskTriggerHandler::tool_router_mutex());
         router.merge(TaskTriggerHandler::tool_router_crew());
         router.merge(TaskTriggerHandler::tool_router_edges());
         router.merge(TaskTriggerHandler::tool_router_ensemble_core());

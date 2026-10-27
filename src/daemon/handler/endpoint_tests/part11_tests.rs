@@ -11,6 +11,7 @@ async fn graph_update_ensemble_switching_to_cascade_clears_stale_straggler_and_g
 
     let created = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
@@ -58,6 +59,7 @@ async fn graph_update_ensemble_switching_to_cascade_clears_stale_straggler_and_g
 
     let updated = handler
         .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+            mutex: None,
             commit_rights: None,
             ensemble_id: ensemble_id.clone(),
             kind: Some("cascade".to_string()),
@@ -109,6 +111,7 @@ async fn graph_update_ensemble_can_change_kind() {
 
     let created = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
@@ -156,6 +159,7 @@ async fn graph_update_ensemble_can_change_kind() {
 
     let updated = handler
         .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+            mutex: None,
             commit_rights: None,
             ensemble_id: ensemble_id.clone(),
             kind: Some("cascade".to_string()),
@@ -214,6 +218,7 @@ async fn graph_update_ensemble_refuses_round_robin_to_parallel_above_eight() {
         .collect();
     let created = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
@@ -294,6 +299,7 @@ async fn graph_add_ensemble_blueprint_members_enforce_requested_kind_bounds() {
 
     let refused = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
@@ -329,6 +335,7 @@ async fn graph_add_ensemble_blueprint_members_enforce_requested_kind_bounds() {
 
     let accepted = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
@@ -381,6 +388,7 @@ async fn graph_update_ensemble_kind_plus_shrink_uses_resulting_count() {
         .collect();
     let created = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,

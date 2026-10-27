@@ -28,7 +28,7 @@ pub(crate) use crate::daemon::handler_ensemble_plan::{
 impl TaskTriggerHandler {
     #[tool(
         name = "graph_add_ensemble",
-        description = "Create an ensemble in ONE call: N (2–8 parallel, 2–16 cascade/round_robin) agent-node members sharing one prompt by default, plus the quorum that waits for all of them, consolidates their outputs (attributed per member), and routes onward. Set `commit_rights: true` to make this ensemble the graph's designated committer (B37) — whichever member the running strategy dispatches becomes the committer for that run. Members differ by platform/model, and each may set its own prompt_override to review the same input from a different angle instead of sharing the template. Each member may also set its own timeout_minutes, overriding the ensemble's shared value for that member only. Each member (and the ensemble as a whole) may also set `infra_retry_limit`/`infra_crash_max_seconds`/`infra_backoff_seconds`, overriding the platform's config.toml value (then the engine default 2/60/30) for the infra-crash retry budget — member wins over ensemble. (Formerly called 'fusion' — retired to avoid colliding with OpenRouter's fusion technology.) on_pass_to/on_fail_to accept a node id or another ensemble's id (chained: the quorum fans out to every member of that ensemble, no intermediate node). Entry rewiring, extra entry sources, and deletion are graph_update_ensemble/graph_delete_ensemble. Pass `crew` to bind an existing crew's ordered members instead of a literal `members` list (mutually exclusive with `members`/blueprint members); later crew edits reach this ensemble at its next dispatch."
+        description = "Create an ensemble in ONE call: N (2–8 parallel, 2–16 cascade/round_robin) agent-node members sharing one prompt by default, plus the quorum that waits for all of them, consolidates their outputs (attributed per member), and routes onward. Set `commit_rights: true` to make this ensemble the graph's designated committer (B37) — whichever member the running strategy dispatches becomes the committer for that run. Members differ by platform/model, and each may set its own prompt_override to review the same input from a different angle instead of sharing the template. Each member may also set its own timeout_minutes, overriding the ensemble's shared value for that member only. Each member (and the ensemble as a whole) may also set `infra_retry_limit`/`infra_crash_max_seconds`/`infra_backoff_seconds`, overriding the platform's config.toml value (then the engine default 2/60/30) for the infra-crash retry budget — member wins over ensemble. (Formerly called 'fusion' — retired to avoid colliding with OpenRouter's fusion technology.) on_pass_to/on_fail_to accept a node id or another ensemble's id (chained: the quorum fans out to every member of that ensemble, no intermediate node). Entry rewiring, extra entry sources, and deletion are graph_update_ensemble/graph_delete_ensemble. Pass `crew` to bind an existing crew's ordered members instead of a literal `members` list (mutually exclusive with `members`/blueprint members); later crew edits reach this ensemble at its next dispatch. Pass `mutex` (e.g. [\"cpu\"]) to hold named shared resources for every member run."
     )]
     pub(crate) async fn graph_add_ensemble(
         &self,
@@ -293,6 +293,12 @@ impl TaskTriggerHandler {
         {
             return Ok(error_result(&e));
         }
+        if let Err(e) = crate::domain::validation::validate_mutex_list(
+            &format!("Ensemble '{name}'"),
+            params.mutex.as_deref(),
+        ) {
+            return Ok(error_result(&e));
+        }
         let timeout_minutes = default_member_timeout(&graphs, params.timeout_minutes);
         if timeout_minutes < 0 {
             return Ok(error_result("timeout_minutes must not be negative."));
@@ -379,6 +385,7 @@ impl TaskTriggerHandler {
             start_position,
             kind,
             commit_rights: params.commit_rights.unwrap_or(false),
+            mutex: params.mutex.clone().unwrap_or_default(),
         });
 
         self.db

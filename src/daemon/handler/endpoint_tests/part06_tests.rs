@@ -110,6 +110,7 @@ async fn graph_add_ensemble_happy_path_and_validation_errors() {
 
     let created = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
@@ -139,6 +140,7 @@ async fn graph_add_ensemble_happy_path_and_validation_errors() {
 
     let missing_prompt = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
@@ -168,6 +170,7 @@ async fn graph_add_ensemble_happy_path_and_validation_errors() {
 
     let bad_min_pass = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
@@ -197,6 +200,7 @@ async fn graph_add_ensemble_happy_path_and_validation_errors() {
 
     let unknown_entry = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
@@ -226,6 +230,7 @@ async fn graph_add_ensemble_happy_path_and_validation_errors() {
 
     let too_few_members = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id),
             graph_id: None,
@@ -282,6 +287,7 @@ async fn graph_add_ensemble_rejects_interactive_only_member() {
 
     let rejected = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
@@ -337,6 +343,7 @@ async fn graph_add_ensemble_rejects_negative_quorum_grace() {
 
     let negative = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
@@ -370,6 +377,7 @@ async fn graph_add_ensemble_rejects_negative_quorum_grace() {
 
     let immediate = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
@@ -421,6 +429,7 @@ async fn graph_update_ensemble_sets_and_clears_quorum_grace() {
     };
     let created = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,

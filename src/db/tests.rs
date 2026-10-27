@@ -451,6 +451,7 @@ fn find_matching_paren(s: &str, open_pos: usize) -> usize {
 mod graph_crew_tests;
 #[cfg(test)]
 mod hooks_tests;
+mod mutex_tests;
 mod part01_tests;
 mod part02_tests;
 mod part03_tests;

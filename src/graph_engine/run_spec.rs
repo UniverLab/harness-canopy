@@ -536,7 +536,13 @@ impl GraphEngine {
         execution: NodeExecution,
         run: &GraphNodeRun,
     ) -> Result<NodeExecution> {
-        if run.status == GraphRunStatus::Running {
+        // `Waiting` finalizes like `Running`: the gate settles a refused wait
+        // itself, so reaching here still waiting means its write failed — the
+        // execution in hand (a refused-wait Fail) is still the right verdict.
+        if matches!(
+            run.status,
+            GraphRunStatus::Running | GraphRunStatus::Waiting
+        ) {
             self.db.update_graph_run_result(
                 run_id,
                 execution.status,

@@ -45,6 +45,7 @@ fn import_plan_rejects_negative_quorum_grace() {
         ],
         edges: vec![],
         ensembles: vec![GraphExportEnsemble {
+            mutex: Vec::new(),
             commit_rights: false,
             name: "team".to_string(),
             kind: None,
@@ -111,6 +112,7 @@ fn import_plan_round_trips_quorum_grace_minutes() {
         ],
         edges: vec![],
         ensembles: vec![GraphExportEnsemble {
+            mutex: Vec::new(),
             commit_rights: false,
             name: "team".to_string(),
             kind: None,
@@ -175,6 +177,7 @@ fn import_plan_bakes_member_timeout_override_into_node_config() {
         ],
         edges: vec![],
         ensembles: vec![GraphExportEnsemble {
+            mutex: Vec::new(),
             commit_rights: false,
             name: "team".to_string(),
             kind: None,
@@ -668,6 +671,7 @@ fn import_rejects_unknown_ensemble_kind() {
         ],
         edges: vec![],
         ensembles: vec![GraphExportEnsemble {
+            mutex: Vec::new(),
             commit_rights: false,
             name: "Reviewers".to_string(),
             kind: Some("hyper".to_string()),
@@ -817,4 +821,131 @@ fn import_refuses_ensemble_without_crew_or_members_naming_it() {
     let err = build_import_plan(&document, "new-graph").unwrap_err();
     assert!(err.contains("Orphan"), "err must name the ensemble: {err}");
     assert!(err.contains("2-8 members"), "unexpected error: {err}");
+}
+
+/// A node's `mutex` config and an ensemble's `mutex` list survive an
+/// export/import round trip, and the exporter stamps `format_version: 6`.
+#[test]
+fn round_trip_keeps_mutex() {
+    let lp = make_graph("mutex-graph");
+    let kickoff = make_node(
+        "kickoff",
+        "kickoff",
+        GraphNodeKind::Check,
+        serde_json::json!({
+            "command": "cargo test --workspace",
+            "success_condition": "exit_code_0",
+            "mutex": ["cpu"],
+        }),
+        1,
+    );
+    let downstream = make_node(
+        "downstream",
+        "downstream",
+        GraphNodeKind::Agent,
+        serde_json::json!({"platform": "claude", "prompt_template": "wrap up"}),
+        10,
+    );
+    let member1 = make_node(
+        "m1",
+        "Proposers [1]",
+        GraphNodeKind::Agent,
+        serde_json::json!({"platform": "openrouter", "model": "model-0", "prompt_template": "draft it", "timeout_minutes": 30}),
+        2,
+    );
+    let member2 = make_node(
+        "m2",
+        "Proposers [2]",
+        GraphNodeKind::Agent,
+        serde_json::json!({"platform": "openrouter", "model": "model-1", "prompt_template": "draft it", "timeout_minutes": 30}),
+        3,
+    );
+    let join = make_node(
+        "join1",
+        "Proposers (quorum)",
+        GraphNodeKind::Join,
+        serde_json::json!({"ensemble_id": "ens1"}),
+        4,
+    );
+    let nodes = vec![kickoff, downstream, member1, member2, join];
+    let edges = vec![
+        make_edge("e1", "kickoff", "m1", GraphEdgeCondition::Always),
+        make_edge("e2", "kickoff", "m2", GraphEdgeCondition::Always),
+        make_edge("e3", "m1", "join1", GraphEdgeCondition::Always),
+        make_edge("e4", "m2", "join1", GraphEdgeCondition::Always),
+        make_edge("e5", "join1", "downstream", GraphEdgeCondition::Pass),
+    ];
+    let mut details =
+        make_ensemble_details("ens1", "join1", "kickoff", "downstream", &["m1", "m2"]);
+    details.ensemble.mutex = vec!["gpu".to_string()];
+
+    let doc = build_export_document(&lp, &nodes, &edges, &[details]).unwrap();
+    assert_eq!(doc.format_version, GRAPH_EXPORT_FORMAT_VERSION);
+    assert_eq!(doc.format_version, 6);
+    let exported_node = doc.nodes.iter().find(|n| n.name == "kickoff").unwrap();
+    assert_eq!(exported_node.config["mutex"], serde_json::json!(["cpu"]));
+    assert_eq!(doc.ensembles.len(), 1);
+    assert_eq!(doc.ensembles[0].mutex, vec!["gpu".to_string()]);
+
+    let plan = build_import_plan(&doc, "graph-2").unwrap();
+    let imported_node = plan.nodes.iter().find(|n| n.name == "kickoff").unwrap();
+    assert_eq!(imported_node.config["mutex"], serde_json::json!(["cpu"]));
+    assert_eq!(plan.ensembles.len(), 1);
+    assert_eq!(plan.ensembles[0].ensemble.mutex, vec!["gpu".to_string()]);
+}
+
+/// A `format_version: 5` document — written before ensembles carried
+/// `mutex` — still imports, with the field treated as absent.
+#[test]
+fn v5_document_imports_without_mutex() {
+    let raw = serde_json::json!({
+        "format_version": 5,
+        "name": "old-graph",
+        "description": null,
+        "hooks": {},
+        "infra_node": null,
+        "nodes": [
+            {
+                "name": "kickoff",
+                "kind": "check",
+                "position": 1,
+                "config": {"command": "true"},
+            },
+            {
+                "name": "next",
+                "kind": "check",
+                "position": 2,
+                "config": {"command": "true"},
+            },
+        ],
+        "edges": [],
+        "ensembles": [
+            {
+                "name": "team",
+                "kind": "parallel",
+                "commit_rights": false,
+                "prompt_template": "go",
+                "entry_from_node": "kickoff",
+                "entry_condition": "always",
+                "extra_entry_sources": [],
+                "on_pass_to": "next",
+                "on_fail_to": null,
+                "min_pass": 1,
+                "timeout_minutes": 30,
+                "straggler_timeout_minutes": null,
+                "quorum_grace_minutes": null,
+                "crew": null,
+                "members": [
+                    {"platform": "claude", "model": null, "prompt_override": null, "timeout_minutes": null},
+                    {"platform": "codex", "model": null, "prompt_override": null, "timeout_minutes": null},
+                ],
+            },
+        ],
+    });
+    let doc: GraphExportDocument =
+        serde_json::from_value(raw).expect("a v5 document parses without mutex");
+    assert!(doc.ensembles[0].mutex.is_empty());
+    let plan = build_import_plan(&doc, "graph-2").unwrap();
+    assert_eq!(plan.ensembles.len(), 1);
+    assert!(plan.ensembles[0].ensemble.mutex.is_empty());
 }

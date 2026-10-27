@@ -113,8 +113,9 @@ impl Database {
         active_graph_run_for_spec_locked(&conn, spec_id).map_err(Into::into)
     }
 
-    /// Every node run still `running` across every graph — used at daemon
-    /// shutdown to terminate every process this boot owns before exiting.
+    /// Every node run still `running` (or `waiting` for a mutex) across
+    /// every graph — used at daemon shutdown to terminate every process this
+    /// boot owns before exiting.
     pub fn list_all_running_graph_runs(&self) -> Result<Vec<GraphNodeRun>> {
         let conn = self
             .conn
@@ -122,7 +123,7 @@ impl Database {
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
             "SELECT id, graph_id, spec_id, node_id, status, input, output, started_at, completed_at, iteration, pid, boot_id, session_id, executed_platform, executed_model
-             FROM graph_runs WHERE status = 'running'",
+             FROM graph_runs WHERE status IN ('running', 'waiting')",
         )?;
         let rows = stmt.query_map(params![], map_graph_run_row)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -266,7 +267,7 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT id, graph_id, spec_id, node_id, status, input, output, started_at, completed_at, iteration, pid, boot_id, session_id, executed_platform, executed_model
              FROM graph_runs
-             WHERE node_id = ?1 AND status = 'running'
+             WHERE node_id = ?1 AND status IN ('running', 'waiting')
              ORDER BY started_at DESC
              LIMIT 1",
         )?;
@@ -301,11 +302,23 @@ impl Database {
                 run_id,
             ],
         )?;
+        // A terminal run holds no mutex: release its leases (and drop its
+        // queue entry) in the same locked write, so no waiter can observe the
+        // run ended but the resource still held.
+        let terminal = !matches!(status, GraphRunStatus::Running | GraphRunStatus::Waiting);
+        if terminal && rows > 0 {
+            Self::release_mutexes_locked(&conn, run_id)?;
+        }
+        drop(conn);
+        if terminal && rows > 0 {
+            self.notify_mutex_waiters();
+        }
         Ok(rows > 0)
     }
 
-    /// Mark a running node run as interrupted by an operator. Does NOT kill
-    /// the process — the caller is responsible for termination.
+    /// Mark a running (or mutex-waiting) node run as interrupted by an
+    /// operator. Does NOT kill the process — the caller is responsible for
+    /// termination. Releases the run's mutex leases, if any.
     pub fn interrupt_graph_run(&self, run_id: &str, reason: &str) -> Result<bool> {
         let conn = self
             .conn
@@ -317,7 +330,7 @@ impl Database {
                  output = ?2,
                  completed_at = ?3,
                  pid = NULL
-             WHERE id = ?4 AND status = 'running'",
+             WHERE id = ?4 AND status IN ('running', 'waiting')",
             params![
                 GraphRunStatus::Interrupted.as_str(),
                 serde_json::to_string(&serde_json::json!({
@@ -328,6 +341,13 @@ impl Database {
                 run_id,
             ],
         )?;
+        if rows > 0 {
+            Self::release_mutexes_locked(&conn, run_id)?;
+        }
+        drop(conn);
+        if rows > 0 {
+            self.notify_mutex_waiters();
+        }
         Ok(rows > 0)
     }
 

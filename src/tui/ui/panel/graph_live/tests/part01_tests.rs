@@ -9,6 +9,7 @@ fn running_graph_renders_header_queue_graph_and_footer_with_current_node_highlig
         started_at: state.current_node_started_at,
         iteration: state.current_node_iteration,
         chosen_route: None,
+        waiting_for: Vec::new(),
     };
 
     let text = render_to_text(80, 40, |frame, area| {
@@ -68,6 +69,7 @@ fn manual_selection_switches_footer_to_the_picked_node() {
         started_at: Some(Utc::now() - chrono::Duration::seconds(10)),
         iteration: Some(1),
         chosen_route: None,
+        waiting_for: Vec::new(),
     };
     let text = render_to_text(80, 40, |frame, area| {
         render_graph_live_view(
@@ -495,6 +497,7 @@ fn completed_graph_renders_statically_with_completed_icon() {
         started_at: state.current_node_started_at,
         iteration: state.current_node_iteration,
         chosen_route: None,
+        waiting_for: Vec::new(),
     };
 
     let text = render_to_text(80, 40, |frame, area| {

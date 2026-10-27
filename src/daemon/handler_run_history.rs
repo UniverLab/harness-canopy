@@ -36,6 +36,8 @@ const GRAPH_EVENT_KINDS: &[&str] = &[
     "hook_fired",
     "config_changed",
     "note",
+    "mutex_waiting",
+    "mutex_acquired",
 ];
 
 #[tool_router(router = tool_router_run_history, vis = "pub(crate)")]
@@ -330,6 +332,40 @@ impl TaskTriggerHandler {
     }
 }
 
+/// CB43: the pair resolved at dispatch, as JSON object entries. Keys are
+/// omitted (not null) when the run predates the recording, so old rows read
+/// exactly as before.
+fn executed_pair_json(run: &GraphNodeRun) -> serde_json::Map<String, serde_json::Value> {
+    let mut executed = serde_json::Map::new();
+    if let Some(platform) = run.executed_platform.as_deref() {
+        executed.insert(
+            "platform".to_string(),
+            serde_json::Value::String(platform.to_string()),
+        );
+    }
+    if let Some(model) = run.executed_model.as_deref() {
+        executed.insert(
+            "model".to_string(),
+            serde_json::Value::String(model.to_string()),
+        );
+    }
+    executed
+}
+
+/// A waiting run's queue entries (what it waits for and who holds each
+/// resource) — the only surface `graph_node_runs_list` has for the queue.
+/// Empty otherwise so settled rows read exactly as before.
+fn waiting_for_json(
+    db: &Database,
+    run: &GraphNodeRun,
+) -> Vec<crate::db::mutex_store::MutexWaitDetail> {
+    if run.status == crate::domain::graphs::GraphRunStatus::Waiting {
+        db.get_graph_run_waiting_for(&run.id).unwrap_or_default()
+    } else {
+        Vec::new()
+    }
+}
+
 /// One row of `graph_node_runs_list` — deliberately excludes `input`/`output`
 /// (can be large; a caller wanting them calls `graph_node_run_get` with this
 /// row's `id`) but resolves `node_name` so a caller isn't left matching a
@@ -344,24 +380,11 @@ pub(crate) fn graph_node_run_summary_json(
         .ok()
         .flatten()
         .map(|node| node.name);
-    // CB43: the pair resolved at dispatch. Keys are omitted (not null) when
-    // the run predates the recording, so old rows read exactly as before.
-    let mut executed = serde_json::Map::new();
-    if let Some(platform) = run.executed_platform.as_deref() {
-        executed.insert(
-            "platform".to_string(),
-            serde_json::Value::String(platform.to_string()),
-        );
-    }
-    if let Some(model) = run.executed_model.as_deref() {
-        executed.insert(
-            "model".to_string(),
-            serde_json::Value::String(model.to_string()),
-        );
-    }
+    let executed = executed_pair_json(run);
     let spec = db.get_graph_spec(&run.spec_id).ok().flatten();
     let spec_end_dirty = spec.as_ref().and_then(|s| s.spec_end_dirty);
     let spec_end_dirty_paths = spec.as_ref().and_then(|s| s.spec_end_dirty_paths.clone());
+    let waiting_for = waiting_for_json(db, run);
     if compact {
         let spec_name = spec.as_ref().map(|s| s.name.clone());
         let mut obj = serde_json::Map::from_iter([
@@ -402,6 +425,9 @@ pub(crate) fn graph_node_run_summary_json(
             ),
         ]);
         obj.extend(executed);
+        if !waiting_for.is_empty() {
+            obj.insert("waiting_for".to_string(), serde_json::json!(waiting_for));
+        }
         serde_json::Value::Object(obj)
     } else {
         let mut obj = serde_json::Map::from_iter([
@@ -439,6 +465,9 @@ pub(crate) fn graph_node_run_summary_json(
             ),
         ]);
         obj.extend(executed);
+        if !waiting_for.is_empty() {
+            obj.insert("waiting_for".to_string(), serde_json::json!(waiting_for));
+        }
         serde_json::Value::Object(obj)
     }
 }

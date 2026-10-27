@@ -504,6 +504,7 @@ fn validate_node_not_ensemble_owned_rejects_member_and_join_nodes() {
         },
     ];
     let ensemble = Ensemble {
+        mutex: Vec::new(),
         commit_rights: false,
         id: "ens1".to_string(),
         spec_id: Some("spec-1".to_string()),

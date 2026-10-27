@@ -1240,7 +1240,7 @@ async fn graph_export_always_includes_platform_and_model() {
         .unwrap();
     assert!(!is_err(&exported), "{}", text(&exported));
     let doc: serde_json::Value = serde_json::from_str(&raw_text(&exported)).unwrap();
-    assert_eq!(doc["format_version"], 5);
+    assert_eq!(doc["format_version"], 6);
     let implementer = doc["nodes"]
         .as_array()
         .unwrap()

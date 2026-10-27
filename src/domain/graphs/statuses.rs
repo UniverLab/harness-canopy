@@ -164,6 +164,10 @@ impl GraphSpecStatus {
 #[serde(rename_all = "snake_case")]
 pub enum GraphRunStatus {
     Running,
+    /// Queued for named mutexes (`mutex` on the node or its ensemble): the
+    /// run row exists but no work has started and the node's timeout has not
+    /// begun. Transitions to `Running` when every lease is granted.
+    Waiting,
     Pass,
     Fail,
     /// Operator-interrupted: the node was explicitly stopped by an operator
@@ -180,6 +184,7 @@ impl GraphRunStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Running => "running",
+            Self::Waiting => "waiting",
             Self::Pass => "pass",
             Self::Fail => "fail",
             Self::Interrupted => "interrupted",
@@ -189,6 +194,7 @@ impl GraphRunStatus {
 
     pub fn from_str(value: &str) -> Self {
         match value {
+            "waiting" => Self::Waiting,
             "pass" => Self::Pass,
             "fail" => Self::Fail,
             "interrupted" => Self::Interrupted,

@@ -183,6 +183,12 @@ ending in `*` (e.g. `opencode-go/*`) addresses a prefix. The engine skips
 effectively-unavailable members at dispatch and blocks a single unavailable
 agent node or hook — it never edits a graph.
 
+## Named mutexes
+
+| Command | Description |
+|---|---|
+| `canopy mutex list [--json]` | List granted mutex leases and queued waiters (FIFO); `--json` prints the raw MCP shape |
+
 ## Crews
 
 | Command | Description |

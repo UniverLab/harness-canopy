@@ -17,6 +17,8 @@ mod graph_crew;
 pub use graph_crew::*;
 mod roster;
 pub use roster::*;
+mod mutex;
+pub use mutex::*;
 mod crew;
 pub use crew::*;
 mod settings;

@@ -655,6 +655,9 @@ pub(crate) fn build_ensemble_copy_unit(
         // would create two committers by accident. Set explicitly afterward
         // via graph_update_ensemble if the copy should also commit.
         commit_rights: false,
+        // Unlike commit rights, the mutex list is ordinary config: the copy
+        // guards the same resources as its source.
+        mutex: source.mutex.clone(),
     })
 }
 

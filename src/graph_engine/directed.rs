@@ -500,6 +500,7 @@ mod tests {
     ) -> EnsembleDetails {
         EnsembleDetails {
             ensemble: Ensemble {
+                mutex: Vec::new(),
                 id: id.to_string(),
                 spec_id: None,
                 graph_id: Some("g".to_string()),

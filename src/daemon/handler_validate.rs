@@ -616,3 +616,52 @@ pub(crate) fn parse_router_routes(
         .to_string();
     Ok((routes, fallback))
 }
+
+/// `Some(reason)` when the node's effective config names a harness marked
+/// `headless = false`. Extracts the platform exactly the way
+/// `handler_nodes::validate_node_config`'s `Agent` arm (via
+/// [`config_has_agent_harness`]) does — a non-empty `platform` (or `cli`)
+/// string; a config of another kind carries no platform, so this returns
+/// `None` for it. An unconfigured platform is untouched (see
+/// `interactive_only_rejection`).
+pub(crate) fn reject_interactive_only_platform(config: &serde_json::Value) -> Option<String> {
+    let map = config.as_object()?;
+    let platform = ["platform", "cli"]
+        .iter()
+        .filter_map(|field| map.get(*field).and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .find(|s| !s.is_empty())?;
+    crate::daemon::handler_helpers::interactive_only_rejection(platform)
+}
+
+/// Validate a node's `mutex` config value: absent is fine, otherwise it must
+/// be a list of strings and every name must match
+/// `^[a-z][a-z0-9-]{0,31}$`. Every refusal names the node and the value.
+/// Called from `graph_add_node`/`graph_update_node` (which know the node's
+/// name) rather than from `validate_node_config` (which does not).
+pub(crate) fn validate_node_mutex_config(
+    node_name: &str,
+    config: &serde_json::Value,
+) -> Result<(), String> {
+    let Some(raw) = config.get("mutex") else {
+        return Ok(());
+    };
+    let Some(items) = raw.as_array() else {
+        return Err(format!(
+            "Node '{node_name}' has an invalid mutex value {raw}: must be a list of resource names."
+        ));
+    };
+    let mut names = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(name) = item.as_str() else {
+            return Err(format!(
+                "Node '{node_name}' has an invalid mutex name {item}: must be a string matching ^[a-z][a-z0-9-]{{0,31}}$."
+            ));
+        };
+        names.push(name.to_string());
+    }
+    crate::domain::validation::validate_mutex_list(
+        &format!("Node '{node_name}'"),
+        Some(names.as_slice()),
+    )
+}

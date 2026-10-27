@@ -46,10 +46,10 @@ pub use validation::*;
 
 /// The latest `format_version` this build writes. `graph_import` accepts `1`
 /// (members with no binding), `2` (bindings included), `3` (graph/error
-/// vocabulary, `break` still read as `error` on import), and `4` (current:
-/// every ensemble entry source). An unrecognized or missing version is a
-/// refusal, never a best-effort parse (decision 6).
-pub const GRAPH_EXPORT_FORMAT_VERSION: i64 = 5;
+/// vocabulary, `break` still read as `error` on import), `4` (every ensemble
+/// entry source), `5`, and `6` (current: ensemble `mutex`). An unrecognized
+/// or missing version is a refusal, never a best-effort parse (decision 6).
+pub const GRAPH_EXPORT_FORMAT_VERSION: i64 = 6;
 
 // Ensemble member count bounds live in `member_bounds` (the single shared
 // definition both this domain layer and the daemon's authoring-time
@@ -184,6 +184,12 @@ pub struct GraphExportEnsemble {
     /// the ensemble.
     #[serde(default)]
     pub members: Vec<GraphExportEnsembleMember>,
+    /// Named mutexes every member run holds. Export omits it when the
+    /// ensemble has none; import of an older document (or one that omits the
+    /// key) treats it as absent. Every name must match
+    /// `^[a-z][a-z0-9-]{0,31}$`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mutex: Vec<String>,
 }
 
 #[cfg(test)]

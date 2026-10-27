@@ -11,6 +11,7 @@ use ratatui::Frame;
 
 use super::lines::graph_lines;
 use super::{LiveViewContext, LiveViewRenderResult};
+use crate::db::mutex_store::MutexWaitDetail;
 use crate::domain::graphs::{GraphRunStatus, GraphSpecStatus, GraphStatus};
 use crate::tui::app::graph_live_state::{GraphLiveState, NodeRunInfo, SpecQueueEntry};
 use crate::tui::ui::panel::compact_cwd;
@@ -517,6 +518,9 @@ fn run_status_span(status: Option<GraphRunStatus>, theme: &Theme) -> Span<'stati
         Some(GraphRunStatus::Running) => {
             Span::styled("running", Style::default().fg(theme.status_running))
         }
+        Some(GraphRunStatus::Waiting) => {
+            Span::styled("waiting", Style::default().fg(theme.status_running))
+        }
         Some(GraphRunStatus::Pass) => Span::styled("pass", Style::default().fg(theme.status_ok)),
         Some(GraphRunStatus::Fail) => Span::styled("fail", Style::default().fg(theme.status_fail)),
         Some(GraphRunStatus::Error) => Span::styled(
@@ -621,8 +625,30 @@ fn footer_lines(
         }
     }
     lines.push(Line::from(meta));
+    if !node_info.waiting_for.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("waiting for: {}", waiting_for_text(&node_info.waiting_for)),
+            Style::default().fg(theme.dim_text),
+        )));
+    }
 
     lines
+}
+
+/// One-line holder summary for a mutex-waiting run: each resource with who
+/// holds it (`cpu (held by graph/node)`), or bare while the resource is free
+/// but an earlier waiter is ahead in FIFO order.
+fn waiting_for_text(waiting_for: &[MutexWaitDetail]) -> String {
+    waiting_for
+        .iter()
+        .map(|detail| match (&detail.holder_graph, &detail.holder_node) {
+            (Some(graph), Some(holder)) => {
+                format!("{} (held by {graph}/{holder})", detail.resource)
+            }
+            _ => detail.resource.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(test)]

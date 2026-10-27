@@ -135,6 +135,7 @@ async fn graph_copy_ensemble_duplicates_members_and_quorum() {
 
     let created = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
@@ -246,6 +247,7 @@ async fn graph_add_ensemble_member_prompt_override_replaces_shared_prompt_for_th
 
     let created = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
@@ -381,6 +383,7 @@ async fn graph_update_ensemble_prompt_members_join_and_wiring() {
 
     let created = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
@@ -428,6 +431,7 @@ async fn graph_update_ensemble_prompt_members_join_and_wiring() {
 
     let added_entry = handler
         .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+            mutex: None,
             commit_rights: None,
             ensemble_id: ensemble_id.clone(),
             kind: None,
@@ -457,6 +461,7 @@ async fn graph_update_ensemble_prompt_members_join_and_wiring() {
     // No fields at all -> rejected.
     let no_op = handler
         .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+            mutex: None,
             commit_rights: None,
             ensemble_id: ensemble_id.clone(),
             kind: None,
@@ -487,6 +492,7 @@ async fn graph_update_ensemble_prompt_members_join_and_wiring() {
     // Prompt-only update, propagated to existing members without a resize.
     let prompt_updated = handler
         .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+            mutex: None,
             commit_rights: None,
             ensemble_id: ensemble_id.clone(),
             kind: None,
@@ -518,6 +524,7 @@ async fn graph_update_ensemble_prompt_members_join_and_wiring() {
     // Grow membership 2 -> 4 while preserving both entry sources.
     let grown = handler
         .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+            mutex: None,
             commit_rights: None,
             ensemble_id: ensemble_id.clone(),
             kind: None,
@@ -621,6 +628,7 @@ async fn graph_update_ensemble_prompt_members_join_and_wiring() {
     // Shrink membership 4 -> 3 and retain complete fan-out.
     let shrunk = handler
         .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+            mutex: None,
             commit_rights: None,
             ensemble_id: ensemble_id.clone(),
             kind: None,
@@ -695,6 +703,7 @@ async fn graph_update_ensemble_prompt_members_join_and_wiring() {
     // min_pass out of bounds.
     let bad_min_pass = handler
         .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+            mutex: None,
             commit_rights: None,
             ensemble_id: ensemble_id.clone(),
             kind: None,
@@ -724,6 +733,7 @@ async fn graph_update_ensemble_prompt_members_join_and_wiring() {
     // Negative straggler timeout.
     let bad_straggler = handler
         .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+            mutex: None,
             commit_rights: None,
             ensemble_id: ensemble_id.clone(),
             kind: None,
@@ -753,6 +763,7 @@ async fn graph_update_ensemble_prompt_members_join_and_wiring() {
     // Re-wire on_pass_to to a new valid target.
     let rewired = handler
         .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+            mutex: None,
             commit_rights: None,
             ensemble_id: ensemble_id.clone(),
             kind: None,
@@ -784,6 +795,7 @@ async fn graph_update_ensemble_prompt_members_join_and_wiring() {
     // Unknown on_pass_to target.
     let bad_target = handler
         .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+            mutex: None,
             commit_rights: None,
             ensemble_id: ensemble_id.clone(),
             kind: None,
@@ -812,6 +824,7 @@ async fn graph_update_ensemble_prompt_members_join_and_wiring() {
 
     let missing_ensemble = handler
         .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+            mutex: None,
             commit_rights: None,
             ensemble_id: "ghost-ensemble".to_string(),
             kind: None,
@@ -854,6 +867,7 @@ async fn graph_update_ensemble_sets_member_own_timeout() {
 
     let created = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
@@ -901,6 +915,7 @@ async fn graph_update_ensemble_sets_member_own_timeout() {
 
     let updated = handler
         .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+            mutex: None,
             commit_rights: None,
             ensemble_id: ensemble_id.clone(),
             kind: None,
@@ -1023,6 +1038,7 @@ async fn graph_add_ensemble_infra_fields_round_trip_and_reject_negative() {
 
     let bad_member = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
@@ -1075,6 +1091,7 @@ async fn graph_add_ensemble_infra_fields_round_trip_and_reject_negative() {
 
     let bad_ensemble = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
@@ -1127,6 +1144,7 @@ async fn graph_add_ensemble_infra_fields_round_trip_and_reject_negative() {
 
     let created = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,

@@ -148,6 +148,12 @@ pub(crate) struct ParallelMemberTask {
     pub(crate) run_id: String,
     pub(crate) iteration: usize,
     pub(crate) straggler_minutes: u64,
+    /// Mutex set this member acquires ahead of every attempt: its node's own
+    /// plus the ensemble's.
+    pub(crate) mutex_resources: Vec<String>,
+    /// The engine's shutdown flag — the task is spawned detached, so the flag
+    /// travels in the task.
+    pub(crate) shutdown: Arc<AtomicBool>,
 }
 
 /// Outcome of one member's straggler-bounded retry sequence.
@@ -174,7 +180,10 @@ pub(crate) async fn settle_parallel_member_outcome(
                 "ensemble member run completed"
             );
             let session_id = run.session_id.clone();
-            let execution = if run.status == GraphRunStatus::Running {
+            let execution = if matches!(
+                run.status,
+                GraphRunStatus::Running | GraphRunStatus::Waiting
+            ) {
                 let _ = db.update_graph_run_result(
                     &final_run_id,
                     execution.status,
@@ -253,76 +262,7 @@ pub(crate) async fn run_parallel_member_task(task: ParallelMemberTask) -> Member
     // counts as failed deterministically.
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(task.straggler_minutes * 60),
-        async {
-            let (retry_limit, crash_max_secs, backoff_secs) = read_infra_config(&task.node);
-            let mut attempt: u32 = 0;
-            let mut member_run_id = task.run_id.clone();
-            let mut resume_candidate: Option<String> = task.resume_candidate_seed.clone();
-            loop {
-                let execution = execute_agent_node(
-                    &task.db,
-                    &task.lp,
-                    &task.spec,
-                    &task.node,
-                    task.previous_output.as_ref(),
-                    &member_run_id,
-                    &task.workdir,
-                    resume_candidate.as_deref(),
-                    false,
-                    task.dynamic_skills.as_ref(),
-                    &task.node_outputs,
-                    &task.all_node_names,
-                )
-                .await?;
-                let run = task.db.get_graph_run(&member_run_id)?.ok_or_else(|| {
-                    anyhow!("Graph run '{member_run_id}' not found after execution.")
-                })?;
-                if is_infra_crash(
-                    &task.node,
-                    &execution,
-                    &run,
-                    attempt,
-                    retry_limit,
-                    crash_max_secs,
-                ) {
-                    resume_candidate = run.session_id.clone();
-                    member_run_id = begin_infra_retry(
-                        &task.db,
-                        &task.lp,
-                        &task.spec,
-                        &task.node,
-                        task.previous_output.as_ref(),
-                        task.iteration as i64,
-                        &member_run_id,
-                        &execution.output,
-                        attempt,
-                        backoff_secs,
-                    )
-                    .await?;
-                    attempt += 1;
-                    continue;
-                }
-                let mut execution = execution;
-                let mut run = run;
-                let member_had_no_verdict = finalize_infra_crash_shape(
-                    &task.db,
-                    &member_run_id,
-                    &task.node,
-                    &mut execution,
-                    &mut run,
-                    attempt,
-                    retry_limit,
-                    crash_max_secs,
-                )
-                .await?;
-                break Ok::<_, anyhow::Error>((
-                    execution,
-                    run,
-                    member_run_id.clone(),
-                    member_had_no_verdict,
-                ));
-            }
-        },
+        drive_parallel_member_attempts(&task),
     )
     .await;
     let (execution, member_session_id, member_had_no_verdict) = settle_parallel_member_outcome(
@@ -341,6 +281,110 @@ pub(crate) async fn run_parallel_member_task(task: ParallelMemberTask) -> Member
         member_session_id,
         member_had_no_verdict,
     )
+}
+
+/// Drive one member's infra-retry loop to a verdict: acquire the member's
+/// mutexes ahead of every attempt, execute, and retry infra crashes —
+/// returning `(execution, run, final_run_id, member_had_no_verdict)`. The
+/// caller bounds this future with the straggler timeout.
+async fn drive_parallel_member_attempts(
+    task: &ParallelMemberTask,
+) -> Result<(NodeExecution, GraphNodeRun, String, bool)> {
+    let (retry_limit, crash_max_secs, backoff_secs) = read_infra_config(&task.node);
+    let mut attempt: u32 = 0;
+    let mut member_run_id = task.run_id.clone();
+    let mut resume_candidate: Option<String> = task.resume_candidate_seed.clone();
+    loop {
+        // The mutex gate sits ahead of every member attempt, inside
+        // the straggler window: the member's own agent timeout starts
+        // at the grant, while the join's straggler bound covers the
+        // member's total time including waits (and kills a member
+        // still waiting when it expires). A refused wait ends the
+        // member with no verdict.
+        if !acquire_mutexes_before_run(
+            &task.db,
+            &task.shutdown,
+            &task.lp,
+            &task.spec.id,
+            &task.node,
+            &member_run_id,
+            &task.mutex_resources,
+        )
+        .await?
+        {
+            let run = task.db.get_graph_run(&member_run_id)?.ok_or_else(|| {
+                anyhow!("Graph run '{member_run_id}' was deleted while waiting for its mutex.")
+            })?;
+            break Ok((
+                interrupted_execution(format!(
+                    "Ensemble member '{}' stopped while waiting for its mutex.",
+                    task.node.name
+                )),
+                run,
+                member_run_id.clone(),
+                true,
+            ));
+        }
+        let execution = execute_agent_node(
+            &task.db,
+            &task.lp,
+            &task.spec,
+            &task.node,
+            task.previous_output.as_ref(),
+            &member_run_id,
+            &task.workdir,
+            resume_candidate.as_deref(),
+            false,
+            task.dynamic_skills.as_ref(),
+            &task.node_outputs,
+            &task.all_node_names,
+        )
+        .await?;
+        let run = task
+            .db
+            .get_graph_run(&member_run_id)?
+            .ok_or_else(|| anyhow!("Graph run '{member_run_id}' not found after execution."))?;
+        if is_infra_crash(
+            &task.node,
+            &execution,
+            &run,
+            attempt,
+            retry_limit,
+            crash_max_secs,
+        ) {
+            resume_candidate = run.session_id.clone();
+            member_run_id = begin_infra_retry(
+                &task.db,
+                &task.lp,
+                &task.spec,
+                &task.node,
+                task.previous_output.as_ref(),
+                task.iteration as i64,
+                &member_run_id,
+                &execution.output,
+                attempt,
+                backoff_secs,
+                &task.mutex_resources,
+            )
+            .await?;
+            attempt += 1;
+            continue;
+        }
+        let mut execution = execution;
+        let mut run = run;
+        let member_had_no_verdict = finalize_infra_crash_shape(
+            &task.db,
+            &member_run_id,
+            &task.node,
+            &mut execution,
+            &mut run,
+            attempt,
+            retry_limit,
+            crash_max_secs,
+        )
+        .await?;
+        break Ok((execution, run, member_run_id.clone(), member_had_no_verdict));
+    }
 }
 
 /// Publish one settled member's pass/fail activity line.

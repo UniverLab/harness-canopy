@@ -414,6 +414,7 @@ fn find_stale_2x_name_hits_scans_hook_commands_and_ensemble_prompts() {
 
     let ensembles = vec![EnsembleDetails {
         ensemble: Ensemble {
+            mutex: Vec::new(),
             id: "ens-reviewers".to_string(),
             spec_id: None,
             graph_id: Some("graph-reviewers".to_string()),

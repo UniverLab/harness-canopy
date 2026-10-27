@@ -33,6 +33,10 @@ pub enum GraphEventKind {
     /// vocabulary are fixed now so the two never drift.
     #[allow(dead_code)]
     Note,
+    /// A node run started waiting for named mutexes.
+    MutexWaiting,
+    /// A node run was granted every mutex it waited for.
+    MutexAcquired,
 }
 
 impl GraphEventKind {
@@ -53,6 +57,8 @@ impl GraphEventKind {
             Self::HookFired => "hook_fired",
             Self::ConfigChanged => "config_changed",
             Self::Note => "note",
+            Self::MutexWaiting => "mutex_waiting",
+            Self::MutexAcquired => "mutex_acquired",
         }
     }
 
@@ -65,7 +71,12 @@ impl GraphEventKind {
     pub fn emits_activity(self) -> bool {
         !matches!(
             self,
-            Self::NodeStarted | Self::SpecSkipped | Self::ConfigChanged | Self::Note
+            Self::NodeStarted
+                | Self::SpecSkipped
+                | Self::ConfigChanged
+                | Self::Note
+                | Self::MutexWaiting
+                | Self::MutexAcquired
         )
     }
 }

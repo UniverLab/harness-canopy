@@ -174,6 +174,7 @@ impl GraphEngine {
                 previous_output: ctx.previous_output,
                 iteration: ctx.iteration,
                 ensemble_id: &ctx.details.ensemble.id,
+                ensemble_mutex: &ctx.details.ensemble.mutex,
             };
             let run_id = self.insert_ensemble_member_run(&run_spec)?;
             // CM46: parallel members record `node_started` here, so every
@@ -194,6 +195,7 @@ impl GraphEngine {
                     payload: None,
                 },
             );
+            let mutex_resources = union_mutex_resources(&node, &ctx.details.ensemble.mutex);
             let task = ParallelMemberTask {
                 db: Arc::clone(&self.db),
                 lp: ctx.lp.clone(),
@@ -211,6 +213,8 @@ impl GraphEngine {
                 run_id,
                 iteration: ctx.iteration,
                 straggler_minutes: ctx.straggler_minutes,
+                mutex_resources,
+                shutdown: Arc::clone(&self.shutdown),
             };
             set.spawn(run_parallel_member_task(task));
         }
@@ -486,12 +490,18 @@ impl GraphEngine {
             Some(run_spec.member.platform.as_str()),
             run_spec.member.model.as_deref(),
         );
+        let initial_status =
+            if union_mutex_resources(run_spec.node, run_spec.ensemble_mutex).is_empty() {
+                GraphRunStatus::Running
+            } else {
+                GraphRunStatus::Waiting
+            };
         self.db.insert_graph_run(&GraphNodeRun {
             id: run_id.clone(),
             graph_id: run_spec.lp.id.clone(),
             spec_id: run_spec.spec.id.clone(),
             node_id: run_spec.node.id.clone(),
-            status: GraphRunStatus::Running,
+            status: initial_status,
             input: run_spec.previous_output.cloned(),
             output: None,
             started_at: chrono::Utc::now(),

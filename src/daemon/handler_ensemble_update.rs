@@ -29,7 +29,7 @@ use rmcp::ErrorData as McpError;
 impl TaskTriggerHandler {
     #[tool(
         name = "graph_update_ensemble",
-        description = "Update an ensemble's shared prompt (propagated to every member without its own prompt_override), member list (platform/model/prompt_override/timeout_minutes/infra_retry_limit/infra_crash_max_seconds/infra_backoff_seconds — added/removed/replaced by position), quorum config (min_pass, straggler_timeout_minutes, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds — clearable with null like straggler_timeout_minutes), entry wiring (from_node/condition replaces every entry; add_entry_from/remove_entry_from add or detach one entry source so several nodes can enter with no relay), and/or exit wiring (on_pass_to/on_fail_to take a node id or another ensemble's id to chain quorums with no intermediate node) — all in one call, without touching individual member nodes directly. `commit_rights` sets whether this ensemble is the graph's designated committer (B37); editable on a running graph, same as prompt/quorum config. `crew` binds this ensemble to a crew by name, or `null` unbinds it (keeping the current members literal); a crew change is its own call and is never combined with the other fields."
+        description = "Update an ensemble's shared prompt (propagated to every member without its own prompt_override), member list (platform/model/prompt_override/timeout_minutes/infra_retry_limit/infra_crash_max_seconds/infra_backoff_seconds — added/removed/replaced by position), quorum config (min_pass, straggler_timeout_minutes, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds — clearable with null like straggler_timeout_minutes), entry wiring (from_node/condition replaces every entry; add_entry_from/remove_entry_from add or detach one entry source so several nodes can enter with no relay), and/or exit wiring (on_pass_to/on_fail_to take a node id or another ensemble's id to chain quorums with no intermediate node) — all in one call, without touching individual member nodes directly. `commit_rights` sets whether this ensemble is the graph's designated committer (B37); editable on a running graph, same as prompt/quorum config. `crew` binds this ensemble to a crew by name, or `null` unbinds it (keeping the current members literal); a crew change is its own call and is never combined with the other fields. `mutex` replaces the named shared resources every member run holds (`[]` clears); editable on a running graph."
     )]
     pub(crate) async fn graph_update_ensemble(
         &self,
@@ -93,6 +93,13 @@ impl TaskTriggerHandler {
         }
 
         if let Err(e) = validate_ensemble_infra_updates(&params) {
+            return Ok(error_result(&e));
+        }
+
+        if let Err(e) = crate::domain::validation::validate_mutex_list(
+            &format!("Ensemble '{}'", details.ensemble.name),
+            params.mutex.as_deref(),
+        ) {
             return Ok(error_result(&e));
         }
 
@@ -170,6 +177,15 @@ impl TaskTriggerHandler {
                 .update_ensemble_commit_rights(&ensemble_id, commit_rights)
                 .map_err(internal_error)?;
             details.ensemble.commit_rights = commit_rights;
+        }
+
+        // `mutex` is CONFIG like `commit_rights` (read fresh at each member
+        // dispatch) — editable on a running graph. `None` keeps, `[]` clears.
+        if let Some(mutex) = params.mutex.as_deref() {
+            self.db
+                .update_ensemble_mutex(&ensemble_id, mutex)
+                .map_err(internal_error)?;
+            details.ensemble.mutex = mutex.to_vec();
         }
 
         let owner_nodes = match (&details.ensemble.spec_id, &details.ensemble.graph_id) {

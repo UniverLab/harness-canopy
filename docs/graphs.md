@@ -616,6 +616,35 @@ doing so is deliberately out of scope. Point concurrent graphs at
 different working directories (or at worktrees of the same repo) and
 they run independently with no coordination required from you.
 
+## Named mutexes
+
+Some nodes saturate a shared resource — a gate that compiles the whole
+workspace wants the entire CPU, a future GPU node wants the only GPU.
+A node (agent, check, gate) declares the resources it needs in its
+config, and an ensemble declares them per member run:
+
+```json
+{ "command": "cargo test --workspace", "mutex": ["cpu"] }
+```
+
+Each name must match `^[a-z][a-z0-9-]{0,31}$` (e.g. `cpu`, `gpu`);
+anything else is refused naming the node and the value. The engine
+grants each resource to one node run at a time across all graphs of
+the daemon: a node that needs `["cpu", "gpu"]` waits until it can hold
+both at once (it never holds one while waiting for the other), and
+grants go in FIFO order except that a waiter whose full set is free is
+never stuck behind an earlier waiter for a different resource.
+
+While waiting the run has status `waiting` — visible in `graph_get`,
+`graph_node_runs_list`, and the TUI graph view together with who holds
+each resource — and the node's timeout only starts when the lease is
+granted. The `graph_events` log records `mutex_waiting` and
+`mutex_acquired` for every wait. The lease is released when the run
+ends for any reason. Inspect the live state with the `mutex` MCP tool
+(action `list`) or `canopy mutex list [--json]`. Mutexes are scoped to
+one daemon (one machine); there are no counting semaphores or
+priorities.
+
 ## Event-keyed hooks
 
 A graph carries hooks keyed by event, over four events: `on_completed`,

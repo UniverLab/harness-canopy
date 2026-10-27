@@ -110,6 +110,12 @@ pub(crate) fn build_graph_summary_json(
             out["queue"] = serde_json::json!({ "id": queue.id, "name": queue.name });
         }
     }
+    // A mutex-waiting current run names what it waits for and who holds it.
+    if let Some(current) = current_spec.as_ref() {
+        if !current.waiting_for.is_empty() {
+            out["waiting_for"] = serde_json::json!(current.waiting_for);
+        }
+    }
     Ok(out)
 }
 
@@ -459,6 +465,7 @@ pub(crate) fn ensemble_details_json(
         "name": ensemble.name,
         "kind": ensemble.kind.as_str(),
         "commit_rights": ensemble.commit_rights,
+        "mutex": ensemble.mutex,
         "prompt_template": ensemble.prompt_template,
         "join_node_id": ensemble.join_node_id,
         "entry_from_node": ensemble.entry_from_node,
@@ -545,8 +552,19 @@ pub(crate) fn graph_spec_details_json(
     let current_run = runs
         .iter()
         .rev()
-        .find(|run| run.status == GraphRunStatus::Running)
+        .find(|run| {
+            matches!(
+                run.status,
+                GraphRunStatus::Running | GraphRunStatus::Waiting
+            )
+        })
         .or_else(|| runs.last());
+    let waiting_for = match current_run {
+        Some(run) if run.status == GraphRunStatus::Waiting => {
+            db.get_graph_run_waiting_for(&run.id)?
+        }
+        _ => Vec::new(),
+    };
     let blocker = runs.last().and_then(graph_run_blocker);
     let resume_actions = if graph_status == GraphStatus::Paused
         && matches!(
@@ -564,7 +582,7 @@ pub(crate) fn graph_spec_details_json(
         .map(|details| ensemble_details_json(details, &spec.edges))
         .collect::<Vec<_>>();
 
-    Ok(serde_json::json!({
+    let mut out = serde_json::json!({
         "id": spec.spec.id,
         "graph_id": spec.spec.graph_id,
         "name": spec.spec.name,
@@ -601,7 +619,11 @@ pub(crate) fn graph_spec_details_json(
         "edges": spec.edges.iter().map(graph_edge_json).collect::<Vec<_>>(),
         "ensembles": ensembles,
         "runs": runs,
-    }))
+    });
+    if !waiting_for.is_empty() {
+        out["waiting_for"] = serde_json::json!(waiting_for);
+    }
+    Ok(out)
 }
 
 pub(crate) fn graph_node_json(node: &GraphNode, edges: &[GraphEdge]) -> serde_json::Value {

@@ -656,7 +656,13 @@ impl App {
             .graph_runs
             .iter()
             .rev()
-            .find(|run| run.status == crate::domain::graphs::GraphRunStatus::Running)
+            .find(|run| {
+                matches!(
+                    run.status,
+                    crate::domain::graphs::GraphRunStatus::Running
+                        | crate::domain::graphs::GraphRunStatus::Waiting
+                )
+            })
             .or_else(|| self.graph_runs.last())
             .map(|run| run.node_id.as_str());
 

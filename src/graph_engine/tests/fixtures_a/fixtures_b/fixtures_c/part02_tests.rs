@@ -451,6 +451,7 @@ fn commit_rights_are_explicit_configuration_only() {
 #[test]
 fn graph_enforces_commit_rights_when_only_an_ensemble_carries_it() {
     let ensemble = crate::domain::graphs::Ensemble {
+        mutex: Vec::new(),
         id: "ens1".to_string(),
         spec_id: Some("s".to_string()),
         graph_id: None,

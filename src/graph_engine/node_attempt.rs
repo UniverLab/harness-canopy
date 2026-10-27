@@ -131,12 +131,19 @@ impl GraphEngine {
         // CB43: record the pair resolved at dispatch, on the row
         // itself — never re-derived from the node config later.
         let (executed_platform, executed_model) = executed_pair_for_node(&node);
+        // A node that declares mutexes starts `waiting` — `run_node_with_infra_retries`
+        // flips it to `running` at the grant, which is also when its timeout starts.
+        let initial_status = if node_mutex_resources(&node).is_empty() {
+            GraphRunStatus::Running
+        } else {
+            GraphRunStatus::Waiting
+        };
         self.db.insert_graph_run(&GraphNodeRun {
             id: run_id.clone(),
             graph_id: ctx.lp.id.clone(),
             spec_id: ctx.spec.id.clone(),
             node_id: node.id.clone(),
-            status: GraphRunStatus::Running,
+            status: initial_status,
             input: previous_output.cloned(),
             output: None,
             started_at: chrono::Utc::now(),
@@ -244,6 +251,9 @@ impl GraphEngine {
                 None => retry.node.clone(),
             };
             let node: &GraphNode = &node_owned;
+            if let Some(stopped) = self.acquire_run_mutexes(ctx, node, &retry.run_id).await? {
+                return Ok(stopped);
+            }
             let execution = self
                 .execute_node(
                     ctx.lp,
@@ -292,6 +302,7 @@ impl GraphEngine {
                 // retry run row records the pair it will run.
                 self.pick_next_crew_member(retry, &mut pending)?;
                 let retry_node = pending.as_ref().unwrap_or(node);
+                let retry_mutex = node_mutex_resources(retry_node);
                 retry.run_id = begin_infra_retry(
                     &self.db,
                     ctx.lp,
@@ -303,6 +314,7 @@ impl GraphEngine {
                     &execution.output,
                     attempt,
                     backoff_secs,
+                    &retry_mutex,
                 )
                 .await?;
                 attempt += 1;
@@ -393,6 +405,46 @@ impl GraphEngine {
             run,
             true,
         ))
+    }
+
+    /// The mutex gate ahead of one execution (initial attempt or infra
+    /// retry): the run waits in `waiting` until its full set is granted, and
+    /// only then starts its timeout. Returns `None` once granted (the caller
+    /// executes), or `Some` early-return triple when the wait was refused
+    /// (interrupt, pause, shutdown, dead run) — ending the dispatch the way a
+    /// shutdown kill does. The settled row underneath tells `run_spec`
+    /// whether this was bookkeeping or a verdict.
+    async fn acquire_run_mutexes(
+        &self,
+        ctx: &SpecStepCtx<'_>,
+        node: &GraphNode,
+        run_id: &str,
+    ) -> Result<Option<(NodeExecution, GraphNodeRun, bool)>> {
+        let mutex_resources = node_mutex_resources(node);
+        if acquire_mutexes_before_run(
+            &self.db,
+            &self.shutdown,
+            ctx.lp,
+            &ctx.spec.id,
+            node,
+            run_id,
+            &mutex_resources,
+        )
+        .await?
+        {
+            return Ok(None);
+        }
+        let run = self.db.get_graph_run(run_id)?.ok_or_else(|| {
+            anyhow!("Graph run '{run_id}' was deleted while waiting for its mutex.")
+        })?;
+        Ok(Some((
+            interrupted_execution(format!(
+                "Node '{}' stopped while waiting for its mutex.",
+                node.name
+            )),
+            run,
+            false,
+        )))
     }
 
     /// CB82: settle an attempt killed by daemon shutdown — record it as

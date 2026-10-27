@@ -209,6 +209,7 @@ async fn graph_add_ensemble_crew_and_members_are_exclusive() {
 
     let refused = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: None,
             graph_id: Some(graph_id.clone()),

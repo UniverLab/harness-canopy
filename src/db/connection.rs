@@ -10,6 +10,7 @@ impl Database {
         let conn = Self::open_connection_with_pragmas(db_path)?;
         let db = Database {
             conn: Arc::new(Mutex::new(conn)),
+            mutex_notify: Arc::new(tokio::sync::Notify::new()),
         };
         db.init()?;
         db.seed_startup_intelligence();
@@ -93,6 +94,7 @@ impl Database {
             let conn = Self::open_connection_with_pragmas(db_path)?;
             return Ok(Database {
                 conn: Arc::new(Mutex::new(conn)),
+                mutex_notify: Arc::new(tokio::sync::Notify::new()),
             });
         }
         Database::new(db_path)

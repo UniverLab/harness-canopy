@@ -91,7 +91,7 @@ fn tail_final_banner(dialog: &NodeTailDialog) -> Option<&'static str> {
         GraphRunStatus::Fail => Some("■ failed"),
         GraphRunStatus::Error => Some("■ error (no verdict)"),
         GraphRunStatus::Interrupted => Some("■ interrupted"),
-        GraphRunStatus::Running => None,
+        GraphRunStatus::Running | GraphRunStatus::Waiting => None,
     }
 }
 
@@ -151,6 +151,7 @@ fn pane_status_line(dialog: &NodeTailDialog) -> Option<String> {
         GraphRunStatus::Fail => Some("failed".to_string()),
         GraphRunStatus::Error => Some("error (no verdict)".to_string()),
         GraphRunStatus::Interrupted => Some("interrupted by operator".to_string()),
+        GraphRunStatus::Waiting => Some("waiting for mutex".to_string()),
     }
 }
 
@@ -190,7 +191,7 @@ pub(crate) fn draw_node_tail_pane(
         )));
     } else if let Some(status_text) = pane_status_line(dialog) {
         let status_style = match dialog.status {
-            Some(GraphRunStatus::Running) => Style::default()
+            Some(GraphRunStatus::Running) | Some(GraphRunStatus::Waiting) => Style::default()
                 .fg(theme.warning)
                 .add_modifier(Modifier::BOLD),
             Some(GraphRunStatus::Pass) => Style::default().fg(theme.header_color),

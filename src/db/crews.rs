@@ -367,7 +367,7 @@ impl Database {
             .query_row(
                 "SELECT 1 FROM graph_runs
                  WHERE node_id IN (SELECT node_id FROM ensemble_members WHERE ensemble_id = ?1)
-                   AND status = 'running'
+                   AND status IN ('running', 'waiting')
                  LIMIT 1",
                 params![ensemble_id],
                 |row| row.get(0),
@@ -700,6 +700,7 @@ mod tests {
         .ok();
         let now = chrono::Utc::now();
         let ensemble = Ensemble {
+            mutex: Vec::new(),
             id: id.to_string(),
             spec_id: Some(spec_id.clone()),
             graph_id: None,

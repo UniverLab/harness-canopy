@@ -199,6 +199,7 @@ pub(super) fn run_status_icon(
     }
     match status {
         GraphRunStatus::Running => "\x1b[36m▶\x1b[0m",
+        GraphRunStatus::Waiting => "\x1b[36m◷\x1b[0m",
         GraphRunStatus::Pass => "\x1b[32m✓\x1b[0m",
         GraphRunStatus::Fail => "\x1b[31m✗\x1b[0m",
         GraphRunStatus::Interrupted => "\x1b[33m⚑\x1b[0m",

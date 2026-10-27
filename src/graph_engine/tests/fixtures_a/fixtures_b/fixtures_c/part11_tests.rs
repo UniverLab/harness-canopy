@@ -638,6 +638,7 @@ async fn ensemble_member_resume_false_forces_cold_start_on_bounce() {
     }
 
     let ensemble = crate::domain::graphs::Ensemble {
+        mutex: Vec::new(),
         commit_rights: false,
         id: "ens1".to_string(),
         spec_id: Some(spec_id.clone()),
@@ -1185,6 +1186,7 @@ async fn ensemble_execute_attributes_members_sharing_platform_by_prompt_override
         condition: GraphEdgeCondition::Pass,
     });
     let ensemble = crate::domain::graphs::Ensemble {
+        mutex: Vec::new(),
         commit_rights: false,
         id: "ens1".to_string(),
         spec_id: Some(spec_id.clone()),

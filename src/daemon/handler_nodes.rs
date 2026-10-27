@@ -9,9 +9,10 @@ use crate::daemon::handler_formatting::{
 use crate::daemon::handler_helpers::record_config_change_if_running;
 use crate::daemon::handler_specs_helpers::validate_at_least_one_bool;
 use crate::daemon::handler_validate::{
-    config_has_agent_harness, json_value_kind_name, parse_router_routes, resolve_prefix_or_error,
-    validate_agent_crew_exclusive, validate_blueprint_agent_harness, validate_node_exists,
-    validate_node_kind, validate_node_not_ensemble_owned, validate_node_position_conflict,
+    config_has_agent_harness, json_value_kind_name, parse_router_routes,
+    reject_interactive_only_platform, resolve_prefix_or_error, validate_agent_crew_exclusive,
+    validate_blueprint_agent_harness, validate_node_exists, validate_node_kind,
+    validate_node_mutex_config, validate_node_not_ensemble_owned, validate_node_position_conflict,
     validate_non_empty, validate_not_join_kind, validate_topology_mutation_allowed,
 };
 use crate::daemon::helpers::error_result;
@@ -33,7 +34,7 @@ use rmcp::ErrorData as McpError;
 impl TaskTriggerHandler {
     #[tool(
         name = "graph_add_node",
-        description = "Add a graph node to an existing graph spec, or (via graph_id instead of spec_id) to the graph's top-level graph. Provide either a full 'config' (with 'kind'), or a 'blueprint' name (see blueprint_list) optionally shallow-merged with 'config_overrides'. An agent node also accepts `infra_retry_limit`/`infra_crash_max_seconds`/`infra_backoff_seconds` (defaults 2/60/30) to override the infra-crash retry budget for this node alone, taking precedence over its platform's config.toml value. A router node with {\"decision\": true} classifies via the platform's decision model instead of spawning an agent (optional \"min_confidence\" 0-1, default 0); e.g. routes quota_with_reset/transient_glitch/other with fallback other."
+        description = "Add a graph node to an existing graph spec, or (via graph_id instead of spec_id) to the graph's top-level graph. Provide either a full 'config' (with 'kind'), or a 'blueprint' name (see blueprint_list) optionally shallow-merged with 'config_overrides'. An agent node also accepts `infra_retry_limit`/`infra_crash_max_seconds`/`infra_backoff_seconds` (defaults 2/60/30) to override the infra-crash retry budget for this node alone, taking precedence over its platform's config.toml value. An agent, check, or gate node also accepts `mutex` (e.g. [\"cpu\"]) to hold named shared resources while it runs. A router node with {\"decision\": true} classifies via the platform's decision model instead of spawning an agent (optional \"min_confidence\" 0-1, default 0); e.g. routes quota_with_reset/transient_glitch/other with fallback other."
     )]
     pub(crate) async fn graph_add_node(
         &self,
@@ -66,6 +67,9 @@ impl TaskTriggerHandler {
             return Ok(error_result(&e));
         }
         if let Err(e) = validate_node_config(kind, &config) {
+            return Ok(error_result(&e));
+        }
+        if let Err(e) = validate_node_mutex_config(name, &config) {
             return Ok(error_result(&e));
         }
         if let Some(msg) = reject_interactive_only_platform(&config) {
@@ -129,7 +133,7 @@ impl TaskTriggerHandler {
 
     #[tool(
         name = "graph_update_node",
-        description = "Update an existing graph node. Config merges with the stored config by default (partial update: keys present are changed, keys absent are left as-is). Set `config_replace` to `true` to replace the entire config instead. Router nodes accept \"decision\"/\"min_confidence\" (see graph_add_node)."
+        description = "Update an existing graph node. Config merges with the stored config by default (partial update: keys present are changed, keys absent are left as-is). Set `config_replace` to `true` to replace the entire config instead. An agent, check, or gate node also accepts `mutex` (e.g. [\"cpu\"]) to hold named shared resources while it runs. Router nodes accept \"decision\"/\"min_confidence\" (see graph_add_node)."
     )]
     pub(crate) async fn graph_update_node(
         &self,
@@ -242,6 +246,10 @@ impl TaskTriggerHandler {
         if kind.is_some() || params.config.is_some() {
             let effective_kind = kind.unwrap_or(node.kind);
             if let Err(e) = validate_node_config(effective_kind, &effective_config) {
+                return Ok(error_result(&e));
+            }
+            let effective_name = name.unwrap_or(&node.name);
+            if let Err(e) = validate_node_mutex_config(effective_name, &effective_config) {
                 return Ok(error_result(&e));
             }
             if let Some(msg) = reject_interactive_only_platform(&effective_config) {
@@ -430,22 +438,6 @@ impl TaskTriggerHandler {
 }
 
 /// `graph_add_node`/`graph_update_node`'s interactive-only gate (CM35):
-/// `Some(reason)` when the node's effective config names a harness marked
-/// `headless = false`. Extracts the platform exactly the way
-/// [`validate_node_config`]'s `Agent` arm (via [`config_has_agent_harness`])
-/// does — a non-empty `platform` (or `cli`) string; a config of another kind
-/// carries no platform, so this returns `None` for it. An unconfigured
-/// platform is untouched (see `interactive_only_rejection`).
-fn reject_interactive_only_platform(config: &serde_json::Value) -> Option<String> {
-    let map = config.as_object()?;
-    let platform = ["platform", "cli"]
-        .iter()
-        .filter_map(|field| map.get(*field).and_then(serde_json::Value::as_str))
-        .map(str::trim)
-        .find(|s| !s.is_empty())?;
-    crate::daemon::handler_helpers::interactive_only_rejection(platform)
-}
-
 /// Every config key an `agent` node is actually read for — see
 /// `execute_agent_node`/`resolve_node_prompt_template` in `graph_engine.rs`.
 /// Notably absent: `prompt`. An agent's prompt is `prompt_template` (or
@@ -477,6 +469,7 @@ pub(crate) const AGENT_CONFIG_KEYS: &[&str] = &[
     "infra_retry_limit",
     "infra_crash_max_seconds",
     "infra_backoff_seconds",
+    "mutex",
 ];
 
 /// Every config key a `check` node is read for — see `execute_check_node`.
@@ -485,10 +478,11 @@ pub(crate) const CHECK_CONFIG_KEYS: &[&str] = &[
     "success_condition",
     "timeout_seconds",
     "commit_rights",
+    "mutex",
 ];
 
 /// Every config key a `gate` node is read for — see `execute_gate_node`.
-pub(crate) const GATE_CONFIG_KEYS: &[&str] = &["evaluate", "value", "commit_rights"];
+pub(crate) const GATE_CONFIG_KEYS: &[&str] = &["evaluate", "value", "commit_rights", "mutex"];
 
 /// Every config key a `router` node is read for — see `parse_router_routes`
 /// and `parse_router_decision`.

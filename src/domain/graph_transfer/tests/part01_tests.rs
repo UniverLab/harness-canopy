@@ -163,7 +163,7 @@ fn format_version_first_key_in_serialized_json() {
     let doc = build_export_document(&lp, &nodes, &edges, &[]).unwrap();
     let raw = serde_json::to_string(&doc).unwrap();
     // struct field order drives serde_json's key order.
-    assert!(raw.starts_with("{\"format_version\":5"));
+    assert!(raw.starts_with("{\"format_version\":6"));
 }
 
 #[test]
@@ -185,8 +185,8 @@ fn import_rejects_unsupported_format_version() {
 }
 
 #[test]
-fn import_accepts_format_versions_1_through_5() {
-    for version in [1, 2, 3, 4, 5] {
+fn import_accepts_format_versions_1_through_6() {
+    for version in [1, 2, 3, 4, 5, 6] {
         let value = serde_json::json!({
             "format_version": version, "name": "x", "nodes": [], "edges": [], "ensembles": []
         });
@@ -251,7 +251,7 @@ fn import_v2_break_condition_is_error() {
         ..document
     })
     .unwrap();
-    assert_eq!(exported["format_version"], 5);
+    assert_eq!(exported["format_version"], 6);
     assert_eq!(exported["edges"][0]["condition"], "error");
 }
 
@@ -719,6 +719,7 @@ fn import_refuses_duplicate_extra_entry_source() {
         ],
         edges: vec![],
         ensembles: vec![GraphExportEnsemble {
+            mutex: Vec::new(),
             commit_rights: false,
             name: "Committer".to_string(),
             kind: None,
@@ -787,6 +788,7 @@ fn import_refuses_extra_entry_source_naming_unknown_node() {
         ],
         edges: vec![],
         ensembles: vec![GraphExportEnsemble {
+            mutex: Vec::new(),
             commit_rights: false,
             name: "Committer".to_string(),
             kind: None,
@@ -984,6 +986,7 @@ fn import_rejects_unknown_ensemble_target() {
         ],
         edges: vec![],
         ensembles: vec![GraphExportEnsemble {
+            mutex: Vec::new(),
             commit_rights: false,
             name: "Reviewer 1".to_string(),
             kind: None,
@@ -1322,6 +1325,7 @@ fn import_plan_rejects_ensemble_with_too_few_members() {
         ],
         edges: vec![],
         ensembles: vec![GraphExportEnsemble {
+            mutex: Vec::new(),
             commit_rights: false,
             name: "solo".to_string(),
             kind: None,

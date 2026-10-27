@@ -343,7 +343,7 @@ fn active_graph_run_for_spec_locked(
     let mut stmt = conn.prepare(
         "SELECT id, graph_id, spec_id, node_id, status, input, output, started_at, completed_at, iteration, pid, boot_id, session_id, executed_platform, executed_model
          FROM graph_runs
-         WHERE spec_id = ?1 AND status = 'running'
+         WHERE spec_id = ?1 AND status IN ('running', 'waiting')
          ORDER BY started_at DESC
          LIMIT 1",
     )?;

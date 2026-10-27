@@ -165,6 +165,7 @@ async fn graph_update_ensemble_shrink_below_min_pass_is_refused() {
 
     let created = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
@@ -194,6 +195,7 @@ async fn graph_update_ensemble_shrink_below_min_pass_is_refused() {
 
     let shrunk = handler
         .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+            mutex: None,
             commit_rights: None,
             ensemble_id: ensemble_id.clone(),
             kind: None,
@@ -248,6 +250,7 @@ async fn graph_update_ensemble_raise_min_pass_above_count_is_refused() {
 
     let created = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
@@ -277,6 +280,7 @@ async fn graph_update_ensemble_raise_min_pass_above_count_is_refused() {
 
     let raised = handler
         .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+            mutex: None,
             commit_rights: None,
             ensemble_id: ensemble_id.clone(),
             kind: None,
@@ -331,6 +335,7 @@ async fn graph_update_ensemble_shrink_with_adjusted_min_pass_succeeds() {
 
     let created = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
@@ -360,6 +365,7 @@ async fn graph_update_ensemble_shrink_with_adjusted_min_pass_succeeds() {
 
     let shrunk = handler
         .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+            mutex: None,
             commit_rights: None,
             ensemble_id: ensemble_id.clone(),
             kind: None,
@@ -411,6 +417,7 @@ async fn graph_preflight_reports_ensemble_with_invalid_min_pass() {
 
     let created = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
@@ -628,6 +635,7 @@ async fn graph_preflight_warns_on_stale_loop_complete_node_in_ensemble_prompt() 
 
     let created = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
@@ -1139,6 +1147,7 @@ async fn graph_preflight_refuses_partial_multi_source_ensemble() {
 
     let created = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,

@@ -37,6 +37,10 @@ pub(crate) const DB_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::fro
 #[derive(Clone)]
 pub struct Database {
     conn: Arc<Mutex<Connection>>,
+    /// Wakes node runs waiting for named mutexes whenever leases or the
+    /// waiter queue change (grant path re-checks under the connection lock,
+    /// so a notify that lands before the wait is harmless).
+    mutex_notify: Arc<tokio::sync::Notify>,
 }
 
 /// Base schema: every table and index created on a fresh database. Kept out of
@@ -416,6 +420,7 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
                 on_fail_to TEXT REFERENCES graph_nodes(id) ON DELETE RESTRICT,
                 commit_rights INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL,
+                mutex TEXT,
                 CHECK ((spec_id IS NULL) <> (graph_id IS NULL))
             );
 
@@ -639,6 +644,7 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
                 condition TEXT NOT NULL,
                 PRIMARY KEY (ensemble_id, from_node, condition)
             );",
+    mutex_store::MUTEX_TABLES_SCHEMA,
 ];
 
 impl Database {
@@ -693,6 +699,8 @@ impl Database {
         Self::migrate_roster_entries_table(&conn)?;
         Self::migrate_crews_tables(&conn)?;
         Self::migrate_agent_action_columns(&conn)?;
+        Self::migrate_ensemble_mutex_column(&conn)?;
+        Self::migrate_graph_events_mutex_kinds(&conn)?;
 
         Self::set_schema_version(&conn)?;
 
@@ -752,6 +760,7 @@ pub mod health;
 pub mod intelligence;
 pub mod last_prompts;
 mod migration;
+pub mod mutex_store;
 pub mod project;
 pub mod queues;
 pub(crate) mod roster_entries;

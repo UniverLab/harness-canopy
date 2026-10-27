@@ -123,6 +123,7 @@ fn insert_ensemble(
         .unwrap();
 
     let ensemble = Ensemble {
+        mutex: Vec::new(),
         id: ensemble_id.to_string(),
         spec_id: Some(spec_id.to_string()),
         graph_id: None,

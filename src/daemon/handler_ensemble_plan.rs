@@ -44,6 +44,7 @@ pub(crate) struct EnsembleUnitSpec<'a> {
     pub(crate) start_position: i64,
     pub(crate) kind: EnsembleKind,
     pub(crate) commit_rights: bool,
+    pub(crate) mutex: Vec<String>,
 }
 
 /// The concrete graph pieces of one ensemble unit, all with fresh ids: the
@@ -138,6 +139,7 @@ pub(crate) fn build_ensemble_unit(spec: &EnsembleUnitSpec) -> BuiltEnsembleUnit 
             None
         },
         commit_rights: spec.commit_rights,
+        mutex: spec.mutex.clone(),
         created_at: now,
 
         crew_id: None,
@@ -379,7 +381,7 @@ pub(crate) fn resolve_chained_exit_ensemble(
 /// Every update field `graph_update_ensemble` accepts, as presence flags —
 /// one list shared by the empty-update refusal and the crew-combination
 /// refusal, so the two can never drift apart.
-fn ensemble_update_field_flags(params: &GraphUpdateEnsembleParams) -> [bool; 19] {
+fn ensemble_update_field_flags(params: &GraphUpdateEnsembleParams) -> [bool; 20] {
     [
         params.kind.is_some(),
         params.prompt_template.is_some(),
@@ -400,6 +402,7 @@ fn ensemble_update_field_flags(params: &GraphUpdateEnsembleParams) -> [bool; 19]
         params.remove_entry_from.is_some(),
         params.commit_rights.is_some(),
         params.crew.is_some(),
+        params.mutex.is_some(),
     ]
 }
 

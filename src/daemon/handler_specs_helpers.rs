@@ -203,6 +203,10 @@ pub(crate) struct SpecRunInfo {
     /// budget. Surfaced so an operator can see a spec approaching the limit
     /// before it actually blocks the graph, not just after.
     pub(crate) cross_run_attempts: i64,
+    /// What the current run is waiting for, when it is `waiting` for named
+    /// mutexes — one entry per resource with its current holder. Empty
+    /// otherwise.
+    pub(crate) waiting_for: Vec<crate::db::mutex_store::MutexWaitDetail>,
 }
 
 pub(crate) fn build_spec_run_info(
@@ -212,12 +216,25 @@ pub(crate) fn build_spec_run_info(
     let runs = db
         .list_graph_runs_for_spec(&spec.id)
         .map_err(internal_error)?;
-    let current_node = runs
+    // A mutex-waiting run is the spec's current run exactly like a running
+    // one — it is in flight, not history.
+    let current_run = runs
         .iter()
         .rev()
-        .find(|run| run.status == GraphRunStatus::Running)
-        .or_else(|| runs.last())
-        .map(|run| run.node_id.clone());
+        .find(|run| {
+            matches!(
+                run.status,
+                GraphRunStatus::Running | GraphRunStatus::Waiting
+            )
+        })
+        .or_else(|| runs.last());
+    let current_node = current_run.map(|run| run.node_id.clone());
+    let waiting_for = match current_run {
+        Some(run) if run.status == GraphRunStatus::Waiting => db
+            .get_graph_run_waiting_for(&run.id)
+            .map_err(internal_error)?,
+        _ => Vec::new(),
+    };
     let blocker = runs.last().and_then(graph_run_blocker);
     let cross_run_attempts = db
         .get_graph_spec_cross_run_attempts(&spec.id)
@@ -227,5 +244,6 @@ pub(crate) fn build_spec_run_info(
         current_node,
         blocker,
         cross_run_attempts,
+        waiting_for,
     })
 }

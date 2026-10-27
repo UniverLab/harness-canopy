@@ -286,6 +286,7 @@ async fn graph_with_unexited_quorum(
 
     let added = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             spec_id: None,
             graph_id: Some(lp.id.clone()),
             name: "Implementer".to_string(),
@@ -514,6 +515,7 @@ async fn add_cb52_ensemble(
     };
     let result = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: Some(spec_id.to_string()),
             graph_id: None,
@@ -662,6 +664,7 @@ async fn add_two_member_ensemble(
 ) -> String {
     let created = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: Some(spec_id.to_string()),
             graph_id: None,
@@ -711,6 +714,7 @@ async fn add_two_member_ensemble(
 
 fn blank_ensemble_update(ensemble_id: &str) -> GraphUpdateEnsembleParams {
     GraphUpdateEnsembleParams {
+        mutex: None,
         ensemble_id: ensemble_id.to_string(),
         kind: None,
         prompt_template: None,
@@ -761,6 +765,7 @@ async fn build_two_source_ensemble_graph(
     };
     let created = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
@@ -1081,6 +1086,7 @@ async fn build_crew_ensemble(
     let downstream_id = extract_id(&downstream, "node_id");
     let ensemble = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: None,
             graph_id: Some(graph_id.clone()),
@@ -1176,6 +1182,7 @@ async fn build_literal_ensemble(
     ];
     let ensemble = handler
         .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+            mutex: None,
             commit_rights: None,
             spec_id: None,
             graph_id: Some(graph_id.clone()),
@@ -1205,6 +1212,7 @@ async fn build_literal_ensemble(
 
 fn ensemble_update_params(ensemble_id: &str) -> GraphUpdateEnsembleParams {
     GraphUpdateEnsembleParams {
+        mutex: None,
         ensemble_id: ensemble_id.to_string(),
         kind: None,
         prompt_template: None,

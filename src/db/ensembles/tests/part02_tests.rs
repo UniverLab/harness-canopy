@@ -107,6 +107,7 @@ fn insert_ensemble_unit_round_trips_member_prompt_override() {
         },
     ];
     let ensemble = Ensemble {
+        mutex: Vec::new(),
         commit_rights: false,
         id: "ens1".to_string(),
         spec_id: Some("spec-1".to_string()),
@@ -276,6 +277,7 @@ fn insert_ensemble_unit_round_trips_member_timeout_minutes() {
         },
     ];
     let ensemble = Ensemble {
+        mutex: Vec::new(),
         commit_rights: false,
         id: "ens1".to_string(),
         spec_id: Some("spec-1".to_string()),
@@ -416,6 +418,7 @@ fn update_ensemble_member_sets_and_clears_prompt_override() {
         },
     ];
     let ensemble = Ensemble {
+        mutex: Vec::new(),
         commit_rights: false,
         id: "ens1".to_string(),
         spec_id: Some("spec-1".to_string()),
@@ -549,6 +552,7 @@ fn update_ensemble_member_sets_and_clears_member_timeout() {
         },
     ];
     let ensemble = Ensemble {
+        mutex: Vec::new(),
         commit_rights: false,
         id: "ens1".to_string(),
         spec_id: Some("spec-1".to_string()),
@@ -723,6 +727,7 @@ fn insert_ensemble_unit_with_cascade_kind_persists_kind() {
         condition: GraphEdgeCondition::Always,
     };
     let ensemble = Ensemble {
+        mutex: Vec::new(),
         commit_rights: false,
         id: "ens1".to_string(),
         spec_id: Some(spec_id),
@@ -828,6 +833,7 @@ fn insert_ensemble_unit_with_round_robin_kind_persists_index() {
         condition: GraphEdgeCondition::Always,
     };
     let ensemble = Ensemble {
+        mutex: Vec::new(),
         commit_rights: false,
         id: "ens1".to_string(),
         spec_id: Some(spec_id),
@@ -933,6 +939,7 @@ fn update_ensemble_kind_changes_kind_and_clears_index() {
         condition: GraphEdgeCondition::Always,
     };
     let ensemble = Ensemble {
+        mutex: Vec::new(),
         commit_rights: false,
         id: "ens1".to_string(),
         spec_id: Some(spec_id),
@@ -1041,6 +1048,7 @@ fn round_robin_index_advances_and_wraps() {
         condition: GraphEdgeCondition::Always,
     };
     let ensemble = Ensemble {
+        mutex: Vec::new(),
         commit_rights: false,
         id: "ens1".to_string(),
         spec_id: Some(spec_id),

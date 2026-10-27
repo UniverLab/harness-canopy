@@ -286,15 +286,24 @@ pub(crate) struct NodeRunInfo {
     /// router's (see `graph_engine::execute_router_node`'s `"route"` output
     /// field). `None` for every other node kind.
     pub chosen_route: Option<String>,
+    /// What the run waits for, when its status is `waiting` — one entry per
+    /// requested mutex with its current holder. Empty otherwise.
+    pub waiting_for: Vec<crate::db::mutex_store::MutexWaitDetail>,
 }
 
 impl NodeRunInfo {
-    fn from_run(run: &crate::domain::graphs::GraphNodeRun) -> Self {
+    fn from_run(db: &Database, run: &crate::domain::graphs::GraphNodeRun) -> Self {
+        let waiting_for = if run.status == GraphRunStatus::Waiting {
+            db.get_graph_run_waiting_for(&run.id).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         NodeRunInfo {
             status: Some(run.status),
             started_at: Some(run.started_at),
             iteration: Some(run.iteration),
             chosen_route: extract_chosen_route(&run.output),
+            waiting_for,
         }
     }
 }
@@ -320,7 +329,7 @@ fn extract_chosen_route(output: &Option<Value>) -> Option<String> {
 pub(crate) fn resolve_node_run_info(db: &Database, spec_id: &str, node_id: &str) -> NodeRunInfo {
     if let Ok(Some(run)) = db.get_active_graph_run_for_node(node_id) {
         if run.spec_id == spec_id {
-            return NodeRunInfo::from_run(&run);
+            return NodeRunInfo::from_run(db, &run);
         }
     }
     db.list_graph_runs_for_spec(spec_id)
@@ -328,7 +337,7 @@ pub(crate) fn resolve_node_run_info(db: &Database, spec_id: &str, node_id: &str)
         .iter()
         .rev()
         .find(|run| run.node_id == node_id)
-        .map(NodeRunInfo::from_run)
+        .map(|run| NodeRunInfo::from_run(db, run))
         .unwrap_or_default()
 }
 
@@ -455,13 +464,13 @@ fn resolve_current_node(
     // Try active (running) run first.
     if let Ok(Some(run)) = db.get_active_graph_run_for_spec(spec_id) {
         let node_id = run.node_id.clone();
-        return (Some(node_id), NodeRunInfo::from_run(&run));
+        return (Some(node_id), NodeRunInfo::from_run(db, &run));
     }
 
     // Fall back to most recent run for this spec.
     let runs = db.list_graph_runs_for_spec(spec_id).unwrap_or_default();
     if let Some(run) = runs.last() {
-        return (Some(run.node_id.clone()), NodeRunInfo::from_run(run));
+        return (Some(run.node_id.clone()), NodeRunInfo::from_run(db, run));
     }
 
     (None, NodeRunInfo::default())
@@ -1260,6 +1269,7 @@ mod tests {
             });
         }
         let ensemble = Ensemble {
+            mutex: Vec::new(),
             commit_rights: false,
             id: "ens1".to_string(),
             spec_id: Some(spec_id.to_string()),
@@ -1318,6 +1328,7 @@ mod tests {
 
     #[test]
     fn node_run_info_from_run_captures_all_fields() {
+        let db = test_db();
         let run = make_run(
             "lp1",
             "s1",
@@ -1326,7 +1337,7 @@ mod tests {
             3,
             Some(json!({"summary": "all good"})),
         );
-        let info = NodeRunInfo::from_run(&run);
+        let info = NodeRunInfo::from_run(&db, &run);
         assert_eq!(info.status, Some(GraphRunStatus::Pass));
         assert!(info.started_at.is_some());
         assert_eq!(info.iteration, Some(3));
@@ -1334,8 +1345,9 @@ mod tests {
 
     #[test]
     fn node_run_info_from_run_with_none_output() {
+        let db = test_db();
         let run = make_run("lp1", "s1", "n1", GraphRunStatus::Running, 1, None);
-        let info = NodeRunInfo::from_run(&run);
+        let info = NodeRunInfo::from_run(&db, &run);
         assert_eq!(info.status, Some(GraphRunStatus::Running));
     }
 

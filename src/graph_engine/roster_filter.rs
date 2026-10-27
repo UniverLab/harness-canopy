@@ -314,6 +314,7 @@ mod tests {
 
     fn ensemble(kind: EnsembleKind, min_pass: i64) -> Ensemble {
         Ensemble {
+            mutex: Vec::new(),
             id: "ens".to_string(),
             spec_id: Some("spec".to_string()),
             graph_id: None,

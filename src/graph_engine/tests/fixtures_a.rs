@@ -788,6 +788,7 @@ fn ensemble_details_fixture(
 ) -> crate::domain::graphs::EnsembleDetails {
     crate::domain::graphs::EnsembleDetails {
         ensemble: crate::domain::graphs::Ensemble {
+            mutex: Vec::new(),
             commit_rights: false,
             id: ensemble_id.to_string(),
             spec_id: Some("spec".to_string()),

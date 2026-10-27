@@ -272,10 +272,12 @@ pub(crate) fn execution_is_infra_failure(output: &Value) -> bool {
 
 /// Persist a crashed agent attempt with B19 `infra_attempt`/`infra_crash`
 /// markers, wait the doubling backoff (`backoff_secs * 2^attempt`), then
-/// insert a fresh `Running` run row for the retry and return its id. `attempt`
+/// insert a fresh run row for the retry and return its id. `attempt`
 /// is the zero-based index of the attempt that just crashed. Shared by the
 /// sequential node path and ensemble members (B26) so every infra retry — no
 /// matter which path — leaves the same distinct, marker-carrying run rows.
+/// The retry row starts `waiting` when `mutex_resources` is non-empty (the
+/// gate re-acquires ahead of the retry) and `running` otherwise.
 #[expect(clippy::too_many_arguments)]
 pub(crate) async fn begin_infra_retry(
     db: &Database,
@@ -288,6 +290,7 @@ pub(crate) async fn begin_infra_retry(
     crashed_output: &Value,
     attempt: u32,
     backoff_secs: u64,
+    mutex_resources: &[String],
 ) -> Result<String> {
     db.update_graph_run_result(
         crashed_run_id,
@@ -315,12 +318,17 @@ pub(crate) async fn begin_infra_retry(
             .filter(|(platform, _)| platform.is_some())
             .unwrap_or_else(|| executed_pair_for_node(node))
     };
+    let retry_status = if mutex_resources.is_empty() {
+        GraphRunStatus::Running
+    } else {
+        GraphRunStatus::Waiting
+    };
     db.insert_graph_run(&GraphNodeRun {
         id: run_id.clone(),
         graph_id: lp.id.clone(),
         spec_id: spec.id.clone(),
         node_id: node.id.clone(),
-        status: GraphRunStatus::Running,
+        status: retry_status,
         input: previous_output.cloned(),
         output: None,
         started_at: chrono::Utc::now(),

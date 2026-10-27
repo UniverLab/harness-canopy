@@ -156,6 +156,7 @@ pub(crate) struct MemberRunSpec<'a> {
     pub(crate) previous_output: Option<&'a Value>,
     pub(crate) iteration: usize,
     pub(crate) ensemble_id: &'a str,
+    pub(crate) ensemble_mutex: &'a [String],
 }
 
 /// Load every member node fresh (CM15), shared by all ensemble kinds.

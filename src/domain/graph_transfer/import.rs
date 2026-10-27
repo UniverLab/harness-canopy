@@ -698,6 +698,7 @@ pub(super) fn import_ensemble_record(
             None
         },
         commit_rights: doc_ensemble.commit_rights,
+        mutex: doc_ensemble.mutex.clone(),
         created_at: now,
 
         // CM49: the crew reference travels by name. `crew_id` and the applied

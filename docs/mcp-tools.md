@@ -195,6 +195,19 @@ The most specific entry wins: exact model, then the longest `*` prefix, then the
 platform-wide entry. An `unavailable` entry past its `until` reads as available
 (expired) — expiry is evaluated at read time, never by a timer.
 
+## Named mutexes (1)
+
+A node (agent, check, gate) or ensemble declares the shared resources it
+needs with `mutex: ["cpu"]`; the engine grants each resource to one node run
+at a time across all graphs of the daemon, and the others wait in a visible
+FIFO queue without burning their timeout. Each name must match
+`^[a-z][a-z0-9-]{0,31}$`. The lease is held per node run (per member run for
+an ensemble) and released when the run ends for any reason.
+
+| Tool | Description |
+|---|---|
+| `mutex` | Action `list`: every granted lease (resource, holder run/graph/node, `acquired_at`) and every queued waiter (run/graph/node, resources, `requested_at`) in FIFO order |
+
 ## Spec backlog (9)
 
 Every tool that takes a `spec_id` also accepts the spec's code (e.g. `FIX-7`),

@@ -92,6 +92,7 @@ fn make_ensemble_details(
     member_ids: &[&str],
 ) -> EnsembleDetails {
     let ensemble = Ensemble {
+        mutex: Vec::new(),
         commit_rights: false,
         id: ensemble_id.to_string(),
         spec_id: None,
@@ -159,6 +160,7 @@ fn make_twelve_member_doc(kind: Option<&str>) -> GraphExportDocument {
         ],
         edges: vec![],
         ensembles: vec![GraphExportEnsemble {
+            mutex: Vec::new(),
             commit_rights: false,
             name: "team".to_string(),
             kind: kind.map(str::to_string),
@@ -210,6 +212,7 @@ fn import_kind_fixture(kind: Option<&str>) -> GraphImportPlan {
         ],
         edges: vec![],
         ensembles: vec![GraphExportEnsemble {
+            mutex: Vec::new(),
             commit_rights: false,
             name: "team".to_string(),
             kind: kind.map(str::to_string),

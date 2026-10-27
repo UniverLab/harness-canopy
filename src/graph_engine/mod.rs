@@ -47,6 +47,7 @@ mod idea_run;
 mod infra;
 mod launch_check;
 mod lifecycle;
+mod mutex_gate;
 mod node_attempt;
 mod node_dispatch;
 mod output_tee;
@@ -87,6 +88,7 @@ pub(crate) use infra::*;
 pub(crate) use launch_check::*;
 #[allow(unused_imports)]
 pub(crate) use lifecycle::*;
+pub(crate) use mutex_gate::*;
 pub(crate) use node_attempt::*;
 #[allow(unused_imports)]
 pub(crate) use node_dispatch::*;

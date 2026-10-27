@@ -115,6 +115,7 @@ fn insert_kind_ensemble_with_member_timeouts(
     }
 
     let ensemble = crate::domain::graphs::Ensemble {
+        mutex: Vec::new(),
         commit_rights: false,
         id: "ens1".to_string(),
         spec_id: Some(spec_id.to_string()),
@@ -543,6 +544,7 @@ fn setup_graph_hook_source(
 fn missing_member_details() -> EnsembleDetails {
     EnsembleDetails {
         ensemble: crate::domain::graphs::Ensemble {
+            mutex: Vec::new(),
             id: "ens-missing".to_string(),
             spec_id: None,
             graph_id: None,

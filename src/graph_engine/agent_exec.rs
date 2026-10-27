@@ -708,6 +708,7 @@ mod spec_notes_prompt_tests {
         };
         db.insert_ensemble_unit(
             &Ensemble {
+                mutex: Vec::new(),
                 id: "ens-1".to_string(),
                 spec_id: Some("spec-1".to_string()),
                 graph_id: None,
