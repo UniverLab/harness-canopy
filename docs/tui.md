@@ -55,6 +55,9 @@ step instead of launching straight away:
   pane shows `Ctrl+C again within 1 s to send it to <platform>`; press it
   twice within that second to forward the interrupt. Every other platform
   (claude, …) keeps forwarding `Ctrl+C` unchanged.
+- **Scrolling up** — the scrollback keeps everything the session wrote,
+  including output an inline TUI scrolled off the top of the screen, so
+  scrolling up shows the transcript instead of stale rows.
 
 ## Monitoring
 
