@@ -249,3 +249,4 @@ fn import_kind_fixture(kind: Option<&str>) -> GraphImportPlan {
 
 mod part01_tests;
 mod part02_tests;
+mod part03_tests;

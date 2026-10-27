@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use super::*;
 
 /// A missing/unsupported `format_version` is refused with its own clear
@@ -43,6 +45,49 @@ pub(super) fn reject_unknown_output_references(
         }
     }
     Ok(())
+}
+
+/// Every `prompt_preset` an agent node names must be resolvable on this
+/// machine: a `<prompts_dir>/<name>.md` file (what
+/// `domain::prompts::resolve_prompt_preset` reads at spawn time) or one of the
+/// builtins seeded on daemon start. Export carries only the preset NAME, so a
+/// document written elsewhere would otherwise import cleanly and then run that
+/// node on an empty prompt — a hard refusal at import time is the safety net
+/// (this spec). Names are compared verbatim (no trimming) because the spawn
+/// path joins them verbatim too.
+///
+/// Only plain agent nodes are inspected: an ensemble member carries no preset
+/// field — its prompt is the ensemble's own template — so there is nothing to
+/// check there until preset bundling lands.
+pub(super) fn reject_unknown_prompt_presets(
+    document: &GraphExportDocument,
+    prompts_dir: &std::path::Path,
+) -> Result<(), String> {
+    let mut referenced: BTreeSet<&str> = document
+        .nodes
+        .iter()
+        .filter(|node| node.kind == GraphNodeKind::Agent)
+        .filter_map(|node| node.config.get("prompt_preset").and_then(Value::as_str))
+        .filter(|name| !name.trim().is_empty())
+        .collect();
+    if referenced.is_empty() {
+        return Ok(());
+    }
+    let builtins: BTreeSet<&str> = crate::domain::prompts::builtin_prompt_preset_specs()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    referenced.retain(|name| {
+        !builtins.contains(name) && !prompts_dir.join(format!("{name}.md")).is_file()
+    });
+    if referenced.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "Unknown prompt preset(s): {}. Add file(s) under {} or use a builtin (implementer, reviewer, resilience).",
+        referenced.into_iter().collect::<Vec<_>>().join(", "),
+        prompts_dir.display()
+    ))
 }
 
 /// Authoring-time shape rules `graph_add_ensemble` enforces: member-count

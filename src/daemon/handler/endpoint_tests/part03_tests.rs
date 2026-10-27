@@ -1385,3 +1385,44 @@ async fn graph_run_allow_dirty_start_launches_with_warning() {
         "must not tell the user to set an already-set flag: {msg}"
     );
 }
+
+/// A document naming a custom prompt preset this machine does not have must
+/// be refused through the MCP surface (never imported to then spawn with an
+/// empty prompt), and nothing may be written.
+#[tokio::test]
+async fn graph_import_rejects_unknown_prompt_preset_and_writes_nothing() {
+    let (dir, db, handler) = endpoint_test_handler();
+    let workdir = dir.path().to_string_lossy().to_string();
+    let preset = format!("absent-{}", uuid::Uuid::new_v4());
+    let document = serde_json::json!({
+        "format_version": 1,
+        "name": "Preset Graph",
+        "nodes": [
+            {
+                "name": "worker",
+                "kind": "agent",
+                "position": 1,
+                "config": {"platform": "claude", "prompt_preset": preset}
+            }
+        ],
+        "edges": [],
+        "ensembles": []
+    });
+
+    let result = handler
+        .graph_import(Parameters(GraphImportParams {
+            document,
+            workdir: workdir.clone(),
+            name: None,
+        }))
+        .await
+        .unwrap();
+
+    assert!(is_err(&result), "{}", text(&result));
+    assert!(
+        text(&result).contains(&preset),
+        "error must name the unknown preset: {}",
+        text(&result)
+    );
+    assert!(db.list_graphs(Some(&workdir), true).unwrap().is_empty());
+}

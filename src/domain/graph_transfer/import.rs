@@ -53,13 +53,29 @@ pub struct GraphImportPlan {
 /// Returns `Err` (with nothing to persist) on: an unsupported/missing
 /// `format_version`, a duplicate node name, an edge or ensemble field naming
 /// a node absent from `document.nodes`, an ensemble that violates its
-/// kind's member-count bounds, or `min_pass`/timeout fields out of range.
+/// kind's member-count bounds, `min_pass`/timeout fields out of range, or an
+/// agent node naming a prompt preset this machine does not have.
 pub fn build_import_plan(
     document: &GraphExportDocument,
     graph_id: &str,
 ) -> Result<GraphImportPlan, String> {
+    build_import_plan_with_prompts(
+        document,
+        graph_id,
+        &crate::domain::prompts::prompts_dir(&crate::domain::prompts::canopy_dir()),
+    )
+}
+
+/// [`build_import_plan`] with the prompts directory injected, so the preset
+/// check reads a caller-chosen directory (tests); production uses the wrapper.
+pub fn build_import_plan_with_prompts(
+    document: &GraphExportDocument,
+    graph_id: &str,
+    prompts_dir: &std::path::Path,
+) -> Result<GraphImportPlan, String> {
     ensure_import_format_version(document)?;
     reject_duplicate_import_names(document)?;
+    reject_unknown_prompt_presets(document, prompts_dir)?;
 
     let now = chrono::Utc::now();
     let (nodes, name_to_id) = build_import_nodes(document, graph_id, now)?;

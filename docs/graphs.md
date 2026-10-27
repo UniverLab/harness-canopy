@@ -857,6 +857,19 @@ its all-or-nothing contract. `format_version` 5 remains the newest
 accepted version; 1, 2, 3 and 4 documents import unchanged (they carry
 fewer fields, never more).
 
+A node's `prompt_preset` travels as a **name**, not as its text, so
+import checks every preset the document references against this
+machine: a file `<canopy_dir>/prompts/<name>.md` (the same file the
+engine reads at spawn time) or one of the builtins (`implementer`,
+`reviewer`, `resilience`, which are seeded on daemon start and fall back
+to embedded constants). If any referenced preset is unknown, the whole
+import is refused with an error naming **every** unknown preset — nothing
+is written — rather than importing a graph whose agent would silently
+run on an empty prompt. A custom preset you rely on must therefore be
+copied to the importing machine's prompts dir first. Nothing else about
+prompt resolution changes: at spawn time an explicit `prompt_template`
+still wins, then `prompt_preset`, then the fallback template.
+
 A [crew](#crews)-bound design travels by name, never by its members:
 `graph_export` writes `crew: "<name>"` on a bound ensemble (with no
 `members` array), on a bound agent node's config, and on a bound agent
