@@ -447,6 +447,84 @@ fn boot_id_migration_is_idempotent_and_a_pre_boot_id_database_opens_cleanly() {
 }
 
 #[test]
+fn harness_conversation_id_migration_adds_column_and_index_and_is_idempotent() {
+    // Simulate a database written before the harness conversation column
+    // existed: interactive_sessions has `boot_id` but no
+    // `harness_conversation_id`.
+    let tmp = NamedTempFile::new().expect("create temp file");
+    let path = tmp.path().to_path_buf();
+    std::mem::forget(tmp);
+
+    {
+        let conn = rusqlite::Connection::open(&path).expect("open raw legacy db");
+        conn.execute_batch(
+            "CREATE TABLE interactive_sessions (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                cli TEXT NOT NULL,
+                working_dir TEXT NOT NULL,
+                args TEXT,
+                started_at TEXT NOT NULL,
+                exited_at TEXT,
+                exit_code INTEGER,
+                status TEXT NOT NULL DEFAULT 'active',
+                session_type TEXT NOT NULL DEFAULT 'interactive',
+                pid INTEGER,
+                boot_id TEXT
+             );
+             INSERT INTO interactive_sessions
+                 (id, name, cli, working_dir, started_at, status, session_type, pid)
+                 VALUES ('legacy-session', 'legacy', 'opencode', '/tmp', '2023-01-01T00:00:00Z', 'active', 'interactive', 4242);",
+        )
+        .expect("seed legacy schema");
+    }
+
+    // Opening the DB must add the column, keep the legacy row readable with a
+    // NULL harness id (FR3: no identifier behaves exactly as before), and
+    // accept a harness id on it once one is reported.
+    let db = Database::new(&path).expect("open pre-harness db, running migration");
+    let legacy = db
+        .get_hookable_session("legacy-session")
+        .unwrap()
+        .expect("legacy row still present after migration");
+    assert_eq!(legacy.harness_conversation_id, None);
+    db.set_session_harness_conversation_id("legacy-session", "conv-legacy")
+        .unwrap();
+    assert_eq!(
+        db.find_session_by_harness_id("conv-legacy")
+            .unwrap()
+            .expect("recorded harness id is findable")
+            .id,
+        "legacy-session"
+    );
+    drop(db);
+
+    // The migration must have created its index too (the guideline's
+    // indexed column), and reopening must be a no-op.
+    {
+        let conn = rusqlite::Connection::open(&path).expect("reopen raw db");
+        let indexed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_interactive_sessions_harness'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query sqlite_master for the harness index");
+        assert_eq!(
+            indexed, 1,
+            "the harness column migration must create its index"
+        );
+    }
+    let db = Database::new(&path).expect("reopen db after migration already applied");
+    let legacy = db.get_hookable_session("legacy-session").unwrap().unwrap();
+    assert_eq!(
+        legacy.harness_conversation_id.as_deref(),
+        Some("conv-legacy")
+    );
+}
+
+#[test]
 fn legacy_bridge_rows_are_reclassified_by_migration() {
     // Simulate a row left over from before session_type = 'bridge' existed:
     // old builds stored the bridge sidecar with session_type = 'interactive'.

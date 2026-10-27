@@ -591,6 +591,124 @@ async fn interactive_hook_name_resolves_single_live_match() {
     assert_eq!(provenance.target_session_name.as_deref(), Some("marasmius"));
 }
 
+/// FR6: a hook addressed to the name of a session that ended and was then
+/// resumed is delivered to the resumed process. The first fire reproduces
+/// the incident exactly (the finished session is not live: the hook fails
+/// naming the name, nothing enqueued); the resume of the same harness
+/// conversation reactivates the row under its kept id, and the second fire
+/// enqueues to that same id — never to a freshly minted one.
+#[tokio::test]
+async fn interactive_hook_delivers_to_a_resumed_session_by_name() {
+    let (_dir, db, engine, graph_id, _spec_id) = graph_fixture().unwrap();
+    let workdir = db.get_graph(&graph_id).unwrap().unwrap().workdir.clone();
+    db.insert_interactive_session(
+        "sess-orch",
+        "marasmius",
+        "claude",
+        &workdir,
+        Some("--continue"),
+        Some(111),
+        "interactive",
+        Some("boot-old"),
+    )
+    .unwrap();
+    db.set_session_harness_conversation_id("sess-orch", "conv-abc")
+        .unwrap();
+    db.finish_interactive_session("sess-orch", 0).unwrap();
+
+    let hook = interactive_hook_name_fixture("marasmius", "Graph {{graph_name}} finished");
+    let mut hooks = std::collections::BTreeMap::new();
+    hooks.insert(
+        crate::domain::graphs::GraphHookEvent::OnCompleted,
+        vec![hook],
+    );
+    db.update_graph_hooks(&graph_id, &hooks).unwrap();
+
+    let lp = db.get_graph(&graph_id).unwrap().unwrap();
+    let completed = vec![("Spec".to_string(), "ok".to_string())];
+    let ctx = HookContext {
+        graph_name: &lp.name,
+        workdir: &lp.workdir,
+        completed_specs: &completed,
+        spec_name: None,
+        spec_id: None,
+        blocker: None,
+        node_name: None,
+        spec_code: None,
+        spec_commit_message: None,
+        spec_scope: None,
+        spec_type: None,
+    };
+
+    // Finished session: the hook fails with the incident's exact wording.
+    engine
+        .fire_hooks(
+            &lp,
+            crate::domain::graphs::GraphHookEvent::OnCompleted,
+            &ctx,
+        )
+        .await;
+    let runs = db.list_graph_completion_hook_runs(&graph_id).unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, GraphRunStatus::Fail);
+    let summary = runs[0].summary.as_deref().unwrap_or("");
+    assert!(
+        summary.contains("does not exist or is no longer live"),
+        "got: {summary}"
+    );
+    assert!(db
+        .list_due_scheduled_sends(chrono::Utc::now())
+        .unwrap()
+        .is_empty());
+
+    // The resume of that harness conversation keeps the row's id and name.
+    let outcome = db
+        .register_interactive_session(&crate::db::session::SessionRegistration {
+            id: "fresh-uuid",
+            name: "populus",
+            cli: "claude",
+            working_dir: &workdir,
+            args: Some("--continue"),
+            pid: Some(4242),
+            session_type: "interactive",
+            boot_id: Some("boot-new"),
+            harness_conversation_id: Some("conv-abc"),
+        })
+        .unwrap();
+    assert_eq!(
+        outcome,
+        crate::db::session::RegistrationOutcome::Reactivated {
+            id: "sess-orch".to_string(),
+            name: "marasmius".to_string(),
+        }
+    );
+
+    // Same hook, same name: now it delivers — to the kept id.
+    engine
+        .fire_hooks(
+            &lp,
+            crate::domain::graphs::GraphHookEvent::OnCompleted,
+            &ctx,
+        )
+        .await;
+    let runs = db.list_graph_completion_hook_runs(&graph_id).unwrap();
+    assert_eq!(runs.len(), 2);
+    assert_eq!(
+        runs[1].status,
+        GraphRunStatus::Pass,
+        "{:?}",
+        runs[1].summary
+    );
+    let due = db.list_due_scheduled_sends(chrono::Utc::now()).unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(
+        due[0].target_session_id, "sess-orch",
+        "delivery must land on the resumed session's kept id"
+    );
+    let provenance = due[0].provenance.as_ref().expect("provenance populated");
+    assert_eq!(provenance.target_session_name.as_deref(), Some("marasmius"));
+}
+
 /// CM27: a name-targeted hook with no live match fails naming the name,
 /// enqueues nothing, and does not fall back to any other session.
 #[tokio::test]

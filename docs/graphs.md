@@ -747,14 +747,16 @@ completion, review the specs this run closed, the resulting code, and
 
 An interactive hook targets a session either by its exact id
 (`target_session_id`) or by its name (`target_session_name`) — exactly one
-of the two must be set. A session id is not stable over time: a hook
-configured with one will eventually point at a session that no longer
-exists (a daemon reinstall or TUI restart changes ids), and firing then
-fails loudly naming the id rather than redirecting the message anywhere
-else. `target_session_name` exists for exactly this case: names survive a
-restart that ids don't, so a name-targeted hook is resolved against the
-live session set fresh on every fire — never cached — the same set
-`session_list` reads. Exactly one live session with that name resolves and
+of the two must be set. A resume canopy recognizes — a sidebar auto-resume,
+or a harness conversation it already has on record — keeps the session's
+id and its name, so a hook addressed to either keeps reaching it
+afterwards. A resume it does not recognize comes back as a new session
+with a fresh id and a fresh generated name, and a hook configured with the
+old id then points at a session that no longer exists: firing fails loudly
+naming the id rather than redirecting the message anywhere else.
+`target_session_name` exists for exactly this case: a name-targeted hook is
+resolved against the live session set fresh on every fire — never cached —
+the same set `session_list` reads. Exactly one live session with that name resolves and
 delivers; zero matches fails naming the name, and more than one match fails
 listing every matching id, rather than guessing which one was meant. Session
 names are not required to be unique, so a hook aimed at a name that two

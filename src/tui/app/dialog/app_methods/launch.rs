@@ -660,3 +660,113 @@ fn yolo_launch_args(dialog: &NewAgentDialog) -> Option<String> {
         None => base_args,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::app::dialog::new_agent::NewAgentDialog;
+    use crate::tui::app::session_resume::ResumableSession;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    fn app_with_known_session() -> (App, Arc<crate::db::Database>, tempfile::TempDir) {
+        // Same file pattern as `tui::app::tests::test_db` (forget the named
+        // temp file so the path survives for the connection).
+        let tmp = tempfile::NamedTempFile::new().expect("create temp file");
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let db = Arc::new(crate::db::Database::new(&path).expect("create test db"));
+        db.insert_interactive_session(
+            "sess-orch",
+            "marasmius",
+            "claude",
+            "/tmp/proj",
+            None,
+            None,
+            "interactive",
+            None,
+        )
+        .unwrap();
+        db.set_session_harness_conversation_id("sess-orch", "ses_abc123")
+            .unwrap();
+        db.finish_interactive_session("sess-orch", 0).unwrap();
+
+        let data_dir = tempdir().unwrap();
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        (app, db, data_dir)
+    }
+
+    /// FR1: the entry the user picked out of the CLI's own session list is
+    /// the harness's conversation identifier — it must resolve to the canopy
+    /// session that reported it (id and name adopted at spawn, row
+    /// reactivated by `register_interactive_session`), never to a guess.
+    #[test]
+    fn picked_harness_entry_resolves_to_its_canopy_session() {
+        let (app, _db, _data_dir) = app_with_known_session();
+
+        let mut dialog = NewAgentDialog::new(None);
+        dialog.selected_session = Some(("ses_abc123".to_string(), "conversation".to_string()));
+
+        let (harness_id, known) = app.resolve_launch_identity(&dialog);
+        assert_eq!(harness_id.as_deref(), Some("ses_abc123"));
+        let known = known.expect("the picked conversation must resolve to its canopy session");
+        assert_eq!(known.id, "sess-orch");
+        assert_eq!(known.name, "marasmius");
+    }
+
+    /// FR1: the canopy-native resume picker resolves through the harness id
+    /// its source session recorded — same matched session, same id and name.
+    #[test]
+    fn canopy_resume_choice_resolves_through_its_recorded_harness_id() {
+        let (app, _db, _data_dir) = app_with_known_session();
+
+        let mut dialog = NewAgentDialog::new(None);
+        dialog.selected_resume_session = Some(ResumableSession {
+            id: "sess-orch".to_string(),
+            name: "marasmius".to_string(),
+            cli: "claude".to_string(),
+            last_active: "2026-10-27T10:00:00Z".to_string(),
+            working_dir: "/tmp/proj".to_string(),
+            args: None,
+            harness_conversation_id: Some("ses_abc123".to_string()),
+        });
+
+        let (harness_id, known) = app.resolve_launch_identity(&dialog);
+        assert_eq!(harness_id.as_deref(), Some("ses_abc123"));
+        let known = known.expect("the recorded harness id must resolve to its canopy session");
+        assert_eq!(known.id, "sess-orch");
+        assert_eq!(known.name, "marasmius");
+    }
+
+    /// FR1/FR3: a conversation canopy has never seen still reports its
+    /// harness id (so the new row records it for the next resume) but has no
+    /// known session to adopt — the launch stays a fresh registration.
+    #[test]
+    fn unknown_harness_entry_reports_its_id_without_a_known_session() {
+        let (app, _db, _data_dir) = app_with_known_session();
+
+        let mut dialog = NewAgentDialog::new(None);
+        dialog.selected_session = Some(("ses_never_seen".to_string(), "conversation".to_string()));
+
+        let (harness_id, known) = app.resolve_launch_identity(&dialog);
+        assert_eq!(harness_id.as_deref(), Some("ses_never_seen"));
+        assert!(known.is_none());
+    }
+
+    /// FR3: with no harness conversation identifier at all, the launch keeps
+    /// today's behaviour — nothing to match, nothing to adopt.
+    #[test]
+    fn launch_without_a_harness_identifier_resolves_nothing() {
+        let (app, _db, _data_dir) = app_with_known_session();
+
+        let dialog = NewAgentDialog::new(None);
+        let (harness_id, known) = app.resolve_launch_identity(&dialog);
+        assert!(harness_id.is_none());
+        assert!(known.is_none());
+    }
+}
