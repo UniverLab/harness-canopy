@@ -36,13 +36,16 @@ Background agents are managed from the TUI or by other agents through the
 
 A background agent can deliver its prompt into a *live interactive session*
 instead of running a CLI headlessly. Set `action` to `send_to_session` and give
-a target session — by **name** is recommended, because a name survives session
-recovery where an id changes. Every time the agent's cron or watch trigger
-fires, canopy enqueues the prompt as a scheduled send to that session, and the
-TUI delivers it on its next refresh tick. Delivery happens when a TUI is open:
-a message that fires while no TUI is running waits for the next TUI — it is not
-lost. If a fire is already waiting for the same target, a new fire replaces that
-message rather than piling up a second one.
+a target session — by **name** is recommended, because the name is resolved
+against the live sessions on every fire, and a resume canopy recognizes keeps
+both the session's id and its name. A resume it does not recognize comes back
+with a fresh id and a fresh generated name (see
+[Graphs](graphs.md#event-keyed-hooks)). Every time the agent's cron or watch
+trigger fires, canopy enqueues the prompt as a scheduled send to that session,
+and the TUI delivers it on its next refresh tick. Delivery happens when a TUI
+is open: a message that fires while no TUI is running waits for the next TUI —
+it is not lost. If a fire is already waiting for the same target, a new fire
+replaces that message rather than piling up a second one.
 
 Cron example (MCP call):
 

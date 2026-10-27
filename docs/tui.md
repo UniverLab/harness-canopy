@@ -39,7 +39,8 @@ step instead of launching straight away:
     has already recorded) reuses that session: it keeps its id and its name,
     so hooks and scheduled sends addressed to it still reach it afterwards,
     and `session_list` shows one row — never the old one plus a newly-named
-    one.
+    one. A conversation canopy has never seen starts a fresh session with a
+    new id and a new generated name, as before.
   - `↑↓` selects, `Enter` confirms, and `Esc` returns to the form with every
   value kept. **Background** and **Terminal** launch from the form as
   before — the Mode step is Interactive-only.
