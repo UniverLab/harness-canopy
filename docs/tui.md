@@ -74,7 +74,8 @@ step instead of launching straight away:
   new node, the view centres that node's whole box (a tall collapsed
   ensemble included) in the panel; your own scroll is left alone until the
   next node change. Manual node inspection shows per-node run info (status,
-  elapsed time, iteration).
+  elapsed time, iteration; a node parked on a named mutex shows `waiting`
+  with a `waiting for:` line naming each resource and who holds it).
   `Esc` toggles between auto-follow and manual mode.
 - **Output pane** — `t` opens a read-only viewer beside the live graph that
   streams the highlighted node's stdout/stderr as the engine writes it (agent

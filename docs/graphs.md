@@ -640,7 +640,9 @@ While waiting the run has status `waiting` — visible in `graph_get`,
 each resource — and the node's timeout only starts when the lease is
 granted. The `graph_events` log records `mutex_waiting` and
 `mutex_acquired` for every wait. The lease is released when the run
-ends for any reason. Inspect the live state with the `mutex` MCP tool
+ends for any reason. Export carries each node's and ensemble's `mutex`
+(`format_version` 6); older documents import with the field absent.
+Inspect the live state with the `mutex` MCP tool
 (action `list`) or `canopy mutex list [--json]`. Mutexes are scoped to
 one daemon (one machine); there are no counting semaphores or
 priorities.
@@ -893,8 +895,8 @@ An ensemble's `kind` is carried in the document for `cascade` and
 absent `kind` means on import. Import refuses a `kind` value it does
 not know — naming the ensemble and the value — and refuses a document
 that carries any field it does not know how to restore, as part of
-its all-or-nothing contract. `format_version` 5 remains the newest
-accepted version; 1, 2, 3 and 4 documents import unchanged (they carry
+its all-or-nothing contract. `format_version` 6 remains the newest
+accepted version; 1, 2, 3, 4 and 5 documents import unchanged (they carry
 fewer fields, never more).
 
 A node's `prompt_preset` travels as a **name**, not as its text, so
