@@ -1191,10 +1191,11 @@ digits, or `-`; owner and repo follow GitHub's naming rules. Anything
 else is refused with the accepted forms in the message.
 
 The fetch is one GET with a `canopy/<version>` User-Agent, following
-redirects (at most 3, https only) with a 15 s timeout and the body
-capped at 1 MiB — no other network traffic. HTTP errors are reported
-with the status and the URL tried; a 404 says the graph was not found
-in the catalogue.
+redirects (at most 3, only ever to https — a catalogue URL you set to
+`http` yourself may redirect within http, and any other scheme is
+refused) with a 15 s timeout and the body capped at 1 MiB — no other
+network traffic. HTTP errors are reported with the status and the URL
+tried; a 404 says the graph was not found in the catalogue.
 
 The fetched document goes through the same validation as
 [`validate`](#validate-before-you-share): any problem aborts the
