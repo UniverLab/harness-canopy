@@ -7,9 +7,23 @@ use super::*;
 
 impl GraphEngine {
     /// The idea `graph_id`'s run last executed with — read straight from the
-    /// row (no `Graph` field for it, cf. `is_graph_hook_launched`).
+    /// row (no `Graph` field for it, cf. `is_graph_hook_launched`). Graphs
+    /// that ran before the run record carried the idea keep it only on their
+    /// blank bookkeeping spec's `description` (what `{{spec_content}}`
+    /// rendered), so a NULL column falls back to that — otherwise every idea
+    /// graph that failed before the column shipped (the motivating
+    /// canopy-test-file-cap case) would be refused as "never run" instead of
+    /// being resumable.
     pub(crate) fn stored_idea(&self, graph_id: &str) -> Result<Option<String>> {
-        self.db.graph_active_run_idea(graph_id)
+        if let Some(idea) = self.db.graph_active_run_idea(graph_id)? {
+            return Ok(Some(idea));
+        }
+        Ok(self
+            .db
+            .list_graph_specs(graph_id)?
+            .into_iter()
+            .filter(is_no_spec_placeholder)
+            .find_map(|spec| spec.description.filter(|text| !text.trim().is_empty())))
     }
 
     /// Whether `lp` is an idea-driven graph: no queue in play, every bound

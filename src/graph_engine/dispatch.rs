@@ -169,11 +169,15 @@ impl GraphEngine {
                 }
             }
             None => {
-                // FR4: a resumed (or directed) run keeps the failed idea
-                // placeholder — its spec id and node runs carry
-                // `{{previous_feedback}}`. Only a fresh, undirected launch
-                // purges a prior attempt's terminal bookkeeping row.
-                if ctx.directed.is_none() && !ctx.is_resume {
+                // FR4: a resumed (or directed) run of an IDEA graph keeps the
+                // failed idea placeholder — its spec id and node runs carry
+                // `{{previous_feedback}}`. Scoped to idea graphs so a stale
+                // blank bookkeeping row on a spec-driven graph keeps being
+                // purged exactly as before (FR5); a fresh, undirected launch
+                // always purges a prior attempt's terminal row.
+                let keep_idea_placeholder =
+                    (ctx.directed.is_some() || ctx.is_resume) && self.is_idea_graph(&lp)?;
+                if !keep_idea_placeholder {
                     self.purge_terminal_placeholder_specs(&graph_id)?;
                 }
                 let specs = self.ensure_placeholder_spec(&ctx, &graph_id, idea).await?;

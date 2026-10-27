@@ -591,9 +591,12 @@ resumes *that* run: the graph remembers the idea it last ran with,
 `{{spec_content}}` renders the stored idea, and the failed run's
 blank-name bookkeeping spec plus its node history (so `{{previous_feedback}}`
 still carries the failed run's feedback) are kept rather than purged — no
-`spec_id` is needed. An idea graph that has never run has nothing to resume:
-`graph_continue` with `run_from_node` (and `retry_current_node`) refuses it,
-naming `graph_run` with an `idea` as the way to start one.
+`spec_id` is needed. An idea run that predates the graph remembering its
+idea (older databases) resumes the same way: the idea is read from that
+bookkeeping spec's text and remembered from then on. An idea graph that has
+never run has nothing to resume: `graph_continue` with `run_from_node`
+(and `retry_current_node`) refuses it, naming `graph_run` with an `idea`
+as the way to start one.
 If a reachable prompt or check references a node with no recorded output
 for the spec, the run is refused and the missing node is named.
 

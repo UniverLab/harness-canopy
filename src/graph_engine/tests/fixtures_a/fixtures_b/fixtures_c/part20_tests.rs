@@ -358,3 +358,113 @@ async fn resumed_idea_run_carries_previous_feedback_and_stored_idea_to_agent() {
         "the failed placeholder keeps the idea text between runs"
     );
 }
+
+/// FR1/FR3 for graphs that ran BEFORE the row carried the idea (the column
+/// migrates as NULL — the motivating canopy-test-file-cap case): such a
+/// graph keeps its idea only on the blank bookkeeping spec's description.
+/// The resume must treat that as the stored idea — not refuse the graph as
+/// "never run" — and the dispatch must self-heal the NULL row from it.
+#[tokio::test]
+async fn run_from_node_resumes_a_pre_migration_idea_graph_whose_row_idea_is_null() {
+    let (_dir, db, engine, graph_id, argv_file, home) = fail_once_idea_fixture();
+    let guard = HomeGuard::set(home.path());
+
+    let _ = engine
+        .run_graph(
+            graph_id.clone(),
+            None,
+            None,
+            Some("IDEA TEXT".to_string()),
+            None,
+            None,
+        )
+        .await;
+    let lp = db.get_graph(&graph_id).unwrap().unwrap();
+    assert_eq!(lp.status, GraphStatus::Failed);
+    // Simulate a graph whose idea run predates the column: NULL on the row,
+    // the idea surviving only on the bookkeeping spec's description.
+    db.set_graph_active_run_idea(&graph_id, None).unwrap();
+
+    let lp = db.get_graph(&graph_id).unwrap().unwrap();
+    assert!(
+        engine.idea_resume_ready(&lp).unwrap().is_none(),
+        "a failed idea graph whose row idea is NULL but whose bookkeeping \
+         spec carries the idea must be resumable, not refused as never-run"
+    );
+
+    let placeholder = db.list_graph_specs(&graph_id).unwrap()[0].clone();
+    engine
+        .run_graph_dispatch(
+            graph_id.clone(),
+            None,
+            None,
+            DispatchMode::resume_from(DirectedStart {
+                spec_id: placeholder.id.clone(),
+                node_arg: "B".to_string(),
+            }),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    drop(guard);
+
+    let lp = db.get_graph(&graph_id).unwrap().unwrap();
+    assert_eq!(
+        lp.status,
+        GraphStatus::Completed,
+        "the pre-migration idea graph must resume from the named node"
+    );
+    let argv = std::fs::read_to_string(&argv_file).unwrap();
+    assert!(
+        argv.contains("IDEA TEXT"),
+        "the resumed node must render the bookkeeping spec's idea: {argv}"
+    );
+    assert_eq!(
+        db.graph_active_run_idea(&graph_id).unwrap().as_deref(),
+        Some("IDEA TEXT"),
+        "the resume must self-heal the NULL row from the bookkeeping spec"
+    );
+}
+
+/// FR5: the resume's placeholder-keep is scoped to IDEA graphs — a
+/// spec-driven graph that carries a stale blank bookkeeping row keeps
+/// today's behaviour: a resume purges that terminal debris instead of
+/// carrying it along.
+#[tokio::test]
+async fn resume_of_a_spec_driven_graph_purges_a_stale_blank_placeholder() {
+    let (_dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+    let named = second_spec(&graph_id, "sid-named", 1);
+    db.insert_graph_spec(&named).unwrap();
+    db.update_graph_spec_status(&named.id, GraphSpecStatus::Completed, None, None)
+        .unwrap();
+    // Terminal blank bookkeeping debris left on a graph that is now
+    // spec-driven: hidden from listings, and (like before this feature)
+    // purged by the next resume rather than carried along.
+    let mut stale = crate::graph_engine::no_spec_placeholder(&graph_id);
+    stale.status = GraphSpecStatus::Completed;
+    db.insert_graph_spec(&stale).unwrap();
+    db.update_graph_status(&graph_id, GraphStatus::Failed, None, None)
+        .unwrap();
+
+    engine
+        .run_graph_dispatch(
+            graph_id.clone(),
+            None,
+            None,
+            DispatchMode::resume(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let specs = db.list_graph_specs(&graph_id).unwrap();
+    assert_eq!(
+        specs.len(),
+        1,
+        "the stale blank bookkeeping row must be purged on a spec-driven \
+         resume, not carried along: {specs:?}"
+    );
+    assert_eq!(specs[0].id, named.id);
+}
