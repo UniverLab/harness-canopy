@@ -56,6 +56,14 @@ fn import_rejects_unknown_custom_preset_and_names_it() {
         err.starts_with("Unknown prompt preset(s):"),
         "error must say what kind of problem it is: {err}"
     );
+    assert!(
+        err.contains(&dir.path().display().to_string()),
+        "error must say WHERE to put the missing preset file: {err}"
+    );
+    assert!(
+        err.contains("implementer, reviewer, resilience"),
+        "error must list the builtins that need no file: {err}"
+    );
 }
 
 /// A custom preset whose file IS present locally resolves at spawn time and
@@ -169,4 +177,16 @@ fn nodes_without_a_preset_are_not_checked() {
     };
 
     build_import_plan_with_prompts(&doc, "g", dir.path()).expect("no preset referenced");
+}
+
+/// A whitespace-only preset is not a reference: the spawn path skips it and
+/// takes the default template, so import must not refuse a document the
+/// engine can run.
+#[test]
+fn whitespace_only_preset_is_not_a_reference() {
+    let dir = tempdir().unwrap();
+    let doc = doc_with_agent_preset("   ");
+
+    build_import_plan_with_prompts(&doc, "g", dir.path())
+        .expect("a blank preset falls back to the default template at spawn");
 }

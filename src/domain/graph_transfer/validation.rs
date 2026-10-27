@@ -53,8 +53,9 @@ pub(super) fn reject_unknown_output_references(
 /// builtins seeded on daemon start. Export carries only the preset NAME, so a
 /// document written elsewhere would otherwise import cleanly and then run that
 /// node on an empty prompt — a hard refusal at import time is the safety net
-/// (this spec). Names are compared verbatim (no trimming) because the spawn
-/// path joins them verbatim too.
+/// (this spec). Names are compared verbatim — the spawn path joins them
+/// verbatim too; only a whitespace-only name is skipped, exactly as the spawn
+/// path skips it (it then takes the default template).
 ///
 /// Only plain agent nodes are inspected: an ensemble member carries no preset
 /// field — its prompt is the ensemble's own template — so there is nothing to
@@ -73,20 +74,24 @@ pub(super) fn reject_unknown_prompt_presets(
     if referenced.is_empty() {
         return Ok(());
     }
-    let builtins: BTreeSet<&str> = crate::domain::prompts::builtin_prompt_preset_specs()
+    let builtin_names: Vec<&'static str> = crate::domain::prompts::builtin_prompt_preset_specs()
         .into_iter()
         .map(|(name, _)| name)
         .collect();
+    let builtins: BTreeSet<&str> = builtin_names.iter().copied().collect();
     referenced.retain(|name| {
         !builtins.contains(name) && !prompts_dir.join(format!("{name}.md")).is_file()
     });
     if referenced.is_empty() {
         return Ok(());
     }
+    // Named from the same list the check uses, in declaration order, so adding
+    // a builtin can never leave the hint behind.
     Err(format!(
-        "Unknown prompt preset(s): {}. Add file(s) under {} or use a builtin (implementer, reviewer, resilience).",
+        "Unknown prompt preset(s): {}. Add file(s) under {} or use a builtin ({}).",
         referenced.into_iter().collect::<Vec<_>>().join(", "),
-        prompts_dir.display()
+        prompts_dir.display(),
+        builtin_names.join(", ")
     ))
 }
 
