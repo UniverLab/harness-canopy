@@ -145,9 +145,111 @@ fn export_omits_builtin_and_missing() {
     );
 }
 
-/// Import on a clean prompts dir installs the bundle, and the node's preset
-/// then resolves at spawn time — `resolve_prompt_preset` is exactly what the
-/// engine reads when it spawns the agent.
+/// A preset several nodes share is bundled exactly once, and an empty preset
+/// file is never bundled: import refuses an empty entry, so export must not
+/// emit a document this build would reject on a clean machine.
+#[test]
+fn export_dedupes_shared_preset_and_skips_empty_file() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("shared.md"), "shared text").unwrap();
+    std::fs::write(dir.path().join("blank.md"), "").unwrap();
+    let lp = make_graph("dedupe-graph");
+    let agent = |name: &str, preset: &str, position: i64| {
+        make_node(
+            name,
+            name,
+            GraphNodeKind::Agent,
+            serde_json::json!({"platform": "claude", "prompt_preset": preset}),
+            position,
+        )
+    };
+    let nodes = vec![
+        agent("aria", "shared", 1),
+        agent("bo", "shared", 2),
+        agent("cy", "blank", 3),
+        agent("di", "implementer", 4),
+        agent("ed", "gone", 5),
+        make_node(
+            "end",
+            "end",
+            GraphNodeKind::Check,
+            serde_json::json!({"command": "true"}),
+            6,
+        ),
+    ];
+    let edges = ["aria", "bo", "cy", "di", "ed"]
+        .iter()
+        .enumerate()
+        .map(|(index, from)| {
+            make_edge(
+                &format!("e{index}"),
+                from,
+                "end",
+                GraphEdgeCondition::Always,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let doc = build_export_document_with_pending_and_prompts(
+        &lp,
+        &nodes,
+        &edges,
+        &[],
+        &HashMap::new(),
+        dir.path(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        doc.prompt_presets,
+        vec![GraphExportPromptPreset {
+            name: "shared".to_string(),
+            content: "shared text".to_string(),
+        }]
+    );
+}
+
+/// The requirement end to end: what export writes is what import installs on
+/// a machine that never had the preset, and the imported node's spawn then
+/// resolves that prompt (`resolve_prompt_preset` is what the engine reads).
+#[test]
+fn export_then_import_installs_the_preset_on_a_clean_machine() {
+    let source = tempdir().unwrap();
+    std::fs::write(source.path().join("my-reviewer.md"), "Review it harshly").unwrap();
+    let (lp, nodes, edges) = graph_with_preset("my-reviewer");
+    let doc = build_export_document_with_pending_and_prompts(
+        &lp,
+        &nodes,
+        &edges,
+        &[],
+        &HashMap::new(),
+        source.path(),
+    )
+    .unwrap();
+
+    // Through the serialized form a shared file/CLI document travels in.
+    let json = serde_json::to_string(&doc).unwrap();
+    let parsed = parse_export_document_str(&json).unwrap();
+
+    let clean = tempdir().unwrap();
+    let plan = build_import_plan_with_prompts(&parsed, "g", clean.path())
+        .expect("a document that bundles its preset must import without it");
+    assert_eq!(plan.nodes.len(), 2);
+    assert_eq!(
+        std::fs::read_to_string(clean.path().join("my-reviewer.md")).unwrap(),
+        "Review it harshly"
+    );
+    assert_eq!(
+        resolve_prompt_preset(clean.path(), "my-reviewer"),
+        "Review it harshly",
+        "the imported node's spawn must find the bundled prompt"
+    );
+}
+
+/// Import on a clean prompts dir installs the bundle and the node's preset
+/// then resolves at spawn time. Import has exactly one path — the plan
+/// builder both MCP and CLI go through — so a plan that succeeded is a plan
+/// whose presets are on disk.
 #[test]
 fn import_installs_bundle_on_clean_dir() {
     let dir = tempdir().unwrap();
@@ -161,9 +263,8 @@ fn import_installs_bundle_on_clean_dir() {
         .expect("a bundled preset must import on a clean prompts dir");
 
     assert_eq!(plan.nodes.len(), 2);
-    let installed = dir.path().join("shipped-preset.md");
     assert_eq!(
-        std::fs::read_to_string(&installed).unwrap(),
+        std::fs::read_to_string(dir.path().join("shipped-preset.md")).unwrap(),
         "Do the work thoroughly"
     );
     assert_eq!(
@@ -304,4 +405,56 @@ fn import_refuses_builtin_duplicate_or_unsafe_entries() {
         .expect_err("empty bundled content must be refused");
     assert!(err.contains("hollow"), "{err}");
     assert!(err.contains("empty"), "{err}");
+}
+
+/// `install` on its own never writes outside the prompts dir and never
+/// overwrites: it re-validates first, so a direct call with a path-escaping
+/// name, a builtin, or a differing local file is a refusal that changes
+/// nothing — not just when reached through the plan builder.
+#[test]
+fn install_standalone_refuses_unsafe_builtin_or_conflicting() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("mine.md"), "my own edited text").unwrap();
+
+    let conflicting = vec![GraphExportPromptPreset {
+        name: "mine".to_string(),
+        content: "the document's text".to_string(),
+    }];
+    let err = install(&conflicting, dir.path())
+        .expect_err("a differing local file must refuse a standalone install");
+    assert!(err.contains("mine"), "{err}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("mine.md")).unwrap(),
+        "my own edited text"
+    );
+
+    let escaping = vec![GraphExportPromptPreset {
+        name: "../escape".to_string(),
+        content: "outside".to_string(),
+    }];
+    let err = install(&escaping, dir.path())
+        .expect_err("a path-escaping name must refuse a standalone install");
+    assert!(err.contains("../escape"), "{err}");
+    assert!(
+        !dir.path().join("../escape.md").exists(),
+        "nothing may be written outside the prompts dir"
+    );
+
+    let builtin = vec![GraphExportPromptPreset {
+        name: "reviewer".to_string(),
+        content: "not allowed".to_string(),
+    }];
+    let err =
+        install(&builtin, dir.path()).expect_err("a builtin must refuse a standalone install");
+    assert!(err.contains("reviewer"), "{err}");
+
+    let identical = vec![GraphExportPromptPreset {
+        name: "mine".to_string(),
+        content: "my own edited text".to_string(),
+    }];
+    install(&identical, dir.path()).expect("identical content must be a no-op");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("mine.md")).unwrap(),
+        "my own edited text"
+    );
 }

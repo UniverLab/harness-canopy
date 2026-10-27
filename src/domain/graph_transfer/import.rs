@@ -166,11 +166,9 @@ pub fn build_import_plan_with_prompts(
     }
     validate_ensembles_in_graph(&ensemble_details, &all_nodes, &edges)?;
 
-    // CM49: a crew-bound ensemble's member wiring (entry fan-out, member→join
-    // fan-in) is materialized later by the sync path, so the pre-materialization
-    // graph has an orphan quorum and the whole-graph entry-point check would
-    // reject it. Skip that check when a crew binding is present; the per-ensemble
-    // wiring-ends check above still applies.
+    // CM49: a crew-bound ensemble's member wiring is materialized later by the
+    // sync path, so the pre-materialization graph has an orphan quorum and the
+    // whole-graph entry-point check would reject it; skip it for a crew binding.
     let has_crew_binding = ensembles
         .iter()
         .any(|plan| plan.ensemble.crew_name.is_some());
@@ -185,7 +183,9 @@ pub fn build_import_plan_with_prompts(
         .as_deref()
         .map(|name| maps.resolve_node_name(name))
         .transpose()?;
-    // v6: install bundled presets now the document fully validated (no overwrites).
+
+    // v6: every check above passed, so install the bundled presets the
+    // accepted document's nodes resolve at spawn time (never overwriting).
     install(&document.prompt_presets, prompts_dir)?;
 
     Ok(GraphImportPlan {

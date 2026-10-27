@@ -18,13 +18,15 @@ use super::*;
 /// bundling into an export document. Builtins are skipped: they are seeded
 /// on every daemon start and need no file. A referenced preset whose file
 /// cannot be read (missing locally, e.g. the node names a preset that does
-/// not exist) is skipped rather than failing the whole export — export
-/// stays "the design as it is", and the import-side refusal is the safety
-/// net for a reference that travelled without content. Names are compared
-/// verbatim, exactly as the spawn path joins them; a name that could point
-/// outside the prompts dir (path separators, `.`, `..`) is skipped, never
-/// bundled. A `BTreeMap` underneath: sorted by name and deduplicated when
-/// several nodes share one preset.
+/// not exist) or is empty is skipped rather than failing the whole export —
+/// export stays "the design as it is", and the import-side refusal is the
+/// safety net for a reference that travelled without content. Skipping an
+/// empty file also keeps the document importable: import refuses an empty
+/// bundled preset, so export never emits one. Names are compared verbatim,
+/// exactly as the spawn path joins them; a name that could point outside the
+/// prompts dir (path separators, `.`, `..`) is skipped, never bundled. A
+/// `BTreeMap` underneath: sorted by name and deduplicated when several nodes
+/// share one preset.
 pub fn collect(
     nodes: &[GraphExportNode],
     prompts_dir: &std::path::Path,
@@ -49,9 +51,13 @@ pub fn collect(
         if by_name.contains_key(name) {
             continue;
         }
-        if let Ok(content) = std::fs::read_to_string(prompts_dir.join(format!("{name}.md"))) {
-            by_name.insert(name.to_string(), content);
+        let Ok(content) = std::fs::read_to_string(prompts_dir.join(format!("{name}.md"))) else {
+            continue;
+        };
+        if content.is_empty() {
+            continue;
         }
+        by_name.insert(name.to_string(), content);
     }
     by_name
         .into_iter()
@@ -119,12 +125,14 @@ pub fn validate(
     Ok(())
 }
 
-/// Install the bundled presets into the prompts dir, called once the whole
-/// import validated (all-or-nothing). An entry whose file already exists is
-/// skipped — never overwritten; [`validate`] already refused a differing
-/// one, so an existing file here is byte-identical. A racing writer between
-/// the existence check and the create is also skipped (`create_new`
-/// reports `AlreadyExists`).
+/// Install the bundled presets into the prompts dir, after the whole import
+/// validated (all-or-nothing). Every entry is re-validated first, so this
+/// function is safe to call on its own: an unsafe name, a builtin, or an
+/// entry that would overwrite a differing local file is a refusal, never a
+/// write outside the prompts dir or over a user's edited preset file. An
+/// entry whose file already exists validated identical, so it is skipped;
+/// a racing writer between the existence check and the create is also
+/// skipped (`create_new` reports `AlreadyExists`).
 pub fn install(
     presets: &[GraphExportPromptPreset],
     prompts_dir: &std::path::Path,
@@ -132,6 +140,7 @@ pub fn install(
     if presets.is_empty() {
         return Ok(());
     }
+    validate(presets, prompts_dir)?;
     std::fs::create_dir_all(prompts_dir).map_err(|error| {
         format!(
             "Could not create prompts dir {}: {error}.",

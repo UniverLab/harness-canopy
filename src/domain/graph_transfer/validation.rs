@@ -49,8 +49,9 @@ pub(super) fn reject_unknown_output_references(
 
 /// Every `prompt_preset` an agent node names must be resolvable on this
 /// machine: a `<prompts_dir>/<name>.md` file (what
-/// `domain::prompts::resolve_prompt_preset` reads at spawn time) or one of the
-/// builtins seeded on daemon start. Export carries only the preset NAME, so a
+/// `domain::prompts::resolve_prompt_preset` reads at spawn time), one of the
+/// builtins seeded on daemon start, or a preset the document itself bundles
+/// (v6). A document from an older version carries only the preset NAME, so a
 /// document written elsewhere would otherwise import cleanly and then run that
 /// node on an empty prompt — a hard refusal at import time is the safety net
 /// (this spec). Names are compared verbatim — the spawn path joins them
