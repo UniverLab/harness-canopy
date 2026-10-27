@@ -229,3 +229,342 @@ async fn resume_refuses_when_the_sandbox_worktree_is_gone() {
         "a refused resume must not run a single node"
     );
 }
+
+// ── A spec bound while the graph runs is not lost ────────────────────
+//
+// The 2026-10-26 incident: spec `1b594ab0` was bound to graph
+// `graphs-catalogue` at position 6 while spec 4 was running; the run
+// finished as `graph_completed` with `Completed (5/6 specs).` and the new
+// spec stayed `pending` forever. These four tests drive the queue advance
+// from a live read and close the completion path that reported it.
+
+/// Poll until `spec_id` reports `Running` — the window a mid-run bind has to
+/// land in to be visible to the live advance.
+async fn wait_for_spec_running(db: &Database, spec_id: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let status = db.get_graph_spec(spec_id).unwrap().map(|spec| spec.status);
+        if status == Some(GraphSpecStatus::Running) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "spec '{spec_id}' never started (status {status:?})"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
+
+/// A check node that appends `label` to `log` and then blocks until `gate`
+/// exists: it keeps its spec `running` for as long as the test needs to bind
+/// another spec into the graph.
+fn blocking_record_node(
+    id: &str,
+    spec_id: &str,
+    label: &str,
+    log: &std::path::Path,
+    gate: &std::path::Path,
+) -> GraphNode {
+    GraphNode {
+        id: id.to_string(),
+        spec_id: Some(spec_id.to_string()),
+        graph_id: None,
+        name: id.to_string(),
+        kind: GraphNodeKind::Check,
+        config: serde_json::json!({
+            "command": format!(
+                "echo {label} >> \"{log}\"; while [ ! -f \"{gate}\" ]; do sleep 0.02; done; printf APPROVED",
+                log = log.display(),
+                gate = gate.display(),
+            ),
+            "success_condition": "exit_code_0"
+        }),
+        position: 1,
+        created_at: chrono::Utc::now(),
+    }
+}
+
+fn logged_lines(path: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+fn activity_messages(db: &Database, workdir: &str) -> Vec<String> {
+    db.list_activity_log_entries(workdir, 200)
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.message)
+        .collect()
+}
+
+/// Every `Completed (n/m specs).` line in `messages`, as `(n, m)`.
+fn completion_counts(messages: &[String]) -> Vec<(usize, usize)> {
+    messages
+        .iter()
+        .filter_map(|message| {
+            let rest = message.strip_prefix("Completed (")?;
+            let (done, rest) = rest.split_once('/')?;
+            let (total, _) = rest.split_once(' ')?;
+            Some((done.parse().ok()?, total.parse().ok()?))
+        })
+        .collect()
+}
+
+/// FR1/FR2: a spec bound at a position *after* the current one while the run
+/// is in flight is picked up by the next advance and runs in position order.
+/// The snapshot the engine used to capture at run start never contained it —
+/// the graph finished `Completed (2/3 specs).` and left it pending, which is
+/// exactly the 2026-10-26 loss.
+#[tokio::test]
+async fn spec_bound_mid_run_at_a_later_position_runs_in_position_order() {
+    let (dir, db, engine, graph_id, spec_a) = graph_fixture().unwrap();
+    let log = dir.path().join("order.log");
+    let gate = dir.path().join("gate");
+    db.insert_graph_node(&blocking_record_node("a-check", &spec_a, "A", &log, &gate))
+        .unwrap();
+    let spec_b = second_spec(&graph_id, "spec-b", 2);
+    db.insert_graph_spec(&spec_b).unwrap();
+    db.insert_graph_node(&record_node("b-check", &spec_b.id, &log, "B"))
+        .unwrap();
+
+    let engine = Arc::new(engine);
+    let run = tokio::spawn({
+        let engine = Arc::clone(&engine);
+        let graph_id = graph_id.clone();
+        async move {
+            engine
+                .run_graph(graph_id, None, None, None, None, None)
+                .await
+        }
+    });
+    wait_for_spec_running(&db, &spec_a).await;
+    // The live window: bind spec C at position 5 while spec A is still running.
+    let spec_c = second_spec(&graph_id, "spec-c", 5);
+    db.insert_graph_spec(&spec_c).unwrap();
+    db.insert_graph_node(&record_node("c-check", &spec_c.id, &log, "C"))
+        .unwrap();
+    std::fs::write(&gate, "go").unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(30), run)
+        .await
+        .expect("the dispatch must finish")
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        logged_lines(&log),
+        vec!["A".to_string(), "B".to_string(), "C".to_string()],
+        "the mid-run bind runs after the specs already at lower positions"
+    );
+    for spec_id in [&spec_a, &spec_b.id, &spec_c.id] {
+        let spec = db.get_graph_spec(spec_id).unwrap().unwrap();
+        assert_eq!(
+            spec.status,
+            GraphSpecStatus::Completed,
+            "spec '{spec_id}' must have run"
+        );
+    }
+    assert_eq!(
+        db.get_graph(&graph_id).unwrap().unwrap().status,
+        GraphStatus::Completed
+    );
+    assert!(
+        activity_messages(&db, &dir.path().to_string_lossy())
+            .iter()
+            .any(|message| message == "Completed (3/3 specs)."),
+        "the graph reports all three specs, the mid-run one included"
+    );
+}
+
+/// FR2: a spec bound at a position *before* the current one while it runs is
+/// the next spec the graph runs — the advance restarts its scan at position 0,
+/// so the newcomer comes right after the spec that was in flight.
+#[tokio::test]
+async fn spec_bound_mid_run_at_a_lower_position_runs_next() {
+    let (dir, db, engine, graph_id, spec_a) = graph_fixture().unwrap();
+    let log = dir.path().join("order.log");
+    let gate = dir.path().join("gate");
+    db.insert_graph_node(&blocking_record_node("a-check", &spec_a, "A", &log, &gate))
+        .unwrap();
+    let spec_b = second_spec(&graph_id, "spec-b", 2);
+    db.insert_graph_spec(&spec_b).unwrap();
+    db.insert_graph_node(&record_node("b-check", &spec_b.id, &log, "B"))
+        .unwrap();
+
+    let engine = Arc::new(engine);
+    let run = tokio::spawn({
+        let engine = Arc::clone(&engine);
+        let graph_id = graph_id.clone();
+        async move {
+            engine
+                .run_graph(graph_id, None, None, None, None, None)
+                .await
+        }
+    });
+    wait_for_spec_running(&db, &spec_a).await;
+    let spec_c = second_spec(&graph_id, "spec-c", 0);
+    db.insert_graph_spec(&spec_c).unwrap();
+    db.insert_graph_node(&record_node("c-check", &spec_c.id, &log, "C"))
+        .unwrap();
+    std::fs::write(&gate, "go").unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(30), run)
+        .await
+        .expect("the dispatch must finish")
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        logged_lines(&log),
+        vec!["A".to_string(), "C".to_string(), "B".to_string()],
+        "the spec bound before the current position runs right after it"
+    );
+    let spec_c = db.get_graph_spec(&spec_c.id).unwrap().unwrap();
+    assert_eq!(
+        spec_c.status,
+        GraphSpecStatus::Completed,
+        "the spec bound at position 0 must have run"
+    );
+}
+
+/// FR3: a graph that would settle while a bound spec is still `pending` never
+/// reports completion. It fails, naming the pending spec id, and `on_completed`
+/// hooks do not fire.
+#[tokio::test]
+async fn a_pending_bound_spec_is_never_reported_as_a_completed_graph() {
+    let (dir, db, engine, graph_id, spec_a) = graph_fixture().unwrap();
+    db.update_graph_spec_status(
+        &spec_a,
+        GraphSpecStatus::Completed,
+        None,
+        Some(chrono::Utc::now()),
+    )
+    .unwrap();
+    let pending = second_spec(&graph_id, "spec-pending", 2);
+    db.insert_graph_spec(&pending).unwrap();
+    let hook_marker = dir.path().join("on-completed-fired");
+    let mut hooks = std::collections::BTreeMap::new();
+    hooks.insert(
+        GraphHookEvent::OnCompleted,
+        vec![crate::domain::graphs::GraphCompletionHook {
+            platform: None,
+            model: None,
+            effort: None,
+            prompt: None,
+            command: Some(format!("touch {}", hook_marker.display())),
+            target_session_id: None,
+            target_session_name: None,
+            timeout_minutes: Some(1),
+            target_graph_id: None,
+            queue_id: None,
+            workdir_override: None,
+            idea: None,
+            crew: None,
+        }],
+    );
+    db.update_graph_hooks(&graph_id, &hooks).unwrap();
+    let claimed_at = chrono::Utc::now();
+    assert!(
+        db.claim_graph_for_run(&graph_id, claimed_at).unwrap(),
+        "the fixture graph must be claimable"
+    );
+
+    let lp = db.get_graph(&graph_id).unwrap().unwrap();
+    let workdir = dir.path().to_string_lossy().to_string();
+    let ctx = DispatchCtx {
+        lp: &lp,
+        graph_id: &graph_id,
+        workdir: &workdir,
+        is_resume: false,
+        directed: None,
+        claimed_at,
+    };
+    engine.finish_dispatch(&ctx, None, None, &[]).await.unwrap();
+
+    let lp = db.get_graph(&graph_id).unwrap().unwrap();
+    assert_eq!(
+        lp.status,
+        GraphStatus::Failed,
+        "a pending bound spec must not settle as a completed graph"
+    );
+    let events = db
+        .list_graph_events(&graph_id, None, None, None, 200)
+        .unwrap();
+    assert!(
+        !events.iter().any(|event| event.kind == "graph_completed"),
+        "no graph_completed may be recorded: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .filter(|event| event.kind == "graph_failed")
+            .any(|event| event.message.contains(&pending.id)),
+        "the failure must name the pending spec id '{}': {:?}",
+        pending.id,
+        events
+            .iter()
+            .map(|event| (event.kind.clone(), event.message.clone()))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !hook_marker.exists(),
+        "on_completed hooks must not fire for a graph that never completed"
+    );
+}
+
+/// FR3/FR4: the completion message can no longer say `Completed (n/m specs).`
+/// with fewer done than total — a full run still reports `(2/2)`, and a
+/// dispatch that settles with a spec bound after the queue drained records no
+/// completion line at all instead of `(2/3)`.
+#[tokio::test]
+async fn the_completion_message_never_reports_fewer_done_than_total() {
+    let (dir, db, engine, graph_id, spec_a) = graph_fixture().unwrap();
+    let log = dir.path().join("order.log");
+    db.insert_graph_node(&record_node("a-check", &spec_a, &log, "A"))
+        .unwrap();
+    let spec_b = second_spec(&graph_id, "spec-b", 2);
+    db.insert_graph_spec(&spec_b).unwrap();
+    db.insert_graph_node(&record_node("b-check", &spec_b.id, &log, "B"))
+        .unwrap();
+
+    engine
+        .run_graph(graph_id.clone(), None, None, None, None, None)
+        .await
+        .unwrap();
+    let workdir = dir.path().to_string_lossy().to_string();
+    let messages = activity_messages(&db, &workdir);
+    assert!(
+        messages.iter().any(|m| m == "Completed (2/2 specs)."),
+        "a full bound-spec run still reports its exact progress: {messages:?}"
+    );
+    assert_eq!(
+        completion_counts(&messages),
+        vec![(2, 2)],
+        "no completion line may report fewer done than total: {messages:?}"
+    );
+
+    // Bind a third spec after the queue drained, then let the dispatch settle
+    // again: the old code reported `Completed (2/3 specs).` here.
+    let spec_c = second_spec(&graph_id, "spec-c", 3);
+    db.insert_graph_spec(&spec_c).unwrap();
+    let lp = db.get_graph(&graph_id).unwrap().unwrap();
+    let ctx = DispatchCtx {
+        lp: &lp,
+        graph_id: &graph_id,
+        workdir: &workdir,
+        is_resume: false,
+        directed: None,
+        claimed_at: chrono::Utc::now(),
+    };
+    engine.finish_dispatch(&ctx, None, None, &[]).await.unwrap();
+
+    let messages = activity_messages(&db, &workdir);
+    assert_eq!(
+        completion_counts(&messages),
+        vec![(2, 2)],
+        "a pending bound spec must never be counted into a completion line: {messages:?}"
+    );
+}

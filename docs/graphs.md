@@ -630,6 +630,17 @@ as the way to start one.
 If a reachable prompt or check references a node with no recorded output
 for the spec, the run is refused and the missing node is named.
 
+**Bound specs are read live.** Every advance re-reads the graph's bound
+specs and picks the first one still `pending`, instead of working through a
+list captured when the run started. A spec added with `graph_add_spec`
+while the graph runs is therefore never left behind: one bound at a position
+after the current spec runs later, in position order, and one bound at an
+earlier position runs right after the current spec. `graph_completed` is
+emitted only when no bound spec is pending; if a run would settle for any
+other reason with one left pending, the graph fails instead, naming the
+pending spec ids in its `graph_failed` event, and `on_completed` hooks do
+not fire. `graph_continue` then picks the pending spec up.
+
 ## Sandboxes
 
 `graph_run` accepts `sandbox: true`: canopy creates a temporary git worktree

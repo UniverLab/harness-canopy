@@ -65,6 +65,62 @@ impl GraphEngine {
         Ok(true)
     }
 
+    /// FR3: a bound-spec run reports completion only when no bound spec is
+    /// still pending. Whatever the live advance left behind — a spec bound in
+    /// the window between its last read and this finish, a resume that settled
+    /// early, a skipped/limited spec left pending — is named here and the graph
+    /// failed instead, so the operator gets a signal. `on_completed` hooks do
+    /// not fire, because completion never happened.
+    ///
+    /// Returns `true` when the graph was failed and `finish_dispatch` must
+    /// stop. The queue path is untouched: it has its own
+    /// incomplete/failed-member guards.
+    async fn fail_on_leftover_bound_specs(
+        &self,
+        ctx: &DispatchCtx<'_>,
+        queue_id: Option<&str>,
+        completed_specs: &[(String, String)],
+    ) -> Result<bool> {
+        if queue_id.is_some() {
+            return Ok(false);
+        }
+        let pending: Vec<String> = self
+            .db
+            .list_graph_specs(ctx.graph_id)?
+            .into_iter()
+            .filter(|spec| {
+                matches!(
+                    spec.status,
+                    GraphSpecStatus::Pending
+                        | GraphSpecStatus::Running
+                        | GraphSpecStatus::Interrupted
+                )
+            })
+            .map(|spec| spec.id)
+            .collect();
+        if pending.is_empty() {
+            return Ok(false);
+        }
+        let blocker = format!(
+            "Graph '{}' cannot complete: {} bound spec(s) still pending ({}). They were not \
+             run — a pending spec is never reported as a completed graph. Resume with \
+             graph_continue to run them.",
+            ctx.lp.name,
+            pending.len(),
+            pending.join(", ")
+        );
+        self.fail_graph(
+            ctx.graph_id,
+            Some(ctx.claimed_at),
+            None,
+            None,
+            &blocker,
+            completed_specs,
+        )
+        .await?;
+        Ok(true)
+    }
+
     pub(crate) async fn finish_dispatch(
         &self,
         ctx: &DispatchCtx<'_>,
@@ -72,6 +128,15 @@ impl GraphEngine {
         sandbox: Option<Sandbox>,
         completed_specs: &[(String, String)],
     ) -> Result<()> {
+        if self
+            .fail_on_leftover_bound_specs(ctx, queue_id, completed_specs)
+            .await?
+        {
+            // FR3: a pending bound spec is named in a `graph_failed` event;
+            // nothing in this dispatch reports completion. `fail_graph` already
+            // kept the sandbox, as it does for every failure.
+            return Ok(());
+        }
         self.db.update_graph_status(
             ctx.graph_id,
             GraphStatus::Completed,
