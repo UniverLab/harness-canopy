@@ -86,7 +86,7 @@ any other tool still work. All other sessions keep the full list.
 |---|---|
 | `graph_create` | Create a graph container. `require_spec_type: true` (default `false`) makes it refuse specs without a type |
 | `graph_update` | Update graph metadata and hooks, including `require_spec_type` |
-| `graph_add_spec` | Add an ordered spec to a graph. Supports `spec_type` and `spec_scope` to enable automatic code generation. A graph with `require_spec_type: true` refuses specs without a type |
+| `graph_add_spec` | Add an ordered spec to a graph. Supports `spec_type` and `spec_scope` to enable automatic code generation. A graph with `require_spec_type: true` refuses specs without a type. A spec added while the graph runs joins the running dispatch in position order (bound specs are read live at every advance), and the run cannot report completion while it is pending — it fails naming the spec instead |
 | `graph_update_spec` | Update a graph spec. Accepts `spec_type` and `spec_scope` |
 | `graph_remove_spec` | Unbind a spec from a graph, making it a standalone backlog spec; execution history is preserved. |
 | `graph_add_node` | Add a node to a graph |

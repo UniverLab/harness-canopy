@@ -641,10 +641,11 @@ list captured when the run started. A spec added with `graph_add_spec`
 while the graph runs is therefore never left behind: one bound at a position
 after the current spec runs later, in position order, and one bound at an
 earlier position runs right after the current spec. `graph_completed` is
-emitted only when no bound spec is pending; if a run would settle for any
-other reason with one left pending, the graph fails instead, naming the
-pending spec ids in its `graph_failed` event, and `on_completed` hooks do
-not fire. `graph_continue` then picks the pending spec up.
+emitted only when no bound spec is left runnable; if a run would settle
+with one still `pending` — or one left `running` or `interrupted` by a
+stale state — the graph fails instead, naming those spec ids in its
+`graph_failed` event, and `on_completed` hooks do not fire.
+`graph_continue` then picks the pending spec up.
 
 ## Sandboxes
 
