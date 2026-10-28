@@ -694,8 +694,9 @@ Leftover sandboxes are dealt with explicitly, never guessed at, and both
 surfaces share one implementation: the [`sandbox` MCP tool](mcp-tools.md)
 (`list`, `get`, `land`, `discard`), or the commands in the
 [CLI reference](cli-reference.md#sandboxes). `graph` `get` reports the
-graph's newest sandbox as `{"id", "status"}`, so an agent can name the
-sandbox it is about to land or discard instead of inventing an id.
+graph's newest sandbox as `{id, status}` (`null` when it never ran
+sandboxed), so an agent can name the sandbox it is about to land or
+discard instead of inventing an id.
 
 ## Concurrency
 
