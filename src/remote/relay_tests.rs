@@ -177,16 +177,23 @@ async fn http_401_stops_without_reconnecting() {
         },
     )
     .expect("identity");
+    let live = Arc::new(crate::remote::live::RemoteLive::new());
     let running = tokio::spawn(supervise(
         dir.path().to_path_buf(),
         db.clone(),
         test_sessions(&db),
+        Arc::clone(&live),
     ));
     // Longer than the slowest first backoff (1200 ms): a 401 misclassified
     // as transient would have retried by now.
     tokio::time::sleep(Duration::from_millis(2500)).await;
     running.abort();
     assert_eq!(counter.load(Ordering::SeqCst), 1, "must not retry a 401");
+    assert_eq!(
+        live.phase(),
+        crate::remote::live::RelayPhase::TokenRejected,
+        "a 401 leaves the token rejected, never retried"
+    );
     let recorded = crate::application::ports::StateRepository::get_state(&db, REMOTE_ERROR_KEY)
         .expect("state")
         .unwrap_or_default();
@@ -654,4 +661,67 @@ async fn a_verified_offer_gets_a_signed_answer_and_updates_last_seen() {
 
     runtime.peers.close(&id);
     drop(device);
+}
+
+#[tokio::test]
+async fn supervise_reports_off_while_signed_out_or_disabled() {
+    use crate::remote::live::{RelayPhase, RemoteLive};
+
+    // Signed out: no identity stored, remote off by default.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = test_db();
+    let live = Arc::new(RemoteLive::new());
+    live.set_phase(RelayPhase::Connecting);
+    let running = tokio::spawn(supervise(
+        dir.path().to_path_buf(),
+        db.clone(),
+        test_sessions(&db),
+        Arc::clone(&live),
+    ));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    running.abort();
+    assert_eq!(live.phase(), RelayPhase::Off);
+
+    // Signed in but disabled: still off, and the supervisor serves the
+    // live state's own peers.
+    let dir = tempfile::tempdir().expect("tempdir");
+    crate::remote::auth::save_identity(
+        dir.path(),
+        &crate::remote::auth::GitHubIdentity {
+            token: "[REDACTED]".to_string(),
+            login: "octocat".to_string(),
+            id: 1,
+        },
+    )
+    .expect("identity");
+    let live = Arc::new(RemoteLive::new());
+    live.set_phase(RelayPhase::Connecting);
+    let running = tokio::spawn(supervise(
+        dir.path().to_path_buf(),
+        db.clone(),
+        test_sessions(&db),
+        Arc::clone(&live),
+    ));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    running.abort();
+    assert_eq!(live.phase(), RelayPhase::Off);
+    assert!(live.peers().is_empty());
+}
+
+#[test]
+fn phase_mappings_are_pure_and_total() {
+    use crate::remote::live::RelayPhase;
+
+    assert_eq!(wait_phase(&Wait::SignedOut), RelayPhase::Off);
+    assert_eq!(wait_phase(&Wait::Disabled), RelayPhase::Off);
+    assert_eq!(wait_phase(&Wait::Rejected), RelayPhase::TokenRejected);
+    assert_eq!(after_phase(&After::Served), RelayPhase::Connected);
+    assert_eq!(
+        after_phase(&After::Rejected("t".to_string())),
+        RelayPhase::TokenRejected
+    );
+    assert_eq!(
+        after_phase(&After::Retry(Duration::from_secs(1))),
+        RelayPhase::Connecting
+    );
 }

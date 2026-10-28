@@ -43,6 +43,11 @@ pub(super) fn handle_hub_key(app: &mut App, code: KeyCode, modifiers: KeyModifie
         hub_shelf_key(app, code);
         return true;
     }
+    // An armed remote revoke owns every key the same way.
+    if app.hub.tab == HubTab::Remote && app.hub.remote.revoke_confirm.is_some() {
+        hub_remote_confirm_key(app, code);
+        return true;
+    }
 
     match code {
         KeyCode::Esc => hub_escape(app),
@@ -58,20 +63,34 @@ pub(super) fn handle_hub_key(app: &mut App, code: KeyCode, modifiers: KeyModifie
         _ if app.hub.tab == HubTab::Settings => hub_settings_key(app, code),
         _ if app.hub.tab == HubTab::Keys => hub_keys_key(app, code),
         _ if app.hub.tab == HubTab::Shelf => hub_shelf_key(app, code),
+        _ if app.hub.tab == HubTab::Remote => app.hub_remote_key(code),
         _ => hub_missions_key(app, code),
     }
     true
 }
 
-/// Esc at the Settings properties level steps back to the categories;
-/// everywhere else — including the categories level — it closes the hub.
+/// Esc at the Settings properties level steps back to the categories; on
+/// the Remote tab with the pairing overlay open it hides the overlay (the
+/// code stays valid); everywhere else it closes the hub.
 fn hub_escape(app: &mut App) {
     let at_properties =
         app.hub.tab == HubTab::Settings && app.hub.settings.focus == SettingsFocus::Properties;
     if at_properties {
         app.settings_back_to_categories();
+    } else if app.hub.tab == HubTab::Remote && app.hub.remote.pair_open {
+        app.close_pair_overlay();
     } else {
         app.close_hub();
+    }
+}
+
+/// While a remote revoke is armed only `y`/Enter confirm and `n`/`Esc`
+/// cancel — every other key, tab switches included, is swallowed.
+fn hub_remote_confirm_key(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Char('y') | KeyCode::Enter => app.confirm_remote_revoke(),
+        KeyCode::Char('n') | KeyCode::Esc => app.cancel_remote_revoke(),
+        _ => {}
     }
 }
 
@@ -314,8 +333,15 @@ mod tests {
         handle_hub_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
         assert_eq!(app.hub.tab, HubTab::Shelf);
         handle_hub_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(app.hub.tab, HubTab::Remote);
+        handle_hub_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
         assert_eq!(app.hub.tab, HubTab::Settings, "Tab wraps forward");
 
+        handle_hub_key(&mut app, KeyCode::Char('2'), KeyModifiers::NONE);
+        assert_eq!(app.hub.tab, HubTab::Keys);
+
+        handle_hub_key(&mut app, KeyCode::Char('5'), KeyModifiers::NONE);
+        assert_eq!(app.hub.tab, HubTab::Remote, "digit 5 opens Remote");
         handle_hub_key(&mut app, KeyCode::Char('2'), KeyModifiers::NONE);
         assert_eq!(app.hub.tab, HubTab::Keys);
 
@@ -568,5 +594,107 @@ mod tests {
             calls[0]["arguments"],
             serde_json::json!({ "key": "theme", "value": "modern" })
         );
+    }
+
+    fn remote_device(id: &str) -> crate::remote::panel::DeviceView {
+        crate::remote::panel::DeviceView {
+            id: id.to_string(),
+            label: "laptop".to_string(),
+            last_seen: None,
+            live: false,
+        }
+    }
+
+    /// Esc with the pairing overlay open hides the overlay — the hub stays
+    /// open and the code stays; a second Esc closes the hub.
+    #[test]
+    fn esc_hides_the_pair_overlay_before_closing_the_hub() {
+        let mut app = test_app();
+        app.open_hub();
+        app.set_hub_tab(HubTab::Remote);
+        app.hub.remote.pair = Some(crate::remote::panel::PairView {
+            code: "7K3QH-M9P2X".to_string(),
+            link: "https://remote.univerlab.org/pair#7K3QH-M9P2X".to_string(),
+            expires_at: chrono::Utc::now().timestamp() + 600,
+            qr: "qr".to_string(),
+        });
+        app.hub.remote.pair_open = true;
+
+        handle_hub_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!app.hub.remote.pair_open, "Esc hides the overlay");
+        assert!(app.hub_open, "the hub stays open");
+        assert!(app.hub.remote.pair.is_some(), "the code stays valid");
+
+        handle_hub_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!app.hub_open, "the second Esc closes the hub");
+    }
+
+    /// `d` on a device row arms the revoke, `n`/Esc cancel it, `y` revokes
+    /// through the daemon — and nothing else acts mid-confirm.
+    #[test]
+    fn remote_revoke_runs_behind_a_y_n_confirmation() {
+        let fake = crate::tui::mcp_client::test_support::spawn_fake_daemon(ok_result());
+        let mut app = test_app();
+        app.db.set_state("port", &fake.port).unwrap();
+        app.open_hub();
+        app.set_hub_tab(HubTab::Remote);
+        app.hub.remote.view.devices = vec![remote_device("bfcba2b742a807bb")];
+        app.hub.remote.row_idx = 4; // Device(0).
+
+        handle_hub_key(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert_eq!(
+            app.hub.remote.revoke_confirm.as_deref(),
+            Some("bfcba2b742a807bb"),
+            "d arms the confirmation"
+        );
+        handle_hub_key(&mut app, KeyCode::Char('2'), KeyModifiers::NONE);
+        assert_eq!(app.hub.tab, HubTab::Remote, "digits do not switch tabs");
+        assert!(app.hub.remote.revoke_confirm.is_some());
+        handle_hub_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(app.hub.remote.revoke_confirm, None, "Esc cancels");
+        assert!(app.hub_open, "Esc must not close the hub mid-confirm");
+
+        handle_hub_key(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
+        handle_hub_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE);
+        assert_eq!(app.hub.remote.revoke_confirm, None, "n cancels");
+
+        handle_hub_key(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
+        handle_hub_key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
+        assert_eq!(app.hub.remote.revoke_confirm, None, "y confirms and clears");
+        for _ in 0..1000 {
+            if app.hub.remote.write_rx.is_none() {
+                break;
+            }
+            app.poll_remote_write();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let calls = fake.recorded_calls();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0]["name"], "remote_revoke");
+        assert_eq!(
+            calls[0]["arguments"],
+            serde_json::json!({ "device_id": "bfcba2b742a807bb" })
+        );
+    }
+
+    /// The Remote tab moves with ↑↓/jk and stays put on other keys.
+    #[test]
+    fn remote_tab_moves_the_cursor_with_arrows_and_jk() {
+        let mut app = test_app();
+        app.open_hub();
+        app.set_hub_tab(HubTab::Remote);
+        assert_eq!(app.hub.remote.row_idx, 0);
+
+        handle_hub_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_eq!(app.hub.remote.row_idx, 1);
+        handle_hub_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(app.hub.remote.row_idx, 2);
+        handle_hub_key(&mut app, KeyCode::Char('k'), KeyModifiers::NONE);
+        assert_eq!(app.hub.remote.row_idx, 1);
+        handle_hub_key(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(app.hub.remote.row_idx, 0);
+        // Up from zero wraps to the last row (Pair, with no devices).
+        handle_hub_key(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(app.hub.remote.row_idx, 3);
     }
 }

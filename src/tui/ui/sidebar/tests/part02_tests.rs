@@ -369,3 +369,14 @@ fn ct14_fair_section_floor_tracks_cursor_not_stored_focus() {
         "floor must track the agent cursor, not the stored Graph kind"
     );
 }
+
+#[test]
+fn sidebar_shows_the_live_device_count_only_when_nonzero() {
+    let text = render_sidebar_text_with(0, 40, 24, &Theme::classic(), SidebarLayer::Live, |app| {
+        app.hub.remote.view.live_devices = vec!["a".to_string(), "b".to_string()];
+    });
+    assert!(text.contains("⇄ 2"), "two live devices: {text}");
+
+    let text = render_sidebar_text(0, 40, 24);
+    assert!(!text.contains('⇄'), "nothing when none live: {text}");
+}

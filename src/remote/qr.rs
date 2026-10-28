@@ -7,9 +7,16 @@ use qrcode::{Color, QrCode};
 const QUIET: usize = 2;
 
 /// Render `text` as a QR code with `▀`, `▄` and `█` (two module rows per
-/// terminal line).
+/// terminal line), at medium error correction.
 pub fn render(text: &str) -> Result<String> {
-    let code = QrCode::new(text.as_bytes())?;
+    render_level(text, qrcode::EcLevel::M)
+}
+
+/// Render `text` as a QR code at one error-correction level. The Remote
+/// panel uses `L`: for a pairing link that is 33×17 terminal cells, while
+/// `M` is 37×19 and no longer fits the 80×24 overlay.
+pub fn render_level(text: &str, level: qrcode::EcLevel) -> Result<String> {
+    let code = QrCode::with_error_correction_level(text.as_bytes(), level)?;
     let width = code.width();
     let side = width + QUIET * 2;
     let mut grid = vec![vec![false; side]; side];
@@ -58,5 +65,25 @@ mod tests {
         // The quiet zone: first and last lines are blank.
         assert!(lines[0].trim().is_empty());
         assert!(lines.last().expect("last line").trim().is_empty());
+    }
+
+    #[test]
+    fn level_l_fits_the_pairing_overlay_while_m_does_not() {
+        let link = "https://remote.univerlab.org/pair#7K3QH-M9P2X";
+        let low = render_level(link, qrcode::EcLevel::L).expect("level L");
+        let low_lines: Vec<&str> = low.lines().collect();
+        assert_eq!(low_lines.len(), 17, "17 rows: {low}");
+        assert!(
+            low_lines.iter().all(|line| line.chars().count() == 33),
+            "33 wide: {low}"
+        );
+
+        let medium = render(link).expect("level M");
+        let medium_lines: Vec<&str> = medium.lines().collect();
+        assert_eq!(medium_lines.len(), 19, "M is one version up: {medium}");
+        assert!(
+            medium_lines.iter().all(|line| line.chars().count() == 37),
+            "37 wide: {medium}"
+        );
     }
 }

@@ -30,6 +30,7 @@ use crate::remote::auth;
 use crate::remote::connection::{self, Control, DevicePeers, PeerSession};
 use crate::remote::devices::RemoteDevices;
 use crate::remote::hostkey::HostKey;
+use crate::remote::live::{RelayPhase, RemoteLive};
 use crate::remote::pairing::PairingState;
 use crate::remote::peer;
 use crate::remote::signaling::{self, Refusal};
@@ -483,7 +484,8 @@ pub fn queue_revocation(db: &Database, device_id: &str) {
 /// config and identity on every iteration, so `canopy remote on|off` takes
 /// effect without a restart.
 pub fn spawn(data_dir: std::path::PathBuf, db: Database, sessions: Arc<SessionsState>) {
-    tokio::spawn(async move { supervise(data_dir, db, sessions).await });
+    let live = crate::remote::live::shared();
+    tokio::spawn(async move { supervise(data_dir, db, sessions, live).await });
 }
 
 /// What keeps the relay from connecting this second.
@@ -612,15 +614,41 @@ fn apply_wait(wait: &Wait, rejected_token: &mut Option<String>, attempt: &mut u3
     }
 }
 
+/// The phase one wait decision leaves behind: a rejected token stays
+/// rejected, anything else is off.
+fn wait_phase(wait: &Wait) -> RelayPhase {
+    match wait {
+        Wait::Rejected => RelayPhase::TokenRejected,
+        Wait::SignedOut | Wait::Disabled => RelayPhase::Off,
+    }
+}
+
+/// The phase one connection attempt leaves behind: a served socket was
+/// connected, a 401 rejects the token, anything else keeps connecting.
+fn after_phase(after: &After) -> RelayPhase {
+    match after {
+        After::Served => RelayPhase::Connected,
+        After::Rejected(_) => RelayPhase::TokenRejected,
+        After::Retry(_) => RelayPhase::Connecting,
+    }
+}
+
 /// The supervisor loop. It re-reads config and identity on every
 /// iteration, so `canopy remote on|off` takes effect without a restart;
 /// the live-connection registry outlives any one socket, so a revoke
 /// still closes connections that were registered before a reconnect.
-pub async fn supervise(data_dir: std::path::PathBuf, db: Database, sessions: Arc<SessionsState>) {
+/// Every iteration records its phase on `live`, and the peers it serves
+/// are `live`'s, so `remote_status` reads the same state.
+pub async fn supervise(
+    data_dir: std::path::PathBuf,
+    db: Database,
+    sessions: Arc<SessionsState>,
+    live: Arc<RemoteLive>,
+) {
     let mut attempt = 0u32;
     let mut rejected_token: Option<String> = None;
     let connections = ConnectionRegistry::default();
-    let peers = DevicePeers::default();
+    let peers = live.peers().clone();
     loop {
         match next_action(
             &data_dir,
@@ -632,6 +660,7 @@ pub async fn supervise(data_dir: std::path::PathBuf, db: Database, sessions: Arc
         ) {
             Next::Wait(wait) => {
                 apply_wait(&wait, &mut rejected_token, &mut attempt);
+                live.set_phase(wait_phase(&wait));
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
             Next::HostKeyError(error) => {
@@ -645,8 +674,10 @@ pub async fn supervise(data_dir: std::path::PathBuf, db: Database, sessions: Arc
                 runtime,
                 token,
             } => {
+                live.set_phase(RelayPhase::Connecting);
                 let after =
                     connect_and_serve(&ws_url, &headers, runtime, token, attempt, &data_dir).await;
+                live.set_phase(after_phase(&after));
                 match after {
                     After::Served => {
                         let _ = db.set_state(REMOTE_ERROR_KEY, "");

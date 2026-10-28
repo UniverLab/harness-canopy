@@ -123,8 +123,8 @@ fn draw_delete_confirm(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) 
 }
 
 /// `created_at` as `HH:MM`, falling back to the raw string when it does not
-/// parse as RFC3339.
-fn shelf_time(created_at: &str) -> String {
+/// parse as RFC3339. Shared with the Remote tab's device rows.
+pub(super) fn shelf_time(created_at: &str) -> String {
     chrono::DateTime::parse_from_rfc3339(created_at)
         .map(|dt| dt.format("%H:%M").to_string())
         .unwrap_or_else(|_| created_at.to_string())

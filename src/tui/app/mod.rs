@@ -10,6 +10,7 @@ mod gamification;
 pub(crate) mod graph_live_nav;
 pub(crate) mod graph_live_state;
 pub(crate) mod hub;
+pub(crate) mod hub_remote;
 pub(crate) mod hub_settings;
 pub(crate) mod hub_shelf;
 mod init;

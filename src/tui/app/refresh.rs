@@ -62,6 +62,14 @@ impl App {
         self.poll_settings_write();
         self.refresh_settings_rows();
         self.dismiss_settings_message();
+        // The Remote tab's cached status, its writes and its device flow;
+        // the status also refreshes off-tab so the sidebar indicator stays
+        // current.
+        self.poll_remote_status();
+        self.poll_remote_write();
+        self.poll_remote_login();
+        self.refresh_remote_status();
+        self.dismiss_remote_message();
         // CT1 multi-face panel: recompute the visible face from the
         // switching rule after every data refresh above has run.
         self.tick_panel_face();

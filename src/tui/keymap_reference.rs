@@ -10,6 +10,7 @@ pub const CONTEXTS: &[&str] = &[
     "Dialogs",
     "Crews",
     "Hub shelf",
+    "Hub remote",
 ];
 
 /// One shortcut row.
@@ -588,6 +589,43 @@ pub static KEY_REFS: &[KeyRef] = &[
         key: "n",
         context: "Hub shelf",
         action: "cancel the delete",
+        code: "Char('n')",
+    },
+    // ── Hub remote ───────────────────────────────────────────────
+    KeyRef {
+        key: "Enter",
+        context: "Hub remote",
+        action: "sign in, toggle the switch, or pair a device",
+        code: "Enter",
+    },
+    KeyRef {
+        key: "d",
+        context: "Hub remote",
+        action: "revoke the selected device (y/n confirm)",
+        code: "Char('d')",
+    },
+    KeyRef {
+        key: "j",
+        context: "Hub remote",
+        action: "move down",
+        code: "Char('j')",
+    },
+    KeyRef {
+        key: "k",
+        context: "Hub remote",
+        action: "move up",
+        code: "Char('k')",
+    },
+    KeyRef {
+        key: "y",
+        context: "Hub remote",
+        action: "confirm the revoke",
+        code: "Char('y')",
+    },
+    KeyRef {
+        key: "n",
+        context: "Hub remote",
+        action: "cancel the revoke",
         code: "Char('n')",
     },
 ];

@@ -4,7 +4,7 @@
 
 use super::types::App;
 
-/// The four hub tabs, in the order the tab bar shows them.
+/// The five hub tabs, in the order the tab bar shows them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum HubTab {
     #[default]
@@ -12,13 +12,15 @@ pub(crate) enum HubTab {
     Keys,
     Missions,
     Shelf,
+    Remote,
 }
 
-pub(crate) const HUB_TABS: [HubTab; 4] = [
+pub(crate) const HUB_TABS: [HubTab; 5] = [
     HubTab::Settings,
     HubTab::Keys,
     HubTab::Missions,
     HubTab::Shelf,
+    HubTab::Remote,
 ];
 
 impl HubTab {
@@ -28,16 +30,18 @@ impl HubTab {
             HubTab::Keys => "Keys",
             HubTab::Missions => "Missions & stats",
             HubTab::Shelf => "Shelf",
+            HubTab::Remote => "Remote",
         }
     }
 
-    /// The `1`/`2`/`3`/`4` shortcut for a tab, or `None`.
+    /// The `1`/`2`/`3`/`4`/`5` shortcut for a tab, or `None`.
     pub(crate) fn from_digit(c: char) -> Option<HubTab> {
         match c {
             '1' => Some(HubTab::Settings),
             '2' => Some(HubTab::Keys),
             '3' => Some(HubTab::Missions),
             '4' => Some(HubTab::Shelf),
+            '5' => Some(HubTab::Remote),
             _ => None,
         }
     }
@@ -66,16 +70,20 @@ pub(crate) struct HubState {
     pub keys_scroll: usize,
     /// The Shelf tab's merged file list, selection and toast.
     pub shelf: super::hub_shelf::ShelfState,
+    /// The Remote tab's cached status view, cursor and flows.
+    pub remote: super::hub_remote::RemoteState,
 }
 
 impl App {
-    /// Open the hub on the last-used tab (in-memory only) and ask the
-    /// Settings tab for fresh data — or, on the Shelf tab, re-list the
-    /// shelves so reopening never shows a stale list.
+    /// Open the hub on the last-used tab (in-memory only) and ask that tab
+    /// for fresh data — or, on the Shelf tab, re-list the shelves so
+    /// reopening never shows a stale list.
     pub(crate) fn open_hub(&mut self) {
         self.hub_open = true;
         if self.hub.tab == HubTab::Shelf {
             self.refresh_shelf();
+        } else if self.hub.tab == HubTab::Remote {
+            self.remote_request_refresh();
         } else {
             self.hub.settings.request_refresh();
         }
@@ -94,7 +102,7 @@ impl App {
     }
 
     /// Switch to `tab`, fetching what that tab shows: the Settings rows,
-    /// or — landing on the Shelf — the shelf listings.
+    /// the shelf listings, or the remote status.
     pub(crate) fn set_hub_tab(&mut self, tab: HubTab) {
         self.hub.tab = tab;
         if tab == HubTab::Settings {
@@ -102,6 +110,9 @@ impl App {
         }
         if tab == HubTab::Shelf {
             self.refresh_shelf();
+        }
+        if tab == HubTab::Remote {
+            self.remote_request_refresh();
         }
     }
 
@@ -129,12 +140,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hub_tab_digits_map_to_the_four_tabs() {
+    fn hub_tab_digits_map_to_the_five_tabs() {
         assert_eq!(HubTab::from_digit('1'), Some(HubTab::Settings));
         assert_eq!(HubTab::from_digit('2'), Some(HubTab::Keys));
         assert_eq!(HubTab::from_digit('3'), Some(HubTab::Missions));
         assert_eq!(HubTab::from_digit('4'), Some(HubTab::Shelf));
-        assert_eq!(HubTab::from_digit('5'), None);
+        assert_eq!(HubTab::from_digit('5'), Some(HubTab::Remote));
+        assert_eq!(HubTab::from_digit('6'), None);
     }
 
     #[test]
@@ -142,8 +154,10 @@ mod tests {
         assert_eq!(HubTab::Settings.next(true), HubTab::Keys);
         assert_eq!(HubTab::Keys.next(true), HubTab::Missions);
         assert_eq!(HubTab::Missions.next(true), HubTab::Shelf);
-        assert_eq!(HubTab::Shelf.next(true), HubTab::Settings);
-        assert_eq!(HubTab::Settings.next(false), HubTab::Shelf);
+        assert_eq!(HubTab::Shelf.next(true), HubTab::Remote);
+        assert_eq!(HubTab::Remote.next(true), HubTab::Settings);
+        assert_eq!(HubTab::Settings.next(false), HubTab::Remote);
+        assert_eq!(HubTab::Remote.next(false), HubTab::Shelf);
         assert_eq!(HubTab::Shelf.next(false), HubTab::Missions);
     }
 }

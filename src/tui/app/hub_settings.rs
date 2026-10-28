@@ -269,7 +269,7 @@ impl App {
         {
             return;
         }
-        let port = self.settings_port();
+        let port = self.daemon_port();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let result = fetch_settings_rows(&port);
@@ -317,7 +317,7 @@ impl App {
             self.set_settings_message(true, "A settings write is still running");
             return;
         }
-        let port = self.settings_port();
+        let port = self.daemon_port();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let message = match crate::tui::mcp_client::call_daemon_tool(&port, tool, &args) {
@@ -339,7 +339,7 @@ impl App {
         }
     }
 
-    fn settings_port(&self) -> String {
+    pub(crate) fn daemon_port(&self) -> String {
         self.db
             .get_state("port")
             .ok()

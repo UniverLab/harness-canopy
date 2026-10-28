@@ -324,6 +324,7 @@ impl TaskTriggerHandler {
         router.merge(TaskTriggerHandler::tool_router_meta());
         router.merge(TaskTriggerHandler::tool_router_settings());
         router.merge(TaskTriggerHandler::tool_router_registry());
+        router.merge(TaskTriggerHandler::tool_router_remote());
         router
     }
 }

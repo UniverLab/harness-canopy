@@ -44,10 +44,24 @@ pub struct DevicePeers {
 }
 
 impl DevicePeers {
-    /// How many peers are live.
-    #[cfg(test)]
+    /// How many peers are live. Status-surface API alongside [`Self::live_ids`].
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.inner.lock().map(|map| map.len()).unwrap_or(0)
+    }
+
+    /// Whether no peer is live.
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The ids of the devices with a live peer.
+    pub fn live_ids(&self) -> Vec<String> {
+        self.inner
+            .lock()
+            .map(|map| map.keys().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Register one peer. `false` means [`MAX_DEVICE_PEERS`] other devices are

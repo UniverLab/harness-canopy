@@ -168,9 +168,10 @@ Press **F1** to open the **Canopy hub**, a centered tabbed dialog:
 **Settings** edits every registry setting in place (with the value's apply
 mode and status), **Keys** is a grouped reference of every shortcut the TUI
 handles, **Missions & stats** lists all the missions above — unlocked
-ones in full colour, locked ones dimmed — and **Shelf** lists the files
-agents have sent (see below). `Shift+←`/`Shift+→`
-switch tabs, as everywhere else in Canopy; `Tab`/`Shift+Tab` and `1`/`2`/`3`/`4`
+ones in full colour, locked ones dimmed — **Shelf** lists the files
+agents have sent (see below), and **Remote** is everything `canopy remote`
+does (see below). `Shift+←`/`Shift+→`
+switch tabs, as everywhere else in Canopy; `Tab`/`Shift+Tab` and `1`/`2`/`3`/`4`/`5`
 also switch. `F1` closes the hub from any state; `Esc` closes it from the top
 level of every tab. `F1` works everywhere — including inside a focused
 interactive session whose harness has claimed the keyboard (alternate screen
@@ -186,6 +187,18 @@ with `a` (add a folder), `d` (delete) and `Shift+↑`/`Shift+↓` (reorder). `/`
 filters every group by key or description. Each change goes through the daemon;
 a refused value keeps the old one and the daemon's message shows in the status
 line. `←`/`→` never change a value.
+
+In **Remote** (`F1`, then `5`), `↑`/`↓` (or `j`/`k`) move over the GitHub,
+Remote control, Relay and Pair rows plus one row per paired device. `Enter`
+on GitHub starts the device flow while signed out (the row shows the user
+code and `https://github.com/login/device` until it completes or expires);
+`Enter` on Remote control flips the relay switch (disabled while signed
+out); Relay only reports the phase (`connected`, `connecting`,
+`token rejected: sign in again`, `off`); `Enter` on Pair a device shows the
+fresh code with its link, QR and countdown in an overlay (`Esc` hides it,
+the code stays valid). Each device row shows its label, id, last seen time
+and `live` while a peer is open; `d` revokes it behind a `y`/`n`
+confirmation. While any device is live the sidebar header shows `⇄ n`.
 
 ### Session shelf
 

@@ -556,7 +556,7 @@ async fn close_by_revoking(loopback: &mut Loopback) {
         "a revoked device's peer must close within a second"
     );
     let deadline = Instant::now() + Duration::from_secs(5);
-    while loopback.peers.len() > 0 {
+    while !loopback.peers.is_empty() {
         assert!(
             Instant::now() < deadline,
             "the peer slot must be released when the channel closes"

@@ -25,6 +25,8 @@ mod settings;
 pub use settings::*;
 mod shelf;
 pub use shelf::*;
+mod remote;
+pub use remote::*;
 
 #[cfg(test)]
 mod tests {

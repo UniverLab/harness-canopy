@@ -1,12 +1,12 @@
 ---
 title: MCP Tools
-description: All 118 MCP tools exposed by the canopy daemon, by category.
+description: All 122 MCP tools exposed by the canopy daemon, by category.
 order: 11
 ---
 
 # MCP Tools
 
-The daemon exposes **118 MCP tools** over Streamable HTTP (port 7755) and
+The daemon exposes **122 MCP tools** over Streamable HTTP (port 7755) and
 stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 
 Writes wait up to 5 seconds for a concurrent writer. If the database is still
@@ -138,7 +138,7 @@ See [Graphs](graphs.md).
 
 Kept callable for the whole 3.x line, but excluded from tool listings
 (`tools/list`) so nothing new adopts them — call the 3.x name instead. Not
-counted in the 118 tools above.
+counted in the 122 tools above.
 
 | Deprecated name | Renamed to (3.0.0) |
 |---|---|
@@ -298,3 +298,12 @@ readable until `spec_convert` migrates them.
 | Tool | Description |
 |---|---|
 | `session_send_file` | Copy 1 to 10 files onto the session shelf (own session by default, `session_id` to target another, host shelf when the caller has no session). Each file must be PNG, JPEG, WebP, GIF or SVG — sniffed from its content, never its extension — and at most 20 MiB. One bad path never blocks the others: the result lists `items` (`file_id`, `name`, `mime`, `size`) and per-path `errors` (`path`, `code`, `message`), with codes `not_found`, `not_a_file`, `too_large`, `unsupported_type`, `io`. An optional `caption` (at most 500 characters) is stored with every file of the call and shown in the TUI |
+
+## Remote control (4)
+
+| Tool | Description |
+|---|---|
+| `remote_status` | Show the remote-control status for the hub's Remote tab: sign-in state, whether remote is enabled, the relay URL, the relay phase (`connected`, `connecting`, `token rejected: sign in again`, `off`), the live device ids and every paired device with its live flag |
+| `remote_pair` | Create a one-time pairing code with its link, expiry and QR, replacing any live one — the same code `canopy remote pair` prints |
+| `remote_set_enabled` | Turn the relay connection on or off (`[remote] enabled`); the daemon picks the change up without a restart |
+| `remote_revoke` | Revoke a paired device by device id: delete the row and close its live connection at once |
