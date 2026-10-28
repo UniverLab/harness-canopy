@@ -198,7 +198,8 @@ out); Relay only reports the phase (`connected`, `connecting`,
 fresh code with its link, QR and countdown in an overlay (`Esc` hides it,
 the code stays valid). Each device row shows its label, id, last seen time
 and `live` while a peer is open; `d` revokes it behind a `y`/`n`
-confirmation. While any device is live the sidebar header shows `⇄ n`.
+confirmation (`Enter` also confirms, `Esc` cancels). While any device is
+live the sidebar header shows `⇄ n`.
 
 ### Session shelf
 
