@@ -21,6 +21,8 @@ pub mod models_db;
 pub mod notification;
 pub mod nursery;
 pub mod project;
+pub mod prompt_catalog;
+pub mod prompt_draft;
 pub mod prompts;
 pub mod queues;
 pub mod quota_reset;
@@ -42,3 +44,5 @@ pub mod validation_mutex;
 
 #[cfg(test)]
 mod domain_tests;
+#[cfg(test)]
+mod prompt_draft_tests;

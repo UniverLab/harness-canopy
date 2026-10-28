@@ -30,6 +30,10 @@ pub(crate) use app::session_resume::build_resumed_session_args;
 pub(crate) use app::dialog::PersistedBuilderState;
 #[cfg(test)]
 pub(crate) use app::dialog::SimplePromptDialog;
+// The hub catalog lists the New dialog's CLIs, so the dialog's CLI list and
+// label helpers are re-exported for that one non-TUI consumer rather than
+// making `app` public.
+pub(crate) use app::dialog::new_agent::{available_clis_for_catalog, cli_label};
 
 use anyhow::{Context, Result};
 use ratatui::crossterm::{

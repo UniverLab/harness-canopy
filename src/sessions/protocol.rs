@@ -5,8 +5,12 @@
 //! An unknown `t` or a missing field answers `error{code:"bad_request"}`
 //! naming the frame and the field.
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use crate::domain::prompt_draft::PromptDraft;
+
+pub use super::host_frame::{parse_host_frame, HostFrame};
 
 /// Protocol version the hub speaks.
 pub const PROTO_VERSION: u32 = 1;
@@ -74,6 +78,13 @@ pub enum ClientFrame {
         id: String,
         text: String,
     },
+    /// `prompt{req,id,draft}`: build the text hub-side, then deliver it like
+    /// [`ClientFrame::Prompt`].
+    PromptDraft {
+        req: String,
+        id: String,
+        draft: PromptDraft,
+    },
     Resize {
         id: String,
         cols: u16,
@@ -108,6 +119,15 @@ pub enum ClientFrame {
     ShelfDelete {
         req: String,
         file_id: String,
+    },
+    /// `compose{req,draft}`: build the text hub-side and answer `composed`.
+    Compose {
+        req: String,
+        draft: PromptDraft,
+    },
+    /// `catalog{req}`: answer the builder `catalog`.
+    Catalog {
+        req: String,
     },
 }
 
@@ -164,50 +184,14 @@ pub fn parse_client_frame(text: &str) -> Result<ClientFrame, FrameError> {
             let data = data_field(&value, &frame)?;
             Ok(ClientFrame::Input { id, data })
         }
-        "prompt" => {
-            let req = req_field(&value, &frame)?;
-            let id = id_field(&value, &frame)?;
-            let text = str_field(&value, &frame, "text")?;
-            Ok(ClientFrame::Prompt { req, id, text })
-        }
+        "prompt" => parse_prompt_frame(&value, &frame),
         "resize" => {
             let id = id_field(&value, &frame)?;
             let cols = size_field(&value, &frame, "cols")?;
             let rows = size_field(&value, &frame, "rows")?;
             Ok(ClientFrame::Resize { id, cols, rows })
         }
-        "spawn" => {
-            let req = req_field(&value, &frame)?;
-            let kind = str_field(&value, &frame, "kind")?;
-            let cli = str_field(&value, &frame, "cli")?;
-            let model = opt_str_field(&value, &frame, "model")?;
-            let workdir = str_field(&value, &frame, "workdir")?;
-            let name = opt_str_field(&value, &frame, "name")?;
-            let prompt = opt_str_field(&value, &frame, "prompt")?;
-            let interactive_args = opt_str_field(&value, &frame, "interactive_args")?;
-            let fallback_args = opt_str_field(&value, &frame, "fallback_args")?;
-            let model_flag = opt_str_field(&value, &frame, "model_flag")?;
-            let id = opt_str_field(&value, &frame, "id")?;
-            let seed_id = opt_str_field(&value, &frame, "seed_id")?;
-            let accent = opt_str_field(&value, &frame, "accent")?;
-            Ok(ClientFrame::Spawn {
-                req,
-                kind,
-                cli,
-                model,
-                workdir,
-                name,
-                prompt,
-                ext: Box::new(SpawnExt {
-                    interactive_args,
-                    fallback_args,
-                    model_flag,
-                    id,
-                    seed_id,
-                    accent,
-                }),
-            })
-        }
+        "spawn" => parse_spawn_frame(&value, &frame),
         "kill" => {
             let req = req_field(&value, &frame)?;
             let id = id_field(&value, &frame)?;
@@ -228,8 +212,75 @@ pub fn parse_client_frame(text: &str) -> Result<ClientFrame, FrameError> {
             let file_id = str_field(&value, &frame, "file_id")?;
             Ok(ClientFrame::ShelfDelete { req, file_id })
         }
+        "compose" => {
+            let req = req_field(&value, &frame)?;
+            let draft = draft_field(&value, &frame)?;
+            Ok(ClientFrame::Compose { req, draft })
+        }
+        "catalog" => {
+            let req = req_field(&value, &frame)?;
+            Ok(ClientFrame::Catalog { req })
+        }
         _ => Err(bad_request(None, format!("unknown frame '{frame}'"))),
     }
+}
+
+/// Parse a `prompt` frame: `text` xor `draft`.
+fn parse_prompt_frame(value: &Value, frame: &str) -> Result<ClientFrame, FrameError> {
+    let req = req_field(value, frame)?;
+    let id = id_field(value, frame)?;
+    match (present_field(value, "text"), present_field(value, "draft")) {
+        (true, false) => {
+            let text = str_field(value, frame, "text")?;
+            Ok(ClientFrame::Prompt { req, id, text })
+        }
+        (false, true) => {
+            let draft = draft_field(value, frame)?;
+            Ok(ClientFrame::PromptDraft { req, id, draft })
+        }
+        (true, true) => Err(bad_request(
+            None,
+            format!("{frame}: fields 'text' and 'draft' are mutually exclusive"),
+        )),
+        (false, false) => Err(bad_request(
+            None,
+            format!("{frame}: missing field 'text' or 'draft'"),
+        )),
+    }
+}
+
+/// Parse a `spawn` frame with its agent launch extras.
+fn parse_spawn_frame(value: &Value, frame: &str) -> Result<ClientFrame, FrameError> {
+    let req = req_field(value, frame)?;
+    let kind = str_field(value, frame, "kind")?;
+    let cli = str_field(value, frame, "cli")?;
+    let model = opt_str_field(value, frame, "model")?;
+    let workdir = str_field(value, frame, "workdir")?;
+    let name = opt_str_field(value, frame, "name")?;
+    let prompt = opt_str_field(value, frame, "prompt")?;
+    let interactive_args = opt_str_field(value, frame, "interactive_args")?;
+    let fallback_args = opt_str_field(value, frame, "fallback_args")?;
+    let model_flag = opt_str_field(value, frame, "model_flag")?;
+    let id = opt_str_field(value, frame, "id")?;
+    let seed_id = opt_str_field(value, frame, "seed_id")?;
+    let accent = opt_str_field(value, frame, "accent")?;
+    Ok(ClientFrame::Spawn {
+        req,
+        kind,
+        cli,
+        model,
+        workdir,
+        name,
+        prompt,
+        ext: Box::new(SpawnExt {
+            interactive_args,
+            fallback_args,
+            model_flag,
+            id,
+            seed_id,
+            accent,
+        }),
+    })
 }
 
 fn req_field(value: &Value, frame: &str) -> Result<String, FrameError> {
@@ -294,6 +345,20 @@ fn data_field(value: &Value, frame: &str) -> Result<Vec<u8>, FrameError> {
     base64::engine::general_purpose::STANDARD
         .decode(encoded.as_bytes())
         .map_err(|_| bad_request(None, format!("{frame}: field 'data' is not valid base64")))
+}
+
+/// Whether `field` carries a value (`null` counts as absent, matching
+/// [`str_field`]).
+fn present_field(value: &Value, field: &str) -> bool {
+    matches!(value.get(field), Some(field_value) if !field_value.is_null())
+}
+
+fn draft_field(value: &Value, frame: &str) -> Result<PromptDraft, FrameError> {
+    match value.get("draft") {
+        Some(draft) if !draft.is_null() => serde_json::from_value(draft.clone())
+            .map_err(|e| bad_request(None, format!("{frame}: field 'draft' is invalid: {e}"))),
+        _ => Err(bad_request(None, format!("{frame}: missing field 'draft'"))),
+    }
 }
 
 fn encode_b64(data: &[u8]) -> String {
@@ -498,228 +563,4 @@ pub fn shelf_get_frame(req: &str, file_id: &str) -> String {
 /// `shelf_delete{req,file_id}`: ask the host to remove one shelf file.
 pub fn shelf_delete_frame(req: &str, file_id: &str) -> String {
     serde_json::json!({"t": "shelf_delete", "req": req, "file_id": file_id}).to_string()
-}
-
-// ── Host frames ───────────────────────────────────────────────────────
-
-/// One frame sent by the hub, parsed by [`parse_host_frame`].
-#[derive(Debug)]
-pub enum HostFrame {
-    Hello {
-        proto: u32,
-        host_label: String,
-    },
-    Sessions {
-        req: String,
-        items: Vec<SessionItem>,
-    },
-    Snapshot {
-        id: String,
-        cols: u16,
-        rows: u16,
-        seq: u64,
-        data: Vec<u8>,
-    },
-    Out {
-        id: String,
-        seq: u64,
-        data: Vec<u8>,
-    },
-    Exited {
-        id: String,
-        code: i32,
-    },
-    SessionAdded {
-        item: Box<SessionItem>,
-    },
-    SessionRemoved {
-        id: String,
-    },
-    Spawned {
-        req: String,
-        id: String,
-    },
-    Ok {
-        req: String,
-    },
-    Error {
-        req: Option<String>,
-        code: String,
-        message: String,
-    },
-    /// `shelf{req,id?,items}`: one shelf's listing, newest first.
-    Shelf {
-        req: String,
-        id: Option<String>,
-        items: Vec<ShelfItem>,
-    },
-    /// `shelf_added{item}`: broadcast when any shelf gains a file.
-    ShelfAdded {
-        item: Box<ShelfItem>,
-    },
-    /// `shelf_removed{file_id}`: broadcast when any shelf loses a file
-    /// (delete, prune, retention, orphan sweep).
-    ShelfRemoved {
-        file_id: String,
-    },
-    /// `file{req,file_id,part,data,last}`: one base64 chunk of a `shelf_get`
-    /// response, at most 12 KiB raw per part.
-    File {
-        req: String,
-        file_id: String,
-        part: u32,
-        data: Vec<u8>,
-        last: bool,
-    },
-    /// Any frame this build does not know: parsed so a newer host can talk
-    /// to an older client (and vice versa), then ignored.
-    Unknown,
-}
-
-impl HostFrame {
-    /// The request id this frame answers, when it answers one.
-    pub fn req(&self) -> Option<&str> {
-        match self {
-            HostFrame::Sessions { req, .. }
-            | HostFrame::Spawned { req, .. }
-            | HostFrame::Shelf { req, .. }
-            | HostFrame::File { req, .. }
-            | HostFrame::Ok { req } => Some(req),
-            HostFrame::Error { req, .. } => req.as_deref(),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "t", rename_all = "snake_case")]
-enum HostFrameWire {
-    Hello {
-        proto: u32,
-        host_label: String,
-    },
-    Sessions {
-        req: String,
-        items: Vec<SessionItem>,
-    },
-    Snapshot {
-        id: String,
-        cols: u16,
-        rows: u16,
-        seq: u64,
-        #[serde(deserialize_with = "de_b64")]
-        data: Vec<u8>,
-    },
-    Out {
-        id: String,
-        seq: u64,
-        #[serde(deserialize_with = "de_b64")]
-        data: Vec<u8>,
-    },
-    Exited {
-        id: String,
-        code: i32,
-    },
-    SessionAdded {
-        item: SessionItem,
-    },
-    SessionRemoved {
-        id: String,
-    },
-    Spawned {
-        req: String,
-        id: String,
-    },
-    Ok {
-        req: String,
-    },
-    Error {
-        req: Option<String>,
-        code: String,
-        message: String,
-    },
-    Shelf {
-        req: String,
-        #[serde(default)]
-        id: Option<String>,
-        items: Vec<ShelfItem>,
-    },
-    ShelfAdded {
-        item: ShelfItem,
-    },
-    ShelfRemoved {
-        file_id: String,
-    },
-    File {
-        req: String,
-        file_id: String,
-        part: u32,
-        #[serde(deserialize_with = "de_b64")]
-        data: Vec<u8>,
-        last: bool,
-    },
-    /// Any `t` this build does not recognise: matches everything else, so
-    /// an unknown frame from a newer peer parses (and is ignored) instead
-    /// of failing the whole text.
-    #[serde(other)]
-    Unknown,
-}
-
-fn de_b64<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
-    use base64::Engine as _;
-    let encoded = String::deserialize(deserializer)?;
-    base64::engine::general_purpose::STANDARD
-        .decode(encoded.as_bytes())
-        .map_err(serde::de::Error::custom)
-}
-
-/// Parse one hub text frame; `Err` carries the serde message.
-pub fn parse_host_frame(text: &str) -> Result<HostFrame, String> {
-    let wire: HostFrameWire =
-        serde_json::from_str(text).map_err(|e| format!("invalid host frame: {e}"))?;
-    Ok(match wire {
-        HostFrameWire::Hello { proto, host_label } => HostFrame::Hello { proto, host_label },
-        HostFrameWire::Sessions { req, items } => HostFrame::Sessions { req, items },
-        HostFrameWire::Snapshot {
-            id,
-            cols,
-            rows,
-            seq,
-            data,
-        } => HostFrame::Snapshot {
-            id,
-            cols,
-            rows,
-            seq,
-            data,
-        },
-        HostFrameWire::Out { id, seq, data } => HostFrame::Out { id, seq, data },
-        HostFrameWire::Exited { id, code } => HostFrame::Exited { id, code },
-        HostFrameWire::SessionAdded { item } => HostFrame::SessionAdded {
-            item: Box::new(item),
-        },
-        HostFrameWire::SessionRemoved { id } => HostFrame::SessionRemoved { id },
-        HostFrameWire::Spawned { req, id } => HostFrame::Spawned { req, id },
-        HostFrameWire::Ok { req } => HostFrame::Ok { req },
-        HostFrameWire::Error { req, code, message } => HostFrame::Error { req, code, message },
-        HostFrameWire::Shelf { req, id, items } => HostFrame::Shelf { req, id, items },
-        HostFrameWire::ShelfAdded { item } => HostFrame::ShelfAdded {
-            item: Box::new(item),
-        },
-        HostFrameWire::ShelfRemoved { file_id } => HostFrame::ShelfRemoved { file_id },
-        HostFrameWire::File {
-            req,
-            file_id,
-            part,
-            data,
-            last,
-        } => HostFrame::File {
-            req,
-            file_id,
-            part,
-            data,
-            last,
-        },
-        HostFrameWire::Unknown => HostFrame::Unknown,
-    })
 }

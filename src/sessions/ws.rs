@@ -23,6 +23,7 @@ use tokio::task::JoinHandle;
 use crate::db::Database;
 
 use super::auth::{bearer_token, ensure_token, token_valid};
+use super::catalog::{handle_catalog, handle_compose, handle_prompt_draft};
 use super::protocol::{
     error_frame, exited_frame, file_frame, hello_frame, ok_frame, out_frame, parse_client_frame,
     session_added_frame, session_removed_frame, sessions_frame, shelf_added_frame, shelf_frame,
@@ -114,7 +115,7 @@ fn request_authorized(headers: &HeaderMap, token: &str) -> bool {
 }
 
 /// Outbound JSON frames for one connection.
-type OutTx = mpsc::UnboundedSender<String>;
+pub(crate) type OutTx = mpsc::UnboundedSender<String>;
 
 /// Output forwarders of one connection, by attached session id.
 type Attached = HashMap<String, JoinHandle<()>>;
@@ -198,6 +199,9 @@ fn handle_client_text(
         } => {
             handle_prompt(state, out_tx, req, &id, prompt);
         }
+        ClientFrame::PromptDraft { req, id, draft } => {
+            handle_prompt_draft(state, out_tx, req, &id, draft);
+        }
         ClientFrame::Resize { id, cols, rows } => handle_resize(state, out_tx, &id, cols, rows),
         ClientFrame::Spawn {
             req,
@@ -242,6 +246,12 @@ fn handle_client_text(
         ClientFrame::ShelfGet { req, file_id } => handle_shelf_get(state, out_tx, req, file_id),
         ClientFrame::ShelfDelete { req, file_id } => {
             handle_shelf_delete(state, out_tx, req, file_id);
+        }
+        ClientFrame::Compose { req, draft } => {
+            handle_compose(state, out_tx, req, draft);
+        }
+        ClientFrame::Catalog { req } => {
+            handle_catalog(state, out_tx, req);
         }
     }
 }
@@ -335,7 +345,7 @@ fn handle_list(state: &Arc<SessionsState>, out_tx: &OutTx, req: &str) {
     let _ = out_tx.send(sessions_frame(req, &items));
 }
 
-fn no_such_session(id: &str) -> String {
+pub(crate) fn no_such_session(id: &str) -> String {
     format!("no such session '{id}'")
 }
 

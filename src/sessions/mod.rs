@@ -6,8 +6,10 @@
 //! children and handle their parsers identically.
 
 pub mod auth;
+pub mod catalog;
 pub mod client;
 pub mod history;
+pub mod host_frame;
 pub mod hub;
 pub mod hub_event;
 pub mod hub_shelf;
