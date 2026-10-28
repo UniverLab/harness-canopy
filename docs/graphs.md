@@ -1181,6 +1181,7 @@ catalogue is what counts the install:
 
 ```
 canopy graph install <ref> [--workdir <dir>] [--name <name>] [--overwrite-presets] [--yes] [--show-prompts] [--json]
+canopy graph install draft:<id>
 ```
 
 The ref is `<slug>` for an official graph or `<owner>/<repo>/<slug>`
@@ -1191,11 +1192,21 @@ digits, or `-`; owner and repo follow GitHub's naming rules. Anything
 else is refused with the accepted forms in the message.
 
 A draft shared from the editor at `graphs.univerlab.org/editor`
-installs with `canopy graph install draft:<id>` (and a node draft with
-`canopy node install draft:<id>`): a draft lives 30 minutes, installs
-once — the review fetch itself consumes it, so a refused install needs
-a new link from the editor — and carries no review, which the summary
-and the confirmation question both say.
+installs with `canopy graph install draft:<id>` (a node draft with
+`canopy node install draft:<id>`); `<id>` is 26 lowercase base32
+characters (`[a-z2-7]`), and anything else after `draft:` is refused
+with the accepted forms. The catalogue serves the draft directly at
+`<catalogue_url>/i/draft/<id>` — no redirect, and a redirect is
+refused rather than followed — under the same User-Agent, 15 s timeout
+and 1 MiB cap as any other ref. A draft lives 30 minutes, installs
+once, and carries no review: the summary and the confirmation question
+both say `This is an unreviewed draft, not a published document.`, and
+the review and the report name the source `draft`. The review fetch is
+what consumes the draft, so a refused install leaves it gone — the
+refusal says so and asks you to copy a new link from the editor — and
+a draft that expired or was already installed reports `draft not
+found: drafts last 30 minutes and are deleted by their first
+install`.
 
 **Review before anything is written.** A shared graph is code: check
 and gate nodes run shell commands with your permissions, hooks run
@@ -1217,7 +1228,8 @@ the document and prints a review summary of everything it will run:
   block — the same marks the catalogue pages show.
 
 Only then does it ask `Install <name> from <source>? [y/N]`, where the
-source is `official` or `owner/repo` (plus the ref, when given).
+source is `official`, `owner/repo` (plus the ref, when given) or
+`draft` — a draft's question also carries the unreviewed-draft line.
 Official graphs are asked about exactly like community ones — official
 is not exempt. Answering anything but `y`/`yes` installs nothing. When
 stdin or stdout is not a TTY (a pipe, a script, an agent) the install
@@ -1232,11 +1244,12 @@ The fetch is one GET with a `canopy/<version>` User-Agent, following
 redirects (at most 3, only ever to https — a catalogue URL you set to
 `http` yourself may redirect within http, and any other scheme is
 refused) with a 15 s timeout and the body capped at 1 MiB — no other
-network traffic. HTTP errors are reported with the status and the URL
-tried; a 404 says the graph was not found in the catalogue, and a 410
-says `<name> was removed from the catalogue after a community report:
-<reason> (<issue>)` — a document the catalogue took down after a
-report is never installed.
+network traffic. A draft is the exception: it is served directly, and
+a redirect is an error, not a hop. HTTP errors are reported with the
+status and the URL tried; a 404 says the graph was not found in the
+catalogue, and a 410 says `<name> was removed from the catalogue after
+a community report: <reason> (<issue>)` — a document the catalogue took
+down after a report is never installed.
 
 The fetched document goes through the same validation as
 [`validate`](#validate-before-you-share): any problem aborts the
@@ -1250,18 +1263,22 @@ suffix when the name is taken), `--name` overriding the document's
 name, `--workdir` defaulting to the current directory (which must be
 absolute and exist).
 
-The report carries the graph id and name, the workdir, the presets
-written, the review, and the agent nodes still needing a platform/model
-with the next command to assign them (`--json` prints the
-machine-readable report). The same operation exists as the MCP tool
+The report carries the graph id and name, its source, the workdir, the
+presets written, the review, and the agent nodes still needing a
+platform/model with the next command to assign them (`--json` prints
+the machine-readable report). The same operation exists as the MCP tool
 `graph_install { ref, workdir, name?, overwrite_presets?, accept? }`:
 called **without** `accept: true` it installs nothing and returns
 `{ needs_review: true, review: { source, commands, prompts,
 attention } }` — the same review printed above; called with
 `accept: true` it installs and echoes that review in the result. An
 agent driving the MCP tool must show the review to its user before
-passing `accept: true`. The catalogue base URL is the
-`graphs.catalogue_url` setting (default `https://graphs.univerlab.org`,
+passing `accept: true`. A draft keeps the two-call shape: the daemon
+parks the body the review call fetched, so `accept: true` installs it
+without a second request — and a draft that reports `draft not found`
+is gone for good; ask for a new link from the editor rather than
+retrying. The catalogue base URL is the `graphs.catalogue_url` setting
+(default `https://graphs.univerlab.org`,
 see [Tuning the engine](#tuning-the-engine)).
 
 ## Archive and restore
@@ -1457,15 +1474,20 @@ node is the installer's decision, not the author's. `canopy graph validate
 ```
 canopy node install <slug>
 canopy node install <owner>/<repo>/<slug>@<ref>
+canopy node install draft:<id>
 canopy node install <ref> --overwrite-presets --yes --show-prompts --json
 ```
 
 The ref grammar is the graph ref grammar (`<slug>` or
-`<owner>/<repo>/<slug>`, optional `@<ref>`); the document is fetched
-through `graphs.catalogue_url` and validated exactly as `canopy graph
-validate` validates it. Before anything is written, the same **review**
-`canopy graph install` prints comes first: every shell command
-(`config.command`) labelled by node, every agent instruction
+`<owner>/<repo>/<slug>`, optional `@<ref>`), plus `draft:<id>` for a
+node draft shared from the editor — the same one-use, 30-minute,
+unreviewed draft as a graph, with the same `draft not found` message
+(see [Install a graph](#install-a-graph)); a draft holding a graph
+document is refused, saying which kind it found. The document is
+fetched through `graphs.catalogue_url` and validated exactly as `canopy
+graph validate` validates it. Before anything is written, the same
+**review** `canopy graph install` prints comes first: every shell
+command (`config.command`) labelled by node, every agent instruction
 (`prompt_template`, `prompt_override`, and the preset content behind
 `prompt_preset` — bundled or builtin — with its first 3 lines and its
 total line count, full text with `--show-prompts`), and the attention
@@ -1476,9 +1498,10 @@ marks for command shapes worth a second look (pipe to shell, `sudo`,
 documents are asked about exactly like community ones. Without a TTY
 and without `--yes` it prints the summary and refuses, exiting 1 with
 `refusing to install without confirmation: re-run with --yes after
-reviewing the commands above`; `--yes` installs after the summary
-without the question, and `--json` prints the review as JSON on stdout
-with the question on stderr.
+reviewing the commands above`; a draft's refusal adds that the draft
+is gone and asks for a new link from the editor. `--yes` installs after
+the summary without the question, and `--json` prints the review as
+JSON on stdout with the question on stderr.
 
 Only after the confirmation is the document written to
 `~/.canopy/nodes/<name>.json`. Its bundled `preset` is installed as

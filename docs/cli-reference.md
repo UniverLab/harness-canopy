@@ -90,7 +90,7 @@ refresh also restarts that 24-hour window.
 | `canopy graph crew --json` | Print the MCP `graph_crew` JSON shape instead of tables |
 | `canopy graph validate <path>` | Check a shared graph or node JSON document without importing it: every structural check `import` runs plus the sharing rules. Prints each problem with its JSON path; exits 0 when the document is valid, 1 when it is not |
 | `canopy graph validate <path> --json` | Print the machine-readable report instead: `ok` with the kind, name and counts, or `problems` |
-| `canopy graph install <ref>` | Install a graph from the catalogue in one command: `<slug>` or `<owner>/<repo>/<slug>`, each with an optional `@<ref>` suffix. Prints a review of every shell command and agent prompt the document runs (with attention marks), asks `Install <name> from <source>? [y/N]`, then — after confirmation — validates the fetched document, installs its bundled presets, and imports it as a new graph |
+| `canopy graph install <ref>` | Install a graph from the catalogue in one command: `<slug>` or `<owner>/<repo>/<slug>`, each with an optional `@<ref>` suffix, or `draft:<id>` for an unreviewed editor draft ([graphs.univerlab.org/editor](https://graphs.univerlab.org/editor), 30 minutes, installs once). Prints a review of every shell command and agent prompt the document runs (with attention marks), asks `Install <name> from <source>? [y/N]`, then — after confirmation — validates the fetched document, installs its bundled presets, and imports it as a new graph |
 | `canopy graph install <ref> [--workdir <dir>] [--name <name>] [--overwrite-presets] [--yes] [--show-prompts] [--json]` | Install into another workdir (default: the current directory), under another name, overwriting differing local preset files instead of refusing, skipping the confirmation question (`--yes`, after printing the review), printing every prompt in full (`--show-prompts`), or printing the review and report as machine-readable JSON |
 
 `canopy graph validate` runs entirely locally — no daemon, no database,
@@ -105,7 +105,7 @@ prefix. Ambiguous references list the candidates.
 | Command | Description |
 |---|---|
 | `canopy node list [--json]` | List installed node documents and the builtins embedded in the binary, marking each `installed` or `builtin` |
-| `canopy node install <ref>` | Install a node document from the catalogue: `<slug>` or `<owner>/<repo>/<slug>`, each with an optional `@<ref>` suffix. Prints the same review as `graph install` and asks for confirmation first; after confirmation it validates the document, installs its bundled preset, and writes it to `~/.canopy/nodes` |
+| `canopy node install <ref>` | Install a node document from the catalogue: `<slug>` or `<owner>/<repo>/<slug>`, each with an optional `@<ref>` suffix, or `draft:<id>` for an unreviewed editor draft. Prints the same review as `graph install` and asks for confirmation first; after confirmation it validates the document, installs its bundled preset, and writes it to `~/.canopy/nodes` |
 | `canopy node install <ref> [--overwrite-presets] [--yes] [--show-prompts] [--json]` | Overwrite differing local preset files instead of refusing, skip the confirmation question (`--yes`, after printing the review), print every prompt in full (`--show-prompts`), or print the review and report as machine-readable JSON |
 | `canopy node remove <name> [--json]` | Remove an installed node document. A builtin with no installed copy cannot be removed; an installed override can |
 
