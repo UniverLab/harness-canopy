@@ -10,28 +10,29 @@
 //! * `resize` always answers `forbidden`;
 //! * `spawn` accepts only `kind:"agent"`.
 //!
-//! Outbound frames are size-bounded for a data channel: raw `out` and
-//! `snapshot` payloads are split into chunks that keep the source `seq`, the
-//! snapshot's first part staying in the `snapshot` frame (with `cols`/`rows`)
-//! and the rest travelling as `snapshot_more{id,data,last}`.
+//! Outbound frames are size-bounded for a data channel: raw `out`,
+//! `snapshot` and `file` payloads are split into chunks that keep the source
+//! `seq`, the snapshot's first part staying in the `snapshot` frame (with
+//! `cols`/`rows`) and the rest travelling as `snapshot_more{id,data,last}`.
+//! Shelf transfers interleave with `out` frames, at most two per device — a
+//! third `shelf_get` answers `error{code:"busy"}`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Semaphore};
 use tokio::task::JoinHandle;
 
 use crate::sessions::catalog::{handle_catalog, handle_compose, handle_prompt_draft};
 use crate::sessions::protocol::{
-    error_frame, exited_frame, ok_frame, out_frame, parse_client_frame, session_added_frame,
-    session_removed_frame, sessions_frame, shelf_added_frame, shelf_removed_frame, snapshot_frame,
-    snapshot_more_frame, ClientFrame, SessionItem, ERR_BAD_REQUEST, ERR_DELIVERY_FAILED,
-    ERR_FORBIDDEN, ERR_INTERNAL, ERR_NOT_FOUND, ERR_SPAWN_FAILED,
+    error_frame, exited_frame, file_frame, ok_frame, out_frame, parse_client_frame,
+    session_added_frame, session_removed_frame, sessions_frame, shelf_added_frame, shelf_frame,
+    shelf_removed_frame, snapshot_frame, snapshot_more_frame, ClientFrame, SessionItem,
+    ERR_BAD_REQUEST, ERR_BUSY, ERR_DELIVERY_FAILED, ERR_FORBIDDEN, ERR_INTERNAL, ERR_NOT_FOUND,
+    ERR_SPAWN_FAILED,
 };
 use crate::sessions::ws::no_such_session;
-use crate::sessions::ws::{
-    handle_shelf_delete, handle_shelf_get, handle_shelf_list, OutTx, SessionsState,
-};
+use crate::sessions::ws::{handle_shelf_delete, OutTx, SessionsState};
 use crate::sessions::{
     HubEvent, HubSession, OutputReceiver, SessionHub, SessionKind, SessionStatus, SpawnRequest,
 };
@@ -49,6 +50,13 @@ type Attached = HashMap<String, JoinHandle<()>>;
 pub struct RemoteBridge {
     state: Arc<SessionsState>,
     attached: Attached,
+    /// At most two `shelf_get` transfers in flight per device.
+    transfers: Arc<Semaphore>,
+    /// Running shelf transfers, aborted when the peer goes away.
+    shelf_tasks: Vec<JoinHandle<()>>,
+    /// Terminal-session files hidden from this peer, so their later
+    /// `shelf_removed` is hidden too.
+    hidden_files: HashSet<String>,
 }
 
 impl RemoteBridge {
@@ -57,6 +65,9 @@ impl RemoteBridge {
         Self {
             state,
             attached: HashMap::new(),
+            transfers: Arc::new(Semaphore::new(2)),
+            shelf_tasks: Vec::new(),
+            hidden_files: HashSet::new(),
         }
     }
 
@@ -152,10 +163,10 @@ impl RemoteBridge {
                 });
             }
             ClientFrame::ShelfList { req, id } => {
-                handle_shelf_list(&self.state, out, req, id);
+                self.handle_shelf_list(req, id, out);
             }
             ClientFrame::ShelfGet { req, file_id } => {
-                handle_shelf_get(&self.state, out, req, file_id);
+                self.handle_shelf_get(req, file_id, out);
             }
             ClientFrame::ShelfDelete { req, file_id } => {
                 handle_shelf_delete(&self.state, out, req, file_id);
@@ -184,15 +195,35 @@ impl RemoteBridge {
                     send(out, exited_frame(&id, code));
                 }
             }
-            HubEvent::ShelfAdded(item) => send(out, shelf_added_frame(&item)),
-            HubEvent::ShelfRemoved { file_id } => send(out, shelf_removed_frame(&file_id)),
+            HubEvent::ShelfAdded(item) => {
+                if item
+                    .session_id
+                    .as_deref()
+                    .is_some_and(|id| self.terminal(id))
+                {
+                    self.hidden_files.insert(item.file_id.clone());
+                } else {
+                    send(out, shelf_added_frame(&item));
+                }
+            }
+            HubEvent::ShelfRemoved { file_id } => {
+                if self.hidden_files.remove(&file_id) {
+                    // Hidden on arrival: the removal stays hidden too.
+                } else {
+                    send(out, shelf_removed_frame(&file_id));
+                }
+            }
         }
     }
 
-    /// Abort every output forwarder (the data channel closed).
+    /// Abort every output forwarder and shelf transfer (the data channel
+    /// closed or the device was revoked).
     pub fn abort(&mut self) {
         for task in self.attached.drain() {
             task.1.abort();
+        }
+        for task in self.shelf_tasks.drain(..) {
+            task.abort();
         }
     }
 
@@ -344,6 +375,105 @@ impl RemoteBridge {
                 ),
             }
         });
+    }
+
+    fn handle_shelf_list(&self, req: String, id: Option<String>, out: &OutTx) {
+        if id.as_deref().is_some_and(|id| self.terminal(id)) {
+            send(out, shelf_frame(&req, id.as_deref(), &[]));
+            return;
+        }
+        let shelf = self.state.shelf.clone();
+        let out = out.clone();
+        let echo = id.clone();
+        tokio::spawn(async move {
+            match tokio::task::spawn_blocking(move || shelf.list(id.as_deref())).await {
+                Ok(items) => send(&out, shelf_frame(&req, echo.as_deref(), &items)),
+                Err(_) => send(
+                    &out,
+                    error_frame(Some(&req), ERR_INTERNAL, "shelf list failed"),
+                ),
+            }
+        });
+    }
+
+    fn handle_shelf_get(&mut self, req: String, file_id: String, out: &OutTx) {
+        let Some(row) = self.state.shelf.get(&file_id) else {
+            let _ = out.send(error_frame(
+                Some(&req),
+                ERR_NOT_FOUND,
+                &format!("no shelf file '{file_id}'"),
+            ));
+            return;
+        };
+        if row
+            .session_id
+            .as_deref()
+            .is_some_and(|id| self.terminal(id))
+        {
+            let _ = out.send(error_frame(
+                Some(&req),
+                ERR_FORBIDDEN,
+                "terminal sessions are not shared with remote devices",
+            ));
+            return;
+        }
+        let Ok(permit) = self.transfers.clone().try_acquire_owned() else {
+            let _ = out.send(error_frame(
+                Some(&req),
+                ERR_BUSY,
+                "too many downloads in flight",
+            ));
+            return;
+        };
+        let shelf = self.state.shelf.clone();
+        let out = out.clone();
+        let task = tokio::spawn(async move {
+            let _permit = permit;
+            let read = tokio::task::spawn_blocking({
+                let file_id = file_id.clone();
+                move || shelf.read_file(&file_id)
+            })
+            .await;
+            let bytes = match read {
+                Ok(Some(bytes)) => bytes,
+                Ok(None) => {
+                    send(
+                        &out,
+                        error_frame(
+                            Some(&req),
+                            ERR_NOT_FOUND,
+                            &format!("no shelf file '{file_id}'"),
+                        ),
+                    );
+                    return;
+                }
+                Err(_) => {
+                    send(
+                        &out,
+                        error_frame(Some(&req), ERR_INTERNAL, "shelf read failed"),
+                    );
+                    return;
+                }
+            };
+            if bytes.is_empty() {
+                send(&out, file_frame(&req, &file_id, 0, &[], true));
+                return;
+            }
+            let total = bytes.len().div_ceil(CHUNK_BYTES);
+            for (index, chunk) in bytes.chunks(CHUNK_BYTES).enumerate() {
+                let last = index + 1 == total;
+                if out
+                    .send(file_frame(&req, &file_id, index as u32, chunk, last))
+                    .is_err()
+                {
+                    return;
+                }
+                if !last {
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+            }
+        });
+        self.shelf_tasks.push(task);
     }
 }
 

@@ -22,6 +22,7 @@ pub const ERR_FORBIDDEN: &str = "forbidden";
 pub const ERR_SPAWN_FAILED: &str = "spawn_failed";
 pub const ERR_DELIVERY_FAILED: &str = "delivery_failed";
 pub const ERR_INTERNAL: &str = "internal";
+pub const ERR_BUSY: &str = "busy";
 
 /// One shelf file, as carried by `shelf` / `shelf_added` (FR3).
 /// `session_id: null` is the host shelf; the wire key for the sender label

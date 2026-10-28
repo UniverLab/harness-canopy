@@ -318,7 +318,14 @@ the list and cannot be attached, written to, prompted or killed, `resize`
 is always refused (the browser renders the host's size scaled), and `spawn`
 creates `agent` sessions only. Output and snapshot frames are chunked to
 stay under 16 KiB; a snapshot's first part carries `cols`/`rows` and the
-rest travels as `snapshot_more`. A host serves at most four device
+rest travels as `snapshot_more`. The shelf rides the same channel:
+`shelf_list` and `shelf_get` answer `shelf` and `file` frames, and
+`shelf_added` / `shelf_removed` push arrivals and removals. Files from
+terminal sessions stay hidden from lists and pushes and answer
+`error{code:"forbidden"}` on fetch; host-shelf files are visible. `file`
+frames stay under 16 KiB, at most two downloads run at once — a third
+answers `error{code:"busy"}` — and their parts interleave with terminal
+output so a large image never stalls it. A host serves at most four device
 connections at once — a fifth is told `busy` — each success refreshes the
 device's `last_seen`, and `canopy remote revoke` closes a live connection
 within a second.

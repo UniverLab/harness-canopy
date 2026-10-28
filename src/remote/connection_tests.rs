@@ -14,6 +14,7 @@ use axum::routing::get;
 use axum::Router;
 use base64::Engine as _;
 use serde_json::{json, Value};
+use sha2::{Digest as _, Sha256};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -164,6 +165,7 @@ struct Loopback {
     pending: Option<Frame>,
     peers: DevicePeers,
     connections: ConnectionRegistry,
+    state: Arc<SessionsState>,
     cat: Arc<HubSession>,
     terminal: Arc<HubSession>,
     /// The guards must outlive the setup: dropping one kills its session, and
@@ -266,7 +268,7 @@ async fn connected_loopback() -> Loopback {
     spawn(PeerSession {
         peer: host_peer,
         device_id: DEVICE_ID.to_string(),
-        state,
+        state: Arc::clone(&state),
         peers: peers.clone(),
         connections: connections.clone(),
         token,
@@ -281,6 +283,7 @@ async fn connected_loopback() -> Loopback {
         pending: None,
         peers,
         connections,
+        state,
         cat,
         terminal,
         _kills: vec![kill_cat, kill_terminal],
@@ -565,6 +568,64 @@ async fn close_by_revoking(loopback: &mut Loopback) {
     }
 }
 
+/// 3 MiB of PNG-sniffable bytes: the 8-byte magic plus a deterministic
+/// pattern (the sniffer only reads the head).
+fn big_png_bytes() -> Vec<u8> {
+    let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    bytes.extend((0..3 * 1024 * 1024 - 8).map(|index| (index % 251) as u8));
+    bytes
+}
+
+/// 1 KiB of PNG-sniffable bytes, for tests that never transfer the file.
+fn small_png_bytes() -> Vec<u8> {
+    let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    bytes.extend((0..1024 - 8).map(|index| (index % 251) as u8));
+    bytes
+}
+
+/// Write `bytes` to a scratch file and put the copy on the shelf; the
+/// scratch dir is dropped after the copy lands, so only the file id returns.
+fn insert_shelf_png(
+    state: &SessionsState,
+    name: &str,
+    bytes: &[u8],
+    session_id: Option<&str>,
+) -> String {
+    let dir = tempfile::tempdir().expect("scratch dir");
+    let path = dir.path().join(name);
+    std::fs::write(&path, bytes).expect("write source");
+    state
+        .shelf
+        .insert(&path, session_id, None, "test")
+        .expect("shelf insert")
+        .file_id
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Fail when any frame arrives within a quiet window: the peer must stay
+/// silent (a suppressed push), not merely slow.
+async fn assert_quiet(loopback: &mut Loopback, what: &str) {
+    assert!(
+        loopback.pending.is_none(),
+        "{what}: no frame may be buffered"
+    );
+    match tokio::time::timeout(Duration::from_secs(1), loopback.events.recv()).await {
+        Err(_) => {}
+        Ok(Some(DeviceEvent::Frame(frame))) => {
+            panic!("{what}: expected silence, got {}", frame.raw)
+        }
+        Ok(Some(DeviceEvent::Closed)) | Ok(None) => {
+            panic!("{what}: the channel closed while waiting for silence")
+        }
+    }
+}
+
 /// End to end over a real data channel: list, attach, echo, the remote
 /// restrictions, 100 KiB chunking, and revoke-closes-the-peer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -575,6 +636,12 @@ async fn a_paired_device_gets_the_session_hub_over_a_webrtc_data_channel() {
     let hello = loopback.recv("the hello").await;
     assert_eq!(hello.json["t"], "hello", "got {}", hello.raw);
     assert_eq!(hello.json["proto"], 1);
+    assert_eq!(
+        hello.json["features"],
+        json!(["shelf"]),
+        "the data channel advertises the shelf: {}",
+        hello.raw
+    );
 
     // The listing the device sees: the agent session in, the terminal out.
     loopback.send(json!({"t": "list", "req": "l1"})).await;
@@ -615,6 +682,217 @@ async fn a_paired_device_gets_the_session_hub_over_a_webrtc_data_channel() {
 
     // A revoke closes the peer and frees its slot.
     close_by_revoking(&mut loopback).await;
+}
+
+/// A 3 MiB host-shelf PNG fetched over the data channel reassembles to the
+/// same sha256, no frame exceeds the wire cap, and terminal output sent
+/// mid-transfer arrives between the file's first and last part instead of
+/// stalling behind it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_remote_client_fetches_a_3mib_shelf_png_intact_while_output_interleaves() {
+    let mut loopback = connected_loopback().await;
+    assert_eq!(loopback.recv("the hello").await.json["t"], "hello");
+
+    let source = big_png_bytes();
+    let want = sha256_hex(&source);
+    let file_id = insert_shelf_png(&loopback.state, "photo.png", &source, None);
+
+    let added = loopback.recv("the shelf_added").await;
+    assert_eq!(added.json["t"], "shelf_added");
+    assert_eq!(added.json["item"]["file_id"], file_id);
+
+    loopback.send(json!({"t": "shelf_list", "req": "l1"})).await;
+    let shelf = loopback.recv("the shelf").await;
+    assert_eq!(shelf.json["t"], "shelf");
+    assert_eq!(shelf.json["req"], "l1");
+    let ids: Vec<&str> = shelf.json["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .map(|item| item["file_id"].as_str().expect("file_id"))
+        .collect();
+    assert!(
+        ids.contains(&file_id.as_str()),
+        "the host shelf lists the PNG: {ids:?}"
+    );
+
+    let cat_id = loopback.cat.id.clone();
+    loopback.send(json!({"t": "attach", "id": cat_id})).await;
+    let _snapshot_seq = loopback.recv_snapshot("the cat snapshot").await;
+
+    loopback
+        .send(json!({"t": "shelf_get", "req": "g1", "file_id": file_id}))
+        .await;
+    let output: Vec<u8> = (0..100 * 1024).map(|index| (index % 251) as u8).collect();
+    let mut reassembled = Vec::new();
+    let mut parts = 0u32;
+    let mut out_frames = 0usize;
+    let mut output_sent = false;
+    loop {
+        let frame = loopback.recv("a file part or interleaved out").await;
+        assert!(
+            frame.raw.len() <= MAX_FRAME_BYTES,
+            "frame of {} bytes exceeds {MAX_FRAME_BYTES}",
+            frame.raw.len()
+        );
+        if frame.json["t"] == "out" {
+            assert_eq!(frame.json["id"], cat_id);
+            out_frames += 1;
+            continue;
+        }
+        assert_eq!(
+            frame.json["t"], "file",
+            "only file parts and out frames expected here: {}",
+            frame.raw
+        );
+        assert_eq!(frame.json["req"], "g1");
+        assert_eq!(frame.json["file_id"], file_id);
+        assert_eq!(
+            frame.json["part"].as_u64(),
+            Some(u64::from(parts)),
+            "parts are contiguous from zero"
+        );
+        reassembled.extend(decode(&frame.json));
+        if !output_sent {
+            output_sent = true;
+            loopback.cat.ingest_chunk(&output);
+        }
+        parts += 1;
+        if frame.json["last"].as_bool().expect("the last flag") {
+            break;
+        }
+    }
+    assert!(
+        out_frames >= 1,
+        "terminal output must arrive between the first and last file part"
+    );
+    assert_eq!(reassembled.len(), source.len());
+    assert_eq!(
+        sha256_hex(&reassembled),
+        want,
+        "the PNG reassembles byte-for-byte"
+    );
+    close_by_revoking(&mut loopback).await;
+}
+
+/// Terminal-session files stay hidden from remote clients — absent from
+/// lists and pushes, refused on fetch — while host files still arrive.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminal_session_files_are_hidden_and_refused_over_the_data_channel() {
+    let mut loopback = connected_loopback().await;
+    assert_eq!(loopback.recv("the hello").await.json["t"], "hello");
+
+    let terminal_id = loopback.terminal.id.clone();
+    let hidden = insert_shelf_png(
+        &loopback.state,
+        "term.png",
+        &small_png_bytes(),
+        Some(&terminal_id),
+    );
+    assert_quiet(&mut loopback, "a terminal file insert").await;
+
+    loopback
+        .send(json!({"t": "shelf_list", "req": "l1", "id": terminal_id}))
+        .await;
+    let shelf = loopback.recv("the terminal shelf").await;
+    assert_eq!(shelf.json["t"], "shelf");
+    assert_eq!(shelf.json["req"], "l1");
+    assert!(
+        shelf.json["items"].as_array().expect("items").is_empty(),
+        "the terminal shelf stays hidden: {}",
+        shelf.raw
+    );
+
+    loopback
+        .send(json!({"t": "shelf_get", "req": "g1", "file_id": hidden}))
+        .await;
+    let error = expect_error(&mut loopback, "shelf_get on a terminal file").await;
+    assert_eq!(error["code"], "forbidden");
+    assert_eq!(error["req"], "g1");
+
+    let _hidden_again = insert_shelf_png(
+        &loopback.state,
+        "term2.png",
+        &small_png_bytes(),
+        Some(&terminal_id),
+    );
+    assert_quiet(&mut loopback, "a second terminal file insert").await;
+
+    let shown = insert_shelf_png(&loopback.state, "host.png", &small_png_bytes(), None);
+    let added = loopback.recv("the host shelf_added").await;
+    assert_eq!(added.json["t"], "shelf_added");
+    assert_eq!(added.json["item"]["file_id"], shown);
+
+    close_by_revoking(&mut loopback).await;
+}
+
+/// A device may hold two shelf downloads at once; the third answers `busy`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_third_concurrent_shelf_get_answers_busy() {
+    let mut loopback = connected_loopback().await;
+    assert_eq!(loopback.recv("the hello").await.json["t"], "hello");
+
+    let source = big_png_bytes();
+    let file_id = insert_shelf_png(&loopback.state, "photo.png", &source, None);
+    assert_eq!(
+        loopback.recv("the shelf_added").await.json["t"],
+        "shelf_added"
+    );
+
+    for req in ["g1", "g2", "g3"] {
+        loopback
+            .send(json!({"t": "shelf_get", "req": req, "file_id": file_id}))
+            .await;
+    }
+    loop {
+        let frame = loopback.recv("file parts or the busy error").await;
+        if frame.json["t"] == "error" {
+            assert_eq!(frame.json["code"], "busy");
+            assert_eq!(frame.json["req"], "g3");
+            break;
+        }
+        assert_eq!(
+            frame.json["t"], "file",
+            "only file parts arrive before the refusal: {}",
+            frame.raw
+        );
+        assert!(
+            frame.raw.len() <= MAX_FRAME_BYTES,
+            "frame of {} bytes exceeds {MAX_FRAME_BYTES}",
+            frame.raw.len()
+        );
+    }
+    close_by_revoking(&mut loopback).await;
+}
+
+/// Revoking the device mid-download stops its transfer: the peer closes and
+/// no more file frames arrive.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_revoked_devices_shelf_transfer_stops() {
+    let mut loopback = connected_loopback().await;
+    assert_eq!(loopback.recv("the hello").await.json["t"], "hello");
+
+    let source = big_png_bytes();
+    let file_id = insert_shelf_png(&loopback.state, "photo.png", &source, None);
+    assert_eq!(
+        loopback.recv("the shelf_added").await.json["t"],
+        "shelf_added"
+    );
+
+    loopback
+        .send(json!({"t": "shelf_get", "req": "g1", "file_id": file_id}))
+        .await;
+    let first = loopback.recv("the first file frame").await;
+    assert_eq!(first.json["t"], "file");
+
+    close_by_revoking(&mut loopback).await;
+
+    match tokio::time::timeout(Duration::from_secs(1), loopback.events.recv()).await {
+        Ok(Some(DeviceEvent::Frame(frame))) => {
+            panic!("no more file frames may arrive after revoke: {}", frame.raw)
+        }
+        Ok(Some(DeviceEvent::Closed)) | Ok(None) | Err(_) => {}
+    }
 }
 
 #[test]
