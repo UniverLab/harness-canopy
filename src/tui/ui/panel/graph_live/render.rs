@@ -75,7 +75,8 @@ pub(super) fn render_graph_live_view(
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
-            .scroll((clamped_scroll, 0)),
+            .scroll((clamped_scroll, 0))
+            .style(Style::default().bg(ctx.theme.info_bg)),
         area,
     );
 

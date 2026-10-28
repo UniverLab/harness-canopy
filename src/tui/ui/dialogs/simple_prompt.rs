@@ -227,7 +227,7 @@ pub fn draw_simple_prompt_dialog(
         .title(" Prompt Builder ")
         .borders(crate::tui::ui::dialog_borders_for(theme))
         .border_style(Style::default().fg(accent))
-        .style(Style::default().bg(theme.dialog_bg));
+        .style(Style::default().bg(theme.info_bg));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1008,6 +1008,54 @@ mod tests {
         assert!(
             border_cells >= 1,
             "dialog border must use the canopy header color"
+        );
+    }
+
+    #[test]
+    fn prompt_builder_chrome_sits_on_info_bg_with_sections_on_stage() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut app = app_for_prompt(Color::Rgb(255, 0, 0));
+        // A fresh dialog has a single focused section; add a second one with
+        // content so an unfocused section row actually renders.
+        let dialog = app.simple_prompt_dialog.as_mut().unwrap();
+        dialog
+            .sections
+            .insert("context_1".to_string(), "some context".to_string());
+        dialog.enabled_sections.push("context_1".to_string());
+        let theme = Theme::classic();
+        let backend = TestBackend::new(200, 50);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_simple_prompt_dialog(frame, &app, &theme);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        const BOX_GLYPHS: [char; 11] = ['┌', '┐', '└', '┘', '─', '│', '├', '┤', '┬', '┴', '┼'];
+        let mut chrome_cells = 0;
+        let mut section_cells = 0;
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                let cell = &buffer[(x, y)];
+                if cell.symbol().chars().any(|c| BOX_GLYPHS.contains(&c))
+                    && cell.fg == theme.header_color
+                    && cell.bg == theme.info_bg
+                {
+                    chrome_cells += 1;
+                }
+                if cell.bg == theme.stage_bg {
+                    section_cells += 1;
+                }
+            }
+        }
+        assert!(
+            chrome_cells >= 1,
+            "dialog chrome must sit on info_bg, found none"
+        );
+        assert!(
+            section_cells >= 1,
+            "unfocused sections must sit on stage_bg, found none"
         );
     }
 }

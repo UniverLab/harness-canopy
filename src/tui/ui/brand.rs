@@ -38,6 +38,16 @@ pub const LINE: (u8, u8, u8) = (26, 60, 58);
 #[allow(dead_code)]
 pub const PHOSPHOR: (u8, u8, u8) = (253, 233, 255);
 
+/// Meaning-tinted grounds, mirrored from the web look kit: five colours at
+/// the same lightness (7.6 %), differing only in hue. Blocks are tinted by
+/// meaning (info, ok, warning, error); `STAGE` is the neutral ground big
+/// views stand on.
+pub const TINT_INFO: (u8, u8, u8) = (1, 29, 38);
+pub const TINT_OK: (u8, u8, u8) = (1, 38, 25);
+pub const TINT_WARN: (u8, u8, u8) = (38, 1, 14);
+pub const TINT_ERROR: (u8, u8, u8) = (38, 1, 3);
+pub const STAGE: (u8, u8, u8) = (5, 5, 5);
+
 /// Wrap a palette tuple as a ratatui [`Color`].
 pub const fn rgb(token: (u8, u8, u8)) -> Color {
     Color::Rgb(token.0, token.1, token.2)
@@ -78,5 +88,14 @@ mod tests {
     #[test]
     fn rgb_wraps_a_token() {
         assert_eq!(rgb(ESSENCE), Color::Rgb(0, 169, 160));
+    }
+
+    #[test]
+    fn meaning_tints_keep_their_web_kit_values() {
+        assert_eq!(TINT_INFO, (1, 29, 38)); // #011D26
+        assert_eq!(TINT_OK, (1, 38, 25)); // #012619
+        assert_eq!(TINT_WARN, (38, 1, 14)); // #26010E
+        assert_eq!(TINT_ERROR, (38, 1, 3)); // #260103
+        assert_eq!(STAGE, (5, 5, 5)); // #050505
     }
 }

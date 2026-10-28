@@ -50,7 +50,7 @@ pub(super) fn draw_raw_tab_content(
         width: inner.width.saturating_sub(2),
         height: avail_h as u16,
     };
-    let section_bg = theme.field_bg;
+    let section_bg = theme.stage_bg;
 
     if raw_empty {
         // Read-only preview, dimmed. ↑↓/PgUp/PgDn scroll it; edge markers show

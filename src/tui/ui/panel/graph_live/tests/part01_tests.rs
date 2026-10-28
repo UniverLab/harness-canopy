@@ -1319,3 +1319,54 @@ fn dfs_layout_pass_before_fail() {
         "pass should appear before fail, pass={pass_idx} fail={fail_idx} text:\n{text}"
     );
 }
+
+#[test]
+fn graph_canvas_sits_on_info_bg() {
+    let state = running_state();
+    let node_info = NodeRunInfo {
+        status: state.current_node_status,
+        started_at: state.current_node_started_at,
+        iteration: state.current_node_iteration,
+        chosen_route: None,
+        waiting_for: Vec::new(),
+    };
+    let theme = Theme::classic();
+    let backend = ratatui::backend::TestBackend::new(80, 40);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            render_graph_live_view(
+                frame,
+                area,
+                &LiveViewContext {
+                    state: &state,
+                    follow: true,
+                    follow_anchor: None,
+                    highlighted_node_id: state.current_node_id.as_deref(),
+                    node_info: &node_info,
+                    blocked: false,
+                    now: Utc::now(),
+                    theme: &theme,
+                    time_format: "%H:%M",
+                    selected_spec_id: None,
+                    spec_scroll: 0,
+                    scroll: 0,
+                },
+            );
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let mut tinted = 0;
+    for y in 0..buffer.area.height {
+        for x in 0..buffer.area.width {
+            if buffer[(x, y)].bg == theme.info_bg {
+                tinted += 1;
+            }
+        }
+    }
+    assert!(
+        tinted >= 1,
+        "graph canvas must paint cells on info_bg, found none"
+    );
+}

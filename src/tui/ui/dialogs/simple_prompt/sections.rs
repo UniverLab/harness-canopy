@@ -220,9 +220,9 @@ pub(super) fn draw_normal_section(
     let mut y_pos = y_pos + 1;
 
     let section_bg = if is_focused {
-        ctx.theme.field_bg_focused
+        ctx.theme.selected_bg
     } else {
-        ctx.theme.field_bg
+        ctx.theme.stage_bg
     };
 
     let (render_text, cursor_idx_opt, content_height, scroll_offset) = section_render_text(
