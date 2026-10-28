@@ -23,9 +23,9 @@ impl TaskTriggerHandler {
     #[tool(
         name = "get_tools",
         description = "Return the right tools and action protocol for the requested scope. \
-        Scopes: session_start (what to do first), file_write (conflict check before modifying), \
-        test_run (broadcast before/after running), close_session (wrap up + summary), \
-        multi_agent (full sync toolkit). Call this before acting — it tells you exactly what to use."
+        Scopes: session_start (what to do first), file_write (read before modifying), \
+        test_run (run and report), close_session (wrap up + summary), \
+        multi_agent (session coordination). Call this before acting — it tells you exactly what to use."
     )]
     pub(crate) async fn get_tools(
         &self,
@@ -80,13 +80,9 @@ impl TaskTriggerHandler {
     }
 
     /// Search registered projects by name or description.
-    #[tool(
-        name = "project_search",
-        description = "Search projects by name/description, returns workdir_hash and metadata."
-    )]
-    pub(crate) async fn project_search(
+    pub(crate) async fn project_search_impl(
         &self,
-        Parameters(params): Parameters<ProjectSearchParams>,
+        params: ProjectSearchParams,
     ) -> Result<CallToolResult, McpError> {
         let projects = self
             .db
@@ -116,13 +112,9 @@ impl TaskTriggerHandler {
     }
 
     /// Update project metadata (description, tags).
-    #[tool(
-        name = "project_update",
-        description = "Update project metadata. Agents can enrich description and tags discovered during a session."
-    )]
-    pub(crate) async fn project_update(
+    pub(crate) async fn project_update_impl(
         &self,
-        Parameters(params): Parameters<ProjectUpdateParams>,
+        params: ProjectUpdateParams,
     ) -> Result<CallToolResult, McpError> {
         let updated = self
             .db
@@ -153,17 +145,9 @@ impl TaskTriggerHandler {
 
     /// Point a project at a new workdir after its directory was renamed or
     /// moved, keeping its sessions and history instead of orphaning them.
-    #[tool(
-        name = "project_remap",
-        description = "Remap a project whose directory was renamed or moved to its new path, \
-        re-keying its sessions/graphs/history instead of losing them. MOVE if nothing is \
-        registered at the new path, MERGE (folding into it, removing the stale row) if a \
-        project already exists there. Refuses a new_path that doesn't exist unless force=true. \
-        Set dry_run=true to preview without changing anything."
-    )]
-    pub(crate) async fn project_remap(
+    pub(crate) async fn project_remap_impl(
         &self,
-        Parameters(params): Parameters<ProjectRemapParams>,
+        params: ProjectRemapParams,
     ) -> Result<CallToolResult, McpError> {
         let new_path = std::path::Path::new(&params.new_path);
         let resolved =
@@ -214,15 +198,9 @@ impl TaskTriggerHandler {
     }
 
     /// Explicitly register a project directory (no marker file required).
-    #[tool(
-        name = "project_register",
-        description = "Explicitly register a project directory in the registry. \
-        Unlike automatic registration (which requires a `.canopy-project` marker \
-        file in the directory), this call registers any existing directory."
-    )]
-    pub(crate) async fn project_register(
+    pub(crate) async fn project_register_impl(
         &self,
-        Parameters(params): Parameters<ProjectRegisterParams>,
+        params: ProjectRegisterParams,
     ) -> Result<CallToolResult, McpError> {
         if let Err(e) = validate_non_empty(&params.path, "path") {
             return Ok(error_result(&e));
@@ -253,19 +231,12 @@ impl TaskTriggerHandler {
     }
 
     /// Full-text search over personal RAG chunks (LanceDB vector search). Rate-limited: 10/min per agent.
-    #[tool(
-        name = "rag_search",
-        description = "Search indexed personal content (markdown and PDF files) using semantic \
-        vector search. Default limit: 5. Rate-limited to 10 calls/min per agent. \
-        Usage examples: 'search RAG for X', 'find documents about Y', \
-        'consult RAG about Z', 'what does the RAG say about W'."
-    )]
-    pub(crate) async fn rag_search(
+    pub(crate) async fn rag_search_impl(
         &self,
-        Parameters(params): Parameters<RagSearchParams>,
-        OptionalExtension(parts): OptionalExtension<Parts>,
+        params: RagSearchParams,
+        parts: Option<&Parts>,
     ) -> Result<CallToolResult, McpError> {
-        self.reject_if_nursery(parts.as_ref())?;
+        self.reject_if_nursery(parts)?;
         if let Some(result) = self.check_rag_rate_limit(&params).await {
             return Ok(result);
         }
@@ -328,36 +299,22 @@ impl TaskTriggerHandler {
     /// versions. Runs on the daemon's own store handle (never a second,
     /// independent connection) and refuses politely while another
     /// maintenance pass is in flight.
-    #[tool(
-        name = "rag_compact",
-        description = "Compact the RAG vector store and prune old versions"
-    )]
-    pub(crate) async fn rag_compact(&self) -> Result<CallToolResult, McpError> {
+    pub(crate) async fn rag_compact_impl(&self) -> Result<CallToolResult, McpError> {
         let report = self.ingestion.compact_now_report().await;
         Ok(CallToolResult::success(vec![ContentBlock::text(report)]))
     }
 
-    #[tool(
-        name = "subagent_spawn",
-        description = "Launch an ephemeral subagent. By default returns an ID \
-         immediately (async); poll subagent_collect for the result. Pass \
-         `blocking: true` to wait for the subagent to finish and return its \
-         result directly — the shape is identical to what subagent_collect \
-         would return, and no collect call is needed. Blocking respects \
-         `timeout_minutes` and returns a timeout as a result, not as an error. \
-         No agent, schedule, or permanent state is registered."
-    )]
-    pub(crate) async fn subagent_spawn(
+    pub(crate) async fn subagent_spawn_impl(
         &self,
-        Parameters(params): Parameters<SubagentSpawnParams>,
-        OptionalExtension(parts): OptionalExtension<Parts>,
+        params: SubagentSpawnParams,
+        parts: Option<&Parts>,
     ) -> Result<CallToolResult, McpError> {
         // Block spawning mid seed-creation interview — but only for a synced
         // agent caller. The `canopy subagent` CLI reaches this tool through
         // the daemon with no sync identity, and `reject_if_nursery` would
         // otherwise hard-fail it on identity resolution alone.
-        if self.resolve_sync_agent_id(parts.as_ref()).is_ok() {
-            self.reject_if_nursery(parts.as_ref())?;
+        if self.resolve_sync_agent_id(parts).is_ok() {
+            self.reject_if_nursery(parts)?;
         }
 
         let platform = params.cli.as_deref().unwrap_or("opencode");
@@ -366,7 +323,7 @@ impl TaskTriggerHandler {
             .clone()
             .filter(|value| !value.trim().is_empty())
             .or_else(|| {
-                self.resolve_sync_agent_id(parts.as_ref())
+                self.resolve_sync_agent_id(parts)
                     .ok()
                     .and_then(|agent_id| resolve_effective_project_hash(&self.db, None, &agent_id))
             })
@@ -406,7 +363,7 @@ impl TaskTriggerHandler {
             .await
             {
                 Ok(blocking_result) => {
-                    // Identical shape to `subagent_collect` (guideline), plus
+                    // Identical shape to `subagent` `collect` (guideline), plus
                     // the wait accounting FR3 requires on timeouts.
                     let result = blocking_result.result;
                     let mut json = serde_json::json!({
@@ -463,15 +420,9 @@ impl TaskTriggerHandler {
         }
     }
 
-    #[tool(
-        name = "subagent_collect",
-        description = "Collect the result of an ephemeral subagent. \
-         Returns the result and marks it for cleanup. Returns status='running' \
-         if the subagent hasn't finished yet."
-    )]
-    pub(crate) async fn subagent_collect(
+    pub(crate) async fn subagent_collect_impl(
         &self,
-        Parameters(params): Parameters<SubagentCollectParams>,
+        params: SubagentCollectParams,
     ) -> Result<CallToolResult, McpError> {
         let db = Arc::clone(&self.db);
         match crate::daemon::subagent::collect_subagent(&db, &params.id) {
@@ -546,51 +497,76 @@ impl TaskTriggerHandler {
     }
 }
 
+/// The 31-tool map every `get_tools` scope serves: one line per tool,
+/// each naming the tool, its actions, and what it is for. Alphabetical by
+/// tool name, matching the canonical listing. The sync protocol is retired,
+/// so every scope carries the same map — the scopes differ only in their
+/// protocol steps.
+fn tool_map_entries() -> Vec<&'static str> {
+    vec![
+        "agent — list, get, logs, status; read background agents, logs, and daemon health",
+        "agent_edit — add, watch, update, remove, enable, disable, schedule, run; manage background agents",
+        "agent_report — report a run's execution status (the only way to report a run)",
+        "config — get, list, set, reset; read and change canopy settings",
+        "crew — list, get, create, update, delete, assignments; manage crews and read harness/model assignments",
+        "get_tools — this map: the right tools and protocol per scope",
+        "graph — list, get, export, validate, audit, events, node_runs, node_run; read graphs, specs, runs, events",
+        "graph_complete_node — complete an active graph node",
+        "graph_control — run, pause, continue, reset, preflight, schedule_continue, schedule_autorun; run and manage graph execution",
+        "graph_edge — add, update, delete; wire graph nodes",
+        "graph_edit — create, update, archive, restore, import, install, attach_spec, detach_spec, update_spec; author graphs and specs",
+        "graph_ensemble — add, update, delete, copy; author multi-member ensembles",
+        "graph_node — add, update, delete, copy; author graph nodes",
+        "graph_report_blocker — report a blocker for an active graph node",
+        "harness — models, probe, probe_recent, refresh_registry, roster_list, roster_set, roster_clear, roster_check; inspect catalogs, probe liveness, manage the roster",
+        "identity — get, evolve, list_seeds, create_seed, remove_seed; read and evolve the agent identity, manage seed identities",
+        "intelligence_admin — delete_node, delete_relation, walk, list_projects, link_projects; prune the knowledge graph and link projects",
+        "intelligence_get_context — curated project context for session start",
+        "intelligence_search — full-text search across intelligence nodes",
+        "intelligence_upsert — persist a fact, pattern, or session summary",
+        "node — list, get, install, remove; manage shareable node documents",
+        "project — register, remap, search, update; manage the project registry",
+        "queue — create, list, add_spec, remove_spec, reorder, set_group; author ordered spec queues",
+        "rag — search, compact; semantic search over indexed content and vector-store maintenance",
+        "scheduled_send — list, cancel; list and cancel pending scheduled sends",
+        "scheduled_send_create — schedule a prompt for future delivery to a session",
+        "session_list — list live interactive sessions",
+        "skill — list, get; discover and fetch skills",
+        "spec — list, get, section, notes; read specs, sections, and notes",
+        "spec_edit — create, update, delete, set_status, note_write; author and transition specs",
+        "subagent — spawn, collect; launch ephemeral subagents and collect their results",
+    ]
+}
+
 pub(crate) fn build_get_tools_response(scope: &str) -> serde_json::Value {
-    match scope {
+    let mut out = match scope {
         "session_start" => serde_json::json!({
             "scope": "session_start",
             "risk": "low",
             "protocol": [
                 "1. Call intelligence_get_context(scope=\"light\") to load workspace brief.",
-                "2. Check active_missions in sync context — align your work with open missions.",
-                "3. If starting a new thread of work, call sync_declare_intent to register your mission.",
+                "2. If this workdir is new here, call project register to register it.",
+                "3. Use intelligence_search to find prior art before starting.",
                 "4. Respond to the user with context in hand."
             ],
-            "tools": [
-                "intelligence_get_context — pull session history, facts, patterns",
-                "sync_get_context — check active missions and workspace vibe",
-                "sync_declare_intent — announce your mission (impact: low/high/breaking)"
-            ]
         }),
         "file_write" => serde_json::json!({
             "scope": "file_write",
             "risk": "high",
             "protocol": [
-                "1. Call sync_get_context(workdir=...) — check for conflicting missions on this path.",
-                "2. If no conflict, call sync_declare_intent(impact=\"high\", mission=\"...\").",
-                "3. Modify the file.",
-                "4. Call sync_report_status(status=\"stable\", message=\"Changes complete: ...\")."
+                "1. Read the file (or the surrounding code) before modifying it.",
+                "2. Modify the file.",
+                "3. Run the smallest check that covers the change."
             ],
-            "tools": [
-                "sync_get_context — check active missions, detect conflicts",
-                "sync_declare_intent — announce what you're changing and why",
-                "sync_report_status — report stable/unstable/testing after the change"
-            ]
         }),
         "test_run" => serde_json::json!({
             "scope": "test_run",
             "risk": "medium",
             "protocol": [
-                "1. Call sync_broadcast(kind=\"info\", message=\"Running tests: <suite/command>\").",
+                "1. Note which suite or command you are running.",
                 "2. Run the tests.",
-                "3. Call sync_broadcast(kind=\"info\", message=\"Tests complete: PASSED/FAILED — <summary>\").",
-                "4. If failed, call sync_report_status(status=\"unstable\", message=\"Test failure: ...\")."
+                "3. On failure, fix or report the failure before moving on."
             ],
-            "tools": [
-                "sync_broadcast — announce test start and result to peer agents",
-                "sync_report_status — mark workspace unstable if tests fail"
-            ]
         }),
         "close_session" => serde_json::json!({
             "scope": "close_session",
@@ -598,35 +574,32 @@ pub(crate) fn build_get_tools_response(scope: &str) -> serde_json::Value {
             "protocol": [
                 "1. Call intelligence_upsert(kind=\"fact\", title=\"Session summary: <mission>\", body=\"<what was done>\", \
                    metadata={\"type\": \"session_summary\", workdir, summary, ...}) — store the session summary in project context.",
-                "2. Call sync_report_status(status=\"stable\", message=\"Mission complete: <summary>\") \
-                   — the daemon closes your mission automatically on exit.",
-                "3. Do NOT manually call any close/shutdown tool — daemon handles it."
+                "2. Do NOT manually call any close/shutdown tool — daemon handles it."
             ],
-            "tools": [
-                "intelligence_upsert — persist the session summary as a 'fact' node with metadata.type = \"session_summary\"",
-                "sync_report_status — leave a clean 'stable' marker for the next agent"
-            ]
         }),
         "multi_agent" => serde_json::json!({
             "scope": "multi_agent",
             "risk": "varies",
             "protocol": [
-                "Follow the action-risk table: low=execute and broadcast if notable, high=declare+execute+report, breaking=same as high with impact=breaking.",
-                "Always non-blocking — act on last-known state, never wait for responses.",
-                "Communicate intent not implementation — missions explain what and why, not how."
+                "1. Call session_list to see every live session before addressing one.",
+                "2. Use scheduled_send_create to wake another session (or your future self) instead of polling.",
+                "3. Persist shared findings with intelligence_upsert so other agents find them via intelligence_search."
             ],
-            "tools": [
-                "sync_get_context — check active missions and workspace vibe (call first)",
-                "sync_declare_intent — announce mission (impact: low/high/breaking)",
-                "sync_broadcast — send info/query/answer messages to peers",
-                "sync_report_status — report stable/unstable/testing after actions",
-                "intelligence_get_context(scope=\"full\") — deep project-context pull for architecture work",
-                "intelligence_upsert — persist facts, patterns, session summaries",
-                "intelligence_search — find prior art or decisions in project context"
-            ]
         }),
         _ => unreachable!(),
+    };
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert(
+            "tools".to_string(),
+            serde_json::Value::Array(
+                tool_map_entries()
+                    .into_iter()
+                    .map(|entry| serde_json::Value::String(entry.to_string()))
+                    .collect(),
+            ),
+        );
     }
+    out
 }
 
 pub(crate) fn rag_result_json(r: &crate::rag::vector_store::SearchResult) -> serde_json::Value {

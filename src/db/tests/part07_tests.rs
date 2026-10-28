@@ -82,3 +82,30 @@ fn completed_member_keeps_its_position() {
         vec!["r", "a", "b", "x", "d"]
     );
 }
+
+#[test]
+fn v12_migration_drops_retired_blueprint_tables() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.db");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE blueprints (id TEXT PRIMARY KEY, name TEXT NOT NULL);
+             CREATE TABLE ensemble_blueprints (id TEXT PRIMARY KEY, name TEXT NOT NULL);",
+        )
+        .unwrap();
+    }
+    let db = Database::new(&path).unwrap();
+    drop(db);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    for table in ["blueprints", "ensemble_blueprints"] {
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [table],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "{table} must be dropped by the v12 migration");
+    }
+}

@@ -4,7 +4,7 @@
 //!
 //! Kept in its own module — separate from `rag::embedding_client` — because
 //! it's the one part of that file that needs `crate::db::Database` and
-//! `crate::rag::status`; `examples/rag_search.rs` re-includes
+//! `crate::rag::status`; the standalone RAG search example re-includes
 //! `embedding_client.rs` standalone via `#[path]` and doesn't (and
 //! shouldn't need to) pull in the rest of the crate to do it.
 
@@ -17,7 +17,7 @@ use crate::rag::embedding_client::EmbeddingProvider;
 use crate::rag::embedding_client::{self, EmbeddingClient};
 
 /// Feature-independent entry point for `IngestionManager::get_embedding_client`
-/// (the shared load point behind `rag_search` and indexing): routes a local
+/// (the shared load point behind `rag` `search` and indexing): routes a local
 /// model through the download/prepare-tracked path when this build can serve
 /// one, and falls back to `client_from_config`'s existing capability-gap
 /// bail otherwise. Kept separate from `client_from_config` itself so the TUI
@@ -88,7 +88,7 @@ pub fn claim_local_download_if_needed(db: &Database, model: &str) {
 /// the CLI, the TUI, a concurrent query racing the same load — see it's in
 /// progress instead of either racing a duplicate attempt or reading a silent
 /// gap as "sleeping". Used by `IngestionManager::get_embedding_client`, the
-/// shared load point behind both `rag_search` and indexing;
+/// shared load point behind both `rag` `search` and indexing;
 /// `client_from_config` itself stays untouched (still an instant bail when a
 /// local model isn't cached) for the TUI playground's throwaway-client path.
 #[cfg(feature = "local-embeddings")]

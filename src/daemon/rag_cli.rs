@@ -612,8 +612,11 @@ async fn handle_rag_compact(data_dir: &std::path::Path) -> Result<()> {
     if crate::daemon::process::read_pid(data_dir)
         .is_some_and(crate::daemon::process::is_process_running)
     {
-        let text =
-            crate::daemon::cli_daemon::call_tool(None, "rag_compact", &serde_json::json!({}))?;
+        let text = crate::daemon::cli_daemon::call_tool(
+            None,
+            "rag",
+            &serde_json::json!({ "action": "compact" }),
+        )?;
         println!("{text}");
         return Ok(());
     }

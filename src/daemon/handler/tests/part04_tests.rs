@@ -384,41 +384,6 @@ fn spec_summary_json_includes_completed_via_when_set() {
     assert_eq!(json["completed_via"], "graph_control");
 }
 
-// ── blueprint_json ──────────────────────────────────────────────
-
-#[test]
-fn blueprint_json_includes_all_fields() {
-    let bp = Blueprint {
-        id: "bp-1".to_string(),
-        name: "my-blueprint".to_string(),
-        kind: GraphNodeKind::Agent,
-        config: serde_json::json!({"platform": "claude"}),
-        builtin: true,
-        created_at: chrono::Utc::now(),
-    };
-    let json = super::blueprint_json(&bp);
-    assert_eq!(json["id"], "bp-1");
-    assert_eq!(json["name"], "my-blueprint");
-    assert_eq!(json["kind"], "agent");
-    assert_eq!(json["builtin"], true);
-    assert_eq!(json["config"]["platform"], "claude");
-}
-
-#[test]
-fn blueprint_json_non_builtin() {
-    let bp = Blueprint {
-        id: "bp-2".to_string(),
-        name: "custom".to_string(),
-        kind: GraphNodeKind::Check,
-        config: serde_json::json!({"command": "true"}),
-        builtin: false,
-        created_at: chrono::Utc::now(),
-    };
-    let json = super::blueprint_json(&bp);
-    assert_eq!(json["builtin"], false);
-    assert_eq!(json["kind"], "check");
-}
-
 // ── build_id_result / build_json_result ─────────────────────────
 
 #[test]

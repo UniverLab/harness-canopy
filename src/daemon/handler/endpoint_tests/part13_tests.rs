@@ -36,7 +36,6 @@ async fn part13_agent_node(handler: &TaskTriggerHandler, graph_id: &str, name: &
             name: name.to_string(),
             kind: Some("agent".to_string()),
             config: Some(agent_node_config("claude")),
-            blueprint: None,
             node: None,
             config_overrides: None,
         }),
@@ -81,7 +80,6 @@ async fn part13_try_ensemble(
             kind: None,
             name: name.to_string(),
             prompt_template: Some(prompt_template.to_string()),
-            blueprint: None,
             node: None,
             members: Some(vec![
                 part13_member("openrouter", None),
@@ -143,7 +141,6 @@ async fn add_node_refuses_unknown_output() {
             name: "beta".to_string(),
             kind: Some("agent".to_string()),
             config: Some(config),
-            blueprint: None,
             node: None,
             config_overrides: None,
         }),
@@ -191,7 +188,6 @@ async fn add_ensemble_refuses_bad_override() {
             kind: None,
             name: "Proposers".to_string(),
             prompt_template: Some("draft it".to_string()),
-            blueprint: None,
             node: None,
             members: Some(vec![
                 part13_member("openrouter", None),

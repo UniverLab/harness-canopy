@@ -108,14 +108,10 @@ impl TaskTriggerHandler {
     }
 
     /// List pending scheduled sends for a session (CM22).
-    #[tool(
-        name = "scheduled_send_list",
-        description = "List pending (not yet fired) scheduled sends for a session, soonest first. Omit `session_id` to list your own session's pending sends. A send disappears from this list once delivered or cancelled."
-    )]
-    pub(crate) async fn scheduled_send_list(
+    pub(crate) async fn scheduled_send_list_impl(
         &self,
-        Parameters(params): Parameters<ScheduledSendListParams>,
-        OptionalExtension(parts): OptionalExtension<Parts>,
+        params: ScheduledSendListParams,
+        parts: Option<&Parts>,
     ) -> Result<CallToolResult, McpError> {
         let session_id = match params
             .session_id
@@ -125,8 +121,8 @@ impl TaskTriggerHandler {
         {
             Some(id) => id.to_string(),
             None => {
-                self.reject_if_nursery(parts.as_ref())?;
-                self.resolve_sync_agent_id(parts.as_ref())?
+                self.reject_if_nursery(parts)?;
+                self.resolve_sync_agent_id(parts)?
             }
         };
 
@@ -174,13 +170,9 @@ impl TaskTriggerHandler {
     }
 
     /// Cancel a pending scheduled send by id (CM22).
-    #[tool(
-        name = "scheduled_send_cancel",
-        description = "Cancel a pending scheduled send by id before it fires. Errors if the id is unknown or already fired — cancellation is not retroactive."
-    )]
-    pub(crate) async fn scheduled_send_cancel(
+    pub(crate) async fn scheduled_send_cancel_impl(
         &self,
-        Parameters(ScheduledSendCancelParams { id }): Parameters<ScheduledSendCancelParams>,
+        ScheduledSendCancelParams { id }: ScheduledSendCancelParams,
     ) -> Result<CallToolResult, McpError> {
         let deleted = self
             .db

@@ -642,23 +642,6 @@ fn build_spec_update_response_text() {
     assert!(text.contains("updated"));
 }
 
-// ── blueprint_json ────────────────────────────────────────────
-
-#[test]
-fn blueprint_json_with_agent_kind() {
-    let bp = Blueprint {
-        id: "bp-a".to_string(),
-        name: "agent-bp".to_string(),
-        kind: GraphNodeKind::Agent,
-        config: serde_json::json!({"platform": "mimo"}),
-        builtin: false,
-        created_at: chrono::Utc::now(),
-    };
-    let json = blueprint_json(&bp);
-    assert_eq!(json["kind"], "agent");
-    assert_eq!(json["builtin"], false);
-}
-
 // ── spec_summary_json edge cases ──────────────────────────────
 
 #[test]
@@ -1294,24 +1277,6 @@ fn validate_queue_reorder_valid() {
     let current = vec!["a".to_string(), "b".to_string()];
     let spec_ids = vec!["b".to_string(), "a".to_string()];
     assert!(validate_queue_reorder(&current, &spec_ids).is_ok());
-}
-
-// ── blueprint_json ────────────────────────────────────────────
-
-#[test]
-fn blueprint_json_basic() {
-    let bp = Blueprint {
-        id: "bp-1".to_string(),
-        name: "ensemble-proposers".to_string(),
-        kind: GraphNodeKind::Agent,
-        config: serde_json::json!({"members": []}),
-        builtin: true,
-        created_at: chrono::Utc::now(),
-    };
-    let json = blueprint_json(&bp);
-    assert_eq!(json["id"], "bp-1");
-    assert_eq!(json["name"], "ensemble-proposers");
-    assert_eq!(json["builtin"], true);
 }
 
 // ── validate_absolute_dir ─────────────────────────────────────

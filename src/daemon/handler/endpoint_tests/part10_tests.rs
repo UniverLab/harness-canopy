@@ -29,16 +29,17 @@ async fn intelligence_delete_node_with_prefix() {
         .unwrap();
     assert!(!is_err(&created), "{}", text(&created));
 
-    let deleted = handler
-        .intelligence_delete_node(
-            Parameters(IntelligenceDeleteNodeParams {
-                node_id: "feedface".to_string(),
-                project_hash: None,
-            }),
-            OptionalExtension(None),
-        )
-        .await
-        .unwrap();
+    let deleted = call_resource_action(
+        &handler,
+        "intelligence_admin",
+        "delete_node",
+        params_id(IntelligenceDeleteNodeParams {
+            node_id: "feedface".to_string(),
+            project_hash: None,
+        }),
+    )
+    .await
+    .unwrap();
     assert!(
         !is_err(&deleted),
         "prefix delete should succeed: {}",
@@ -50,14 +51,18 @@ async fn intelligence_delete_node_with_prefix() {
         "delete response should contain the full UUID: {body}"
     );
 
-    let walked = handler
-        .intelligence_graph_walk(Parameters(IntelligenceGraphWalkParams {
+    let walked = call_resource_action(
+        &handler,
+        "intelligence_admin",
+        "walk",
+        params_id(IntelligenceGraphWalkParams {
             node_id: full_id.to_string(),
             depth: Some(1),
             compact: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(
         is_err(&walked),
         "node should be gone after prefix delete: {}",
@@ -361,14 +366,18 @@ async fn intelligence_graph_walk_compact_omits_bodies() {
     )
     .await;
 
-    let walked = handler
-        .intelligence_graph_walk(Parameters(IntelligenceGraphWalkParams {
+    let walked = call_resource_action(
+        &handler,
+        "intelligence_admin",
+        "walk",
+        params_id(IntelligenceGraphWalkParams {
             node_id: "cb28-c".to_string(),
             depth: Some(2),
             compact: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&walked), "{}", text(&walked));
     let body = raw_text(&walked);
     for marker in ["LARGE-BODY-ALPHA", "LARGE-BODY-BETA", "LARGE-BODY-GAMMA"] {
@@ -417,14 +426,18 @@ async fn intelligence_graph_walk_root_appears_once() {
     )
     .await;
 
-    let walked = handler
-        .intelligence_graph_walk(Parameters(IntelligenceGraphWalkParams {
+    let walked = call_resource_action(
+        &handler,
+        "intelligence_admin",
+        "walk",
+        params_id(IntelligenceGraphWalkParams {
             node_id: "cb28-r2".to_string(),
             depth: Some(1),
             compact: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&walked), "{}", text(&walked));
     let parsed: serde_json::Value = serde_json::from_str(&raw_text(&walked)).unwrap();
     let root_id = parsed["root"]["id"].as_str().unwrap().to_string();
@@ -456,14 +469,18 @@ async fn intelligence_graph_walk_compact_false_returns_bodies() {
     )
     .await;
 
-    let walked = handler
-        .intelligence_graph_walk(Parameters(IntelligenceGraphWalkParams {
+    let walked = call_resource_action(
+        &handler,
+        "intelligence_admin",
+        "walk",
+        params_id(IntelligenceGraphWalkParams {
             node_id: "cb28-f1".to_string(),
             depth: Some(1),
             compact: Some(false),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&walked), "{}", text(&walked));
     assert!(
         raw_text(&walked).contains("FULL-BODY-DISTINCTIVE"),
@@ -905,178 +922,6 @@ async fn spec_section_get_rejects_unknown_section() {
 }
 
 #[tokio::test]
-async fn spec_convert_converts_legacy_and_skips_tagged() {
-    let (_dir, db, handler) = endpoint_test_handler();
-
-    let legacy_desc = "## Objective\nShip.\n\n## Functional Requirements\nDoes thing.\n\n## Non-Functional Requirements\nFast.\n\n## Constraints\nNone.\n\n## Guidelines\nStyle.\n\n## In Scope\nThis.\n\n## Out of Scope\nNothing.";
-    db.insert_graph_spec(&GraphSpec {
-        id: "legacy-spec-1".to_string(),
-        graph_id: None,
-        name: "Legacy".to_string(),
-        description: Some(legacy_desc.to_string()),
-        position: 0,
-        parallelizable: false,
-        status: GraphSpecStatus::Pending,
-        started_at: None,
-        completed_at: None,
-        spec_start_head: None,
-        spec_start_dirty: None,
-        spec_end_dirty: None,
-        spec_end_dirty_paths: None,
-        spec_committed_head: None,
-        workdir: None,
-        completed_via: None,
-        completed_via_reason: None,
-        completed_via_at: None,
-        spec_type: None,
-        spec_scope: None,
-        spec_code: None,
-    })
-    .unwrap();
-
-    let created = call_resource_action(
-        &handler,
-        "spec_edit",
-        "create",
-        params_id(SpecCreateParams {
-            name: "Already tagged".to_string(),
-            description: valid_spec_description(),
-            workdir: None,
-            spec_type: None,
-            spec_scope: None,
-        }),
-    )
-    .await
-    .unwrap();
-    assert!(!is_err(&created));
-
-    let result = handler.spec_convert().await.unwrap();
-    assert!(!is_err(&result), "{}", text(&result));
-    let body = raw_text(&result);
-    assert!(body.contains("\"converted\": 1"));
-    assert!(body.contains("\"already_tagged\": 1"));
-
-    let legacy = db.get_graph_spec("legacy-spec-1").unwrap().unwrap();
-    let desc = legacy.description.unwrap();
-    assert!(desc.contains("<spec>"));
-    assert!(desc.contains("<objective>"));
-}
-
-#[tokio::test]
-async fn spec_convert_defers_running_spec_and_leaves_body_untouched() {
-    let (_dir, db, handler) = endpoint_test_handler();
-
-    let legacy_desc = "## Objective\nShip.\n\n## Functional Requirements\nDoes thing.\n\n## Non-Functional Requirements\nFast.\n\n## Constraints\nNone.\n\n## Guidelines\nStyle.\n\n## In Scope\nThis.\n\n## Out of Scope\nNothing.";
-    db.insert_graph_spec(&GraphSpec {
-        id: "running-legacy-spec".to_string(),
-        graph_id: None,
-        name: "Running legacy".to_string(),
-        description: Some(legacy_desc.to_string()),
-        position: 0,
-        parallelizable: false,
-        status: GraphSpecStatus::Running,
-        started_at: None,
-        completed_at: None,
-        spec_start_head: None,
-        spec_start_dirty: None,
-        spec_end_dirty: None,
-        spec_end_dirty_paths: None,
-        spec_committed_head: None,
-        workdir: None,
-        completed_via: None,
-        completed_via_reason: None,
-        completed_via_at: None,
-        spec_type: None,
-        spec_scope: None,
-        spec_code: None,
-    })
-    .unwrap();
-
-    let result = handler.spec_convert().await.unwrap();
-    assert!(!is_err(&result), "{}", text(&result));
-    let body = raw_text(&result);
-    assert!(body.contains("\"converted\": 0"), "{body}");
-    assert!(body.contains("\"deferred_running\": 1"), "{body}");
-    assert!(body.contains("running-legacy-spec"), "{body}");
-
-    // A running spec's body must never be rewritten mid-flight.
-    let after = db.get_graph_spec("running-legacy-spec").unwrap().unwrap();
-    assert_eq!(after.description.as_deref(), Some(legacy_desc));
-
-    // The DB-level guard also refuses the write directly.
-    assert!(
-        !db.update_spec_description_if_not_running("running-legacy-spec", "<spec></spec>")
-            .unwrap(),
-        "conditional update must report no row changed for a running spec"
-    );
-    let still = db.get_graph_spec("running-legacy-spec").unwrap().unwrap();
-    assert_eq!(still.description.as_deref(), Some(legacy_desc));
-}
-
-#[tokio::test]
-async fn spec_convert_is_idempotent() {
-    let (_dir, db, handler) = endpoint_test_handler();
-
-    let legacy_desc = "## Objective\nShip src/main.rs:42 on 2026-09-01.\n\n## Functional Requirements\nNode abc-123 does thing.\n\n## Non-Functional Requirements\nLatency < 100ms.\n\n## Constraints\nUse `file:line`.\n\n## Guidelines\nStyle.\n\n## In Scope\nThis.\n\n## Out of Scope\nNothing.";
-    db.insert_graph_spec(&GraphSpec {
-        id: "idem-legacy-spec".to_string(),
-        graph_id: None,
-        name: "Idem legacy".to_string(),
-        description: Some(legacy_desc.to_string()),
-        position: 0,
-        parallelizable: false,
-        status: GraphSpecStatus::Pending,
-        started_at: None,
-        completed_at: None,
-        spec_start_head: None,
-        spec_start_dirty: None,
-        spec_end_dirty: None,
-        spec_end_dirty_paths: None,
-        spec_committed_head: None,
-        workdir: None,
-        completed_via: None,
-        completed_via_reason: None,
-        completed_via_at: None,
-        spec_type: None,
-        spec_scope: None,
-        spec_code: None,
-    })
-    .unwrap();
-
-    let first = handler.spec_convert().await.unwrap();
-    assert!(raw_text(&first).contains("\"converted\": 1"));
-    let converted_body = db
-        .get_graph_spec("idem-legacy-spec")
-        .unwrap()
-        .unwrap()
-        .description
-        .unwrap();
-    // Sentinels survive the mechanical conversion verbatim.
-    assert!(converted_body.contains("src/main.rs:42"));
-    assert!(converted_body.contains("2026-09-01"));
-    assert!(converted_body.contains("abc-123"));
-    assert!(converted_body.contains("Latency < 100ms"));
-    assert!(converted_body.contains("`file:line`"));
-
-    let second = handler.spec_convert().await.unwrap();
-    let second_body = raw_text(&second);
-    assert!(second_body.contains("\"converted\": 0"), "{second_body}");
-    assert!(
-        second_body.contains("\"already_tagged\": 1"),
-        "{second_body}"
-    );
-    assert_eq!(
-        db.get_graph_spec("idem-legacy-spec")
-            .unwrap()
-            .unwrap()
-            .description
-            .unwrap(),
-        converted_body,
-        "second conversion run must not change stored content"
-    );
-}
-
-#[tokio::test]
 async fn resolve_spec_id_by_prefix_tests() {
     let (_dir, db, _handler) = endpoint_test_handler();
     let spec1 = GraphSpec {
@@ -1234,7 +1079,6 @@ async fn graph_add_ensemble_with_cascade_kind_rejects_single_member() {
                 infra_crash_max_seconds: None,
                 infra_backoff_seconds: None,
             }]),
-            blueprint: None,
             node: None,
             from_node: entry.clone(),
             condition: "always".to_string(),
@@ -1294,7 +1138,6 @@ async fn graph_add_ensemble_with_parallel_kind_rejects_single_member() {
                 infra_crash_max_seconds: None,
                 infra_backoff_seconds: None,
             }]),
-            blueprint: None,
             node: None,
             from_node: entry.clone(),
             condition: "always".to_string(),
@@ -1359,7 +1202,6 @@ async fn graph_add_ensemble_rejects_straggler_timeout_on_cascade() {
                     infra_backoff_seconds: None,
                 },
             ]),
-            blueprint: None,
             node: None,
             from_node: entry.clone(),
             condition: "always".to_string(),
@@ -1429,7 +1271,6 @@ async fn graph_update_ensemble_rejects_quorum_grace_on_round_robin() {
                     infra_backoff_seconds: None,
                 },
             ]),
-            blueprint: None,
             node: None,
             from_node: entry.clone(),
             condition: "always".to_string(),

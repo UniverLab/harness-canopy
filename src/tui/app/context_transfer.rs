@@ -139,7 +139,7 @@ impl App {
     ) {
         let mut initial_content = HashMap::from([("context".to_string(), context_payload)]);
         if let Some(query) = rag_query.filter(|query| !query.trim().is_empty()) {
-            initial_content.insert("rag_search".to_string(), format!("global: {query}"));
+            initial_content.insert("rag".to_string(), format!("global: {query}"));
         }
         self.open_simple_prompt_dialog(Some(initial_content));
     }

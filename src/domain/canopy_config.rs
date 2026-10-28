@@ -455,7 +455,7 @@ fn default_rag_max_file_mb() -> u32 {
 
 /// Kept equal to `rag::vector_store::DEFAULT_INDEX_CACHE_ENTRIES` (see that
 /// constant for the measurement behind the value). Not referenced directly
-/// across the module boundary because `examples/rag_search.rs` mounts
+/// across the module boundary because the standalone RAG search example mounts
 /// `vector_store` at its own crate root via `#[path]`, without a `rag`
 /// module wrapping it — `crate::rag::vector_store` doesn't resolve there.
 fn default_rag_vector_cache_entries() -> u32 {
@@ -497,8 +497,8 @@ pub struct SkillSourceConfig {
 ///
 /// Sources are checked in list order for a skill; when two sources publish a
 /// skill with the same name, the *later* source in this list wins — both for
-/// `skill_list`'s merged catalog and for which source a not-yet-installed
-/// skill is fetched from by `skill_get`.
+/// `skill` `list`'s merged catalog and for which source a not-yet-installed
+/// skill is fetched from by `skill` `get`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillsConfig {
     #[serde(default = "default_skill_sources")]

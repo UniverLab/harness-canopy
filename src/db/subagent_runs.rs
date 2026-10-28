@@ -151,7 +151,7 @@ impl Database {
 
     /// CM18: record that a blocking spawn delivered `id` inline. The
     /// `subagent_runs` row is already deleted; this tombstone lets a later
-    /// `subagent_collect` answer "already delivered" instead of "not found".
+    /// `subagent` `collect` answer "already delivered" instead of "not found".
     /// `expires_at` must be the original run's expiry so natural expiry
     /// cleans the tombstone on the same schedule.
     pub fn insert_delivered_tombstone(

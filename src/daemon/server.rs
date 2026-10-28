@@ -18,7 +18,6 @@ use crate::executor::Executor;
 use crate::graph_engine::GraphEngine;
 use crate::rag::ingestion::IngestionManager;
 use crate::scheduler::cron_scheduler::CronScheduler;
-use crate::sync_manager::SyncManager;
 use crate::watchers::WatcherEngine;
 
 mod personal_rag;
@@ -52,7 +51,6 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
         Arc::clone(&db),
         Arc::clone(&notification_service),
     ));
-    let sync_manager = Arc::new(SyncManager::new(Arc::clone(&db)));
     let canopy_config = crate::domain::canopy_config::CanopyConfig::load(&data_dir);
     // CM51 (D12): remember what the running daemon loaded, so `config_list`
     // can report `pending_restart`, and watch the file so a hand edit takes
@@ -120,7 +118,6 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
             scheduler_notify: Arc::clone(&background.scheduler_notify),
             graph_engine: Arc::clone(&graph_engine),
             notification_service: Arc::clone(&notification_service),
-            sync_manager: Arc::clone(&sync_manager),
             ingestion: Arc::clone(&ingestion),
             dynamic_skills: Arc::clone(&dynamic_skills),
             start_time: daemon_start,
@@ -295,7 +292,6 @@ fn build_mcp_router(deps: HandlerDeps, ct: &tokio_util::sync::CancellationToken)
         scheduler_notify: handler_scheduler_notify,
         graph_engine: handler_graph_engine,
         notification_service,
-        sync_manager: handler_sync_manager,
         ingestion: handler_ingestion,
         dynamic_skills: handler_dynamic_skills,
         start_time,
@@ -311,7 +307,6 @@ fn build_mcp_router(deps: HandlerDeps, ct: &tokio_util::sync::CancellationToken)
                 scheduler_notify: Arc::clone(&handler_scheduler_notify),
                 graph_engine: Arc::clone(&handler_graph_engine),
                 notification_service: Arc::clone(&notification_service),
-                sync_manager: Arc::clone(&handler_sync_manager),
                 ingestion: Arc::clone(&handler_ingestion),
                 dynamic_skills: Arc::clone(&handler_dynamic_skills),
                 start_time,
@@ -523,7 +518,6 @@ fn build_stdio_handler(db: &Arc<Database>, startup: &StdioServerStartup) -> Task
         scheduler_notify: Arc::clone(&startup.scheduler_notify),
         graph_engine: Arc::clone(&startup.graph_engine),
         notification_service: Arc::clone(&startup.notification_service),
-        sync_manager: Arc::clone(&startup.sync_manager),
         ingestion: Arc::clone(&startup.ingestion),
         dynamic_skills: Arc::clone(&startup.dynamic_skills),
         start_time: startup.start_time,
@@ -569,7 +563,6 @@ struct StdioServerStartup {
     executor: Arc<Executor>,
     watcher_engine: Arc<WatcherEngine>,
     notification_service: Arc<dyn NotificationService>,
-    sync_manager: Arc<SyncManager>,
     graph_engine: Arc<GraphEngine>,
     ingestion: Arc<IngestionManager>,
     dynamic_skills: Arc<crate::dynamic_skills::SkillStore>,
@@ -593,7 +586,6 @@ async fn stdio_server_startup(db: Arc<Database>, data_dir: &std::path::Path) -> 
         Arc::clone(&db),
         Arc::clone(&notification_service),
     ));
-    let sync_manager = Arc::new(SyncManager::new(Arc::clone(&db)));
     let canopy_config = crate::domain::canopy_config::CanopyConfig::load(data_dir);
     let dynamic_skills = Arc::new(crate::dynamic_skills::SkillStore::from_config(
         data_dir,
@@ -652,7 +644,6 @@ async fn stdio_server_startup(db: Arc<Database>, data_dir: &std::path::Path) -> 
         executor,
         watcher_engine,
         notification_service,
-        sync_manager,
         graph_engine,
         ingestion,
         dynamic_skills,
@@ -718,7 +709,6 @@ mod hang_repro {
     use crate::executor::Executor;
     use crate::graph_engine::GraphEngine;
     use crate::rag::ingestion::IngestionManager;
-    use crate::sync_manager::SyncManager;
     use crate::watchers::WatcherEngine;
     use std::os::unix::fs::PermissionsExt;
 
@@ -774,7 +764,6 @@ mod hang_repro {
     async fn spawn_test_server(db: Arc<Database>) -> (u16, Arc<GraphEngine>) {
         let notif: Arc<dyn NotificationService> = Arc::new(DefaultNotificationService);
         let executor = Arc::new(Executor::new(Arc::clone(&db), Arc::clone(&notif)));
-        let sync_manager = Arc::new(SyncManager::new(Arc::clone(&db)));
         let graph_engine = Arc::new(GraphEngine::new(Arc::clone(&db), Arc::clone(&notif)));
         let watcher_engine = Arc::new(WatcherEngine::new(
             Arc::clone(&db),
@@ -805,7 +794,6 @@ mod hang_repro {
         let handler_executor = Arc::clone(&executor);
         let handler_watcher_engine = Arc::clone(&watcher_engine);
         let handler_scheduler_notify = Arc::clone(&scheduler_notify);
-        let handler_sync_manager = Arc::clone(&sync_manager);
         let handler_graph_engine = Arc::clone(&graph_engine);
         let handler_notif = Arc::clone(&notif);
         let handler_ingestion = Arc::clone(&ingestion);
@@ -820,7 +808,6 @@ mod hang_repro {
                     scheduler_notify: Arc::clone(&handler_scheduler_notify),
                     graph_engine: Arc::clone(&handler_graph_engine),
                     notification_service: Arc::clone(&handler_notif),
-                    sync_manager: Arc::clone(&handler_sync_manager),
                     ingestion: Arc::clone(&handler_ingestion),
                     dynamic_skills: Arc::clone(&handler_dynamic_skills),
                     start_time: std::time::Instant::now(),

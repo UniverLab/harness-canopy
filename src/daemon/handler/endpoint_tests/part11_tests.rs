@@ -41,7 +41,6 @@ async fn graph_update_ensemble_switching_to_cascade_clears_stale_straggler_and_g
                     infra_backoff_seconds: None,
                 },
             ]),
-            blueprint: None,
             node: None,
             from_node: entry.clone(),
             condition: "always".to_string(),
@@ -150,7 +149,6 @@ async fn graph_update_ensemble_can_change_kind() {
                     infra_backoff_seconds: None,
                 },
             ]),
-            blueprint: None,
             node: None,
             from_node: entry.clone(),
             condition: "always".to_string(),
@@ -247,7 +245,6 @@ async fn graph_update_ensemble_refuses_round_robin_to_parallel_above_eight() {
             kind: Some("round_robin".to_string()),
             prompt_template: Some("do it".to_string()),
             members: Some(members),
-            blueprint: None,
             node: None,
             from_node: entry.clone(),
             condition: "always".to_string(),
@@ -297,109 +294,6 @@ async fn graph_update_ensemble_refuses_round_robin_to_parallel_above_eight() {
     );
 }
 
-/// CM36: blueprint-supplied members were cloned through without a
-/// per-kind bounds check — a 12-member blueprint used with kind parallel
-/// built an over-cap ensemble no validator would ever have accepted.
-/// A 12-member blueprint with a sequential kind still builds fine.
-#[tokio::test]
-async fn graph_add_ensemble_blueprint_members_enforce_requested_kind_bounds() {
-    use crate::domain::blueprints::EnsembleBlueprint;
-    let (dir, db, handler) = endpoint_test_handler();
-    let lp = insert_test_graph(&db, dir.path());
-    let spec = insert_test_spec(&db, &lp.id, 1);
-    let entry = add_agent_node(&handler, &spec.id, "Entry").await;
-    let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
-
-    let wide: crate::domain::graphs::EnsembleMemberSpec =
-        ("claude".to_string(), None, None, None, None, None, None);
-    db.insert_ensemble_blueprint(&EnsembleBlueprint {
-        id: uuid::Uuid::new_v4().to_string(),
-        name: "wide-blueprint".to_string(),
-        prompt_template: "do it".to_string(),
-        members: vec![wide.clone(); 12],
-        min_pass: None,
-        quorum_grace_minutes: None,
-        builtin: false,
-        created_at: chrono::Utc::now(),
-    })
-    .unwrap();
-
-    let refused = call_graph_action(
-        &handler,
-        "graph_ensemble",
-        "add",
-        params_id(GraphAddEnsembleParams {
-            mutex: None,
-            commit_rights: None,
-            spec_id: Some(spec.id.clone()),
-            graph_id: None,
-            name: "TooWide".to_string(),
-            kind: Some("parallel".to_string()),
-            prompt_template: None,
-            members: None,
-            blueprint: Some("wide-blueprint".to_string()),
-            node: None,
-            from_node: entry.clone(),
-            condition: "always".to_string(),
-            min_pass: None,
-            straggler_timeout_minutes: None,
-            quorum_grace_minutes: None,
-            timeout_minutes: None,
-            infra_retry_limit: None,
-            infra_crash_max_seconds: None,
-            infra_backoff_seconds: None,
-            on_pass_to: arbiter.clone(),
-            on_fail_to: None,
-
-            crew: None,
-        }),
-    )
-    .await
-    .unwrap();
-    assert!(
-        is_err(&refused),
-        "a 12-member blueprint with kind parallel must be refused: {:?}",
-        refused
-    );
-    let msg = text(&refused);
-    assert!(msg.contains("parallel"), "{msg}");
-    assert!(msg.contains("2-8") && msg.contains("12"), "{msg}");
-
-    let accepted = call_graph_action(
-        &handler,
-        "graph_ensemble",
-        "add",
-        params_id(GraphAddEnsembleParams {
-            mutex: None,
-            commit_rights: None,
-            spec_id: Some(spec.id.clone()),
-            graph_id: None,
-            name: "WideSeq".to_string(),
-            kind: Some("round_robin".to_string()),
-            prompt_template: None,
-            members: None,
-            blueprint: Some("wide-blueprint".to_string()),
-            node: None,
-            from_node: entry.clone(),
-            condition: "always".to_string(),
-            min_pass: None,
-            straggler_timeout_minutes: None,
-            quorum_grace_minutes: None,
-            timeout_minutes: None,
-            infra_retry_limit: None,
-            infra_crash_max_seconds: None,
-            infra_backoff_seconds: None,
-            on_pass_to: arbiter.clone(),
-            on_fail_to: None,
-
-            crew: None,
-        }),
-    )
-    .await
-    .unwrap();
-    assert!(!is_err(&accepted), "{}", text(&accepted));
-}
-
 /// CM36 FR3 follow-up: a combined kind-plus-members update uses the
 /// RESULTING count — shrinking a 12-member round_robin to 8 members
 /// while switching to parallel is accepted, not refused on the stale
@@ -436,7 +330,6 @@ async fn graph_update_ensemble_kind_plus_shrink_uses_resulting_count() {
             kind: Some("round_robin".to_string()),
             prompt_template: Some("do it".to_string()),
             members: Some(members),
-            blueprint: None,
             node: None,
             from_node: entry.clone(),
             condition: "always".to_string(),
@@ -1217,7 +1110,7 @@ async fn graph_preflight_with_reviewer_spawns_background_run() {
     assert_eq!(review["pair"], "opencode/default", "{body}");
     match review["status"].as_str().unwrap_or_default() {
         "running" => {
-            assert_eq!(review["collect_with"], "subagent_collect", "{body}");
+            assert_eq!(review["collect_with"], "subagent collect", "{body}");
             let id = review["id"]
                 .as_str()
                 .unwrap_or_else(|| panic!("running review must carry an id: {body}"));

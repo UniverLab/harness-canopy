@@ -140,7 +140,7 @@ impl GraphEngine {
 
     /// Give this engine the dynamic skill store (S1) it resolves pinned
     /// `skills` (S2) through at spawn time — e.g. the same store instance
-    /// the daemon's `skill_list`/`skill_get` MCP tools use, so there is only
+    /// the daemon's `skill` MCP tool (`list`/`get`) uses, so there is only
     /// ever one fetch/TTL-cache path for a given skill.
     pub fn with_dynamic_skills(mut self, store: Arc<crate::dynamic_skills::SkillStore>) -> Self {
         self.dynamic_skills = Some(store);

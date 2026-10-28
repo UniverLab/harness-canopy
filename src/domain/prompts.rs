@@ -1,12 +1,12 @@
 //! Prompt presets (P1) — file-backed, user-editable prompt text for builtin
-//! agent blueprints. Seeded under `~/.canopy/prompts/` at daemon startup
+//! agent node documents. Seeded under `~/.canopy/prompts/` at daemon startup
 //! (never overwriting an existing file — user edits are sacred) and resolved
 //! at agent SPAWN time, so an edit takes effect on the very next run without
 //! a recompile.
 //!
 //! The engine never special-cases a preset name — "implementer"/"reviewer"/
-//! "resilience" are seed data here, exactly like `builtin_blueprint_specs()`
-//! in `blueprints.rs`. The hardcoded constants below are both the seed
+//! "resilience" are seed data here, exactly like the embedded node documents
+//! in `nodes.rs`. The hardcoded constants below are both the seed
 //! content written to disk *and* the fallback used when a preset file goes
 //! missing or unreadable, so the two can never drift apart.
 
@@ -189,8 +189,7 @@ pub fn canopy_dir() -> PathBuf {
 }
 
 /// Seed the builtin prompt presets under `<canopy_dir>/prompts/` if missing.
-/// Idempotent and reseed-if-missing, mirroring
-/// `Database::seed_builtin_blueprints`: a file already present (by name) is
+/// Idempotent and reseed-if-missing: a file already present (by name) is
 /// left completely untouched — user edits are never overwritten — so this is
 /// safe to call on every daemon startup and every `canopy prompts` CLI
 /// invocation.

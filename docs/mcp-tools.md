@@ -1,12 +1,12 @@
 ---
 title: MCP Tools
-description: All 57 MCP tools exposed by the canopy daemon, by category.
+description: All 31 MCP tools exposed by the canopy daemon, by category.
 order: 11
 ---
 
 # MCP Tools
 
-The daemon exposes **57 MCP tools** over Streamable HTTP (port 7755) and
+The daemon exposes **31 MCP tools** over Streamable HTTP (port 7755) and
 stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 
 Writes wait up to 5 seconds for a concurrent writer. If the database is still
@@ -14,19 +14,18 @@ busy after that, the call fails with `<tool>: database busy after 5 s — nothin
 was written, retry`. Nothing changed, so retry the same call.
 
 Graph-node sessions (agent and ensemble nodes launched by the graph engine) get
-a fixed node profile of 17 tools in `tools/list` (`CANOPY_MCP_PROFILE=node`), so
+a fixed node profile of 12 tools in `tools/list` (`CANOPY_MCP_PROFILE=node`), so
 every node stays under the 128-tool cap of OpenAI-compatible providers. Calls to
 any other tool still work. All other sessions keep the full list.
 
-## Agent management (5)
+## Agent management (4)
 
 | Tool | Description |
 |---|---|
 | `agent` | Read agents, logs, and daemon health. Actions: `list`, `get` (needs `id` — the full stored definition as JSON, including the untruncated prompt), `logs` (`id`, optional `lines`/`since`), `status` — pass `action` plus the params the refusal/table lists |
 | `agent_edit` | Create, change, and run agents. Actions: `add` (`id`, `prompt`, `schedule` — a 5-field cron expression), `watch` (`id`, `path`, `events`, `prompt`), `update`, `remove`, `enable`, `disable`, `schedule` (`id`, `at` — a one-shot enable at a future ISO 8601 time), `run` — the old one-operation agent tools, now one tool with an `action` parameter and the same per-action params, except `action` itself, renamed `delivery_action` (`headless` or `send_to_session`) |
 | `agent_report` | Report execution status for scheduled tasks — the only way to report a run |
-| `subagent_spawn` | Launch an ephemeral subagent, asynchronously or blocking; the subagent runs with the given `workdir` as its working directory (default: the caller's project), and a missing or non-directory `workdir` is refused before anything spawns, naming the path |
-| `subagent_collect` | Collect an ephemeral subagent result and mark it for cleanup |
+| `subagent` | Launch ephemeral subagents and collect their results. Actions: `spawn` (`prompt`, optional `cli`/`workdir`/`model`/`effort`/`mcp_servers`/`timeout_minutes`/`ttl_minutes`/`blocking` — async by default, or `blocking: true` to wait and return the result directly), `collect` (`id`) — pass `action` plus the params the refusal/table lists |
 
 ## Harness (1)
 
@@ -44,44 +43,31 @@ The most specific entry wins: exact model, then the longest `*` prefix, then the
 platform-wide entry. An `unavailable` entry past its `until` reads as available
 (expired) — expiry is evaluated at read time, never by a timer.
 
-## Multi-agent sync (4)
-
-| Tool | Description |
-|---|---|
-| `sync_declare_intent` | Declare a mission with impact level |
-| `sync_report_status` | Report workspace stability |
-| `sync_broadcast` | Send info/query/answer messages |
-| `sync_get_context` | Active missions, chatter, workspace vibe |
-
-## Intelligence (8)
+## Intelligence (4)
 
 | Tool | Description |
 |---|---|
 | `intelligence_get_context` | Curated project context for session start |
 | `intelligence_upsert` | Persist a fact, pattern or session summary |
 | `intelligence_search` | Full-text search across nodes |
-| `intelligence_graph_walk` | Traverse the knowledge graph |
-| `intelligence_list_projects` | List known projects |
-| `intelligence_link_projects` | Link projects with typed relations |
-| `intelligence_delete_node` | Delete an intelligence node and its relations |
-| `intelligence_delete_relation` | Delete a single relation by ID |
+| `intelligence_admin` | Prune and link the knowledge graph. Actions: `delete_node` (`node_id`, optional `project_hash`), `delete_relation` (`edge_id`, optional `project_hash`), `walk` (`node_id`, optional `depth`/`compact`), `list_projects` (optional `query`/`limit`), `link_projects` (`from_project_hash`, `to_project_hash`, optional `relation`/`weight`) — pass `action` plus the params the refusal/table lists |
 
-## Seed identity (5)
+The multi-agent sync tools are retired: coordination now goes through
+`session_list` (see every live session), `scheduled_send_create` (wake a
+session later instead of polling), and `intelligence_upsert` /
+`intelligence_search` (persist and find shared findings).
 
-| Tool | Description |
-|---|---|
-| `get_identity` | Read the bound seed identity |
-| `evolve_identity` | Refine the identity over time |
-| `create_seed` | Create a seed identity |
-| `list_seeds` | List seed identities |
-| `remove_seed` | Remove a seed identity |
-
-## Skills (2)
+## Identity (1)
 
 | Tool | Description |
 |---|---|
-| `skill_list` | List skills available from the dynamic skill store and configured catalogs; an installed skill that its git source no longer lists is marked `orphaned`, and its description starts with `[removed upstream]` |
-| `skill_get` | Fetch a skill's full instructions by name, cloning or refreshing it on demand |
+| `identity` | Read and evolve the agent identity, and manage seed identities. Actions: `get` (the agent's own structured identity contract), `evolve` (optional `new_directives`/`new_traits`), `list_seeds`, `create_seed` (`name`, optional `directives`/`traits`), `remove_seed` (`seed_id`) — pass `action` plus the params the refusal/table lists |
+
+## Skills (1)
+
+| Tool | Description |
+|---|---|
+| `skill` | Discover and fetch skills from the dynamic skill store. Actions: `list` (skills available from the store and configured catalogs; an installed skill that its git source no longer lists is marked `orphaned`, and its description starts with `[removed upstream]`), `get` (a skill's full instructions by name, cloning or refreshing it on demand) — pass `action` plus the params the refusal/table lists |
 
 ## Graph engine (8)
 
@@ -89,7 +75,7 @@ platform-wide entry. An `unavailable` entry past its `until` reads as available
 |---|---|
 | `graph` | Read graphs, specs, node runs, and events. Actions: `list`, `get`, `export`, `validate`, `audit`, `events`, `node_runs`, `node_run` — pass `action` plus the params the refusal/table lists (e.g. `get` needs `graph_id`; `node_run` needs `run_id`) |
 | `graph_edit` | Create, change, and archive graphs and their specs. Actions: `create`, `update`, `archive`, `restore`, `import`, `install`, `attach_spec`, `detach_spec`, `update_spec` — the old one-operation graph authoring tools, now one tool with an `action` parameter and the same per-action params |
-| `graph_node` | Author graph nodes. Actions: `add` (kind+config, blueprint, or node document + `config_overrides`), `update`, `delete`, `copy`. Never completes a node or reports a blocker — node sessions keep using `graph_complete_node` / `graph_report_blocker` |
+| `graph_node` | Author graph nodes. Actions: `add` (kind+config, or node document + `config_overrides`), `update`, `delete`, `copy`. Never completes a node or reports a blocker — node sessions keep using `graph_complete_node` / `graph_report_blocker` |
 | `graph_edge` | Wire graph nodes. Actions: `add`, `update`, `delete` (params unchanged: `from_node`/`to_node`/`condition`/`route`, `edge_id`, …) |
 | `graph_ensemble` | Author multi-member ensembles. Actions: `add`, `update`, `delete`, `copy` (params unchanged: `members`, `min_pass`, `on_pass_to`, …) |
 | `graph_control` | Run and manage graph execution. Actions: `run`, `pause`, `continue` (required `mode`: retry_current_node / skip_next_spec / run_from_node), `reset`, `preflight`, `schedule_continue` (optional `mode`: retry_current_node / skip_next_spec), `schedule_autorun` |
@@ -125,7 +111,7 @@ See [Graphs](graphs.md).
 
 Kept callable for the whole 3.x line, but excluded from tool listings
 (`tools/list`) so nothing new adopts them — call the 3.x name instead. Not
-counted in the 57 tools above.
+counted in the 31 tools above.
 
 | Deprecated name | Renamed to (3.0.0) |
 |---|---|
@@ -162,20 +148,17 @@ for how name resolution and its failure modes work. `session_list` remains
 the way to see both the names and ids of every live session a hook can
 target.
 
-## Named mutexes (1)
+## Named mutexes
 
 A node (agent, check, gate) or ensemble declares the shared resources it
 needs with `mutex: ["cpu"]`; the engine grants each resource to one node run
 at a time across all graphs of the daemon, and the others wait in a visible
 FIFO queue without burning their timeout. Each name must match
 `^[a-z][a-z0-9-]{0,31}$`. The lease is held per node run (per member run for
-an ensemble) and released when the run ends for any reason.
+an ensemble) and released when the run ends for any reason. Inspect the live
+leases and FIFO waiters with `canopy mutex list [--json]`.
 
-| Tool | Description |
-|---|---|
-| `mutex` | Action `list`: every granted lease (resource, holder run/graph/node, `acquired_at`) and every queued waiter (run/graph/node, resources, `requested_at`) in FIFO order |
-
-## Spec backlog (3)
+## Spec backlog (2)
 
 Every tool that takes a `spec_id` also accepts the spec's code (e.g. `FIX-7`),
 resolved within the caller's or the graph's workdir.
@@ -184,14 +167,13 @@ resolved within the caller's or the graph's workdir.
 |---|---|
 | `spec` | Read specs, sections, and notes. Actions: `list` (filterable by workdir, status, and `spec_type`, with limit/offset pagination), `get` (one spec with its full description), `section` (one canonical section from a spec body), `notes` (every note of a spec, newest first, with owner, author model, `updated_at` and body) — pass `action` plus the params the refusal/table lists |
 | `spec_edit` | Create, change, and transition specs. Actions: `create` (a standalone spec — supports `spec_type`/`spec_scope` for automatic code generation and deterministic commit messages; a conventional name such as `fix(tui): open F1` sets the type and scope and stores the subject alone, while an untyped create still succeeds but returns a `warning`), `update`, `delete` (refused while bound to a graph), `set_status` (admin transition: complete, skip, or reopen), `note_write` (`run_id` + `body`, or `spec_id` + `body` for the `operator` note; body ≤ 2 500 chars) — the old one-operation spec tools, now one tool with an `action` parameter and the same per-action params |
-| `spec_convert` | Convert legacy heading-format spec bodies to the tagged `<spec>` format (skips tagged and running specs) |
 
 Spec bodies use the tagged `<spec>` format with all seven canonical section
 tags — `<objective>`, `<functional_requirements>`,
 `<non_functional_requirements>`, `<constraints>`, `<guidelines>`, `<in_scope>`,
 `<out_of_scope>` — with markdown inside each section. Writes that do not parse
 are rejected naming the offending tag; legacy heading-format bodies remain
-readable until `spec_convert` migrates them.
+readable.
 
 ## Spec queues (1)
 
@@ -199,37 +181,27 @@ readable until `spec_convert` migrates them.
 |---|---|
 | `queue` | Author ordered spec queues. Actions: `create`, `list` (a queue's members, or all queues), `add_spec` (a grouped add lands after the group's last pending member), `remove_spec`, `reorder` (full replacement of the order), `set_group` — pass `action` plus the params the refusal/table lists |
 
-## Node blueprints (3)
+## Node documents (1)
 
 | Tool | Description |
 |---|---|
-| `blueprint_list` | List all builtins and custom blueprints |
-| `blueprint_create` | Create a reusable node config template |
-| `blueprint_delete` | Delete a custom blueprint (builtins protected) |
+| `node` | Manage shareable node documents. Actions: `list` (installed documents and the builtins embedded in the binary, marking each `installed` or `builtin`), `get` (one document with its kind, source, and full config), `install` (a node document from the catalogue by `ref` — `<slug>`, `<owner>/<repo>/<slug>`, each with an optional `@<ref>`, or `draft:<id>` for a one-use editor draft — with its bundled preset; `overwrite_presets?`, `accept?`. Without `accept: true` it writes nothing and returns `{needs_review: true, review}` (commands, prompts, attention marks) for the agent to show its user first; with `accept: true` it installs and echoes the review), `remove` (an installed document; a builtin with no override is refused) — pass `action` plus the params the refusal/table lists ([Nodes](graphs.md#nodes)) |
 
-## Node documents (3)
+Node documents replaced the retired blueprint tools outright: `graph_node`
+and `graph_ensemble` `add` take `node`, `kind` + `config`, or — for
+ensembles — a crew.
 
-| Tool | Description |
-|---|---|
-| `node_list` | List installed node documents and the builtins embedded in the binary, marking each `installed` or `builtin` |
-| `node_install` | Install a node document from the catalogue by ref (`<slug>`, `<owner>/<repo>/<slug>`, each with an optional `@<ref>`, or `draft:<id>` for a one-use editor draft), with its bundled preset — `overwrite_presets?`, `accept?`. Without `accept: true` it writes nothing and returns `{needs_review: true, review}` (commands, prompts, attention marks) for the agent to show its user first; with `accept: true` it installs and echoes the review ([Nodes](graphs.md#nodes)) |
-| `node_remove` | Remove an installed node document (a builtin with no override is refused) |
-
-## Project (4)
+## Project (1)
 
 | Tool | Description |
 |---|---|
-| `project_search` | Search the project registry |
-| `project_update` | Update a project's registry entry |
-| `project_remap` | Remap a moved/renamed workdir instead of orphaning history |
-| `project_register` | Explicitly register a project directory (no marker file needed) |
+| `project` | Manage the project registry. Actions: `register` (`path` — explicitly register a directory, no marker file needed), `remap` (`project_hash`, `new_path`, optional `dry_run`/`force` — remap a moved/renamed workdir instead of orphaning history), `search` (`query` — search by name/description), `update` (`project_hash`, optional `description`/`tags`) — pass `action` plus the params the refusal/table lists |
 
-## RAG (2)
+## RAG (1)
 
 | Tool | Description |
 |---|---|
-| `rag_search` | Semantic search over indexed documents (rate-limited) |
-| `rag_compact` | Compact the vector store now: merge fragments and prune old versions |
+| `rag` | Search indexed personal content and maintain the vector store. Actions: `search` (`query`, optional `agent_id`/`limit` — semantic search, rate-limited), `compact` (merge fragments and prune old versions now) — pass `action` plus the params the refusal/table lists |
 
 ## Protocol (1)
 
@@ -243,10 +215,9 @@ readable until `spec_convert` migrates them.
 |---|---|
 | `session_list` | List live interactive sessions with the exact ids an interactive graph hook's `target_session_id` accepts, each with platform, workdir, name, and whether a TUI is attached; pass `session_id` to look one up. A conversation resumed under a harness conversation id canopy knows appears once, with the id and name it already had — never a dead row plus a freshly-named one |
 
-## Scheduled sends (3)
+## Scheduled sends (2)
 
 | Tool | Description |
 |---|---|
 | `scheduled_send_create` | Schedule a prompt for future delivery to a session (own session by default) |
-| `scheduled_send_list` | List a session's pending scheduled sends |
-| `scheduled_send_cancel` | Cancel a pending scheduled send by id |
+| `scheduled_send` | List and cancel pending scheduled sends. Actions: `list` (a session's pending sends, soonest first; optional `session_id`), `cancel` (`id`) — pass `action` plus the params the refusal/table lists |

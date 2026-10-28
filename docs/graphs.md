@@ -38,7 +38,7 @@ Graph
 - **Edges** — connect nodes with routing conditions: `pass`, `fail`,
   `always`.
 - **Node MCP profile** — agent and ensemble nodes launched by the graph
-  engine receive a fixed set of 17 tools in `tools/list`
+  engine receive a fixed set of 12 tools in `tools/list`
   (`CANOPY_MCP_PROFILE=node`); check nodes, hooks, and other sessions keep
   the full list. See [MCP Tools](mcp-tools.md).
 
@@ -446,7 +446,7 @@ merely that HEAD differs from wherever the spec started — see
 **Editing the recommended check command text here does not retroactively
 touch any graph.** A node's `command` is whatever text was written into
 its config when the graph was authored (`graph_node` `add`, or copied from
-a blueprint) — the engine reads it fresh at execution time but never
+a node document) — the engine reads it fresh at execution time but never
 rewrites it. A spec already using the old `{{spec_start_head}}`-only
 comparison keeps using it until someone explicitly runs
 `graph_node` `update` on it; only graphs authored or edited after adopting
@@ -735,9 +735,8 @@ granted. The event log records `mutex_waiting` and
 `mutex_acquired` for every wait. The lease is released when the run
 ends for any reason. Export carries each node's and ensemble's `mutex`
 (`format_version` 6); older documents import with the field absent.
-Inspect the live state with the `mutex` MCP tool
-(action `list`) or `canopy mutex list [--json]`. Mutexes are scoped to
-one daemon (one machine); there are no counting semaphores or
+Inspect the live state with `canopy mutex list [--json]`. Mutexes are
+scoped to one daemon (one machine); there are no counting semaphores or
 priorities.
 
 ## Event-keyed hooks
@@ -850,16 +849,14 @@ a workdir for filtering:
 | `spec_edit` `delete` | Delete an unbound spec |
 | `spec_edit` `set_status` | Admin transition: complete, skip, or reopen a standalone spec |
 | `spec` `section` | Extract one canonical section from a spec body |
-| `spec_convert` | Migrate legacy heading-format spec bodies to the tagged `<spec>` format |
 
 Spec bodies are written in the tagged `<spec>` format — all seven canonical
 section tags (`<objective>`, `<functional_requirements>`,
 `<non_functional_requirements>`, `<constraints>`, `<guidelines>`, `<in_scope>`,
 `<out_of_scope>`) with markdown inside each. A body that does not parse is
 rejected on write with the offending tag named. Existing heading-format specs
-stay readable during the transition and are reported as needing conversion;
-`spec_convert` migrates them one row at a time and never rewrites a running
-spec.
+stay readable and are reported as needing conversion; rewrite them into the
+tagged format by hand.
 
 The TUI sidebar shows backlog specs under the **Backlog** section,
 filtered to the selected project's workdir.
@@ -1528,7 +1525,7 @@ install unless `--overwrite-presets` is given. A graph document fetched
 from a node endpoint is refused, and a 410 says `<name> was removed
 from the catalogue after a community report: <reason> (<issue>)`.
 
-Over MCP, `node_install { ref, overwrite_presets?, accept? }` follows
+Over MCP, `node` `install` { `ref`, `overwrite_presets`?, `accept`? } follows
 the same gate: **without** `accept: true` it installs nothing and
 returns `{ needs_review: true, review: { source, commands, prompts,
 attention } }`; with `accept: true` it installs and echoes the same
@@ -1559,7 +1556,7 @@ graph_ensemble { action: "add", spec_id, name: "Proposers", node: "ensemble-prop
                  on_pass_to: "<arbiter>" }
 ```
 
-`node` is the alternative to `kind` + `config` (or a `blueprint`), and
+`node` is the alternative to `kind` + `config`, and
 `config_overrides` shallow-merges on top of the document's config — the
 override wins, the rest of the document is preserved. An agent node
 document has no harness, so the call is refused with a message naming the
@@ -1578,9 +1575,9 @@ A builtin with no installed copy cannot be removed; an installed copy that
 overrides a builtin is removed like any other, and the builtin resolves
 again afterwards.
 
-The `blueprint_list`/`blueprint_create`/`blueprint_delete` tools and the
-`blueprint` parameter still exist for now; the MCP surface redesign removes
-them once node documents replace every use.
+Node documents replaced the retired blueprint tools and the `blueprint`
+parameter outright: `graph_node` and `graph_ensemble` `add` take `node`,
+`kind` + `config`, or — for ensembles — a crew, and nothing else.
 
 ## Tuning the engine
 

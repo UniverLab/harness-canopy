@@ -1,5 +1,5 @@
 //! Install a shareable node document from the catalogue
-//! (`canopy node install` / `node_install`).
+//! (`canopy node install` / `node` `install`).
 //!
 //! The same one-GET path `graph install` uses — parse the ref, fetch the
 //! document through the catalogue's install-counting endpoint, validate it
@@ -120,7 +120,7 @@ fn reject_invalid_report(reference: &str, report: &serde_json::Value) -> Result<
             .unwrap_or("?");
         return Err(format!(
             "The catalogue returned a graph document '{name}', not a node document; \
-             `node_install` only installs node documents."
+             `node` `install` only installs node documents."
         ));
     }
     Ok(())

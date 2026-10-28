@@ -2,7 +2,7 @@ use super::*;
 
 // ── Seed Identity tool parameter types ─────────────────────────────
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EvolveIdentityParams {
     /// New directives list (replaces existing).
     pub new_directives: Option<Vec<String>>,
@@ -10,7 +10,7 @@ pub struct EvolveIdentityParams {
     pub new_traits: Option<std::collections::HashMap<String, String>>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CreateSeedParams {
     /// Unique display name (enforced case-insensitive across all seeds).
     pub name: String,
@@ -20,7 +20,7 @@ pub struct CreateSeedParams {
     pub traits: Option<crate::domain::seeds::SeedTraits>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RemoveSeedParams {
     /// Seed ID to remove.
     pub seed_id: String,
@@ -28,15 +28,15 @@ pub struct RemoveSeedParams {
 
 // ── Dynamic skill store tool parameter types ──────────────────────────
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SkillGetParams {
-    /// Skill directory name, as reported by `skill_list` (e.g. "code-review").
+    /// Skill directory name, as reported by `skill` `list` (e.g. "code-review").
     pub name: String,
 }
 
 // ── Ephemeral subagent tool parameter types ───────────────────────────
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SubagentSpawnParams {
     /// The instruction for the subagent to execute.
     pub prompt: String,
@@ -60,14 +60,14 @@ pub struct SubagentSpawnParams {
     /// TTL in minutes before an uncollected result expires. Default: 60.
     pub ttl_minutes: Option<u64>,
     /// When true, wait for the subagent to finish and return its result
-    /// directly, instead of returning an id for later `subagent_collect`.
+    /// directly, instead of returning an id for later `subagent` `collect`.
     /// Default false (async, today's behaviour).
     #[serde(default)]
     pub blocking: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SubagentCollectParams {
-    /// The subagent run ID returned by subagent_spawn.
+    /// The subagent run ID returned by `subagent` `spawn`.
     pub id: String,
 }

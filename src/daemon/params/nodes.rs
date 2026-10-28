@@ -11,24 +11,20 @@ pub struct GraphAddNodeParams {
     pub graph_id: Option<String>,
     /// Human-readable node name.
     pub name: String,
-    /// Node kind: agent, check, or gate. Optional when `blueprint` or `node`
-    /// is given — the template's own kind applies. Never pass it with `node`:
-    /// the node document already declares its kind.
+    /// Node kind: agent, check, or gate. Optional when `node` is given —
+    /// the document's own kind applies. Never pass it with `node`: the node
+    /// document already declares its kind.
     pub kind: Option<String>,
-    /// Kind-specific configuration object. Alternative to `blueprint` and
-    /// `node`; provide exactly one of `config`/`blueprint`/`node`.
+    /// Kind-specific configuration object. Alternative to `node`; provide
+    /// exactly one of `config`/`node`.
     pub config: Option<serde_json::Map<String, serde_json::Value>>,
-    /// Name of an existing blueprint (builtin or custom) to base this node
-    /// on, instead of a full `config`. See `blueprint_list`.
-    pub blueprint: Option<String>,
     /// Name of an installed or builtin node document to base this node on
-    /// (see `node_list`) — the alternative to `kind` + `config`. An agent
+    /// (see `node` `list`) — the alternative to `kind` + `config`. An agent
     /// node document never carries a harness, so pass `config_overrides`
     /// with `platform` (or `cli`, or `crew`) to choose one.
     pub node: Option<String>,
-    /// Shallow overrides merged onto the template's config — blueprint or
-    /// node document. Override keys win, every other templated key is
-    /// preserved.
+    /// Shallow overrides merged onto the node document's config. Override
+    /// keys win, every other templated key is preserved.
     pub config_overrides: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
@@ -48,23 +44,19 @@ pub struct GraphAddEnsembleParams {
     pub kind: Option<String>,
     /// The one shared prompt every member renders — supports the same
     /// placeholders as an agent node's `prompt_template`. Required unless a
-    /// `blueprint` or `node` supplies one.
+    /// `node` document supplies one.
     pub prompt_template: Option<String>,
     /// Members (2–8 for parallel, 2–16 for cascade/round_robin): proposer/
     /// reviewer variants that differ by
     /// platform/model and, optionally, per-member `prompt_override`.
-    /// Required when `node` is given (the document carries no harnesses);
-    /// otherwise required unless a `blueprint` supplies them.
+    /// Always required: a `node` document carries no harnesses, so pass a
+    /// platform for each of its members.
     pub members: Option<Vec<EnsembleMemberParams>>,
-    /// Name of an existing ensemble blueprint (e.g. "ensemble-proposers") to
-    /// source `prompt_template`/`members` from when they're omitted above.
-    /// An explicit `prompt_template`/`members` still wins if both are given.
-    pub blueprint: Option<String>,
     /// Name of an installed or builtin ensemble node document (see
-    /// `node_list`, e.g. "ensemble-proposers") to source the shared prompt,
+    /// `node` `list`, e.g. "ensemble-proposers") to source the shared prompt,
     /// the member count, and the ensemble shape from. Its members carry no
     /// harnesses, so `members` must still be passed with a platform for each
-    /// one. Mutually exclusive with `blueprint` and `crew`.
+    /// one. Mutually exclusive with `crew`.
     pub node: Option<String>,
     /// Existing node ID this ensemble is wired from. Every member gets an
     /// incoming edge from this node with `condition`.
@@ -105,7 +97,7 @@ pub struct GraphAddEnsembleParams {
     /// an ordinary node with no `commit_rights` key.
     pub commit_rights: Option<bool>,
     /// CM49: a crew name to bind instead of `members` — mutually exclusive
-    /// with `members`/a blueprint that supplies members. The crew's ordered
+    /// with `members`. The crew's ordered
     /// members become this ensemble's members, and later `crew update` calls
     /// reach it at its next dispatch.
     pub crew: Option<String>,
@@ -137,5 +129,11 @@ pub struct NodeInstallParams {
 pub struct NodeRemoveParams {
     /// Name of an installed node document to remove. A builtin with no
     /// installed override cannot be removed; its override can.
+    pub name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct NodeGetParams {
+    /// Name of an installed or builtin node document to inspect.
     pub name: String,
 }

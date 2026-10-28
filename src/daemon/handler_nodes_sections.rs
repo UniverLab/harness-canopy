@@ -23,20 +23,16 @@ use rmcp::model::CallToolResult;
 use rmcp::ErrorData as McpError;
 
 pub(crate) fn resolve_add_node_kind_config(
-    db: &Database,
     node: Option<&str>,
     kind: Option<&str>,
     config: Option<serde_json::Map<String, serde_json::Value>>,
-    blueprint: Option<&str>,
     config_overrides: Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<(GraphNodeKind, serde_json::Value), CallToolResult> {
     let node_name = node.map(str::trim).filter(|value| !value.is_empty());
     match node_name {
         Some(node_name) => {
-            if config.is_some() || blueprint.is_some() {
-                return Err(error_result(
-                    "Pass one of 'config', 'blueprint', or 'node', never more than one.",
-                ));
+            if config.is_some() {
+                return Err(error_result("Pass one of 'config' or 'node', never both."));
             }
             if kind.is_some() {
                 return Err(error_result(
@@ -48,7 +44,7 @@ pub(crate) fn resolve_add_node_kind_config(
                 Err(e) => Err(error_result(&e)),
             }
         }
-        None => match resolve_node_kind_and_config(db, kind, config, blueprint, config_overrides) {
+        None => match resolve_node_kind_and_config(kind, config) {
             Ok(result) => Ok(result),
             Err(e) => Err(error_result(&e)),
         },

@@ -522,7 +522,7 @@ pub(crate) fn json_value_kind_name(value: &serde_json::Value) -> &'static str {
 /// Whether an agent node's config names a harness — a non-empty `platform`,
 /// `cli`, or `crew` field (CM49 added `crew`, the harness-by-crew-name
 /// alternative). Shared by `validate_node_config`'s `Agent` arm and by
-/// `resolve_node_kind_and_config`'s blueprint branch.
+/// `validate_node_document_agent_harness`.
 pub(crate) fn config_has_agent_harness(map: &serde_json::Map<String, serde_json::Value>) -> bool {
     let has_non_empty_str = |field: &str| {
         map.get(field)
@@ -530,26 +530,6 @@ pub(crate) fn config_has_agent_harness(map: &serde_json::Map<String, serde_json:
             .is_some_and(|s| !s.trim().is_empty())
     };
     has_non_empty_str("platform") || has_non_empty_str("cli") || has_non_empty_str("crew")
-}
-
-/// A blueprint-resolved agent node must name a harness. Blueprints
-/// intentionally carry no platform/cli/crew (see `builtin_blueprint_specs`) —
-/// which harness runs a node is the caller's decision, supplied here via
-/// `config_overrides`, never a default this resolver falls back to. Catching
-/// the missing case here (rather than only via `validate_node_config`'s
-/// generic message) lets the error name the blueprint and say *why* the
-/// field is missing instead of just that it is.
-pub(crate) fn validate_blueprint_agent_harness(
-    blueprint_name: &str,
-    merged: &serde_json::Value,
-) -> Result<(), String> {
-    let has_harness = merged.as_object().is_some_and(config_has_agent_harness);
-    if !has_harness {
-        return Err(format!(
-            "Blueprint '{blueprint_name}' intentionally does not provide a platform (or cli) — which harness runs a node is the caller's decision, not the blueprint's. Pass config_overrides with a non-empty 'platform' (and 'model' if that platform needs one) to select the harness."
-        ));
-    }
-    Ok(())
 }
 
 /// A node-document-resolved agent node must name a harness. A shareable node

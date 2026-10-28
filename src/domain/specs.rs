@@ -80,7 +80,6 @@ pub enum SpecParseError {
     UnexpectedTag(String),
     MalformedClosingTag(String),
     MissingSpecWrapper(String),
-    LegacyConversionFailed(String),
 }
 
 impl fmt::Display for SpecParseError {
@@ -91,7 +90,6 @@ impl fmt::Display for SpecParseError {
             Self::UnexpectedTag(tag) => write!(f, "spec has an unexpected tag <{tag}>"),
             Self::MalformedClosingTag(tag) => write!(f, "spec has malformed closing tag </{tag}>"),
             Self::MissingSpecWrapper(msg) => write!(f, "{msg}"),
-            Self::LegacyConversionFailed(msg) => write!(f, "legacy spec conversion failed: {msg}"),
         }
     }
 }
@@ -454,86 +452,6 @@ fn parse_legacy_sections(body: &str) -> Result<Vec<(SpecSection, String)>, SpecP
     Ok(result)
 }
 
-pub fn convert_legacy_spec_description(input: &str) -> Result<String, SpecParseError> {
-    let trimmed = input.trim();
-
-    if looks_like_tagged(trimmed) {
-        parse_tagged_spec(trimmed)?;
-        return Ok(trimmed.to_string());
-    }
-
-    let lines: Vec<&str> = trimmed.lines().collect();
-    let mut section_starts: Vec<(SpecSection, usize)> = Vec::new();
-
-    for (line_idx, line) in lines.iter().enumerate() {
-        let trimmed_line = line.trim().to_lowercase();
-        let stripped = trimmed_line
-            .trim_start_matches('#')
-            .trim_start()
-            .trim_start_matches("- ")
-            .trim_start_matches("* ")
-            .trim()
-            .trim_end_matches(':')
-            .trim()
-            .to_string();
-
-        for section in SpecSection::all() {
-            for pattern in section.legacy_heading_patterns() {
-                if stripped == *pattern {
-                    section_starts.push((*section, line_idx));
-                    break;
-                }
-            }
-        }
-    }
-
-    let mut seen = std::collections::HashSet::new();
-    for (section, _) in &section_starts {
-        if !seen.insert(*section) {
-            return Err(SpecParseError::LegacyConversionFailed(format!(
-                "duplicate heading for section <{}>",
-                section.tag()
-            )));
-        }
-    }
-
-    for section in SpecSection::all() {
-        if !section_starts.iter().any(|(s, _)| *s == *section) {
-            return Err(SpecParseError::LegacyConversionFailed(format!(
-                "missing heading for required section <{}>",
-                section.tag()
-            )));
-        }
-    }
-
-    section_starts.sort_by_key(|(_, line)| *line);
-
-    let mut output = String::from("<spec>\n");
-    for (i, (section, start_line)) in section_starts.iter().enumerate() {
-        let end_line = if i + 1 < section_starts.len() {
-            section_starts[i + 1].1
-        } else {
-            lines.len()
-        };
-
-        let body_lines: Vec<&str> = lines[*start_line + 1..end_line].to_vec();
-        let body = body_lines.join("\n").trim().to_string();
-
-        output.push_str(&format!("  <{}>\n", section.tag()));
-        if !body.is_empty() {
-            for line in body.lines() {
-                output.push_str("  ");
-                output.push_str(line);
-                output.push('\n');
-            }
-        }
-        output.push_str(&format!("  </{}>\n", section.tag()));
-    }
-    output.push_str("</spec>");
-
-    Ok(output)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -741,143 +659,6 @@ Everything else."#;
         match result {
             ParsedSpecDescription::Legacy(_) => {}
             _ => panic!("expected legacy"),
-        }
-    }
-
-    #[test]
-    fn legacy_conversion_preserves_sentinels() {
-        let input = r#"## Objective
-Ship the feature at src/main.rs:42 on 2026-09-01.
-
-## Functional Requirements
-- Node abc-123 does thing
-- Value is 42
-
-## Non-Functional Requirements
-Latency < 100ms
-
-## Constraints
-Use `file:line` references
-
-## Guidelines
-Follow house style
-
-## In Scope
-This change
-
-## Out of Scope
-Everything else"#;
-        let converted = convert_legacy_spec_description(input).unwrap();
-        assert!(converted.contains("<spec>"));
-        assert!(converted.contains("</spec>"));
-        assert!(converted.contains("<objective>"));
-        assert!(converted.contains("src/main.rs:42"));
-        assert!(converted.contains("2026-09-01"));
-        assert!(converted.contains("abc-123"));
-        assert!(converted.contains("42"));
-        assert!(converted.contains("Latency < 100ms"));
-        assert!(converted.contains("`file:line`"));
-
-        let reparsed = parse_spec_description(&converted).unwrap();
-        match reparsed {
-            ParsedSpecDescription::Tagged(parsed) => {
-                assert_eq!(parsed.sections.len(), 7);
-                let obj = parsed.section_body(SpecSection::Objective).unwrap();
-                assert!(obj.contains("src/main.rs:42"));
-                assert!(obj.contains("2026-09-01"));
-            }
-            _ => panic!("expected tagged after conversion"),
-        }
-    }
-
-    #[test]
-    fn legacy_conversion_is_idempotent() {
-        let input = r#"## Objective
-Ship.
-
-## Functional Requirements
-Does thing.
-
-## Non-Functional Requirements
-Fast.
-
-## Constraints
-None.
-
-## Guidelines
-Style.
-
-## In Scope
-This.
-
-## Out of Scope
-Nothing."#;
-        let first = convert_legacy_spec_description(input).unwrap();
-        let second = convert_legacy_spec_description(&first).unwrap();
-        assert_eq!(first, second);
-    }
-
-    #[test]
-    fn legacy_conversion_fails_on_duplicate_heading() {
-        let input = r#"## Objective
-Ship.
-
-## Objective
-Ship again.
-
-## Functional Requirements
-Does thing.
-
-## Non-Functional Requirements
-Fast.
-
-## Constraints
-None.
-
-## Guidelines
-Style.
-
-## In Scope
-This.
-
-## Out of Scope
-Nothing."#;
-        let err = convert_legacy_spec_description(input).unwrap_err();
-        match err {
-            SpecParseError::LegacyConversionFailed(msg) => {
-                assert!(msg.contains("duplicate"));
-                assert!(msg.contains("objective"));
-            }
-            other => panic!("expected LegacyConversionFailed, got: {}", other),
-        }
-    }
-
-    #[test]
-    fn legacy_conversion_fails_on_missing_heading() {
-        let input = r#"## Objective
-Ship.
-
-## Functional Requirements
-Does thing.
-
-## Non-Functional Requirements
-Fast.
-
-## Constraints
-None.
-
-## Guidelines
-Style.
-
-## In Scope
-This."#;
-        let err = convert_legacy_spec_description(input).unwrap_err();
-        match err {
-            SpecParseError::LegacyConversionFailed(msg) => {
-                assert!(msg.contains("missing"));
-                assert!(msg.contains("out_of_scope"));
-            }
-            other => panic!("expected LegacyConversionFailed, got: {}", other),
         }
     }
 

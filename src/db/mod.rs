@@ -21,7 +21,9 @@ use std::sync::{Arc, Mutex};
 /// binding columns — see `migrate_crews_tables` (CM49).
 /// Version 11 adds the `action`/`target_session_id`/`target_session_name`
 /// columns to `agents` for `send_to_session` delivery (CM53).
-const SCHEMA_VERSION: i64 = 11;
+/// Version 12 drops the retired `blueprints` and `ensemble_blueprints`
+/// tables — see `migrate_drop_blueprint_tables`.
+const SCHEMA_VERSION: i64 = 12;
 
 /// CM40: how long every daemon SQLite connection waits for a concurrent writer
 /// before failing with `SQLITE_BUSY`. Applied once, at open, in
@@ -448,20 +450,6 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
             CREATE INDEX IF NOT EXISTS idx_ensembles_join_node
                 ON ensembles(join_node_id);
 
-            -- F1: ensemble blueprints -- a whole ensemble's shared prompt +
-            -- member list (unlike `blueprints`, which templates a single
-            -- node), seeded with the builtin ensemble-proposers pattern.
-            CREATE TABLE IF NOT EXISTS ensemble_blueprints (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL UNIQUE,
-                prompt_template TEXT NOT NULL,
-                members TEXT NOT NULL,
-                min_pass INTEGER,
-                quorum_grace_minutes INTEGER,
-                builtin INTEGER NOT NULL DEFAULT 0,
-                created_at INTEGER NOT NULL
-            );
-
             CREATE TABLE IF NOT EXISTS queues (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -488,15 +476,6 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
 
             CREATE INDEX IF NOT EXISTS idx_seed_sessions_seed
                 ON seed_sessions(seed_id);
-
-            CREATE TABLE IF NOT EXISTS blueprints (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL UNIQUE,
-                kind TEXT NOT NULL,
-                config TEXT NOT NULL,
-                builtin INTEGER NOT NULL DEFAULT 0,
-                created_at INTEGER NOT NULL
-            );
 
             CREATE TABLE IF NOT EXISTS scheduled_sends (
                 id TEXT PRIMARY KEY,
@@ -559,9 +538,9 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
             );",
     "
 
-            -- CM18: tombstones for blocking `subagent_spawn` deliveries. A
+            -- CM18: tombstones for blocking `subagent` `spawn` deliveries. A
             -- blocking spawn returns its result inline and deletes the
-            -- `subagent_runs` row immediately, so a later `subagent_collect`
+            -- `subagent_runs` row immediately, so a later `subagent` `collect`
             -- would otherwise be indistinguishable from never-existed.
             -- A tombstone records the delivered id until the original
             -- `expires_at`, letting `collect` answer already-delivered.
@@ -703,6 +682,7 @@ impl Database {
         Self::migrate_agent_action_columns(&conn)?;
         Self::migrate_ensemble_mutex_column(&conn)?;
         Self::migrate_graph_events_mutex_kinds(&conn)?;
+        Self::migrate_drop_blueprint_tables(&conn)?;
 
         Self::set_schema_version(&conn)?;
 
@@ -745,7 +725,6 @@ pub struct NewSubagentRun<'a> {
 pub mod achievements;
 pub mod activity_log;
 pub mod agent;
-pub mod blueprints;
 pub mod clean;
 pub(crate) mod connection;
 pub mod crew_binding;

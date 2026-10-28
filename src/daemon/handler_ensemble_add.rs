@@ -14,40 +14,32 @@ use crate::daemon::handler_validate::{
 use crate::daemon::helpers::EarlyReturn;
 use crate::daemon::params::*;
 use crate::db::Database;
-use crate::domain::blueprints::EnsembleBlueprint;
 use crate::domain::canopy_config::GraphsConfig;
 use crate::domain::graphs::{EnsembleKind, EnsembleMemberSpec, GraphNode, MemberCaps};
 use crate::domain::nodes::EnsembleNodeConfig;
 
 /// Where the ensemble's prompt, members and shape come from: explicit
-/// params, a blueprint, or an ensemble node document.
+/// params or an ensemble node document.
 pub(crate) struct EnsembleSources {
     pub name: String,
-    pub blueprint: Option<EnsembleBlueprint>,
     pub ensemble_node: Option<(String, EnsembleNodeConfig)>,
 }
 
 pub(crate) fn resolve_ensemble_sources(
-    db: &Database,
     params: &GraphAddEnsembleParams,
 ) -> Result<EnsembleSources, EarlyReturn> {
     let name = params.name.trim();
     if let Err(e) = validate_non_empty(name, "Ensemble name") {
         return Err(EarlyReturn::tool_error(&e));
     }
-    let blueprint_name = params
-        .blueprint
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
     let node_name = params
         .node
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    if node_name.is_some() && (blueprint_name.is_some() || params.crew.is_some()) {
+    if node_name.is_some() && params.crew.is_some() {
         return Err(EarlyReturn::tool_error(
-            "Pass node or blueprint/crew, never both: an ensemble node document supplies the prompt and members on its own.",
+            "Pass node or crew, never both: an ensemble node document supplies the prompt and members on its own.",
         ));
     }
     let ensemble_node = match node_name {
@@ -59,30 +51,14 @@ pub(crate) fn resolve_ensemble_sources(
         }
         None => None,
     };
-    let blueprint = match blueprint_name {
-        Some(blueprint_name) => match db
-            .get_ensemble_blueprint_by_name(blueprint_name)
-            .map_err(internal_error)?
-        {
-            Some(bp) => Some(bp),
-            None => {
-                return Err(EarlyReturn::tool_error(&format!(
-                    "Unknown ensemble blueprint '{blueprint_name}'."
-                )))
-            }
-        },
-        None => None,
-    };
     Ok(EnsembleSources {
         name: name.to_string(),
-        blueprint,
         ensemble_node,
     })
 }
 
 pub(crate) fn resolve_shared_prompt(
     params: &GraphAddEnsembleParams,
-    blueprint: Option<&EnsembleBlueprint>,
     node_config: Option<&EnsembleNodeConfig>,
 ) -> Result<String, EarlyReturn> {
     match params
@@ -92,11 +68,10 @@ pub(crate) fn resolve_shared_prompt(
         .filter(|value| !value.is_empty())
     {
         Some(explicit) => Ok(explicit.to_string()),
-        None => match (blueprint, node_config) {
-            (Some(bp), _) => Ok(bp.prompt_template.clone()),
-            (None, Some(config)) => Ok(config.prompt_template.clone()),
-            (None, None) => Err(EarlyReturn::tool_error(
-                "Provide prompt_template, or a blueprint or node document that supplies one.",
+        None => match node_config {
+            Some(config) => Ok(config.prompt_template.clone()),
+            None => Err(EarlyReturn::tool_error(
+                "Provide prompt_template, or a node document that supplies one.",
             )),
         },
     }
@@ -153,21 +128,14 @@ pub(crate) fn resolve_ensemble_build_plan(
     caps: MemberCaps,
 ) -> Result<EnsembleBuildPlan, EarlyReturn> {
     let node_config = sources.ensemble_node.as_ref().map(|(_, config)| config);
-    let prompt_template = resolve_shared_prompt(params, sources.blueprint.as_ref(), node_config)?;
+    let prompt_template = resolve_shared_prompt(params, node_config)?;
     let kind = resolve_ensemble_kind(params, node_config)?;
-    let member_list = resolve_ensemble_member_list(
-        db,
-        params,
-        sources.blueprint.as_ref(),
-        sources.ensemble_node.as_ref(),
-        kind,
-        caps,
-    )?;
+    let member_list =
+        resolve_ensemble_member_list(db, params, sources.ensemble_node.as_ref(), kind, caps)?;
     let timeouts = resolve_ensemble_timeouts(
         params,
         &sources.name,
         node_config,
-        sources.blueprint.as_ref(),
         kind,
         graphs,
         member_list.members.len(),
@@ -240,22 +208,19 @@ pub(crate) fn resolve_ensemble_wiring(
 pub(crate) fn resolve_ensemble_member_list(
     db: &Database,
     params: &GraphAddEnsembleParams,
-    blueprint: Option<&EnsembleBlueprint>,
     ensemble_node: Option<&(String, EnsembleNodeConfig)>,
     kind: EnsembleKind,
     caps: MemberCaps,
 ) -> Result<EnsembleMemberList, EarlyReturn> {
     // CM49: a crew binding is mutually exclusive with a literal member
-    // list (explicit or blueprint-supplied). When bound, the crew's
-    // ordered members seed the unit; the binding is stamped after insert.
+    // list. When bound, the crew's ordered members seed the unit; the
+    // binding is stamped after insert.
     let crew_name = params
         .crew
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    if crew_name.is_some()
-        && (params.members.is_some() || blueprint.is_some_and(|bp| !bp.members.is_empty()))
-    {
+    if crew_name.is_some() && params.members.is_some() {
         return Err(EarlyReturn::tool_error("pass crew or members, never both."));
     }
     let members: Vec<EnsembleMemberSpec> = match crew_name {
@@ -280,21 +245,15 @@ pub(crate) fn resolve_ensemble_member_list(
                 )))
             }
         },
-        None => match resolve_ensemble_members(
-            params.members.as_ref(),
-            ensemble_node,
-            blueprint,
-            kind,
-            caps,
-        ) {
-            Ok(members) => members,
-            Err(e) => return Err(EarlyReturn::tool_error(&e)),
-        },
+        None => {
+            match resolve_ensemble_members(params.members.as_ref(), ensemble_node, kind, caps) {
+                Ok(members) => members,
+                Err(e) => return Err(EarlyReturn::tool_error(&e)),
+            }
+        }
     };
-    // Blueprint-supplied members bypass `validate_ensemble_members` above
-    // (they are already `EnsembleMemberSpec`), so enforce the requested
-    // kind's bounds here for both paths — a 12-member blueprint used
-    // with kind parallel is refused exactly like 12 explicit members.
+    // Enforce the requested kind's bounds here for both paths — a member
+    // list outside them is refused exactly like an explicit one.
     let (min, max) = crate::domain::graphs::member_bounds(kind, caps);
     if members.len() < min || members.len() > max {
         return Err(EarlyReturn::tool_error(
@@ -427,7 +386,7 @@ pub(crate) fn exit_row_targets(
 }
 
 /// Quorum, timeout and infra budgets: explicit params win, then the node
-/// document's, then the blueprint's, then the engine default.
+/// document's, then the engine default.
 pub(crate) struct EnsembleTimeouts {
     pub mutex: Vec<String>,
     pub min_pass: i64,
@@ -443,7 +402,6 @@ pub(crate) fn resolve_ensemble_timeouts(
     params: &GraphAddEnsembleParams,
     name: &str,
     node_config: Option<&EnsembleNodeConfig>,
-    blueprint: Option<&EnsembleBlueprint>,
     kind: EnsembleKind,
     graphs: &GraphsConfig,
     members_len: usize,
@@ -456,7 +414,6 @@ pub(crate) fn resolve_ensemble_timeouts(
     let min_pass = params
         .min_pass
         .or_else(|| node_config.and_then(|config| config.min_pass))
-        .or_else(|| blueprint.and_then(|bp| bp.min_pass))
         .unwrap_or(members_len as i64);
     if let Err(e) =
         crate::domain::validation::validate_ensemble_min_pass(name, min_pass, members_len)
@@ -491,8 +448,7 @@ pub(crate) fn resolve_ensemble_timeouts(
     )?;
     let quorum_grace_minutes = params
         .quorum_grace_minutes
-        .or_else(|| node_config.and_then(|config| config.quorum_grace_minutes))
-        .or_else(|| blueprint.and_then(|bp| bp.quorum_grace_minutes));
+        .or_else(|| node_config.and_then(|config| config.quorum_grace_minutes));
     refuse_sequential_grace_field(
         kind,
         "quorum_grace_minutes",

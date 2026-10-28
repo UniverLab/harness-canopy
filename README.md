@@ -119,7 +119,7 @@ docs/ is published at univerlab.org/canopy/docs and holds user documentation onl
 - **Terminal Sessions** — Raw shell sessions with per-session command history (TOML-backed), cross-session autocomplete search, and Warp-like input mode for efficient command entry.
 - **Background Agents** — Cron-scheduled and file-watcher-triggered agents with configurable timeouts, automatic retries, execution logging (5 MB rotation), and per-run status tracking.
 - **Platform Liveness Probe** — `harness` `probe` tests whether a platform+model pair can actually respond before the `graph_control` run action spends real quota on it. Probes the exact pair a node would use, not just the platform default.
-- **Seed Identity System** — Persistent, evolvable agent identities stored as structured TOML at `~/.canopy/seeds/<id>/identity.toml`. Each seed has a unique name, family, behavioral directives, and personality traits. Binded sessions receive the seed's prompt injection automatically. The `evolve_identity` MCP tool lets agents refine themselves over time. 4 KB size cap, case-insensitive name uniqueness, and mandatory field validation.
+- **Seed Identity System** — Persistent, evolvable agent identities stored as structured TOML at `~/.canopy/seeds/<id>/identity.toml`. Each seed has a unique name, family, behavioral directives, and personality traits. Binded sessions receive the seed's prompt injection automatically. The `identity` `evolve` action lets agents refine themselves over time. 4 KB size cap, case-insensitive name uniqueness, and mandatory field validation.
 - **Seed Nursery** — Collaborative workspace for creating new seed identities. Creates a temporary directory with a draft `identity.toml` and CLI-specific instruction files (e.g. `CLAUDE.md`, `AGENTS.md`) that guide the agent to interview the user and define the seed's personality. Validates and registers the seed on completion.
 - **Context Transfer** — Seamlessly transfer conversation context, prompts, and output between agents while preserving session state and scrollback history.
 - **Prompt Builder** — Structured prompt templates with configurable sections (instruction, context, resources, examples, Canopy protocol), section picker, and @-mention agent references. The session-start Canopy protocol rides on the first prompt of an interactive session only — persisted per session across restarts and resumes — and the locked **Canopy protocol** section (`Ctrl+A`) resends it on purpose.
@@ -133,12 +133,12 @@ docs/ is published at univerlab.org/canopy/docs and holds user documentation onl
 - **Project Relationships** — Link projects with typed relations (`depends_on`, `complements`, `extends`, `publishes`; `relates_to` accepted as legacy, `contains` derived) and query related projects for context enrichment.
 - **Context Retrieval** — `intelligence_get_context` auto-detects the project, returns a curated mix of session knowledge, project facts, and related-project summaries.
 
-### 🔄 Multi-Agent Sync
+### 🔄 Multi-Agent Coordination
 
-- **Mission Declaration** — Agents declare high-level missions with impact levels (`low`/`high`/`breaking`) so peers can see what's happening.
-- **Workspace Status** — Report workspace stability (`stable`/`unstable`/`testing`) to coordinate safe concurrent work.
-- **Broadcast Messaging** — Info, query, and answer messages between agents in the same workdir.
-- **Active Context** — `sync_get_context` returns active missions, recent chatter, and a computed workspace "vibe" (worst status among active intents).
+The sync protocol tools are retired. Sessions coordinate through
+`session_list` (see every live session), `scheduled_send_create` (wake a
+session later instead of polling), and `intelligence_upsert` /
+`intelligence_search` (persist and find shared findings).
 
 ### 🔀 Graph DAG Engine
 
@@ -147,11 +147,11 @@ docs/ is published at univerlab.org/canopy/docs and holds user documentation onl
 - **Spec Queues** — Ordered queues of existing specs that a graph drains one by one. Append and reorder while a graph is running via `queue` (`create`, `add_spec`, `list`, `remove_spec`, `reorder`, `set_group`).
 - **Node Kinds** — `agent` nodes invoke CLI tools with prompt templates; `check` nodes execute shell commands; `gate` nodes validate previous output (e.g., `output_contains`); `router` nodes classify and route by token matching with fallback; `quorum` is the engine-managed node that closes an ensemble.
 - **Ensembles** — `graph_ensemble` `add` creates a parallel group of 2-8 agent-node members sharing one prompt (or per-member prompt overrides for specialist panels), plus a wait-all quorum that consolidates their outputs and routes onward, in a single MCP call. `graph_ensemble` `update` edits the shared prompt, member list, quorum/exit config, and entry wiring (including multi-source entry and chaining a quorum into another ensemble) as one unit; `graph_ensemble` `delete` removes the whole unit. See [docs/graphs.md](docs/graphs.md#ensembles).
-- **Node Blueprints** — Reusable `{name, kind, config}` templates referenced by name in `graph_node` `add`. Five builtins seeded at startup; custom blueprints via `blueprint_create`/`blueprint_delete`/`blueprint_list`.
+- **Node Documents** — Reusable versioned `{name, kind, config}` templates installed from the catalogue (`node` `install`) and referenced by name in `graph_node` `add`. Six builtins are embedded in the binary; list them with `node` `list`.
 - **Full Lifecycle** — Create, update, run, pause, continue (retry or skip), reset, complete nodes, and report blockers for human intervention. `graph_control` `schedule_autorun` resumes failed/completed graphs at a future time. Archive and restore graphs without losing history. Export and import graph designs as shareable JSON documents, and validate one — graph or single node — before installing it (`graph` `validate`, `canopy graph validate`). Copy nodes and ensembles within or across graphs. View node run history for failure diagnosis.
 - **Event-keyed Hooks** — Agent execution, direct shell commands, or interactive messages into a live session on `on_completed`, `on_failed`, `on_blocked`, and `on_spec_completed` (e.g. documentation maintenance fires once per completion; a failing graph at midnight puts a message in the operator's session, delivered when they next open the TUI). Several hooks can serve one event in order; hooks are not retroactive and never change the graph's status.
 - **Template Variables** — Graph prompts support `{{graph_name}}`, `{{workdir}}`, `{{spec_id}}`, `{{spec_name}}`, `{{spec_content}}`, `{{spec_code}}`, `{{spec_type}}`, `{{spec_scope}}`, `{{spec_commit_message}}`, `{{node_id}}`, `{{previous_feedback}}`, `{{output:<node>}}` (another node's recorded output, by node name), and `{{spec_start_head}}` (git HEAD at spec start, for check nodes). A prompt template carrying a placeholder nothing can bind — including `{{output:<name>}}` that names an ensemble rather than a node — is refused when the graph is written, not when a member tries to spawn.
-- **MCP Tools** — Complete authoring, inspection, runtime, spec, queue, and blueprint management.
+- **MCP Tools** — Complete authoring, inspection, runtime, spec, queue, and node-document management.
 
 ### 📚 Personal RAG Pipeline
 
@@ -181,7 +181,7 @@ docs/ is published at univerlab.org/canopy/docs and holds user documentation onl
 ### 🔧 Additional Features
 
 - **Prompt Template Engine** — Background agent prompts support `{{TIMESTAMP}}`, `{{TASK_ID}}`, `{{LOG_PATH}}`, `{{FILE_PATH}}`, `{{EVENT_TYPE}}` placeholders.
-- **Project Registry** — Automatic project index keyed by workdir hash. README descriptions extracted from project roots (min 20 words, before first `##` heading). Search and update via `project_search` and `project_update` MCP tools.
+- **Project Registry** — Automatic project index keyed by workdir hash. README descriptions extracted from project roots (min 20 words, before first `##` heading). Search and update via the `project` MCP tool (`search`, `update`).
 - **Action Protocol Advisor** — `get_tools` MCP tool returns scope-sensitive action protocols (`session_start`, `file_write`, `test_run`, `close_session`, `multi_agent`) with risk levels and recommended tool sets.
 - **Setup Wizard** — Interactive `canopy setup` detects installed AI CLIs from a GitHub-hosted registry, configures binary paths, model flags, headless modes, environment variables, and temperature units. Generates `~/.canopy/config.toml`.
 - **On-Demand Registry Refresh** — `canopy registry refresh` applies the platform registry to `config.toml` now, ignoring the 24-hour window the TUI's background refresh uses at startup. Reports the CLI fields it changed, the local overrides it kept, and the platforms added, updated or removed. The `harness` `refresh_registry` action does the same from an agent session.
@@ -192,31 +192,28 @@ docs/ is published at univerlab.org/canopy/docs and holds user documentation onl
 
 ---
 
-## MCP Tools (57)
+## MCP Tools (31)
 
-Graph-node sessions (agent and ensemble nodes launched by the graph engine) receive a fixed node profile of 17 tools via `CANOPY_MCP_PROFILE=node`, so every node stays well under the 128-tool cap of OpenAI-compatible providers. All other sessions — the orchestrator, check nodes, hooks, TUI, subagents, and background agents — keep the full tool list.
+Graph-node sessions (agent and ensemble nodes launched by the graph engine) receive a fixed node profile of 12 tools via `CANOPY_MCP_PROFILE=node`, so every node stays well under the 128-tool cap of OpenAI-compatible providers. All other sessions — the orchestrator, check nodes, hooks, TUI, subagents, and background agents — keep the full tool list.
 
 | Tools | Category |
 |---|---|
-| `agent`, `agent_edit`, `agent_report`, `subagent_spawn`, `subagent_collect` | **Agent management** (5) |
+| `agent`, `agent_edit`, `agent_report`, `subagent` | **Agent management** (4) |
 | `harness` | **Harness** (1) |
-| `sync_declare_intent`, `sync_report_status`, `sync_broadcast`, `sync_get_context` | **Multi-agent sync** (4) |
-| `intelligence_get_context`, `intelligence_upsert`, `intelligence_search`, `intelligence_graph_walk`, `intelligence_list_projects`, `intelligence_link_projects`, `intelligence_delete_node`, `intelligence_delete_relation` | **Intelligence** (8) |
-| `get_identity`, `evolve_identity`, `create_seed`, `list_seeds`, `remove_seed` | **Seed identity** (5) |
-| `skill_list`, `skill_get` | **Skills** (2) |
+| `intelligence_get_context`, `intelligence_upsert`, `intelligence_search`, `intelligence_admin` | **Intelligence** (4) |
+| `identity` | **Identity** (1) |
+| `skill` | **Skills** (1) |
 | `graph`, `graph_edit`, `graph_node`, `graph_edge`, `graph_ensemble`, `graph_control`, `graph_complete_node`, `graph_report_blocker` | **Graph engine** (8) |
 | `crew` | **Crews** (1) |
 | `config` | **Configuration** (1) |
-| `mutex` | **Named mutexes** (1) |
-| `spec`, `spec_edit`, `spec_convert` | **Spec backlog** (3) |
+| `spec`, `spec_edit` | **Spec backlog** (2) |
 | `queue` | **Spec queues** (1) |
-| `blueprint_list`, `blueprint_create`, `blueprint_delete` | **Node blueprints** (3) |
-| `node_list`, `node_install`, `node_remove` | **Node documents** (3) |
-| `project_search`, `project_update`, `project_remap`, `project_register` | **Project** (4) |
-| `rag_search`, `rag_compact` | **RAG** (2) |
+| `node` | **Node documents** (1) |
+| `project` | **Project** (1) |
+| `rag` | **RAG** (1) |
 | `get_tools` | **Protocol** (1) |
 | `session_list` | **Interactive sessions** (1) |
-| `scheduled_send_create`, `scheduled_send_list`, `scheduled_send_cancel` | **Scheduled sends** (3) |
+| `scheduled_send_create`, `scheduled_send` | **Scheduled sends** (2) |
 
 ---
 
@@ -227,8 +224,8 @@ Graph-node sessions (agent and ensemble nodes launched by the graph engine) rece
 - **Watcher Engine** — Reacts to file system events, triggering tasks as defined.
 - **Executor** — Runs tasks and agents, manages locking, logs, and status.
 - **Intelligence V2** — Project-scoped knowledge graph with node/edge CRUD, deletion tools, graph walk, project relationships.
-- **Sync Manager** — Per-workdir in-memory broadcast channels (64 capacity), DB persistence, and intelligence node auto-upsert.
-- **Graph Engine** — DAG execution engine: agent/check/gate/router node runners, iteration limits, pause/continue, blocker reporting, spec queues, node blueprints, scheduled autorun, archive/restore, export/import, node run history, and copy tools.
+- **Sync History** — Durable mission and chatter store that `intelligence_get_context` surfaces and the TUI renders; the live broadcast protocol is retired.
+- **Graph Engine** — DAG execution engine: agent/check/gate/router node runners, iteration limits, pause/continue, blocker reporting, spec queues, node documents, scheduled autorun, archive/restore, export/import, node run history, and copy tools.
 - **RAG Pipeline** — Background ingestion, language-aware chunking, embedding client, vector store, and rate-limited search.
 - **TUI** — Full-screen ratatui terminal UI for managing agents, viewing output, graphs, and system metrics in real time.
 - **Gamification** — Mission tracker with 28 achievements across 6 categories, persisted in the database.
@@ -242,11 +239,10 @@ Graph-node sessions (agent and ensemble nodes launched by the graph engine) rece
 - `autoupdate/` — Self-update system (GitHub releases)
 - `daemon/` — MCP server, handler, params, RAG CLI, doctor
 - `db/` — SQLite persistence and migrations (agents, runs, sessions, sync, intelligence, graphs, projects, seeds, groups, state)
-- `domain/` — Core models: Agent, Trigger, WatchEvent, Project, SeedIdentity, Graph, GraphSpec, Queue, GraphNodeBlueprint, SyncMessage, IntelligenceNode
+- `domain/` — Core models: Agent, Trigger, WatchEvent, Project, SeedIdentity, Graph, GraphSpec, Queue, GraphNode, SyncMessage, IntelligenceNode
 - `executor/` — Task and agent execution logic
 - `rag/` — RAG pipeline (ingestion, chunking, embedding, vector store, rate limiting)
 - `scheduler/` — Internal cron scheduler with template variables
-- `sync_manager/` — Multi-agent coordination broadcast
 - `tui/` — Terminal UI: agent management, dialogs, sidebar, system dashboard, context transfer
 - `watchers/` — File system watcher engine
 - `graph_engine/` — DAG graph execution engine

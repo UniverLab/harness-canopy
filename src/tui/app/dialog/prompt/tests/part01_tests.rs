@@ -1093,7 +1093,7 @@ fn append_tool_skill_canopy_formats_with_skill_get() {
     let mut result = String::new();
     append_tool_skill(&mut result, "canopy:canopy-graph-design");
     assert!(result.contains("canopy skill canopy-graph-design"));
-    assert!(result.contains("skill_get(name=\"canopy-graph-design\")"));
+    assert!(result.contains("the `skill` tool's `get` action (name=\"canopy-graph-design\")"));
 }
 
 #[test]
@@ -1248,10 +1248,10 @@ fn build_body_renders_canopy_skill_with_skill_get_instruction() {
     let mut dialog = SimplePromptDialog::new();
     dialog.add_section_with_content("tools", "canopy:canopy-graph-design".to_string());
     let body = dialog.build_body();
-    let expected = "canopy skill canopy-graph-design \u{2014} load it with skill_get(name=\"canopy-graph-design\")";
+    let expected = "canopy skill canopy-graph-design \u{2014} load it with the `skill` tool's `get` action (name=\"canopy-graph-design\")";
     assert!(
         body.contains(expected),
-        "build_body should render the canopy skill as a skill_get fetch instruction; got: {body}"
+        "build_body should render the canopy skill as a skill get fetch instruction; got: {body}"
     );
 }
 

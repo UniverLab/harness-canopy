@@ -56,7 +56,7 @@ Entries are previewed before writing — overwrites are marked
 `(replaces existing)` — and one confirm installs them everywhere.
 See the [CLI reference](cli-reference.md) for details.
 After that, your AI agents can call all
-[85 MCP tools](mcp-tools.md) — schedule background agents, store
+[31 MCP tools](mcp-tools.md) — schedule background agents, store
 knowledge, coordinate with each other.
 
 ## 5. Verify

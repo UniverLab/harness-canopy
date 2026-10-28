@@ -109,7 +109,7 @@ impl SeedIdentity {
         Ok(())
     }
 
-    /// Apply evolution updates (from evolve_identity MCP tool).
+    /// Apply evolution updates (from the `identity` `evolve` action).
     pub fn evolve(
         &mut self,
         new_directives: Option<Vec<String>>,

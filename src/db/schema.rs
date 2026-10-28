@@ -381,20 +381,6 @@ impl Database {
             )
             .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
-        let has_bp_quorum_grace: bool = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('ensemble_blueprints') WHERE name = 'quorum_grace_minutes'",
-                [],
-                |row| Ok(row.get::<_, i32>(0)? > 0),
-            )
-            .unwrap_or(false);
-        if !has_bp_quorum_grace {
-            conn.execute(
-                "ALTER TABLE ensemble_blueprints ADD COLUMN quorum_grace_minutes INTEGER",
-                [],
-            )
-            .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
-        }
         Ok(())
     }
 
@@ -757,6 +743,21 @@ impl Database {
                 .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
             }
         }
+        Ok(())
+    }
+
+    /// Drop the retired `blueprints` and `ensemble_blueprints` tables.
+    /// Guarded `DROP TABLE IF EXISTS` — a no-op on a fresh database (the
+    /// tables are gone from `BASE_SCHEMA_BATCHES`) and on an
+    /// already-migrated one, and the thing that removes them from a
+    /// database created before they were retired. Node configs are inline,
+    /// so nothing reads either table at run time.
+    pub(in crate::db) fn migrate_drop_blueprint_tables(conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS blueprints;
+             DROP TABLE IF EXISTS ensemble_blueprints;",
+        )
+        .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         Ok(())
     }
 }

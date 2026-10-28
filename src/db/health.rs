@@ -73,7 +73,7 @@ impl Database {
 
 /// Runs `PRAGMA integrity_check` against an arbitrary database file, without
 /// going through [`Database::new`] — which would run every migration and
-/// seed builtin blueprints/prompts against it, mutating a file that's
+/// seed builtin prompts against it, mutating a file that's
 /// supposed to be an inert, exact copy. Opened read-only so verifying a
 /// backup can never itself write to it.
 ///

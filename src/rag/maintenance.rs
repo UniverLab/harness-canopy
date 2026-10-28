@@ -291,7 +291,7 @@ impl IngestionManager {
         }
     }
 
-    /// Behind the `rag_compact` MCP tool / `canopy rag compact`: run a
+    /// Behind the `rag` `compact` action / `canopy rag compact`: run a
     /// compaction now and return a human-readable before/after block.
     /// Refuses politely when a maintenance pass is already running.
     pub(crate) async fn compact_now_report(&self) -> String {

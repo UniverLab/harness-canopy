@@ -141,7 +141,7 @@ lists the same missions read-only from the command line (see
 
 Two missions to know by their exact challenge: **The Gardener** —
 update descriptions or tags for 5+ different projects (via the
-`project_update` tool); **Parallel Vision** — run a graph with a
+`project` tool's `update` action); **Parallel Vision** — run a graph with a
 parallel ensemble. On systems with no CPU temperature sensor (such as
 WSL), **Nuclear Winter** shows as `not measurable on this system`.
 
@@ -232,7 +232,7 @@ row: `/` filters, `n` creates, `e` edits and `F4` deletes.
   cache only — no network). A name present both on disk and in canopy's
   store appears under both prefixes, so you pick which one to reference.
   Selecting a `[canopy]:` entry renders
-  `canopy skill <name> — load it with skill_get(name="<name>")` in the
+  `canopy skill <name> — load it with the skill tool's get action (name="<name>")` in the
   built prompt's tools block, so the agent fetches it over MCP; on-disk
   skills keep their plain `skill:<name>` entry.
 - **Canopy protocol — once per session** — the builder prepends the

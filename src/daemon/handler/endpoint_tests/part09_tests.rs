@@ -147,25 +147,33 @@ async fn intelligence_upsert_search_and_graph_walk() {
         .unwrap();
     assert!(raw_text(&searched).contains("fact-1"));
 
-    let walked = handler
-        .intelligence_graph_walk(Parameters(IntelligenceGraphWalkParams {
+    let walked = call_resource_action(
+        &handler,
+        "intelligence_admin",
+        "walk",
+        params_id(IntelligenceGraphWalkParams {
             node_id: "fact-2".to_string(),
             depth: Some(2),
             compact: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&walked), "{}", text(&walked));
     assert!(raw_text(&walked).contains("fact-1"));
 
-    let missing_root = handler
-        .intelligence_graph_walk(Parameters(IntelligenceGraphWalkParams {
+    let missing_root = call_resource_action(
+        &handler,
+        "intelligence_admin",
+        "walk",
+        params_id(IntelligenceGraphWalkParams {
             node_id: "ghost-node".to_string(),
             depth: None,
             compact: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&missing_root));
 }
 
@@ -362,16 +370,17 @@ async fn intelligence_delete_node_removes_node_and_reports_relations() {
     .await;
 
     // "delete-b" sits in the middle of a -> b, b -> c: two edges touch it.
-    let deleted = handler
-        .intelligence_delete_node(
-            Parameters(IntelligenceDeleteNodeParams {
-                node_id: "delete-b".to_string(),
-                project_hash: None,
-            }),
-            OptionalExtension(None),
-        )
-        .await
-        .unwrap();
+    let deleted = call_resource_action(
+        &handler,
+        "intelligence_admin",
+        "delete_node",
+        params_id(IntelligenceDeleteNodeParams {
+            node_id: "delete-b".to_string(),
+            project_hash: None,
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&deleted), "{}", text(&deleted));
     let body = raw_text(&deleted);
     assert!(body.contains("delete-b"));
@@ -394,25 +403,33 @@ async fn intelligence_delete_node_removes_node_and_reports_relations() {
 
     // Neither surviving neighbor's graph walk should error or reference
     // the removed middle node.
-    let from_a = handler
-        .intelligence_graph_walk(Parameters(IntelligenceGraphWalkParams {
+    let from_a = call_resource_action(
+        &handler,
+        "intelligence_admin",
+        "walk",
+        params_id(IntelligenceGraphWalkParams {
             node_id: "delete-a".to_string(),
             depth: Some(3),
             compact: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&from_a), "{}", text(&from_a));
     assert!(!raw_text(&from_a).contains("delete-b"));
 
-    let from_c = handler
-        .intelligence_graph_walk(Parameters(IntelligenceGraphWalkParams {
+    let from_c = call_resource_action(
+        &handler,
+        "intelligence_admin",
+        "walk",
+        params_id(IntelligenceGraphWalkParams {
             node_id: "delete-c".to_string(),
             depth: Some(3),
             compact: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&from_c), "{}", text(&from_c));
     assert!(!raw_text(&from_c).contains("delete-b"));
 }
@@ -422,16 +439,17 @@ async fn intelligence_delete_node_missing_id_returns_error_not_silent_success() 
     let (_dir, _db, handler) = endpoint_test_handler();
     let _agent_guard = AgentIdVar::set("agent-intel-delete-2");
 
-    let deleted = handler
-        .intelligence_delete_node(
-            Parameters(IntelligenceDeleteNodeParams {
-                node_id: "ghost-node".to_string(),
-                project_hash: None,
-            }),
-            OptionalExtension(None),
-        )
-        .await
-        .unwrap();
+    let deleted = call_resource_action(
+        &handler,
+        "intelligence_admin",
+        "delete_node",
+        params_id(IntelligenceDeleteNodeParams {
+            node_id: "ghost-node".to_string(),
+            project_hash: None,
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&deleted));
 }
 
@@ -453,14 +471,18 @@ async fn intelligence_delete_relation_removes_edge_leaves_nodes_intact() {
     )
     .await;
 
-    let walked = handler
-        .intelligence_graph_walk(Parameters(IntelligenceGraphWalkParams {
+    let walked = call_resource_action(
+        &handler,
+        "intelligence_admin",
+        "walk",
+        params_id(IntelligenceGraphWalkParams {
             node_id: "rel-b".to_string(),
             depth: Some(1),
             compact: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let edge_id = serde_json::from_str::<serde_json::Value>(&raw_text(&walked))
         .unwrap()
         .get("edges")
@@ -470,26 +492,31 @@ async fn intelligence_delete_relation_removes_edge_leaves_nodes_intact() {
         .and_then(|id| id.as_i64())
         .expect("edge id present in graph walk response");
 
-    let deleted = handler
-        .intelligence_delete_relation(
-            Parameters(IntelligenceDeleteRelationParams {
-                edge_id,
-                project_hash: None,
-            }),
-            OptionalExtension(None),
-        )
-        .await
-        .unwrap();
+    let deleted = call_resource_action(
+        &handler,
+        "intelligence_admin",
+        "delete_relation",
+        params_id(IntelligenceDeleteRelationParams {
+            edge_id,
+            project_hash: None,
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&deleted), "{}", text(&deleted));
 
-    let walked_after = handler
-        .intelligence_graph_walk(Parameters(IntelligenceGraphWalkParams {
+    let walked_after = call_resource_action(
+        &handler,
+        "intelligence_admin",
+        "walk",
+        params_id(IntelligenceGraphWalkParams {
             node_id: "rel-b".to_string(),
             depth: Some(1),
             compact: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!raw_text(&walked_after).contains("rel-a"));
 
     // Both endpoint nodes survive the relation delete.
@@ -510,16 +537,17 @@ async fn intelligence_delete_relation_removes_edge_leaves_nodes_intact() {
     assert!(search_body.contains("rel-a"));
     assert!(search_body.contains("rel-b"));
 
-    let missing = handler
-        .intelligence_delete_relation(
-            Parameters(IntelligenceDeleteRelationParams {
-                edge_id,
-                project_hash: None,
-            }),
-            OptionalExtension(None),
-        )
-        .await
-        .unwrap();
+    let missing = call_resource_action(
+        &handler,
+        "intelligence_admin",
+        "delete_relation",
+        params_id(IntelligenceDeleteRelationParams {
+            edge_id,
+            project_hash: None,
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&missing));
 }
 
@@ -582,35 +610,47 @@ async fn intelligence_list_and_link_projects() {
     let hash_a = crate::domain::project::workdir_hash(&dir_a.path().to_string_lossy());
     let hash_b = crate::domain::project::workdir_hash(&dir_b.path().to_string_lossy());
 
-    let listed = handler
-        .intelligence_list_projects(Parameters(IntelligenceListProjectsParams {
+    let listed = call_resource_action(
+        &handler,
+        "intelligence_admin",
+        "list_projects",
+        params_id(IntelligenceListProjectsParams {
             query: None,
             limit: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&listed));
 
-    let empty_fields = handler
-        .intelligence_link_projects(Parameters(IntelligenceLinkProjectsParams {
+    let empty_fields = call_resource_action(
+        &handler,
+        "intelligence_admin",
+        "link_projects",
+        params_id(IntelligenceLinkProjectsParams {
             from_project_hash: "  ".to_string(),
             to_project_hash: hash_b.clone(),
             relation: None,
             weight: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&empty_fields));
 
-    let linked = handler
-        .intelligence_link_projects(Parameters(IntelligenceLinkProjectsParams {
+    let linked = call_resource_action(
+        &handler,
+        "intelligence_admin",
+        "link_projects",
+        params_id(IntelligenceLinkProjectsParams {
             from_project_hash: hash_a,
             to_project_hash: hash_b,
             relation: Some("depends_on".to_string()),
             weight: Some(0.5),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&linked), "{}", text(&linked));
     assert!(raw_text(&linked).contains("depends_on"));
 }
@@ -633,27 +673,35 @@ async fn intelligence_link_rejects_unknown_relation_via_mcp() {
             .to_string_lossy(),
     );
 
-    let bad = handler
-        .intelligence_link_projects(Parameters(IntelligenceLinkProjectsParams {
+    let bad = call_resource_action(
+        &handler,
+        "intelligence_admin",
+        "link_projects",
+        params_id(IntelligenceLinkProjectsParams {
             from_project_hash: hash_a.clone(),
             to_project_hash: hash_b.clone(),
             relation: Some("blocks".to_string()),
             weight: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&bad), "unknown relation must be an error_result");
     assert!(raw_text(&bad).contains("allowed:"));
 
-    let derived = handler
-        .intelligence_link_projects(Parameters(IntelligenceLinkProjectsParams {
+    let derived = call_resource_action(
+        &handler,
+        "intelligence_admin",
+        "link_projects",
+        params_id(IntelligenceLinkProjectsParams {
             from_project_hash: hash_a,
             to_project_hash: hash_b,
             relation: Some("contains".to_string()),
             weight: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&derived));
     assert!(raw_text(&derived).contains("derived"));
 }
@@ -766,12 +814,16 @@ async fn project_register_tool_registers_without_marker() {
     std::fs::create_dir_all(&target).unwrap();
     assert!(!target.join(".canopy-project").exists());
 
-    let registered = handler
-        .project_register(Parameters(ProjectRegisterParams {
+    let registered = call_resource_action(
+        &handler,
+        "project",
+        "register",
+        params_id(ProjectRegisterParams {
             path: target.to_string_lossy().to_string(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&registered), "{}", text(&registered));
     assert!(raw_text(&registered).contains("\"workdir_hash\""));
 
@@ -885,40 +937,56 @@ async fn project_search_and_update() {
     std::fs::create_dir_all(&project_dir).unwrap();
     let project = db.register_project_path(&project_dir).unwrap();
 
-    let no_match = handler
-        .project_search(Parameters(ProjectSearchParams {
+    let no_match = call_resource_action(
+        &handler,
+        "project",
+        "search",
+        params_id(ProjectSearchParams {
             query: "nothing-matches-this-xyz".to_string(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(text(&no_match).contains("No projects found"));
 
-    let found = handler
-        .project_search(Parameters(ProjectSearchParams {
+    let found = call_resource_action(
+        &handler,
+        "project",
+        "search",
+        params_id(ProjectSearchParams {
             query: "searchable-project".to_string(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(raw_text(&found).contains(&project.hash));
 
-    let updated = handler
-        .project_update(Parameters(ProjectUpdateParams {
+    let updated = call_resource_action(
+        &handler,
+        "project",
+        "update",
+        params_id(ProjectUpdateParams {
             project_hash: project.hash.clone(),
             description: Some("A test project".to_string()),
             tags: Some(vec!["rust".to_string()]),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&updated), "{}", text(&updated));
 
-    let missing = handler
-        .project_update(Parameters(ProjectUpdateParams {
+    let missing = call_resource_action(
+        &handler,
+        "project",
+        "update",
+        params_id(ProjectUpdateParams {
             project_hash: "not-a-real-hash".to_string(),
             description: Some("x".to_string()),
             tags: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&missing));
 }
 
@@ -936,28 +1004,36 @@ async fn project_update_unlocks_gardener_after_five_projects() {
 
     // The same project twice counts once.
     for _ in 0..2 {
-        let updated = handler
-            .project_update(Parameters(ProjectUpdateParams {
+        let updated = call_resource_action(
+            &handler,
+            "project",
+            "update",
+            params_id(ProjectUpdateParams {
                 project_hash: hashes[0].clone(),
                 description: Some("A tended garden".to_string()),
                 tags: None,
-            }))
-            .await
-            .unwrap();
+            }),
+        )
+        .await
+        .unwrap();
         assert!(!is_err(&updated), "{}", text(&updated));
     }
     assert_eq!(db.count_gardener_projects().unwrap(), 1);
 
     // Tags-only updates count too; four more distinct projects unlock.
     for hash in hashes.iter().skip(1) {
-        let updated = handler
-            .project_update(Parameters(ProjectUpdateParams {
+        let updated = call_resource_action(
+            &handler,
+            "project",
+            "update",
+            params_id(ProjectUpdateParams {
                 project_hash: hash.clone(),
                 description: None,
                 tags: Some(vec!["tended".to_string()]),
-            }))
-            .await
-            .unwrap();
+            }),
+        )
+        .await
+        .unwrap();
         assert!(!is_err(&updated), "{}", text(&updated));
     }
     assert_eq!(db.count_gardener_projects().unwrap(), 5);
@@ -977,15 +1053,19 @@ async fn project_remap_moves_project_to_new_path() {
     db.insert_terminal_session("t-1", "t-1", "bash", &project.path)
         .unwrap();
 
-    let result = handler
-        .project_remap(Parameters(ProjectRemapParams {
+    let result = call_resource_action(
+        &handler,
+        "project",
+        "remap",
+        params_id(ProjectRemapParams {
             project_hash: project.hash.clone(),
             new_path: new_dir.to_string_lossy().to_string(),
             dry_run: None,
             force: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&result), "{}", text(&result));
     let body = raw_text(&result);
     assert!(body.contains("\"kind\": \"move\""));
@@ -1015,15 +1095,19 @@ async fn project_remap_dry_run_changes_nothing() {
     std::fs::create_dir_all(&new_dir).unwrap();
     let project = db.register_project_path(&old_dir).unwrap();
 
-    let result = handler
-        .project_remap(Parameters(ProjectRemapParams {
+    let result = call_resource_action(
+        &handler,
+        "project",
+        "remap",
+        params_id(ProjectRemapParams {
             project_hash: project.hash.clone(),
             new_path: new_dir.to_string_lossy().to_string(),
             dry_run: Some(true),
             force: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&result), "{}", text(&result));
     assert!(raw_text(&result).contains("\"dry_run\": true"));
 
@@ -1039,15 +1123,19 @@ async fn project_remap_refuses_missing_path_without_force() {
     std::fs::create_dir_all(&old_dir).unwrap();
     let project = db.register_project_path(&old_dir).unwrap();
 
-    let result = handler
-        .project_remap(Parameters(ProjectRemapParams {
+    let result = call_resource_action(
+        &handler,
+        "project",
+        "remap",
+        params_id(ProjectRemapParams {
             project_hash: project.hash.clone(),
             new_path: "/definitely/does/not/exist/anywhere".to_string(),
             dry_run: None,
             force: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&result));
     assert!(db.get_project(&project.hash).unwrap().is_some());
 }
@@ -1058,14 +1146,20 @@ async fn project_remap_refuses_missing_path_without_force() {
 async fn skill_list_empty_and_skill_get_unknown() {
     let (_dir, _db, handler) = endpoint_test_handler();
 
-    let listed = handler.skill_list().await.unwrap();
+    let listed = call_resource_action(&handler, "skill", "list", ())
+        .await
+        .unwrap();
     assert!(!is_err(&listed));
 
-    let missing = handler
-        .skill_get(Parameters(SkillGetParams {
+    let missing = call_resource_action(
+        &handler,
+        "skill",
+        "get",
+        params_id(SkillGetParams {
             name: "unknown-skill".to_string(),
-        }))
-        .await;
+        }),
+    )
+    .await;
     assert!(missing.is_err());
 }
 
@@ -1363,14 +1457,18 @@ async fn intelligence_graph_walk_with_prefix() {
         .unwrap();
     assert!(!is_err(&created), "{}", text(&created));
 
-    let walked = handler
-        .intelligence_graph_walk(Parameters(IntelligenceGraphWalkParams {
+    let walked = call_resource_action(
+        &handler,
+        "intelligence_admin",
+        "walk",
+        params_id(IntelligenceGraphWalkParams {
             node_id: "deadbeef".to_string(),
             depth: Some(1),
             compact: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(
         !is_err(&walked),
         "prefix walk should succeed: {}",

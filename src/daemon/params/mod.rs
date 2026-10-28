@@ -19,8 +19,6 @@ mod graph_crew;
 pub use graph_crew::*;
 mod roster;
 pub use roster::*;
-mod mutex;
-pub use mutex::*;
 mod crew;
 pub use crew::*;
 mod settings;
@@ -67,7 +65,7 @@ mod tests {
         let schema = schemars::schema_for!(GraphAddNodeParams);
         let value = serde_json::to_value(&schema).expect("schema should serialize");
         let config_schema = &value["properties"]["config"];
-        // `config` is now optional (an alternative to `blueprint`), so the
+        // `config` is now optional (an alternative to `node`), so the
         // "object" type may appear directly or nested under a $ref/anyOf
         // produced for `Option<..>`.
         let type_str = config_schema["type"].as_str();

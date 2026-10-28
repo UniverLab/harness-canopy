@@ -58,12 +58,6 @@ impl Database {
         if let Err(e) = self.seed_cm9_project_dependencies() {
             self.log_startup_step_failure("seed CM9 project dependencies", &e);
         }
-        if let Err(e) = self.seed_builtin_blueprints() {
-            self.log_startup_step_failure("seed builtin blueprints", &e);
-        }
-        if let Err(e) = self.seed_builtin_ensemble_blueprints() {
-            self.log_startup_step_failure("seed builtin ensemble blueprints", &e);
-        }
     }
 
     /// Test-only escape hatch: run raw SQL against the handle. Lets UI tests

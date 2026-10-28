@@ -218,7 +218,7 @@ pub fn migrate_legacy_caches(canopy_dir: &Path, other_instance_may_be_running: b
 /// `daemon::process::other_instance_may_be_running` before calling in,
 /// rather than this module reaching for daemon detection itself: this
 /// `domain` module is also compiled standalone (see
-/// `examples/rag_search.rs`) without the `daemon` module available. As with
+/// the standalone RAG search example) without the `daemon` module available. As with
 /// `usage_stats::migrate_legacy_json`, "an old reader of the legacy path
 /// may still exist" is assumed by default: this project rebuilds and
 /// re-runs from source while the previously installed binary's daemon and

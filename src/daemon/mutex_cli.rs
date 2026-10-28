@@ -1,37 +1,41 @@
 //! CLI handlers for `canopy mutex` subcommands.
 //!
-//! Every subcommand delegates to the `mutex` MCP tool via
-//! `daemon::cli_daemon::call_tool`, so the CLI and MCP share one code path.
+//! `list` is read-only: it opens the local database directly, exactly like
+//! `canopy agent show` (see `agent_cli.rs`), and never requires the daemon.
 
 use anyhow::Result;
 use clap::Subcommand;
 
-use crate::daemon::cli_daemon::call_tool;
 use crate::db::mutex_store::MutexState;
+use crate::db::Database;
+use crate::domain::db_paths::database_path;
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum MutexAction {
     /// List granted mutex leases and queued waiters (FIFO).
     List {
-        /// Print the raw MCP JSON shape instead of human-readable lines.
+        /// Print the raw JSON shape instead of human-readable lines.
         #[arg(long)]
         json: bool,
     },
 }
 
-pub async fn handle_mutex_action(action: MutexAction, port_override: Option<u16>) -> Result<()> {
+pub async fn handle_mutex_action(action: MutexAction, _port_override: Option<u16>) -> Result<()> {
     match action {
         MutexAction::List { json } => {
-            let text = call_tool(
-                port_override,
-                "mutex",
-                &serde_json::json!({ "action": "list" }),
-            )?;
+            let data_dir = crate::ensure_data_dir()?;
+            let db = Database::new_safe(&database_path(&data_dir), &data_dir)?;
+            let state = db.list_mutex_state()?;
             if json {
-                println!("{text}");
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "leases": state.leases,
+                        "waiters": state.waiters,
+                    }))?
+                );
                 return Ok(());
             }
-            let state: MutexState = serde_json::from_str(&text).unwrap_or_default();
             for line in render_mutex_state(&state) {
                 println!("{line}");
             }

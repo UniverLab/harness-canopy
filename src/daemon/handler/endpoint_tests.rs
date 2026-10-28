@@ -7,7 +7,6 @@ use crate::domain::models::{Agent, Cli, RunLog, RunStatus, TriggerType};
 use crate::executor::Executor;
 use crate::graph_engine::GraphEngine;
 use crate::rag::ingestion::IngestionManager;
-use crate::sync_manager::SyncManager;
 use crate::watchers::WatcherEngine;
 use tempfile::tempdir;
 use tokio::sync::Notify;
@@ -49,7 +48,6 @@ fn endpoint_test_handler() -> (
     let db = Arc::new(Database::new(&dir.path().join("test.db")).unwrap());
     let notif: Arc<dyn NotificationService> = Arc::new(DefaultNotificationService);
     let executor = Arc::new(Executor::new(Arc::clone(&db), Arc::clone(&notif)));
-    let sync_manager = Arc::new(SyncManager::new(Arc::clone(&db)));
     let graph_engine = Arc::new(GraphEngine::new(Arc::clone(&db), Arc::clone(&notif)));
     let watcher_engine = Arc::new(WatcherEngine::new(
         Arc::clone(&db),
@@ -72,7 +70,6 @@ fn endpoint_test_handler() -> (
         scheduler_notify: Arc::new(Notify::new()),
         graph_engine,
         notification_service: notif,
-        sync_manager,
         ingestion,
         dynamic_skills,
         start_time: std::time::Instant::now(),
@@ -211,7 +208,6 @@ async fn build_simple_graph(
             name: "implementer".to_string(),
             kind: Some("agent".to_string()),
             config: Some(agent_node_config("claude")),
-            blueprint: None,
             node: None,
             config_overrides: None,
         }),
@@ -230,7 +226,6 @@ async fn build_simple_graph(
             name: "gate".to_string(),
             kind: Some("check".to_string()),
             config: Some(check_node_config("cargo test")),
-            blueprint: None,
             node: None,
             config_overrides: None,
         }),
@@ -249,7 +244,6 @@ async fn build_simple_graph(
             name: "committer".to_string(),
             kind: Some("agent".to_string()),
             config: Some(agent_node_config("claude")),
-            blueprint: None,
             node: None,
             config_overrides: None,
         }),
@@ -338,7 +332,6 @@ async fn graph_with_unexited_quorum(
                     infra_backoff_seconds: None,
                 },
             ]),
-            blueprint: None,
             node: None,
             from_node: entry.id.clone(),
             condition: "always".to_string(),
@@ -520,7 +513,6 @@ async fn add_agent_node(handler: &TaskTriggerHandler, spec_id: &str, name: &str)
             name: name.to_string(),
             kind: Some("agent".to_string()),
             config: Some(agent_node_config("claude")),
-            blueprint: None,
             node: None,
             config_overrides: None,
         }),
@@ -563,7 +555,6 @@ async fn add_cb52_ensemble(
             kind: None,
             prompt_template: Some("Review {{spec_name}}".to_string()),
             members: Some(vec![member(), member()]),
-            blueprint: None,
             node: None,
             from_node: entry.to_string(),
             condition: "always".to_string(),
@@ -736,7 +727,6 @@ async fn add_two_member_ensemble(
                     infra_backoff_seconds: None,
                 },
             ]),
-            blueprint: None,
             node: None,
             from_node: from_node.to_string(),
             condition: "always".to_string(),
@@ -823,7 +813,6 @@ async fn build_two_source_ensemble_graph(
             kind: None,
             prompt_template: Some("Draft it".to_string()),
             members: Some((0..member_count).map(|_| member()).collect()),
-            blueprint: None,
             node: None,
             from_node: entry.clone(),
             condition: "always".to_string(),
@@ -1123,7 +1112,6 @@ async fn build_crew_ensemble(
             name: "kickoff".to_string(),
             kind: Some("check".to_string()),
             config: Some(check_node_config("true")),
-            blueprint: None,
             node: None,
             config_overrides: None,
         }),
@@ -1141,7 +1129,6 @@ async fn build_crew_ensemble(
             name: "downstream".to_string(),
             kind: Some("agent".to_string()),
             config: Some(agent_node_config("claude")),
-            blueprint: None,
             node: None,
             config_overrides: None,
         }),
@@ -1161,7 +1148,6 @@ async fn build_crew_ensemble(
             kind: None,
             name: "Proposers".to_string(),
             prompt_template: Some("draft it".to_string()),
-            blueprint: None,
             node: None,
             members: None,
             condition: "always".to_string(),
@@ -1218,7 +1204,6 @@ async fn build_literal_ensemble(
             name: "kickoff".to_string(),
             kind: Some("check".to_string()),
             config: Some(check_node_config("true")),
-            blueprint: None,
             node: None,
             config_overrides: None,
         }),
@@ -1236,7 +1221,6 @@ async fn build_literal_ensemble(
             name: "downstream".to_string(),
             kind: Some("agent".to_string()),
             config: Some(agent_node_config("claude")),
-            blueprint: None,
             node: None,
             config_overrides: None,
         }),
@@ -1276,7 +1260,6 @@ async fn build_literal_ensemble(
             kind: None,
             name: "Proposers".to_string(),
             prompt_template: Some("draft it".to_string()),
-            blueprint: None,
             node: None,
             members: Some(members),
             condition: "always".to_string(),
@@ -1341,3 +1324,4 @@ mod part13_tests;
 mod part14_tests;
 mod part15_tests;
 mod part16_tests;
+mod part17_tests;

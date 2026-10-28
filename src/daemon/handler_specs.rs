@@ -1,4 +1,4 @@
-//! MCP handler tools split out of `daemon::handler` (spec and blueprint tools).
+//! MCP handler tools split out of `daemon::handler` (spec tools).
 //! Moved verbatim; tool names, schemas, and behaviour unchanged.
 
 use crate::daemon::handler::{TaskTriggerHandler, SPEC_LIST_DEFAULT_LIMIT};
@@ -6,7 +6,7 @@ use crate::daemon::handler_formatting::{
     build_id_result, build_spec_update_response, internal_error,
 };
 use crate::daemon::handler_specs_helpers::{
-    convert_specs, spec_create_result, spec_summary_json, validate_at_least_one_bool,
+    spec_create_result, spec_summary_json, validate_at_least_one_bool,
 };
 use crate::daemon::handler_validate::{
     resolve_prefix_or_error, validate_non_empty, validate_position_conflict,
@@ -22,11 +22,8 @@ use crate::domain::graphs::{
 use crate::domain::spec_type::{parse_conventional_title, resolve_spec_naming};
 use crate::domain::specs::{extract_spec_section, SpecSection, SpecSectionResult};
 use rmcp::model::{CallToolResult, ContentBlock};
-use rmcp::tool;
-use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
 
-#[tool_router(router = tool_router_specs, vis = "pub(crate)")]
 impl TaskTriggerHandler {
     pub(crate) async fn graph_add_spec_impl(
         &self,
@@ -716,33 +713,5 @@ impl TaskTriggerHandler {
                 e
             ))),
         }
-    }
-
-    #[tool(
-        name = "spec_convert",
-        description = "Convert all legacy heading-format specs to the tagged <spec> format. Skips already-tagged specs and running specs. Returns a structured report."
-    )]
-    pub(crate) async fn spec_convert(&self) -> Result<CallToolResult, McpError> {
-        let all_specs = self
-            .db
-            .list_all_specs_for_conversion()
-            .map_err(internal_error)?;
-
-        let report = convert_specs(&self.db, &all_specs)?;
-
-        let report_json = serde_json::json!({
-            "scanned": report.scanned,
-            "converted": report.converted,
-            "already_tagged": report.already_tagged,
-            "deferred_running": report.deferred_running,
-            "invalid_legacy": report.invalid_legacy,
-            "converted_ids": report.converted_ids,
-            "deferred": report.deferred,
-            "errors": report.errors,
-        });
-
-        Ok(CallToolResult::success(vec![ContentBlock::text(
-            serde_json::to_string_pretty(&report_json).unwrap_or_default(),
-        )]))
     }
 }

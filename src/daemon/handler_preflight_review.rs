@@ -28,7 +28,7 @@ pub(crate) fn build_preflight_reviewer_prompt(
         " Read the graph with graph get (and `queue list` for the queue) through the MCP surface.",
     );
     prompt.push_str(
-        " Load the 'graph-reviewer' skill with skill_get; if the skill text is appended below under '## Skill: graph-reviewer', that IS its content — do not fetch again.",
+        " Load the 'graph-reviewer' skill with the `skill` tool's `get` action; if the skill text is appended below under '## Skill: graph-reviewer', that IS its content — do not fetch again.",
     );
     prompt.push_str(skill_section);
     prompt.push_str(
@@ -128,7 +128,7 @@ pub(crate) async fn spawn_preflight_reviewer(
             "platform": platform,
             "model": model,
             "pair": pair,
-            "collect_with": "subagent_collect",
+            "collect_with": "subagent collect",
             "note": format!("Cost: ran on '{pair}'. Advisory only — does not affect probe results."),
         }),
         Ok(Err(e)) => serde_json::json!({

@@ -90,7 +90,7 @@ pub(super) fn section_display_label(
             "context",
             "project_context",
             "resources",
-            "rag_search",
+            "rag",
             "constraints",
             "canopy_protocol",
         ];

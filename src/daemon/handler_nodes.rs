@@ -46,11 +46,9 @@ impl TaskTriggerHandler {
         };
 
         let (kind, config) = match resolve_add_node_kind_config(
-            &self.db,
             params.node.as_deref(),
             params.kind.as_deref(),
             params.config,
-            params.blueprint.as_deref(),
             params.config_overrides,
         ) {
             Ok(result) => result,

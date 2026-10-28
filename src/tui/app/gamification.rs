@@ -157,7 +157,7 @@ impl App {
         }
 
         // The Gardener counts distinct projects whose description or tags
-        // changed (recorded by the daemon's `project_update`); the legacy
+        // changed (recorded by the daemon's `project` `update`); the legacy
         // knowledge-dialog counter is gone.
         let gardener_edits = self.db.count_gardener_projects().unwrap_or(0);
 

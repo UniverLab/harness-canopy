@@ -1,225 +1,27 @@
-//! MCP handler tools split out of `daemon::handler` (sync and project-context tools).
-//! Moved verbatim; tool names, schemas, and behaviour unchanged.
+//! Session-identity and project-context helpers split out of
+//! `daemon::handler`, plus the `intelligence_admin` `list_projects` /
+//! `link_projects` `_impl` methods. The `sync_*` MCP tools are retired; the
+//! identity resolution every remaining tool uses lives on here.
 
-use crate::daemon::handler::{missing_sync_identity_error, OptionalExtension, TaskTriggerHandler};
-use crate::daemon::handler_helpers::{map_action_result, resolve_effective_project_hash};
+use crate::daemon::handler::{missing_sync_identity_error, TaskTriggerHandler};
+use crate::daemon::handler_helpers::resolve_effective_project_hash;
 use crate::daemon::handler_validate::validate_non_empty;
 use crate::daemon::helpers::error_result;
 use crate::daemon::params::*;
-use crate::daemon::params_extract::Parameters;
 use crate::db::intelligence::IntelligenceNodeRecord;
 use crate::db::Database;
-use crate::domain::sync::MessageKind;
-use crate::domain::sync::MissionImpact;
-use crate::domain::sync::WorkspaceStatus;
 use crate::shared::sync_identity::harness_conversation_id;
 use crate::shared::sync_identity::header_str;
 use crate::shared::sync_identity::CANOPY_AGENT_ID_ENV;
 use crate::shared::sync_identity::CANOPY_AGENT_ID_HEADER;
-use crate::shared::sync_identity::CANOPY_CLIENT_NAME_ENV;
-use crate::shared::sync_identity::CANOPY_CLIENT_NAME_HEADER;
 use axum::http::request::Parts;
 use rmcp::model::{CallToolResult, ContentBlock};
-use rmcp::tool;
-use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
 
-#[tool_router(router = tool_router_sync, vis = "pub(crate)")]
 impl TaskTriggerHandler {
-    #[tool(
-        name = "sync_declare_intent",
-        description = "Declare a high-level mission for the current workdir. Non-blocking. \
-         Use this to announce major work before you start changing things. \
-         The actor identity is resolved automatically from the current Canopy session."
-    )]
-    pub(crate) async fn sync_declare_intent(
+    pub(crate) async fn intelligence_admin_list_projects_impl(
         &self,
-        Parameters(params): Parameters<SyncDeclareIntentParams>,
-        OptionalExtension(parts): OptionalExtension<Parts>,
-    ) -> Result<CallToolResult, McpError> {
-        self.reject_if_nursery(parts.as_ref())?;
-        self.record_harness_id(parts.as_ref());
-        let Some(impact) = MissionImpact::from_str(&params.impact) else {
-            return Ok(error_result(
-                "Invalid impact. Must be: low, high, breaking.",
-            ));
-        };
-        let agent_id = self.resolve_sync_agent_id(parts.as_ref())?;
-        let client_name = self.resolve_sync_client_name(parts.as_ref());
-
-        Ok(map_action_result(
-            self.sync_manager
-                .declare_intent(
-                    &params.workdir,
-                    &agent_id,
-                    client_name.as_deref(),
-                    &params.mission,
-                    impact,
-                    &params.description,
-                )
-                .await,
-            "Intent declared.",
-        ))
-    }
-
-    #[tool(
-        name = "sync_report_status",
-        description = "Report the current workspace status for your mission. Non-blocking. \
-         status: stable | unstable | testing. The actor identity is resolved \
-         automatically from the current Canopy session."
-    )]
-    pub(crate) async fn sync_report_status(
-        &self,
-        Parameters(params): Parameters<SyncReportStatusParams>,
-        OptionalExtension(parts): OptionalExtension<Parts>,
-    ) -> Result<CallToolResult, McpError> {
-        self.reject_if_nursery(parts.as_ref())?;
-        self.record_harness_id(parts.as_ref());
-        let Some(status) = WorkspaceStatus::from_str(&params.status) else {
-            return Ok(error_result(
-                "Invalid status. Must be: stable, unstable, testing.",
-            ));
-        };
-        let agent_id = self.resolve_sync_agent_id(parts.as_ref())?;
-        let client_name = self.resolve_sync_client_name(parts.as_ref());
-
-        Ok(map_action_result(
-            self.sync_manager
-                .report_status(
-                    &params.workdir,
-                    &agent_id,
-                    client_name.as_deref(),
-                    status,
-                    &params.message,
-                )
-                .await,
-            "Status reported.",
-        ))
-    }
-
-    /// Broadcast a message to the workdir sync channel (non-blocking).
-    #[tool(
-        name = "sync_broadcast",
-        description = "Broadcast a message to the workdir sync channel. Non-blocking. \
-         kind: info | query | answer. The actor identity is resolved \
-         automatically from the current Canopy session."
-    )]
-    pub(crate) async fn sync_broadcast(
-        &self,
-        Parameters(params): Parameters<SyncBroadcastParams>,
-        OptionalExtension(parts): OptionalExtension<Parts>,
-    ) -> Result<CallToolResult, McpError> {
-        self.reject_if_nursery(parts.as_ref())?;
-        self.record_harness_id(parts.as_ref());
-        let Some(kind) = MessageKind::from_str(&params.kind) else {
-            return Ok(error_result("Invalid kind. Must be: info, query, answer."));
-        };
-        if !kind.is_chatter() {
-            return Ok(error_result(
-                "sync_broadcast only accepts: info, query, answer.",
-            ));
-        }
-
-        let payload = params
-            .metadata
-            .as_ref()
-            .map(|metadata| metadata.to_string());
-        let agent_id = self.resolve_sync_agent_id(parts.as_ref())?;
-        let client_name = self.resolve_sync_client_name(parts.as_ref());
-        Ok(map_action_result(
-            self.sync_manager
-                .broadcast(
-                    &params.workdir,
-                    &agent_id,
-                    client_name.as_deref(),
-                    kind,
-                    &params.message,
-                    payload.as_deref(),
-                )
-                .await,
-            "Message broadcast.",
-        ))
-    }
-
-    #[tool(
-        name = "sync_get_context",
-        description = "Get active missions, recent sync chatter, and current workspace vibe for a workdir."
-    )]
-    pub(crate) async fn sync_get_context(
-        &self,
-        Parameters(params): Parameters<SyncGetContextParams>,
-        OptionalExtension(parts): OptionalExtension<Parts>,
-    ) -> Result<CallToolResult, McpError> {
-        self.reject_if_nursery(parts.as_ref())?;
-        let limit = params.limit.unwrap_or(10);
-
-        let context = self
-            .sync_manager
-            .get_context(&params.workdir, limit)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-
-        let intents_json: Vec<serde_json::Value> = context
-            .active_intents
-            .iter()
-            .map(|intent| {
-                serde_json::json!({
-                    "agent_id": intent.agent_id,
-                    "agent_name": intent.agent_name,
-                    "mission": intent.mission,
-                    "impact": intent.impact.as_str(),
-                    "description": intent.description,
-                    "status": intent.status.as_str(),
-                    "since": intent.since,
-                })
-            })
-            .collect();
-
-        let chatter_json: Vec<serde_json::Value> = context
-            .recent_chatter
-            .iter()
-            .map(|message| {
-                serde_json::json!({
-                    "agent_id": message.agent_id,
-                    "agent_name": message.agent_name,
-                    "kind": message.kind.as_str(),
-                    "message": message.message,
-                    "ts": message.created_at,
-                })
-            })
-            .collect();
-
-        let summary = if context.active_intents.is_empty() {
-            "No active missions.".to_owned()
-        } else {
-            let parts: Vec<String> = context
-                .active_intents
-                .iter()
-                .map(|intent| format!("{}: {}", intent.agent_name, intent.mission))
-                .collect();
-            parts.join("; ")
-        };
-
-        let out = serde_json::json!({
-            "active_intents": intents_json,
-            "recent_chatter": chatter_json,
-            "vibe": context.vibe.as_str(),
-            "summary": summary,
-        });
-
-        Ok(CallToolResult::success(vec![ContentBlock::text(
-            serde_json::to_string_pretty(&out).unwrap_or_default(),
-        )]))
-    }
-
-    #[tool(
-        name = "intelligence_list_projects",
-        description = "List all indexed projects for the project picker. \
-         Returns project nodes with their hash, name, and description. \
-         Supports optional query filtering by name/body."
-    )]
-    pub(crate) async fn intelligence_list_projects(
-        &self,
-        Parameters(params): Parameters<IntelligenceListProjectsParams>,
+        params: IntelligenceListProjectsParams,
     ) -> Result<CallToolResult, McpError> {
         let limit = params.limit.unwrap_or(20).min(100);
         let projects = self
@@ -251,17 +53,9 @@ impl TaskTriggerHandler {
         )]))
     }
 
-    #[tool(
-        name = "intelligence_link_projects",
-        description = "Create a typed relationship between two indexed projects. \
-         Relation must be one of: depends_on, complements, extends, publishes \
-         (relates_to is accepted as legacy). 'contains' is derived from registry \
-         paths and rejected here. Both projects must exist as kind='project' \
-         nodes in the intelligence graph."
-    )]
-    pub(crate) async fn intelligence_link_projects(
+    pub(crate) async fn intelligence_admin_link_projects_impl(
         &self,
-        Parameters(params): Parameters<IntelligenceLinkProjectsParams>,
+        params: IntelligenceLinkProjectsParams,
     ) -> Result<CallToolResult, McpError> {
         if let Err(e) = validate_non_empty(&params.from_project_hash, "from_project_hash") {
             return Ok(error_result(&e));
@@ -321,18 +115,6 @@ impl TaskTriggerHandler {
             }
         }
         Err(missing_sync_identity_error())
-    }
-
-    pub(crate) fn resolve_sync_client_name(&self, parts: Option<&Parts>) -> Option<String> {
-        if let Some(parts) = parts {
-            if let Some(client_name) = header_str(parts, CANOPY_CLIENT_NAME_HEADER) {
-                return Some(client_name.to_string());
-            }
-        }
-        std::env::var(CANOPY_CLIENT_NAME_ENV)
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
     }
 
     /// Record the harness conversation identifier this caller reports on its

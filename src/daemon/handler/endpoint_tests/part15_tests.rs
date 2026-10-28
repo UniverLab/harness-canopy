@@ -82,14 +82,18 @@ async fn install_node(
     overwrite_presets: Option<bool>,
     accept: Option<bool>,
 ) -> rmcp::model::CallToolResult {
-    handler
-        .node_install(Parameters(NodeInstallParams {
+    call_resource_action(
+        handler,
+        "node",
+        "install",
+        params_id(NodeInstallParams {
             reference: reference.to_string(),
             overwrite_presets,
             accept,
-        }))
-        .await
-        .unwrap()
+        }),
+    )
+    .await
+    .unwrap()
 }
 
 /// An install that already carries the user's acceptance — what every
@@ -103,12 +107,16 @@ async fn install_node_accepted(
 }
 
 async fn remove_node(handler: &TaskTriggerHandler, name: &str) -> rmcp::model::CallToolResult {
-    handler
-        .node_remove(Parameters(NodeRemoveParams {
+    call_resource_action(
+        handler,
+        "node",
+        "remove",
+        params_id(NodeRemoveParams {
             name: name.to_string(),
-        }))
-        .await
-        .unwrap()
+        }),
+    )
+    .await
+    .unwrap()
 }
 
 fn overrides(pairs: &[(&str, &str)]) -> serde_json::Map<String, serde_json::Value> {
@@ -260,7 +268,9 @@ async fn node_install_writes_the_document_and_its_preset() {
         "audit well"
     );
 
-    let listed = handler.node_list().await.unwrap();
+    let listed = call_resource_action(&handler, "node", "list", ())
+        .await
+        .unwrap();
     let body: serde_json::Value = serde_json::from_str(&raw_text(&listed)).unwrap();
     let entry = body["nodes"]
         .as_array()
@@ -379,7 +389,6 @@ async fn graph_add_node_from_a_node_document_carries_the_overrides() {
             name: "audit".to_string(),
             kind: None,
             config: None,
-            blueprint: None,
             node: Some("auditor".to_string()),
             config_overrides: Some(overrides(&[("platform", "claude"), ("model", "opus")])),
         }),
@@ -439,7 +448,6 @@ async fn graph_add_node_from_a_node_document_without_harness_is_refused() {
             name: "audit".to_string(),
             kind: None,
             config: None,
-            blueprint: None,
             node: Some("auditor".to_string()),
             config_overrides: None,
         }),
@@ -491,7 +499,6 @@ async fn graph_add_ensemble_from_ensemble_proposers() {
             name: "kickoff".to_string(),
             kind: Some("check".to_string()),
             config: Some(check_node_config("true")),
-            blueprint: None,
             node: None,
             config_overrides: None,
         }),
@@ -509,7 +516,6 @@ async fn graph_add_ensemble_from_ensemble_proposers() {
             name: "downstream".to_string(),
             kind: Some("agent".to_string()),
             config: Some(agent_node_config("claude")),
-            blueprint: None,
             node: None,
             config_overrides: None,
         }),
@@ -535,7 +541,6 @@ async fn graph_add_ensemble_from_ensemble_proposers() {
             kind: None,
             name: "Proposers".to_string(),
             prompt_template: None,
-            blueprint: None,
             node: Some("ensemble-proposers".to_string()),
             members: Some(members.clone()),
             condition: "always".to_string(),
@@ -587,7 +592,6 @@ async fn graph_add_ensemble_from_ensemble_proposers() {
             kind: None,
             name: "No Harness".to_string(),
             prompt_template: None,
-            blueprint: None,
             node: Some("ensemble-proposers".to_string()),
             members: None,
             condition: "always".to_string(),

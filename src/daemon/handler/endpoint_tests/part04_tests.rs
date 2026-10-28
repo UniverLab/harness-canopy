@@ -760,79 +760,6 @@ async fn graph_remove_spec_preserves_execution_history() {
     assert_eq!(runs.len(), 1);
 }
 
-// ── blueprint_list / blueprint_create / blueprint_delete ─────
-
-#[tokio::test]
-async fn blueprint_create_list_delete_round_trip() {
-    let (_dir, db, handler) = endpoint_test_handler();
-
-    let created = handler
-        .blueprint_create(Parameters(BlueprintCreateParams {
-            name: "my-agent-bp".to_string(),
-            kind: "agent".to_string(),
-            config: agent_node_config("claude"),
-        }))
-        .await
-        .unwrap();
-    assert!(!is_err(&created), "{}", text(&created));
-
-    let duplicate = handler
-        .blueprint_create(Parameters(BlueprintCreateParams {
-            name: "my-agent-bp".to_string(),
-            kind: "agent".to_string(),
-            config: agent_node_config("claude"),
-        }))
-        .await
-        .unwrap();
-    assert!(is_err(&duplicate));
-    assert!(text(&duplicate).contains("already exists"));
-
-    let bad_kind = handler
-        .blueprint_create(Parameters(BlueprintCreateParams {
-            name: "other-bp".to_string(),
-            kind: "not-a-kind".to_string(),
-            config: agent_node_config("claude"),
-        }))
-        .await
-        .unwrap();
-    assert!(is_err(&bad_kind));
-
-    let bad_config = handler
-        .blueprint_create(Parameters(BlueprintCreateParams {
-            name: "no-platform-bp".to_string(),
-            kind: "agent".to_string(),
-            config: serde_json::Map::new(),
-        }))
-        .await
-        .unwrap();
-    assert!(is_err(&bad_config));
-
-    let listed = handler.blueprint_list().await.unwrap();
-    assert!(text(&listed).contains("my-agent-bp"));
-    assert!(db
-        .list_blueprints()
-        .unwrap()
-        .iter()
-        .any(|bp| bp.name == "my-agent-bp"));
-
-    let deleted = handler
-        .blueprint_delete(Parameters(BlueprintDeleteParams {
-            name: "my-agent-bp".to_string(),
-        }))
-        .await
-        .unwrap();
-    assert!(!is_err(&deleted), "{}", text(&deleted));
-    assert!(db.get_blueprint_by_name("my-agent-bp").unwrap().is_none());
-
-    let missing = handler
-        .blueprint_delete(Parameters(BlueprintDeleteParams {
-            name: "ghost-bp".to_string(),
-        }))
-        .await
-        .unwrap();
-    assert!(is_err(&missing));
-}
-
 // ── graph_node / graph_node ──────────────────────────
 
 #[tokio::test]
@@ -851,7 +778,6 @@ async fn graph_add_node_happy_path_and_invalid_config() {
             name: "Kickoff".to_string(),
             kind: Some("agent".to_string()),
             config: Some(agent_node_config("claude")),
-            blueprint: None,
             node: None,
             config_overrides: None,
         }),
@@ -871,7 +797,6 @@ async fn graph_add_node_happy_path_and_invalid_config() {
             name: "Orphan".to_string(),
             kind: Some("agent".to_string()),
             config: Some(agent_node_config("claude")),
-            blueprint: None,
             node: None,
             config_overrides: None,
         }),
@@ -890,7 +815,6 @@ async fn graph_add_node_happy_path_and_invalid_config() {
             name: "No Platform".to_string(),
             kind: Some("agent".to_string()),
             config: Some(serde_json::Map::new()),
-            blueprint: None,
             node: None,
             config_overrides: None,
         }),
@@ -909,7 +833,6 @@ async fn graph_add_node_happy_path_and_invalid_config() {
             name: "Quorum".to_string(),
             kind: Some("join".to_string()),
             config: Some(serde_json::Map::new()),
-            blueprint: None,
             node: None,
             config_overrides: None,
         }),
@@ -945,7 +868,6 @@ async fn graph_add_node_rejects_prompt_key_naming_prompt_template() {
             name: "Implementer".to_string(),
             kind: Some("agent".to_string()),
             config: Some(config),
-            blueprint: None,
             node: None,
             config_overrides: None,
         }),
@@ -991,7 +913,6 @@ async fn graph_add_node_rejects_interactive_only_platform() {
             name: "Live Only".to_string(),
             kind: Some("agent".to_string()),
             config: Some(agent_node_config("freebuff")),
-            blueprint: None,
             node: None,
             config_overrides: None,
         }),
@@ -1032,7 +953,6 @@ async fn graph_update_node_rejects_interactive_only_platform() {
             name: "Implementer".to_string(),
             kind: Some("agent".to_string()),
             config: Some(agent_node_config("claude")),
-            blueprint: None,
             node: None,
             config_overrides: None,
         }),
@@ -1087,7 +1007,6 @@ async fn graph_update_node_records_config_changed_only_for_running_graph() {
             name: "Implementer".to_string(),
             kind: Some("agent".to_string()),
             config: Some(agent_node_config("claude")),
-            blueprint: None,
             node: None,
             config_overrides: None,
         }),
@@ -1163,7 +1082,6 @@ async fn graph_update_node_renames_and_validates() {
             name: "Node A".to_string(),
             kind: Some("agent".to_string()),
             config: Some(agent_node_config("claude")),
-            blueprint: None,
             node: None,
             config_overrides: None,
         }),
@@ -1250,7 +1168,6 @@ async fn graph_add_node_accepts_skills_on_agent_and_preserves_order() {
             name: "Implementer".to_string(),
             kind: Some("agent".to_string()),
             config: Some(config),
-            blueprint: None,
             node: None,
             config_overrides: None,
         }),
@@ -1295,7 +1212,6 @@ async fn graph_update_node_accepts_skills_on_agent_and_preserves_order() {
             name: "Implementer".to_string(),
             kind: Some("agent".to_string()),
             config: Some(agent_node_config("claude")),
-            blueprint: None,
             node: None,
             config_overrides: None,
         }),
@@ -1360,7 +1276,6 @@ async fn graph_update_node_partial_config_merge_preserves_prompt() {
             name: "Agent".to_string(),
             kind: Some("agent".to_string()),
             config: Some(config),
-            blueprint: None,
             node: None,
             config_overrides: None,
         }),
@@ -1425,7 +1340,6 @@ async fn graph_update_node_partial_config_merge_timeout_leaves_others() {
             name: "Agent".to_string(),
             kind: Some("agent".to_string()),
             config: Some(config),
-            blueprint: None,
             node: None,
             config_overrides: None,
         }),
@@ -1482,7 +1396,6 @@ async fn graph_update_node_full_replacement_drops_keys() {
             name: "Agent".to_string(),
             kind: Some("agent".to_string()),
             config: Some(config),
-            blueprint: None,
             node: None,
             config_overrides: None,
         }),
@@ -1540,7 +1453,6 @@ async fn graph_update_node_unknown_key_rejected_in_both_modes() {
             name: "Agent".to_string(),
             kind: Some("agent".to_string()),
             config: Some(agent_node_config("claude")),
-            blueprint: None,
             node: None,
             config_overrides: None,
         }),

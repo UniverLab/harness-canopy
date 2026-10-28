@@ -9,24 +9,16 @@ use rusqlite::{params, OptionalExtension};
 use std::io::{Error as IoError, ErrorKind};
 
 use crate::db::Database;
-use crate::domain::blueprints::{builtin_ensemble_blueprint_specs, EnsembleBlueprint};
 use crate::domain::graphs::{
-    Ensemble, EnsembleDetails, EnsembleKind, EnsembleMember, EnsembleMemberSpec, GraphEdge,
-    GraphEdgeCondition, GraphNode, GraphNodeKind,
+    Ensemble, EnsembleDetails, EnsembleKind, EnsembleMember, GraphEdge, GraphEdgeCondition,
+    GraphNode, GraphNodeKind,
 };
 
 mod entry_wiring;
 pub use entry_wiring::*;
-mod blueprints;
 mod update;
 pub use update::EnsembleJoinConfigPatch;
 use update::{decode_ensemble_mutex, encode_ensemble_mutex};
-// Blueprint persistence lives entirely in `blueprints` (its `impl Database`
-// methods are inherent, so no re-export is needed for callers); the only
-// piece the tests in this module reach for directly is the member-list
-// parser.
-#[cfg(test)]
-use blueprints::parse_ensemble_blueprint_members;
 impl Database {
     /// Create an entire ensemble unit — the join node, every member node,
     /// every wiring edge (entry fan-out, member→join fan-in, join exit

@@ -314,23 +314,6 @@ pub struct SpecSectionGetParams {
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct BlueprintCreateParams {
-    /// Unique blueprint name.
-    pub name: String,
-    /// Node kind: agent, check, or gate.
-    pub kind: String,
-    /// Config template. `graph_node add` uses this as the node's config,
-    /// optionally shallow-merged with `config_overrides`.
-    pub config: serde_json::Map<String, serde_json::Value>,
-}
-
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct BlueprintDeleteParams {
-    /// Existing custom blueprint name. Builtins can't be deleted.
-    pub name: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphUpdateNodeParams {
     /// Existing node ID.
     pub node_id: String,

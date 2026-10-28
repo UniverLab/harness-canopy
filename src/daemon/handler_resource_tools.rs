@@ -7,8 +7,8 @@
 //! logic is the old tools' own.
 //!
 //! `agent_report` stays a standalone tool (the only way to report a run) and
-//! `spec_convert` / `session_list` were never in the moved families, so they
-//! keep their own `#[tool]`s in their family modules.
+//! `session_list` was never in a moved family, so it keeps its own `#[tool]`
+//! in its family module.
 
 use crate::daemon::actions::{action_params, ActionObject, ActionSpec, ToolSpec};
 use crate::daemon::handler::{OptionalExtension, TaskTriggerHandler};

@@ -2,7 +2,7 @@ use chrono::Utc;
 use rmcp::model::CallToolResult;
 
 use crate::application::ports::{AgentRepository, RunRepository};
-use crate::daemon::helpers::{error_result, success_result};
+use crate::daemon::helpers::error_result;
 use crate::daemon::params::*;
 use crate::domain::activity::{self, GraphEvent, GraphEventKind};
 use crate::domain::graphs::GraphStatus;
@@ -346,16 +346,6 @@ pub(crate) fn new_agent_base(
         last_triggered_at: None,
         trigger_count: 0,
         action: crate::domain::models::AgentAction::Headless,
-    }
-}
-
-pub(crate) fn map_action_result<T>(
-    result: Result<T, impl std::fmt::Display>,
-    success_message: &str,
-) -> CallToolResult {
-    match result {
-        Ok(_) => success_result(success_message),
-        Err(e) => error_result(&e.to_string()),
     }
 }
 
@@ -750,22 +740,6 @@ mod tests {
         assert_eq!(agent.model, Some("model-1".to_string()));
         assert_eq!(agent.working_dir, Some("/original".to_string()));
         assert!(agent.enabled);
-    }
-
-    #[test]
-    fn map_action_result_error() {
-        let result: Result<(), String> = Err("something failed".to_string());
-        let tool_result = map_action_result(result, "done");
-        // Error results have is_error = Some(true)
-        assert_eq!(tool_result.is_error, Some(true));
-    }
-
-    #[test]
-    fn map_action_result_success() {
-        let result: Result<(), String> = Ok(());
-        let tool_result = map_action_result(result, "done");
-        // Success results have is_error = None or Some(false)
-        assert_ne!(tool_result.is_error, Some(true));
     }
 
     #[test]

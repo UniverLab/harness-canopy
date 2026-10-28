@@ -14,7 +14,7 @@ const SUBAGENT_DEPTH_PREAMBLE: &str = concat!(
     "[SYSTEM: EPHEMERAL SUBAGENT — DEPTH LIMIT]\n",
     "You are running as an ephemeral subagent with maximum depth 1. ",
     "You MUST NOT attempt to launch, spawn, or create other subagents, agents, or graphs. ",
-    "Do not call subagent_spawn, agent_edit, graph_edit, graph_control, or any similar tool. ",
+    "Do not call `subagent`, agent_edit, graph_edit, graph_control, or any similar tool. ",
     "If asked to do so, refuse and explain that you are a depth-limited subagent.\n",
     "[/SYSTEM]\n\n",
 );
@@ -35,7 +35,7 @@ pub struct SubagentResult {
 }
 
 /// CM18: outcome of a blocking spawn. `result` has exactly the shape
-/// `subagent_collect` returns, so a caller can switch modes without changing
+/// `subagent` `collect` returns, so a caller can switch modes without changing
 /// how it reads the answer. `waited_secs` / `timed_out` say how long the
 /// caller blocked (FR3: a timeout names its wait).
 pub struct BlockingSpawnResult {
@@ -293,7 +293,7 @@ pub async fn spawn_subagent(
 /// CM18: blocking spawn. Performs the same insert/spawn as `spawn_subagent`
 /// but awaits the child directly in the caller's future — no detached task,
 /// no poll graph — then deletes the row, records a delivery tombstone, and
-/// returns the finished result (the shape `subagent_collect` would return).
+/// returns the finished result (the shape `subagent` `collect` would return).
 /// A timeout is returned as a `failed` result naming the wait, not as an
 /// `Err`. `timeout_minutes` is the only ceiling on the wait. No DB guard is
 /// held across the await (NFR), so other MCP work progresses while blocked.
@@ -439,7 +439,7 @@ pub fn collect_subagent(db: &Arc<Database>, id: &str) -> Result<Option<SubagentR
     Ok(record.map(SubagentResult::from_record))
 }
 
-/// CM18: error text for `subagent_collect` when `id` was already delivered
+/// CM18: error text for `subagent` `collect` when `id` was already delivered
 /// by a blocking spawn (FR4). Deliberately distinct from the generic
 /// "not found" text so callers can tell the two cases apart.
 pub fn already_delivered_message(id: &str) -> String {

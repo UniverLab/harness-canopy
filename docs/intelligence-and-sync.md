@@ -20,10 +20,10 @@ Canopy persists what agents learn, scoped to projects.
   to the full id before anything is written.
 - **Full-text search** — `intelligence_search` queries nodes by text and
   optional kind filter across all projects.
-- **Graph walk** — `intelligence_graph_walk` traverses from any node up
+- **Graph walk** — `intelligence_admin` `walk` traverses from any node up
   to a configurable depth, returning connected facts, patterns and
   cross-references.
-- **Project relationships** — `intelligence_link_projects` links projects
+- **Project relationships** — `intelligence_admin` `link_projects` links projects
   with typed relations (`depends_on`, `complements`, `extends`, `publishes`;
   `relates_to` accepted as legacy; `contains` is derived from registry paths
   and cannot be hand-linked). Scoped reads traverse outbound edges (each hit
@@ -41,38 +41,28 @@ starts smarter.
 ## Project registry
 
 Canopy registers a project only explicitly: a `.canopy-project` marker file
-in the directory root enables automatic registration, or call
-`project_register` with the directory path. Registration derives `contains`
-edges from registry paths automatically. `project_search` and
-`project_update` expose the registry to agents; registry noise is removable
-via project deletion / `canopy clean`, and `project_remap` moves a project
+in the directory root enables automatic registration, or call `project`
+`register` with the directory path. Registration derives `contains`
+edges from registry paths automatically. `project` `search` and
+`project` `update` expose the registry to agents; registry noise is removable
+via project deletion / `canopy clean`, and `project` `remap` moves a project
 (including its graph node) after a directory rename or move.
 
-## Sync — multi-agent coordination
+## Sync — retired
 
-When several agents share a workspace, the sync layer keeps them from
-stepping on each other:
+The multi-agent sync protocol (mission declaration, workspace status,
+broadcast messaging, active context) is retired: the live broadcast channels
+and their MCP tools are gone. What remains is the durable history — past
+missions and chatter stay in the database, where `intelligence_get_context`
+surfaces them and the TUI renders them. Sessions coordinate through
+`session_list` (see every live session), `scheduled_send_create` (wake a
+session later instead of polling), and `intelligence_upsert` /
+`intelligence_search` (persist and find shared findings).
 
-- **Mission declaration** — `sync_declare_intent` declares a high-level
-  mission with an impact level (`low` / `high` / `breaking`).
-- **Workspace status** — `sync_report_status` reports stability
-  (`stable` / `unstable` / `testing`).
-- **Broadcast messaging** — `sync_broadcast` sends info, query and answer
-  messages between agents in the same workdir.
-- **Active context** — `sync_get_context` returns active missions, recent
-  chatter and a computed workspace "vibe" (the worst status among active
-  intents).
-
-Messages flow through per-workdir in-memory broadcast channels and are
-persisted to the database; relevant ones are auto-upserted as
-intelligence nodes.
-
-The graph engine narrates itself into this same stream: graph lifecycle
+The graph engine narrates itself into this same history: graph lifecycle
 transitions, spec starts/completions, node and ensemble terminal states, and
 hook firings are written directly into the activity log the TUI's activity
-panel already reads, attributed as `graph:<name>`. No new surface, no new
-table — a running graph's history is visible in the same place agent chatter
-is, and reachable via `sync_get_context` without a live TUI session.
+panel already reads, attributed as `graph:<name>`.
 
 ## Action protocol advisor
 

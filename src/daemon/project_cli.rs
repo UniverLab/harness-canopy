@@ -19,7 +19,7 @@ pub enum ProjectAction {
     /// moved, keeping its sessions and history instead of orphaning them.
     Remap {
         /// The project's current `workdir_hash` (see `canopy clean`'s
-        /// orphan report or `project_search`).
+        /// orphan report or `project` `search`).
         project_hash: String,
         /// The project's new location on disk.
         new_path: PathBuf,

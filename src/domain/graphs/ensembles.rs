@@ -211,16 +211,13 @@ impl Ensemble {
 
 /// `(platform, model, prompt_override, timeout_minutes, infra_retry_limit,
 /// infra_crash_max_seconds, infra_backoff_seconds)` — the normalized shape
-/// of one ensemble member's identity, shared by `graph_ensemble`/
-/// `graph_ensemble`'s validated input, [`EnsembleBlueprint`]'s stored
-/// members, and [`EnsembleMember`] itself. `timeout_minutes` is this
+/// of one ensemble member's identity, shared by `graph_ensemble`'s
+/// validated input and [`EnsembleMember`] itself. `timeout_minutes` is this
 /// member's own timeout override, or `None` to use the ensemble's shared
 /// `timeout_minutes`. `infra_retry_limit`, `infra_crash_max_seconds` and
 /// `infra_backoff_seconds` are this member's own infra-retry overrides, or
 /// `None` to use the ensemble's own default (which may itself defer to the
 /// platform's config.toml value, then the engine default).
-///
-/// [`EnsembleBlueprint`]: crate::domain::blueprints::EnsembleBlueprint
 pub type EnsembleMemberSpec = (
     String,
     Option<String>,

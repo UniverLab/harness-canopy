@@ -1,4 +1,4 @@
-//! Minimal parser for the one-line description shown in `skill_list`.
+//! Minimal parser for the one-line description shown in `skill` `list`.
 //!
 //! Reads the `description:` key from a SKILL.md's YAML frontmatter, falling
 //! back to the first `#` heading. This is not a general YAML parser — it

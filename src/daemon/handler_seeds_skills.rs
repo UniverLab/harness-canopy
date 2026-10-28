@@ -2,32 +2,23 @@
 //! Moved verbatim; tool names, schemas, and behaviour unchanged.
 
 use crate::application::ports::StateRepository;
-use crate::daemon::handler::{OptionalExtension, TaskTriggerHandler};
+use crate::daemon::handler::TaskTriggerHandler;
 use crate::daemon::handler_helpers::load_bound_seed_identity;
 use crate::daemon::helpers::success_result;
 use crate::daemon::params::*;
-use crate::daemon::params_extract::Parameters;
 use axum::http::request::Parts;
 use rmcp::model::{CallToolResult, ContentBlock};
-use rmcp::tool;
-use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
 use std::sync::Arc;
 
-#[tool_router(router = tool_router_seeds_skills, vis = "pub(crate)")]
 impl TaskTriggerHandler {
-    #[tool(
-        name = "get_identity",
-        description = "Read the agent's own structured identity contract (identity.toml). \
-         Returns the full TOML content including name, directives, and traits."
-    )]
-    pub(crate) async fn get_identity(
+    pub(crate) async fn identity_get_impl(
         &self,
-        OptionalExtension(parts): OptionalExtension<Parts>,
+        parts: Option<&Parts>,
     ) -> Result<CallToolResult, McpError> {
-        self.reject_if_nursery(parts.as_ref())?;
-        let agent_id = self.resolve_sync_agent_id(parts.as_ref())?;
-        let (_, identity) = load_bound_seed_identity(&self.db, parts.as_ref(), &agent_id)
+        self.reject_if_nursery(parts)?;
+        let agent_id = self.resolve_sync_agent_id(parts)?;
+        let (_, identity) = load_bound_seed_identity(&self.db, parts, &agent_id)
             .map_err(|e| McpError::invalid_params(e, None))?;
         let toml_str = identity
             .to_toml()
@@ -35,20 +26,14 @@ impl TaskTriggerHandler {
         Ok(CallToolResult::success(vec![ContentBlock::text(toml_str)]))
     }
 
-    #[tool(
-        name = "evolve_identity",
-        description = "Suggest refinements to the agent's directives or traits based on \
-         the current session's learnings. The Daemon validates updates against the schema \
-         and the 4KB size cap, then overwrites the global identity.toml."
-    )]
-    pub(crate) async fn evolve_identity(
+    pub(crate) async fn identity_evolve_impl(
         &self,
-        Parameters(params): Parameters<EvolveIdentityParams>,
-        OptionalExtension(parts): OptionalExtension<Parts>,
+        params: EvolveIdentityParams,
+        parts: Option<&Parts>,
     ) -> Result<CallToolResult, McpError> {
-        self.reject_if_nursery(parts.as_ref())?;
-        let agent_id = self.resolve_sync_agent_id(parts.as_ref())?;
-        let (seed_id, mut identity) = load_bound_seed_identity(&self.db, parts.as_ref(), &agent_id)
+        self.reject_if_nursery(parts)?;
+        let agent_id = self.resolve_sync_agent_id(parts)?;
+        let (seed_id, mut identity) = load_bound_seed_identity(&self.db, parts, &agent_id)
             .map_err(|e| McpError::invalid_params(e, None))?;
         identity
             .evolve(params.new_directives, params.new_traits)
@@ -59,11 +44,7 @@ impl TaskTriggerHandler {
         Ok(success_result("Identity evolved and saved successfully."))
     }
 
-    #[tool(
-        name = "list_seeds",
-        description = "List all existing seed identities. Returns seed IDs and their names."
-    )]
-    pub(crate) async fn list_seeds(&self) -> Result<CallToolResult, McpError> {
+    pub(crate) async fn identity_list_seeds_impl(&self) -> Result<CallToolResult, McpError> {
         let seed_ids =
             crate::domain::seeds::list_seeds().map_err(|e| McpError::internal_error(e, None))?;
         let mut seeds_info = Vec::new();
@@ -80,16 +61,12 @@ impl TaskTriggerHandler {
         )]))
     }
 
-    #[tool(
-        name = "create_seed",
-        description = "Create a new seed identity. Validates name uniqueness, structure, and 4KB size cap."
-    )]
-    pub(crate) async fn create_seed(
+    pub(crate) async fn identity_create_seed_impl(
         &self,
-        Parameters(params): Parameters<CreateSeedParams>,
-        OptionalExtension(parts): OptionalExtension<Parts>,
+        params: CreateSeedParams,
+        parts: Option<&Parts>,
     ) -> Result<CallToolResult, McpError> {
-        self.reject_if_nursery(parts.as_ref())?;
+        self.reject_if_nursery(parts)?;
         let seed_id = crate::domain::nursery::slugify(&params.name);
         let identity = crate::domain::seeds::SeedIdentity {
             name: params.name,
@@ -104,13 +81,9 @@ impl TaskTriggerHandler {
         ))]))
     }
 
-    #[tool(
-        name = "remove_seed",
-        description = "Remove a seed identity completely by ID."
-    )]
-    pub(crate) async fn remove_seed(
+    pub(crate) async fn identity_remove_seed_impl(
         &self,
-        Parameters(params): Parameters<RemoveSeedParams>,
+        params: RemoveSeedParams,
     ) -> Result<CallToolResult, McpError> {
         crate::domain::seeds::remove_seed(&params.seed_id)
             .map_err(|e| McpError::invalid_params(e, None))?;
@@ -120,18 +93,7 @@ impl TaskTriggerHandler {
         ))]))
     }
 
-    #[tool(
-        name = "skill_list",
-        description = "List skills available to this agent from the dynamic skill store — the \
-         union of skills already fetched into ~/.canopy/skills/ and the catalogs of every \
-         git source configured under [skills] in ~/.canopy/config.toml. Each entry reports \
-         name, one-line description, source URL, and whether it is already installed \
-         (fetched locally, served instantly) or merely available (fetch it on demand with \
-         skill_get, which clones it into the store transparently). Call this first to \
-         discover what's available before deciding which skill_get to call — this system \
-         works across every harness, not just one platform's local skills folder."
-    )]
-    pub(crate) async fn skill_list(&self) -> Result<CallToolResult, McpError> {
+    pub(crate) async fn skill_list_impl(&self) -> Result<CallToolResult, McpError> {
         let store = Arc::clone(&self.dynamic_skills);
         let entries = tokio::task::spawn_blocking(move || store.list())
             .await
@@ -141,19 +103,9 @@ impl TaskTriggerHandler {
         )]))
     }
 
-    #[tool(
-        name = "skill_get",
-        description = "Fetch a skill's full instructions by name from the dynamic skill \
-         store. If the skill isn't in the local store yet, clones it on demand from its \
-         configured git source; if it is present but its TTL has expired, transparently \
-         checks the source for updates and refreshes the local copy first (network failures \
-         during that check are non-fatal — the last-known-good copy is served). Returns the \
-         SKILL.md/INSTRUCTIONS.md instructions plus any reference files (inlined when small, \
-         otherwise listed by store path). Call skill_list first to find valid skill names."
-    )]
-    pub(crate) async fn skill_get(
+    pub(crate) async fn skill_get_impl(
         &self,
-        Parameters(params): Parameters<SkillGetParams>,
+        params: SkillGetParams,
     ) -> Result<CallToolResult, McpError> {
         let store = Arc::clone(&self.dynamic_skills);
         let content = tokio::task::spawn_blocking(move || store.get(&params.name))

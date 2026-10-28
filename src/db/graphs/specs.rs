@@ -479,22 +479,6 @@ impl Database {
             .map_err(Into::into)
     }
 
-    pub fn update_spec_description_if_not_running(
-        &self,
-        spec_id: &str,
-        new_description: &str,
-    ) -> Result<bool> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
-        let rows = conn.execute(
-            "UPDATE graph_specs SET description = ?1, updated_at = ?3 WHERE id = ?2 AND status != 'running'",
-            params![new_description, spec_id, Utc::now().timestamp_millis()],
-        )?;
-        Ok(rows > 0)
-    }
-
     /// Delete a spec outright. Callers must enforce the graph-binding guard
     /// (see `spec_edit delete`'s handler) before calling this — this function
     /// performs no such check itself.

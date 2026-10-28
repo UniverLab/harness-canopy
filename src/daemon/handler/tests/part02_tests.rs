@@ -2,171 +2,6 @@
 use super::*;
 
 #[test]
-fn blueprints_are_listed_after_a_fresh_startup_and_reseeding_is_idempotent() {
-    let dir = tempdir().unwrap();
-    let db = Database::new(&dir.path().join("test.db")).unwrap();
-
-    let names_after_first_start: Vec<String> = db
-        .list_blueprints()
-        .unwrap()
-        .into_iter()
-        .map(|b| b.name)
-        .collect();
-    for expected in [
-        "implementer",
-        "cargo-gates",
-        "reviewer-committer",
-        "commit-check",
-        "resilience",
-    ] {
-        assert!(
-            names_after_first_start.contains(&expected.to_string()),
-            "expected builtin '{expected}' after fresh startup, got {names_after_first_start:?}"
-        );
-    }
-
-    // Simulate a second daemon startup against the same database.
-    db.seed_builtin_blueprints().unwrap();
-    let names_after_second_start: Vec<String> = db
-        .list_blueprints()
-        .unwrap()
-        .into_iter()
-        .map(|b| b.name)
-        .collect();
-    assert_eq!(
-        names_after_first_start.len(),
-        names_after_second_start.len(),
-        "reseeding must not duplicate builtins"
-    );
-}
-
-#[test]
-fn custom_blueprint_create_list_delete_round_trip_and_builtin_delete_refused() {
-    let dir = tempdir().unwrap();
-    let db = Database::new(&dir.path().join("test.db")).unwrap();
-
-    let custom = Blueprint {
-        id: uuid::Uuid::new_v4().to_string(),
-        name: "tdd-implementer".to_string(),
-        kind: GraphNodeKind::Agent,
-        config: serde_json::json!({ "platform": "claude", "prompt": "write a failing test first" }),
-        builtin: false,
-        created_at: chrono::Utc::now(),
-    };
-    db.insert_blueprint(&custom).unwrap();
-
-    let names: Vec<String> = db
-        .list_blueprints()
-        .unwrap()
-        .into_iter()
-        .map(|b| b.name)
-        .collect();
-    assert!(names.contains(&"tdd-implementer".to_string()));
-
-    let removed = db.delete_blueprint_by_name("tdd-implementer").unwrap();
-    assert!(removed);
-    assert!(db
-        .get_blueprint_by_name("tdd-implementer")
-        .unwrap()
-        .is_none());
-
-    // Deleting a builtin is refused at the validation layer with an
-    // actionable message, before ever touching the DB.
-    let builtin = db
-        .get_blueprint_by_name("implementer")
-        .unwrap()
-        .expect("builtin should exist");
-    let error = super::validate_blueprint_deletable(&builtin).unwrap_err();
-    assert!(error.contains("implementer"));
-    assert!(error.contains("cannot be deleted"));
-}
-
-#[test]
-fn graph_add_node_from_blueprint_with_override_merges_config_and_override_wins() {
-    let dir = tempdir().unwrap();
-    let db = Database::new(&dir.path().join("test.db")).unwrap();
-
-    // The builtin carries no platform (see `builtin_blueprint_specs`),
-    // so the caller must supply one via `config_overrides` — this also
-    // exercises the required-override path with a successful call.
-    let mut overrides = serde_json::Map::new();
-    overrides.insert("platform".to_string(), serde_json::json!("claude"));
-    overrides.insert("model".to_string(), serde_json::json!("opus"));
-
-    let (kind, config) =
-        resolve_node_kind_and_config(&db, None, None, Some("implementer"), Some(overrides))
-            .expect("blueprint resolution should succeed");
-
-    assert_eq!(kind, GraphNodeKind::Agent);
-    assert_eq!(config["platform"], "claude");
-    assert_eq!(config["model"], "opus");
-    // The templated key (prompt_preset) survives the shallow merge.
-    assert_eq!(config["prompt_preset"], "implementer");
-}
-
-/// The caller-must-supply-a-harness contract, from the other side: an
-/// agent blueprint's config omits `platform`/`cli` by design (see
-/// `builtin_blueprint_specs`), so creating a node from one without
-/// `config_overrides` supplying it must fail — never silently fall back
-/// to a default harness — with a message that names the missing field
-/// and says the omission is intentional.
-#[test]
-fn graph_add_node_from_agent_blueprint_without_harness_override_fails_with_useful_message() {
-    let dir = tempdir().unwrap();
-    let db = Database::new(&dir.path().join("test.db")).unwrap();
-
-    let error =
-        resolve_node_kind_and_config(&db, None, None, Some("implementer"), None).unwrap_err();
-
-    assert!(error.contains("implementer"), "{error}");
-    assert!(error.contains("platform"), "{error}");
-    assert!(
-        error.contains("intentionally"),
-        "error should explain the blueprint intentionally omits a harness: {error}"
-    );
-}
-
-/// A custom blueprint that pins its own platform (the pre-existing,
-/// still-supported pattern) needs no override at all — only the
-/// harness-free builtins require one.
-#[test]
-fn graph_add_node_from_custom_blueprint_with_platform_needs_no_override() {
-    let dir = tempdir().unwrap();
-    let db = Database::new(&dir.path().join("test.db")).unwrap();
-    db.insert_blueprint(&Blueprint {
-        id: uuid::Uuid::new_v4().to_string(),
-        name: "my-pinned-implementer".to_string(),
-        kind: GraphNodeKind::Agent,
-        config: serde_json::json!({"platform": "claude", "prompt": "go implement it"}),
-        builtin: false,
-        created_at: chrono::Utc::now(),
-    })
-    .unwrap();
-
-    let (kind, config) =
-        resolve_node_kind_and_config(&db, None, None, Some("my-pinned-implementer"), None)
-            .expect("a custom blueprint with its own platform should not require an override");
-
-    assert_eq!(kind, GraphNodeKind::Agent);
-    assert_eq!(config["platform"], "claude");
-}
-
-#[test]
-fn graph_add_node_with_unknown_blueprint_lists_available_names() {
-    let dir = tempdir().unwrap();
-    let db = Database::new(&dir.path().join("test.db")).unwrap();
-
-    let error = validate_blueprint_exists(&db, "does-not-exist").unwrap_err();
-
-    assert!(error.contains("does-not-exist"));
-    assert!(error.contains("implementer"));
-    assert!(error.contains("cargo-gates"));
-    assert!(error.contains("reviewer-committer"));
-    assert!(error.contains("commit-check"));
-    assert!(error.contains("resilience"));
-}
-
-#[test]
 fn resolve_sync_agent_id_reads_canopy_header() {
     let request = axum::http::Request::builder()
         .header(CANOPY_AGENT_ID_HEADER, "agent-123")
@@ -1405,4 +1240,38 @@ async fn graph_schedule_continue_rejects_invalid_action() {
         lp.auto_continue_at.is_none(),
         "an invalid mode must not schedule anything"
     );
+}
+
+#[test]
+fn resolve_node_kind_and_config_accepts_explicit_kind_and_config() {
+    let mut config = serde_json::Map::new();
+    config.insert(
+        "command".to_string(),
+        serde_json::Value::String("cargo test".to_string()),
+    );
+    let (kind, merged) = resolve_node_kind_and_config(Some("check"), Some(config)).unwrap();
+    assert_eq!(kind, GraphNodeKind::Check);
+    assert_eq!(merged["command"], "cargo test");
+}
+
+#[test]
+fn resolve_node_kind_and_config_requires_kind() {
+    let error = resolve_node_kind_and_config(None, Some(serde_json::Map::new())).unwrap_err();
+    assert!(error.contains("Provide 'kind'"), "{error}");
+}
+
+#[test]
+fn resolve_node_kind_and_config_requires_config() {
+    let error = resolve_node_kind_and_config(Some("check"), None).unwrap_err();
+    assert!(
+        error.contains("Provide either 'config' or 'node'"),
+        "{error}"
+    );
+}
+
+#[test]
+fn resolve_node_kind_and_config_rejects_unknown_kind() {
+    let error =
+        resolve_node_kind_and_config(Some("bogus"), Some(serde_json::Map::new())).unwrap_err();
+    assert!(error.contains("must be one of"), "{error}");
 }

@@ -69,8 +69,6 @@ pub enum SpecAction {
         #[arg(long)]
         group: Option<String>,
     },
-    /// Convert all legacy heading-format specs to the tagged `<spec>` format.
-    Convert,
     /// Print a spec's notes.
     Notes {
         /// Spec ID whose notes to print.
@@ -109,7 +107,6 @@ pub async fn handle_spec_action(action: SpecAction, port_override: Option<u16>) 
                 group: group.as_deref(),
             },
         ),
-        SpecAction::Convert => convert_specs(port_override),
         SpecAction::Notes { spec_id } => print_notes(port_override, &spec_id),
     }
 }
@@ -174,12 +171,6 @@ fn create_spec(port_override: Option<u16>, spec: &NewSpec<'_>) -> Result<()> {
         println!("{queue_text}");
     }
 
-    Ok(())
-}
-
-fn convert_specs(port_override: Option<u16>) -> Result<()> {
-    let text = call_tool(port_override, "spec_convert", &serde_json::json!({}))?;
-    println!("{text}");
     Ok(())
 }
 
@@ -450,26 +441,5 @@ mod tests {
             }
         }
         panic!("port kept getting claimed by another test after 5 attempts");
-    }
-
-    #[test]
-    fn spec_action_convert_variant_parses() {
-        let cli = TestCli::try_parse_from(["test", "convert"]).expect("should parse");
-        assert!(matches!(cli.action, SpecAction::Convert));
-    }
-
-    #[test]
-    fn convert_specs_calls_spec_convert_and_prints_report() {
-        let fake = spawn_fake_daemon(serde_json::json!({
-            "content": [{"type": "text", "text": "{\"scanned\":3,\"converted\":1}"}],
-            "isError": false
-        }));
-        let port: u16 = fake.port.parse().unwrap();
-
-        convert_specs(Some(port)).expect("should succeed");
-
-        let calls = fake.recorded_calls();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0]["name"], "spec_convert");
     }
 }

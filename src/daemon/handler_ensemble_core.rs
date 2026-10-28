@@ -34,7 +34,7 @@ impl TaskTriggerHandler {
         let canopy_dir = crate::domain::prompts::canopy_dir();
         let graphs = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir).graphs;
         let caps = crate::domain::graphs::MemberCaps::from_graphs(&graphs);
-        let sources = or_early_return!(resolve_ensemble_sources(&self.db, &params));
+        let sources = or_early_return!(resolve_ensemble_sources(&params));
         let ensemble_node_config = sources.ensemble_node.as_ref().map(|(_, config)| config);
         let plan = or_early_return!(resolve_ensemble_build_plan(
             &self.db, &params, &sources, &graphs, caps
@@ -171,16 +171,15 @@ pub(crate) fn default_member_timeout(
     requested.unwrap_or(graphs.straggler_timeout_minutes as i64)
 }
 
-/// Resolve `graph_ensemble`'s members from the caller's list, an
-/// ensemble node document (which carries no harnesses), or an ensemble
-/// blueprint. A document's members match the caller's one-for-one: each
+/// Resolve `graph_ensemble`'s members from the caller's list, merged with
+/// an ensemble node document's templates when one is given (which carries
+/// no harnesses). A document's members match the caller's one-for-one: each
 /// caller entry supplies the platform the document deliberately omits, and
 /// the document fills in the per-member prompt override, timeout and infra
 /// budget the caller left out.
 pub(crate) fn resolve_ensemble_members(
     explicit: Option<&Vec<EnsembleMemberParams>>,
     ensemble_node: Option<&(String, crate::domain::nodes::EnsembleNodeConfig)>,
-    blueprint: Option<&crate::domain::blueprints::EnsembleBlueprint>,
     kind: EnsembleKind,
     caps: crate::domain::graphs::MemberCaps,
 ) -> Result<Vec<EnsembleMemberSpec>, String> {
@@ -194,13 +193,7 @@ pub(crate) fn resolve_ensemble_members(
             "Ensemble node document '{document_name}' carries no member harnesses; pass members with a non-empty 'platform' for each of its {} members (and 'model' when the platform needs one).",
             config.members.len()
         )),
-        (None, None) => match blueprint {
-            Some(bp) => Ok(bp.members.clone()),
-            None => Err(
-                "Provide members, or a blueprint or node document that supplies them."
-                    .to_string(),
-            ),
-        },
+        (None, None) => Err("Provide members, or a crew that supplies them.".to_string()),
     }
 }
 

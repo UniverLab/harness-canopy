@@ -175,7 +175,7 @@ fn has_other_canopy_state(canopy_dir: &Path) -> bool {
 /// is `true` — the caller (`ensure_data_dir` in `main.rs`) computes this
 /// once via `daemon::process::other_instance_may_be_running` before calling
 /// in, rather than this module reaching for daemon detection itself: this
-/// `domain` module is also compiled standalone (see `examples/rag_search.rs`)
+/// `domain` module is also compiled standalone (see the standalone RAG search example)
 /// without the `daemon` module available. This project rebuilds and re-runs
 /// from source while the previously installed binary's daemon (and TUI) are
 /// still live, so "an old reader of the legacy path still exists" is the

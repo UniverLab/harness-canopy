@@ -1090,12 +1090,11 @@ mod tests {
 
     /// Regression guard for the identity-shadowing bug (T39): every platform
     /// is funneled through this sidecar, so a hardcoded `x-canopy-client-name:
-    /// bridge` header would shadow a real session's name at the daemon (see
-    /// `TaskTriggerHandler::resolve_sync_client_name`), turning "boletus ·
-    /// claude" into "boletus · claude · bridge" — two spellings of one
-    /// identity. The daemon already resolves the transport (bridge vs.
-    /// direct) from the session's own `cli` column, so this header must stay
-    /// absent.
+    /// bridge` header would shadow a real session's name at the daemon,
+    /// turning "boletus · claude" into "boletus · claude · bridge" — two
+    /// spellings of one identity. The daemon already resolves the transport
+    /// (bridge vs. direct) from the session's own `cli` column, so this
+    /// header must stay absent.
     #[tokio::test]
     async fn forward_request_omits_client_name_header() {
         use axum::extract::Request;
@@ -1110,10 +1109,7 @@ mod tests {
             axum::extract::State(flag): axum::extract::State<Arc<AtomicBool>>,
             request: Request,
         ) -> axum::response::Response {
-            if request
-                .headers()
-                .contains_key(crate::shared::sync_identity::CANOPY_CLIENT_NAME_HEADER)
-            {
+            if request.headers().contains_key("x-canopy-client-name") {
                 flag.store(true, Ordering::SeqCst);
             }
             (

@@ -10,10 +10,15 @@
 use std::fs;
 use std::path::Path;
 
-/// The tool names removed from the MCP surface when the graph family and
-/// then the spec/queue/agent/harness/config/crew families moved onto the
-/// resource tools, plus the deleted `loop_schedule_autorun` alias.
-/// (`spec_get` never existed as a tool, so there is no name to forbid.)
+/// The tool names removed from the MCP surface when the graph family,
+/// then the spec/queue/agent/harness/config/crew families, and finally the
+/// node/intelligence/project/scheduled-send/skill/subagent/rag/identity
+/// families moved onto the resource tools — plus the deleted
+/// `loop_schedule_autorun` alias, the retired sync and blueprint tools, and
+/// `spec_convert`.
+/// (`spec_get` never existed as a tool, so there is no name to forbid.
+/// `mutex` is covered by its own narrower test below: the bare word stays in
+/// the engine, the CLI, and the node-config field.)
 const REMOVED_NAMES: &[&str] = &[
     "graph_list",
     "graph_get",
@@ -95,6 +100,41 @@ const REMOVED_NAMES: &[&str] = &[
     "crew_update",
     "crew_delete",
     "graph_crew",
+    // Final wave: every name the eight last resource tools absorbed, plus
+    // the retired sync, blueprint, and convert tools.
+    "node_list",
+    "node_install",
+    "node_remove",
+    "intelligence_delete_node",
+    "intelligence_delete_relation",
+    "intelligence_graph_walk",
+    "intelligence_link_projects",
+    "intelligence_list_projects",
+    "project_register",
+    "project_remap",
+    "project_search",
+    "project_update",
+    "scheduled_send_list",
+    "scheduled_send_cancel",
+    "skill_get",
+    "skill_list",
+    "subagent_collect",
+    "subagent_spawn",
+    "rag_compact",
+    "rag_search",
+    "get_identity",
+    "evolve_identity",
+    "list_seeds",
+    "create_seed",
+    "remove_seed",
+    "sync_broadcast",
+    "sync_declare_intent",
+    "sync_get_context",
+    "sync_report_status",
+    "blueprint_list",
+    "blueprint_create",
+    "blueprint_delete",
+    "spec_convert",
 ];
 
 /// `graph_events` is also the name of the SQLite table the durable event log
@@ -109,12 +149,14 @@ fn is_test_path(path: &str) -> bool {
     path.contains("test")
 }
 
-/// Removed names that are also `Database` method names, which keep their
-/// names: the read path the engine and CLIs call directly. A method call
-/// (`.name(`), a `::`-qualified path, or the `fn name(` definition inside
-/// `src/db/` is the database, not the MCP surface — everything else (a
-/// `name = "…"` tool attribute, a `call_tool("…")` caller, prompt or error
-/// prose) is still a hit.
+/// Removed names that are also `Database` method (or `domain::seeds`
+/// function) names, which keep their names: the read path the engine and
+/// CLIs call directly. A method call (`.name(`), a `::`-qualified path, the
+/// `fn name(` definition inside `src/db/`, or any use inside either
+/// `seeds.rs` (the module that implements the seeds functions) is the
+/// database, not the MCP surface — everything else (a `name = "…"` tool
+/// attribute, a `call_tool("…")` caller, prompt or error prose) is still a
+/// hit.
 const DB_METHOD_NAMES: &[&str] = &[
     "spec_note_write",
     "spec_notes_get",
@@ -125,6 +167,8 @@ const DB_METHOD_NAMES: &[&str] = &[
     "crew_update",
     "crew_delete",
     "graph_crew",
+    "list_seeds",
+    "remove_seed",
 ];
 
 /// Removed names that survive as `harness` action names. The action table
@@ -134,6 +178,14 @@ const DB_METHOD_NAMES: &[&str] = &[
 /// `name = "…"` tool attribute or an old-style `call_tool("…")` caller is
 /// still a hit.
 const ROSTER_ACTION_NAMES: &[&str] = &["roster_set", "roster_list", "roster_clear", "roster_check"];
+
+/// Removed names that survive as `identity` action names. Same shape as the
+/// roster exemption: the action table (`name: "…"`), the dispatch match arm
+/// (`"…"=>`), a caller payload (the line names `action`), new-surface prose
+/// (the line names `identity`), and the dispatch file's own action
+/// descriptions are the new surface — a `name = "…"` tool attribute or an
+/// old-style `call_tool("…")` caller is still a hit.
+const IDENTITY_ACTION_NAMES: &[&str] = &["list_seeds", "create_seed", "remove_seed"];
 
 fn scan_file(path: &Path) -> Vec<String> {
     let Ok(text) = fs::read_to_string(path) else {
@@ -154,8 +206,12 @@ fn scan_file(path: &Path) -> Vec<String> {
             // CLI and node installer call directly; a `::`-qualified path
             // segment or a `mod` declaration is code, not a tool reference.
             // `graph_crew` also names the `db`/`params` modules (plus their
-            // `use` re-export); same rationale.
-            if (*name == "graph_install" || *name == "graph_validate" || *name == "graph_crew")
+            // `use` re-export), and `node_install` the node-installer module;
+            // same rationale.
+            if (*name == "graph_install"
+                || *name == "graph_validate"
+                || *name == "graph_crew"
+                || *name == "node_install")
                 && (line.contains(&format!("::{name}"))
                     || line.contains(&format!("mod {name}"))
                     || line.contains(&format!("use {name}")))
@@ -165,6 +221,7 @@ fn scan_file(path: &Path) -> Vec<String> {
             if DB_METHOD_NAMES.contains(name)
                 && (line.contains(&format!(".{name}("))
                     || line.contains(&format!("::{name}"))
+                    || shown.ends_with("seeds.rs")
                     || (line.contains(&format!("fn {name}(")) && shown.contains("src/db/")))
             {
                 continue;
@@ -178,6 +235,19 @@ fn scan_file(path: &Path) -> Vec<String> {
                     || line.contains(&format!("name: \"{name}\""))
                     || line.contains(&format!("\"{name}\" =>"))
                     || shown.ends_with("src/daemon/handler_resource_tools.rs")
+                {
+                    continue;
+                }
+            }
+            if IDENTITY_ACTION_NAMES.contains(name) {
+                let words: Vec<&str> = line
+                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .collect();
+                if words.contains(&"identity")
+                    || words.contains(&"action")
+                    || line.contains(&format!("name: \"{name}\""))
+                    || line.contains(&format!("\"{name}\" =>"))
+                    || shown.ends_with("src/daemon/handler_resource_tools_final.rs")
                 {
                     continue;
                 }
@@ -228,5 +298,69 @@ fn no_removed_tool_name_survives_in_src_outside_tests() {
         hits.is_empty(),
         "removed tool names must be reworded to the new tool+action outside tests:\n{}",
         hits.join("\n")
+    );
+}
+
+fn collect_rs_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rs_files(&path, out);
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            out.push(path);
+        }
+    }
+}
+
+/// The `mutex` MCP tool is retired, but the bare word stays: the engine
+/// (lease/waiter store), the `canopy mutex` CLI, and the node-config `mutex`
+/// field all keep the name. So instead of a whole-word ban, forbid only the
+/// MCP surface spellings — a `name = "mutex"` tool attribute or a
+/// `call_tool("mutex", …)` caller — and assert the keepers still exist.
+#[test]
+fn no_mutex_mcp_tool_survives_while_engine_and_param_keep_the_word() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let src = Path::new(manifest_dir).join("src");
+    let mut files = Vec::new();
+    collect_rs_files(&src, &mut files);
+    let mut hits = Vec::new();
+    for path in &files {
+        let shown = path.to_string_lossy().to_string();
+        if is_test_path(&shown) {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(path) else {
+            continue;
+        };
+        let text = text.split("#[cfg(test)]").next().unwrap_or(&text);
+        for (idx, line) in text.lines().enumerate() {
+            if line.contains("name = \"mutex\"")
+                || (line.contains("call_tool(") && line.contains("\"mutex\""))
+            {
+                hits.push(format!("{shown}:{}: {line}", idx + 1));
+            }
+        }
+    }
+    assert!(
+        hits.is_empty(),
+        "mutex MCP surface must be gone outside tests:\n{}",
+        hits.join("\n")
+    );
+    let engine = fs::read_to_string(src.join("db/mutex_store.rs")).unwrap_or_default();
+    assert!(
+        engine.contains("mutex_leases"),
+        "the mutex engine (mutex_leases store) must stay"
+    );
+    let params = fs::read_to_string(src.join("daemon/params/nodes.rs")).unwrap_or_default();
+    assert!(
+        params.contains("pub mutex:"),
+        "the node-config `mutex` field must stay"
+    );
+    assert!(
+        src.join("daemon/mutex_cli.rs").exists(),
+        "the `canopy mutex` CLI must stay"
     );
 }

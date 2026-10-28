@@ -106,8 +106,8 @@ focus = "Refactoring, Architecture"
 - Each seed has a unique name (case-insensitive), behavioral directives
   and personality traits; identities are capped at 4 KB and validated.
 - Sessions bound to a seed receive its prompt injection automatically.
-- The `evolve_identity` MCP tool lets agents refine their own identity
-  over time; `create_seed`, `list_seeds` and `remove_seed` manage the
+- The `identity` MCP tool's `evolve` action lets agents refine their own identity
+  over time; its `create_seed`, `list_seeds` and `remove_seed` actions manage the
   nursery.
 
 ## Context transfer

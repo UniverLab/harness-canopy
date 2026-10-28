@@ -404,7 +404,7 @@ impl SimplePromptDialog {
             ("resources", "Resources"),
         ];
         if rag_enabled {
-            sections.push(("rag_search", "RAG Search"));
+            sections.push(("rag", "RAG Search"));
         }
         sections.extend([("constraints", "Constraints"), ("tools", "Tools")]);
         // The manual resend path: a locked, read-only section holding the

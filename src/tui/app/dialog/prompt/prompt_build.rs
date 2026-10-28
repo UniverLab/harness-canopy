@@ -196,7 +196,7 @@ impl SimplePromptDialog {
         db: &Database,
         default_project_hash: Option<&str>,
     ) -> Vec<String> {
-        self.section_lines("rag_search")
+        self.section_lines("rag")
             .into_iter()
             .flat_map(|query| Self::search_rag_resources(db, &query, default_project_hash))
             .collect()
@@ -348,7 +348,7 @@ pub(super) fn append_tool_skill(result: &mut String, tool_line: &str) {
     if let Some(name) = tool_line.strip_prefix("canopy:") {
         result.push_str("  <skill>\n");
         result.push_str(&format!(
-            "    canopy skill {name} — load it with skill_get(name=\"{name}\")\n"
+            "    canopy skill {name} — load it with the `skill` tool's `get` action (name=\"{name}\")\n"
         ));
         result.push_str("  </skill>\n\n");
     } else {

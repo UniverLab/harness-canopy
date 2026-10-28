@@ -5,8 +5,8 @@
 //! preset?}`; `canopy graph validate` is its schema check (see
 //! `daemon::graph`), and `graph_node`/`graph_ensemble` can
 //! instantiate one by name instead of asking the caller for a full `config`.
-//! Installed copies live in `~/.canopy/nodes/<name>.json`; the six former
-//! builtin blueprints are embedded in the binary with `include_str!` and are
+//! Installed copies live in `~/.canopy/nodes/<name>.json`; the six builtin
+//! node documents are embedded in the binary with `include_str!` and are
 //! always resolvable offline. Lookup order is installed copy first, then the
 //! embedded builtin — so installing your own `implementer` overrides the
 //! builtin one without losing the ability to remove the override again.
@@ -261,6 +261,20 @@ pub fn unknown_node_message(dir: &Path, name: &str) -> Result<String, String> {
     ))
 }
 
+/// Shallow-merge `overrides` onto `template`: keys present in `overrides` win,
+/// every other key from `template` is preserved. Non-object inputs are
+/// treated as empty objects rather than rejected — callers validate node
+/// config shape separately (see `validate_node_config`).
+pub fn merge_config(template: &Value, overrides: Option<&Value>) -> Value {
+    let mut merged = template.as_object().cloned().unwrap_or_default();
+    if let Some(overrides) = overrides.and_then(Value::as_object) {
+        for (key, value) in overrides {
+            merged.insert(key.clone(), value.clone());
+        }
+    }
+    Value::Object(merged)
+}
+
 fn invalid_name_message(name: &str) -> String {
     format!("Invalid node name '{name}': use 1-48 lowercase letters, digits, or '-'.")
 }
@@ -269,8 +283,8 @@ fn invalid_name_message(name: &str) -> String {
 mod tests {
     use super::*;
 
-    /// The six embedded builtins, sorted — the five former blueprints plus
-    /// `ensemble-proposers`.
+    /// The six embedded builtins, sorted — the five single-node documents
+    /// plus `ensemble-proposers`.
     const EXPECTED_BUILTINS: [&str; 6] = [
         "cargo-gates",
         "commit-check",
@@ -298,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn the_five_former_blueprints_are_agent_and_check_nodes() {
+    fn the_five_single_node_builtins_are_agent_and_check_nodes() {
         let mut kinds: Vec<(String, String)> = Vec::new();
         for name in ["implementer", "reviewer-committer", "resilience"] {
             let document = builtin(name).expect("agent builtin");
@@ -408,5 +422,79 @@ mod tests {
         let error = write(&nodes_dir(dir.path()), &document).unwrap_err();
         assert!(error.contains("Invalid node name"), "{error}");
         assert!(!dir.path().join("escape.json").exists());
+    }
+
+    #[test]
+    fn merge_config_shallow_merges_override_keys_win() {
+        let template = serde_json::json!({
+            "platform": "claude",
+            "prompt": "base prompt"
+        });
+        let overrides = serde_json::json!({
+            "prompt": "custom prompt",
+            "model": "opus"
+        });
+
+        let merged = merge_config(&template, Some(&overrides));
+
+        assert_eq!(merged["platform"], "claude");
+        assert_eq!(merged["prompt"], "custom prompt");
+        assert_eq!(merged["model"], "opus");
+    }
+
+    #[test]
+    fn merge_config_with_no_overrides_returns_template() {
+        let template = serde_json::json!({ "command": "cargo test" });
+        let merged = merge_config(&template, None);
+        assert_eq!(merged, template);
+    }
+
+    /// S2: a node document may carry pinned `skills` in its config template
+    /// like any other key. With no override, the template's array passes
+    /// through untouched.
+    #[test]
+    fn merge_config_preserves_skills_array_from_template() {
+        let template = serde_json::json!({
+            "platform": "claude",
+            "skills": ["coder", "rust-idiomatic-patterns"]
+        });
+        let merged = merge_config(&template, None);
+        assert_eq!(
+            merged["skills"],
+            serde_json::json!(["coder", "rust-idiomatic-patterns"])
+        );
+    }
+
+    /// S2: an override's `skills` key replaces the template's wholesale —
+    /// shallow merge, not an elementwise union — exactly like every other
+    /// overridden key.
+    #[test]
+    fn merge_config_override_replaces_template_skills_array() {
+        let template = serde_json::json!({
+            "platform": "claude",
+            "skills": ["coder"]
+        });
+        let overrides = serde_json::json!({ "skills": ["reviewer", "coder"] });
+
+        let merged = merge_config(&template, Some(&overrides));
+
+        assert_eq!(merged["skills"], serde_json::json!(["reviewer", "coder"]));
+        assert_eq!(merged["platform"], "claude");
+    }
+
+    #[test]
+    fn merge_config_with_empty_overrides_returns_template() {
+        let template = serde_json::json!({ "a": 1, "b": 2 });
+        let overrides = serde_json::json!({});
+        let merged = merge_config(&template, Some(&overrides));
+        assert_eq!(merged, template);
+    }
+
+    #[test]
+    fn merge_config_with_non_object_overrides_returns_template() {
+        let template = serde_json::json!({ "a": 1 });
+        let overrides = serde_json::json!("just a string");
+        let merged = merge_config(&template, Some(&overrides));
+        assert_eq!(merged, template);
     }
 }

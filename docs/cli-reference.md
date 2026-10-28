@@ -191,7 +191,6 @@ served from the local database — no daemon required.
 | `canopy spec complete <spec-id> --reason <text>` | Mark a standalone spec as completed |
 | `canopy spec skip <spec-id> --reason <text>` | Mark a standalone spec as skipped |
 | `canopy spec reopen <spec-id> --reason <text>` | Reopen a completed/skipped spec back to pending |
-| `canopy spec convert` | Migrate legacy heading-format spec bodies to the tagged `<spec>` format (skips tagged and running specs; prints a report) |
 | `canopy spec notes <spec-id>` | Print every spec note of a spec, newest first, with its owner, last update and body (see [Spec notes](graphs.md#spec-notes)) |
 
 ## Availability roster

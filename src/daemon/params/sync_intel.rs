@@ -1,51 +1,5 @@
 use super::*;
 
-// ── Sync tool parameter types ──────────────────────────────────────────
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct SyncDeclareIntentParams {
-    /// Workdir this mission belongs to.
-    pub workdir: String,
-    /// High-level mission being started.
-    pub mission: String,
-    /// Impact on the workspace: low | high | breaking.
-    pub impact: String,
-    /// Optional human-readable details.
-    pub description: String,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct SyncReportStatusParams {
-    /// Workdir this status applies to.
-    pub workdir: String,
-    /// Workspace state: stable | unstable | testing.
-    pub status: String,
-    /// Optional status details shown to peers.
-    pub message: String,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct SyncBroadcastParams {
-    /// Workdir channel to broadcast to.
-    pub workdir: String,
-    /// Message kind: info | query | answer.
-    pub kind: String,
-    /// Human-readable message.
-    pub message: String,
-    /// Optional JSON metadata.
-    #[serde(default)]
-    #[schemars(schema_with = "arbitrary_json_value_schema")]
-    pub metadata: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct SyncGetContextParams {
-    /// Workdir to query.
-    pub workdir: String,
-    /// Number of recent messages to return (default: 10).
-    pub limit: Option<usize>,
-}
-
 // ── Intelligence tool parameter types ─────────────────────────────
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -165,7 +119,7 @@ pub struct IntelligenceSearchParams {
     pub depth: Option<usize>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct IntelligenceGraphWalkParams {
     /// Starting node ID.
     pub node_id: String,
@@ -176,7 +130,7 @@ pub struct IntelligenceGraphWalkParams {
     pub compact: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct IntelligenceDeleteNodeParams {
     /// ID of the intelligence node to delete.
     pub node_id: String,
@@ -186,10 +140,10 @@ pub struct IntelligenceDeleteNodeParams {
     pub project_hash: Option<String>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct IntelligenceDeleteRelationParams {
     /// ID of the relation (edge) to delete, as returned in the `edges` list
-    /// of `intelligence_graph_walk`.
+    /// of `intelligence_admin` `walk`.
     pub edge_id: i64,
     /// Optional project hash to explicitly scope the deletion, the same way
     /// `intelligence_get_context` allows an explicit override of the
@@ -207,7 +161,7 @@ pub struct GetToolsParams {
 
 // ── Intelligence V2 tool parameter types ─────────────────────────────
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct IntelligenceListProjectsParams {
     /// Optional search query to filter projects by name/body.
     pub query: Option<String>,
@@ -215,7 +169,7 @@ pub struct IntelligenceListProjectsParams {
     pub limit: Option<usize>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct IntelligenceLinkProjectsParams {
     /// Source project hash.
     pub from_project_hash: String,

@@ -18,12 +18,12 @@ use template::TemplateArgs;
 
 #[cfg(test)]
 use identity::{truncate_identity_output, IDENTITY_CHECK_OUTPUT_LIMIT};
-// `examples/rag_search.rs` re-includes `src/domain` via `#[path]` as a private
+// the standalone RAG search example re-includes `src/domain` via `#[path]` as a private
 // module, so these re-exports look unused in that crate even though the daemon
 // (probe/doctor) uses them. Same pattern as `domain::graphs`' re-export.
 #[allow(unused_imports)]
 pub use identity::{verify_identity, verify_identity_async, WrongBinaryError};
-// Same `#[allow(unused_imports)]` pattern as `identity` above: `examples/rag_search.rs`
+// Same `#[allow(unused_imports)]` pattern as `identity` above: the standalone RAG search example
 // re-includes `src/domain` via `#[path]` as a private module, so these re-exports
 // look unused in that crate even though probe/dispatch/doctor use them.
 #[allow(unused_imports)]

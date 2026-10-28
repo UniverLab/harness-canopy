@@ -13,7 +13,6 @@ fn handler_deps_round_trip_constructs_identical_handler() {
     use crate::executor::Executor;
     use crate::graph_engine::GraphEngine;
     use crate::rag::ingestion::IngestionManager;
-    use crate::sync_manager::SyncManager;
     use crate::watchers::WatcherEngine;
     use std::sync::Arc;
     use tokio::sync::Notify;
@@ -22,7 +21,6 @@ fn handler_deps_round_trip_constructs_identical_handler() {
     let db = Arc::new(Database::new(&dir.path().join("test.db")).unwrap());
     let notif: Arc<dyn NotificationService> = Arc::new(DefaultNotificationService);
     let executor = Arc::new(Executor::new(Arc::clone(&db), Arc::clone(&notif)));
-    let sync_manager = Arc::new(SyncManager::new(Arc::clone(&db)));
     let graph_engine = Arc::new(GraphEngine::new(Arc::clone(&db), Arc::clone(&notif)));
     let watcher_engine = Arc::new(WatcherEngine::new(
         Arc::clone(&db),
@@ -47,7 +45,6 @@ fn handler_deps_round_trip_constructs_identical_handler() {
         scheduler_notify: Arc::clone(&scheduler_notify),
         graph_engine: Arc::clone(&graph_engine),
         notification_service: Arc::clone(&notif),
-        sync_manager: Arc::clone(&sync_manager),
         ingestion: Arc::clone(&ingestion),
         dynamic_skills: Arc::clone(&dynamic_skills),
         start_time: std::time::Instant::now(),
@@ -84,7 +81,6 @@ fn daemon_start_instant_is_shared_by_every_handler() {
     use crate::executor::Executor;
     use crate::graph_engine::GraphEngine;
     use crate::rag::ingestion::IngestionManager;
-    use crate::sync_manager::SyncManager;
     use crate::watchers::WatcherEngine;
     use std::sync::Arc;
     use tokio::sync::Notify;
@@ -93,7 +89,6 @@ fn daemon_start_instant_is_shared_by_every_handler() {
     let db = Arc::new(Database::new(&dir.path().join("test.db")).unwrap());
     let notif: Arc<dyn NotificationService> = Arc::new(DefaultNotificationService);
     let executor = Arc::new(Executor::new(Arc::clone(&db), Arc::clone(&notif)));
-    let sync_manager = Arc::new(SyncManager::new(Arc::clone(&db)));
     let graph_engine = Arc::new(GraphEngine::new(Arc::clone(&db), Arc::clone(&notif)));
     let watcher_engine = Arc::new(WatcherEngine::new(
         Arc::clone(&db),
@@ -123,7 +118,6 @@ fn daemon_start_instant_is_shared_by_every_handler() {
         scheduler_notify: Arc::clone(&scheduler_notify),
         graph_engine: Arc::clone(&graph_engine),
         notification_service: Arc::clone(&notif),
-        sync_manager: Arc::clone(&sync_manager),
         ingestion: Arc::clone(&ingestion),
         dynamic_skills: Arc::clone(&dynamic_skills),
         start_time: daemon_start,
@@ -143,7 +137,6 @@ fn daemon_start_instant_is_shared_by_every_handler() {
         scheduler_notify: Arc::clone(&scheduler_notify),
         graph_engine: Arc::clone(&graph_engine),
         notification_service: Arc::clone(&notif),
-        sync_manager: Arc::clone(&sync_manager),
         ingestion: Arc::clone(&ingestion),
         dynamic_skills: Arc::clone(&dynamic_skills),
         start_time: daemon_start,
@@ -1246,13 +1239,14 @@ async fn scheduled_send_list_defaults_to_own_session() {
     )
     .unwrap();
 
-    let result = handler
-        .scheduled_send_list(
-            Parameters(ScheduledSendListParams { session_id: None }),
-            OptionalExtension(None),
-        )
-        .await
-        .unwrap();
+    let result = call_resource_action(
+        &handler,
+        "scheduled_send",
+        "list",
+        params_id(ScheduledSendListParams { session_id: None }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&result), "{}", text(&result));
     let out = raw_text(&result);
     assert!(out.contains("ss-list-1"));
@@ -1273,15 +1267,16 @@ async fn scheduled_send_list_explicit_session_needs_no_identity() {
     )
     .unwrap();
 
-    let result = handler
-        .scheduled_send_list(
-            Parameters(ScheduledSendListParams {
-                session_id: Some("some-session".to_string()),
-            }),
-            OptionalExtension(None),
-        )
-        .await
-        .unwrap();
+    let result = call_resource_action(
+        &handler,
+        "scheduled_send",
+        "list",
+        params_id(ScheduledSendListParams {
+            session_id: Some("some-session".to_string()),
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&result), "{}", text(&result));
     assert!(raw_text(&result).contains("ss-list-2"));
 }
@@ -1289,15 +1284,16 @@ async fn scheduled_send_list_explicit_session_needs_no_identity() {
 #[tokio::test]
 async fn scheduled_send_list_empty_reports_none_pending() {
     let (_dir, _db, handler) = endpoint_test_handler();
-    let result = handler
-        .scheduled_send_list(
-            Parameters(ScheduledSendListParams {
-                session_id: Some("nobody".to_string()),
-            }),
-            OptionalExtension(None),
-        )
-        .await
-        .unwrap();
+    let result = call_resource_action(
+        &handler,
+        "scheduled_send",
+        "list",
+        params_id(ScheduledSendListParams {
+            session_id: Some("nobody".to_string()),
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&result));
     assert!(text(&result).contains("No pending"));
 }
@@ -1316,12 +1312,16 @@ async fn scheduled_send_cancel_removes_pending_send() {
     )
     .unwrap();
 
-    let result = handler
-        .scheduled_send_cancel(Parameters(ScheduledSendCancelParams {
+    let result = call_resource_action(
+        &handler,
+        "scheduled_send",
+        "cancel",
+        params_id(ScheduledSendCancelParams {
             id: "ss-cancel-1".to_string(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&result), "{}", text(&result));
     assert!(db
         .list_pending_scheduled_sends_for_session("session-x")
@@ -1332,12 +1332,16 @@ async fn scheduled_send_cancel_removes_pending_send() {
 #[tokio::test]
 async fn scheduled_send_cancel_unknown_id_is_not_found() {
     let (_dir, _db, handler) = endpoint_test_handler();
-    let result = handler
-        .scheduled_send_cancel(Parameters(ScheduledSendCancelParams {
+    let result = call_resource_action(
+        &handler,
+        "scheduled_send",
+        "cancel",
+        params_id(ScheduledSendCancelParams {
             id: "no-such-id".to_string(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&result));
     assert!(text(&result).contains("no-such-id"));
 }

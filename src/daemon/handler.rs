@@ -10,7 +10,6 @@ use crate::db::Database;
 use crate::executor::Executor;
 use crate::graph_engine::GraphEngine;
 use crate::rag::rate_limiter::RateLimiter;
-use crate::sync_manager::SyncManager;
 use crate::watchers::WatcherEngine;
 use rmcp::handler::server::common::AsRequestContext;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -33,8 +32,6 @@ use crate::daemon::handler_formatting::make_log_path;
 use crate::daemon::helpers::error_result;
 #[cfg(test)]
 use crate::daemon::params::*;
-#[cfg(test)]
-use crate::domain::blueprints::{validate_blueprint_deletable, Blueprint};
 #[cfg(test)]
 #[allow(unused_imports)]
 use crate::domain::graphs::{
@@ -59,8 +56,6 @@ pub(crate) use crate::daemon::handler_validate::{
     delete_graph_edge_checked, retarget_graph_edge, validate_absolute_dir, validate_non_empty,
 };
 
-#[cfg(test)]
-pub(crate) use crate::daemon::handler_blueprints::blueprint_json;
 #[cfg(test)]
 pub(crate) use crate::daemon::handler_copy::{node_copy_note, plan_ensemble_copy, plan_node_copy};
 #[cfg(test)]
@@ -87,9 +82,7 @@ pub(crate) use crate::daemon::handler_models_probes::{
     prepend_recent_usage,
 };
 #[cfg(test)]
-pub(crate) use crate::daemon::handler_node_lib::{
-    resolve_node_kind_and_config, validate_blueprint_exists,
-};
+pub(crate) use crate::daemon::handler_node_lib::resolve_node_kind_and_config;
 #[cfg(test)]
 pub(crate) use crate::daemon::handler_nodes::unknown_config_keys;
 #[cfg(test)]
@@ -217,14 +210,13 @@ pub struct TaskTriggerHandler {
     pub scheduler_notify: Arc<Notify>,
     pub graph_engine: Arc<GraphEngine>,
     pub notification_service: Arc<dyn NotificationService>,
-    pub sync_manager: Arc<SyncManager>,
     /// Shared RAG ingestion manager: rag_search must acquire its embedding
     /// client through this cache (B22) so queries reuse the loaded model and
     /// keep the persisted model-loaded status truthful.
     pub ingestion: Arc<crate::rag::ingestion::IngestionManager>,
-    /// Rate limiters for rag_search (10 calls/min). Keyed by agent_id.
+    /// Rate limiters for `rag` `search` (10 calls/min). Keyed by agent_id.
     pub rag_limiters: Arc<tokio::sync::Mutex<std::collections::HashMap<String, RateLimiter>>>,
-    /// Backing store for `skill_list`/`skill_get` (`~/.canopy/skills/`).
+    /// Backing store for `skill` `list`/`get` (`~/.canopy/skills/`).
     /// Git operations block, so callers run it via `spawn_blocking`.
     pub dynamic_skills: Arc<crate::dynamic_skills::SkillStore>,
     pub start_time: std::time::Instant,
@@ -241,7 +233,6 @@ pub struct HandlerDeps {
     pub scheduler_notify: Arc<Notify>,
     pub graph_engine: Arc<GraphEngine>,
     pub notification_service: Arc<dyn NotificationService>,
-    pub sync_manager: Arc<SyncManager>,
     pub ingestion: Arc<crate::rag::ingestion::IngestionManager>,
     pub dynamic_skills: Arc<crate::dynamic_skills::SkillStore>,
     /// CB83: the daemon process start instant, captured once when the
@@ -261,7 +252,6 @@ impl TaskTriggerHandler {
             scheduler_notify,
             graph_engine,
             notification_service,
-            sync_manager,
             ingestion,
             dynamic_skills,
             start_time,
@@ -275,7 +265,6 @@ impl TaskTriggerHandler {
             scheduler_notify,
             graph_engine,
             notification_service,
-            sync_manager,
             ingestion,
             rag_limiters: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             dynamic_skills,
@@ -294,16 +283,11 @@ impl TaskTriggerHandler {
         router.merge(TaskTriggerHandler::tool_router_agents());
         router.merge(TaskTriggerHandler::tool_router_scheduled_sends());
         router.merge(TaskTriggerHandler::tool_router_resource_tools());
-        router.merge(TaskTriggerHandler::tool_router_sync());
+        router.merge(TaskTriggerHandler::tool_router_resource_tools_final());
         router.merge(TaskTriggerHandler::tool_router_intel());
-        router.merge(TaskTriggerHandler::tool_router_seeds_skills());
         router.merge(TaskTriggerHandler::tool_router_graphs());
         router.merge(TaskTriggerHandler::tool_router_graph_tools());
-        router.merge(TaskTriggerHandler::tool_router_specs());
-        router.merge(TaskTriggerHandler::tool_router_blueprints());
         router.merge(TaskTriggerHandler::tool_router_nodes());
-        router.merge(TaskTriggerHandler::tool_router_node_lib());
-        router.merge(TaskTriggerHandler::tool_router_mutex());
         router.merge(TaskTriggerHandler::tool_router_edges());
         router.merge(TaskTriggerHandler::tool_router_ensemble_core());
         router.merge(TaskTriggerHandler::tool_router_copy());
@@ -338,16 +322,11 @@ pub const NODE_TOOLS: &[&str] = &[
     "intelligence_get_context",
     "intelligence_search",
     "intelligence_upsert",
-    "intelligence_graph_walk",
-    "rag_search",
-    "skill_get",
-    "skill_list",
-    "sync_get_context",
-    "sync_declare_intent",
-    "sync_report_status",
-    "sync_broadcast",
+    "intelligence_admin",
+    "rag",
+    "skill",
+    "identity",
     "get_tools",
-    "get_identity",
 ];
 
 fn node_tool_list() -> Vec<Tool> {
@@ -496,13 +475,15 @@ pub(crate) async fn call_graph_action_value(
     }
 }
 
-/// Test-only dispatch seam for the eight second-wave resource tools
-/// (`spec`, `spec_edit`, `queue`, `agent`, `agent_edit`, `harness`,
-/// `config`, `crew`): the typed params struct is serialized with nulls
-/// stripped, `action` is injected, and the call goes through the tool's own
-/// `Parameters<ActionObject>` validation before reaching the same `_impl`
-/// logic the old one-operation tools held. `agent_edit` runs without a
-/// caller session, like the ported tests' old `OptionalExtension(None)`.
+/// Test-only dispatch seam for the sixteen second- and final-wave resource
+/// tools (`spec`, `spec_edit`, `queue`, `agent`, `agent_edit`, `harness`,
+/// `config`, `crew`, `node`, `intelligence_admin`, `project`,
+/// `scheduled_send`, `skill`, `subagent`, `rag`, `identity`): the typed
+/// params struct is serialized with nulls stripped, `action` is injected,
+/// and the call goes through the tool's own `Parameters<ActionObject>`
+/// validation before reaching the same `_impl` logic the old one-operation
+/// tools held. Tools that take a caller session run without one, like the
+/// ported tests' old `OptionalExtension(None)`.
 #[cfg(test)]
 pub(crate) async fn call_resource_action<P: serde::Serialize>(
     handler: &TaskTriggerHandler,
@@ -551,6 +532,22 @@ pub(crate) async fn call_resource_action_value(
         "harness" => handler.harness(parameters).await,
         "config" => handler.config(parameters).await,
         "crew" => handler.crew(parameters).await,
+        "node" => handler.node(parameters).await,
+        "intelligence_admin" => {
+            handler
+                .intelligence_admin(parameters, OptionalExtension(None))
+                .await
+        }
+        "project" => handler.project(parameters).await,
+        "scheduled_send" => {
+            handler
+                .scheduled_send(parameters, OptionalExtension(None))
+                .await
+        }
+        "skill" => handler.skill(parameters).await,
+        "subagent" => handler.subagent(parameters, OptionalExtension(None)).await,
+        "rag" => handler.rag(parameters, OptionalExtension(None)).await,
+        "identity" => handler.identity(parameters, OptionalExtension(None)).await,
         other => panic!("unknown resource tool '{other}'"),
     }
 }
@@ -575,8 +572,8 @@ mod coverage_tests;
 //
 // The three test modules above almost exclusively exercise *pure* helper
 // functions (validate_*, build_*, format_*). The `#[tool]` methods on
-// `TaskTriggerHandler` itself — `agent_edit`, `sync_*`,
-// `intelligence_*`, `graph_*`, `spec_*`, `blueprint_*`, etc. — are called
+// `TaskTriggerHandler` itself — `agent_edit`, `intelligence_*`,
+// `graph_*`, `spec_*`, etc. — are called
 // directly here instead: construct `Parameters<...>`, call the method on a
 // real handler wired to a real (tempdir) SQLite database, assert on the
 // `CallToolResult` and on the resulting DB state. This is the surface a

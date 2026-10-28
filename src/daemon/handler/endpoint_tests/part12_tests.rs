@@ -240,7 +240,6 @@ async fn graph_add_ensemble_crew_and_members_are_exclusive() {
             name: "entry".to_string(),
             kind: Some("check".to_string()),
             config: Some(check_node_config("true")),
-            blueprint: None,
             node: None,
             config_overrides: None,
         }),
@@ -261,7 +260,6 @@ async fn graph_add_ensemble_crew_and_members_are_exclusive() {
             kind: None,
             name: "Both".to_string(),
             prompt_template: Some("draft it".to_string()),
-            blueprint: None,
             node: None,
             members: Some(vec![crate::daemon::params::EnsembleMemberParams {
                 platform: "claude".to_string(),
