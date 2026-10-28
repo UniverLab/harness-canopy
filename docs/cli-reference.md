@@ -370,13 +370,13 @@ such as `FEAT-12` or null, `name`, `status`, `attempts`) and
 `updated_at`:
 
 ```json
-{"t": "graph_watch", "req": "w1", "id": "ebea3d93-d26b-4c78-9294-d08f6eba46c8"}
+{"t": "graph_watch", "req": "w1", "id": "7c1e4b2a-9d3f-4a6e-8b5c-2f0d1e3a4b6c"}
 ```
 
 `graph_unwatch{id}` stops that watch and answers nothing:
 
 ```json
-{"t": "graph_unwatch", "id": "ebea3d93-d26b-4c78-9294-d08f6eba46c8"}
+{"t": "graph_unwatch", "id": "7c1e4b2a-9d3f-4a6e-8b5c-2f0d1e3a4b6c"}
 ```
 
 A connection holds at most four watches — a fifth answers
