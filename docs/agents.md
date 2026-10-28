@@ -29,13 +29,13 @@ variables: `{{TIMESTAMP}}`, `{{TASK_ID}}`, `{{LOG_PATH}}`,
 `{{FILE_PATH}}`, `{{EVENT_TYPE}}`.
 
 Background agents are managed from the TUI or by other agents through the
-[agent MCP tools](mcp-tools.md) (`agent_add`, `agent_watch`,
-`agent_run`, `agent_status`, …).
+[agent MCP tools](mcp-tools.md) (`agent_edit` `add`, `agent_edit` `watch`,
+`agent_edit` `run`, `agent` `status`, …).
 
 ### Send to a session
 
 A background agent can deliver its prompt into a *live interactive session*
-instead of running a CLI headlessly. Set `action` to `send_to_session` and give
+instead of running a CLI headlessly. Set `delivery_action` to `send_to_session` (`action` is the tool's dispatch key, so the delivery parameter is named `delivery_action`) and give
 a target session — by **name** is recommended, because the name is resolved
 against the live sessions on every fire, and a resume canopy recognizes keeps
 both the session's id and its name. A resume it does not recognize comes back
@@ -50,16 +50,16 @@ replaces that message rather than piling up a second one.
 Cron example (MCP call):
 
 ```json
-{"tool":"agent_add","arguments":{"id":"hourly-orchestrator-nudge","schedule":"0 * * * *","action":"send_to_session","target_session_name":"orchestrator","prompt":"Check the release board and report anything blocked."}}
+{"tool":"agent_edit","arguments":{"action":"add","id":"hourly-orchestrator-nudge","schedule":"0 * * * *","delivery_action":"send_to_session","target_session_name":"orchestrator","prompt":"Check the release board and report anything blocked."}}
 ```
 
 Watch example:
 
 ```json
-{"tool":"agent_watch","arguments":{"id":"spec-changed-nudge","path":"/abs/path/to/specs","events":["modify","create"],"action":"send_to_session","target_session_name":"orchestrator","prompt":"A spec changed; re-read it and update the plan."}}
+{"tool":"agent_edit","arguments":{"action":"watch","id":"spec-changed-nudge","path":"/abs/path/to/specs","events":["modify","create"],"delivery_action":"send_to_session","target_session_name":"orchestrator","prompt":"A spec changed; re-read it and update the plan."}}
 ```
 
-Omit both target fields to target the calling session. Use `agent_run` to
+Omit both target fields to target the calling session. Use `agent_edit` `run` to
 deliver once now.
 
 ## Terminal sessions

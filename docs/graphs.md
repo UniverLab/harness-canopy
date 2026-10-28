@@ -309,7 +309,7 @@ state while running, expandable on inspect.
 
 ### Availability at dispatch
 
-The roster (`roster_set`, or `canopy roster set` — see the
+The roster (`harness` `roster_set`, or `canopy roster set` — see the
 [CLI reference](cli-reference.md) and [MCP tools](mcp-tools.md)) declares a
 platform/model pair — or a whole platform — out for a while. At dispatch an
 ensemble simply skips members whose pair is effectively unavailable: a
@@ -338,8 +338,8 @@ counts an ensemble the roster would block as `would_fail`.
 A **crew** is a named, ordered list of members — `(platform, model, timeout,
 infra-retry budget)` — kept in one place, so the same "designer crew" or
 "implementer crew" is written once instead of copied into every graph. The
-tools are `crew_list`, `crew_get`, `crew_create` (`members` or
-`from_ensemble`), `crew_update` and `crew_delete`; the CLI mirrors them as
+tool is `crew` with actions `list`, `get`, `create` (`members` or
+`from_ensemble`), `update` and `delete`; the CLI mirrors them as
 `canopy crew list | show | create --from-ensemble | delete` (member editing
 is MCP/TUI only). `from_ensemble` refuses an ensemble whose members carry a
 per-member `prompt_override` — a review panel with its own angles stays
@@ -358,9 +358,9 @@ available.
 
 Editing a crew reaches every bound ensemble at its next dispatch: the engine
 re-syncs a bound ensemble's members just before it dispatches (never while a
-member is in flight), and `crew_update` also syncs every bound ensemble whose
+member is in flight), and `crew` `update` also syncs every bound ensemble whose
 graph is not `running`/`pausing` immediately. A node or hook names a crew in
-its config (`{"crew": "name"}`) instead of `platform`; `crew_delete` is
+its config (`{"crew": "name"}`) instead of `platform`; `crew` `delete` is
 refused while anything still binds the crew and the error lists every
 binding.
 
@@ -843,12 +843,13 @@ a workdir for filtering:
 
 | Tool | Description |
 |---|---|
-| `spec_create` | Create a standalone spec |
-| `spec_list` | List specs (filterable by workdir, status) |
-| `spec_update` | Update a spec's name, description, or workdir tag |
-| `spec_delete` | Delete an unbound spec |
-| `spec_set_status` | Admin transition: complete, skip, or reopen a standalone spec |
-| `spec_section_get` | Extract one canonical section from a spec body |
+| `spec` `list` | List specs (filterable by workdir, status) |
+| `spec` `get` | One spec with its full description |
+| `spec_edit` `create` | Create a standalone spec |
+| `spec_edit` `update` | Update a spec's name, description, or workdir tag |
+| `spec_edit` `delete` | Delete an unbound spec |
+| `spec_edit` `set_status` | Admin transition: complete, skip, or reopen a standalone spec |
+| `spec` `section` | Extract one canonical section from a spec body |
 | `spec_convert` | Migrate legacy heading-format spec bodies to the tagged `<spec>` format |
 
 Spec bodies are written in the tagged `<spec>` format — all seven canonical
@@ -872,20 +873,20 @@ bound specs:
 
 | Tool | Description |
 |---|---|
-| `queue_create` | Create an empty queue |
-| `queue_add_spec` | Append a spec to a queue — a grouped add lands after the group's last pending member |
-| `queue_list` | List a queue's members (or all queues) |
-| `queue_remove_spec` | Remove a spec from a queue |
-| `queue_reorder` | Full replacement of a queue's order |
-| `queue_set_group` | Set or clear a member's context group |
+| `queue` `create` | Create an empty queue |
+| `queue` `add_spec` | Append a spec to a queue — a grouped add lands after the group's last pending member |
+| `queue` `list` | List a queue's members (or all queues) |
+| `queue` `remove_spec` | Remove a spec from a queue |
+| `queue` `reorder` | Full replacement of a queue's order |
+| `queue` `set_group` | Set or clear a member's context group |
 
 Pass a queue to `graph_control` `run` via `queue_id` (or `canopy graph run <graph>
 --queue <queue-id>`).
 
 **Context groups.** A queue member may carry a `group` label. Grouped
-specs stay together: `queue_add_spec` with a `group` lands the spec right
-after the group's last pending member, and `queue_set_group` (or
-`canopy queue group`) moves a member next to its group. `queue_reorder`
+specs stay together: `queue` `add_spec` with a `group` lands the spec right
+after the group's last pending member, and `queue` `set_group` (or
+`canopy queue group`) moves a member next to its group. `queue` `reorder`
 refuses an order that would split a group's pending members, and reports
 the positions that would have split it; nothing changes on refusal. Members
 of one group share a warm harness session: a grouped spec resumes the
@@ -918,7 +919,7 @@ resume surfaces a `consistency_warning` in `graph` `get`.
 |---|---|
 | Authoring | `graph_edit` `create`, `graph_edit` `update`, `graph_edit` `attach_spec`, `graph_edit` `update_spec`, `graph_edit` `detach_spec`, `graph_node` `add`, `graph_node` `update`, `graph_edge` `add`, `graph_edge` `update`, `graph_edge` `delete`, `graph_node` `delete`, `graph_ensemble` `add`, `graph_ensemble` `update`, `graph_ensemble` `delete`, `graph_node` `copy`, `graph_ensemble` `copy`, `graph` `audit` |
 | Sharing | `graph` `export`, `graph_edit` `import`, `graph_edit` `install`, `graph` `validate`, `graph_edit` `archive`, `graph_edit` `restore` |
-| Inspection | `graph` `get`, `graph` `list`, `graph_crew`, `graph` `node_runs`, `graph` `node_run`, `graph` `events` |
+| Inspection | `graph` `get`, `graph` `list`, `crew` `assignments`, `graph` `node_runs`, `graph` `node_run`, `graph` `events` |
 | Runtime | `graph_control` `run`, `graph_control` `reset`, `graph_control` `schedule_autorun`, `graph_control` `schedule_continue`, `graph_control` `pause`, `graph_control` `continue`, `graph_complete_node`, `graph_report_blocker`, `graph_control` `preflight` |
 
 Graphs can be authored programmatically by agents through these tools,
@@ -1046,8 +1047,8 @@ list, and the ensemble's `entry_from_node`/`entry_condition`, every
 chained into another ensemble are all recorded at import. They are wired
 through the same sync path the engine already uses the moment the crew's
 members are materialised — during the import when the crew exists
-locally, or on the crew's first sync (dispatch, or `crew_create`/
-`crew_update`) when it is created later. Either way the result is a fully
+locally, or on the crew's first sync (dispatch, or `crew` `create`/
+`update`) when it is created later. Either way the result is a fully
 wired ensemble, so a shared design reaching a machine that has the crews
 arrives runnable; a document that names neither a crew nor any members is
 still refused, naming the ensemble.
@@ -1380,11 +1381,11 @@ as a quick reference and counts features and bugs.
    and `n` the next number for that type among the specs tagged with the
    same workdir (counter persisted per workdir and type; never reused,
    even after a spec is deleted). The code is immutable and never set by
-   callers. Setting `type` later on a legacy spec through `spec_update`
+   callers. Setting `type` later on a legacy spec through `spec_edit` `update`
    assigns its code at that moment; changing the type afterwards does not
    renumber it.
 
-2. **Conventional titles.** When `spec_create`/`graph_edit` `attach_spec` receive a
+2. **Conventional titles.** When `spec_edit` `create`/`graph_edit` `attach_spec` receive a
    name of the form `<type>(<scope>)?!?: <subject>` and no explicit `type`,
    canopy parses it and stores the subject as the name, with type and scope
    extracted. An explicit `type` wins over the parsed one.
@@ -1398,7 +1399,7 @@ as a quick reference and counts features and bugs.
 4. **Opt-in enforcement.** A graph created or updated with
    `require_spec_type: true` (default `false`) refuses a spec without a type
    in `graph_edit` `attach_spec`, and `graph_control` `run` refuses a queue holding one, naming
-   the spec. `queue_add_spec` refuses an untyped spec while any graph has the
+   the spec. `queue` `add_spec` refuses an untyped spec while any graph has the
    setting on, because queues are not tied to a single graph. Legacy specs
    keep working everywhere else.
 
@@ -1433,14 +1434,14 @@ the writer is an ensemble member, in which case the owner is the ensemble,
 so every member shares the one note and a replacing member continues where
 the cut one left off. Each spec has at most one note per owner, plus one
 `operator` note written by people and orchestrators without a run. A node
-can only write its own note: `spec_note_write` takes no owner argument.
+can only write its own note: `spec_edit` `note_write` takes no owner argument.
 
-**Writing and reading.** An agent writes with `spec_note_write(run_id,
-body)` — the engine resolves the owner from the active run and refuses a
+**Writing and reading.** An agent writes with `spec_edit` `note_write`
+(`run_id`, `body`) — the engine resolves the owner from the active run and refuses a
 `run_id` that is no longer running. The body is at most 2 500 characters;
-longer writes are refused naming the limit. `spec_note_write(spec_id, body)`
-without a `run_id` writes the `operator` note. Read with
-`spec_notes_get(spec_id)` (newest first), or `canopy spec notes <spec-id>`.
+longer writes are refused naming the limit. `spec_edit` `note_write` with
+(`spec_id`, `body`) and no `run_id` writes the `operator` note. Read with
+`spec` `notes` (`spec_id`) (newest first), or `canopy spec notes <spec-id>`.
 
 **Prompt injection.** Every agent-node prompt gets a `[SPEC NOTES]` section
 before `[REPORTING]` with a 5 000-character budget: the caller's own note

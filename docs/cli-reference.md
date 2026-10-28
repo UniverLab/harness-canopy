@@ -87,7 +87,7 @@ refresh also restarts that 24-hour window.
 | `canopy graph crew --platform <p> --model <m>` | Filter by exact platform and case-insensitive model substring |
 | `canopy graph crew --all` | Include archived graphs |
 | `canopy graph crew --group-by-pair` | Summarise per platform/model pair: graph, ensemble, node and hook counts plus the graph names |
-| `canopy graph crew --json` | Print the MCP `graph_crew` JSON shape instead of tables |
+| `canopy graph crew --json` | Print the MCP `crew` `assignments` JSON shape instead of tables |
 | `canopy graph validate <path>` | Check a shared graph or node JSON document without importing it: every structural check `import` runs plus the sharing rules. Prints each problem with its JSON path; exits 0 when the document is valid, 1 when it is not |
 | `canopy graph validate <path> --json` | Print the machine-readable report instead: `ok` with the kind, name and counts, or `problems` |
 | `canopy graph install <ref>` | Install a graph from the catalogue in one command: `<slug>` or `<owner>/<repo>/<slug>`, each with an optional `@<ref>` suffix, or `draft:<id>` for an unreviewed editor draft ([graphs.univerlab.org/editor](https://graphs.univerlab.org/editor), 30 minutes, installs once). Prints a review of every shell command and agent prompt the document runs (with attention marks), asks `Install <name> from <source>? [y/N]`, then — after confirmation — validates the fetched document, installs its bundled presets, and imports it as a new graph |
@@ -166,7 +166,7 @@ Read-only inspection of registered agents, served from the local database
 | Command | Description |
 |---|---|
 | `canopy agent show <id>` | Show one agent's full stored definition, prompt last and untruncated |
-| `canopy agent show <id> --json` | Print the same definition as JSON (identical to the `agent_get` MCP tool's output) |
+| `canopy agent show <id> --json` | Print the same definition as JSON (identical to the `agent` `get` action's output) |
 
 ## Missions
 

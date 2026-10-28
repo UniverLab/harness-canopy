@@ -211,7 +211,7 @@ Let the engine parse the message; let the model only decide which message it
 is looking at.
 
 If this recipe grows a Designer node ahead of implement, have it write the
-plan with `spec_note_write(run_id, body)` rather than a file in the repo —
+plan with `spec_edit` `note_write` (`run_id`, `body`) rather than a file in the repo —
 the implementer's and reviewer's prompts already carry every note, and a
 verify check reads `grep -q '^## Designer' "$CANOPY_SPEC_NOTES_FILE"`.
 See [Spec notes](graphs.md#spec-notes).
@@ -435,10 +435,10 @@ Turn one GitHub issue into one spec. You do not fix anything.
 1. Read ~/.canopy/inbox/github-issue.json.
 2. Reproduce the problem well enough to state it precisely. An issue is a
    report, not a specification.
-3. Write the spec with spec_create: objective, functional requirements,
+3. Write the spec with `spec_edit` `create`: objective, functional requirements,
    in scope, out of scope, acceptance. Where the issue is ambiguous, choose
    the narrowest reading and say so in OUT OF SCOPE.
-4. Append it with queue_add_spec.
+4. Append it with `queue` `add_spec`.
 5. Report pass with the spec id.
 ```
 
@@ -648,7 +648,7 @@ spec and losing a night.
 
 **Queue order can split a group.** A queue reorder that would separate one
 context group's pending specs is refused and nothing changes. Put a spec in
-a group with `queue_add_spec` or `queue_set_group` and the engine keeps the
+a group with `queue` `add_spec` or `queue` `set_group` and the engine keeps the
 group together, so it gets the warm session it shares with its siblings.
 
 **Commit rights are configuration, not instruction.** Three different models

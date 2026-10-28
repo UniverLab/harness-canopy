@@ -136,8 +136,8 @@ ensemble/member/node overrides win; see docs/graphs.md.
 An entry may also declare a binary identity check: `identity_args` (an
 argv array, e.g. `["--version"]`) plus `identity_pattern` (a regex the
 combined stdout+stderr must match). When both are set, every surface that
-resolves the binary — `agent_probe`, node dispatch, `agent_add` /
-`agent_watch` validation and `canopy doctor` — runs
+resolves the binary — `harness` `probe`, node dispatch, `agent_edit` `add` /
+`agent_edit` `watch` validation and `canopy doctor` — runs
 `<binary> <identity_args>` once per path+mtime (5 s timeout) and reports
 the platform as **not installed**
 (`<platform>: '<path>' is not <name> (identity check failed: …)`) on a
@@ -149,10 +149,10 @@ A platform whose CLI has no headless/print mode (e.g. `freebuff`) declares
 sessions and appears in `canopy doctor` and the new-session picker marked
 **interactive only**, but canopy refuses to use it anywhere a headless run
 is required: `graph_node` `add` / `graph_node` `update`, ensemble members,
-`agent_add`, and `agent_probe` (reported `interactive_only`, nothing
+`agent_edit` `add`, and `harness` `probe` (reported `interactive_only`, nothing
 spawned) all reject it with
 `platform '<name>' is interactive-only (no headless mode)`, and
-`agent_models` returns an empty list with that reason instead of
+`harness` `models` returns an empty list with that reason instead of
 enumerating. `graph_control` `preflight` flags every existing node that uses one.
 Omit the field — the default is `true` — and the platform behaves exactly
 as before.

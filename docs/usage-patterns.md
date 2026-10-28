@@ -66,7 +66,7 @@ rewrites, not `cargo fmt --check`, which fails. Only genuine breakage should
 route back to implement.
 
 **Hand plans through spec notes, not files.** A Designer node writes its
-plan with `spec_note_write(run_id, body)` instead of a temp file no later
+plan with `spec_edit` `note_write` (`run_id`, `body`) instead of a temp file no later
 node can find, and the verify step reads
 `grep -q '^## Designer' "$CANOPY_SPEC_NOTES_FILE"` — every agent prompt
 already carries the notes, so nothing needs deleting and nothing goes stale.
@@ -364,7 +364,7 @@ a file is strictly simpler and stays local-first. Use a real webhook only
 when the latency actually matters.
 
 The intake node is a normal agent node whose job is to turn the file into a
-spec via `spec_create` and `queue_add_spec`. Once it does, the rest of the
+spec via `spec_edit` `create` and `queue` `add_spec`. Once it does, the rest of the
 graph is pattern 1 and knows nothing about GitHub.
 
 **The gap**: a watch-triggered graph is told *that* it fired, never *what*
