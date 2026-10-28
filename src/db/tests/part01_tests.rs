@@ -401,9 +401,8 @@ fn scheduled_sends_for_closed_session_are_dropped_on_missing_target_restore() {
     );
 
     // The session is closed as unrecoverable, so it is not resumed and never
-    // joins the live-agent set. `restore_scheduled_sends`' missing-target drop
-    // (modelled here with an empty live list) then discards its schedules —
-    // the same path a session with a missing target already takes.
+    // joins the live-agent set. Dropping schedules for targets that are gone
+    // is modelled here with an empty live list.
     db.mark_session_closed("sess-x").unwrap();
     let dropped = db.drop_scheduled_sends_missing_targets(&[]).unwrap();
     assert_eq!(dropped, 1);

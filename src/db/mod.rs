@@ -624,7 +624,12 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
                 condition TEXT NOT NULL,
                 PRIMARY KEY (ensemble_id, from_node, condition)
             );",
+    // The session shelf: one row per file (`shelf::SHELF_FILES_SCHEMA`).
+    // No FK on `session_id` — files outlive the session by design.
+    shelf::SHELF_FILES_SCHEMA,
     mutex_store::MUTEX_TABLES_SCHEMA,
+    // Browsers paired as revocable devices (remote control).
+    remote_devices::REMOTE_DEVICES_SCHEMA,
 ];
 
 impl Database {
@@ -679,11 +684,13 @@ impl Database {
         Self::migrate_spec_notes_table(&conn)?;
         Self::migrate_roster_entries_table(&conn)?;
         Self::migrate_crews_tables(&conn)?;
+        Self::migrate_remote_devices(&conn)?;
         Self::migrate_agent_action_columns(&conn)?;
         Self::migrate_ensemble_mutex_column(&conn)?;
         Self::migrate_graph_events_mutex_kinds(&conn)?;
         Self::migrate_drop_blueprint_tables(&conn)?;
         Self::migrate_sandbox_intelligence_attribution(&conn)?;
+        Self::migrate_shelf_files(&conn)?;
 
         Self::set_schema_version(&conn)?;
 
@@ -745,6 +752,7 @@ mod migration;
 pub mod mutex_store;
 pub mod project;
 pub mod queues;
+pub mod remote_devices;
 pub(crate) mod roster_entries;
 pub mod run;
 pub mod sandbox;
@@ -754,6 +762,7 @@ mod schema;
 pub mod seeds;
 pub mod session;
 pub mod session_target;
+pub mod shelf;
 pub mod state;
 mod subagent_runs;
 pub mod sync;

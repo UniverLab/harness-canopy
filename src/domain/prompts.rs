@@ -15,9 +15,9 @@ use std::path::{Path, PathBuf};
 
 /// The tag vocabulary every builtin preset below is built from, mirroring
 /// the `# [NAME]: Description` header + XML-tag convention Canopy's own
-/// prompt builder emits (see `tui::app::dialog::prompt`'s
-/// `append_instruction_section` and its `push_xml_item`/`build_xml_block`
-/// helpers) — a header line, an outer tag, and one indented `<item_tag>`
+/// prompt builder emits (see `domain::prompt_draft`'s instruction group and
+/// its `push_xml_item` helper) — a header line, an outer tag, and one
+/// indented `<item_tag>`
 /// block per item. Defined once here, and referenced by all three presets
 /// below, so the four sections every preset shares — role, procedure, what
 /// it may use, what it must never do — can't drift into three
@@ -62,8 +62,8 @@ fn wrapped_section(section: &Section, content: &str) -> String {
 
 /// Render a list section: a header line, an outer `section.tag`, and one
 /// `section.item_tag` block per entry in `items` — the same
-/// header-then-indented-items shape [`push_xml_item`]/[`build_xml_block`] in
-/// `tui::app::dialog::prompt` produce. Used for every preset section except
+/// header-then-indented-items shape [`push_xml_item`](super::prompt_draft::push_xml_item)
+/// in `domain::prompt_draft` produces. Used for every preset section except
 /// [`ROLE`].
 fn itemized_section(section: &Section, items: &[&str]) -> String {
     let mut out = String::new();

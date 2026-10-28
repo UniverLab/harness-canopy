@@ -1313,6 +1313,7 @@ async fn agent_stdout_trim_matches_previous_semantics() {
         None,
         None,
         false,
+        None,
     )
     .await
     {

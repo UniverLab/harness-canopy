@@ -165,7 +165,9 @@ session later instead of polling), and `intelligence_upsert` /
 ### 🖥️ Interactive TUI (Canopy Hub)
 
 - **NewAgentDialog** — Three modes (Interactive, Background Cron/Watch, Terminal) with CLI picker, model picker, seed identity selector (`◀ None / SeedName ▶`), directory browser, and yolo mode toggle.
+- **Detachable Sessions** — Sessions run in the daemon, not the TUI: quitting the TUI leaves them running, reopening it reattaches to them live with screen and scrollback, a daemon restart respawns every session still listed as active under the same id and name (a terminal comes back with its saved scrollback replayed), sessions started or closed elsewhere update the sidebar live, and a dropped daemon connection reconnects on its own (0.5 s doubling to 5 s) and re-lists what the daemon still has.
 - **Scheduled Delivery** — `Shift+Enter` (Kitty keyboard protocol) sends prompts at a chosen time instead of immediately.
+- **Session Shelf** — an agent copies up to 10 files per call (PNG, JPEG, WebP, GIF or SVG, sniffed from content, 20 MiB each) onto its session's shelf with the `session_send_file` MCP tool; the F1 hub's `Shelf` tab lists every shelf newest first, toasts each arrival as `📎 <name> — <from>`, and opens, copies the path of, or deletes the selected file, with `canopy shelf list`/`open` reaching the same files from the CLI.
 - **Split Groups** — Side-by-side horizontal/vertical views for monitoring multiple agents simultaneously.
 - **System Dashboard** — CPU, memory, disk, GPU (NVIDIA/Linux/macOS), temperatures with amber/red alert thresholds. WSL queries Windows host metrics via PowerShell.
 - **Live Graph View** — Real-time graph rendering with auto-follow on the running node, manual node inspection, and per-node run info (status, elapsed, output tail).
@@ -183,6 +185,7 @@ session later instead of polling), and `intelligence_upsert` /
 - **Prompt Template Engine** — Background agent prompts support `{{TIMESTAMP}}`, `{{TASK_ID}}`, `{{LOG_PATH}}`, `{{FILE_PATH}}`, `{{EVENT_TYPE}}` placeholders.
 - **Project Registry** — Automatic project index keyed by workdir hash. README descriptions extracted from project roots (min 20 words, before first `##` heading). Search and update via the `project` MCP tool (`search`, `update`).
 - **Action Protocol Advisor** — `get_tools` MCP tool returns scope-sensitive action protocols (`session_start`, `file_write`, `test_run`, `close_session`, `multi_agent`) with risk levels and recommended tool sets.
+- **Remote Access** — `canopy remote login` signs this host in to GitHub with the OAuth device flow (no browser on the host, no scopes), printing the code to enter at github.com/login/device and storing `{token, login, id}` in `~/.canopy/remote/github.json` (mode 0600); `canopy remote status [--json]` reports the signed-in login, whether remote control is enabled, and the relay URL, and `canopy remote logout` deletes the identity. `canopy remote on`/`off` opens or closes the daemon's relay WebSocket (P-256 host key in `~/.canopy/remote/host_key`), `canopy remote pair` prints a one-time `XXXXX-XXXXX` code with its `<relay_url>/pair#<code>` link and a terminal QR code so a browser pairs once for ten minutes, `canopy remote devices [--json]` lists the paired browsers and `canopy remote revoke <device_id>` deletes one and drops its live connection. A paired browser then reaches the session hub directly over a signed WebRTC data channel — the relay only carries signaling — where terminal sessions stay host-only and `resize` is refused. The token never appears in logs, errors, or status output. The F1 hub's `Remote` tab (`F1`, then `5`) offers the same from the TUI.
 - **Setup Wizard** — Interactive `canopy setup` detects installed AI CLIs from a GitHub-hosted registry, configures binary paths, model flags, headless modes, environment variables, and temperature units. Generates `~/.canopy/config.toml`.
 - **On-Demand Registry Refresh** — `canopy registry refresh` applies the platform registry to `config.toml` now, ignoring the 24-hour window the TUI's background refresh uses at startup. Reports the CLI fields it changed, the local overrides it kept, and the platforms added, updated or removed. The `harness` `refresh_registry` action does the same from an agent session.
 - **MCP Wizard** — `canopy mcp` subcommand for syncing, adding, and removing MCP server entries across all detected platforms with automatic format conversion (JSON ↔ TOML).
@@ -192,7 +195,7 @@ session later instead of polling), and `intelligence_upsert` /
 
 ---
 
-## MCP Tools (32)
+## MCP Tools (34)
 
 Graph-node sessions (agent and ensemble nodes launched by the graph engine) receive a fixed node profile of 12 tools via `CANOPY_MCP_PROFILE=node`, so every node stays well under the 128-tool cap of OpenAI-compatible providers. All other sessions — the orchestrator, check nodes, hooks, TUI, subagents, and background agents — keep the full tool list.
 
@@ -214,6 +217,8 @@ Graph-node sessions (agent and ensemble nodes launched by the graph engine) rece
 | `get_tools` | **Protocol** (1) |
 | `session_list` | **Interactive sessions** (1) |
 | `scheduled_send_create`, `scheduled_send` | **Scheduled sends** (2) |
+| `session_send_file` | **Session shelf** (1) |
+| `remote` | **Remote control** (1) |
 
 ---
 

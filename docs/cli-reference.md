@@ -227,6 +227,192 @@ A crew is a named, ordered member list ensembles and agent nodes/hooks bind
 to; member editing is MCP/TUI only (see
 [MCP tools](mcp-tools.md)).
 
+## Shelf
+
+| Command | Description |
+|---|---|
+| `canopy shelf list [--json]` | List every shelf file (the host shelf plus every session's), newest first, through the daemon; `--json` prints the items with their file ids |
+| `canopy shelf open <file_id>` | Open one shelf file with the system viewer, via the daemon |
+
+Both subcommands go through the running daemon over the session-protocol
+WebSocket — the CLI never writes the shelf itself. `file_id` is the
+16-lowercase-hex id printed by `canopy shelf list --json`.
+
+## Remote
+
+| Command | Description |
+|---|---|
+| `canopy remote login` | Sign in to GitHub with the OAuth device flow (identity only, no scopes) |
+| `canopy remote logout` | Delete the stored GitHub identity |
+| `canopy remote status [--json]` | Show the sign-in state, whether remote is enabled, and the relay URL; `--json` prints `{signed_in, login, enabled, relay_url}` |
+| `canopy remote on` / `off` | Turn the relay connection on or off (`[remote] enabled`); the daemon picks the change up without a restart |
+| `canopy remote pair` | Create a one-time code, print it with its `<relay_url>/pair#<code>` link and expiry, and draw the link as a terminal QR code |
+| `canopy remote devices [--json]` | List paired browsers (`id`, `label`, `paired_at`, `last_seen`) |
+| `canopy remote revoke <device_id>` | Delete a paired browser and close its live connection at once |
+
+The same actions live in the TUI: `F1`, then `5` opens the hub's **Remote**
+tab — GitHub sign-in with the device flow, the relay switch and phase,
+pairing with a QR overlay, and revoking devices ([TUI](tui.md)).
+
+### Pairing a browser
+
+Pairing turns a browser into a revocable device of this host. The code is
+ten Crockford base32 characters shown as `XXXXX-XXXXX`, works once for ten
+minutes, and is burned after one success or five failed code checks. One
+code is live per host: `canopy remote pair` replaces the previous one, and
+the old code stops working at once. Case, spaces and dashes do not matter
+when the code is typed, `I`/`L` are read as `1` and `O` as `0`.
+
+`canopy remote pair` prints the code, the link and the expiry time, then
+the link as a terminal QR code:
+
+```text
+Pairing code: 7K3QH-M9P2X
+Link: https://remote.univerlab.org/pair#7K3QH-M9P2X
+Expires: 2026-10-28 15:04:05 UTC
+<the link as a QR code, drawn with half blocks>
+```
+
+The browser opens that link and exchanges long-term P-256 public keys with
+this host, authenticated by the code, so later connections need no code
+and the relay never learns anything that lets it impersonate either side.
+The exchange rides the daemon's relay connection, so pairing completes
+only while the daemon is running, `remote status` shows a login, and
+remote is on. A failed exchange tells the browser only `no_code`,
+`expired` or `bad_code`: run `canopy remote pair` again for a fresh code.
+
+`canopy remote devices [--json]` prints `id`, `label`, `paired_at` and
+`last_seen` (`never` when the registry has no time), one line per device
+or as a JSON array; `no paired devices` when there are none. `canopy
+remote revoke <device_id>` deletes the device and closes its live
+connection within a second, printing `revoked <device_id>`, and refuses
+an unknown id with `no paired device with id <device_id>`. Re-pairing the
+same browser updates its label and `paired_at` instead of adding a row.
+
+The host key lives in `~/.canopy/remote/host_key` (PKCS#8 DER, mode 0600)
+and `host_id` is the first 16 hex chars of SHA-256 over its public key;
+the live code and its derived key sit in `~/.canopy/remote/pairing.json`
+(mode 0600, removed once the code is used, refused as expired, or burned —
+deleting it cancels the code). Paired browsers are recorded in the
+`remote_devices` table and identified by the first 16 hex chars of SHA-256
+over their own key.
+
+### The relay connection
+
+With `remote on` and a stored identity, the daemon keeps one WebSocket to
+`<relay_url>/ws/host`, carrying the GitHub token and this host's id and
+label, and answers the pairing frames the relay forwards to it. A dropped
+socket is retried after one second, doubling to one minute, with jitter.
+`canopy remote off` closes the socket and `on` reconnects within a second
+— neither needs a daemon restart. If the relay answers HTTP 401, the
+daemon stops retrying that token and logs `github token rejected: run
+canopy remote login` (see `canopy daemon logs`); a fresh `canopy remote
+login` makes it connect again.
+
+Remote control is owner-only: the relay admits only hosts signed in with
+the same GitHub account. `login` prints the device URL and the code to
+enter (`Open https://github.com/login/device and enter <user_code>`, plus
+the full verification URL when GitHub returns one), then polls GitHub at
+the interval it asks for — `slow_down` adds five seconds, an expired or
+denied code stops with a one-line message — and ends with `Signed in to
+GitHub as <login>.` It stores `{token, login, id}` in
+`~/.canopy/remote/github.json` (mode 0600, directory 0700); the token never
+appears in logs, errors, or status output. `logout` deletes that file and
+succeeds when it is already gone. `status` prints `login: <login>` (or
+`not signed in`), `enabled: …` and `relay_url: …`.
+
+### A paired browser's connection
+
+The relay only carries signaling. A paired browser sends a signed WebRTC
+offer through it; the host verifies the signature against
+`remote_devices` and refuses `unknown_device`, `stale` (over 120 seconds
+off) or `bad_signature`, then answers with a signature of its own. Both
+signatures cover the SDP, so the DTLS fingerprints are pinned end to end
+and neither the relay nor a TURN server can read or impersonate the
+session. Nothing but those signaling bodies reaches the relay.
+
+Once the data channel is open, the browser speaks the same protocol v1 as
+`/sessions/ws`, with four restrictions: terminal sessions are hidden from
+the list and cannot be attached, written to, prompted or killed, `resize`
+is always refused (the browser renders the host's size scaled), and `spawn`
+creates `agent` sessions only. A `spawn` names a directory (`workdir`)
+rather than a project. `workdir` may be absolute or start with `~/` (`~` and
+`~/` alone mean the host user's home), and the expanded path must be an
+existing directory; the browser's New dialog types that directory. A
+relative path is refused with `spawn: field 'workdir' must be an
+absolute path`, and a path that does not exist or is not a directory with
+`spawn: workdir '<expanded>' does not exist or is not a directory`; both are
+`error{code:"bad_request"}`. The `yolo` field (default `false`) launches the
+harness with its approval prompts off — the switch the TUI's New dialog
+offers — by appending that harness's registry `yolo_flag` after whatever
+interactive args the frame sent; a harness with no `yolo_flag` refuses it
+with `spawn: harness '<cli>' has no yolo mode`, and a `terminal` spawn with
+`spawn: field 'yolo' is not allowed for kind 'terminal'`. Each `catalog` CLI
+row carries `yolo: true|false`, so the browser only offers the switch where
+the host can honor it. Output and snapshot frames are chunked to stay under
+16 KiB; a snapshot's first part carries `cols`/`rows` and the
+rest travels as `snapshot_more`. The shelf rides the same channel:
+`shelf_list` and `shelf_get` answer `shelf` and `file` frames, and
+`shelf_added` / `shelf_removed` push arrivals and removals. Files from
+terminal sessions stay hidden from lists and pushes and answer
+`error{code:"forbidden"}` on fetch; host-shelf files are visible. `file`
+frames stay under 16 KiB, at most two downloads run at once — a third
+answers `error{code:"busy"}` — and their parts interleave with terminal
+output so a large image never stalls it. A host serves at most four device
+connections at once — a fifth is told `busy` — each success refreshes the
+device's `last_seen`, and `canopy remote revoke` closes a live connection
+within a second.
+
+Graphs ride the same channel, read-only. `graphs{req}` answers
+`graphs{req,graphs}` with the non-archived running, paused and failed
+graphs plus completed graphs active within the last 24 hours — running
+first, then paused, failed, completed, most recent activity first, at
+most 50 — each row carrying `id`, `name`, `status`, `workdir` as a
+basename (never the host's absolute path), `current_spec` (the current
+spec's name), `current_node` (the node's *name*, never its id),
+`done`/`total` over the graph's queue or specs, `blocked` and
+`updated_at`:
+
+```json
+{"t": "graphs", "req": "g1"}
+```
+
+`graph_watch{req,id}` first answers `graph{req,id,document,state}` — the
+graph's export document, exactly what `canopy graph export` writes, plus
+its live `state` — and then pushes `graph_state{id,state}` only when
+that state differs from the last one sent on the connection, re-read
+every 2 seconds. `state` carries `status`, `blocked`/`blocker`,
+`current_spec_id`, the `current_node` name, the `nodes` map of the
+current spec's latest iteration (`"running"`, `"pass"` or `"fail"`, a
+node with no run absent), the queue-ordered `specs` (each `id`, `code`
+such as `FEAT-12` or null, `name`, `status`, `attempts`) and
+`updated_at`:
+
+```json
+{"t": "graph_watch", "req": "w1", "id": "7c1e4b2a-9d3f-4a6e-8b5c-2f0d1e3a4b6c"}
+```
+
+`graph_unwatch{id}` stops that watch and answers nothing:
+
+```json
+{"t": "graph_unwatch", "id": "7c1e4b2a-9d3f-4a6e-8b5c-2f0d1e3a4b6c"}
+```
+
+A connection holds at most four watches — a fifth answers
+`error{code:"busy"}` and starts nothing — an unknown or archived graph
+id answers `error{code:"not_found"}` and starts no watch either, and
+every watch ends with the connection — or as soon as its graph is
+deleted, which stops the pushes and frees the slot for another watch.
+None of these frames ever changes a graph, a spec or a queue: pausing
+and continuing stay local.
+
+The `[remote]` table in `~/.canopy/config.toml` carries `enabled` (default
+`false`), `relay_url`, `github_client_id` (the public Client ID of
+UniverLab's "Canopy Remote" OAuth App — no configuration needed), and
+`host_label` (empty means the hostname). Overriding `github_client_id`
+with an empty string makes `login` stop before any request:
+`remote.github_client_id is not set in ~/.canopy/config.toml`.
+
 ## Settings
 
 Every setting in `~/.canopy/config.toml` is declared once, in a typed
@@ -357,6 +543,10 @@ it came from. **Apply** says when a change takes effect: `applied` (at once),
 | `graph_event_retention_days` | 90 | 1–3650 days | next run | Days a graph's event log is kept before `canopy clean` prunes it |
 | `clean.reclaim_min_deleted_rows` | 50 | 0–100000 | applied | Deleted rows that trigger VACUUM during `canopy clean` |
 | `activity.retention_per_workdir` | 500 | 50–100000 | applied | Activity-log entries kept per workdir |
+| `remote.enabled` | `false` | bool | applied | Whether this host accepts owner-only remote control via the relay |
+| `remote.relay_url` | `https://remote.univerlab.org` | — | next run | Relay URL for owner-only remote control |
+| `remote.github_client_id` | `Ov23liVCfE58kUb3ssDy` | — | next run | Public Client ID of UniverLab's "Canopy Remote" OAuth App (identity only; empty disables `remote login`) |
+| `remote.host_label` | empty | — | next run | Label shown for this host; empty means the hostname |
 
 `scheduler.retry_*` and `spec_attempt_limit` are not in `graphs.*`, which is
 why they are listed here.

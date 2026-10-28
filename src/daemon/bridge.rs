@@ -31,8 +31,10 @@ use crate::application::ports::StateRepository;
 use crate::db::Database;
 use crate::domain::db_paths::database_path;
 use crate::shared::sync_identity::{
-    CANOPY_AGENT_ID_ENV, CANOPY_AGENT_ID_HEADER, CANOPY_MCP_PROFILE_ENV, CANOPY_MCP_PROFILE_HEADER,
-    CANOPY_SEED_ID_ENV, CANOPY_SEED_ID_HEADER, CANOPY_WORKDIR_ENV,
+    CANOPY_AGENT_ID_ENV, CANOPY_AGENT_ID_HEADER, CANOPY_GRAPH_ID_ENV, CANOPY_GRAPH_ID_HEADER,
+    CANOPY_MCP_PROFILE_ENV, CANOPY_MCP_PROFILE_HEADER, CANOPY_NODE_ID_ENV, CANOPY_NODE_ID_HEADER,
+    CANOPY_NODE_RUN_ID_ENV, CANOPY_NODE_RUN_ID_HEADER, CANOPY_SEED_ID_ENV, CANOPY_SEED_ID_HEADER,
+    CANOPY_WORKDIR_ENV,
 };
 
 const MCP_SESSION_HEADER: &str = "mcp-session-id";
@@ -414,6 +416,17 @@ async fn forward_request(
     }
     if let Some(profile) = non_empty_env(CANOPY_MCP_PROFILE_ENV) {
         request = request.header(CANOPY_MCP_PROFILE_HEADER, profile);
+    }
+    // The agent's run identity rides along as headers so the daemon resolves
+    // id-less verdicts even though the MCP server never sees this env.
+    if let Some(graph_id) = non_empty_env(CANOPY_GRAPH_ID_ENV) {
+        request = request.header(CANOPY_GRAPH_ID_HEADER, graph_id);
+    }
+    if let Some(node_id) = non_empty_env(CANOPY_NODE_ID_ENV) {
+        request = request.header(CANOPY_NODE_ID_HEADER, node_id);
+    }
+    if let Some(run_id) = non_empty_env(CANOPY_NODE_RUN_ID_ENV) {
+        request = request.header(CANOPY_NODE_RUN_ID_HEADER, run_id);
     }
     if let Some(sid) = session_id {
         request = request.header(MCP_SESSION_HEADER, sid);
@@ -1148,6 +1161,91 @@ mod tests {
             "forward_request must not send x-canopy-client-name; the daemon \
              resolves the display name from the session itself"
         );
+
+        server.abort();
+    }
+
+    /// The bridge forwards the agent's run identity env vars as headers so
+    /// the daemon resolves id-less verdicts on the proxied path: a fake
+    /// daemon records the three headers it receives.
+    #[tokio::test]
+    async fn forward_request_forwards_graph_identity_headers() {
+        use axum::extract::Request;
+        use axum::response::IntoResponse;
+        use std::sync::Arc;
+
+        /// (name, value) pairs a fake daemon recorded.
+        type RecordedHeaders = Arc<Mutex<Vec<(String, String)>>>;
+
+        let seen: RecordedHeaders = Arc::new(Mutex::new(Vec::new()));
+        let flag = Arc::clone(&seen);
+
+        async fn handle_mcp(
+            axum::extract::State(flag): axum::extract::State<RecordedHeaders>,
+            request: Request,
+        ) -> axum::response::Response {
+            for name in [
+                crate::shared::sync_identity::CANOPY_GRAPH_ID_HEADER,
+                crate::shared::sync_identity::CANOPY_NODE_ID_HEADER,
+                crate::shared::sync_identity::CANOPY_NODE_RUN_ID_HEADER,
+            ] {
+                if let Some(value) = request.headers().get(name).and_then(|v| v.to_str().ok()) {
+                    flag.lock()
+                        .unwrap()
+                        .push((name.to_string(), value.to_string()));
+                }
+            }
+            (
+                axum::http::StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                r#"{"jsonrpc":"2.0","id":1,"result":{}}"#,
+            )
+                .into_response()
+        }
+
+        let router = axum::Router::new()
+            .route("/mcp", axum::routing::post(handle_mcp))
+            .with_state(flag);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        std::env::set_var(CANOPY_GRAPH_ID_ENV, "graph-1");
+        std::env::set_var(CANOPY_NODE_ID_ENV, "node-1");
+        std::env::set_var(CANOPY_NODE_RUN_ID_ENV, "run-1");
+
+        let endpoint = format!("http://127.0.0.1:{port}/mcp");
+        let client = Client::new();
+        let outcome = forward_request(
+            &client,
+            &endpoint,
+            "sess-boletus",
+            None,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+            None,
+        )
+        .await;
+
+        std::env::remove_var(CANOPY_GRAPH_ID_ENV);
+        std::env::remove_var(CANOPY_NODE_ID_ENV);
+        std::env::remove_var(CANOPY_NODE_RUN_ID_ENV);
+
+        outcome.expect("forward_request should succeed against the fake daemon");
+
+        let seen = seen.lock().unwrap();
+        for (header, value) in [
+            (CANOPY_GRAPH_ID_HEADER, "graph-1"),
+            (CANOPY_NODE_ID_HEADER, "node-1"),
+            (CANOPY_NODE_RUN_ID_HEADER, "run-1"),
+        ] {
+            assert!(
+                seen.contains(&(header.to_string(), value.to_string())),
+                "forward_request must forward {header}={value}; got {seen:?}"
+            );
+        }
 
         server.abort();
     }

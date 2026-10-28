@@ -354,6 +354,12 @@ impl Cli {
         super::cli_config::PasteSubmitSpec::from_cli_config(config)
     }
 
+    /// This platform's registry entry, if setup detected one — the
+    /// interactive args, fallback args and model flag a spawn builds with.
+    pub(crate) fn registry_config(&self) -> Option<super::cli_config::CliConfig> {
+        Self::load_registry()?.get(self.as_str()).cloned()
+    }
+
     pub fn detect_available() -> Vec<Cli> {
         let Some(registry) = Self::load_registry() else {
             return Vec::new();

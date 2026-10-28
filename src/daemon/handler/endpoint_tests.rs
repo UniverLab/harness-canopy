@@ -72,6 +72,7 @@ fn endpoint_test_handler() -> (
         notification_service: notif,
         ingestion,
         dynamic_skills,
+        shelf: crate::sessions::shelf::ShelfStore::for_test(&db),
         start_time: std::time::Instant::now(),
         port: 0,
     });
@@ -1327,3 +1328,5 @@ mod part16_tests;
 mod part17_tests;
 mod part18_tests;
 mod part19_tests;
+mod part20_tests;
+mod part21_tests;

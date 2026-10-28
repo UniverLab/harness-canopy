@@ -5,7 +5,6 @@ use crate::tui::agent::{
 };
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use std::io::Write;
 use std::time::Duration;
 
 impl InteractiveAgent {
@@ -139,22 +138,13 @@ impl InteractiveAgent {
             .is_some_and(|text| line_looks_sensitive_prompt(&text))
     }
 
-    /// True when the PTY's foreground process group differs from the spawned
-    /// shell — an interactive child (wizard, editor, running command) owns the
-    /// terminal, so input must go straight to the PTY instead of the warp buffer.
+    /// True when an interactive child (wizard, editor, running command)
+    /// owns the terminal, so input must go straight to the session instead
+    /// of the warp buffer. The session protocol v1 exposes no foreground
+    /// process group, so this is always false: warp decides on the
+    /// alternate screen and sensitive prompts alone.
     pub fn foreground_app_active(&self) -> bool {
-        let Some(shell_pid) = self.child.try_lock().ok().and_then(|c| c.process_id()) else {
-            return false;
-        };
-        let Some(fg_group) = self
-            .master
-            .try_lock()
-            .ok()
-            .and_then(|m| m.process_group_leader())
-        else {
-            return false;
-        };
-        fg_group > 0 && fg_group as u32 != shell_pid
+        false
     }
 
     pub fn should_bypass_warp_input(&self) -> bool {
@@ -185,17 +175,19 @@ impl InteractiveAgent {
         }
     }
 
-    /// Deliver a prompt-builder prompt to the PTY as a SUBMITTED message —
-    /// not text left pending in the target's input box. See
-    /// [`write_submitted_prompt`] for why the submit keystroke must be a
-    /// separate write from the paste.
+    /// Deliver a prompt-builder prompt to the session as a SUBMITTED
+    /// message — not text left pending in the target's input box. Delivery
+    /// runs hub-side through the same paste path and this CLI's registry
+    /// spec (the spec every caller passes), so only the text travels.
     pub fn submit_prompt_to_pty(&self, prompt: &str, spec: PasteSubmitSpec) -> Result<()> {
-        let bracketed = self.bracketed_paste_enabled();
-        let mut writer = self
-            .writer
-            .lock()
-            .map_err(|_| anyhow::anyhow!("pty writer lock poisoned"))?;
-        write_submitted_prompt(&mut *writer, prompt, bracketed, spec)?;
+        let _ = spec;
+        if self.status != AgentStatus::Running {
+            anyhow::bail!("session '{}' has exited", self.name);
+        }
+        if !self.is_connected() {
+            anyhow::bail!("session '{}' is disconnected from the hub", self.name);
+        }
+        self.stream.prompt(prompt);
         Ok(())
     }
 
@@ -519,40 +511,10 @@ fn recently_active(last_output_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
     now.signed_duration_since(last_output_at).num_milliseconds() < ACTIVITY_IDLE_THRESHOLD_MS
 }
 
-/// Write `prompt` to `writer` as a SUBMITTED message: the paste lands as one
-/// block (bracketed only when the target actually enabled bracketed-paste
-/// mode — see [`InteractiveAgent::bracketed_paste_enabled`]), then the
-/// submit keystroke is written as a SEPARATE event after `spec.settle`.
-///
-/// This separation matters: writing the submit key immediately after the
-/// paste (zero delay, same logical write) lets the two coalesce into one
-/// chunk at the pty/kernel level. A target CLI with bracketed-paste
-/// handling that reads a `\r` inside (or immediately trailing, same-chunk)
-/// the paste event can fold it into the pasted text as a literal newline
-/// instead of parsing it as a distinct Enter keypress — the prompt lands in
-/// the input box but is never submitted.
-pub fn write_submitted_prompt(
-    writer: &mut impl Write,
-    prompt: &str,
-    bracketed: bool,
-    spec: PasteSubmitSpec,
-) -> std::io::Result<()> {
-    if bracketed {
-        writer.write_all(format!("\x1b[200~{prompt}\x1b[201~").as_bytes())?;
-    } else {
-        writer.write_all(prompt.as_bytes())?;
-    }
-    writer.flush()?;
-
-    for _ in 0..spec.presses.max(1) {
-        if spec.settle > Duration::ZERO {
-            std::thread::sleep(spec.settle);
-        }
-        writer.write_all(spec.submit_key)?;
-        writer.flush()?;
-    }
-    Ok(())
-}
+/// Shared paste+submit path (moved to [`crate::sessions::spawn`]): re-exported
+/// here for the sequencing tests below.
+#[cfg(test)]
+pub use crate::sessions::write_submitted_prompt;
 
 #[cfg(test)]
 mod activity_tests {
@@ -772,7 +734,7 @@ mod forward_mouse_scroll_tests {
     fn spawn_cat_agent() -> InteractiveAgent {
         InteractiveAgent::spawn(
             Cli::new("cat"),
-            ".",
+            env!("CARGO_MANIFEST_DIR"),
             80,
             24,
             None,
@@ -937,7 +899,7 @@ mod kitty_keyboard_negotiation_tests {
     fn spawn_cat_agent() -> InteractiveAgent {
         InteractiveAgent::spawn(
             Cli::new("cat"),
-            ".",
+            env!("CARGO_MANIFEST_DIR"),
             80,
             24,
             None,

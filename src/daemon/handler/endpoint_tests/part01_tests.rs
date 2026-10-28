@@ -47,6 +47,7 @@ fn handler_deps_round_trip_constructs_identical_handler() {
         notification_service: Arc::clone(&notif),
         ingestion: Arc::clone(&ingestion),
         dynamic_skills: Arc::clone(&dynamic_skills),
+        shelf: crate::sessions::shelf::ShelfStore::for_test(&db),
         start_time: std::time::Instant::now(),
         port: 0,
     };
@@ -120,6 +121,7 @@ fn daemon_start_instant_is_shared_by_every_handler() {
         notification_service: Arc::clone(&notif),
         ingestion: Arc::clone(&ingestion),
         dynamic_skills: Arc::clone(&dynamic_skills),
+        shelf: crate::sessions::shelf::ShelfStore::for_test(&db),
         start_time: daemon_start,
         port: 0,
     });
@@ -139,6 +141,7 @@ fn daemon_start_instant_is_shared_by_every_handler() {
         notification_service: Arc::clone(&notif),
         ingestion: Arc::clone(&ingestion),
         dynamic_skills: Arc::clone(&dynamic_skills),
+        shelf: crate::sessions::shelf::ShelfStore::for_test(&db),
         start_time: daemon_start,
         port: 0,
     });

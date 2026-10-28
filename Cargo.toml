@@ -25,7 +25,7 @@ path = "src/main.rs"
 rmcp = { version = "2.1", features = ["server", "transport-io", "transport-streamable-http-server"] }
 
 # Axum for Streamable HTTP transport
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 
 # Async runtime
 tokio = { version = "1.50", features = ["full"] }
@@ -104,8 +104,8 @@ portable-pty = "0.9"
 # Virtual terminal emulator for embedding agent output
 vt100 = "0.16"
 
-# HTTP client for registry fetch
-reqwest = { version = "0.13", features = ["blocking", "json"] }
+# HTTP client for registry fetch (`form` for the GitHub device flow)
+reqwest = { version = "0.13", features = ["blocking", "json", "form"] }
 
 # Interactive prompts for setup wizard
 inquire = "0.9"
@@ -160,6 +160,12 @@ hf-hub = { version = "0.5", optional = true, default-features = false, features 
     "native-tls",
 ] }
 toml_edit = "0.25"
+p256 = { version = "0.14", features = ["ecdsa", "pkcs8"] }
+hmac = "0.13"
+pbkdf2 = "0.13"
+subtle = "2.6"
+qrcode = { version = "0.14", default-features = false }
+webrtc = "0.21.1"
 
 # Unix process management (kill, setsid)
 [target.'cfg(unix)'.dependencies]

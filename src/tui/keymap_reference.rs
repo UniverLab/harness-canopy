@@ -9,6 +9,8 @@ pub const CONTEXTS: &[&str] = &[
     "Agent focus",
     "Dialogs",
     "Crews",
+    "Hub shelf",
+    "Hub remote",
 ];
 
 /// One shortcut row.
@@ -539,6 +541,92 @@ pub static KEY_REFS: &[KeyRef] = &[
         context: "Crews",
         action: "clear",
         code: "Char('x')",
+    },
+    // ── Hub shelf ────────────────────────────────────────────────
+    KeyRef {
+        key: "Enter",
+        context: "Hub shelf",
+        action: "open the selected file",
+        code: "Enter",
+    },
+    KeyRef {
+        key: "Space",
+        context: "Hub shelf",
+        action: "open the selected file",
+        code: "Char(' ')",
+    },
+    KeyRef {
+        key: "d",
+        context: "Hub shelf",
+        action: "delete the selected file (y/n confirm)",
+        code: "Char('d')",
+    },
+    KeyRef {
+        key: "c",
+        context: "Hub shelf",
+        action: "copy its path",
+        code: "Char('c')",
+    },
+    KeyRef {
+        key: "j",
+        context: "Hub shelf",
+        action: "move down",
+        code: "Char('j')",
+    },
+    KeyRef {
+        key: "k",
+        context: "Hub shelf",
+        action: "move up",
+        code: "Char('k')",
+    },
+    KeyRef {
+        key: "y",
+        context: "Hub shelf",
+        action: "confirm the delete",
+        code: "Char('y')",
+    },
+    KeyRef {
+        key: "n",
+        context: "Hub shelf",
+        action: "cancel the delete",
+        code: "Char('n')",
+    },
+    // ── Hub remote ───────────────────────────────────────────────
+    KeyRef {
+        key: "Enter",
+        context: "Hub remote",
+        action: "sign in, toggle the switch, or pair a device",
+        code: "Enter",
+    },
+    KeyRef {
+        key: "d",
+        context: "Hub remote",
+        action: "revoke the selected device (y/n confirm)",
+        code: "Char('d')",
+    },
+    KeyRef {
+        key: "j",
+        context: "Hub remote",
+        action: "move down",
+        code: "Char('j')",
+    },
+    KeyRef {
+        key: "k",
+        context: "Hub remote",
+        action: "move up",
+        code: "Char('k')",
+    },
+    KeyRef {
+        key: "y",
+        context: "Hub remote",
+        action: "confirm the revoke",
+        code: "Char('y')",
+    },
+    KeyRef {
+        key: "n",
+        context: "Hub remote",
+        action: "cancel the revoke",
+        code: "Char('n')",
     },
 ];
 

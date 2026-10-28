@@ -76,13 +76,13 @@ completion, review the specs this run closed, the resulting code, and
 
 An interactive hook targets a session either by its exact id
 (`target_session_id`) or by its name (`target_session_name`) — exactly one
-of the two must be set. A resume canopy recognizes — a sidebar auto-resume,
-or a harness conversation it already has on record — keeps the session's
-id and its name, so a hook addressed to either keeps reaching it
-afterwards. A resume it does not recognize comes back as a new session
-with a fresh id and a fresh generated name, and a hook configured with the
-old id then points at a session that no longer exists: firing fails loudly
-naming the id rather than redirecting the message anywhere else.
+of the two must be set. A resume canopy recognizes — a harness conversation
+it already has on record — keeps the session's id and its name, so a hook
+addressed to either keeps reaching it afterwards. A resume it does not
+recognize comes back as a new session with a fresh id and a fresh generated
+name, and a hook configured with the old id then points at a session that no
+longer exists: firing fails loudly naming the id rather than redirecting the
+message anywhere else.
 `target_session_name` exists for exactly this case: a name-targeted hook is
 resolved against the live session set fresh on every fire — never cached —
 the same set `session_list` reads. Exactly one live session with that name resolves and
@@ -98,8 +98,10 @@ as structure alongside the prompt, so the recipient, and the delivery
 history, can tell both that it came from a hook and which session actually
 received it, without that origin being buried in the prompt text.
 
-A message enqueued while no TUI is running is queued, not lost: it stays
-pending and is delivered when a TUI later starts.
+A message is delivered by the daemon: the scheduler fires it on its next tick
+whether or not a TUI is attached. A message whose target session is gone by
+then is not lost either — the prompt is preserved for recall and a
+notification reports that the session was not found.
 
 ## Standalone spec backlog
 

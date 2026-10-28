@@ -207,12 +207,16 @@ pub struct App {
     pub(crate) terminal_agents: Vec<InteractiveAgent>,
     /// Sessions orphaned during auto-resume (can be revived or dismissed).
     pub(crate) orphaned_sessions: Vec<crate::db::session::InteractiveSession>,
-    /// Gate: pending scheduled sends are held (not delivered) until the
-    /// startup restore runs — auto-resume reassigns each schedule onto its
-    /// resumed session id and drops schedules whose session is gone. Without
-    /// this, the first refresh (before sessions resume) would see zero live
-    /// sessions and prematurely treat every due schedule as dead.
-    pub(crate) scheduled_sends_restored: bool,
+    /// The daemon session hub connection plus reconnect state.
+    pub(crate) session_hub: super::session_hub::SessionHubState,
+    /// Notice about the hub connection (e.g. protocol mismatch), if any.
+    pub(crate) hub_notice: Option<String>,
+    /// Streams of sessions closed but still inside their shadow-summary
+    /// linger, kept so quitting within that window can still send the
+    /// `kill` the linger thread would have sent — that thread dies with
+    /// this process, and a lost kill would let the closed session come
+    /// back on the next start.
+    pub(crate) pending_closes: Vec<crate::sessions::client::SessionSend>,
 
     // Split group state
     pub(crate) split_groups: Vec<crate::domain::models::SplitGroup>,

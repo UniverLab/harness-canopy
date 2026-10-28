@@ -32,17 +32,20 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Them
     } else {
         format!(" v{} ", app.daemon_version)
     };
-    let update_notice = app
-        .update_available
-        .as_deref()
-        .map(|tag| format!(" canopy {tag} available — run canopy update"))
-        .unwrap_or_default();
+    // A hub notice (e.g. protocol mismatch) preempts the update notice.
+    let notice = app.hub_notice.as_deref().map(|notice| format!(" {notice}"));
+    let notice = notice.unwrap_or_else(|| {
+        app.update_available
+            .as_deref()
+            .map(|tag| format!(" canopy {tag} available — run canopy update"))
+            .unwrap_or_default()
+    });
     draw_footer_right(
         frame,
         area,
         split_label.as_deref(),
         &version,
-        &update_notice,
+        &notice,
         theme,
     );
 }
@@ -878,7 +881,7 @@ mod tests {
         // child" hint must be gone, from this branch and everywhere else.
         let agent = crate::tui::agent::InteractiveAgent::spawn(
             crate::domain::models::Cli::new("cat"),
-            ".",
+            env!("CARGO_MANIFEST_DIR"),
             80,
             24,
             None,
@@ -925,7 +928,7 @@ mod tests {
         // because plain F4 belongs to the child while claimed.
         let agent = crate::tui::agent::InteractiveAgent::spawn(
             crate::domain::models::Cli::new("cat"),
-            ".",
+            env!("CARGO_MANIFEST_DIR"),
             80,
             24,
             None,
@@ -1179,7 +1182,7 @@ mod tests {
         // pane's key-hint row, so the user never has to reach for Shift.
         let agent = crate::tui::agent::InteractiveAgent::spawn(
             crate::domain::models::Cli::new("cat"),
-            ".",
+            env!("CARGO_MANIFEST_DIR"),
             80,
             24,
             None,

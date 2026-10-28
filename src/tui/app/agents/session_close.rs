@@ -113,6 +113,10 @@ impl App {
         let Some(agent) = self.interactive_agents.get(idx) else {
             return false;
         };
+        // The shadow kill rides a thread that dies with the process: keep the
+        // stream here too so quitting within the linger window can still
+        // send it (`App::cleanup`) instead of losing the close.
+        self.pending_closes.push(agent.stream.clone());
         agent.schedule_shadow_shutdown(
             SHADOW_SUMMARY_INSTRUCTION,
             Duration::from_secs(SHADOW_SUMMARY_LINGER_SECS),
@@ -227,7 +231,7 @@ impl App {
         Ok(())
     }
 
-    pub(super) fn dissolve_groups_for_session(&mut self, session_name: &str) {
+    pub(crate) fn dissolve_groups_for_session(&mut self, session_name: &str) {
         let ids_to_dissolve: Vec<String> = self
             .split_groups
             .iter()

@@ -221,17 +221,18 @@ fn resolve_reported_run_accepts_matching_active_run() {
     ))
     .unwrap();
 
-    let run = resolve_reported_run(&db, "run-1", "node-1")
+    let report = resolve_reported_run(&db, Some("run-1"), Some("node-1"), None)
         .unwrap()
         .expect("a running run for the claimed node_id must be accepted");
-    assert_eq!(run.id, "run-1");
+    assert_eq!(report.run.id, "run-1");
+    assert!(report.correction.is_none());
 }
 
 #[test]
 fn resolve_reported_run_rejects_unknown_run_id() {
     let (_dir, db) = reported_run_fixture();
 
-    let result = resolve_reported_run(&db, "no-such-run", "node-1").unwrap();
+    let result = resolve_reported_run(&db, Some("no-such-run"), Some("node-1"), None).unwrap();
     let error = result.expect_err("an unknown run_id must be rejected");
     assert!(error.is_error.unwrap_or(false));
 }
@@ -249,7 +250,7 @@ fn resolve_reported_run_rejects_node_id_mismatch() {
 
     // "run-1" really belongs to "node-1" (see graph_run_row) — a report
     // claiming a different node_id for the same run_id is malformed.
-    let result = resolve_reported_run(&db, "run-1", "some-other-node").unwrap();
+    let result = resolve_reported_run(&db, Some("run-1"), Some("some-other-node"), None).unwrap();
     let error = result.expect_err("a node_id that doesn't match the run must be rejected");
     assert!(error.is_error.unwrap_or(false));
 }
@@ -283,7 +284,7 @@ fn resolve_reported_run_rejects_already_finalized_run() {
     ))
     .unwrap();
 
-    let result = resolve_reported_run(&db, "run-stale", "node-1").unwrap();
+    let result = resolve_reported_run(&db, Some("run-stale"), Some("node-1"), None).unwrap();
     let error = result.expect_err("a finalized run must reject a late report");
     assert!(error.is_error.unwrap_or(false));
 

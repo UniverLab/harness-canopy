@@ -33,6 +33,42 @@ impl Row {
         self.cells.iter()
     }
 
+    /// Inline rendering of this row with no cursor movement: attribute
+    /// diffs and cell text only, for byte streams a fresh parser consumes
+    /// linearly (see `Grid::write_scrollback_formatted`). Trailing blank
+    /// cells are omitted; the caller terminates the line.
+    pub(crate) fn write_contents_linear(
+        &self,
+        contents: &mut Vec<u8>,
+        prev_attrs: &mut crate::attrs::Attrs,
+    ) {
+        let default_attrs = crate::attrs::Attrs::default();
+        let mut end = 0usize;
+        for (i, cell) in self.cells().enumerate() {
+            if cell.has_contents() || cell.attrs() != &default_attrs {
+                end = i + 1;
+            }
+        }
+        let mut prev_was_wide = false;
+        for cell in self.cells().take(end) {
+            if prev_was_wide {
+                prev_was_wide = false;
+                continue;
+            }
+            prev_was_wide = cell.is_wide();
+            let attrs = cell.attrs();
+            if prev_attrs != attrs {
+                attrs.write_escape_code_diff(contents, prev_attrs);
+                *prev_attrs = *attrs;
+            }
+            if cell.has_contents() {
+                contents.extend(cell.contents().as_bytes());
+            } else {
+                contents.push(b' ');
+            }
+        }
+    }
+
     pub fn get(&self, col: u16) -> Option<&crate::Cell> {
         self.cells.get(usize::from(col))
     }

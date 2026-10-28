@@ -517,12 +517,20 @@ impl App {
     }
 
     pub fn cleanup(&mut self) {
-        for agent in &mut self.interactive_agents {
-            agent.kill();
+        // A session closed but still inside its shadow-summary linger would
+        // die with this process before its thread sent `kill`, letting the
+        // closed session survive in the daemon and come back on the next
+        // start: send those kills now and give the frames a beat to reach
+        // the hub before the sockets close with the process.
+        if !self.pending_closes.is_empty() {
+            for stream in std::mem::take(&mut self.pending_closes) {
+                stream.kill();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
         }
-        for agent in &mut self.terminal_agents {
-            agent.kill();
-        }
+        // Quitting the TUI only closes the hub WebSocket; every session keeps
+        // running in the daemon and reattaches on the next start.
+        self.close_session_hub();
         // Clear any lingering toast notifications from the Windows Action Center
         crate::domain::notification::clear_notifications_on_exit();
     }
@@ -1535,5 +1543,70 @@ mod ct16_warp_fullscreen_handover_tests {
             assert!(warp_active, "warp input box stays for normal children");
         }
         app.terminal_agents[0].kill();
+    }
+}
+
+#[cfg(test)]
+mod cleanup_shadow_linger_tests {
+    use super::*;
+    use crate::db::Database;
+    use crate::tui::agent::InteractiveAgent;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use tempfile::tempdir;
+
+    /// FR5: closing a session sends `kill` — but only after the 7 s
+    /// shadow-summary linger, whose thread dies with the process. Quitting
+    /// inside that window must still deliver the kill from `cleanup`,
+    /// otherwise the closed session survives in the daemon and comes back
+    /// on the next start.
+    #[test]
+    fn cleanup_kills_a_session_closed_inside_its_shadow_linger() {
+        let hub = &crate::sessions::client::test_client().hub;
+        let tmp = tempfile::NamedTempFile::new().expect("create temp file");
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let db = Arc::new(Database::new(&path).expect("create test db"));
+        let data_dir = tempdir().expect("tempdir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+
+        let agent = InteractiveAgent::spawn_terminal(
+            "cat",
+            "/tmp",
+            80,
+            24,
+            Some("quit-during-linger"),
+            &[],
+            ratatui::style::Color::White,
+        )
+        .expect("spawn cat on the test hub");
+        let id = agent.id.clone();
+        app.interactive_agents.push(agent);
+
+        assert!(app.close_interactive_session_at(0, 0));
+        assert!(
+            hub.get(&id).is_some(),
+            "the hub still holds the session mid-linger"
+        );
+        assert!(
+            !app.pending_closes.is_empty(),
+            "the close kept no stream for the quit flush"
+        );
+
+        app.cleanup();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while hub.get(&id).is_some() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            hub.get(&id).is_none(),
+            "quitting during the shadow linger lost the kill"
+        );
     }
 }

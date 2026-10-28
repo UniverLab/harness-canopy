@@ -100,6 +100,20 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
     // `startup_personal_rag` runs; the periodic tick continues from `start()`.
     ingestion.run_rag_maintenance().await;
 
+    // The session endpoint's state comes up before anything serves: the hub
+    // owns every PTY, so reconciliation has to respawn the previous daemon's
+    // sessions before the first client can connect, and the scheduler gets
+    // the hub to deliver scheduled sends through.
+    let sessions_state = crate::sessions::ws::SessionsState::ensure(&data_dir, Arc::clone(&db))?;
+    // The relay answers offers by bridging into the hub, so the hub exists
+    // first.
+    crate::remote::relay::spawn(
+        data_dir.clone(),
+        Database::clone(&db),
+        Arc::clone(&sessions_state),
+    );
+    crate::sessions::resume::reconcile_at_startup(&sessions_state.hub, &data_dir);
+
     let background = start_background_tasks(
         &db,
         &executor,
@@ -107,6 +121,7 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
         &notification_service,
         &data_dir,
         canopy_config.announcements_enabled,
+        &sessions_state.hub,
     );
 
     let ct = tokio_util::sync::CancellationToken::new();
@@ -120,15 +135,25 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
             notification_service: Arc::clone(&notification_service),
             ingestion: Arc::clone(&ingestion),
             dynamic_skills: Arc::clone(&dynamic_skills),
+            shelf: sessions_state.shelf.clone(),
             start_time: daemon_start,
             port,
         },
         &ct,
+        Arc::clone(&sessions_state),
     );
 
     bind_and_serve(router, port, ct).await?;
 
-    shutdown_http_server(background, watcher_engine, &db, &data_dir, &graph_engine).await;
+    shutdown_http_server(
+        background,
+        watcher_engine,
+        &db,
+        &data_dir,
+        &graph_engine,
+        &sessions_state.hub,
+    )
+    .await;
 
     Ok(())
 }
@@ -242,6 +267,7 @@ fn start_background_tasks(
     notification_service: &Arc<dyn NotificationService>,
     data_dir: &std::path::Path,
     announcements_enabled: bool,
+    sessions: &crate::sessions::SessionHub,
 ) -> HttpBackgroundTasks {
     let cron_scheduler = Arc::new(
         CronScheduler::with_graphs(
@@ -249,6 +275,7 @@ fn start_background_tasks(
             Arc::clone(executor),
             Arc::clone(graph_engine),
         )
+        .with_hub(sessions.clone())
         .with_retry(crate::scheduler::cron_scheduler::RetryPolicy::from_config(
             &crate::domain::canopy_config::CanopyConfig::load(data_dir).scheduler,
         )),
@@ -283,8 +310,13 @@ fn start_background_tasks(
 /// Builds the `/mcp` router: the streamable-HTTP service (one
 /// `TaskTriggerHandler` per session), the session manager, and the server
 /// config wired to the shutdown cancellation token, layered with the
-/// error-status logger.
-fn build_mcp_router(deps: HandlerDeps, ct: &tokio_util::sync::CancellationToken) -> axum::Router {
+/// error-status logger. Also serves the daemon session hub at
+/// `/sessions/ws` (see `crate::sessions::ws`).
+fn build_mcp_router(
+    deps: HandlerDeps,
+    ct: &tokio_util::sync::CancellationToken,
+    sessions: Arc<crate::sessions::ws::SessionsState>,
+) -> axum::Router {
     let HandlerDeps {
         db: handler_db,
         executor: handler_executor,
@@ -294,6 +326,7 @@ fn build_mcp_router(deps: HandlerDeps, ct: &tokio_util::sync::CancellationToken)
         notification_service,
         ingestion: handler_ingestion,
         dynamic_skills: handler_dynamic_skills,
+        shelf: handler_shelf,
         start_time,
         port,
     } = deps;
@@ -309,6 +342,7 @@ fn build_mcp_router(deps: HandlerDeps, ct: &tokio_util::sync::CancellationToken)
                 notification_service: Arc::clone(&notification_service),
                 ingestion: Arc::clone(&handler_ingestion),
                 dynamic_skills: Arc::clone(&handler_dynamic_skills),
+                shelf: Arc::clone(&handler_shelf),
                 start_time,
                 port,
             }))
@@ -332,7 +366,12 @@ fn build_mcp_router(deps: HandlerDeps, ct: &tokio_util::sync::CancellationToken)
 
     axum::Router::new()
         .nest_service("/mcp", service)
+        .route(
+            "/sessions/ws",
+            axum::routing::get(crate::sessions::ws::sessions_ws_handler),
+        )
         .layer(axum::middleware::from_fn(log_mcp_error_responses))
+        .with_state(sessions)
 }
 
 /// Frees the port (a stale occupant from a previous daemon), binds, logs the
@@ -374,7 +413,12 @@ async fn shutdown_http_server(
     db: &Arc<Database>,
     data_dir: &std::path::Path,
     graph_engine: &Arc<GraphEngine>,
+    sessions: &crate::sessions::SessionHub,
 ) {
+    // Terminals first: the PTYs die with this process, so their scrollback has
+    // to be persisted while the hub's parsers still hold it, before anything
+    // below stops or terminates work.
+    crate::sessions::save_terminal_histories(sessions, data_dir);
     // CB82: FIRST — before the scheduler/health cancels and before
     // `terminate_all_...` sends SIGTERM — so the engine finalizes in-flight
     // runs as interrupted instead of routing the fail edge of a killed node.
@@ -403,13 +447,15 @@ async fn log_mcp_error_responses(
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     let session_id_present = request.headers().contains_key("mcp-session-id");
+    let path = request.uri().path().to_string();
     let response = next.run(request).await;
     let status = response.status();
     if status.as_u16() >= 400 {
         tracing::warn!(
             status = %status,
             session_id_present,
-            "/mcp request failed"
+            path = %path,
+            "request failed"
         );
     }
     response
@@ -510,8 +556,16 @@ pub(crate) async fn run_stdio_server() -> Result<()> {
 
 /// The MCP handler over the startup dependencies — port 0, because stdio
 /// has no port of its own to report.
-fn build_stdio_handler(db: &Arc<Database>, startup: &StdioServerStartup) -> TaskTriggerHandler {
-    TaskTriggerHandler::with_deps(HandlerDeps {
+fn build_stdio_handler(
+    db: &Arc<Database>,
+    startup: &StdioServerStartup,
+) -> anyhow::Result<TaskTriggerHandler> {
+    let shelf = crate::sessions::shelf::ShelfStore::new(
+        Arc::clone(db),
+        crate::sessions::shelf::default_shelf_dir(),
+    )?;
+    shelf.maintenance();
+    Ok(TaskTriggerHandler::with_deps(HandlerDeps {
         db: Arc::clone(db),
         executor: Arc::clone(&startup.executor),
         watcher_engine: Arc::clone(&startup.watcher_engine),
@@ -520,16 +574,17 @@ fn build_stdio_handler(db: &Arc<Database>, startup: &StdioServerStartup) -> Task
         notification_service: Arc::clone(&startup.notification_service),
         ingestion: Arc::clone(&startup.ingestion),
         dynamic_skills: Arc::clone(&startup.dynamic_skills),
+        shelf,
         start_time: startup.start_time,
         port: 0,
-    })
+    }))
 }
 
 /// Serves JSON-RPC over the stdio transport until the client closes it:
 /// build the handler, serve, log the started line, then wait for the
 /// transport to end.
 async fn serve_stdio_transport(db: &Arc<Database>, startup: &StdioServerStartup) -> Result<()> {
-    let handler = build_stdio_handler(db, startup);
+    let handler = build_stdio_handler(db, startup)?;
 
     let transport = rmcp::transport::stdio();
     let server = handler.serve(transport).await?;
@@ -810,6 +865,7 @@ mod hang_repro {
                     notification_service: Arc::clone(&handler_notif),
                     ingestion: Arc::clone(&handler_ingestion),
                     dynamic_skills: Arc::clone(&handler_dynamic_skills),
+                    shelf: crate::sessions::shelf::ShelfStore::for_test(&handler_db),
                     start_time: std::time::Instant::now(),
                     port: 0,
                 }))

@@ -14,6 +14,15 @@ Each interactive agent runs your chosen AI CLI in a dedicated
 pseudo-terminal with full vt100 emulation, 24-bit color and cursor
 positioning — anything that works in a terminal works inside canopy.
 
+The daemon hosts those pseudo-terminals, so an interactive session outlives
+the TUI that started it: quitting the TUI (`F10` or closing the window) keeps
+every running session alive, and the next TUI attaches to it with its screen
+and scrollback intact. Restarting the daemon does end its sessions — they
+are its children — but as soon as the new daemon starts it brings back every
+session the database still lists as active, under the same id and name; a
+session that ended while no TUI was open is not reopened. Closing a session
+in the TUI ends it.
+
 ## Background agents
 
 Background agents run unattended, triggered by:
@@ -42,10 +51,13 @@ both the session's id and its name. A resume it does not recognize comes back
 with a fresh id and a fresh generated name (see
 [Graphs](graphs-hooks-and-queues.md#event-keyed-hooks)). Every time the agent's cron or watch
 trigger fires, canopy enqueues the prompt as a scheduled send to that session,
-and the TUI delivers it on its next refresh tick. Delivery happens when a TUI
-is open: a message that fires while no TUI is running waits for the next TUI —
-it is not lost. If a fire is already waiting for the same target, a new fire
-replaces that message rather than piling up a second one.
+and the daemon delivers it on its next scheduler tick. Delivery does not need
+a TUI: a message that fires while nobody is watching still reaches a live
+session. If the target session is gone by the time it is due, the prompt is
+preserved for recall in that project (the same recall the schedule dialog
+offers) and a notification says the session was not found, rather than the
+message being dropped silently. If a fire is already waiting for the same
+target, a new fire replaces that message rather than piling up a second one.
 
 Cron example (MCP call):
 

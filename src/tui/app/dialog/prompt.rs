@@ -451,27 +451,10 @@ impl SimplePromptDialog {
     /// yields an empty list rather than an error; an unreadable file is
     /// skipped rather than aborting the whole listing.
     pub fn collect_presets_for_picker(dir: &std::path::Path) -> Vec<(String, String, String)> {
-        let Ok(read_dir) = std::fs::read_dir(dir) else {
-            return Vec::new();
-        };
-        let mut entries: Vec<(String, String, String)> = read_dir
-            .filter_map(|entry| entry.ok())
-            .filter(|entry| entry.path().extension().and_then(|e| e.to_str()) == Some("md"))
-            .filter_map(|entry| {
-                let path = entry.path();
-                let name = path.file_stem()?.to_str()?.to_string();
-                let content = std::fs::read_to_string(&path).ok()?;
-                let preview = content
-                    .lines()
-                    .map(str::trim)
-                    .find(|line| !line.is_empty())
-                    .unwrap_or("")
-                    .to_string();
-                Some((name, preview, content))
-            })
-            .collect();
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
-        entries
+        crate::domain::prompt_catalog::collect_preset_entries(dir)
+            .into_iter()
+            .map(|entry| (entry.name, entry.preview, entry.content))
+            .collect()
     }
 
     /// Indices into `entries` whose name matches `filter` as a

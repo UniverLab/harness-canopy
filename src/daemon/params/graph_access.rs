@@ -234,12 +234,14 @@ pub struct GraphScheduleContinueParams {
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphCompleteNodeParams {
-    /// The exact node run ID this report belongs to (given to you in the
-    /// [REPORTING] section of your prompt). Required so a report can never
+    /// The exact node run ID this report belongs to. Omit it inside a node
+    /// run: it is read from the CANOPY_NODE_RUN_ID environment variable the
+    /// engine sets on every agent process. Required so a report can never
     /// be misattributed to a different, newer attempt at the same node.
-    pub run_id: String,
-    /// Graph node ID.
-    pub node_id: String,
+    pub run_id: Option<String>,
+    /// Graph node ID. Omit it inside a node run: it is read from the
+    /// CANOPY_NODE_ID environment variable alongside `run_id`.
+    pub node_id: Option<String>,
     /// pass or fail.
     pub status: String,
     /// Node output payload.
@@ -250,12 +252,14 @@ pub struct GraphCompleteNodeParams {
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphReportBlockerParams {
-    /// The exact node run ID this report belongs to (given to you in the
-    /// [REPORTING] section of your prompt). Required so a report can never
+    /// The exact node run ID this report belongs to. Omit it inside a node
+    /// run: it is read from the CANOPY_NODE_RUN_ID environment variable the
+    /// engine sets on every agent process. Required so a report can never
     /// be misattributed to a different, newer attempt at the same node.
-    pub run_id: String,
-    /// Graph node ID.
-    pub node_id: String,
+    pub run_id: Option<String>,
+    /// Graph node ID. Omit it inside a node run: it is read from the
+    /// CANOPY_NODE_ID environment variable alongside `run_id`.
+    pub node_id: Option<String>,
     /// Human-readable blocker description.
     pub description: String,
 }

@@ -143,7 +143,7 @@ pub struct NewAgentDialog {
 
 impl NewAgentDialog {
     pub fn new(start_dir: Option<&str>) -> Self {
-        let (available, configs) = Self::load_available_clis();
+        let (available, configs) = available_clis_for_catalog();
         let cwd = start_dir.map(|s| s.to_string()).unwrap_or_else(|| {
             std::env::current_dir()
                 .map(|p| p.to_string_lossy().to_string())
@@ -167,16 +167,8 @@ impl NewAgentDialog {
             mode_candidates: Vec::new(),
             background_trigger: BackgroundTrigger::Cron,
             cli_index: 0,
-            available_clis: if available.is_empty() {
-                vec![Cli::new("opencode"), Cli::new("kiro"), Cli::new("qwen")]
-            } else {
-                available
-            },
-            cli_configs: if configs.is_empty() {
-                vec![None, None, None]
-            } else {
-                configs
-            },
+            available_clis: available,
+            cli_configs: configs,
             working_dir: cwd.clone(),
             model: String::new(),
             prompt: String::new(),
@@ -308,22 +300,7 @@ impl NewAgentDialog {
             .map(|c| c.as_str())
             .unwrap_or("");
         let config = self.cli_configs.get(idx).and_then(|c| c.as_ref());
-        let display = config
-            .map(|c| c.display_name())
-            .unwrap_or_else(|| slug.to_string());
-        let base = if display == slug {
-            display
-        } else {
-            format!("{display} ({slug})")
-        };
-        // CM35: interactive-only platforms stay selectable for a live
-        // session — never filtered out — but are marked so the user knows
-        // what this harness can and cannot do.
-        if config.is_some_and(|c| !c.headless) {
-            format!("{base} (interactive only)")
-        } else {
-            base
-        }
+        cli_label(slug, config)
     }
 
     pub fn selected_args(&self) -> Option<String> {
@@ -625,6 +602,47 @@ impl NewAgentDialog {
             self.model = entry.id.clone();
             self.model_picker_open = false;
         }
+    }
+}
+
+/// The New dialog's CLI list with configs, for the hub catalog: configured
+/// CLIs (or auto-detected ones), most-used first — with the same three
+/// fallback slugs the dialog shows when nothing is detected.
+pub(crate) fn available_clis_for_catalog(
+) -> (Vec<Cli>, Vec<Option<crate::domain::cli_config::CliConfig>>) {
+    let (available, configs) = NewAgentDialog::load_available_clis();
+    if available.is_empty() {
+        (
+            vec![Cli::new("opencode"), Cli::new("kiro"), Cli::new("qwen")],
+            vec![None, None, None],
+        )
+    } else {
+        (available, configs)
+    }
+}
+
+/// Human label for one CLI slug with its config: the product display string
+/// with the slug in parentheses when it differs. The logic behind
+/// [`NewAgentDialog::cli_display_label`].
+pub(crate) fn cli_label(
+    slug: &str,
+    config: Option<&crate::domain::cli_config::CliConfig>,
+) -> String {
+    let display = config
+        .map(|c| c.display_name())
+        .unwrap_or_else(|| slug.to_string());
+    let base = if display == slug {
+        display
+    } else {
+        format!("{display} ({slug})")
+    };
+    // CM35: interactive-only platforms stay selectable for a live
+    // session — never filtered out — but are marked so the user knows
+    // what this harness can and cannot do.
+    if config.is_some_and(|c| !c.headless) {
+        format!("{base} (interactive only)")
+    } else {
+        base
     }
 }
 

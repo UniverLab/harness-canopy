@@ -64,12 +64,31 @@ step instead of launching straight away:
 - **Scrolling up** — the scrollback keeps everything the session wrote,
   including output an inline TUI scrolled off the top of the screen, so
   scrolling up shows the transcript instead of stale rows.
+- **Surviving TUI restarts** — sessions live in the daemon, not the TUI:
+  quitting (`F10`, closing the window) leaves every running session running,
+  and reopening the TUI reattaches to them live, with screen and scrollback
+  intact; a session that ended while the TUI was closed is not reopened.
+  Only closing a session explicitly ends it. Restarting the daemon itself
+  (`canopy daemon restart`) does end its sessions — they are its children —
+  but the new daemon respawns every session the database still lists as
+  active as soon as it starts, under the same id and name, resuming the
+  harness conversation where the platform supports it. A terminal comes back
+  in its working directory with the scrollback it had when the daemon shut
+  down, above a `--- restored session history above ---` divider.
+  While the TUI runs, a dropped daemon connection is retried on its own
+  (0.5 s doubling up to 5 s) and the sidebar re-lists what the daemon still
+  has; sessions started or closed from another TUI appear in, or leave, the
+  sidebar live. When the daemon speaks an incompatible session protocol the
+  footer shows `canopy daemon speaks session protocol <n>; restart the
+  daemon (canopy daemon restart)` and nothing attaches until the restarted
+  daemon matches.
 
 ## Monitoring
 
 - **Agent status colors** — teal for working (recent output), blue for
-  idle, red for failed, gray for exited. The sidebar shows a colored
-  gutter bar per agent.
+  idle, red for failed, gray for exited. A running session whose daemon
+  connection dropped shows dim gray until it reconnects. The sidebar shows
+  a colored gutter bar per agent.
 - **Split groups** — side-by-side horizontal/vertical views to watch
   multiple agents simultaneously.
 - **System dashboard** — CPU, memory, disk, GPU (NVIDIA/Linux/macOS) and
@@ -148,9 +167,11 @@ WSL), **Nuclear Winter** shows as `not measurable on this system`.
 Press **F1** to open the **Canopy hub**, a centered tabbed dialog:
 **Settings** edits every registry setting in place (with the value's apply
 mode and status), **Keys** is a grouped reference of every shortcut the TUI
-handles, and **Missions & stats** lists all the missions above — unlocked
-ones in full colour, locked ones dimmed. `Shift+←`/`Shift+→`
-switch tabs, as everywhere else in Canopy; `Tab`/`Shift+Tab` and `1`/`2`/`3`
+handles, **Missions & stats** lists all the missions above — unlocked
+ones in full colour, locked ones dimmed — **Shelf** lists the files
+agents have sent (see below), and **Remote** is everything `canopy remote`
+does (see below). `Shift+←`/`Shift+→`
+switch tabs, as everywhere else in Canopy; `Tab`/`Shift+Tab` and `1`/`2`/`3`/`4`/`5`
 also switch. `F1` closes the hub from any state; `Esc` closes it from the top
 level of every tab. `F1` works everywhere — including inside a focused
 interactive session whose harness has claimed the keyboard (alternate screen
@@ -166,6 +187,44 @@ with `a` (add a folder), `d` (delete) and `Shift+↑`/`Shift+↓` (reorder). `/`
 filters every group by key or description. Each change goes through the daemon;
 a refused value keeps the old one and the daemon's message shows in the status
 line. `←`/`→` never change a value.
+
+In **Remote** (`F1`, then `5`), `↑`/`↓` (or `j`/`k`) move over the GitHub,
+Remote control, Relay and Pair rows plus one row per paired device. `Enter`
+on GitHub starts the device flow while signed out (the row shows the user
+code and `https://github.com/login/device` until it completes or expires);
+`Enter` on Remote control flips the relay switch (disabled while signed
+out); Relay only reports the phase (`connected`, `connecting`,
+`token rejected: sign in again`, `off`); `Enter` on Pair a device shows the
+fresh code with its link, QR and countdown in an overlay (`Esc` hides it,
+the code stays valid). Each device row shows its label, id, last seen time
+and `live` while a peer is open; `d` revokes it behind a `y`/`n`
+confirmation (`Enter` also confirms, `Esc` cancels). While any device is
+live the sidebar header shows `⇄ n`.
+
+### Session shelf
+
+- **Sending** — an agent delivers files to its session with the MCP tool
+  `session_send_file`: 1..10 absolute paths per call, up to 20 MiB each.
+  PNG, JPEG, WebP, GIF and SVG are recognised from the file's content, not
+  its extension.
+- **Listing** — the hub's **Shelf** tab (`F1`, then `4`) lists the files
+  agents have sent — the host shelf plus one per session, merged newest
+  first — with arrival time, sender, name, size and caption per row.
+- **Opening** — `Enter` (or `Space`) opens the selected file with the
+  system viewer — `open` on macOS, `xdg-open` on Linux, `wslview` (or
+  `explorer.exe` with the path translated by `wslpath`) under WSL. `c`
+  copies its absolute path, and `d` deletes it after a `y`/`n`
+  confirmation. A viewer that fails or is missing raises a toast naming the
+  file and the error — which carries the path — instead of crashing the TUI.
+- **Confirming** — while the `y`/`n` prompt is armed every key answers it:
+  `y` or `Enter` deletes, `n` or `Esc` cancels, and nothing else moves — not
+  even a tab switch.
+- **Arrivals** — a file sent while the TUI runs joins the list live and
+  shows a `📎 <name> — <from>` toast for five seconds, wherever you are in
+  the TUI.
+- **Lifetime** — a session's files are kept until 7 days after the session
+  is removed, and the whole shelf is capped at 1 GiB: when a new file
+  would exceed it, the oldest files are pruned first.
 
 ## Projects sidebar
 

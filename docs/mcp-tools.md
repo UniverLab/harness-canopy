@@ -1,12 +1,12 @@
 ---
 title: MCP Tools
-description: All 32 MCP tools exposed by the canopy daemon, by category.
+description: All 34 MCP tools exposed by the canopy daemon, by category.
 order: 17
 ---
 
 # MCP Tools
 
-The daemon exposes **32 MCP tools** over Streamable HTTP (port 7755) and
+The daemon exposes **34 MCP tools** over Streamable HTTP (port 7755) and
 stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 
 Writes wait up to 5 seconds for a concurrent writer. If the database is still
@@ -79,8 +79,8 @@ session later instead of polling), and `intelligence_upsert` /
 | `graph_edge` | Wire graph nodes. Actions: `add`, `update`, `delete` (params unchanged: `from_node`/`to_node`/`condition`/`route`, `edge_id`, …) |
 | `graph_ensemble` | Author multi-member ensembles. Actions: `add`, `update`, `delete`, `copy` (params unchanged: `members`, `min_pass`, `on_pass_to`, …) |
 | `graph_control` | Run and manage graph execution. Actions: `run`, `pause`, `continue` (required `mode`: retry_current_node / skip_next_spec / run_from_node), `reset`, `preflight`, `schedule_continue` (optional `mode`: retry_current_node / skip_next_spec), `schedule_autorun` |
-| `graph_complete_node` | Complete an active graph node |
-| `graph_report_blocker` | Report a blocker for an active graph node |
+| `graph_complete_node` | Complete an active graph node. `run_id`/`node_id` may be omitted inside a node run — they resolve from the `CANOPY_NODE_RUN_ID`/`CANOPY_NODE_ID` environment the engine sets on every agent process; a supplied id with the right 8-char prefix but a wrong tail is corrected to the environment's run (the reply says `Corrected ...`), while any other unknown id fails naming the env run id |
+| `graph_report_blocker` | Report a blocker for an active graph node (same optional-ids resolution and prefix correction as `graph_complete_node`) |
 | `sandbox` | List, inspect, land and discard the sandbox worktrees a sandboxed graph run leaves behind. Actions: `list` (optional `graph_id`/`status` — every sandbox with its id, path, graph, branch, base branch, original workdir, status, whether its branch holds unique commits, how far behind its base it is, and whether its worktree is still registered), `get` (`id` — one sandbox by id or unambiguous prefix), `land` (`id` — merges onto the base branch, marks it `merged` and removes the worktree; refuses rather than forcing when the base checkout is on another branch, has uncommitted changes, or the merge conflicts, naming the conflicting paths, and leaves the sandbox untouched), `discard` (`id`, optional `force` — removes the worktree and branch, marks it `discarded`; refuses unique commits unless `force: true`) — pass `action` plus the params the refusal/table lists. The same operations as `canopy sandbox`, which is the CLI form ([Sandboxes](cli-reference.md#sandboxes)) |
 
 ## Crews (1)
@@ -112,7 +112,7 @@ See [Graphs](graphs.md).
 
 Kept callable for the whole 3.x line, but excluded from tool listings
 (`tools/list`) so nothing new adopts them — call the 3.x name instead. Not
-counted in the 32 tools above.
+counted in the 34 tools above.
 
 | Deprecated name | Renamed to (3.0.0) |
 |---|---|
@@ -214,7 +214,7 @@ ensembles — a crew.
 
 | Tool | Description |
 |---|---|
-| `session_list` | List live interactive sessions with the exact ids an interactive graph hook's `target_session_id` accepts, each with platform, workdir, name, and whether a TUI is attached; pass `session_id` to look one up. A conversation resumed under a harness conversation id canopy knows appears once, with the id and name it already had — never a dead row plus a freshly-named one |
+| `session_list` | List live interactive sessions with the exact ids an interactive graph hook's `target_session_id` accepts, each with platform, workdir, name, and `attached` — whether the session's CLI process is still alive on this host, which stays `yes` for a daemon-hosted session even while no TUI is open; pass `session_id` to look one up. A conversation resumed under a harness conversation id canopy knows appears once, with the id and name it already had — never a dead row plus a freshly-named one |
 
 ## Scheduled sends (2)
 
@@ -222,3 +222,15 @@ ensembles — a crew.
 |---|---|
 | `scheduled_send_create` | Schedule a prompt for future delivery to a session (own session by default) |
 | `scheduled_send` | List and cancel pending scheduled sends. Actions: `list` (a session's pending sends, soonest first; optional `session_id`), `cancel` (`id`) — pass `action` plus the params the refusal/table lists |
+
+## Session shelf (1)
+
+| Tool | Description |
+|---|---|
+| `session_send_file` | Copy 1 to 10 files onto the session shelf (own session by default, `session_id` to target another, host shelf when the caller has no session). Each file must be PNG, JPEG, WebP, GIF or SVG — sniffed from its content, never its extension — and at most 20 MiB. One bad path never blocks the others: the result lists `items` (`file_id`, `name`, `mime`, `size`) and per-path `errors` (`path`, `code`, `message`), with codes `not_found`, `not_a_file`, `too_large`, `unsupported_type`, `io`. An optional `caption` (at most 500 characters) is stored with every file of the call and shown in the TUI |
+
+## Remote control (1)
+
+| Tool | Description |
+|---|---|
+| `remote` | Remote control of this hub from the browser. Actions: `status` (sign-in state, whether remote is enabled, the relay URL, the relay phase — `connected`, `connecting`, `token rejected: sign in again`, `off` — the live device ids and every paired device with its live flag), `pair` (a one-time pairing code with its link, expiry and QR, replacing any live one — the same code `canopy remote pair` prints), `set_enabled` (`enabled`: turn the relay connection on or off; the daemon picks the change up without a restart), `revoke` (`device_id`: delete the paired device and close its live connection at once) |

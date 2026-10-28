@@ -1,27 +1,29 @@
-//! Interactive agent management — PTY + vt100 virtual terminal.
+//! Interactive agent management — hub sessions with a local vt100 screen.
 //!
-//! Each agent runs in a PTY. A background thread reads PTY output and
-//! feeds it into a `vt100::Parser` which maintains a virtual screen buffer.
-//! The UI reads this screen buffer and renders it as ratatui cells inside
-//! the right panel — fully embedded, with colors and cursor.
+//! Each agent is a daemon-hub session the TUI attached to: the hub owns the
+//! PTY, and a background thread feeds hub output frames into a local
+//! `vt100::Parser` which maintains a virtual screen buffer. The UI reads
+//! this screen buffer and renders it as ratatui cells inside the right
+//! panel — fully embedded, with colors and cursor.
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::collections::VecDeque;
-use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ratatui::style::Color;
 
 use crate::domain::models::Cli;
-use crate::shared::sync_identity::{
-    CANOPY_AGENT_ID_ENV, CANOPY_SEED_ID_ENV, CANOPY_SESSION_NAME_ENV, CANOPY_WORKDIR_ENV,
+use crate::sessions::client::{
+    new_req, proto_mismatch_message, with_active, SessionEvent, SessionOpenError, SessionSend,
+    SessionStream,
 };
-
-#[cfg(unix)]
-use crate::tui::agent::pty::{install_signal_handlers, send_sighup_to_group};
+use crate::sessions::protocol::{
+    list_frame, spawn_frame, spawn_frame_full, HostFrame, SessionItem, SpawnExt, SpawnFrameArgs,
+};
+use crate::sessions::{format_accent_rgb, preserve_rows_on_shrink, VT_SCROLLBACK_LINES};
 
 pub mod input;
 pub mod naming;
@@ -49,7 +51,9 @@ pub struct PromptEntry {
 
 /// Maximum number of prompt entries to keep in the ring buffer.
 const MAX_PROMPT_HISTORY: usize = 20;
-const VT_SCROLLBACK_LINES: usize = 5_000;
+
+/// `exit_code` while no `exited` frame has arrived.
+const EXIT_UNKNOWN: i32 = i32::MIN;
 
 /// How recently a session must have produced PTY output to count as
 /// "working" (blinking green) rather than merely "healthy but idle" (solid
@@ -89,70 +93,6 @@ fn decode_osc52_payload(data: &[u8]) -> Option<String> {
 /// vt100 parser wired with our clipboard-forwarding callbacks.
 pub(crate) type Vt = vt100::Parser<ClipboardForwarder>;
 
-/// Before shrinking a vt100 screen from `old_rows` to `new_rows`, move the rows
-/// that would fall off the bottom into the scrollback.
-///
-/// vt100's `set_size` shrink path ends in `Vec::resize`, which truncates the
-/// tail rows — the newest output — and never hands them to the scrollback. A
-/// Scroll Up first routes them through `scroll_up`, which does push evicted rows
-/// onto the scrollback deque; the matching Cursor Up keeps the shell's prompt on
-/// its logical line so it does not appear to jump. A grow (or an unchanged
-/// height, e.g. a cols-only resize) is a no-op.
-///
-/// The scroll is anchored at the cursor (what xterm does): only the overflow
-/// of the cursor past the new bottom is scrolled, so a shrink of a
-/// mostly-blank screen — cursor near the top, blanks below — scrolls nothing
-/// and keeps the newest output (the just-finished command's) on screen. A
-/// blind `old_rows - new_rows` scroll anchored at the top would discard the
-/// oldest rows first and push the newest content off into scrollback or drop
-/// it (CT15); when the screen is full the cursor sits at the bottom and both
-/// computations agree (CT9).
-fn preserve_rows_on_shrink<C: vt100::Callbacks>(
-    parser: &mut vt100::Parser<C>,
-    old_rows: u16,
-    new_rows: u16,
-) {
-    if new_rows >= old_rows {
-        return;
-    }
-    let cursor_row = parser.screen().cursor_position().0;
-    let needed = (cursor_row + 1).saturating_sub(new_rows);
-    if needed == 0 {
-        return;
-    }
-    parser.process(format!("\x1b[{needed}S\x1b[{needed}A").as_bytes());
-}
-
-/// The session id and display name a spawned agent runs under: a resumed
-/// harness conversation passes both, so it keeps its canopy session id and
-/// name (hooks and scheduled sends addressed to them keep resolving);
-/// otherwise the id is a fresh uuid and the name a random one that avoids
-/// `existing_ids`.
-fn spawn_identity(id: Option<&str>, name: Option<&str>, existing_ids: &[&str]) -> (String, String) {
-    let id = id
-        .map(str::to_owned)
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let name = name
-        .map(str::to_owned)
-        .unwrap_or_else(|| naming::pick_random_name(existing_ids));
-    (id, name)
-}
-
-fn apply_canopy_session_env(
-    cmd: &mut CommandBuilder,
-    agent_id: &str,
-    session_name: &str,
-    working_dir: &str,
-    seed_id: Option<&str>,
-) {
-    cmd.env(CANOPY_AGENT_ID_ENV, agent_id);
-    cmd.env(CANOPY_SESSION_NAME_ENV, session_name);
-    cmd.env(CANOPY_WORKDIR_ENV, working_dir);
-    if let Some(sid) = seed_id {
-        cmd.env(CANOPY_SEED_ID_ENV, sid);
-    }
-}
-
 /// An interactive agent with a virtual terminal screen.
 pub struct InteractiveAgent {
     /// UUID-based permanent identifier
@@ -177,14 +117,25 @@ pub struct InteractiveAgent {
     pub is_terminal: bool,
     /// Shell binary for terminal sessions (e.g. "zsh", "bash").
     pub shell: String,
-    /// PTY writer — send bytes to the agent's stdin.
-    pub(crate) writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    /// Virtual terminal screen — fed by PTY output (for live rendering with colors).
+    /// The hub stream: writes go out as frames, output arrives as events.
+    pub(crate) stream: SessionSend,
+    /// Virtual terminal screen — fed by hub output (for live rendering with colors).
     pub(crate) vt: Arc<Mutex<Vt>>,
-    /// Child process handle.
-    pub(crate) child: Arc<Mutex<Box<dyn portable_pty::Child + Send>>>,
-    /// PTY master — needed for resize.
-    master: Arc<Mutex<Box<dyn portable_pty::MasterPty + Send>>>,
+    /// The hub child's OS process id, from hub metadata.
+    pid: Option<i64>,
+    /// Last output `seq` applied; frames at or below it are duplicates.
+    last_seq: Arc<AtomicU64>,
+    /// Bumped when a reattach replaces the stream. A reader from an older
+    /// generation stops feeding the parser and stops touching `connected`,
+    /// so a stale socket can neither garble the fresh snapshot nor mark the
+    /// live connection disconnected.
+    stream_gen: Arc<AtomicU64>,
+    /// Exit code from the `exited` frame; `EXIT_UNKNOWN` while running.
+    exit_code: Arc<AtomicI32>,
+    /// False once the stream drops; the session keeps running in the hub.
+    connected: Arc<AtomicBool>,
+    /// Protocol mismatch observed while attaching, if any.
+    pub(crate) proto_error: Option<String>,
     /// Scroll offset (0 = bottom/live, positive = scrolled up).
     pub scroll_offset: usize,
     /// Last known PTY dimensions (for resize detection).
@@ -227,18 +178,22 @@ pub struct InteractiveAgent {
     /// `encode_scroll_sequence` in `input.rs` for why Page Up/Page Down
     /// specifically have no distinct Kitty encoding to switch to).
     pub(crate) kitty_keyboard_flags: Arc<Mutex<Option<u8>>>,
+    /// Test tap: when set, `write_to_pty` also appends there, so key
+    /// routing tests observe writes without a harness round-trip.
+    #[cfg(test)]
+    pub test_sink: Option<Arc<Mutex<Vec<u8>>>>,
 }
 
 impl InteractiveAgent {
-    /// Spawn a new interactive agent in a PTY with a virtual terminal.
+    /// Spawn a new interactive agent as a hub session and attach to it.
     ///
     /// `cols` and `rows` should match the panel area where the agent will render.
-    /// `interactive_args` come from the registry (e.g. `--tui`, `-c`, etc.).
-    /// `fallback_args` are tried if the primary args fail (e.g. kiro `chat`).
+    /// `interactive_args` (resume/yolo included), `fallback_args`, `model_flag`,
+    /// `id` (resume identity), `seed_id` and the accent travel in the spawn
+    /// frame so the hub builds the same child the TUI built before.
     /// `name` is an optional user-provided session name (random if None).
-    /// `id` is an existing session id to keep (a resumed conversation), else a fresh uuid.
     /// `existing_ids` is used to avoid name collisions.
-    /// `model` and `model_flag` allow passing a model selection (e.g. `-m gpt-4`).
+    /// `model` selects the model (e.g. `gpt-4`).
     #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         cli: Cli,
@@ -255,128 +210,30 @@ impl InteractiveAgent {
         model_flag: Option<&str>,
         seed_id: Option<&str>,
     ) -> Result<Self> {
-        #[cfg(unix)]
-        install_signal_handlers();
-
-        let (id, name) = spawn_identity(id, name, existing_ids);
-        let (seed_id_owned, seed_name) = match seed_id {
-            Some(sid) => {
-                let resolved = crate::domain::seeds::load_seed(sid)
-                    .ok()
-                    .map(|identity| identity.name);
-                (Some(sid.to_string()), resolved)
-            }
-            None => (None, None),
+        let accent = match accent_color {
+            Color::Rgb(r, g, b) => Some(format_accent_rgb((r, g, b))),
+            _ => None,
         };
-
-        let pty_system = native_pty_system();
-
-        let pair = pty_system.openpty(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })?;
-
-        let mut cmd = CommandBuilder::new(cli.command_name());
-        // Apply registry-driven interactive args (e.g. "--tui", "-c", etc.)
-        // If primary args fail and fallback is available, try that instead.
-        let args_to_use = interactive_args.or(fallback_args);
-        if let Some(args) = args_to_use {
-            for arg in args.split_whitespace().filter(|a| !a.is_empty()) {
-                cmd.arg(arg);
-            }
-        }
-        if let (Some(flag), Some(m)) = (model_flag, model) {
-            if !m.is_empty() {
-                cmd.arg(flag);
-                cmd.arg(m);
-            }
-        }
-        cmd.cwd(working_dir);
-        apply_canopy_session_env(&mut cmd, &id, &name, working_dir, seed_id);
-
-        // Advertise truecolor capability so child CLIs (Kiro, etc.) use
-        // 24-bit RGB color sequences for their accent colors instead of
-        // limited 16-color ANSI codes that get mapped to wrong hues.
-        cmd.env("TERM", "xterm-256color");
-        cmd.env("COLORTERM", "truecolor");
-
-        // Pass Canopy's UX accent color to child CLIs so they respect
-        // the original color scheme instead of using their own ANSI color map.
-        // Extract RGB components from ratatui::style::Color
-        if let Color::Rgb(r, g, b) = accent_color {
-            cmd.env("CANOPY_ACCENT_R", r.to_string());
-            cmd.env("CANOPY_ACCENT_G", g.to_string());
-            cmd.env("CANOPY_ACCENT_B", b.to_string());
-        }
-
-        let child = pair.slave.spawn_command(cmd)?;
-        // Drop slave so the PTY closes when the child exits
-        drop(pair.slave);
-
-        let writer = pair.master.take_writer()?;
-        let reader = pair.master.try_clone_reader()?;
-        let master = pair.master;
-
-        let vt = Arc::new(Mutex::new(vt100::Parser::new_with_callbacks(
-            rows,
-            cols,
-            VT_SCROLLBACK_LINES,
-            ClipboardForwarder,
-        )));
-        let vt_clone = Arc::clone(&vt);
-
-        let last_output_at = Arc::new(Mutex::new(Utc::now()));
-        let last_output_at_clone = Arc::clone(&last_output_at);
-        let activity_suppressed_until = Arc::new(Mutex::new(Utc::now()));
-        let suppressed_until_clone = Arc::clone(&activity_suppressed_until);
-        let kitty_keyboard_flags = Arc::new(Mutex::new(None));
-        let kitty_keyboard_flags_clone = Arc::clone(&kitty_keyboard_flags);
-
-        // Background thread: read PTY output → feed into vt100 parser
-        Self::spawn_pty_reader_thread(
-            reader,
-            vt_clone,
-            last_output_at_clone,
-            suppressed_until_clone,
-            kitty_keyboard_flags_clone,
-        );
-
-        Ok(Self {
+        let name = name
+            .map(str::to_owned)
+            .unwrap_or_else(|| naming::pick_random_name(existing_ids));
+        let item = spawn_on_hub(&HubSpawnArgs {
+            kind: "agent",
+            cli: cli.as_str(),
+            model,
+            workdir: working_dir,
+            name: &name,
+            interactive_args,
+            fallback_args,
+            model_flag,
             id,
-            name,
-            seed_id: seed_id_owned,
-            seed_name,
-            cli,
-            working_dir: working_dir.to_string(),
-            started_at: Utc::now(),
-            status: AgentStatus::Running,
-            accent_color,
-            is_terminal: false,
-            shell: String::new(),
-            writer: Arc::new(Mutex::new(writer)),
-            vt,
-            child: Arc::new(Mutex::new(child)),
-            master: Arc::new(Mutex::new(master)),
-            scroll_offset: 0,
-            last_pty_cols: cols,
-            last_pty_rows: rows,
-            prompt_history: Arc::new(Mutex::new(VecDeque::with_capacity(MAX_PROMPT_HISTORY))),
-            input_buffer: Arc::new(Mutex::new(String::new())),
-            last_output_at,
-            activity_suppressed_until,
-            last_viewed_at: Arc::new(Mutex::new(Utc::now())),
-            exit_notified: false,
-            warp_mode: false,
-            warp_cursor: 0,
-            history_index: None,
-            warp_passthrough: false,
-            kitty_keyboard_flags,
-        })
+            seed_id,
+            accent: accent.as_deref(),
+        })?;
+        Self::attach_item(&item, cli, accent_color, seed_id, cols, rows)
     }
 
-    /// Spawn a raw terminal session (no AI CLI model).
+    /// Spawn a raw terminal session (no AI CLI model) and attach to it.
     ///
     /// Uses `shell` as the command (e.g. `"bash"`, `"zsh"`).
     #[allow(clippy::too_many_arguments)]
@@ -389,95 +246,235 @@ impl InteractiveAgent {
         existing_ids: &[&str],
         accent_color: Color,
     ) -> Result<Self> {
-        #[cfg(unix)]
-        install_signal_handlers();
-
-        let id = uuid::Uuid::new_v4().to_string();
-        let session_name = name
+        let name = name
             .map(str::to_owned)
             .unwrap_or_else(|| naming::pick_terminal_name(existing_ids));
-        let pty_system = native_pty_system();
-        let pair = pty_system.openpty(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })?;
+        let item = spawn_on_hub_terminal("terminal", shell, working_dir, &name)?;
+        Self::attach_item(&item, Cli::new(shell), accent_color, None, cols, rows)
+    }
 
-        let mut cmd = CommandBuilder::new(shell);
-        cmd.cwd(working_dir);
-        apply_canopy_session_env(&mut cmd, &id, &session_name, working_dir, None);
-        // Compact prompt since warp mode shows its own prompt line
-        cmd.env("PS1", "$ ");
-        cmd.env("PROMPT_COMMAND", "");
-        cmd.env("TERM", "xterm-256color");
-        cmd.env("COLORTERM", "truecolor");
+    /// Attach to a hub session: open its stream, take its snapshot, size it.
+    pub(crate) fn attach_item(
+        item: &SessionItem,
+        cli: Cli,
+        accent_color: Color,
+        seed_id: Option<&str>,
+        cols: u16,
+        rows: u16,
+    ) -> Result<Self> {
+        let endpoint = with_active(|active| (active.url.clone(), active.token.clone()))
+            .ok_or_else(|| anyhow::anyhow!("not connected to the session hub"))?;
+        let (stream, rx) = SessionStream::open(&endpoint.0, &endpoint.1, &item.id)
+            .map_err(|e| anyhow::anyhow!("cannot attach to session '{}': {e}", item.id))?;
+        let mut agent = Self::from_item(item, cli, accent_color, seed_id, stream);
+        agent.wait_for_snapshot(&rx)?;
+        agent.spawn_stream_reader(rx);
+        agent.resize(cols, rows);
+        Ok(agent)
+    }
 
-        let child = pair.slave.spawn_command(cmd)?;
-        drop(pair.slave);
+    /// Reopen the stream after a hub reconnect: a fresh snapshot rebuilds the
+    /// parser, a new reader continues from its `seq`, and writes flow again.
+    pub(crate) fn reattach(&mut self) -> Result<()> {
+        let endpoint = with_active(|active| (active.url.clone(), active.token.clone()))
+            .ok_or_else(|| anyhow::anyhow!("not connected to the session hub"))?;
+        let opened = SessionStream::open(&endpoint.0, &endpoint.1, &self.id);
+        let (stream, rx) = match opened {
+            Ok(opened) => opened,
+            Err(SessionOpenError::Proto(proto)) => {
+                let message = proto_mismatch_message(proto);
+                self.proto_error = Some(message.clone());
+                anyhow::bail!("cannot reattach to session '{}': {message}", self.id);
+            }
+            Err(e) => anyhow::bail!("cannot reattach to session '{}': {e}", self.id),
+        };
+        // Retire the old reader before its socket goes away: it must not feed
+        // the parser the snapshot is about to replace, and its shutdown must
+        // not mark this new connection disconnected.
+        self.stream_gen.fetch_add(1, Ordering::SeqCst);
+        self.wait_for_snapshot(&rx)?;
+        self.stream = stream;
+        self.connected.store(true, Ordering::Relaxed);
+        self.proto_error = None;
+        self.spawn_stream_reader(rx);
+        // Reassert our size: the hub kept its own while we were gone.
+        let (cols, rows) = (self.last_pty_cols, self.last_pty_rows);
+        self.resize(cols, rows);
+        Ok(())
+    }
 
-        let writer = pair.master.take_writer()?;
-        let reader = pair.master.try_clone_reader()?;
-        let master = pair.master;
-
-        let vt = Arc::new(Mutex::new(vt100::Parser::new_with_callbacks(
-            rows,
-            cols,
-            VT_SCROLLBACK_LINES,
-            ClipboardForwarder,
-        )));
-        let vt_clone = Arc::clone(&vt);
-
-        let last_output_at = Arc::new(Mutex::new(Utc::now()));
-        let last_output_at_clone = Arc::clone(&last_output_at);
-        let activity_suppressed_until = Arc::new(Mutex::new(Utc::now()));
-        let suppressed_until_clone = Arc::clone(&activity_suppressed_until);
-        let kitty_keyboard_flags = Arc::new(Mutex::new(None));
-        let kitty_keyboard_flags_clone = Arc::clone(&kitty_keyboard_flags);
-
-        // See the sibling reader thread above: repaint bursts inside a
-        // post-resize window are not activity (B21).
-        Self::spawn_pty_reader_thread(
-            reader,
-            vt_clone,
-            last_output_at_clone,
-            suppressed_until_clone,
-            kitty_keyboard_flags_clone,
-        );
-
-        let cli = Cli::new(shell);
-
-        Ok(Self {
-            id,
-            name: session_name,
-            seed_id: None,
-            seed_name: None,
+    /// Build the agent shell around an open stream; the snapshot wait and
+    /// the reader come right after (see `attach_item`).
+    fn from_item(
+        item: &SessionItem,
+        cli: Cli,
+        accent_color: Color,
+        seed_id: Option<&str>,
+        stream: SessionSend,
+    ) -> Self {
+        let (seed_id_owned, seed_name) = match seed_id {
+            Some(sid) => {
+                let resolved = crate::domain::seeds::load_seed(sid)
+                    .ok()
+                    .map(|identity| identity.name);
+                (Some(sid.to_string()), resolved)
+            }
+            None => (None, None),
+        };
+        let is_terminal = item.kind == "terminal";
+        let status = match item.status.as_str() {
+            "exited" => AgentStatus::Exited(item.exit_code.unwrap_or(-1)),
+            _ => AgentStatus::Running,
+        };
+        Self {
+            id: item.id.clone(),
+            name: item.name.clone(),
+            seed_id: seed_id_owned,
+            seed_name,
             cli,
-            working_dir: working_dir.to_string(),
-            started_at: Utc::now(),
-            status: AgentStatus::Running,
+            working_dir: item.workdir.clone(),
+            started_at: parse_hub_time(&item.started_at),
+            status,
             accent_color,
-            is_terminal: true,
-            shell: shell.to_string(),
-            writer: Arc::new(Mutex::new(writer)),
-            vt,
-            child: Arc::new(Mutex::new(child)),
-            master: Arc::new(Mutex::new(master)),
+            is_terminal,
+            shell: if is_terminal {
+                item.cli.clone()
+            } else {
+                String::new()
+            },
+            stream,
+            vt: Arc::new(Mutex::new(Vt::new_with_callbacks(
+                item.rows,
+                item.cols,
+                VT_SCROLLBACK_LINES,
+                ClipboardForwarder,
+            ))),
+            pid: item.pid,
+            last_seq: Arc::new(AtomicU64::new(0)),
+            stream_gen: Arc::new(AtomicU64::new(0)),
+            exit_code: Arc::new(AtomicI32::new(EXIT_UNKNOWN)),
+            connected: Arc::new(AtomicBool::new(true)),
+            proto_error: None,
             scroll_offset: 0,
-            last_pty_cols: cols,
-            last_pty_rows: rows,
+            last_pty_cols: item.cols,
+            last_pty_rows: item.rows,
             prompt_history: Arc::new(Mutex::new(VecDeque::with_capacity(MAX_PROMPT_HISTORY))),
             input_buffer: Arc::new(Mutex::new(String::new())),
-            last_output_at,
-            activity_suppressed_until,
+            last_output_at: Arc::new(Mutex::new(parse_hub_time(&item.last_output_at))),
+            activity_suppressed_until: Arc::new(Mutex::new(Utc::now())),
             last_viewed_at: Arc::new(Mutex::new(Utc::now())),
             exit_notified: false,
-            warp_mode: true,
+            warp_mode: is_terminal,
             warp_cursor: 0,
             history_index: None,
             warp_passthrough: false,
+            kitty_keyboard_flags: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            test_sink: None,
+        }
+    }
+
+    /// Wait up to 5 s for the attach snapshot and rebuild the parser from it.
+    fn wait_for_snapshot(&self, rx: &std::sync::mpsc::Receiver<SessionEvent>) -> Result<()> {
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(SessionEvent::Snapshot {
+                cols,
+                rows,
+                seq,
+                data,
+            }) => {
+                self.apply_snapshot(cols, rows, seq, &data);
+                Ok(())
+            }
+            Ok(_) => Err(anyhow::anyhow!(
+                "attach to session '{}' was refused",
+                self.id
+            )),
+            Err(_) => Err(anyhow::anyhow!(
+                "timed out waiting for session '{}' snapshot",
+                self.id
+            )),
+        }
+    }
+
+    /// Rebuild the parser from a snapshot: a fresh parser at the snapshot
+    /// size fed the snapshot bytes, with `seq` becoming the new floor.
+    /// Snapshots carry history, so `last_output_at` is left alone.
+    pub(crate) fn apply_snapshot(&self, cols: u16, rows: u16, seq: u64, data: &[u8]) {
+        Self::rebuild_parser(
+            &self.vt,
+            &self.kitty_keyboard_flags,
+            &self.last_seq,
+            cols,
+            rows,
+            seq,
+            data,
+        );
+    }
+
+    fn rebuild_parser(
+        vt: &Mutex<Vt>,
+        kitty_keyboard_flags: &Mutex<Option<u8>>,
+        last_seq: &AtomicU64,
+        cols: u16,
+        rows: u16,
+        seq: u64,
+        data: &[u8],
+    ) {
+        if let Ok(mut parser) = vt.lock() {
+            *parser = Vt::new_with_callbacks(
+                rows.max(1),
+                cols.max(1),
+                VT_SCROLLBACK_LINES,
+                ClipboardForwarder,
+            );
+            parser.process(data);
+        }
+        if let Some(flags) = input::parse_kitty_keyboard_push(data) {
+            if let Ok(mut current) = kitty_keyboard_flags.lock() {
+                *current = Some(flags);
+            }
+        }
+        last_seq.store(seq, Ordering::Relaxed);
+    }
+
+    /// Apply one `out` frame; returns false when `seq` is not newer than
+    /// the last applied and the frame was dropped as a duplicate.
+    /// Test-only: the stream reader calls [`Self::ingest_out`] directly.
+    #[cfg(test)]
+    pub(crate) fn apply_out_frame(&self, seq: u64, data: &[u8]) -> bool {
+        Self::ingest_out(
+            &self.vt,
+            &self.kitty_keyboard_flags,
+            &self.last_output_at,
+            &self.activity_suppressed_until,
+            &self.last_seq,
+            seq,
+            data,
+        )
+    }
+
+    fn ingest_out(
+        vt: &Mutex<Vt>,
+        kitty_keyboard_flags: &Mutex<Option<u8>>,
+        last_output_at: &Mutex<DateTime<Utc>>,
+        activity_suppressed_until: &Mutex<DateTime<Utc>>,
+        last_seq: &AtomicU64,
+        seq: u64,
+        data: &[u8],
+    ) -> bool {
+        if seq <= last_seq.load(Ordering::Relaxed) {
+            return false;
+        }
+        Self::process_pty_chunk(
+            data,
+            vt,
             kitty_keyboard_flags,
-        })
+            last_output_at,
+            activity_suppressed_until,
+        );
+        last_seq.store(seq, Ordering::Relaxed);
+        true
     }
 
     /// Process one chunk of PTY bytes: feed the vt100 parser, record any Kitty
@@ -509,29 +506,63 @@ impl InteractiveAgent {
         }
     }
 
-    /// Spawn the background PTY reader thread that feeds chunks into
-    /// [`Self::process_pty_chunk`]. Breaks on EOF (`Ok(0)`) or read error.
-    fn spawn_pty_reader_thread(
-        mut reader: Box<dyn std::io::Read + Send>,
-        vt: Arc<Mutex<Vt>>,
-        last_output_at: Arc<Mutex<DateTime<Utc>>>,
-        activity_suppressed_until: Arc<Mutex<DateTime<Utc>>>,
-        kitty_keyboard_flags: Arc<Mutex<Option<u8>>>,
-    ) {
+    /// Spawn the background stream reader: `out` frames newer than the
+    /// last applied go through [`Self::process_pty_chunk`], a lag-resync
+    /// snapshot rebuilds the parser, `exited` records the code for
+    /// [`Self::poll`], and `Closed` marks the agent disconnected.
+    fn spawn_stream_reader(&self, rx: std::sync::mpsc::Receiver<SessionEvent>) {
+        let vt = Arc::clone(&self.vt);
+        let kitty_keyboard_flags = Arc::clone(&self.kitty_keyboard_flags);
+        let last_output_at = Arc::clone(&self.last_output_at);
+        let activity_suppressed_until = Arc::clone(&self.activity_suppressed_until);
+        let last_seq = Arc::clone(&self.last_seq);
+        let exit_code = Arc::clone(&self.exit_code);
+        let connected = Arc::clone(&self.connected);
+        let stream_gen = Arc::clone(&self.stream_gen);
+        let my_gen = stream_gen.load(Ordering::SeqCst);
         std::thread::spawn(move || {
-            let mut tmp = [0u8; 4096];
-            loop {
-                match reader.read(&mut tmp) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => Self::process_pty_chunk(
-                        &tmp[..n],
+            for event in rx {
+                // A reattach bumped the generation: this reader belongs to the
+                // replaced socket, so it drops its frames and stops.
+                if !reader_is_current(&stream_gen, my_gen) {
+                    return;
+                }
+                match event {
+                    SessionEvent::Snapshot {
+                        cols,
+                        rows,
+                        seq,
+                        data,
+                    } => Self::rebuild_parser(
                         &vt,
                         &kitty_keyboard_flags,
-                        &last_output_at,
-                        &activity_suppressed_until,
+                        &last_seq,
+                        cols,
+                        rows,
+                        seq,
+                        &data,
                     ),
+                    SessionEvent::Out { seq, data } => {
+                        Self::ingest_out(
+                            &vt,
+                            &kitty_keyboard_flags,
+                            &last_output_at,
+                            &activity_suppressed_until,
+                            &last_seq,
+                            seq,
+                            &data,
+                        );
+                    }
+                    SessionEvent::Exited { code } => {
+                        exit_code.store(code, Ordering::Relaxed);
+                    }
+                    SessionEvent::Closed => {
+                        mark_disconnected(&stream_gen, my_gen, &connected);
+                        return;
+                    }
                 }
             }
+            mark_disconnected(&stream_gen, my_gen, &connected);
         });
     }
 
@@ -543,43 +574,38 @@ impl InteractiveAgent {
         }
     }
 
-    /// The OS process id of the underlying CLI child, if the PTY exposes it.
+    /// The OS process id of the hub child, from hub metadata.
     pub fn pid(&self) -> Option<i64> {
-        self.child
-            .lock()
-            .ok()
-            .and_then(|c| c.process_id())
-            .map(|p| p as i64)
+        self.pid
     }
 
-    /// Send raw bytes to the agent's PTY stdin.
+    /// Send raw bytes to the agent's stdin as an `input` frame.
     pub fn write_to_pty(&self, data: &[u8]) -> Result<()> {
-        if let Ok(mut w) = self.writer.lock() {
-            w.write_all(data)?;
-            w.flush()?;
+        #[cfg(test)]
+        if let Some(sink) = self.test_sink.as_ref() {
+            if let Ok(mut sink) = sink.lock() {
+                sink.extend_from_slice(data);
+            }
         }
+        self.stream.input(data);
         Ok(())
     }
 
-    /// Check if the process has exited.
+    /// Fold an arrived `exited` frame into the status.
     pub fn poll(&mut self) {
         if self.status != AgentStatus::Running {
             return;
         }
-        if let Ok(mut child) = self.child.lock() {
-            if let Ok(Some(status)) = child.try_wait() {
-                self.status = AgentStatus::Exited(status.exit_code().try_into().unwrap_or(-1));
-            }
+        let code = self.exit_code.load(Ordering::Relaxed);
+        if code != EXIT_UNKNOWN {
+            self.status = AgentStatus::Exited(code);
         }
     }
-    /// on `child.wait()`. The background PTY reader thread will detect EOF and
-    /// exit on its own; the OS reaps the child process.
+
+    /// End the hub session with `kill`. Quitting the TUI never calls this —
+    /// dropping the agent only closes its stream and the session runs on.
     pub fn kill(&mut self) {
-        if let Ok(mut child) = self.child.lock() {
-            #[cfg(unix)]
-            send_sighup_to_group(child.as_mut());
-            let _ = child.kill();
-        }
+        self.stream.kill();
         self.status = AgentStatus::Exited(-9);
     }
 
@@ -591,18 +617,29 @@ impl InteractiveAgent {
         let _ = self.write_to_pty(final_instruction.as_bytes());
         let _ = self.write_to_pty(b"\n");
 
-        let child = Arc::clone(&self.child);
+        let stream = self.stream.clone();
         std::thread::spawn(move || {
             std::thread::sleep(linger);
-            if let Ok(mut child) = child.lock() {
-                #[cfg(unix)]
-                send_sighup_to_group(child.as_mut());
-                let _ = child.kill();
-            }
+            stream.kill();
         });
     }
 
-    /// Resize the PTY and virtual terminal (e.g. on terminal window resize).
+    /// False once the stream drops; the session keeps running in the hub.
+    pub fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::Relaxed)
+    }
+
+    /// Record an `exited` frame that arrived on another connection.
+    pub(crate) fn note_exited(&self, code: i32) {
+        self.exit_code.store(code, Ordering::Relaxed);
+    }
+
+    /// Mark the stream dropped (hub restart); cleared by `reattach`.
+    pub(crate) fn note_disconnected(&self) {
+        self.connected.store(false, Ordering::Relaxed);
+    }
+
+    /// Resize the hub session and the virtual terminal (e.g. on window resize).
     pub fn resize(&mut self, cols: u16, rows: u16) {
         let old_rows = self.last_pty_rows;
         self.last_pty_cols = cols;
@@ -613,18 +650,11 @@ impl InteractiveAgent {
         if let Ok(mut until) = self.activity_suppressed_until.lock() {
             *until = Utc::now() + chrono::Duration::seconds(1);
         }
-        // Resize the actual PTY so the process knows about the new size
-        if let Ok(m) = self.master.lock() {
-            let _ = m.resize(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            });
-        }
+        // Resize the hub session so the child knows about the new size.
+        self.stream.resize(cols, rows);
         // Resize the virtual terminal screen. On a shrink, first scroll the rows
         // that would otherwise be truncated into the scrollback — both steps run
-        // under one `vt` acquisition so a PTY reader thread can't slip output in
+        // under one `vt` acquisition so a stream reader can't slip output in
         // between the scroll and the resize.
         if let Ok(mut vt) = self.vt.lock() {
             preserve_rows_on_shrink(&mut vt, old_rows, rows);
@@ -636,6 +666,108 @@ impl InteractiveAgent {
     pub fn update_working_dir(&mut self, new_dir: &str) {
         self.working_dir = new_dir.to_string();
     }
+}
+
+/// Whether a stream reader still belongs to the agent's current socket.
+fn reader_is_current(stream_gen: &AtomicU64, my_gen: u64) -> bool {
+    stream_gen.load(Ordering::SeqCst) == my_gen
+}
+
+/// Clear `connected` only while this reader still owns the connection: a
+/// reattach may already have replaced it, and its reader is live.
+fn mark_disconnected(stream_gen: &AtomicU64, my_gen: u64, connected: &AtomicBool) {
+    if reader_is_current(stream_gen, my_gen) {
+        connected.store(false, Ordering::Relaxed);
+    }
+}
+
+/// Launch fields for one hub spawn; a struct so the spawn helper stays
+/// under the argument-count lint without silencing it.
+struct HubSpawnArgs<'a> {
+    kind: &'a str,
+    cli: &'a str,
+    model: Option<&'a str>,
+    workdir: &'a str,
+    name: &'a str,
+    interactive_args: Option<&'a str>,
+    fallback_args: Option<&'a str>,
+    model_flag: Option<&'a str>,
+    id: Option<&'a str>,
+    seed_id: Option<&'a str>,
+    accent: Option<&'a str>,
+}
+
+/// Spawn a hub session and return its metadata row: `spawn` answers the id,
+/// then `list` finds the row the hub announced for it.
+fn spawn_on_hub(args: &HubSpawnArgs<'_>) -> Result<SessionItem> {
+    let ext = SpawnExt {
+        interactive_args: args.interactive_args.map(str::to_owned),
+        fallback_args: args.fallback_args.map(str::to_owned),
+        model_flag: args.model_flag.map(str::to_owned),
+        id: args.id.map(str::to_owned),
+        seed_id: args.seed_id.map(str::to_owned),
+        accent: args.accent.map(str::to_owned),
+        yolo: false,
+    };
+    let req = new_req();
+    let frame_args = SpawnFrameArgs {
+        req: &req,
+        kind: args.kind,
+        cli: args.cli,
+        model: args.model,
+        workdir: args.workdir,
+        name: Some(args.name),
+        prompt: None,
+        ext: &ext,
+    };
+    let spawned = with_active(|active| active.client.request(&req, spawn_frame_full(&frame_args)))
+        .ok_or_else(|| anyhow::anyhow!("not connected to the session hub"))??;
+    let HostFrame::Spawned { id, .. } = spawned else {
+        anyhow::bail!("hub answered spawn with an unexpected frame");
+    };
+    let req = new_req();
+    let listed = with_active(|active| active.client.request(&req, list_frame(&req)))
+        .ok_or_else(|| anyhow::anyhow!("not connected to the session hub"))??;
+    let HostFrame::Sessions { items, .. } = listed else {
+        anyhow::bail!("hub answered list with an unexpected frame");
+    };
+    items
+        .into_iter()
+        .find(|item| item.id == id)
+        .ok_or_else(|| anyhow::anyhow!("hub has no session '{id}' it just spawned"))
+}
+
+/// Terminal spawn through the short frame: terminals carry no agent launch
+/// fields, so the 7-arg builder stays the non-test caller of `spawn_frame`.
+fn spawn_on_hub_terminal(kind: &str, cli: &str, workdir: &str, name: &str) -> Result<SessionItem> {
+    let req = new_req();
+    let spawned = with_active(|active| {
+        active.client.request(
+            &req,
+            spawn_frame(&req, kind, cli, None, workdir, Some(name), None),
+        )
+    })
+    .ok_or_else(|| anyhow::anyhow!("not connected to the session hub"))??;
+    let HostFrame::Spawned { id, .. } = spawned else {
+        anyhow::bail!("hub answered spawn with an unexpected frame");
+    };
+    let req = new_req();
+    let listed = with_active(|active| active.client.request(&req, list_frame(&req)))
+        .ok_or_else(|| anyhow::anyhow!("not connected to the session hub"))??;
+    let HostFrame::Sessions { items, .. } = listed else {
+        anyhow::bail!("hub answered list with an unexpected frame");
+    };
+    items
+        .into_iter()
+        .find(|item| item.id == id)
+        .ok_or_else(|| anyhow::anyhow!("hub has no session '{id}' it just spawned"))
+}
+
+/// Parse a hub timestamp; now when it does not parse.
+fn parse_hub_time(raw: &str) -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(raw)
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now())
 }
 
 pub use pty::key_to_bytes;

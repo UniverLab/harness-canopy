@@ -53,9 +53,11 @@ pub(super) fn draw_sidebar(frame: &mut Frame, area: Rect, app: &mut App, theme: 
     );
 
     let areas = split_sidebar_content(area, app, theme);
+    let mut content = areas.content;
+    draw_remote_live_header(frame, &mut content, app, theme);
 
-    let show_rag = app.rag_info.has_rag_activity() && areas.content.height >= 6;
-    let (rag_area, content_below) = split_top_panel(areas.content, show_rag, 6);
+    let show_rag = app.rag_info.has_rag_activity() && content.height >= 6;
+    let (rag_area, content_below) = split_top_panel(content, show_rag, 6);
 
     if let Some(rag_area) = rag_area.filter(|area| area.height >= 3) {
         render_titled_panel(
@@ -80,8 +82,28 @@ pub(super) fn draw_sidebar(frame: &mut Frame, area: Rect, app: &mut App, theme: 
     render_dashboard_if_present(frame, areas.dashboard, app, theme);
 
     if let Some(dialog) = app.project_relation_dialog.as_ref() {
-        draw_project_relation_dialog(frame, areas.content, app, dialog, theme);
+        draw_project_relation_dialog(frame, content, app, dialog, theme);
     }
+}
+
+/// The remote live-device header: `⇄ n` right-aligned in `header_color`
+/// when n devices are live, nothing at all when none.
+fn draw_remote_live_header(frame: &mut Frame, content: &mut Rect, app: &App, theme: &Theme) {
+    let live = app.hub.remote.view.live_devices.len();
+    if live == 0 {
+        return;
+    }
+    let Some(header) = take_top(content, 1) else {
+        return;
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!("⇄ {live}"),
+            Style::default().fg(theme.header_color),
+        )))
+        .alignment(ratatui::layout::Alignment::Right),
+        header,
+    );
 }
 
 #[cfg(test)]

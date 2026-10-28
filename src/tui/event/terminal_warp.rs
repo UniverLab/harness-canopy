@@ -897,22 +897,8 @@ mod alternate_screen_key_routing_tests {
     use crate::tui::app::types::AgentEntry;
     use crate::tui::app::types::{App, Focus};
     use ratatui::style::Color;
-    use std::io::{self, Write};
     use std::sync::{Arc, Mutex};
     use tempfile::{tempdir, NamedTempFile};
-
-    struct RecordingWriter(Arc<Mutex<Vec<u8>>>);
-
-    impl Write for RecordingWriter {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.0.lock().expect("lock recording writer").extend(bytes);
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
 
     fn test_app(agent: InteractiveAgent) -> App {
         let tmp = NamedTempFile::new().expect("create temp database");
@@ -945,7 +931,7 @@ mod alternate_screen_key_routing_tests {
         .expect("spawn terminal");
         agent.vt.lock().expect("lock vt").process(b"\x1b[?1049h");
         let written = Arc::new(Mutex::new(Vec::new()));
-        agent.writer = Arc::new(Mutex::new(Box::new(RecordingWriter(Arc::clone(&written)))));
+        agent.test_sink = Some(Arc::clone(&written));
         let mut app = test_app(agent);
 
         handle_terminal_direct_pty_key(&mut app, 0, KeyCode::F(10), KeyModifiers::NONE)

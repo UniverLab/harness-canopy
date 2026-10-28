@@ -227,7 +227,7 @@ pub(crate) fn render_agent_prompt(
     prompt_template: &str,
     previous_output: Option<&Value>,
     workdir: &str,
-    run_id: &str,
+    _run_id: &str,
     node_outputs: &HashMap<String, Value>,
     all_node_names: &[String],
     spec_notes_section: &str,
@@ -290,13 +290,10 @@ pub(crate) fn render_agent_prompt(
         String::new()
     };
 
-    // `run_id` (not just `node_id`) must round-trip through the report tools
-    // (B12): a node can be retried, so more than one run can exist for the
-    // same `node_id` over a spec's lifetime. Without the exact run_id, a
-    // report arriving late from a killed/superseded attempt (e.g. a timed-out
-    // agent that ignores its own termination and calls the tool anyway) would
-    // otherwise be matched to "whatever's currently active for this node_id"
-    // and silently corrupt a newer, unrelated run.
+    // A verdict still binds to an exact run (B12), but the ids travel via
+    // the environment (CANOPY_NODE_RUN_ID/CANOPY_NODE_ID, exported at spawn),
+    // not the prompt: a model retyping two UUIDs invents tails (2026-10-27),
+    // while the engine-owned identity cannot be mistyped.
     // CM47: engine-owned `[SPEC NOTES]` travels with every cold-start prompt,
     // like `[REPORTING]` — no template placeholder needed. Pre-built by the
     // caller (which has DB access); `""` for previews that skip notes.
@@ -306,7 +303,7 @@ pub(crate) fn render_agent_prompt(
         format!("{}\n\n", spec_notes_section.trim_end())
     };
     Ok(format!(
-        "# [GRAPH CONTEXT]\n<graph>\n  <name>{}</name>\n  <spec>{}</spec>\n  <node>{}</node>\n  <workdir>{}</workdir>\n</graph>\n{}\n# [SPEC]\n{}\n\n# [PREVIOUS FEEDBACK]\n{}\n\n{}# [REPORTING]\nWhen you finish this node, call graph_complete_node with run_id=\"{}\", node_id=\"{}\", status=\"pass\"|\"fail\", a concise summary, and your output.\nIf you are blocked and need human intervention, call graph_report_blocker with run_id=\"{}\", node_id=\"{}\" and the blocker description.\n",
+        "# [GRAPH CONTEXT]\n<graph>\n  <name>{}</name>\n  <spec>{}</spec>\n  <node>{}</node>\n  <workdir>{}</workdir>\n</graph>\n{}\n# [SPEC]\n{}\n\n# [PREVIOUS FEEDBACK]\n{}\n\n{}# [REPORTING]\nWhen you finish this node, call graph_complete_node({{status, summary, output}}) with status=\"pass\"|\"fail\", a concise summary, and your output. Do not pass run_id or node_id: the ids come from the environment (CANOPY_NODE_RUN_ID, CANOPY_NODE_ID).\nIf you are blocked and need human intervention, call graph_report_blocker({{description}}) with the blocker description. The ids come from the environment (CANOPY_NODE_RUN_ID, CANOPY_NODE_ID).\n",
         lp.name,
         spec.name,
         node.name,
@@ -315,10 +312,6 @@ pub(crate) fn render_agent_prompt(
         prompt,
         previous_feedback,
         spec_notes_block,
-        run_id,
-        node.id,
-        run_id,
-        node.id
     ))
 }
 
@@ -332,7 +325,7 @@ pub(crate) fn render_agent_prompt(
 /// contract are sent. Overridable per node via the `resume_prompt` config
 /// key — but only for this same-spec case; see
 /// [`RESUME_PROMPT_CROSS_SPEC_DEFAULT`] for the other one.
-pub(crate) const RESUME_PROMPT_DEFAULT: &str = "# [CONTINUE]\nYou are resuming your existing session for this task. The full task context is already in your session history — only the new feedback is included below. Address it, then report.\n\n# [PREVIOUS FEEDBACK]\n{{previous_feedback}}\n\n# [REPORTING]\nWhen you finish, call graph_complete_node with run_id=\"{{run_id}}\", node_id=\"{{node_id}}\", status=\"pass\"|\"fail\", a concise summary, and your output.\nIf you are blocked and need human intervention, call graph_report_blocker with run_id=\"{{run_id}}\", node_id=\"{{node_id}}\" and the blocker description.\n";
+pub(crate) const RESUME_PROMPT_DEFAULT: &str = "# [CONTINUE]\nYou are resuming your existing session for this task. The full task context is already in your session history — only the new feedback is included below. Address it, then report.\n\n# [PREVIOUS FEEDBACK]\n{{previous_feedback}}\n\n# [REPORTING]\nWhen you finish, call graph_complete_node({status, summary, output}) with status=\"pass\"|\"fail\", a concise summary, and your output. Do not pass run_id or node_id: the ids come from the environment (CANOPY_NODE_RUN_ID, CANOPY_NODE_ID).\nIf you are blocked and need human intervention, call graph_report_blocker({description}) with the blocker description. The ids come from the environment (CANOPY_NODE_RUN_ID, CANOPY_NODE_ID).\n";
 
 /// Default incremental prompt for a CROSS-SPEC resumed agent run (RS3): a
 /// context-group handoff, where the session being resumed was captured by a
@@ -346,7 +339,7 @@ pub(crate) const RESUME_PROMPT_DEFAULT: &str = "# [CONTINUE]\nYou are resuming y
 /// spec captured the session being resumed) — never overridable via the
 /// node's `resume_prompt` config key, since that choice depends on runtime
 /// state a static per-node template cannot know.
-pub(crate) const RESUME_PROMPT_CROSS_SPEC_DEFAULT: &str = "# [CONTINUE: NEW SPEC]\nYou are resuming your existing session, but for a NEW spec. The previous spec you were working on is finished and already committed — do not restate its conclusions or describe its prior work as this spec's output. Only the spec below is outstanding; address it, then report.\n\n# [SPEC]\n{{spec_content}}\n\n# [PREVIOUS FEEDBACK]\n{{previous_feedback}}\n\n# [REPORTING]\nWhen you finish, call graph_complete_node with run_id=\"{{run_id}}\", node_id=\"{{node_id}}\", status=\"pass\"|\"fail\", a concise summary, and your output.\nIf you are blocked and need human intervention, call graph_report_blocker with run_id=\"{{run_id}}\", node_id=\"{{node_id}}\" and the blocker description.\n";
+pub(crate) const RESUME_PROMPT_CROSS_SPEC_DEFAULT: &str = "# [CONTINUE: NEW SPEC]\nYou are resuming your existing session, but for a NEW spec. The previous spec you were working on is finished and already committed — do not restate its conclusions or describe its prior work as this spec's output. Only the spec below is outstanding; address it, then report.\n\n# [SPEC]\n{{spec_content}}\n\n# [PREVIOUS FEEDBACK]\n{{previous_feedback}}\n\n# [REPORTING]\nWhen you finish, call graph_complete_node({status, summary, output}) with status=\"pass\"|\"fail\", a concise summary, and your output. Do not pass run_id or node_id: the ids come from the environment (CANOPY_NODE_RUN_ID, CANOPY_NODE_ID).\nIf you are blocked and need human intervention, call graph_report_blocker({description}) with the blocker description. The ids come from the environment (CANOPY_NODE_RUN_ID, CANOPY_NODE_ID).\n";
 
 /// Render a resumed run's incremental prompt (RS2/RS3) from `template` — the
 /// node's `resume_prompt` override or [`RESUME_PROMPT_DEFAULT`] for a

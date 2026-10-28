@@ -4,6 +4,7 @@ use super::*;
 
 impl App {
     pub fn refresh(&mut self) -> Result<()> {
+        self.poll_session_hub();
         self.animation_tick = self.animation_tick.wrapping_add(1);
         // The project type-ahead only ever applies to the Knowledge layer's
         // list, so it is dropped here — the one place every way of leaving
@@ -27,7 +28,6 @@ impl App {
         self.refresh_active_runs()?;
         self.poll_interactive_agents();
         self.poll_terminal_agents();
-        self.deliver_due_scheduled_sends();
         self.tick_banner_animation();
         self.ensure_sidebar_brain();
         self.refresh_log();
@@ -44,6 +44,8 @@ impl App {
         self.poll_graph_action();
         self.poll_node_tail_dialog();
         self.dismiss_graph_action_message();
+        // The Shelf tab's `📎 …` toast holds for 5 s, then goes.
+        self.dismiss_shelf_toast();
         // CT30: apply any finished Crews-face fetch/write, then start a new
         // one if the face is visible and its throttle allows (D5). Runs
         // before the panel-face tick so the recomputation sees current data.
@@ -60,6 +62,14 @@ impl App {
         self.poll_settings_write();
         self.refresh_settings_rows();
         self.dismiss_settings_message();
+        // The Remote tab's cached status, its writes and its device flow;
+        // the status also refreshes off-tab so the sidebar indicator stays
+        // current.
+        self.poll_remote_status();
+        self.poll_remote_write();
+        self.poll_remote_login();
+        self.refresh_remote_status();
+        self.dismiss_remote_message();
         // CT1 multi-face panel: recompute the visible face from the
         // switching rule after every data refresh above has run.
         self.tick_panel_face();

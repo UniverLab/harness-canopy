@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 use super::cli_config::CliConfig;
+pub use super::remote_config::RemoteConfig;
 use super::settings;
 
 /// Top-level canopy configuration.
@@ -173,6 +174,10 @@ pub struct CanopyConfig {
     /// `[tui]` settings for the terminal UI.
     #[serde(default)]
     pub tui: TuiConfig,
+
+    /// `[remote]` settings for owner-only remote control via the relay.
+    #[serde(default)]
+    pub remote: RemoteConfig,
 }
 
 /// Retry policy of the cron scheduler, read from the `[scheduler]` table in
@@ -754,6 +759,7 @@ impl Default for CanopyConfig {
             update: UpdateConfig::default(),
             notifications: NotificationsConfig::default(),
             tui: TuiConfig::default(),
+            remote: RemoteConfig::default(),
         }
     }
 }
@@ -1239,5 +1245,47 @@ mod tests {
         assert_eq!(names.len(), 2);
         assert!(names.contains(&"opencode"));
         assert!(names.contains(&"kiro"));
+    }
+
+    #[test]
+    fn remote_defaults_carry_device_flow_client_id() {
+        let remote = RemoteConfig::default();
+        assert!(!remote.enabled);
+        assert_eq!(remote.relay_url, "https://remote.univerlab.org");
+        assert_eq!(remote.github_client_id, "Ov23liVCfE58kUb3ssDy");
+        assert_eq!(remote.host_label, "");
+
+        // A config predating the `[remote]` table still gets these.
+        let dir = TempDir::new().unwrap();
+        let canopy_dir = dir.path().join(".canopy");
+        std::fs::create_dir_all(&canopy_dir).unwrap();
+        let toml = r#"embeddings_model = "intfloat/multilingual-e5-base""#;
+        std::fs::write(canopy_dir.join("config.toml"), toml).unwrap();
+        let loaded = CanopyConfig::load(&canopy_dir);
+        assert_eq!(loaded.remote.github_client_id, "Ov23liVCfE58kUb3ssDy");
+        assert!(!loaded.remote.enabled);
+    }
+
+    #[test]
+    fn remote_section_round_trips_via_config_toml() {
+        let dir = TempDir::new().unwrap();
+        let canopy_dir = dir.path().join(".canopy");
+
+        let config = CanopyConfig {
+            remote: RemoteConfig {
+                enabled: true,
+                relay_url: "https://relay.example".to_string(),
+                github_client_id: "custom-id".to_string(),
+                host_label: "home-server".to_string(),
+            },
+            ..CanopyConfig::default()
+        };
+        config.save_for_tests(&canopy_dir).unwrap();
+
+        let loaded = CanopyConfig::load(&canopy_dir);
+        assert!(loaded.remote.enabled);
+        assert_eq!(loaded.remote.relay_url, "https://relay.example");
+        assert_eq!(loaded.remote.github_client_id, "custom-id");
+        assert_eq!(loaded.remote.host_label, "home-server");
     }
 }

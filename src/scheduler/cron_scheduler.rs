@@ -18,6 +18,7 @@ use crate::application::ports::{AgentRepository, RunRepository};
 use crate::db::Database;
 use crate::executor::Executor;
 use crate::graph_engine::GraphEngine;
+use crate::sessions::SessionHub;
 
 use autorun::{launch_due_autorun, warn_blocked_operator_paused_autorun};
 use retry::run_with_retry;
@@ -40,6 +41,7 @@ pub use retry::RetryPolicy;
 mod autorun;
 mod retry;
 mod schedule_math;
+mod scheduled_sends;
 /// The internal cron scheduler that runs as a tokio background_agent.
 pub struct CronScheduler {
     db: Arc<Database>,
@@ -50,6 +52,10 @@ pub struct CronScheduler {
     /// Optional graph engine — when set, the scheduler also evaluates graphs
     /// whose trigger is `Cron` and launches them alongside agents.
     graph_engine: Option<Arc<GraphEngine>>,
+    /// Optional session hub — when set, the scheduler also delivers due
+    /// scheduled sends to hub sessions and wakes for them, so a schedule
+    /// fires with no TUI attached.
+    hub: Option<SessionHub>,
     /// Tick idempotency: the most recent *scheduled* tick already fired per
     /// schedulable (agents keyed by their id; graphs by [`graph_key`] to avoid
     /// colliding with an agent that happens to share the same id).
@@ -87,6 +93,7 @@ impl CronScheduler {
             cancel: CancellationToken::new(),
             notify: Arc::new(Notify::new()),
             graph_engine: None,
+            hub: None,
             last_fired: Arc::new(Mutex::new(std::collections::HashMap::new())),
             in_flight: Arc::new(Mutex::new(std::collections::HashSet::new())),
             retry: RetryPolicy::default(),
@@ -111,6 +118,14 @@ impl CronScheduler {
             graph_engine: Some(graph_engine),
             ..Self::new(db, executor)
         }
+    }
+
+    /// Deliver due scheduled sends to this hub's sessions on every tick, and
+    /// wake for the nearest `fire_at`. Without a hub the scheduler neither
+    /// delivers nor considers scheduled sends at all.
+    pub fn with_hub(mut self, hub: SessionHub) -> Self {
+        self.hub = Some(hub);
+        self
     }
 
     /// Get a handle to wake the scheduler when agents change.
@@ -207,10 +222,22 @@ impl CronScheduler {
 
         self.fold_fireable_graph_schedules(&mut earliest, now_local);
         self.fold_pending_one_shot_wakeups(&mut earliest);
+        self.fold_pending_scheduled_sends(&mut earliest);
 
         match earliest {
             Some(t) => earliest_duration_before(now_utc, t),
             None => FALLBACK,
+        }
+    }
+
+    /// A pending scheduled send wakes the scheduler at its `fire_at`, so it is
+    /// delivered close to when it is due even when no agent is scheduled.
+    fn fold_pending_scheduled_sends(&self, earliest: &mut Option<chrono::DateTime<Utc>>) {
+        if self.hub.is_none() {
+            return;
+        }
+        if let Ok(next) = self.db.next_scheduled_send_at() {
+            fold_earliest_instant(earliest, next);
         }
     }
 
@@ -296,6 +323,7 @@ impl CronScheduler {
 
     /// Fire all agents whose next cron time is now (within a 1-second tolerance).
     async fn fire_due_tasks(&self) -> anyhow::Result<()> {
+        self.deliver_scheduled_sends().await;
         self.quarantine_corrupt_agents()?;
         let agents = self.db.list_cron_agents()?;
         // Evaluate schedules in the user's local timezone. `now_utc` is only
@@ -321,6 +349,24 @@ impl CronScheduler {
         self.fire_due_auto_continue_graphs(now_utc)?;
 
         Ok(())
+    }
+
+    /// Deliver due scheduled sends through the hub. Runs off the async
+    /// executor: delivery writes to a PTY and waits out the target CLI's
+    /// paste-settle window.
+    async fn deliver_scheduled_sends(&self) {
+        let Some(hub) = self.hub.as_ref() else {
+            return;
+        };
+        let db = Arc::clone(&self.db);
+        let hub = hub.clone();
+        let delivered = tokio::task::spawn_blocking(move || {
+            scheduled_sends::deliver_due_scheduled_sends(&db, &hub);
+        })
+        .await;
+        if delivered.is_err() {
+            tracing::warn!("Scheduled-send delivery task failed");
+        }
     }
 
     /// One-shot `enable_at`: for each disabled agent with a pending

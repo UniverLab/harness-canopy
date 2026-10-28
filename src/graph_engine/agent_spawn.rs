@@ -1,6 +1,7 @@
 use super::output_tee::{spawn_and_wait_tee, OutputTee};
 use super::verdict_shutdown::{guard_wait, VerdictWatch};
 use super::*;
+use crate::shared::sync_identity::GraphIdentity;
 
 /// A failure to build or spawn the child process, classified by whether it
 /// can plausibly resolve itself between attempts (B39).
@@ -129,6 +130,11 @@ pub(crate) enum CliProcessOutcome {
 /// leave it running indefinitely (`Command::output` gives the caller no
 /// handle to kill), which is exactly what let a `mimo run` child outlive its
 /// node run by 42+ minutes in the 2026-07-12 incident.
+///
+/// `graph_identity` is the run this spawn executes for: its ids are exported
+/// as `CANOPY_GRAPH_ID`/`CANOPY_NODE_ID`/`CANOPY_NODE_RUN_ID` so the agent's
+/// verdict never depends on reproducing UUIDs from memory. `None` (hooks,
+/// tests) scrubs all three rather than inheriting a stale identity.
 #[expect(clippy::too_many_arguments)]
 pub(crate) async fn spawn_and_wait_cli_process(
     strategy: &crate::domain::cli_strategy::CliStrategy,
@@ -145,6 +151,7 @@ pub(crate) async fn spawn_and_wait_cli_process(
     tee: Option<OutputTee>,
     verdict_watch: Option<VerdictWatch>,
     node_profile: bool,
+    graph_identity: Option<&GraphIdentity>,
 ) -> Result<CliProcessOutcome, SpawnError> {
     // CB85: identity check before anything is spawned.
     if let Some(error) = ensure_platform_identity(strategy).await {
@@ -173,6 +180,7 @@ pub(crate) async fn spawn_and_wait_cli_process(
     } else {
         command.env_remove(crate::shared::sync_identity::CANOPY_MCP_PROFILE_ENV);
     }
+    apply_graph_identity_env(&mut command, graph_identity);
     // Set the child process cwd to the node's workdir, whether or not the
     // platform supports a working-dir flag. The flag behaviour for platforms
     // that have one is unchanged.
@@ -464,6 +472,8 @@ pub(crate) async fn run_agent_process(
 
     let verdict = VerdictWatch::for_run(db, run_id);
 
+    let graph_identity = graph_identity_for_run(db, node, run_id)?;
+
     let outcome = spawn_and_wait_cli_process(
         strategy,
         prompt,
@@ -477,11 +487,7 @@ pub(crate) async fn run_agent_process(
         // CB84: cold starts stamp `canopy-<run_id>` as the session title so a
         // terminated run whose id was never captured can still be found by
         // title. Resumes continue an existing session and must not rename it.
-        if resume_session_id.is_none() {
-            Some(run_id)
-        } else {
-            None
-        },
+        resume_session_id.is_none().then_some(run_id),
         |pid| {
             let _ = db.set_graph_run_pid(run_id, pid as i64, crate::system::boot_id().as_deref());
         },
@@ -492,6 +498,7 @@ pub(crate) async fn run_agent_process(
         }),
         verdict.clone(),
         true,
+        graph_identity.as_ref(),
     )
     .await;
 
@@ -836,6 +843,7 @@ mod tests {
             None,
             None,
             true,
+            None,
         )
         .await;
         assert!(
@@ -859,6 +867,7 @@ mod tests {
             None,
             None,
             true,
+            None,
         )
         .await;
         assert!(
@@ -921,6 +930,7 @@ mod tests {
             None,
             None,
             node_profile,
+            None,
         )
         .await;
         assert!(
@@ -949,6 +959,115 @@ mod tests {
             profile_env_seen_by_child(false).await,
             "",
             "hook spawn must keep the full tool list (no CANOPY_MCP_PROFILE)"
+        );
+    }
+
+    /// Spawns a fake CLI that records its three graph-identity env values
+    /// and returns what it recorded (empty per var when unset).
+    async fn identity_env_seen_by_child(identity: Option<GraphIdentity>) -> Vec<String> {
+        let workdir = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let record = scratch.path().join("identity_record.txt");
+        let record_str = record.to_string_lossy().to_string();
+
+        let fake_bin = scratch.path().join("fake-identity-cli");
+        std::fs::write(
+            &fake_bin,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n%s\\n%s\\n' \"$CANOPY_GRAPH_ID\" \"$CANOPY_NODE_ID\" \"$CANOPY_NODE_RUN_ID\" > '{record_str}'\n"
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let cli_config = CliConfig {
+            name: "fake-identity".to_string(),
+            binary: fake_bin.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        let strategy = CliStrategy::from_cli_config(&cli_config);
+        let workdir_str = workdir.path().to_string_lossy().to_string();
+
+        let outcome = spawn_and_wait_cli_process(
+            &strategy,
+            "prompt",
+            None,
+            None,
+            &workdir_str,
+            5,
+            None,
+            None,
+            false,
+            Some("run-identity"),
+            |_| {},
+            None,
+            None,
+            true,
+            identity.as_ref(),
+        )
+        .await;
+        assert!(
+            matches!(
+                outcome,
+                Ok(CliProcessOutcome::Finished { exit_code: 0, .. })
+            ),
+            "spawn must succeed"
+        );
+
+        std::fs::read_to_string(&record)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn spawn_exports_graph_identity_env_to_child() {
+        let seen = identity_env_seen_by_child(Some(GraphIdentity {
+            graph_id: "graph-123".to_string(),
+            node_id: "node-456".to_string(),
+            run_id: "run-789".to_string(),
+        }))
+        .await;
+        assert_eq!(
+            seen,
+            vec![
+                "graph-123".to_string(),
+                "node-456".to_string(),
+                "run-789".to_string()
+            ],
+            "agent node spawn must export all three identity vars"
+        );
+    }
+
+    /// A spawn with no identity must scrub all three vars even when the
+    /// parent's own environment carries a stale identity — so seed stale
+    /// values first: without them a missing `env_remove` would let the child
+    /// inherit an empty ambient env and the test would pass vacuously.
+    #[tokio::test]
+    async fn spawn_without_identity_scrubs_identity_env() {
+        use crate::shared::sync_identity::{
+            CANOPY_GRAPH_ID_ENV, CANOPY_NODE_ID_ENV, CANOPY_NODE_RUN_ID_ENV,
+        };
+        unsafe {
+            std::env::set_var(CANOPY_GRAPH_ID_ENV, "stale-graph");
+            std::env::set_var(CANOPY_NODE_ID_ENV, "stale-node");
+            std::env::set_var(CANOPY_NODE_RUN_ID_ENV, "stale-run");
+        }
+        let seen = identity_env_seen_by_child(None).await;
+        unsafe {
+            std::env::remove_var(CANOPY_GRAPH_ID_ENV);
+            std::env::remove_var(CANOPY_NODE_ID_ENV);
+            std::env::remove_var(CANOPY_NODE_RUN_ID_ENV);
+        }
+        assert_eq!(
+            seen,
+            vec!["".to_string(), "".to_string(), "".to_string()],
+            "a spawn with no identity must unset all three vars, never inherit them \
+             (stale-graph/stale-node/stale-run were seeded in the parent env)"
         );
     }
 }

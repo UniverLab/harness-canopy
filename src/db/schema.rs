@@ -760,4 +760,13 @@ impl Database {
         .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         Ok(())
     }
+
+    /// Create the `remote_devices` table on databases that predate it.
+    /// Guarded `CREATE TABLE IF NOT EXISTS` — a no-op on a fresh database
+    /// (already in `BASE_SCHEMA_BATCHES`) and on an already-migrated one.
+    pub(in crate::db) fn migrate_remote_devices(conn: &Connection) -> Result<()> {
+        conn.execute_batch(super::remote_devices::REMOTE_DEVICES_SCHEMA)
+            .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+        Ok(())
+    }
 }

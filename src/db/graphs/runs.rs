@@ -130,6 +130,22 @@ impl Database {
             .map_err(Into::into)
     }
 
+    /// The graph's most recent node-run activity: the newest `completed_at`
+    /// — or `started_at` for a run still in flight — across its runs. The
+    /// "last activity" stamp the remote graph list filters and sorts by.
+    pub fn latest_graph_run_at(&self, graph_id: &str) -> Result<Option<DateTime<Utc>>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let latest: Option<i64> = conn.query_row(
+            "SELECT MAX(COALESCE(completed_at, started_at)) FROM graph_runs WHERE graph_id = ?1",
+            params![graph_id],
+            |row| row.get(0),
+        )?;
+        latest.map(from_timestamp).transpose().map_err(Into::into)
+    }
+
     pub fn list_graph_runs_for_spec(&self, spec_id: &str) -> Result<Vec<GraphNodeRun>> {
         let conn = self
             .conn

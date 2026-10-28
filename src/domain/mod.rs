@@ -21,10 +21,13 @@ pub mod nodes;
 pub mod notification;
 pub mod nursery;
 pub mod project;
+pub mod prompt_catalog;
+pub mod prompt_draft;
 pub mod prompts;
 pub mod queues;
 pub mod quota_reset;
 pub mod registry_baseline;
+pub mod remote_config;
 pub mod roster;
 pub mod sandbox;
 pub mod seeds;
@@ -42,3 +45,5 @@ pub mod validation_mutex;
 
 #[cfg(test)]
 mod domain_tests;
+#[cfg(test)]
+mod prompt_draft_tests;

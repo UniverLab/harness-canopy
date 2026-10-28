@@ -527,6 +527,19 @@ impl Database {
         Ok(())
     }
 
+    /// Test-only: age a terminal session's `last_active`, the instant the
+    /// shelf's 7-day retention clock starts from, so retention tests do not
+    /// have to wait real days (same pattern as `set_shelf_created_at`).
+    #[cfg(test)]
+    pub fn set_terminal_last_active(&self, id: &str, at: &str) -> Result<()> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        conn.execute(
+            "UPDATE terminal_sessions SET last_active = ?1 WHERE id = ?2",
+            params![at, id],
+        )?;
+        Ok(())
+    }
+
     /// Get the session_type for an interactive session by id.
     pub fn get_session_type(&self, session_id: &str) -> Result<Option<String>> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;

@@ -1,22 +1,20 @@
 use super::*;
+use crate::domain::prompt_draft::{self, DraftSection, PromptCatalog, PromptContext, PromptDraft};
+
+/// Test-only re-export of the assembly helpers that moved to
+/// `domain::prompt_draft`: the unchanged dialog tests reach them through
+/// this module's glob import in `prompt.rs`.
+#[cfg(test)]
+pub(crate) use crate::domain::prompt_draft::{
+    append_tool_skill, build_xml_block, format_indexed_xml_section, push_xml_item,
+    strip_resources_section,
+};
 
 impl SimplePromptDialog {
+    /// Thin shim over the moved [`prompt_draft::format_project_block`],
+    /// kept so the unchanged dialog tests still resolve this path.
     pub(super) fn format_project_block(project: &Project) -> String {
-        let mut lines = vec![
-            format!("name: {}", project.name),
-            format!("workdir_hash: {}", project.hash),
-            format!("path: {}", project.path),
-        ];
-        if let Some(description) = project.description.as_deref() {
-            lines.push(format!("description: {}", description));
-        }
-        if let Some(tags) = project.tags.as_deref() {
-            lines.push(format!("tags: {}", tags));
-        }
-        if let Some(indexed_at) = project.indexed_at {
-            lines.push(format!("indexed_at: {}", indexed_at));
-        }
-        lines.join("\n")
+        prompt_draft::format_project_block(project)
     }
 
     pub(super) fn format_file_resource(path: &Path) -> String {
@@ -202,58 +200,36 @@ impl SimplePromptDialog {
             .collect()
     }
 
-    pub(super) fn append_prompt_section(
-        &self,
-        result: &mut String,
-        prefix: &str,
-        header: &str,
-        outer_tag: &str,
-        item_tag: &str,
-    ) {
-        build_xml_block(
-            result,
-            &self.enabled_sections,
-            |section_id| Self::section_matches_prefix(section_id, prefix),
-            |section_id| self.section_content_for_build(section_id),
-            header,
-            outer_tag,
-            item_tag,
-        );
-    }
-
-    pub(super) fn append_instruction_section(&self, result: &mut String) {
-        result.push_str("# [INSTRUCTIONS]: Execution Logic\n");
-        result.push_str("<instruction_set>\n");
-        for content in self.section_entries("instruction") {
-            push_xml_item(result, "instruction", content);
-        }
-        result.push_str("</instruction_set>\n\n");
-    }
-
-    pub(super) fn append_tools_section(&self, result: &mut String) {
-        let tool_lines = self.collect_tool_lines();
-        if tool_lines.is_empty() {
-            return;
-        }
-
-        result.push_str("# [TOOLS]: Skills & Capabilities\n");
-        result.push_str("<tools>\n");
-        for tool_line in tool_lines {
-            append_tool_skill(result, &tool_line);
-        }
-        result.push_str("</tools>\n\n");
-    }
-
+    /// Test-only shim over the moved [`prompt_draft::tool_lines`]: the
+    /// unchanged dialog tests still call this, while production builds the
+    /// tools group through [`prompt_draft::build_prompt_body`].
+    #[cfg(test)]
     pub(super) fn collect_tool_lines(&self) -> Vec<String> {
-        self.section_entries("tools")
-            .into_iter()
-            .flat_map(|content| {
-                content
-                    .lines()
-                    .map(str::trim)
-                    .filter(|line| !line.is_empty())
-                    .map(str::to_string)
-                    .collect::<Vec<_>>()
+        prompt_draft::tool_lines(&self.draft_sections())
+    }
+
+    /// This dialog's state as a domain draft: every enabled section by id,
+    /// with no separate named choices — a picked preset/skills/project
+    /// already lives in the sections as instruction/tools/project_context
+    /// content by the time anything builds.
+    fn to_prompt_draft(&self) -> PromptDraft {
+        PromptDraft {
+            sections: self.draft_sections(),
+            preset: None,
+            skills: Vec::new(),
+            project: None,
+        }
+    }
+
+    fn draft_sections(&self) -> Vec<DraftSection> {
+        self.enabled_sections
+            .iter()
+            .map(|id| DraftSection {
+                title: id.clone(),
+                content: self
+                    .section_content_for_build(id)
+                    .unwrap_or_default()
+                    .to_string(),
             })
             .collect()
     }
@@ -263,115 +239,29 @@ impl SimplePromptDialog {
         db: &Database,
         current_workdir: &Path,
     ) -> Result<String> {
-        let system = self.render_system_block();
-        let mut body = self.build_body();
-        let project_contexts = self.resolve_project_contexts(db);
         let default_project_hash = self.default_project_hash(db, current_workdir);
         let mut resources = self.resolve_resource_entries(db);
         resources.extend(self.resolve_rag_resources(db, default_project_hash.as_deref()));
 
-        // PROJECT CONTEXT leads the body, right below the system block.
-        if let Some(section) = format_indexed_xml_section(
-            "# [PROJECT CONTEXT]: Registered Project Metadata\n",
-            "project_context",
-            "project",
-            &project_contexts,
-        ) {
-            body = format!("{section}{body}");
-        }
-
-        // Resolved resources replace the raw resources section and close the body.
-        if let Some(section) = format_indexed_xml_section(
-            "# [RESOURCES]: Knowledge Base & Data\n",
-            "resources",
-            "resource",
-            &resources,
-        ) {
-            body = strip_resources_section(&body);
-            body.push_str(&section);
-        }
-
-        // System block stays first so its protocol is read before the task.
-        Ok(format!("{system}{body}"))
-    }
-
-    /// The invisible system block, rendered so its operating protocol is the
-    /// first thing the agent reads — the session-start protocol once at the
-    /// top when it rides along, then the per-turn context (see
-    /// `system_text`). Empty when there is neither to send.
-    pub(super) fn render_system_block(&self) -> String {
-        let system = self.system_text();
-        if system.is_empty() {
-            return String::new();
-        }
-        format!("<system>\n{system}\n</system>\n\n")
+        let ctx = PromptContext {
+            catalog: PromptCatalog::default(),
+            project_blocks: self.resolve_project_contexts(db),
+            resources,
+            turn_context: self.system_content.clone(),
+            protocol_included: self.protocol_in_prompt(),
+        };
+        prompt_draft::build_prompt_text(&self.to_prompt_draft(), &ctx).map_err(anyhow::Error::from)
     }
 
     /// Build the prompt body (every section except the system block).
+    /// Test-only now: production sends build through
+    /// [`prompt_draft::build_prompt_text`], and this stays so the unchanged
+    /// dialog tests still resolve the helper.
+    #[cfg(test)]
     pub(super) fn build_body(&self) -> String {
-        let mut result = String::new();
-        self.append_prompt_section(
-            &mut result,
-            "goal",
-            "# [GOAL]: Desired Outcome\n",
-            "goal",
-            "goal_item",
-        );
-        self.append_prompt_section(
-            &mut result,
-            "context",
-            "# [CONTEXT]: Project Background\n",
-            "context",
-            "context",
-        );
-        self.append_instruction_section(&mut result);
-        self.append_prompt_section(
-            &mut result,
-            "resources",
-            "# [RESOURCES]: Knowledge Base & Data\n",
-            "resources",
-            "resource",
-        );
-        self.append_prompt_section(
-            &mut result,
-            "constraints",
-            "# [CONSTRAINTS]: Behavioral Boundaries\n",
-            "constraints",
-            "constraint",
-        );
-        self.append_tools_section(&mut result);
-        result
+        prompt_draft::build_prompt_body(&self.to_prompt_draft(), &PromptCatalog::default())
+            .expect("dialog drafts carry no preset or skill lookups")
     }
-}
-
-pub(super) fn append_tool_skill(result: &mut String, tool_line: &str) {
-    if let Some(name) = tool_line.strip_prefix("canopy:") {
-        result.push_str("  <skill>\n");
-        result.push_str(&format!(
-            "    canopy skill {name} — load it with the `skill` tool's `get` action (name=\"{name}\")\n"
-        ));
-        result.push_str("  </skill>\n\n");
-    } else {
-        result.push_str("  <skill>\n");
-        result.push_str(&format!("    {tool_line}\n"));
-        result.push_str("  </skill>\n\n");
-    }
-}
-
-pub(super) fn strip_resources_section(prompt: &str) -> String {
-    let header = "# [RESOURCES]: Knowledge Base & Data\n<resources>\n";
-    let Some(start) = prompt.find(header) else {
-        return prompt.to_string();
-    };
-    let Some(end_rel) = prompt[start..].find("</resources>\n\n") else {
-        return prompt.to_string();
-    };
-
-    let end = start + end_rel + "</resources>\n\n".len();
-    let mut stripped = String::with_capacity(prompt.len().saturating_sub(end - start));
-    stripped.push_str(&prompt[..start]);
-    stripped.push_str(&prompt[end..]);
-    stripped
 }
 
 // ── Prompt builder helpers ────────────────────────────────────────
@@ -401,69 +291,5 @@ pub(super) fn add_skills_from_dir(
             continue;
         }
         out.push((format!("skill:{raw_name}"), raw_name, prefix.to_string()));
-    }
-}
-
-// XML formatting helpers
-
-pub(super) fn push_xml_item(result: &mut String, tag: &str, content: &str) {
-    result.push_str(&format!("  <{tag}>\n"));
-    for line in content.lines() {
-        result.push_str(&format!("    {line}\n"));
-    }
-    result.push_str(&format!("  </{tag}>\n\n"));
-}
-
-pub(super) fn format_indexed_xml_section(
-    header: &str,
-    outer_tag: &str,
-    item_tag: &str,
-    items: &[String],
-) -> Option<String> {
-    if items.is_empty() {
-        return None;
-    }
-
-    let mut result = String::new();
-    result.push_str(header);
-    result.push_str(&format!("<{outer_tag}>\n"));
-    for item in items.iter() {
-        push_xml_item(&mut result, item_tag, item);
-    }
-    result.push_str(&format!("</{outer_tag}>\n\n"));
-    Some(result)
-}
-
-/// Build a wrapped XML section (header + outer tag + items) from matching section IDs.
-pub(super) fn build_xml_block<'a>(
-    result: &mut String,
-    sections: &'a [String],
-    matches: impl Fn(&str) -> bool,
-    content_for: impl Fn(&'a str) -> Option<&'a str>,
-    header: &str,
-    outer_tag: &str,
-    item_tag: &str,
-) {
-    let mut count = 0;
-    for id in sections {
-        if !matches(id) {
-            continue;
-        }
-        let Some(content) = content_for(id) else {
-            continue;
-        };
-        let trimmed = content.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if count == 0 {
-            result.push_str(header);
-            result.push_str(&format!("<{outer_tag}>\n"));
-        }
-        count += 1;
-        push_xml_item(result, item_tag, trimmed);
-    }
-    if count > 0 {
-        result.push_str(&format!("</{outer_tag}>\n\n"));
     }
 }

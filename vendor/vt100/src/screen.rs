@@ -240,6 +240,18 @@ impl Screen {
         contents
     }
 
+    /// Render every scrollback row, oldest first, each with its
+    /// attributes and followed by `\r\n` — the scrollback prefix of a
+    /// session snapshot (see `Grid::write_scrollback_formatted`). Feeding
+    /// the result to a fresh parser of the same size reproduces this
+    /// scrollback; empty when there is none.
+    #[must_use]
+    pub fn scrollback_formatted(&self) -> Vec<u8> {
+        let mut contents = vec![];
+        self.grid().write_scrollback_formatted(&mut contents);
+        contents
+    }
+
     /// Returns the formatted visible contents of the terminal.
     ///
     /// Formatting information will be included inline as terminal escape

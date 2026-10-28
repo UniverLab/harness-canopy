@@ -1029,7 +1029,8 @@ fn render_agent_prompt_includes_reporting_contract() {
 
     assert!(prompt.contains("graph_complete_node"));
     assert!(prompt.contains("graph_report_blocker"));
-    assert!(prompt.contains("run_id=\"run-1\""));
+    assert!(!prompt.contains("run_id=\""));
+    assert!(prompt.contains("CANOPY_NODE_RUN_ID"));
     assert!(prompt.contains("Do the thing"));
     assert!(prompt.contains("\"feedback\": \"ok\""));
 }

@@ -1265,25 +1265,31 @@ async fn graph_complete_node_records_result_and_rejects_stale_report() {
     let node_id = run.node_id.clone();
 
     let bad_status = handler
-        .graph_complete_node(Parameters(GraphCompleteNodeParams {
-            run_id: run.id.clone(),
-            node_id: node_id.clone(),
-            status: "sideways".to_string(),
-            output: "out".to_string(),
-            summary: "sum".to_string(),
-        }))
+        .graph_complete_node(
+            Parameters(GraphCompleteNodeParams {
+                run_id: Some(run.id.clone()),
+                node_id: Some(node_id.clone()),
+                status: "sideways".to_string(),
+                output: "out".to_string(),
+                summary: "sum".to_string(),
+            }),
+            OptionalExtension(None),
+        )
         .await
         .unwrap();
     assert!(is_err(&bad_status));
 
     let ok = handler
-        .graph_complete_node(Parameters(GraphCompleteNodeParams {
-            run_id: run.id.clone(),
-            node_id: node_id.clone(),
-            status: "pass".to_string(),
-            output: "out".to_string(),
-            summary: "sum".to_string(),
-        }))
+        .graph_complete_node(
+            Parameters(GraphCompleteNodeParams {
+                run_id: Some(run.id.clone()),
+                node_id: Some(node_id.clone()),
+                status: "pass".to_string(),
+                output: "out".to_string(),
+                summary: "sum".to_string(),
+            }),
+            OptionalExtension(None),
+        )
         .await
         .unwrap();
     assert!(!is_err(&ok), "{}", text(&ok));
@@ -1291,38 +1297,47 @@ async fn graph_complete_node_records_result_and_rejects_stale_report() {
     // Reporting again against the now-finalized run must be rejected as
     // stale, not silently accepted.
     let stale = handler
-        .graph_complete_node(Parameters(GraphCompleteNodeParams {
-            run_id: run.id.clone(),
-            node_id: node_id.clone(),
-            status: "pass".to_string(),
-            output: "out2".to_string(),
-            summary: "sum2".to_string(),
-        }))
+        .graph_complete_node(
+            Parameters(GraphCompleteNodeParams {
+                run_id: Some(run.id.clone()),
+                node_id: Some(node_id.clone()),
+                status: "pass".to_string(),
+                output: "out2".to_string(),
+                summary: "sum2".to_string(),
+            }),
+            OptionalExtension(None),
+        )
         .await
         .unwrap();
     assert!(is_err(&stale));
     assert!(text(&stale).contains("no longer active"));
 
     let wrong_node = handler
-        .graph_complete_node(Parameters(GraphCompleteNodeParams {
-            run_id: run.id,
-            node_id: "not-the-right-node".to_string(),
-            status: "pass".to_string(),
-            output: "out".to_string(),
-            summary: "sum".to_string(),
-        }))
+        .graph_complete_node(
+            Parameters(GraphCompleteNodeParams {
+                run_id: Some(run.id),
+                node_id: Some("not-the-right-node".to_string()),
+                status: "pass".to_string(),
+                output: "out".to_string(),
+                summary: "sum".to_string(),
+            }),
+            OptionalExtension(None),
+        )
         .await
         .unwrap();
     assert!(is_err(&wrong_node));
 
     let unknown_run = handler
-        .graph_complete_node(Parameters(GraphCompleteNodeParams {
-            run_id: "ghost-run".to_string(),
-            node_id,
-            status: "pass".to_string(),
-            output: "out".to_string(),
-            summary: "sum".to_string(),
-        }))
+        .graph_complete_node(
+            Parameters(GraphCompleteNodeParams {
+                run_id: Some("ghost-run".to_string()),
+                node_id: Some(node_id),
+                status: "pass".to_string(),
+                output: "out".to_string(),
+                summary: "sum".to_string(),
+            }),
+            OptionalExtension(None),
+        )
         .await
         .unwrap();
     assert!(is_err(&unknown_run));
@@ -1336,11 +1351,14 @@ async fn graph_report_blocker_pauses_the_graph() {
     let node_id = run.node_id.clone();
 
     let result = handler
-        .graph_report_blocker(Parameters(GraphReportBlockerParams {
-            run_id: run.id,
-            node_id,
-            description: "waiting on human input".to_string(),
-        }))
+        .graph_report_blocker(
+            Parameters(GraphReportBlockerParams {
+                run_id: Some(run.id),
+                node_id: Some(node_id),
+                description: "waiting on human input".to_string(),
+            }),
+            OptionalExtension(None),
+        )
         .await
         .unwrap();
     assert!(!is_err(&result), "{}", text(&result));
@@ -1357,13 +1375,16 @@ async fn loop_complete_node_records_result_like_graph_complete_node_and_notes_de
     let run = insert_running_node_run(&db, &lp.id);
 
     let result = handler
-        .loop_complete_node(Parameters(GraphCompleteNodeParams {
-            run_id: run.id.clone(),
-            node_id: run.node_id.clone(),
-            status: "pass".to_string(),
-            output: "out".to_string(),
-            summary: "sum".to_string(),
-        }))
+        .loop_complete_node(
+            Parameters(GraphCompleteNodeParams {
+                run_id: Some(run.id.clone()),
+                node_id: Some(run.node_id.clone()),
+                status: "pass".to_string(),
+                output: "out".to_string(),
+                summary: "sum".to_string(),
+            }),
+            OptionalExtension(None),
+        )
         .await
         .unwrap();
 
@@ -1383,11 +1404,14 @@ async fn loop_report_blocker_pauses_the_graph_and_notes_deprecation() {
     let run = insert_running_node_run(&db, &lp.id);
 
     let result = handler
-        .loop_report_blocker(Parameters(GraphReportBlockerParams {
-            run_id: run.id,
-            node_id: run.node_id,
-            description: "waiting on human input".to_string(),
-        }))
+        .loop_report_blocker(
+            Parameters(GraphReportBlockerParams {
+                run_id: Some(run.id),
+                node_id: Some(run.node_id),
+                description: "waiting on human input".to_string(),
+            }),
+            OptionalExtension(None),
+        )
         .await
         .unwrap();
 
@@ -1437,11 +1461,14 @@ async fn graph_run_refuses_a_paused_graph_with_an_active_blocker() {
     let node_id = run.node_id.clone();
 
     let blocked = handler
-        .graph_report_blocker(Parameters(GraphReportBlockerParams {
-            run_id: run.id,
-            node_id,
-            description: "waiting on human input".to_string(),
-        }))
+        .graph_report_blocker(
+            Parameters(GraphReportBlockerParams {
+                run_id: Some(run.id),
+                node_id: Some(node_id),
+                description: "waiting on human input".to_string(),
+            }),
+            OptionalExtension(None),
+        )
         .await
         .unwrap();
     assert!(!is_err(&blocked), "{}", text(&blocked));

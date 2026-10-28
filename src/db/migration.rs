@@ -520,6 +520,14 @@ impl Database {
         Ok(())
     }
 
+    /// The session shelf table on databases created before it existed:
+    /// the same batch as the base schema, a no-op once applied.
+    pub(super) fn migrate_shelf_files(conn: &Connection) -> Result<()> {
+        conn.execute_batch(super::shelf::SHELF_FILES_SCHEMA)
+            .map_err(|e| anyhow::anyhow!("shelf_files schema migration failed: {e}"))?;
+        Ok(())
+    }
+
     /// Fail the migration when any foreign-key violation remains, naming the
     /// step in the message (observable via `canopy doctor`).
     fn assert_no_foreign_key_violations(conn: &Connection, migration_label: &str) -> Result<()> {

@@ -456,6 +456,42 @@ pub static REGISTRY: &[SettingDef] = &[
         apply: Apply::Hot,
         wizard: false,
     },
+    SettingDef {
+        key: "remote.enabled",
+        kind: Kind::Bool,
+        default: DefaultValue::Literal("false"),
+        group: Group::General,
+        description: "Whether this host accepts owner-only remote control via the relay.",
+        apply: Apply::Hot,
+        wizard: false,
+    },
+    SettingDef {
+        key: "remote.relay_url",
+        kind: Kind::String,
+        default: DefaultValue::Literal("\"https://remote.univerlab.org\""),
+        group: Group::General,
+        description: "Relay URL for owner-only remote control.",
+        apply: Apply::NextRun,
+        wizard: false,
+    },
+    SettingDef {
+        key: "remote.github_client_id",
+        kind: Kind::String,
+        default: DefaultValue::Literal("\"Ov23liVCfE58kUb3ssDy\""),
+        group: Group::General,
+        description: "Public Client ID of UniverLab's \"Canopy Remote\" OAuth App (device flow, identity only).",
+        apply: Apply::NextRun,
+        wizard: false,
+    },
+    SettingDef {
+        key: "remote.host_label",
+        kind: Kind::String,
+        default: DefaultValue::Literal("\"\""),
+        description: "Label shown for this host; empty means the hostname.",
+        group: Group::General,
+        apply: Apply::NextRun,
+        wizard: false,
+    },
 ];
 
 #[cfg(test)]
@@ -465,7 +501,7 @@ mod tests {
 
     #[test]
     fn registry_has_one_entry_per_setting_and_they_are_unique() {
-        assert_eq!(REGISTRY.len(), 46);
+        assert_eq!(REGISTRY.len(), 50);
         for def in REGISTRY {
             assert_eq!(find(def.key).map(|d| d.key), Some(def.key));
         }

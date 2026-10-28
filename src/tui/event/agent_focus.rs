@@ -1297,7 +1297,7 @@ mod focus_shortcuts_keyboard_claim_tests {
     fn spawn_cat_agent(name: &str) -> InteractiveAgent {
         InteractiveAgent::spawn(
             Cli::new("cat"),
-            ".",
+            env!("CARGO_MANIFEST_DIR"),
             80,
             24,
             None,

@@ -10,7 +10,9 @@ mod gamification;
 pub(crate) mod graph_live_nav;
 pub(crate) mod graph_live_state;
 pub(crate) mod hub;
+pub(crate) mod hub_remote;
 pub(crate) mod hub_settings;
+pub(crate) mod hub_shelf;
 mod init;
 pub(crate) mod panel_face;
 mod project_activity;
@@ -19,6 +21,7 @@ mod project_graph;
 mod project_nav;
 mod refresh;
 mod refresh_graph_whimsg;
+pub(crate) mod session_hub;
 mod sessions;
 mod sidebar_nav;
 mod sync;
@@ -51,11 +54,6 @@ use system_monitor::{
 };
 
 // ── pub(crate) re-exports for tests (use super::{…} in #[cfg(test)] mods) ─
-#[cfg(test)]
-pub(crate) use sessions::{
-    process_is_alive, process_matches_cli, process_outlives_grace, resume_decision,
-    should_resume_session, ResumeDecision,
-};
 #[cfg(test)]
 pub(crate) use system_monitor::{
     adaptive_change_score, adaptive_poll_interval_ms, blend_optional_f32, blend_optional_f64,

@@ -45,6 +45,10 @@ impl SimplePromptDialog {
     /// top (when it rides along), then the per-turn context. `system_content`
     /// itself never carries the block, so an automatic send and a manual
     /// `Canopy protocol` section can never duplicate it.
+    /// Test-only now: production assembles the system block inside
+    /// `domain::prompt_draft`, and this stays so the unchanged session
+    /// protocol tests still resolve the helper.
+    #[cfg(test)]
     pub fn system_text(&self) -> String {
         let turn_context = self.system_content.clone().unwrap_or_default();
         if !self.protocol_in_prompt() {

@@ -18,10 +18,10 @@ impl GraphEngine {
     /// send carrying the rendered prompt, a canonical promptbuilder-equivalent
     /// builder state, and structured hook provenance (graph id + event).
     ///
-    /// Delivery itself stays where it already is — the TUI's
-    /// `deliver_due_scheduled_sends` — so a send enqueued while no TUI is
-    /// running stays queued (pending, never failed) until one comes up. A
-    /// missing or non-live target fails the hook run naming the exact session
+    /// Delivery itself runs in the daemon's scheduler
+    /// (`scheduler::cron_scheduler::scheduled_sends`), so a send is delivered
+    /// on the next tick whether or not a TUI is attached. A missing or
+    /// non-live target fails the hook run naming the exact session
     /// id, without inserting anything and without touching the graph's status
     /// (the caller records the failure and continues to later hooks).
     pub(crate) async fn execute_interactive_hook(

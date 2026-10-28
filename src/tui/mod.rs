@@ -4,7 +4,7 @@
 //! concurrent readers) and displays background_agents, watchers, and their logs
 //! in a card-based sidebar with a live log panel.
 
-mod agent;
+pub(crate) mod agent;
 mod app;
 mod atmosphere;
 mod brians_brain;
@@ -21,12 +21,19 @@ pub(crate) mod ui;
 mod whimsg;
 
 pub(crate) use ui::truncate_str_keep_tail;
+// The daemon resumes sessions on its own (see `crate::sessions::resume`), so
+// the resume-args builder is re-exported for that one non-TUI consumer.
+pub(crate) use app::session_resume::build_resumed_session_args;
 // CH3: the graph engine enqueues interactive hook messages with a canonical
 // promptbuilder-equivalent state — the builder types live here, so they are
 // re-exported for that one non-TUI consumer rather than making `app` public.
 pub(crate) use app::dialog::PersistedBuilderState;
 #[cfg(test)]
 pub(crate) use app::dialog::SimplePromptDialog;
+// The hub catalog lists the New dialog's CLIs, so the dialog's CLI list and
+// label helpers are re-exported for that one non-TUI consumer rather than
+// making `app` public.
+pub(crate) use app::dialog::new_agent::{available_clis_for_catalog, cli_label};
 
 use anyhow::{Context, Result};
 use ratatui::crossterm::{
@@ -79,19 +86,20 @@ pub fn run_tui() -> Result<()> {
     let canopy_config = crate::domain::canopy_config::CanopyConfig::load(&home.join(".canopy"));
     let mut app = App::new(Arc::clone(&db), &data_dir, &canopy_config)?;
 
+    // The hub owns every session now: closing the TUI only closes the
+    // WebSocket (see `App::cleanup`), so install the SIGHUP handler here —
+    // spawns no longer do it — and attach the live sessions.
+    #[cfg(unix)]
+    crate::tui::agent::pty::install_signal_handlers();
     // Reap bridge sidecars whose owning process died without cleaning up
     app.reconcile_bridge_sessions();
-    // Auto-resume previously active interactive sessions
-    app.auto_resume_sessions();
+    // Attach the daemon hub's live sessions: the daemon resumes them and
+    // delivers scheduled sends, the TUI only shows what the hub runs.
+    app.connect_session_hub();
     // Load orphaned sessions for TUI visibility
     if let Ok(orphaned) = app.db.get_orphaned_sessions() {
         app.orphaned_sessions = orphaned;
     }
-    // Auto-resume previously active terminal sessions
-    app.auto_resume_terminal_sessions();
-    // Now that sessions are resumed (and their schedules reassigned), open the
-    // scheduled-send delivery gate and drop schedules whose session is gone.
-    app.restore_scheduled_sends();
 
     // Setup terminal
     enable_raw_mode()?;

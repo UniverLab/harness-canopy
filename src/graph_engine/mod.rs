@@ -58,6 +58,7 @@ mod roster_filter;
 mod routing;
 mod run_spec;
 mod shell_utils;
+mod spawn_identity;
 mod spec_step;
 mod verdict_shutdown;
 
@@ -102,6 +103,7 @@ pub(crate) use routing::*;
 #[allow(unused_imports)]
 pub(crate) use run_spec::*;
 pub(crate) use shell_utils::*;
+pub(crate) use spawn_identity::*;
 #[allow(unused_imports)]
 pub(crate) use spec_step::*;
 
