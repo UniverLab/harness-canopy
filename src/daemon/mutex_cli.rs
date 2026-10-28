@@ -20,7 +20,7 @@ pub(crate) enum MutexAction {
     },
 }
 
-pub async fn handle_mutex_action(action: MutexAction, _port_override: Option<u16>) -> Result<()> {
+pub async fn handle_mutex_action(action: MutexAction) -> Result<()> {
     match action {
         MutexAction::List { json } => {
             let data_dir = crate::ensure_data_dir()?;

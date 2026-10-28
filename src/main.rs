@@ -313,7 +313,7 @@ async fn main() -> Result<()> {
         Some(Commands::Spec { action }) => handle_spec_action(action, cli.port).await,
         Some(Commands::Roster { action }) => handle_roster_action(action, cli.port).await,
         Some(Commands::Crew { action }) => handle_crew_action(action, cli.port).await,
-        Some(Commands::Mutex { action }) => handle_mutex_action(action, cli.port).await,
+        Some(Commands::Mutex { action }) => handle_mutex_action(action).await,
         Some(Commands::Config { action }) => handle_settings_action(action, cli.port).await,
         Some(Commands::Queue { action }) => handle_queue_action(action, cli.port).await,
         Some(Commands::Models { action }) => handle_models_action(action).await,
