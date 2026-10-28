@@ -18,35 +18,85 @@ use std::path::Path;
 use crate::domain::graph_transfer::{parse_export_document_str, GraphExportDocument};
 
 /// A parsed catalogue ref: `<slug>` (official) or `<owner>/<repo>/<slug>`
-/// (community), each with an optional `@<ref>` suffix selecting a version.
+/// (community), each with an optional `@<ref>` suffix selecting a version —
+/// or `draft:<id>`, an unreviewed editor draft served directly by the
+/// catalogue.
 #[derive(Debug)]
-pub(crate) struct GraphRef {
-    /// `(owner, repo)` for a community ref; `None` for an official slug.
-    pub scope: Option<(String, String)>,
-    pub slug: String,
-    /// The `@<ref>` suffix, sent as the `ref` query parameter.
-    pub git_ref: Option<String>,
+pub(crate) enum GraphRef {
+    /// A published ref: `(owner, repo)` scope for community, `None` for an
+    /// official slug.
+    Standard {
+        /// `(owner, repo)` for a community ref; `None` for an official slug.
+        scope: Option<(String, String)>,
+        slug: String,
+        /// The `@<ref>` suffix, sent as the `ref` query parameter.
+        git_ref: Option<String>,
+    },
+    /// An editor draft: 26 lowercase base32 characters.
+    Draft { id: String },
 }
 
 impl GraphRef {
     /// Render the ref back the way the user wrote it (for messages).
     fn display(&self) -> String {
-        let mut text = match &self.scope {
-            None => self.slug.clone(),
-            Some((owner, repo)) => format!("{owner}/{repo}/{}", self.slug),
-        };
-        if let Some(git_ref) = &self.git_ref {
-            text.push('@');
-            text.push_str(git_ref);
+        match self {
+            GraphRef::Standard {
+                scope,
+                slug,
+                git_ref,
+            } => {
+                let mut text = match scope {
+                    None => slug.clone(),
+                    Some((owner, repo)) => format!("{owner}/{repo}/{slug}"),
+                };
+                if let Some(git_ref) = git_ref {
+                    text.push('@');
+                    text.push_str(git_ref);
+                }
+                text
+            }
+            GraphRef::Draft { id } => format!("draft:{id}"),
         }
-        text
+    }
+
+    /// Whether this ref is an editor draft.
+    pub(crate) fn is_draft(&self) -> bool {
+        matches!(self, GraphRef::Draft { .. })
+    }
+
+    /// The draft id, when this ref is one.
+    pub(crate) fn draft_id(&self) -> Option<&str> {
+        match self {
+            GraphRef::Draft { id } => Some(id),
+            GraphRef::Standard { .. } => None,
+        }
+    }
+
+    /// The source label for the install review: `draft` for a draft, else
+    /// the official/community label.
+    pub(crate) fn source_label(&self) -> String {
+        match self {
+            GraphRef::Draft { .. } => "draft".to_string(),
+            GraphRef::Standard { scope, git_ref, .. } => {
+                crate::domain::nodes::review::source_label(scope, git_ref)
+            }
+        }
+    }
+
+    /// The slug (or draft id) for messages that name the document.
+    fn slug_or_id(&self) -> &str {
+        match self {
+            GraphRef::Standard { slug, .. } => slug,
+            GraphRef::Draft { id } => id,
+        }
     }
 }
 
 /// Parse a graph catalogue ref: `<slug>` or `<owner>/<repo>/<slug>`, each
-/// with an optional `@<ref>` suffix. The slug is `[a-z0-9-]{1,48}`; owner and
-/// repo follow GitHub's rules. Anything else is refused with the accepted
-/// forms in the message.
+/// with an optional `@<ref>` suffix — or `draft:<id>` for an editor draft.
+/// The slug is `[a-z0-9-]{1,48}`; owner and repo follow GitHub's rules; the
+/// draft id is 26 lowercase base32 characters. Anything else is refused with
+/// the accepted forms in the message.
 pub(crate) fn parse_ref(raw: &str) -> Result<GraphRef, String> {
     parse_ref_for("graph", raw)
 }
@@ -57,8 +107,23 @@ pub(crate) fn parse_ref_node(raw: &str) -> Result<GraphRef, String> {
     parse_ref_for("node", raw)
 }
 
+/// The draft id when `reference` parses as a `draft:<id>` ref — the one
+/// check callers use instead of matching the `draft:` prefix themselves.
+/// The grammar is the same for graph and node refs, so one helper serves
+/// both install paths.
+pub(crate) fn draft_id(reference: &str) -> Option<String> {
+    parse_ref(reference).ok()?.draft_id().map(str::to_string)
+}
+
 fn parse_ref_for(kind: &str, raw: &str) -> Result<GraphRef, String> {
     let trimmed = raw.trim();
+    if let Some(id) = trimmed.strip_prefix("draft:") {
+        return if is_draft_id(id) {
+            Ok(GraphRef::Draft { id: id.to_string() })
+        } else {
+            Err(invalid_ref_message(kind, raw))
+        };
+    }
     let (path, git_ref) = match trimmed.split_once('@') {
         None => (trimmed, None),
         Some((path, git_ref)) => {
@@ -70,13 +135,13 @@ fn parse_ref_for(kind: &str, raw: &str) -> Result<GraphRef, String> {
     };
     let parts: Vec<&str> = path.split('/').collect();
     match parts.as_slice() {
-        [slug] if is_slug(slug) => Ok(GraphRef {
+        [slug] if is_slug(slug) => Ok(GraphRef::Standard {
             scope: None,
             slug: (*slug).to_string(),
             git_ref,
         }),
         [owner, repo, slug] if is_github_owner(owner) && is_github_repo(repo) && is_slug(slug) => {
-            Ok(GraphRef {
+            Ok(GraphRef::Standard {
                 scope: Some(((*owner).to_string(), (*repo).to_string())),
                 slug: (*slug).to_string(),
                 git_ref,
@@ -90,9 +155,18 @@ fn invalid_ref_message(kind: &str, raw: &str) -> String {
     format!(
         "Invalid {kind} ref '{raw}'. Accepted forms: <slug> or <owner>/<repo>/<slug>, \
          each with an optional @<ref> suffix (for example 'my-graph', \
-         'acme/widgets/my-graph' or 'acme/widgets/my-graph@v1.2'). \
+         'acme/widgets/my-graph' or 'acme/widgets/my-graph@v1.2'), \
+         or 'draft:<id>' for an editor draft (26 lowercase base32 characters). \
          The slug is 1-48 lowercase letters, digits, or '-'."
     )
+}
+
+/// A draft id: exactly 26 lowercase base32 characters (`[a-z2-7]{26}`).
+fn is_draft_id(id: &str) -> bool {
+    id.len() == 26
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || matches!(b, b'2'..=b'7'))
 }
 
 /// A shareable slug: `[a-z0-9-]{1,48}` — the same rule node documents use.
@@ -137,7 +211,8 @@ fn is_git_ref(git_ref: &str) -> bool {
 
 /// A catalogue document fetched and validated — nothing written yet. Its
 /// `source` is the review's source label (`official`, `owner/repo`, each
-/// with `@<ref>`), so the CLI, MCP and docs name the origin the same way.
+/// with `@<ref>`, or `draft`), so the CLI, MCP and docs name the origin the
+/// same way.
 #[derive(Debug)]
 pub(crate) struct FetchedGraph {
     pub document: GraphExportDocument,
@@ -146,6 +221,9 @@ pub(crate) struct FetchedGraph {
     pub source_url: String,
     /// The source label for the install review.
     pub source: String,
+    /// The raw validated body — a draft review parks it for the accept call,
+    /// since the draft is consumed by the first fetch.
+    pub body: String,
 }
 
 /// Fetch the document for `reference` from the catalogue at `base` and
@@ -154,15 +232,39 @@ pub(crate) struct FetchedGraph {
 /// user accepted) touches disk.
 pub(crate) fn fetch_graph(base: &str, reference: &str) -> Result<FetchedGraph, String> {
     let parsed = parse_ref(reference)?;
-    let source = crate::domain::nodes::review::source_label(&parsed.scope, &parsed.git_ref);
     let fetched = fetch::fetch_document(base, &parsed, "graph")?;
-    let report = crate::daemon::graph_validate::validate_document_str(&fetched.body);
+    assemble_graph(&parsed, reference, &fetched.body, fetched.source_url)
+}
+
+/// Rebuild the fetch result from a draft body the review call already
+/// consumed: the same validation and import-path parsing as [`fetch_graph`],
+/// without touching the network.
+pub(crate) fn graph_from_body(
+    reference: &str,
+    body: &str,
+    source_url: String,
+) -> Result<FetchedGraph, String> {
+    let parsed = parse_ref(reference)?;
+    assemble_graph(&parsed, reference, body, source_url)
+}
+
+/// Validate `body` exactly as `graph_validate` would and parse it for the
+/// import path — the tail [`fetch_graph`] and [`graph_from_body`] share.
+fn assemble_graph(
+    parsed: &GraphRef,
+    reference: &str,
+    body: &str,
+    source_url: String,
+) -> Result<FetchedGraph, String> {
+    let source = parsed.source_label();
+    let report = crate::daemon::graph_validate::validate_document_str(body);
     reject_invalid_report(reference, &report)?;
-    let document = parse_export_document_str(&fetched.body)?;
+    let document = parse_export_document_str(body)?;
     Ok(FetchedGraph {
         document,
-        source_url: fetched.source_url,
+        source_url,
         source,
+        body: body.to_string(),
     })
 }
 
@@ -281,24 +383,39 @@ mod tests {
         )
     }
 
+    fn as_standard(reference: &GraphRef) -> (&Option<(String, String)>, &str, &Option<String>) {
+        let GraphRef::Standard {
+            scope,
+            slug,
+            git_ref,
+        } = reference
+        else {
+            panic!("{reference:?} must parse as a standard ref");
+        };
+        (scope, slug, git_ref)
+    }
+
     #[test]
     fn parse_ref_accepts_official_community_and_versioned_refs() {
         let official = parse_ref("my-graph").unwrap();
-        assert!(official.scope.is_none());
-        assert_eq!(official.slug, "my-graph");
-        assert!(official.git_ref.is_none());
+        assert!(!official.is_draft());
+        let (scope, slug, git_ref) = as_standard(&official);
+        assert!(scope.is_none());
+        assert_eq!(slug, "my-graph");
+        assert!(git_ref.is_none());
 
         let community = parse_ref("acme/widgets/my-graph").unwrap();
-        assert_eq!(
-            community.scope,
-            Some(("acme".to_string(), "widgets".to_string()))
-        );
-        assert_eq!(community.slug, "my-graph");
+        let (scope, slug, _) = as_standard(&community);
+        assert_eq!(*scope, Some(("acme".to_string(), "widgets".to_string())));
+        assert_eq!(slug, "my-graph");
 
         let versioned = parse_ref("acme/widgets/my-graph@v1.2").unwrap();
-        assert_eq!(versioned.git_ref.as_deref(), Some("v1.2"));
+        assert_eq!(as_standard(&versioned).2.as_deref(), Some("v1.2"));
         let versioned_official = parse_ref("my-graph@abc123").unwrap();
-        assert_eq!(versioned_official.git_ref.as_deref(), Some("abc123"));
+        assert_eq!(
+            as_standard(&versioned_official).2.as_deref(),
+            Some("abc123")
+        );
     }
 
     #[test]
@@ -319,6 +436,114 @@ mod tests {
         let required = schema["required"].as_array().expect("required array");
         assert!(required.contains(&json!("ref")), "schema: {schema}");
         assert!(required.contains(&json!("workdir")), "schema: {schema}");
+    }
+
+    /// A valid draft id: 26 lowercase base32 characters.
+    const DRAFT_ID: &str = "abcdefghijklmnopqrstuvwxyz";
+
+    #[test]
+    fn parse_ref_accepts_a_draft_id_for_graphs_and_nodes() {
+        let reference = format!("draft:{DRAFT_ID}");
+        for parsed in [parse_ref(&reference), parse_ref_node(&reference)] {
+            let parsed = parsed.unwrap();
+            assert!(parsed.is_draft());
+            assert_eq!(parsed.draft_id(), Some(DRAFT_ID));
+            assert_eq!(parsed.source_label(), "draft");
+        }
+        assert_eq!(draft_id(&reference).as_deref(), Some(DRAFT_ID));
+        assert_eq!(draft_id("my-graph"), None);
+    }
+
+    #[test]
+    fn parse_ref_refuses_anything_else_after_draft_with_the_accepted_forms() {
+        let long = format!("draft:{DRAFT_ID}7");
+        let suffixed = format!("draft:{DRAFT_ID}@v1");
+        let cases = vec![
+            "draft:",
+            "draft:too-short",
+            long.as_str(),
+            "draft:ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+            "draft:abcdefghijkmnpqrstuvwxyz01",
+            "draft:abcdefghijkmnpqrstuvwxyz-9",
+            suffixed.as_str(),
+            "draft: abcdefghijklmnopqrstuvwxyz",
+        ];
+        for case in cases {
+            for parsed in [parse_ref(case), parse_ref_node(case)] {
+                let error = parsed.expect_err(&format!("{case:?} must be refused"));
+                assert!(error.contains("Accepted forms"), "{case:?}: {error}");
+                assert!(error.contains("draft:<id>"), "{case:?}: {error}");
+            }
+        }
+        let error = parse_ref("My-Graph").expect_err("still refused");
+        assert!(error.contains("draft:<id>"), "{error}");
+    }
+
+    #[test]
+    fn fetch_graph_refuses_a_malformed_draft_id_before_any_request() {
+        let stub = stub_serving(&graph_doc().to_string());
+        let error = fetch_graph(&stub.base_url(), "draft:not-an-id")
+            .expect_err("malformed draft id must fail");
+        assert!(error.contains("draft:<id>"), "{error}");
+        assert!(
+            stub.hits().is_empty(),
+            "a malformed id never reaches the network"
+        );
+    }
+
+    #[test]
+    fn fetch_graph_fetches_a_draft_and_reports_the_draft_source() {
+        let stub = StubCatalogue::start(
+            [(
+                format!("/i/draft/{DRAFT_ID}"),
+                StubRoute::ok(&graph_doc().to_string()),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let fetched = fetch_graph(&stub.base_url(), &format!("draft:{DRAFT_ID}")).unwrap();
+        assert_eq!(fetched.document.name, "shared");
+        assert_eq!(fetched.source, "draft");
+        assert_eq!(
+            fetched.source_url,
+            format!("{}/i/draft/{DRAFT_ID}", stub.base_url())
+        );
+        let hits = stub.hits();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].target, format!("/i/draft/{DRAFT_ID}"));
+    }
+
+    #[test]
+    fn fetch_graph_refuses_a_draft_holding_a_node_document() {
+        let node = json!({
+            "format_version": 1,
+            "name": "auditor",
+            "kind": "agent",
+            "config": {"prompt_template": "audit this"},
+        });
+        let stub = StubCatalogue::start(
+            [(
+                format!("/i/draft/{DRAFT_ID}"),
+                StubRoute::ok(&node.to_string()),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let error = fetch_graph(&stub.base_url(), &format!("draft:{DRAFT_ID}"))
+            .expect_err("node doc must fail");
+        assert!(error.contains("node document"), "{error}");
+        assert!(error.contains("auditor"), "{error}");
+    }
+
+    #[test]
+    fn fetch_graph_reports_a_missing_draft_with_its_lifetime() {
+        let stub = StubCatalogue::start(std::collections::HashMap::new());
+        let error =
+            fetch_graph(&stub.base_url(), &format!("draft:{DRAFT_ID}")).expect_err("404 must fail");
+        assert_eq!(
+            error,
+            "draft not found: drafts last 30 minutes and are deleted by their first install"
+        );
     }
 
     #[test]

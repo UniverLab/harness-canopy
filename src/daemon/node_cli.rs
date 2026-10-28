@@ -25,7 +25,7 @@ pub(crate) enum NodeAction {
     /// ~/.canopy/nodes.
     Install {
         /// Catalogue ref: `<slug>` or `<owner>/<repo>/<slug>`, each with an
-        /// optional `@<ref>` suffix.
+        /// optional `@<ref>` suffix — or `draft:<id>` for an editor draft.
         reference: String,
         /// Overwrite a local preset file whose content differs instead of
         /// refusing the install.
@@ -142,14 +142,25 @@ pub(crate) fn run_install(
     let review = crate::domain::nodes::review::review_node(&fetched.document, &fetched.source);
     print_summary(&review, show_prompts, json);
 
+    let is_draft = crate::daemon::graph_install::draft_id(reference).is_some();
     let ask = crate::daemon::install_confirm::Ask {
         name: review.name.clone(),
         source: review.source.clone(),
         yes,
         tty,
         to_stderr: json,
+        is_draft,
     };
-    ask.confirm(read).map_err(|e| anyhow!(e))?;
+    ask.confirm(read).map_err(|message| {
+        if is_draft {
+            anyhow!(
+                "{message}{}",
+                crate::daemon::install_confirm::draft_consumed_note()
+            )
+        } else {
+            anyhow!(message)
+        }
+    })?;
 
     let presets_written = crate::daemon::node_install::write_node_install(
         &fetched.document,
@@ -163,6 +174,7 @@ pub(crate) fn run_install(
         "kind": fetched.document.kind,
         "ref": reference,
         "source_url": fetched.source_url,
+        "source": fetched.source,
         "presets_written": presets_written,
         "review": review,
     });
@@ -211,10 +223,13 @@ fn install_report_lines(report: &serde_json::Value) -> Vec<String> {
     };
     let name = field("name");
     let kind = field("kind");
-    let mut lines = vec![format!(
-        "Installed node '{name}' ({kind}) from {}.",
-        field("source_url")
-    )];
+    let mut lines = vec![
+        format!(
+            "Installed node '{name}' ({kind}) from {}.",
+            field("source_url")
+        ),
+        format!("source: {}", field("source")),
+    ];
     let presets = report
         .get("presets_written")
         .and_then(serde_json::Value::as_array)
@@ -377,6 +392,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn install_report_names_the_source() {
+        let lines = install_report_lines(&serde_json::json!({
+            "name": "auditor",
+            "kind": "agent",
+            "source_url": "https://graphs.univerlab.org/i/draft/abcdefghijklmnopqrstuvwxyz",
+            "source": "draft",
+            "presets_written": [],
+        }));
+        assert!(
+            lines.iter().any(|line| line == "source: draft"),
+            "{lines:?}"
+        );
+    }
+
     /// RAII guard: points `CANOPY_HOME_OVERRIDE` at `path` for the test
     /// body, restoring the previous value on drop. Safe under `cargo
     /// nextest` (one process per test) but would race under `cargo test`.
@@ -511,6 +541,87 @@ mod tests {
             std::fs::read_to_string(prompts.join("auditor-preset.md")).unwrap(),
             "audit well"
         );
+    }
+
+    /// A valid draft id: 26 lowercase base32 characters.
+    const DRAFT_ID: &str = "abcdefghijklmnopqrstuvwxyz";
+
+    fn draft_reference() -> String {
+        format!("draft:{DRAFT_ID}")
+    }
+
+    /// Refusing a draft says it is gone and names a new link: the review
+    /// fetch already consumed it. Nothing is written.
+    #[test]
+    fn refusing_a_draft_names_a_new_link_and_writes_nothing() {
+        use crate::daemon::graph_install::stub::{StubCatalogue, StubRoute};
+        let stub = StubCatalogue::start(
+            [(
+                format!("/i/draft/{DRAFT_ID}"),
+                StubRoute::ok(&auditor_doc().to_string()),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let (_home, _guard, nodes, prompts) = install_home(&stub.base_url());
+
+        let error = run_install(
+            &draft_reference(),
+            false,
+            false,
+            false,
+            false,
+            false,
+            &mut "".as_bytes(),
+        )
+        .expect_err("non-TTY without --yes must refuse");
+        assert!(error.to_string().contains("gone"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("copy a new link from the editor"),
+            "{error}"
+        );
+        assert_eq!(stub.hits().len(), 1, "the review was fetched first");
+        assert!(
+            !nodes.join("auditor.json").exists(),
+            "a refused install writes no node document"
+        );
+        assert!(
+            !prompts.join("auditor-preset.md").exists(),
+            "a refused install writes no preset"
+        );
+    }
+
+    /// `--yes` installs a draft in its single fetch.
+    #[test]
+    fn yes_installs_a_draft() {
+        use crate::daemon::graph_install::stub::{StubCatalogue, StubRoute};
+        let stub = StubCatalogue::start(
+            [(
+                format!("/i/draft/{DRAFT_ID}"),
+                StubRoute::ok(&auditor_doc().to_string()),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let (_home, _guard, nodes, _prompts) = install_home(&stub.base_url());
+
+        run_install(
+            &draft_reference(),
+            false,
+            true,
+            false,
+            false,
+            false,
+            &mut "".as_bytes(),
+        )
+        .expect("--yes installs a draft");
+        assert!(
+            nodes.join("auditor.json").exists(),
+            "the draft document was written"
+        );
+        assert_eq!(stub.hits().len(), 1, "one fetch installs a draft");
     }
 
     /// A TTY answering `y` installs; answering empty refuses.

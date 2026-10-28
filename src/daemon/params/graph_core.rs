@@ -676,7 +676,8 @@ pub struct GraphImportParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GraphInstallParams {
     /// Catalogue ref: `<slug>` or `<owner>/<repo>/<slug>`, each with an
-    /// optional `@<ref>` suffix selecting a version.
+    /// optional `@<ref>` suffix selecting a version — or `draft:<id>` for
+    /// an editor draft.
     #[serde(rename = "ref")]
     pub reference: String,
     /// Absolute workdir for the new graph.

@@ -109,7 +109,7 @@ impl TaskTriggerHandler {
 
     #[tool(
         name = "graph_install",
-        description = "Install a graph from the catalogue in one command: fetch the published export document for `ref` — `<slug>` for an official graph or `<owner>/<repo>/<slug>` for a community one, each with an optional `@<ref>` version suffix — through `graphs.catalogue_url` (default https://graphs.univerlab.org), so the catalogue counts the install, and validate it exactly as `graph_validate` would (any problem aborts the install). BEFORE ANYTHING IS WRITTEN the call returns {needs_review: true, review: {source, commands, prompts, attention}}: every shell command (check/gate config.command and hook command, labelled by node or hook), every agent instruction (prompt_template, prompt_override, bundled or builtin preset content, hook prompt — first 3 lines with a total line count), and the attention marks for dangerous command shapes (pipe to shell, sudo, rm -rf, chmod 777, git push/--force, sensitive-path write, eval, base64 -d, pipe to python/node). AN AGENT MUST SHOW THIS REVIEW TO ITS USER before calling again with accept: true; without accept nothing is installed, and official documents are reviewed the same as community ones. With accept: true the bundled `prompt_presets` are installed into the prompts dir (a local file with different content aborts the install unless `overwrite_presets` is true), the document is imported exactly as `graph_import` would (always a new graph in `workdir`, a numeric suffix when the name is taken), and the response carries the same review plus the graph id and name, the workdir, the presets written, the agent nodes still needing a platform, and the next command to assign them."
+        description = "Install a graph from the catalogue in one command: fetch the published export document for `ref` — `<slug>` for an official graph or `<owner>/<repo>/<slug>` for a community one, each with an optional `@<ref>` version suffix, or `draft:<id>` for an unreviewed editor draft (26 lowercase base32 characters, served directly, installable once within 30 minutes) — through `graphs.catalogue_url` (default https://graphs.univerlab.org), so the catalogue counts the install, and validate it exactly as `graph_validate` would (any problem aborts the install). BEFORE ANYTHING IS WRITTEN the call returns {needs_review: true, review: {source, commands, prompts, attention}}: every shell command (check/gate config.command and hook command, labelled by node or hook), every agent instruction (prompt_template, prompt_override, bundled or builtin preset content, hook prompt — first 3 lines with a total line count), and the attention marks for dangerous command shapes (pipe to shell, sudo, rm -rf, chmod 777, git push/--force, sensitive-path write, eval, base64 -d, pipe to python/node). AN AGENT MUST SHOW THIS REVIEW TO ITS USER before calling again with accept: true; without accept nothing is installed, and official documents are reviewed the same as community ones. With accept: true the bundled `prompt_presets` are installed into the prompts dir (a local file with different content aborts the install unless `overwrite_presets` is true), the document is imported exactly as `graph_import` would (always a new graph in `workdir`, a numeric suffix when the name is taken), and the response carries the same review plus the graph id and name, the workdir, the presets written, the agent nodes still needing a platform, and the next command to assign them."
     )]
     pub(crate) async fn graph_install(
         &self,
@@ -124,13 +124,26 @@ impl TaskTriggerHandler {
         }
 
         // The fetch is blocking I/O, so it runs off the async runtime. It
-        // writes nothing: the review comes first.
+        // writes nothing: the review comes first. A draft is consumed by
+        // the review fetch, so the accept call reuses the parked body —
+        // with no parked body it re-fetches and the 404 says the draft
+        // is gone.
+        let accepted = params.accept == Some(true);
         let reference = params.reference.clone();
-        let fetched = tokio::task::spawn_blocking(move || {
-            crate::daemon::graph_install::fetch_graph(
+        let cached = if accepted {
+            crate::daemon::graph_install::draft_id(&reference)
+                .and_then(|id| crate::daemon::draft_pending::take(&id))
+        } else {
+            None
+        };
+        let fetched = tokio::task::spawn_blocking(move || match cached {
+            Some((body, source_url)) => {
+                crate::daemon::graph_install::graph_from_body(&reference, &body, source_url)
+            }
+            None => crate::daemon::graph_install::fetch_graph(
                 &crate::daemon::graph_install::catalogue_url(),
                 &reference,
-            )
+            ),
         })
         .await
         .map_err(|error| internal_error(error.to_string()))?;
@@ -140,7 +153,14 @@ impl TaskTriggerHandler {
         };
 
         let review = crate::domain::nodes::review::review_graph(&fetched.document, &fetched.source);
-        if params.accept != Some(true) {
+        if !accepted {
+            if let Some(id) = crate::daemon::graph_install::draft_id(&params.reference) {
+                crate::daemon::draft_pending::store(
+                    &id,
+                    fetched.body.clone(),
+                    fetched.source_url.clone(),
+                );
+            }
             return Ok(build_json_result(&serde_json::json!({
                 "needs_review": true,
                 "review": review,
@@ -174,6 +194,7 @@ impl TaskTriggerHandler {
                 value["workdir"] = serde_json::json!(workdir);
                 value["ref"] = serde_json::json!(params.reference);
                 value["source_url"] = serde_json::json!(fetched.source_url);
+                value["source"] = serde_json::json!(fetched.source);
                 value["presets_written"] = serde_json::json!(presets_written);
                 value["review"] = serde_json::to_value(&review).unwrap_or_default();
                 value["next"] = serde_json::json!(install_next_step(&value));

@@ -13,6 +13,7 @@ pub(crate) mod config_watch;
 pub(crate) mod crew_cli;
 pub(crate) mod daemon_start;
 pub(crate) mod doctor;
+pub(crate) mod draft_pending;
 pub(crate) mod graph_cli;
 pub(crate) mod graph_install;
 pub(crate) mod graph_validate;

@@ -1190,6 +1190,13 @@ version (`my-graph`, `acme/widgets/my-graph`,
 digits, or `-`; owner and repo follow GitHub's naming rules. Anything
 else is refused with the accepted forms in the message.
 
+A draft shared from the editor at `graphs.univerlab.org/editor`
+installs with `canopy graph install draft:<id>` (and a node draft with
+`canopy node install draft:<id>`): a draft lives 30 minutes, installs
+once — the review fetch itself consumes it, so a refused install needs
+a new link from the editor — and carries no review, which the summary
+and the confirmation question both say.
+
 **Review before anything is written.** A shared graph is code: check
 and gate nodes run shell commands with your permissions, hooks run
 commands too, and agent nodes carry prompts that steer an agent able to

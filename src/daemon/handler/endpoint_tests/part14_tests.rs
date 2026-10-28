@@ -502,3 +502,63 @@ async fn install_overwrite_presets_replaces_a_conflicting_file() {
     let graph_id = report["graph_id"].as_str().unwrap();
     assert!(db.get_graph(graph_id).unwrap().is_some(), "graph imported");
 }
+
+/// A draft installs across the two calls with a single fetch: the review
+/// call consumes it and parks the body, the accept call reuses it. The
+/// review and the report both name the source as `draft`.
+#[tokio::test]
+async fn install_draft_reviews_then_installs_with_one_fetch() {
+    const DRAFT_ID: &str = "graphdraftabcdefghijklmnop";
+    let reference = format!("draft:{DRAFT_ID}");
+    let (dir, db, handler) = endpoint_test_handler();
+    let workdir = dir.path().to_string_lossy().to_string();
+    let stub = StubCatalogue::start(
+        [(
+            format!("/i/draft/{DRAFT_ID}"),
+            StubRoute::ok(&install_doc().to_string()),
+        )]
+        .into_iter()
+        .collect(),
+    );
+    let (_home, _guard, _prompts) = install_home(&stub.base_url());
+
+    let pending = install(&handler, &reference, &workdir, None, None, None).await;
+    assert!(!is_err(&pending), "{}", text(&pending));
+    let body: serde_json::Value = serde_json::from_str(&raw_text(&pending)).unwrap();
+    assert_eq!(body["needs_review"], true);
+    assert_eq!(body["review"]["source"], "draft");
+
+    let installed = install_accepted(&handler, &reference, &workdir, None, None).await;
+    assert!(!is_err(&installed), "{}", text(&installed));
+    let report: serde_json::Value = serde_json::from_str(&raw_text(&installed)).unwrap();
+    assert_eq!(report["name"], "shared");
+    assert_eq!(report["source"], "draft");
+    let graph_id = report["graph_id"].as_str().unwrap();
+    assert!(db.get_graph(graph_id).unwrap().is_some(), "graph imported");
+
+    let hits = stub.hits();
+    assert_eq!(hits.len(), 1, "the accept call reuses the parked body");
+    assert_eq!(hits[0].target, format!("/i/draft/{DRAFT_ID}"));
+}
+
+/// Accepting a draft with no parked body re-fetches, and the catalogue's
+/// 404 says the draft is gone.
+#[tokio::test]
+async fn install_draft_accept_without_a_parked_body_reports_it_gone() {
+    const DRAFT_ID: &str = "graphdraftmissingdocabcdef";
+    let reference = format!("draft:{DRAFT_ID}");
+    let (dir, _db, handler) = endpoint_test_handler();
+    let workdir = dir.path().to_string_lossy().to_string();
+    let stub = StubCatalogue::start(std::collections::HashMap::new());
+    let (_home, _guard, _prompts) = install_home(&stub.base_url());
+
+    let installed = install_accepted(&handler, &reference, &workdir, None, None).await;
+    assert!(is_err(&installed), "{}", text(&installed));
+    assert!(
+        text(&installed).contains(
+            "draft not found: drafts last 30 minutes and are deleted by their first install"
+        ),
+        "{}",
+        text(&installed)
+    );
+}

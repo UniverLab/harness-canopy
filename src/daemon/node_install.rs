@@ -24,6 +24,9 @@ pub(crate) struct FetchedNode {
     pub source_url: String,
     /// The source label for the install review.
     pub source: String,
+    /// The raw validated body — a draft review parks it for the accept call,
+    /// since the draft is consumed by the first fetch.
+    pub body: String,
 }
 
 /// Fetch `reference` from the catalogue at `base` and validate it exactly as
@@ -32,15 +35,40 @@ pub(crate) struct FetchedNode {
 /// disk.
 pub(crate) fn fetch_node_document(base: &str, reference: &str) -> Result<FetchedNode, String> {
     let parsed = crate::daemon::graph_install::parse_ref_node(reference)?;
-    let source = crate::domain::nodes::review::source_label(&parsed.scope, &parsed.git_ref);
     let fetched = crate::daemon::graph_install::fetch_document(base, &parsed, "node")?;
-    let report = crate::daemon::graph_validate::validate_document_str(&fetched.body);
+    assemble_node(&parsed, reference, &fetched.body, fetched.source_url)
+}
+
+/// Rebuild the fetch result from a draft body the review call already
+/// consumed: the same validation and import-path parsing as
+/// [`fetch_node_document`], without touching the network.
+pub(crate) fn node_from_body(
+    reference: &str,
+    body: &str,
+    source_url: String,
+) -> Result<FetchedNode, String> {
+    let parsed = crate::daemon::graph_install::parse_ref_node(reference)?;
+    assemble_node(&parsed, reference, body, source_url)
+}
+
+/// Validate `body` exactly as `graph_validate` would and parse it for the
+/// import path — the tail [`fetch_node_document`] and [`node_from_body`]
+/// share.
+fn assemble_node(
+    parsed: &crate::daemon::graph_install::GraphRef,
+    reference: &str,
+    body: &str,
+    source_url: String,
+) -> Result<FetchedNode, String> {
+    let source = parsed.source_label();
+    let report = crate::daemon::graph_validate::validate_document_str(body);
     reject_invalid_report(reference, &report)?;
-    let document = crate::domain::nodes::parse_document(&fetched.body)?;
+    let document = crate::domain::nodes::parse_document(body)?;
     Ok(FetchedNode {
         document,
-        source_url: fetched.source_url,
+        source_url,
         source,
+        body: body.to_string(),
     })
 }
 
@@ -139,6 +167,13 @@ fn install_preset(
 mod tests {
     use super::*;
     use crate::daemon::graph_install::stub::{StubCatalogue, StubRoute};
+
+    /// A valid draft id: 26 lowercase base32 characters.
+    const DRAFT_ID: &str = "abcdefghijklmnopqrstuvwxyz";
+
+    fn draft_reference() -> String {
+        format!("draft:{DRAFT_ID}")
+    }
 
     fn node_doc() -> serde_json::Value {
         serde_json::json!({
@@ -272,6 +307,55 @@ mod tests {
             fetch_node_document(&stub.base_url(), "auditor").expect_err("invalid doc must fail");
         assert!(error.contains("name"), "{error}");
         assert!(error.contains("config"), "{error}");
+    }
+
+    #[test]
+    fn fetch_node_document_fetches_a_draft_and_reports_the_draft_source() {
+        let stub = stub_serving(&format!("/i/draft/{DRAFT_ID}"), &node_doc().to_string());
+        let fetched = fetch_node_document(&stub.base_url(), &draft_reference()).unwrap();
+        assert_eq!(fetched.document.name, "auditor");
+        assert_eq!(fetched.source, "draft");
+        assert_eq!(
+            fetched.source_url,
+            format!("{}/i/draft/{DRAFT_ID}", stub.base_url())
+        );
+        let hits = stub.hits();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].target, format!("/i/draft/{DRAFT_ID}"));
+    }
+
+    #[test]
+    fn fetch_node_document_refuses_a_draft_holding_a_graph_document() {
+        let graph = serde_json::json!({
+            "format_version": 6,
+            "name": "shared",
+            "nodes": [
+                {"name": "start", "kind": "agent", "position": 1,
+                 "config": {"prompt_template": "do it"}},
+                {"name": "finish", "kind": "check", "position": 2,
+                 "config": {"command": "true"}},
+            ],
+            "edges": [
+                {"from_node": "start", "to_node": "finish", "condition": "always"},
+            ],
+            "ensembles": [],
+        });
+        let stub = stub_serving(&format!("/i/draft/{DRAFT_ID}"), &graph.to_string());
+        let error = fetch_node_document(&stub.base_url(), &draft_reference())
+            .expect_err("graph doc must fail");
+        assert!(error.contains("graph document"), "{error}");
+        assert!(error.contains("shared"), "{error}");
+    }
+
+    #[test]
+    fn fetch_node_document_reports_a_missing_draft_with_its_lifetime() {
+        let stub = StubCatalogue::start(std::collections::HashMap::new());
+        let error =
+            fetch_node_document(&stub.base_url(), &draft_reference()).expect_err("404 must fail");
+        assert_eq!(
+            error,
+            "draft not found: drafts last 30 minutes and are deleted by their first install"
+        );
     }
 
     #[test]

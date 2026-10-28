@@ -28,12 +28,30 @@ pub(crate) struct Ask {
     /// Send the question to stderr instead of stdout (so `--json` stdout
     /// stays machine-readable).
     pub to_stderr: bool,
+    /// The document is an unreviewed editor draft: the question says so.
+    pub is_draft: bool,
+}
+
+/// The suffix for a refused draft install: the draft was consumed by the
+/// review fetch itself, so it is gone whatever the answer was — the user
+/// needs a new link from the editor.
+pub(crate) fn draft_consumed_note() -> &'static str {
+    " The draft is gone; copy a new link from the editor."
 }
 
 impl Ask {
-    /// The question this ask would print: `Install <name> from <source>? [y/N]`.
+    /// The question this ask would print: `Install <name> from <source>? [y/N]`,
+    /// with the unreviewed-draft warning appended for a draft.
     pub(crate) fn question(&self) -> String {
-        format!("Install {} from {}? [y/N] ", self.name, self.source)
+        let base = format!("Install {} from {}? [y/N] ", self.name, self.source);
+        if self.is_draft {
+            format!(
+                "{base}{}",
+                crate::domain::nodes::review::UNREVIEWED_DRAFT_LINE
+            )
+        } else {
+            base
+        }
     }
 
     /// `Ok(())` when the install may proceed: `--yes`, or an affirmative
@@ -83,6 +101,7 @@ mod tests {
             yes,
             tty,
             to_stderr: false,
+            is_draft: false,
         }
     }
 
@@ -138,5 +157,32 @@ mod tests {
     fn the_question_names_the_reviewed_document_and_source() {
         let question = ask(false, true).question();
         assert_eq!(question, "Install shared from acme/widgets@v1.2? [y/N] ");
+    }
+
+    #[test]
+    fn a_draft_question_appends_the_unreviewed_line() {
+        let mut draft = ask(false, true);
+        draft.is_draft = true;
+        draft.source = "draft".to_string();
+        let question = draft.question();
+        assert!(
+            question.starts_with("Install shared from draft? [y/N] "),
+            "{question}"
+        );
+        assert!(
+            question.contains("This is an unreviewed draft, not a published document."),
+            "{question}"
+        );
+        assert!(
+            !ask(false, true).question().contains("unreviewed draft"),
+            "published documents carry no draft warning"
+        );
+    }
+
+    #[test]
+    fn the_consumed_note_says_the_draft_is_gone_and_names_a_new_link() {
+        let note = draft_consumed_note();
+        assert!(note.contains("gone"), "{note}");
+        assert!(note.contains("copy a new link from the editor"), "{note}");
     }
 }

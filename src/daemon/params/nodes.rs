@@ -118,7 +118,8 @@ pub struct GraphAddEnsembleParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct NodeInstallParams {
     /// Catalogue ref: `<slug>` or `<owner>/<repo>/<slug>`, each with an
-    /// optional `@<ref>` suffix selecting a version.
+    /// optional `@<ref>` suffix selecting a version — or `draft:<id>` for
+    /// an editor draft.
     #[serde(rename = "ref")]
     pub reference: String,
     /// Overwrite a local preset file whose content differs from the bundled

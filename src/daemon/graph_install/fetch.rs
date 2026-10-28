@@ -24,8 +24,10 @@ pub(crate) struct FetchedDocument {
 /// GET the document for `reference` from the catalogue at `base`:
 /// `<base>/i/<kind>/<slug>` for an official ref,
 /// `<base>/i/<owner>/<repo>/<kind>/<slug>` for a community one, with the
-/// `@<ref>` suffix (if any) as the `ref` query parameter. `kind` is
-/// `"graph"` or `"node"` — the catalogue's two shareable document kinds.
+/// `@<ref>` suffix (if any) as the `ref` query parameter — or
+/// `<base>/i/draft/<id>` for an editor draft, served directly with no
+/// redirect. `kind` is `"graph"` or `"node"` — the catalogue's two
+/// shareable document kinds.
 pub(crate) fn fetch_document(
     base: &str,
     reference: &GraphRef,
@@ -35,33 +37,46 @@ pub(crate) fn fetch_document(
     let attempted = url.to_string();
     let display = reference.display();
     let allow_http = url.scheme() == "http";
-    let client = reqwest::blocking::Client::builder()
+    let builder = reqwest::blocking::Client::builder()
         .user_agent(format!("canopy/{}", env!("CARGO_PKG_VERSION")))
-        .timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
-        .redirect(reqwest::redirect::Policy::custom(
-            move |attempt| match redirect_decision(
-                attempt.previous().len(),
-                attempt.url(),
-                allow_http,
-            ) {
-                RedirectDecision::Follow => attempt.follow(),
-                RedirectDecision::Refuse(message) => attempt.error(message),
-            },
-        ))
-        .build()
-        .map_err(|error| format!("Could not build the catalogue HTTP client: {error}."))?;
+        .timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS));
+    let client = if reference.is_draft() {
+        // A draft is served directly by the catalogue: any redirect is
+        // refused rather than followed.
+        builder.redirect(reqwest::redirect::Policy::none()).build()
+    } else {
+        builder
+            .redirect(reqwest::redirect::Policy::custom(
+                move |attempt| match redirect_decision(
+                    attempt.previous().len(),
+                    attempt.url(),
+                    allow_http,
+                ) {
+                    RedirectDecision::Follow => attempt.follow(),
+                    RedirectDecision::Refuse(message) => attempt.error(message),
+                },
+            ))
+            .build()
+    }
+    .map_err(|error| format!("Could not build the catalogue HTTP client: {error}."))?;
     let mut response = client.get(url).send().map_err(|error| {
         format!("Could not fetch '{display}' from the catalogue (GET {attempted}): {error}.")
     })?;
     let status = response.status();
     if status == reqwest::StatusCode::NOT_FOUND {
+        if reference.is_draft() {
+            return Err(
+                "draft not found: drafts last 30 minutes and are deleted by their first install"
+                    .to_string(),
+            );
+        }
         return Err(format!(
             "Graph '{display}' was not found in the catalogue (GET {attempted} returned 404)."
         ));
     }
     if status == reqwest::StatusCode::GONE {
         return Err(blocked_or_generic(
-            &reference.slug,
+            reference.slug_or_id(),
             &display,
             &attempted,
             status,
@@ -137,16 +152,30 @@ fn generic_status_message(display: &str, attempted: &str, status: reqwest::Statu
 }
 
 /// The catalogue URL for a ref: the install-counting endpoint, not the raw
-/// document host.
+/// document host. A draft is served directly at `/i/draft/<id>`, with no
+/// `ref` query.
 fn request_url(base: &str, reference: &GraphRef, kind: &str) -> Result<reqwest::Url, String> {
     let base = base.trim_end_matches('/');
-    let without_query = match &reference.scope {
-        None => format!("{base}/i/{kind}/{}", reference.slug),
-        Some((owner, repo)) => format!("{base}/i/{owner}/{repo}/{kind}/{}", reference.slug),
+    if let GraphRef::Draft { id } = reference {
+        let url = format!("{base}/i/draft/{id}");
+        return reqwest::Url::parse(&url)
+            .map_err(|error| format!("Invalid catalogue URL '{base}': {error}."));
+    }
+    let GraphRef::Standard {
+        scope,
+        slug,
+        git_ref,
+    } = reference
+    else {
+        unreachable!("draft refs return above");
+    };
+    let without_query = match scope {
+        None => format!("{base}/i/{kind}/{slug}"),
+        Some((owner, repo)) => format!("{base}/i/{owner}/{repo}/{kind}/{slug}"),
     };
     let mut url = reqwest::Url::parse(&without_query)
         .map_err(|error| format!("Invalid catalogue URL '{base}': {error}."))?;
-    if let Some(git_ref) = &reference.git_ref {
+    if let Some(git_ref) = git_ref {
         url.query_pairs_mut().append_pair("ref", git_ref);
     }
     Ok(url)
@@ -267,6 +296,51 @@ mod tests {
             stub.hits().len(),
             4,
             "three redirects followed, then refused"
+        );
+    }
+
+    const DRAFT_ID: &str = "abcdefghijklmnopqrstuvwxyz";
+
+    #[test]
+    fn fetch_draft_requests_the_draft_path_with_canopy_user_agent() {
+        let stub = StubCatalogue::start(routes(vec![(
+            &format!("/i/draft/{DRAFT_ID}"),
+            StubRoute::ok("{\"ok\":true}"),
+        )]));
+        let reference = super::super::parse_ref(&format!("draft:{DRAFT_ID}")).unwrap();
+        let fetched = fetch_document(&stub.base_url(), &reference, "graph").unwrap();
+        assert_eq!(fetched.body, "{\"ok\":true}");
+        assert_eq!(
+            fetched.source_url,
+            format!("{}/i/draft/{DRAFT_ID}", stub.base_url())
+        );
+        let hits = stub.hits();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].target, format!("/i/draft/{DRAFT_ID}"));
+        let agent = hits[0].user_agent.clone().expect("User-Agent is sent");
+        assert!(agent.starts_with("canopy/"), "{agent}");
+    }
+
+    #[test]
+    fn fetch_draft_refuses_any_redirect_without_following_it() {
+        let stub = StubCatalogue::start(routes(vec![
+            (
+                &format!("/i/draft/{DRAFT_ID}"),
+                StubRoute::redirect_to("/doc"),
+            ),
+            ("/doc", StubRoute::ok("{\"ok\":true}")),
+        ]));
+        let reference = super::super::parse_ref(&format!("draft:{DRAFT_ID}")).unwrap();
+        let error = fetch_document(&stub.base_url(), &reference, "graph")
+            .expect_err("a draft redirect must fail");
+        assert!(
+            error.contains("draft:abcdefghijklmnopqrstuvwxyz"),
+            "{error}"
+        );
+        assert_eq!(
+            stub.hits().len(),
+            1,
+            "the redirect target is never requested"
         );
     }
 

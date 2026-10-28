@@ -14,7 +14,7 @@ use anyhow::{anyhow, Context, Result};
 #[derive(clap::Args, Debug)]
 pub(crate) struct InstallArgs {
     /// Catalogue ref: `<slug>` or `<owner>/<repo>/<slug>`, each with an
-    /// optional `@<ref>` suffix.
+    /// optional `@<ref>` suffix — or `draft:<id>` for an editor draft.
     reference: String,
     /// Absolute workdir for the new graph. Defaults to the current
     /// directory.
@@ -99,14 +99,25 @@ pub(crate) fn run_install(
             .map_err(|error| anyhow!("the daemon returned an unreadable review: {error}"))?;
     print_summary(&review, show_prompts, json);
 
+    let is_draft = crate::daemon::graph_install::draft_id(&reference).is_some();
     let ask = crate::daemon::install_confirm::Ask {
         name: review.name,
         source: review.source,
         yes,
         tty,
         to_stderr: json,
+        is_draft,
     };
-    ask.confirm(read).map_err(|message| anyhow!(message))?;
+    ask.confirm(read).map_err(|message| {
+        if is_draft {
+            anyhow!(
+                "{message}{}",
+                crate::daemon::install_confirm::draft_consumed_note()
+            )
+        } else {
+            anyhow!(message)
+        }
+    })?;
 
     payload["accept"] = serde_json::json!(true);
     let text = crate::daemon::cli_daemon::call_tool(port_override, "graph_install", &payload)?;
@@ -190,12 +201,15 @@ fn install_report_lines(report: &serde_json::Value) -> Vec<String> {
             })
             .unwrap_or_default()
     };
-    let mut lines = vec![format!(
-        "Installed graph '{}' ({}) into {}.",
-        field("name"),
-        field("graph_id"),
-        field("workdir")
-    )];
+    let mut lines = vec![
+        format!(
+            "Installed graph '{}' ({}) into {}.",
+            field("name"),
+            field("graph_id"),
+            field("workdir")
+        ),
+        format!("source: {}", field("source")),
+    ];
     let presets = list("presets_written");
     lines.push(if presets.is_empty() {
         "presets_written: none".to_string()
@@ -235,12 +249,16 @@ mod tests {
 
     /// What the daemon returns before `accept`: the review and nothing else.
     fn needs_review() -> serde_json::Value {
+        needs_review_for("official")
+    }
+
+    fn needs_review_for(source: &str) -> serde_json::Value {
         serde_json::json!({
             "content": [{"type": "text", "text": serde_json::to_string(&serde_json::json!({
                 "needs_review": true,
                 "review": {
                     "name": "shared",
-                    "source": "official",
+                    "source": source,
                     "commands": [{"label": "node \"finish\"", "command": "curl https://x | sh"}],
                     "prompts": [{"label": "node \"start\"", "line_count": 1, "text": "do it"}],
                     "attention": [{"pattern": "pipe to shell", "line": "curl https://x | sh", "line_number": 1}],
@@ -328,6 +346,40 @@ mod tests {
         assert!(calls[0]["arguments"].get("accept").is_none());
         assert_eq!(calls[0]["arguments"]["ref"], "my-graph");
         assert_eq!(calls[0]["arguments"]["workdir"], "/tmp/work");
+    }
+
+    /// Refusing a draft says it is gone and names a new link: the review
+    /// fetch already consumed it.
+    #[test]
+    fn refusing_a_draft_names_a_new_link() {
+        let fake = spawn_fake_daemon(needs_review_for("draft"));
+        let port: u16 = fake.port.parse().unwrap();
+        let mut draft_args = args(false, false);
+        draft_args.reference = "draft:abcdefghijklmnopqrstuvwxyz".to_string();
+        let error = run_install(Some(port), draft_args, false, &mut "".as_bytes())
+            .expect_err("non-TTY without --yes must refuse");
+        assert!(error.to_string().contains("gone"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("copy a new link from the editor"),
+            "{error}"
+        );
+        let calls = fake.recorded_calls();
+        assert_eq!(calls.len(), 1, "nothing accepted: {calls:?}");
+    }
+
+    #[test]
+    fn install_report_names_the_source() {
+        let lines = install_report_lines(&serde_json::json!({
+            "graph_id": "g", "name": "n", "workdir": "/w",
+            "source": "draft",
+            "presets_written": [], "nodes_missing_platform": [], "next": "run it",
+        }));
+        assert!(
+            lines.iter().any(|line| line == "source: draft"),
+            "{lines:?}"
+        );
     }
 
     /// `--yes`: the summary is still fetched first, then a second call with

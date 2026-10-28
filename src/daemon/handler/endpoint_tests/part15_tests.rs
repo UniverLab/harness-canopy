@@ -575,3 +575,55 @@ async fn graph_add_ensemble_from_ensemble_proposers() {
     assert!(message.contains("ensemble-proposers"), "{message}");
     assert!(message.contains("platform"), "{message}");
 }
+
+/// A draft installs across the two calls with a single fetch: the review
+/// call consumes it and parks the body, the accept call reuses it. The
+/// review and the report both name the source as `draft`.
+#[tokio::test]
+async fn node_install_draft_reviews_then_installs_with_one_fetch() {
+    const DRAFT_ID: &str = "nodedraftabcdefghijklmnopq";
+    let reference = format!("draft:{DRAFT_ID}");
+    let (_dir, _db, handler) = endpoint_test_handler();
+    let stub = stub_serving(&format!("/i/draft/{DRAFT_ID}"), &auditor_doc().to_string());
+    let (_home, _guard, nodes_dir, prompts_dir) = node_home(&stub.base_url());
+
+    let pending = install_node(&handler, &reference, None, None).await;
+    assert!(!is_err(&pending), "{}", text(&pending));
+    let body: serde_json::Value = serde_json::from_str(&raw_text(&pending)).unwrap();
+    assert_eq!(body["needs_review"], true);
+    assert_eq!(body["review"]["source"], "draft");
+
+    let installed = install_node_accepted(&handler, &reference, None).await;
+    assert!(!is_err(&installed), "{}", text(&installed));
+    let report: serde_json::Value = serde_json::from_str(&raw_text(&installed)).unwrap();
+    assert_eq!(report["name"], "auditor");
+    assert_eq!(report["source"], "draft");
+    assert!(nodes_dir.join("auditor.json").exists());
+    assert!(prompts_dir.join("auditor-preset.md").exists());
+
+    let hits = stub.hits();
+    assert_eq!(hits.len(), 1, "the accept call reuses the parked body");
+    assert_eq!(hits[0].target, format!("/i/draft/{DRAFT_ID}"));
+}
+
+/// Accepting a draft with no parked body re-fetches, and the catalogue's
+/// 404 says the draft is gone.
+#[tokio::test]
+async fn node_install_draft_accept_without_a_parked_body_reports_it_gone() {
+    const DRAFT_ID: &str = "nodedraftmissingdocabcdefg";
+    let reference = format!("draft:{DRAFT_ID}");
+    let (_dir, _db, handler) = endpoint_test_handler();
+    let stub = StubCatalogue::start(std::collections::HashMap::new());
+    let (_home, _guard, nodes_dir, _prompts_dir) = node_home(&stub.base_url());
+
+    let installed = install_node_accepted(&handler, &reference, None).await;
+    assert!(is_err(&installed), "{}", text(&installed));
+    assert!(
+        text(&installed).contains(
+            "draft not found: drafts last 30 minutes and are deleted by their first install"
+        ),
+        "{}",
+        text(&installed)
+    );
+    assert!(!nodes_dir.join("auditor.json").exists());
+}

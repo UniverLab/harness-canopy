@@ -36,6 +36,10 @@ pub struct PromptReview {
     pub text: String,
 }
 
+/// The warning carried by every draft install's summary and confirmation
+/// question: a draft was never published, so it carries no review.
+pub const UNREVIEWED_DRAFT_LINE: &str = "This is an unreviewed draft, not a published document.";
+
 /// Everything a document runs, built from the fetched and validated document
 /// before anything is written — the one review the CLI renders and the MCP
 /// tools return.
@@ -349,6 +353,10 @@ pub fn render(review: &InstallReview, show_prompts: bool) -> String {
             mark.pattern, mark.line_number, mark.line
         ));
     }
+    if review.source == "draft" {
+        out.push_str(UNREVIEWED_DRAFT_LINE);
+        out.push('\n');
+    }
     out
 }
 
@@ -542,6 +550,21 @@ mod tests {
             summary.starts_with("Review 'shared' from official:\ncommands (3):"),
             "{summary}"
         );
+    }
+
+    #[test]
+    fn render_appends_the_unreviewed_line_for_a_draft_source_only() {
+        let mut review = review_graph(&graph_doc(), "draft");
+        let summary = render(&review, false);
+        assert!(summary.contains("Review 'shared' from draft:"), "{summary}");
+        assert!(
+            summary.contains("This is an unreviewed draft, not a published document."),
+            "{summary}"
+        );
+
+        review.source = "official".to_string();
+        let published = render(&review, false);
+        assert!(!published.contains("unreviewed draft"), "{published}");
     }
 
     #[test]
