@@ -155,11 +155,36 @@ async fn ws_refuses_a_missing_workdir() {
 }
 
 #[test]
+fn yolo_flag_composition_is_unconditional() {
+    // No registry needed: the helper pins the append the hub performs.
+    assert_eq!(with_yolo(Some("--tui"), "--yolo"), "--tui --yolo");
+    assert_eq!(with_yolo(None, "--yolo"), "--yolo");
+    assert_eq!(with_yolo(Some(""), "--yolo"), "--yolo");
+    assert_eq!(with_yolo(Some("  --tui  "), "  --yolo  "), "--tui --yolo");
+    assert_eq!(
+        with_yolo(Some("--tui"), "--agent auto-approve"),
+        "--tui --agent auto-approve"
+    );
+}
+
+#[test]
+fn hub_leaves_args_untouched_without_yolo_even_for_unknown_harnesses() {
+    // Pins the `req.yolo.then(...)` guard: without yolo the hub must never
+    // look up the flag (an unknown harness has none, so an unconditional
+    // lookup would panic on the `expect("validated")`).
+    let workdir = tempfile::tempdir().expect("workdir");
+    let mut req = agent_spawn("no-such-harness-xyz", &workdir.path().to_string_lossy());
+    req.interactive_args = Some("--tui".to_string());
+    let (_, args) = build_spawn_command(&req, "sess-plain", "plain-name");
+    assert_eq!(args.as_deref(), Some("--tui"));
+}
+
+#[test]
 fn hub_appends_the_harness_yolo_flag() {
     let Some((cli, flag)) = registry_cli_with_yolo() else {
-        // No registry on this host: at least the composition must hold.
-        assert_eq!(with_yolo(Some("--tui"), "--yolo"), "--tui --yolo");
-        assert_eq!(with_yolo(None, "--yolo"), "--yolo");
+        // No yolo-capable harness on this host: the composition and guard
+        // tests above still pin the behaviour; the registry append needs a
+        // real flag to append.
         return;
     };
     let workdir = tempfile::tempdir().expect("workdir");
@@ -190,6 +215,21 @@ fn hub_appends_the_harness_yolo_flag() {
     assert!(
         argv.ends_with(&expected),
         "the child argv {argv:?} must end with the yolo args {expected:?}"
+    );
+
+    // And on top of the registry's own interactive args when the frame sent
+    // none: the expected string is the same composition the hub performs.
+    let registry_interactive = Cli::new(cli.as_str())
+        .registry_config()
+        .and_then(|config| config.interactive_args);
+    let mut req = agent_spawn(&cli, &workdir.path().to_string_lossy());
+    req.yolo = true;
+    let (_, args) = build_spawn_command(&req, "sess-registry", "registry-name");
+    let expected = with_yolo(registry_interactive.as_deref(), &flag);
+    assert_eq!(
+        args.as_deref(),
+        Some(expected.as_str()),
+        "yolo must append to the registry args when the frame sent none"
     );
 }
 
@@ -224,6 +264,15 @@ fn catalog_yolo_matches_the_registry() {
 }
 
 #[test]
+fn catalog_yolo_absent_reads_as_false() {
+    // Older hosts send no `yolo` key: the row must still parse as false.
+    let row: crate::sessions::catalog::CatalogCli =
+        serde_json::from_value(serde_json::json!({"cli": "c", "label": "c", "models": []}))
+            .expect("a catalog row without yolo parses");
+    assert!(!row.yolo, "a missing catalog yolo reads as false");
+}
+
+#[test]
 fn workdir_tilde_alone_expands_to_the_home_directory() {
     let home = dirs::home_dir().expect("home directory");
     assert_eq!(
@@ -233,6 +282,25 @@ fn workdir_tilde_alone_expands_to_the_home_directory() {
     assert_eq!(
         resolve_spawn_workdir("~/").expect("~/ is the home directory"),
         home.to_string_lossy()
+    );
+}
+
+#[test]
+fn workdir_double_slash_stays_under_the_home_directory() {
+    let home = dirs::home_dir().expect("home directory");
+    assert_eq!(
+        resolve_spawn_workdir("~//").expect("~// is the home directory"),
+        home.to_string_lossy()
+    );
+    let expanded = home.join("canopy-no-such-dir-xyz");
+    let error = resolve_spawn_workdir("~//canopy-no-such-dir-xyz").unwrap_err();
+    assert_eq!(
+        error,
+        format!(
+            "spawn: workdir '{}' does not exist or is not a directory",
+            expanded.display()
+        ),
+        "~//x must expand under the home, not to the root"
     );
 }
 

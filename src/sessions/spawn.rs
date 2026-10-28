@@ -236,7 +236,16 @@ fn expand_home(raw: &str) -> String {
     // `~user` is not expanded (the absolute check refuses it).
     match rest.strip_prefix('/').or(rest.is_empty().then_some("")) {
         Some("") => home.to_string_lossy().into_owned(),
-        Some(tail) => home.join(tail).to_string_lossy().into_owned(),
+        Some(tail) => {
+            // A `~/` prefix with extra slashes (`~//x`) must stay under the
+            // home: `Path::join` discards the base for an absolute tail.
+            let tail = tail.trim_start_matches('/');
+            if tail.is_empty() {
+                home.to_string_lossy().into_owned()
+            } else {
+                home.join(tail).to_string_lossy().into_owned()
+            }
+        }
         None => raw.to_string(),
     }
 }

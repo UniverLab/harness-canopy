@@ -193,8 +193,20 @@ fn spawn_frame_carries_every_field() {
             assert_eq!(ext.id, None);
             assert_eq!(ext.seed_id, None);
             assert_eq!(ext.accent, None);
-            assert!(!ext.yolo, "an absent yolo reads as false");
+            assert!(!ext.yolo, "an explicit yolo:false reads as false");
         }
         other => panic!("spawn frame parsed as {other:?}"),
+    }
+    // A missing or null `yolo` also reads as false (older clients).
+    for text in [
+        r#"{"t": "spawn", "req": "r3", "kind": "agent", "cli": "c", "workdir": "/tmp"}"#,
+        r#"{"t": "spawn", "req": "r4", "kind": "agent", "cli": "c", "workdir": "/tmp", "yolo": null}"#,
+    ] {
+        match parse_client_frame(text).expect("spawn frame parses") {
+            ClientFrame::Spawn { ext, .. } => {
+                assert!(!ext.yolo, "a missing yolo reads as false: {text}");
+            }
+            other => panic!("spawn frame parsed as {other:?}"),
+        }
     }
 }

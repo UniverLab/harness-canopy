@@ -1142,6 +1142,73 @@ async fn bridge_restrictions_hide_and_refuse_terminal_sessions() {
     assert_eq!(first["id"], cat.id);
 }
 
+/// A remote `spawn` runs the same extension checks as the local one: yolo
+/// needs a flagged harness, `workdir` must be absolute and real. A terminal
+/// stays `forbidden` (the kind check runs first), even with yolo set.
+#[tokio::test]
+async fn bridge_spawn_validates_yolo_and_workdir() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db =
+        Arc::new(crate::db::Database::new(&dir.path().join("test.db")).expect("test database"));
+    let hub = SessionHub::with_broadcast_capacity(db, "test-host".to_string(), 256);
+    let state = SessionsState::for_test(hub, "token".to_string());
+    let workdir = tempfile::tempdir().expect("workdir");
+    let workdir = workdir.path().to_string_lossy().to_string();
+
+    let bad = |frame: Value| {
+        let replies = bridge_reply(&state, &frame);
+        assert_eq!(replies.len(), 1, "exactly one refusal, got {replies:?}");
+        let error: Value = serde_json::from_str(&replies[0]).expect("error frame");
+        assert_eq!(error["t"], "error", "must be an error: {error}");
+        error
+    };
+
+    let error = bad(json!({
+        "t": "spawn", "req": "b-yolo", "kind": "agent",
+        "cli": "no-such-harness-xyz", "workdir": workdir, "yolo": true,
+    }));
+    assert_eq!(error["code"], "bad_request");
+    assert_eq!(error["req"], "b-yolo");
+    assert_eq!(
+        error["message"], "spawn: harness 'no-such-harness-xyz' has no yolo mode",
+        "must name the harness: {error}"
+    );
+
+    let error = bad(json!({
+        "t": "spawn", "req": "b-rel", "kind": "agent",
+        "cli": "cat", "workdir": "relative/dir",
+    }));
+    assert_eq!(error["code"], "bad_request");
+    assert_eq!(
+        error["message"], "spawn: field 'workdir' must be an absolute path",
+        "must name the field: {error}"
+    );
+
+    let missing = format!("{workdir}/not-a-directory");
+    let error = bad(json!({
+        "t": "spawn", "req": "b-missing", "kind": "agent",
+        "cli": "cat", "workdir": missing,
+    }));
+    assert_eq!(error["code"], "bad_request");
+    assert_eq!(
+        error["message"],
+        format!("spawn: workdir '{missing}' does not exist or is not a directory"),
+        "must name the path: {error}"
+    );
+
+    // The agent-only gate wins over the yolo check on the remote path.
+    assert_forbidden(
+        &bridge_reply(
+            &state,
+            &json!({
+                "t": "spawn", "req": "b-term", "kind": "terminal",
+                "cli": "sh", "workdir": workdir, "yolo": true,
+            }),
+        ),
+        Some("b-term"),
+    );
+}
+
 /// Terminal files already on the shelf hide their later removal from a new
 /// bridge — including one that lands during the handshake — while host
 /// removals still push.
