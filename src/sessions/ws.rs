@@ -258,7 +258,12 @@ fn handle_client_text(
 
 /// `shelf_list`: one shelf's items (host shelf when `id` is absent), newest
 /// first. The query runs off the executor like every other blocking hub call.
-fn handle_shelf_list(state: &Arc<SessionsState>, out_tx: &OutTx, req: String, id: Option<String>) {
+pub(crate) fn handle_shelf_list(
+    state: &Arc<SessionsState>,
+    out_tx: &OutTx,
+    req: String,
+    id: Option<String>,
+) {
     let shelf = state.shelf.clone();
     let out_tx = out_tx.clone();
     let echo = id.clone();
@@ -278,7 +283,12 @@ fn handle_shelf_list(state: &Arc<SessionsState>, out_tx: &OutTx, req: String, id
 /// `shelf_get`: stream one file back as `file` parts of at most 12 KiB raw.
 /// The id is matched against rows first, so nothing outside the shelf
 /// directory is ever read (FR: `shelf_get` takes a `file_id` only).
-fn handle_shelf_get(state: &Arc<SessionsState>, out_tx: &OutTx, req: String, file_id: String) {
+pub(crate) fn handle_shelf_get(
+    state: &Arc<SessionsState>,
+    out_tx: &OutTx,
+    req: String,
+    file_id: String,
+) {
     let shelf = state.shelf.clone();
     let out_tx = out_tx.clone();
     tokio::spawn(async move {
@@ -315,7 +325,12 @@ fn handle_shelf_get(state: &Arc<SessionsState>, out_tx: &OutTx, req: String, fil
 
 /// `shelf_delete`: remove one file; the store broadcasts `shelf_removed` to
 /// every connection (including the requester) when it did.
-fn handle_shelf_delete(state: &Arc<SessionsState>, out_tx: &OutTx, req: String, file_id: String) {
+pub(crate) fn handle_shelf_delete(
+    state: &Arc<SessionsState>,
+    out_tx: &OutTx,
+    req: String,
+    file_id: String,
+) {
     let shelf = state.shelf.clone();
     let out_tx = out_tx.clone();
     let id_for_error = file_id.clone();

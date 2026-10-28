@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result};
 use p256::ecdsa::SigningKey;
 use p256::elliptic_curve::Generate as _;
-use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey};
+use p256::pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePrivateKey, EncodePublicKey};
 use sha2::{Digest as _, Sha256};
 
 /// Path of the host key inside the canopy data directory.
@@ -32,10 +32,32 @@ pub fn id_from_spki(spki: &[u8]) -> String {
 
 /// A loaded host key plus its cached SPKI DER.
 pub struct HostKey {
-    // Kept for the connection layer added by the next spec.
-    #[allow(dead_code)]
     signing_key: SigningKey,
     spki_der: Vec<u8>,
+}
+
+/// ECDSA P-256 SHA-256 signature in IEEE P1363 form (64 bytes `r‖s`).
+///
+/// [`p256::ecdsa::Signature::to_bytes`] is P1363, never DER, so this is the
+/// only encoding the remote protocol ever sees.
+pub fn sign_p1363(key: &SigningKey, message: &[u8]) -> [u8; 64] {
+    use p256::ecdsa::signature::Signer as _;
+    let signature: p256::ecdsa::Signature = key.sign(message);
+    signature.to_bytes().into()
+}
+
+/// Verify one P-1363 signature against a stored SPKI DER public key.
+/// Malformed keys, wrong-length signatures and valid-but-wrong signatures all
+/// answer `false`; nothing here distinguishes them for the caller.
+pub fn verify_p1363(spki: &[u8], message: &[u8], signature: &[u8]) -> bool {
+    use p256::ecdsa::signature::Verifier as _;
+    let Ok(key) = p256::ecdsa::VerifyingKey::from_public_key_der(spki) else {
+        return false;
+    };
+    let Ok(signature) = p256::ecdsa::Signature::from_slice(signature) else {
+        return false;
+    };
+    key.verify(message, &signature).is_ok()
 }
 
 impl HostKey {
@@ -82,10 +104,15 @@ impl HostKey {
         Self::from_pkcs8_der(der.as_bytes())
     }
 
-    /// The signing key (test-only while no connection signs yet).
-    #[cfg(test)]
+    /// The signing key (tests sign with it directly).
+    #[allow(dead_code)]
     pub fn signing_key(&self) -> &SigningKey {
         &self.signing_key
+    }
+
+    /// Sign one message; see [`sign_p1363`].
+    pub fn sign(&self, message: &[u8]) -> [u8; 64] {
+        sign_p1363(&self.signing_key, message)
     }
 
     /// The public key's SPKI DER (tests derive device ids from it).

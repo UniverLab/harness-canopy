@@ -396,6 +396,16 @@ pub fn out_frame(id: &str, seq: u64, chunk: &[u8]) -> String {
     serde_json::json!({"t": "out", "id": id, "seq": seq, "data": encode_b64(chunk)}).to_string()
 }
 
+/// `snapshot_more{id,data,last}`: one continuation part of a snapshot whose
+/// first part travelled in the `snapshot` frame. Remote peers use it because
+/// a data-channel frame is size-bounded.
+pub fn snapshot_more_frame(id: &str, data: &[u8], last: bool) -> String {
+    serde_json::json!({
+        "t": "snapshot_more", "id": id, "data": encode_b64(data), "last": last,
+    })
+    .to_string()
+}
+
 /// `exited{id,code}`.
 pub fn exited_frame(id: &str, code: i32) -> String {
     serde_json::json!({"t": "exited", "id": id, "code": code}).to_string()

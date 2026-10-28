@@ -27,9 +27,13 @@ use crate::application::ports::StateRepository as _;
 use crate::db::Database;
 use crate::domain::canopy_config::CanopyConfig;
 use crate::remote::auth;
+use crate::remote::connection::{self, Control, DevicePeers, PeerSession};
 use crate::remote::devices::RemoteDevices;
 use crate::remote::hostkey::HostKey;
 use crate::remote::pairing::PairingState;
+use crate::remote::peer;
+use crate::remote::signaling::{self, Refusal, MAX_DEVICE_PEERS};
+use crate::sessions::ws::SessionsState;
 
 /// `daemon_state` key carrying the last terminal relay error.
 pub const REMOTE_ERROR_KEY: &str = "remote_error";
@@ -40,6 +44,10 @@ pub const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
 /// A connected relay socket.
 pub type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+/// Outbound relay bodies: `(to, body)`. One connection's task pushes answers
+/// and trickled candidates here; the socket loop writes them.
+pub type SignalTx = tokio::sync::mpsc::UnboundedSender<(String, Value)>;
 
 /// Headers every host socket carries.
 #[derive(Debug, Clone)]
@@ -161,12 +169,16 @@ impl ConnectionRegistry {
 
 /// Everything one relay connection needs to answer frames.
 pub struct RelayRuntime {
-    host: HostKey,
+    host: Arc<HostKey>,
     pairing: PairingState,
     devices: RemoteDevices,
     connections: ConnectionRegistry,
     github_login: String,
     db: Database,
+    sessions: Option<Arc<SessionsState>>,
+    relay_url: String,
+    bearer: String,
+    peers: DevicePeers,
 }
 
 impl RelayRuntime {
@@ -181,13 +193,104 @@ impl RelayRuntime {
         connections: ConnectionRegistry,
     ) -> Self {
         Self {
-            host,
+            host: Arc::new(host),
             pairing,
             devices: RemoteDevices::new(db.clone()),
             connections,
             github_login,
             db,
+            sessions: None,
+            relay_url: String::new(),
+            bearer: String::new(),
+            peers: DevicePeers::default(),
         }
+    }
+
+    /// Route one body: `pair_init` answers inline, signalling bodies spawn or
+    /// reach a live peer, anything else is `unknown_type`.
+    pub fn route(&self, body: &Value, now: i64, from: &str, signal: &SignalTx) -> Option<Value> {
+        match body.get("t").and_then(Value::as_str) {
+            Some("pair_init") => Some(self.answer(body, now)),
+            Some("offer") => {
+                self.start_offer(body, now, from, signal);
+                None
+            }
+            Some("ice") => {
+                let device_id = body.get("device_id").and_then(Value::as_str);
+                if let (Some(id), Some(candidate)) = (device_id, signaling::ice_candidate(body)) {
+                    self.peers.route(id, Control::Ice(candidate.to_string()));
+                }
+                None
+            }
+            Some("bye") => {
+                if let Some(id) = body.get("device_id").and_then(Value::as_str) {
+                    self.peers.close(id);
+                    self.connections.close(id);
+                }
+                None
+            }
+            _ => Some(json!({"t": "error", "reason": "unknown_type"})),
+        }
+    }
+
+    /// Verify an offer, refuse it, or build the answer off the socket loop.
+    fn start_offer(&self, body: &Value, now: i64, from: &str, signal: &SignalTx) {
+        let host_id = self.host.host_id();
+        let offer = match signaling::verify_offer(&self.devices, &host_id, body, now) {
+            Ok(offer) => offer,
+            Err(refusal) => {
+                let _ = signal.send((from.to_string(), signaling::connect_fail(refusal)));
+                return;
+            }
+        };
+        let Some(sessions) = self.sessions.clone() else {
+            let _ = signal.send((from.to_string(), signaling::connect_fail(Refusal::Busy)));
+            return;
+        };
+        if self.peers.len() >= MAX_DEVICE_PEERS {
+            let _ = signal.send((from.to_string(), signaling::connect_fail(Refusal::Busy)));
+            return;
+        }
+        let device_id = offer.device.id.clone();
+        let token = self.connections.register(&device_id);
+        let (control_tx, control_rx) = tokio::sync::mpsc::unbounded_channel();
+        if !self.peers.register(&device_id, token.clone(), control_tx) {
+            let _ = signal.send((from.to_string(), signaling::connect_fail(Refusal::Busy)));
+            return;
+        }
+        let host = Arc::clone(&self.host);
+        let devices = self.devices.clone();
+        let peers = self.peers.clone();
+        let connections = self.connections.clone();
+        let relay_url = self.relay_url.clone();
+        let bearer = self.bearer.clone();
+        let signal = signal.clone();
+        let from = from.to_string();
+        tokio::spawn(async move {
+            let servers = peer::fetch_ice_servers(&relay_url, &bearer)
+                .await
+                .unwrap_or_default();
+            let answered = peer::Peer::answer_offer(servers, &offer.sdp).await;
+            let Ok((sdp, peer)) = answered else {
+                peers.remove(&device_id);
+                let _ = signal.send((from, signaling::connect_fail(Refusal::BadSignature)));
+                return;
+            };
+            let answer = signaling::answer_body(&host, &device_id, &offer.sig_b64, &sdp);
+            let _ = signal.send((from.clone(), answer));
+            let _ = devices.touch(&device_id);
+            connection::spawn(PeerSession {
+                peer,
+                device_id,
+                state: sessions,
+                peers,
+                connections,
+                token,
+                control: control_rx,
+                signal,
+                from,
+            });
+        });
     }
 
     /// One protocol reply for one relay body.
@@ -206,6 +309,7 @@ impl RelayRuntime {
     pub fn revoke(&self, device_id: &str) -> Result<bool> {
         let removed = self.devices.revoke(device_id)?;
         self.connections.close(device_id);
+        self.peers.close(device_id);
         Ok(removed)
     }
 
@@ -253,13 +357,19 @@ pub async fn serve_socket(
     data_dir: std::path::PathBuf,
 ) -> Result<()> {
     use futures::StreamExt as _;
+    let (signal_tx, mut signal_rx) = tokio::sync::mpsc::unbounded_channel::<(String, Value)>();
     let mut ticks = tokio::time::interval(Duration::from_secs(1));
     loop {
         tokio::select! {
             message = socket.next() => {
                 let Some(message) = message else { return Ok(()) };
                 let message = message.context("relay socket read failed")?;
-                if !handle_message(&mut socket, &message, &runtime).await? {
+                if !handle_message(&mut socket, &message, &runtime, &signal_tx).await? {
+                    return Ok(());
+                }
+            }
+            Some((to, body)) = signal_rx.recv() => {
+                if !send_body(&mut socket, &to, &body).await? {
                     return Ok(());
                 }
             }
@@ -283,9 +393,10 @@ async fn handle_message(
     socket: &mut WsStream,
     message: &Message,
     runtime: &Arc<RelayRuntime>,
+    signal: &SignalTx,
 ) -> Result<bool> {
     match message {
-        Message::Text(text) => answer_text(socket, text.as_str(), runtime).await,
+        Message::Text(text) => answer_text(socket, text.as_str(), runtime, signal).await,
         Message::Ping(payload) => {
             socket.send(Message::Pong(payload.clone())).await?;
             Ok(true)
@@ -299,6 +410,7 @@ async fn answer_text(
     socket: &mut WsStream,
     text: &str,
     runtime: &Arc<RelayRuntime>,
+    signal: &SignalTx,
 ) -> Result<bool> {
     let Ok(envelope) = serde_json::from_str::<Value>(text) else {
         return Ok(true);
@@ -309,12 +421,21 @@ async fn answer_text(
     ) else {
         return Ok(true);
     };
-    let reply = runtime.answer(body, chrono::Utc::now().timestamp());
-    let outbound = json!({"to": from, "body": reply});
-    socket
-        .send(Message::Text(outbound.to_string().into()))
-        .await?;
+    if let Some(reply) = runtime.route(body, chrono::Utc::now().timestamp(), from, signal) {
+        if !send_body(socket, from, &reply).await? {
+            return Ok(false);
+        }
+    }
     Ok(true)
+}
+
+/// Write one `{to, body}` envelope; `false` when the socket is gone.
+async fn send_body(socket: &mut WsStream, to: &str, body: &Value) -> Result<bool> {
+    let outbound = json!({"to": to, "body": body});
+    Ok(socket
+        .send(Message::Text(outbound.to_string().into()))
+        .await
+        .is_ok())
 }
 
 /// Record the terminal 401 message and stop retrying that token.
@@ -342,8 +463,8 @@ pub fn queue_revocation(db: &Database, device_id: &str) {
 /// Spawn the relay supervisor for the life of the daemon. It re-reads
 /// config and identity on every iteration, so `canopy remote on|off` takes
 /// effect without a restart.
-pub fn spawn(data_dir: std::path::PathBuf, db: Database) {
-    tokio::spawn(async move { supervise(data_dir, db).await });
+pub fn spawn(data_dir: std::path::PathBuf, db: Database, sessions: Arc<SessionsState>) {
+    tokio::spawn(async move { supervise(data_dir, db, sessions).await });
 }
 
 /// What keeps the relay from connecting this second.
@@ -382,6 +503,8 @@ fn next_action(
     db: &Database,
     rejected_token: Option<&str>,
     connections: &ConnectionRegistry,
+    sessions: &Arc<SessionsState>,
+    peers: &DevicePeers,
 ) -> Next {
     let Some(identity) = auth::load_identity(data_dir) else {
         return Next::Wait(Wait::SignedOut);
@@ -402,13 +525,19 @@ fn next_action(
         host_id: host.host_id(),
         label: host_label(&config),
     };
-    let runtime = Arc::new(RelayRuntime::new(
+    let mut runtime = RelayRuntime::new(
         host,
         db.clone(),
         identity.login.clone(),
         PairingState::new(data_dir),
         connections.clone(),
-    ));
+    );
+    runtime.github_login = identity.login.clone();
+    runtime.sessions = Some(Arc::clone(sessions));
+    runtime.relay_url = config.remote.relay_url.clone();
+    runtime.bearer = identity.token.clone();
+    runtime.peers = peers.clone();
+    let runtime = Arc::new(runtime);
     Next::Connect {
         ws_url: websocket_url(&config.remote.relay_url),
         headers,
@@ -468,12 +597,20 @@ fn apply_wait(wait: &Wait, rejected_token: &mut Option<String>, attempt: &mut u3
 /// iteration, so `canopy remote on|off` takes effect without a restart;
 /// the live-connection registry outlives any one socket, so a revoke
 /// still closes connections that were registered before a reconnect.
-pub async fn supervise(data_dir: std::path::PathBuf, db: Database) {
+pub async fn supervise(data_dir: std::path::PathBuf, db: Database, sessions: Arc<SessionsState>) {
     let mut attempt = 0u32;
     let mut rejected_token: Option<String> = None;
     let connections = ConnectionRegistry::default();
+    let peers = DevicePeers::default();
     loop {
-        match next_action(&data_dir, &db, rejected_token.as_deref(), &connections) {
+        match next_action(
+            &data_dir,
+            &db,
+            rejected_token.as_deref(),
+            &connections,
+            &sessions,
+            &peers,
+        ) {
             Next::Wait(wait) => {
                 apply_wait(&wait, &mut rejected_token, &mut attempt);
                 tokio::time::sleep(Duration::from_secs(1)).await;

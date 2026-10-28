@@ -59,7 +59,6 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
     // effect without a restart (D4).
     crate::domain::settings::set_running_snapshot(canopy_config.clone());
     crate::daemon::config_watch::spawn(data_dir.clone(), Arc::clone(&db));
-    crate::remote::relay::spawn(data_dir.clone(), Database::clone(&db));
     let dynamic_skills = Arc::new(crate::dynamic_skills::SkillStore::from_config(
         &data_dir,
         &canopy_config.skills,
@@ -108,6 +107,13 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
     // sessions before the first client can connect, and the scheduler gets
     // the hub to deliver scheduled sends through.
     let sessions_state = crate::sessions::ws::SessionsState::ensure(&data_dir, Arc::clone(&db))?;
+    // The relay answers offers by bridging into the hub, so the hub exists
+    // first.
+    crate::remote::relay::spawn(
+        data_dir.clone(),
+        Database::clone(&db),
+        Arc::clone(&sessions_state),
+    );
     crate::sessions::resume::reconcile_at_startup(&sessions_state.hub, &data_dir);
 
     let background = start_background_tasks(

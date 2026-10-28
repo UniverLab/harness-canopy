@@ -94,6 +94,7 @@ impl Database {
     }
 
     /// Whether a device id is still paired.
+    #[allow(dead_code)]
     pub fn is_remote_device_paired(&self, id: &str) -> Result<bool> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         let found: Option<i64> = conn
@@ -102,6 +103,30 @@ impl Database {
             })
             .optional()?;
         Ok(found.is_some())
+    }
+
+    /// One paired device by id, with the public key its signatures verify
+    /// against.
+    pub fn get_remote_device(&self, id: &str) -> Result<Option<RemoteDevice>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let device = conn
+            .query_row(
+                "SELECT id, spki, label, github_login, paired_at, last_seen
+                 FROM remote_devices WHERE id = ?1",
+                [id],
+                |row| {
+                    Ok(RemoteDevice {
+                        id: row.get(0)?,
+                        spki: row.get(1)?,
+                        label: row.get(2)?,
+                        github_login: row.get(3)?,
+                        paired_at: row.get(4)?,
+                        last_seen: row.get(5)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(device)
     }
 
     /// Record the last time a paired device was seen.

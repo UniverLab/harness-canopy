@@ -165,6 +165,7 @@ hmac = "0.13"
 pbkdf2 = "0.13"
 subtle = "2.6"
 qrcode = { version = "0.14", default-features = false }
+webrtc = "0.21.1"
 
 # Unix process management (kill, setsid)
 [target.'cfg(unix)'.dependencies]

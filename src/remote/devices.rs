@@ -67,15 +67,18 @@ impl RemoteDevices {
         self.db.list_remote_devices()
     }
 
-    /// Whether this device id is currently paired. The next spec's live
-    /// connections all gate on this one function.
+    /// Whether this device id is currently paired.
     #[allow(dead_code)]
     pub fn is_paired(&self, id: &str) -> Result<bool> {
         self.db.is_remote_device_paired(id)
     }
 
-    /// Mark a device as seen now (next spec's live connections).
-    #[allow(dead_code)]
+    /// One paired device, or `None` when it was revoked.
+    pub fn get(&self, id: &str) -> Result<Option<RemoteDevice>> {
+        self.db.get_remote_device(id)
+    }
+
+    /// Mark a device as seen now (live connections).
     pub fn touch(&self, id: &str) -> Result<()> {
         self.db.touch_remote_device(id, &now_rfc3339())
     }

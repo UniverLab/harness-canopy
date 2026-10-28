@@ -26,6 +26,11 @@ fn test_db() -> Database {
     db
 }
 
+fn test_sessions(db: &Database) -> Arc<crate::sessions::ws::SessionsState> {
+    let hub = crate::sessions::SessionHub::new(Arc::new(db.clone()), "test-host".to_string());
+    crate::sessions::ws::SessionsState::for_test(hub, "test-token".to_string())
+}
+
 fn headers() -> HostHeaders {
     HostHeaders {
         token: "gho_test_token".to_string(),
@@ -171,7 +176,11 @@ async fn http_401_stops_without_reconnecting() {
         },
     )
     .expect("identity");
-    let running = tokio::spawn(supervise(dir.path().to_path_buf(), db.clone()));
+    let running = tokio::spawn(supervise(
+        dir.path().to_path_buf(),
+        db.clone(),
+        test_sessions(&db),
+    ));
     // Longer than the slowest first backoff (1200 ms): a 401 misclassified
     // as transient would have retried by now.
     tokio::time::sleep(Duration::from_millis(2500)).await;
@@ -395,4 +404,71 @@ async fn connect_ws_classifies_401_separately_from_transient_failures() {
         .await
         .expect_err("the port is closed");
     assert!(matches!(refused, ConnectError::Transient(_)));
+}
+
+/// One offer body signed by `key` over the vector SDP, fresh at `ts`.
+fn signed_offer(key: &HostKey, host_id: &str, ts: i64) -> Value {
+    let sdp = "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\n";
+    let message = crate::remote::signaling::offer_message(host_id, ts, sdp);
+    let sig = base64::engine::general_purpose::STANDARD.encode(key.sign(message.as_bytes()));
+    json!({
+        "t": "offer", "device_id": device_id(key.spki_der()),
+        "ts": ts, "sdp": sdp, "sig": sig,
+    })
+}
+
+#[tokio::test]
+async fn the_fifth_concurrent_offer_is_answered_busy() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = test_db();
+    let host = HostKey::load_or_create(dir.path()).expect("host key");
+    let host_id = host.host_id();
+    let devices = crate::remote::devices::RemoteDevices::new(db.clone());
+    for scalar in 0x22u8..=0x26 {
+        devices
+            .pair(
+                HostKey::from_scalar_bytes(&[scalar; 32])
+                    .expect("device key")
+                    .spki_der()
+                    .to_vec(),
+                "browser",
+                "octocat",
+                "2026-01-01T00:00:00Z",
+            )
+            .expect("pair a device");
+    }
+    let mut runtime = RelayRuntime::new(
+        host,
+        db.clone(),
+        "octocat".to_string(),
+        crate::remote::pairing::PairingState::new(dir.path()),
+        ConnectionRegistry::default(),
+    );
+    runtime.sessions = Some(test_sessions(&db));
+    let (signal, mut inbox) = tokio::sync::mpsc::unbounded_channel();
+    let ts = chrono::Utc::now().timestamp();
+
+    // Four verified offers register four peers; no await between them, so the
+    // spawned answer builds cannot finish first.
+    for index in 0..MAX_DEVICE_PEERS {
+        let key = HostKey::from_scalar_bytes(&[0x22u8 + index as u8; 32]).expect("device key");
+        let body = signed_offer(&key, &host_id, ts);
+        assert_eq!(
+            runtime.route(&body, ts, &format!("d:{index}"), &signal),
+            None
+        );
+    }
+    assert_eq!(runtime.peers.len(), MAX_DEVICE_PEERS);
+
+    // The fifth verified offer is refused `busy` before its peer is built.
+    let fifth = HostKey::from_scalar_bytes(&[0x26; 32]).expect("fifth device key");
+    assert_eq!(
+        runtime.route(&signed_offer(&fifth, &host_id, ts), ts, "d:5", &signal),
+        None
+    );
+    let (to, refusal) = inbox
+        .try_recv()
+        .expect("the fifth offer is refused at once");
+    assert_eq!(to, "d:5");
+    assert_eq!(refusal, json!({"t": "connect_fail", "reason": "busy"}));
 }

@@ -6,9 +6,13 @@
 //! revoke` surface plus the daemon's relay client.
 
 pub mod auth;
+pub mod bridge;
 pub mod cli;
+pub mod connection;
 pub mod devices;
 pub mod hostkey;
 pub mod pairing;
+pub mod peer;
 pub mod qr;
 pub mod relay;
+pub mod signaling;
