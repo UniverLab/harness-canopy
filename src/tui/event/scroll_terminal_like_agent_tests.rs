@@ -5,7 +5,7 @@ use ratatui::style::Color;
 fn spawn_cat_agent() -> InteractiveAgent {
     InteractiveAgent::spawn(
         Cli::new("cat"),
-        ".",
+        env!("CARGO_MANIFEST_DIR"),
         80,
         24,
         None,

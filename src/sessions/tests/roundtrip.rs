@@ -174,6 +174,7 @@ fn agent_spawn_preserves_dialog_launch_fields() {
         id: Some("sess-resume-1".to_string()),
         seed_id: Some("seed-1".to_string()),
         accent: Some("1,2,3".to_string()),
+        yolo: false,
     };
     let (session, _guard) = KillGuard::spawn(&hub, &req);
     assert_eq!(session.id, "sess-resume-1");

@@ -11,6 +11,7 @@ pub mod client;
 pub mod history;
 pub mod host_frame;
 pub mod hub;
+pub mod hub_command;
 pub mod hub_event;
 pub mod hub_shelf;
 pub mod protocol;
@@ -26,8 +27,8 @@ pub use hub::{
 };
 pub use spawn::{
     agent_args_string, build_agent_cmd, build_terminal_cmd, format_accent_rgb, parse_accent_rgb,
-    preserve_rows_on_shrink, spawn_identity, write_submitted_prompt, AgentSpawnSpec,
-    TerminalSpawnSpec, VT_SCROLLBACK_LINES,
+    preserve_rows_on_shrink, resolve_spawn_workdir, spawn_identity, with_yolo,
+    write_submitted_prompt, yolo_flag_for, AgentSpawnSpec, TerminalSpawnSpec, VT_SCROLLBACK_LINES,
 };
 
 #[cfg(test)]

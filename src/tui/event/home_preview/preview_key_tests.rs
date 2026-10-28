@@ -359,7 +359,7 @@ fn app_on_two_graphs() -> App {
 fn spawn_cat_agent(name: &str) -> crate::tui::agent::InteractiveAgent {
     crate::tui::agent::InteractiveAgent::spawn(
         Cli::new("cat"),
-        ".",
+        env!("CARGO_MANIFEST_DIR"),
         80,
         24,
         None,

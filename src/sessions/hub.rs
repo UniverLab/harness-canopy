@@ -33,11 +33,7 @@ fn send_sighup_to_group(child: &mut dyn portable_pty::Child) {
 }
 
 use super::protocol::SessionItem;
-use super::{
-    agent_args_string, build_agent_cmd, build_terminal_cmd, parse_accent_rgb,
-    preserve_rows_on_shrink, spawn_identity, write_submitted_prompt, AgentSpawnSpec,
-    TerminalSpawnSpec, VT_SCROLLBACK_LINES,
-};
+use super::{preserve_rows_on_shrink, spawn_identity, write_submitted_prompt, VT_SCROLLBACK_LINES};
 
 /// Divider written after replayed scrollback, shared with the TUI so a
 /// restored terminal reads the same whoever replays it.
@@ -174,6 +170,10 @@ pub struct SpawnRequest {
     pub seed_id: Option<String>,
     /// Canopy accent as `"r,g,b"`.
     pub accent: Option<String>,
+    /// Skip the harness's approval prompts: append its registry `yolo_flag`
+    /// to the interactive args. Handlers refuse `yolo` for a terminal or a
+    /// harness with no flag before the hub ever sees it.
+    pub yolo: bool,
 }
 
 impl HubSession {
@@ -524,7 +524,7 @@ impl SessionHub {
             }
         };
 
-        let (cmd, args) = self.build_spawn_command(req, &id, &name);
+        let (cmd, args) = super::hub_command::build_spawn_command(req, &id, &name);
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
             rows: DEFAULT_ROWS,
@@ -585,66 +585,6 @@ impl SessionHub {
             }
         }
         Ok(session)
-    }
-
-    /// Build the spawn command and the args string recorded in the DB row.
-    /// Explicit launch fields from the New dialog win; when absent the hub
-    /// falls back to the registry, so older clients keep working.
-    fn build_spawn_command(
-        &self,
-        req: &SpawnRequest,
-        id: &str,
-        name: &str,
-    ) -> (portable_pty::CommandBuilder, Option<String>) {
-        match req.kind {
-            SessionKind::Agent => {
-                let cli = Cli::new(req.cli.as_str());
-                let command = cli.command_name();
-                let registry = cli.registry_config();
-                let interactive_args = req.interactive_args.as_deref().or_else(|| {
-                    registry
-                        .as_ref()
-                        .and_then(|c| c.interactive_args.as_deref())
-                });
-                let fallback_args = req.fallback_args.as_deref().or_else(|| {
-                    registry
-                        .as_ref()
-                        .and_then(|c| c.fallback_interactive_args.as_deref())
-                });
-                let model_flag = req
-                    .model_flag
-                    .as_deref()
-                    .or_else(|| registry.as_ref().and_then(|c| c.model_flag.as_deref()));
-                let args = agent_args_string(
-                    interactive_args,
-                    fallback_args,
-                    req.model.as_deref(),
-                    model_flag,
-                );
-                let cmd = build_agent_cmd(&AgentSpawnSpec {
-                    command: &command,
-                    working_dir: &req.workdir,
-                    interactive_args,
-                    fallback_args,
-                    model: req.model.as_deref(),
-                    model_flag,
-                    accent_rgb: parse_accent_rgb(req.accent.as_deref()),
-                    id,
-                    name,
-                    seed_id: req.seed_id.as_deref(),
-                });
-                (cmd, args)
-            }
-            SessionKind::Terminal => {
-                let cmd = build_terminal_cmd(&TerminalSpawnSpec {
-                    shell: &req.cli,
-                    working_dir: &req.workdir,
-                    id,
-                    name,
-                });
-                (cmd, None)
-            }
-        }
     }
 
     /// Write the `interactive_sessions` / `terminal_sessions` row the TUI

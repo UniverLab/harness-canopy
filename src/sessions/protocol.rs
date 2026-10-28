@@ -142,6 +142,10 @@ pub struct SpawnExt {
     pub id: Option<String>,
     pub seed_id: Option<String>,
     pub accent: Option<String>,
+    /// Skip the harness's approval prompts: the hub appends the registry's
+    /// `yolo_flag` to the interactive args. Only for `kind:"agent"`, and only
+    /// for a harness that defines one.
+    pub yolo: bool,
 }
 
 /// A rejected client frame: the request id to echo (when the frame carried
@@ -265,6 +269,7 @@ fn parse_spawn_frame(value: &Value, frame: &str) -> Result<ClientFrame, FrameErr
     let id = opt_str_field(value, frame, "id")?;
     let seed_id = opt_str_field(value, frame, "seed_id")?;
     let accent = opt_str_field(value, frame, "accent")?;
+    let yolo = opt_bool_field(value, frame, "yolo")?;
     Ok(ClientFrame::Spawn {
         req,
         kind,
@@ -280,6 +285,7 @@ fn parse_spawn_frame(value: &Value, frame: &str) -> Result<ClientFrame, FrameErr
             id,
             seed_id,
             accent,
+            yolo,
         }),
     })
 }
@@ -313,6 +319,18 @@ fn opt_str_field(value: &Value, frame: &str, field: &str) -> Result<Option<Strin
         Some(_) => Err(bad_request(
             None,
             format!("{frame}: field '{field}' must be a string"),
+        )),
+    }
+}
+
+/// An optional boolean field: absent or `null` reads as `false`.
+fn opt_bool_field(value: &Value, frame: &str, field: &str) -> Result<bool, FrameError> {
+    match value.get(field) {
+        Some(Value::Bool(flag)) => Ok(*flag),
+        Some(Value::Null) | None => Ok(false),
+        Some(_) => Err(bad_request(
+            None,
+            format!("{frame}: field '{field}' must be a boolean"),
         )),
     }
 }
@@ -504,12 +522,16 @@ pub fn resize_frame(id: &str, cols: u16, rows: u16) -> String {
     serde_json::json!({"t": "resize", "id": id, "cols": cols, "rows": rows}).to_string()
 }
 
-/// `spawn{req,kind,cli,model?,workdir,name?,prompt?,interactive_args?,fallback_args?,model_flag?,id?,seed_id?,accent?}`:
+/// `spawn{req,kind,cli,model?,workdir,name?,prompt?,interactive_args?,fallback_args?,model_flag?,id?,seed_id?,accent?,yolo?}`:
 /// spawn a hub session. The agent launch fields mirror what the TUI passes to
 /// `InteractiveAgent::spawn` today: explicit args (resume/yolo included),
-/// the resume identity, the seed and the accent (`"r,g,b"`). `None` values
-/// serialize as `null`, which the hub reads as absent and falls back to the
-/// registry for.
+/// the resume identity, the seed and the accent (`"r,g,b"`). `yolo` (default
+/// `false`) asks the hub to append the harness's registry `yolo_flag` to the
+/// interactive args; it is refused for `kind:"terminal"` and for a harness
+/// with no such flag. `workdir` may start with `~/` (or be `~` alone) to mean
+/// the host user's home, must be absolute after that expansion, and must name
+/// an existing directory. `None` values serialize as `null`, which the hub
+/// reads as absent and falls back to the registry for.
 pub fn spawn_frame(
     req: &str,
     kind: &str,
@@ -551,6 +573,7 @@ pub fn spawn_frame_full(args: &SpawnFrameArgs<'_>) -> String {
         "model": args.model, "workdir": args.workdir, "name": args.name, "prompt": args.prompt,
         "interactive_args": ext.interactive_args, "fallback_args": ext.fallback_args,
         "model_flag": ext.model_flag, "id": ext.id, "seed_id": ext.seed_id, "accent": ext.accent,
+        "yolo": ext.yolo,
     })
     .to_string()
 }

@@ -26,12 +26,15 @@ use super::ws::{no_such_session, OutTx, SessionsState};
 use super::{HubSession, SessionStatus};
 
 /// One CLI row of the wire catalog: the stored slug, the New dialog's
-/// display label, and the model ids the New dialog would suggest for it.
+/// display label, the model ids the New dialog would suggest for it, and
+/// whether the harness has a yolo mode (`yolo_flag` in the registry).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CatalogCli {
     pub cli: String,
     pub label: String,
     pub models: Vec<String>,
+    #[serde(default)]
+    pub yolo: bool,
 }
 
 /// One project row of the wire catalog.
@@ -120,6 +123,9 @@ fn load_cli_entries(model_catalog: Option<&ModelCatalog>) -> Vec<CatalogCli> {
                 cli: cli.as_str().to_string(),
                 label: cli_label(cli.as_str(), config.as_ref()),
                 models,
+                yolo: config
+                    .as_ref()
+                    .is_some_and(|config| config.yolo_flag.is_some()),
             }
         })
         .collect()
@@ -131,6 +137,8 @@ pub fn composed_frame(req: &str, text: &str) -> String {
 }
 
 /// `catalog{req,clis,projects,presets,skills}`: the answer to `catalog`.
+/// Each `clis` row carries `yolo`, true exactly when that harness's registry
+/// entry defines a `yolo_flag` — the switch the New dialog offers.
 pub fn catalog_frame(req: &str, data: &CatalogData) -> String {
     serde_json::json!({
         "t": "catalog", "req": req, "clis": data.clis,

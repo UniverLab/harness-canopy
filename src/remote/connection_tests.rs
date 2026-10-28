@@ -149,6 +149,7 @@ fn spawn_session(
         id: None,
         seed_id: None,
         accent: None,
+        yolo: false,
     };
     let session = hub.spawn(&request).expect("test spawn");
     let guard = KillGuard {

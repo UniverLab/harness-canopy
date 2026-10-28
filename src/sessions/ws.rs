@@ -32,7 +32,8 @@ use super::protocol::{
 };
 use super::shelf::{ShelfStore, READ_CHUNK_BYTES};
 use super::{
-    HubEvent, HubSession, OutputReceiver, SessionHub, SessionKind, SessionStatus, SpawnRequest,
+    resolve_spawn_workdir, yolo_flag_for, HubEvent, HubSession, OutputReceiver, SessionHub,
+    SessionKind, SessionStatus, SpawnRequest,
 };
 
 /// Shared state for the sessions endpoint: the hub, the shelf it broadcasts
@@ -238,6 +239,7 @@ fn handle_client_text(
                     id: ext.id,
                     seed_id: ext.seed_id,
                     accent: ext.accent,
+                    yolo: ext.yolo,
                 },
             );
         }
@@ -455,7 +457,7 @@ fn handle_resize(state: &Arc<SessionsState>, out_tx: &OutTx, id: &str, cols: u16
     session.resize(cols, rows);
 }
 
-fn handle_spawn(state: &Arc<SessionsState>, out_tx: &OutTx, req: String, spawn: SpawnRequest) {
+fn handle_spawn(state: &Arc<SessionsState>, out_tx: &OutTx, req: String, mut spawn: SpawnRequest) {
     if spawn.cli.is_empty() {
         let _ = out_tx.send(error_frame(
             Some(&req),
@@ -470,6 +472,10 @@ fn handle_spawn(state: &Arc<SessionsState>, out_tx: &OutTx, req: String, spawn: 
             ERR_BAD_REQUEST,
             "spawn: field 'workdir' must not be empty",
         ));
+        return;
+    }
+    if let Err(message) = validate_spawn_extensions(&mut spawn) {
+        let _ = out_tx.send(error_frame(Some(&req), ERR_BAD_REQUEST, &message));
         return;
     }
     let hub = state.hub.clone();
@@ -488,6 +494,27 @@ fn handle_spawn(state: &Arc<SessionsState>, out_tx: &OutTx, req: String, spawn: 
             }
         }
     });
+}
+
+/// Validate a spawn's extension fields before the hub opens a PTY: `yolo`
+/// needs an agent whose harness defines a `yolo_flag`, and `workdir` must
+/// expand (`~`, `~/x`) to an absolute path naming a real directory — the
+/// expanded path replaces the frame's own. `Err` carries the `bad_request`
+/// message.
+pub(crate) fn validate_spawn_extensions(spawn: &mut SpawnRequest) -> Result<(), String> {
+    if spawn.yolo {
+        if spawn.kind != SessionKind::Agent {
+            return Err(format!(
+                "spawn: field 'yolo' is not allowed for kind '{}'",
+                spawn.kind.as_str()
+            ));
+        }
+        if yolo_flag_for(&spawn.cli).is_none() {
+            return Err(format!("spawn: harness '{}' has no yolo mode", spawn.cli));
+        }
+    }
+    spawn.workdir = resolve_spawn_workdir(&spawn.workdir)?;
+    Ok(())
 }
 
 fn handle_kill(state: &Arc<SessionsState>, out_tx: &OutTx, req: String, id: String) {

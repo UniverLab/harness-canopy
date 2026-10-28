@@ -164,6 +164,7 @@ fn compose_and_catalog_shapes_roundtrip() {
             cli: "claude".to_string(),
             label: "claude".to_string(),
             models: vec!["m1".to_string()],
+            yolo: true,
         }],
         projects: vec![CatalogProject {
             name: "p".to_string(),
@@ -183,6 +184,7 @@ fn compose_and_catalog_shapes_roundtrip() {
             assert_eq!(req, "c2");
             assert_eq!(data.clis.len(), 1);
             assert_eq!(data.clis[0].models, vec!["m1".to_string()]);
+            assert!(data.clis[0].yolo, "catalog yolo must survive the wire");
             assert_eq!(data.projects.len(), 1);
             assert_eq!(data.presets.len(), 1);
             assert_eq!(data.skills.len(), 1);

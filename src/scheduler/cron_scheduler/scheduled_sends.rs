@@ -227,6 +227,7 @@ mod tests {
             id: None,
             seed_id: None,
             accent: None,
+            yolo: false,
         }
     }
 

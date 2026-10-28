@@ -10,6 +10,7 @@ mod resume;
 mod roundtrip;
 mod shelf;
 mod snapshot;
+mod spawn_yolo;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -186,6 +187,7 @@ fn terminal_spawn(cli: &str, workdir: &str) -> SpawnRequest {
         id: None,
         seed_id: None,
         accent: None,
+        yolo: false,
     }
 }
 
@@ -203,5 +205,6 @@ fn agent_spawn(cli: &str, workdir: &str) -> SpawnRequest {
         id: None,
         seed_id: None,
         accent: None,
+        yolo: false,
     }
 }

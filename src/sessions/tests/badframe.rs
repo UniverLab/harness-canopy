@@ -52,6 +52,13 @@ fn malformed_frames_are_bad_request() {
     assert!(zero_size.contains("cols"));
     let bad_b64 = parse_err(r#"{"t": "input", "id": "x", "data": "!!!"}"#);
     assert!(bad_b64.contains("data"));
+    let bad_yolo = parse_err(
+        r#"{"t": "spawn", "req": "r", "kind": "agent", "cli": "c", "workdir": "/tmp", "yolo": "yes"}"#,
+    );
+    assert!(
+        bad_yolo.contains("spawn") && bad_yolo.contains("yolo"),
+        "must name the frame and the field: {bad_yolo}"
+    );
 }
 
 #[test]

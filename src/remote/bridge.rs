@@ -27,12 +27,12 @@ use crate::sessions::catalog::{handle_catalog, handle_compose, handle_prompt_dra
 use crate::sessions::protocol::{
     error_frame, exited_frame, file_frame, ok_frame, out_frame, parse_client_frame,
     session_added_frame, session_removed_frame, sessions_frame, shelf_added_frame, shelf_frame,
-    shelf_removed_frame, snapshot_frame, snapshot_more_frame, ClientFrame, SessionItem,
+    shelf_removed_frame, snapshot_frame, snapshot_more_frame, ClientFrame, SessionItem, SpawnExt,
     ERR_BAD_REQUEST, ERR_BUSY, ERR_DELIVERY_FAILED, ERR_FORBIDDEN, ERR_INTERNAL, ERR_NOT_FOUND,
     ERR_SPAWN_FAILED,
 };
 use crate::sessions::ws::no_such_session;
-use crate::sessions::ws::{handle_shelf_delete, OutTx, SessionsState};
+use crate::sessions::ws::{handle_shelf_delete, validate_spawn_extensions, OutTx, SessionsState};
 use crate::sessions::{
     HubEvent, HubSession, OutputReceiver, SessionHub, SessionKind, SessionStatus, SpawnRequest,
 };
@@ -57,6 +57,34 @@ pub struct RemoteBridge {
     /// Terminal-session files hidden from this peer, so their later
     /// `shelf_removed` is hidden too.
     hidden_files: HashSet<String>,
+}
+
+/// The hub request a remote `spawn` frame describes. A device may only spawn
+/// agents, so the request kind is fixed here and [`RemoteBridge::handle_spawn`]
+/// refuses a frame that asked for anything else.
+fn spawn_request(
+    cli: String,
+    model: Option<String>,
+    workdir: String,
+    name: Option<String>,
+    prompt: Option<String>,
+    ext: SpawnExt,
+) -> SpawnRequest {
+    SpawnRequest {
+        kind: SessionKind::Agent,
+        cli,
+        model,
+        workdir,
+        name,
+        prompt,
+        interactive_args: ext.interactive_args,
+        fallback_args: ext.fallback_args,
+        model_flag: ext.model_flag,
+        id: ext.id,
+        seed_id: ext.seed_id,
+        accent: ext.accent,
+        yolo: ext.yolo,
+    }
 }
 
 impl RemoteBridge {
@@ -146,20 +174,7 @@ impl RemoteBridge {
                 prompt,
                 ext,
             } => {
-                let request = SpawnRequest {
-                    kind: SessionKind::Agent,
-                    cli,
-                    model,
-                    workdir,
-                    name,
-                    prompt,
-                    interactive_args: ext.interactive_args,
-                    fallback_args: ext.fallback_args,
-                    model_flag: ext.model_flag,
-                    id: ext.id,
-                    seed_id: ext.seed_id,
-                    accent: ext.accent,
-                };
+                let request = spawn_request(cli, model, workdir, name, prompt, *ext);
                 self.handle_spawn(req, &kind, request, out);
             }
             ClientFrame::Kill { req, id } => {
@@ -387,6 +402,10 @@ impl RemoteBridge {
             return;
         }
         request.kind = SessionKind::Agent;
+        if let Err(message) = validate_spawn_extensions(&mut request) {
+            let _ = out.send(error_frame(Some(&req), ERR_BAD_REQUEST, &message));
+            return;
+        }
         let hub = self.state.hub.clone();
         let out = out.clone();
         tokio::spawn(async move {

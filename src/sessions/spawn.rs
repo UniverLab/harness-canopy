@@ -182,6 +182,65 @@ pub fn format_accent_rgb((r, g, b): (u8, u8, u8)) -> String {
     format!("{r},{g},{b}")
 }
 
+/// The registry's autonomous-mode flag for `cli`, or `None` when the harness
+/// has no `yolo_flag` — the flag a `spawn{yolo:true}` appends.
+pub fn yolo_flag_for(cli: &str) -> Option<String> {
+    crate::domain::models::Cli::new(cli)
+        .registry_config()
+        .and_then(|config| config.yolo_flag)
+}
+
+/// `interactive_args` with the harness's yolo flag appended (the New dialog's
+/// skip-approvals switch). Unconditional: an explicit arg string keeps its
+/// own flags and gains this one after them.
+pub fn with_yolo(interactive_args: Option<&str>, yolo_flag: &str) -> String {
+    let base = interactive_args.unwrap_or_default().trim();
+    let flag = yolo_flag.trim();
+    match (base.is_empty(), flag.is_empty()) {
+        (true, true) => String::new(),
+        (true, false) => flag.to_string(),
+        (false, true) => base.to_string(),
+        (false, false) => format!("{base} {flag}"),
+    }
+}
+
+/// Expand and validate a `spawn` frame's `workdir`: a leading `~/` (or a bare
+/// `~`) becomes the host user's home, the result must be absolute, and it
+/// must name an existing directory. `Err` carries the `bad_request` message
+/// naming the offending path.
+pub fn resolve_spawn_workdir(raw: &str) -> Result<String, String> {
+    let expanded = expand_home(raw);
+    let path = std::path::Path::new(&expanded);
+    if !path.is_absolute() {
+        return Err("spawn: field 'workdir' must be an absolute path".to_string());
+    }
+    if !path.is_dir() {
+        return Err(format!(
+            "spawn: workdir '{expanded}' does not exist or is not a directory"
+        ));
+    }
+    Ok(expanded)
+}
+
+/// `~` and `~/x` become the host user's home and its child; any other path is
+/// returned unchanged (and a `~user` form is left for the absolute check to
+/// refuse).
+fn expand_home(raw: &str) -> String {
+    let Some(home) = dirs::home_dir() else {
+        return raw.to_string();
+    };
+    let Some(rest) = raw.strip_prefix('~') else {
+        return raw.to_string();
+    };
+    // `~`, `~/` and `~/x` are the home, its trailing-slash form and a child;
+    // `~user` is not expanded (the absolute check refuses it).
+    match rest.strip_prefix('/').or(rest.is_empty().then_some("")) {
+        Some("") => home.to_string_lossy().into_owned(),
+        Some(tail) => home.join(tail).to_string_lossy().into_owned(),
+        None => raw.to_string(),
+    }
+}
+
 /// The launch-args string recorded in the session's database row: the
 /// interactive (or fallback) args plus the model flag and model, in the same
 /// order [`build_agent_cmd`] passes them to the child.

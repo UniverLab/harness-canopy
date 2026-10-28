@@ -734,7 +734,7 @@ mod forward_mouse_scroll_tests {
     fn spawn_cat_agent() -> InteractiveAgent {
         InteractiveAgent::spawn(
             Cli::new("cat"),
-            ".",
+            env!("CARGO_MANIFEST_DIR"),
             80,
             24,
             None,
@@ -899,7 +899,7 @@ mod kitty_keyboard_negotiation_tests {
     fn spawn_cat_agent() -> InteractiveAgent {
         InteractiveAgent::spawn(
             Cli::new("cat"),
-            ".",
+            env!("CARGO_MANIFEST_DIR"),
             80,
             24,
             None,

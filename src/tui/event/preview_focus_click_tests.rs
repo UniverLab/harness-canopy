@@ -7,7 +7,7 @@ use std::sync::Arc;
 fn spawn_cat_interactive(name: &str) -> InteractiveAgent {
     InteractiveAgent::spawn(
         Cli::new("cat"),
-        ".",
+        env!("CARGO_MANIFEST_DIR"),
         80,
         24,
         None,

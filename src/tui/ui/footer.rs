@@ -881,7 +881,7 @@ mod tests {
         // child" hint must be gone, from this branch and everywhere else.
         let agent = crate::tui::agent::InteractiveAgent::spawn(
             crate::domain::models::Cli::new("cat"),
-            ".",
+            env!("CARGO_MANIFEST_DIR"),
             80,
             24,
             None,
@@ -928,7 +928,7 @@ mod tests {
         // because plain F4 belongs to the child while claimed.
         let agent = crate::tui::agent::InteractiveAgent::spawn(
             crate::domain::models::Cli::new("cat"),
-            ".",
+            env!("CARGO_MANIFEST_DIR"),
             80,
             24,
             None,
@@ -1182,7 +1182,7 @@ mod tests {
         // pane's key-hint row, so the user never has to reach for Shift.
         let agent = crate::tui::agent::InteractiveAgent::spawn(
             crate::domain::models::Cli::new("cat"),
-            ".",
+            env!("CARGO_MANIFEST_DIR"),
             80,
             24,
             None,

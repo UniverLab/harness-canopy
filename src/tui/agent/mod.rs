@@ -707,6 +707,7 @@ fn spawn_on_hub(args: &HubSpawnArgs<'_>) -> Result<SessionItem> {
         id: args.id.map(str::to_owned),
         seed_id: args.seed_id.map(str::to_owned),
         accent: args.accent.map(str::to_owned),
+        yolo: false,
     };
     let req = new_req();
     let frame_args = SpawnFrameArgs {

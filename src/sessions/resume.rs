@@ -169,6 +169,7 @@ fn spawn_resumed_or_fresh(
             id: Some(session.id.clone()),
             seed_id: None,
             accent: resume_accent(cli_config),
+            yolo: false,
         })
     };
     match spawn(resume_args.as_deref()) {
@@ -283,6 +284,7 @@ fn resume_terminal_session(hub: &SessionHub, data_dir: &Path, session: &Terminal
         id: Some(session.id.clone()),
         seed_id: None,
         accent: None,
+        yolo: false,
     };
     match hub.spawn(&request) {
         Ok(spawned) => {
