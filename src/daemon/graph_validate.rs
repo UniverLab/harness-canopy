@@ -331,6 +331,15 @@ struct NodeDocument {
     preset: Option<NodePreset>,
 }
 
+/// What a validated node document describes: a single engine node of a
+/// known kind, or an ensemble node document (whose config carries the
+/// ensemble shape instead of one node's config).
+#[derive(Debug, Clone, Copy)]
+enum NodeShape {
+    Node(GraphNodeKind),
+    Ensemble,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NodePreset {
@@ -375,8 +384,13 @@ fn validate_node_document(value: &Value) -> Value {
             ),
         ));
     }
-    let kind = validate_node_kind(&document.kind, &mut problems);
-    if let Some(kind) = kind {
+    let kind = if document.kind.trim() == "ensemble" {
+        validate_ensemble_node_config(&document, &mut problems);
+        Some(NodeShape::Ensemble)
+    } else {
+        validate_node_kind(&document.kind, &mut problems).map(NodeShape::Node)
+    };
+    if let Some(NodeShape::Node(kind)) = kind {
         validate_node_config(kind, &document.config, &mut problems);
     }
     validate_node_preset(&document, &mut problems);
@@ -387,17 +401,21 @@ fn validate_node_document(value: &Value) -> Value {
         return fail(&problems);
     };
     if problems.is_empty() {
-        let needs_harness: Vec<String> =
-            if kind == GraphNodeKind::Agent && !node_config_has_harness(&document.config) {
+        let node_kind = match kind {
+            NodeShape::Node(kind) => kind.as_str(),
+            NodeShape::Ensemble => "ensemble",
+        };
+        let needs_harness: Vec<String> = match kind {
+            NodeShape::Node(GraphNodeKind::Agent) if !node_config_has_harness(&document.config) => {
                 vec![document.name.clone()]
-            } else {
-                Vec::new()
-            };
+            }
+            _ => Vec::new(),
+        };
         serde_json::json!({
             "ok": true,
             "kind": "node",
             "name": document.name,
-            "node_kind": kind.as_str(),
+            "node_kind": node_kind,
             "nodes": 1,
             "edges": 0,
             "ensembles": 0,
@@ -424,7 +442,7 @@ fn validate_node_kind(raw: &str, problems: &mut Vec<Problem>) -> Option<GraphNod
             problems.push(problem(
                 "kind",
                 format!(
-                    "Node document has unknown kind '{raw}'. Expected one of: agent, check, gate, router."
+                    "Node document has unknown kind '{raw}'. Expected one of: agent, check, gate, router, ensemble."
                 ),
             ));
             None
@@ -437,6 +455,26 @@ fn validate_node_kind(raw: &str, problems: &mut Vec<Problem>) -> Option<GraphNod
             None
         }
         Some(kind) => Some(kind),
+    }
+}
+
+/// An ensemble node document's `config` must be the ensemble shape — no
+/// harness anywhere (members travel without platform/model), a non-empty
+/// shared prompt, and member/min_pass bounds the engine will accept.
+fn validate_ensemble_node_config(document: &NodeDocument, problems: &mut Vec<Problem>) {
+    if !document.config.is_object() {
+        problems.push(problem(
+            "config",
+            "Node document config must be a JSON object.",
+        ));
+        return;
+    }
+    collect_harness_key_problems(&document.config, "config", problems);
+    let parsed =
+        crate::domain::nodes::EnsembleNodeConfig::from_value(&document.name, &document.config)
+            .and_then(|config| config.validate(&document.name));
+    if let Err(message) = parsed {
+        problems.push(problem("config", message));
     }
 }
 
@@ -1009,6 +1047,49 @@ mod tests {
         doc["preset"] = json!({"name": "my-preset", "content": "text"});
         let report = validate_document_value(&doc);
         assert_eq!(report["ok"], true);
+    }
+
+    fn valid_ensemble_node() -> Value {
+        json!({
+            "format_version": 1,
+            "name": "ensemble-proposers",
+            "kind": "ensemble",
+            "description": "Three proposers.",
+            "config": {
+                "kind": "parallel",
+                "prompt_template": "draft it {{spec_content}}",
+                "members": [{}, {}, {}],
+            },
+        })
+    }
+
+    #[test]
+    fn valid_ensemble_node_reports_node_kind_ensemble() {
+        let report = validate_document_value(&valid_ensemble_node());
+        assert_eq!(report["ok"], true, "{report}");
+        assert_eq!(report["kind"], "node");
+        assert_eq!(report["node_kind"], "ensemble");
+        assert_eq!(report["needs_harness"], json!([]));
+    }
+
+    #[test]
+    fn ensemble_node_member_with_a_platform_reports_the_nested_path() {
+        let mut doc = valid_ensemble_node();
+        doc["config"]["members"][0] = json!({"platform": "claude"});
+        let report = validate_document_value(&doc);
+        assert_eq!(report["ok"], false);
+        assert_eq!(first_path(&report), "config.members[0].platform");
+    }
+
+    #[test]
+    fn ensemble_node_outside_the_member_bounds_reports_config() {
+        let mut doc = valid_ensemble_node();
+        doc["config"]["members"] = json!([{}]);
+        let report = validate_document_value(&doc);
+        assert_eq!(report["ok"], false);
+        assert_eq!(first_path(&report), "config");
+        let message = report["problems"][0]["message"].as_str().expect("message");
+        assert!(message.contains("ensemble-proposers"), "{message}");
     }
 
     #[test]

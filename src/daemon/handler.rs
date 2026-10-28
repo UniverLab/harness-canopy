@@ -87,9 +87,11 @@ pub(crate) use crate::daemon::handler_models_probes::{
     prepend_recent_usage,
 };
 #[cfg(test)]
-pub(crate) use crate::daemon::handler_nodes::{
-    resolve_node_kind_and_config, unknown_config_keys, validate_blueprint_exists,
+pub(crate) use crate::daemon::handler_node_lib::{
+    resolve_node_kind_and_config, validate_blueprint_exists,
 };
+#[cfg(test)]
+pub(crate) use crate::daemon::handler_nodes::unknown_config_keys;
 #[cfg(test)]
 pub(crate) use crate::daemon::handler_preflight_review::{
     build_preflight_reviewer_prompt, resolve_reviewer_skill_section,
@@ -301,6 +303,7 @@ impl TaskTriggerHandler {
         router.merge(TaskTriggerHandler::tool_router_blueprints());
         router.merge(TaskTriggerHandler::tool_router_queues());
         router.merge(TaskTriggerHandler::tool_router_nodes());
+        router.merge(TaskTriggerHandler::tool_router_node_lib());
         router.merge(TaskTriggerHandler::tool_router_notes());
         router.merge(TaskTriggerHandler::tool_router_roster());
         router.merge(TaskTriggerHandler::tool_router_mutex());

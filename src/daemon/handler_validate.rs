@@ -552,6 +552,26 @@ pub(crate) fn validate_blueprint_agent_harness(
     Ok(())
 }
 
+/// A node-document-resolved agent node must name a harness. A shareable node
+/// document intentionally carries no platform/cli/crew (see
+/// `domain::nodes`) — which harness runs a node is the caller's decision,
+/// supplied here via `config_overrides`, never a default this resolver falls
+/// back to. Catching the missing case here (rather than only via
+/// `validate_node_config`'s generic message) lets the error name the document
+/// and say *why* the field is missing instead of just that it is.
+pub(crate) fn validate_node_document_agent_harness(
+    node_name: &str,
+    merged: &serde_json::Value,
+) -> Result<(), String> {
+    let has_harness = merged.as_object().is_some_and(config_has_agent_harness);
+    if !has_harness {
+        return Err(format!(
+            "Node document '{node_name}' intentionally does not provide a harness — which platform, cli, or crew runs a node is the caller's decision, not the document's. Pass config_overrides with a non-empty 'platform' (and 'model' if that platform needs one) to select the harness."
+        ));
+    }
+    Ok(())
+}
+
 /// CM49: an agent node names a harness through `platform`/`cli` OR a crew
 /// through `crew` — never both. The crew is resolved to a pair at dispatch,
 /// so a literal pair beside it would be ambiguous.

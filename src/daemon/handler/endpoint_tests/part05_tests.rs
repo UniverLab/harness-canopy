@@ -19,6 +19,7 @@ async fn graph_update_node_response_names_changed_keys() {
             kind: Some("agent".to_string()),
             config: Some(config),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -128,6 +129,7 @@ async fn graph_add_node_rejects_skills_on_check_gate_router() {
                 kind: Some(kind.to_string()),
                 config: Some(config),
                 blueprint: None,
+                node: None,
                 config_overrides: None,
             }))
             .await
@@ -209,6 +211,7 @@ async fn graph_add_node_tolerates_malformed_skills_values() {
             kind: Some("agent".to_string()),
             config: Some(config_string),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -232,6 +235,7 @@ async fn graph_add_node_tolerates_malformed_skills_values() {
             kind: Some("agent".to_string()),
             config: Some(config_mixed),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -1176,6 +1180,7 @@ async fn graph_add_node_router_created_persisted_and_read_back_with_routes() {
             kind: Some("router".to_string()),
             config: Some(router_node_config(&two_routes(), "retry")),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -1248,6 +1253,7 @@ async fn graph_add_node_router_rejects_fewer_than_two_routes_and_missing_fallbac
                 "retry",
             )),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -1265,6 +1271,7 @@ async fn graph_add_node_router_rejects_fewer_than_two_routes_and_missing_fallbac
             kind: Some("router".to_string()),
             config: Some(no_fallback_config),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -1287,6 +1294,7 @@ async fn graph_add_edge_route_condition_rejects_undeclared_route_and_non_router_
             kind: Some("router".to_string()),
             config: Some(router_node_config(&two_routes(), "retry")),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await

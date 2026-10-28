@@ -127,6 +127,7 @@ async fn graph_export_import_v2_round_trip_preserves_ensemble() {
             kind: Some("check".to_string()),
             config: Some(check_node_config("true")),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -141,6 +142,7 @@ async fn graph_export_import_v2_round_trip_preserves_ensemble() {
             kind: Some("agent".to_string()),
             config: Some(agent_node_config("claude")),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -157,6 +159,7 @@ async fn graph_export_import_v2_round_trip_preserves_ensemble() {
             name: "Proposers".to_string(),
             prompt_template: Some("draft it".to_string()),
             blueprint: None,
+            node: None,
             members: Some(vec![
                 EnsembleMemberParams {
                     platform: "openrouter".to_string(),
@@ -274,6 +277,7 @@ async fn graph_export_import_round_trip_preserves_all_ensemble_kinds() {
             kind: Some("check".to_string()),
             config: Some(check_node_config("true")),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -288,6 +292,7 @@ async fn graph_export_import_round_trip_preserves_all_ensemble_kinds() {
             kind: Some("check".to_string()),
             config: Some(check_node_config("true")),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -302,6 +307,7 @@ async fn graph_export_import_round_trip_preserves_all_ensemble_kinds() {
             kind: Some("agent".to_string()),
             config: Some(agent_node_config("claude")),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -331,6 +337,7 @@ async fn graph_export_import_round_trip_preserves_all_ensemble_kinds() {
             name: "CascadeTeam".to_string(),
             prompt_template: Some("draft it".to_string()),
             blueprint: None,
+            node: None,
             members: Some(vec![
                 EnsembleMemberParams {
                     platform: "openrouter".to_string(),
@@ -380,6 +387,7 @@ async fn graph_export_import_round_trip_preserves_all_ensemble_kinds() {
             name: "RrTeam".to_string(),
             prompt_template: Some("draft it".to_string()),
             blueprint: None,
+            node: None,
             members: Some(vec![
                 EnsembleMemberParams {
                     platform: "openrouter".to_string(),
@@ -532,6 +540,7 @@ async fn graph_export_import_round_trip_preserves_ensemble_commit_rights() {
             kind: Some("check".to_string()),
             config: Some(check_node_config("true")),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -546,6 +555,7 @@ async fn graph_export_import_round_trip_preserves_ensemble_commit_rights() {
             kind: Some("agent".to_string()),
             config: Some(agent_node_config("claude")),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -562,6 +572,7 @@ async fn graph_export_import_round_trip_preserves_ensemble_commit_rights() {
             name: "Committer".to_string(),
             prompt_template: Some("draft it".to_string()),
             blueprint: None,
+            node: None,
             members: Some(vec![
                 EnsembleMemberParams {
                     platform: "openrouter".to_string(),
@@ -664,6 +675,7 @@ async fn graph_preflight_rejects_unknown_named_output_reference() {
             kind: Some("agent".to_string()),
             config: Some(agent_node_config("claude")),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -748,6 +760,7 @@ async fn graph_preflight_reports_graph_validation_errors() {
             kind: Some("agent".to_string()),
             config: Some(agent_node_config("claude")),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -760,6 +773,7 @@ async fn graph_preflight_reports_graph_validation_errors() {
             kind: Some("agent".to_string()),
             config: Some(agent_node_config("claude")),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -816,6 +830,7 @@ async fn graph_preflight_reports_unknown_marker_in_check_command() {
             kind: Some("check".to_string()),
             config: Some(check_node_config("echo {{nope}}")),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -874,6 +889,7 @@ async fn graph_preflight_accepts_every_known_check_command_marker() {
                      {{spec_start_head}} {{spec_start_dirty}} {{spec_committed_head}}",
             )),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -1198,6 +1214,7 @@ async fn graph_preflight_warns_spec_quorum_without_fail_exit() {
                 },
             ]),
             blueprint: None,
+            node: None,
             from_node: kickoff.id.clone(),
             condition: "always".to_string(),
             min_pass: None,

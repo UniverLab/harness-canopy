@@ -40,6 +40,7 @@ use daemon::graph_cli::{handle_graph_action, GraphAction};
 use daemon::missions_cli::handle_missions_action;
 use daemon::models_cli::{handle_models_action, ModelsAction};
 use daemon::mutex_cli::{handle_mutex_action, MutexAction};
+use daemon::node_cli::{handle_node_action, NodeAction};
 use daemon::project_cli::{handle_project_action, ProjectAction};
 use daemon::prompts_cli::{handle_prompts_action, PromptsAction};
 use daemon::queue_cli::{handle_queue_action, QueueAction};
@@ -134,6 +135,12 @@ enum Commands {
     Graph {
         #[command(subcommand)]
         action: GraphAction,
+    },
+    /// Install, list, and remove shareable node documents (a single node or
+    /// an ensemble) and add them to graphs by name.
+    Node {
+        #[command(subcommand)]
+        action: NodeAction,
     },
     /// Inspect registered agents (read-only, served from the local database).
     Agent {
@@ -302,6 +309,7 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Rag { action }) => handle_rag_action(action).await,
         Some(Commands::Graph { action }) => handle_graph_action(action, cli.port).await,
+        Some(Commands::Node { action }) => handle_node_action(action),
         Some(Commands::Agent { action }) => handle_agent_action(action).await,
         Some(Commands::Spec { action }) => handle_spec_action(action, cli.port).await,
         Some(Commands::Roster { action }) => handle_roster_action(action, cli.port).await,

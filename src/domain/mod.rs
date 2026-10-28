@@ -18,6 +18,7 @@ pub mod graphs;
 pub mod instruction_file;
 pub mod models;
 pub mod models_db;
+pub mod nodes;
 pub mod notification;
 pub mod nursery;
 pub mod project;

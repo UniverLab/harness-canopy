@@ -1283,6 +1283,7 @@ async fn graph_export_rejects_duplicate_node_names() {
                 kind: Some("check".to_string()),
                 config: Some(check_node_config("true")),
                 blueprint: None,
+                node: None,
                 config_overrides: None,
             }))
             .await

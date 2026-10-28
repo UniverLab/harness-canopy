@@ -149,6 +149,9 @@ const EXPECTED_TOOL_NAMES: &[&str] = &[
     "loop_report_blocker",
     "loop_schedule_autorun",
     "mutex",
+    "node_install",
+    "node_list",
+    "node_remove",
     "project_register",
     "project_remap",
     "project_search",
@@ -229,8 +232,8 @@ const EXPECTED_TOOL_ROWS: &[&str] = &[
                 "get_identity|21d80d3a69d9719487bc498958b5600e86bf36519e229d270d2c2ae338383f72|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
                 "get_tools|ea4c08804bf3a96c7e2e9f9be825feedb18ce038998f953065423576f6783beb|8d1085667f9f7b280bc979a52911ce87934bee573c8dd9a35175afad22365c8f",
                 "graph_add_edge|0368038fcdc6790d79f1558cf8c5e66aae12d6c475c616849c217670707ec5f7|7d566ad0c4bd03073fbb853a2173742c44d0ea98ed2616b7cea6eb1138c656ee",
-                "graph_add_ensemble|b50f08e8fce614b99ac904b4d24dd98795cae0d53e0c3247a26e7f8882d75aec|ae59a53b5ae4893aee772de508d5a2f1819e6518338db2969b7ee7cb92119ee4",
-                "graph_add_node|6e976c2045c4e2aac3f58219ea46a2c981556d151ad69c1873541d9da45d2793|1e69250d65d030a8a6ceb57beffb792b4941e884a409af813ceb224ccb76a506",
+                "graph_add_ensemble|e4db13c7ee80d0c2bebb6496a2eb131be9366634638138d02b6d6fc2b9444185|1973772a561409c967cf1f4e2c9b2e4a54581a5eadde1bc497fe02c6701754e2",
+                "graph_add_node|3b22303f69c1a78405e638ec61ade91bd08e38606aaca730e944534616e8b3cc|9f72044c5a564b232fffb8efe6f3be9b2892985bb5fa8ec769bf803797fd4bd2",
                 "graph_add_spec|d054dce21de8cb570c402ef4081ebbec27391f28052aaae6b7636b75a6135343|e7d42c59ce2d7562681c85b529a8b32f873f46013b0e41b9aca12378cbf50646",
                 "graph_archive|86c62c25726d635c29691b8d1e90acbd2af55efafbf4b2acf866d82146fe9dc2|ffee5a13290c895a4b822c65948298658b131c5c24554e3c6a3277ada768e49f",
                 "graph_audit_node_configs|be2716e66df14f94162057f5919f89bf87cab3b84d7f90ba6c2614e90b4ec749|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
@@ -265,7 +268,7 @@ const EXPECTED_TOOL_ROWS: &[&str] = &[
                 "graph_update_ensemble|e6ac4063680af0162c1af4f5aeb89478b36ce90817c790bce80ddf4e35d4ac76|a4e9437cc127c575269936eee8d13dc2412b0796eb0ab6ecd298a63a251cc0d4",
                 "graph_update_node|ac50ff325d1e92ef50bbf4e768f94932b453102e98b2ec426fb07681aab98b71|a658e57090f68b4628fd2290c13e6e7682533a0be5ea633370be5f0f9cd0a731",
                 "graph_update_spec|cc242e8d96c9fa9c957a7ca885258947ab54337e4a9e1b9f2ddc66eb6ae06b6d|939fc5607765a972a02a8d785a1bf18447c5a5a5e055e85ab1e82dc90ebb31b1",
-                "graph_validate|ee71a11a7565b7674eeeb9585abd8f738ae698c82f803bf81e19b34ddc2765f9|11e638fbdc20f2a83c8fddeae21e084d17960f72ab0a214e95fd162606414ed8",
+                "graph_validate|dbefacceb7a8aa3a63c2dd1c6fee386a98040f0a452b678685be3667d0523513|11e638fbdc20f2a83c8fddeae21e084d17960f72ab0a214e95fd162606414ed8",
                 "intelligence_delete_node|b70ce24d59d2619e275cb40397037d7748f3ebca64ac5ffdc85eae6ee65bb1af|28ea20eaac05de60c91d7d9f3f7af2d48bab582aae5ee9dd04b5bc04ba88f1ca",
                 "intelligence_delete_relation|14ac75ee8ed351ec58f6bec7bbb0a9ca8267f01931e936d287cc0aaf494612a8|811a9f24eda2e40c4d023042194be57946b8da97789fe52c5855eb4e6d258752",
                 "intelligence_get_context|669fe1f581e27a2bdf49f09765a42bc8f1f0879bf49c0466ff072ed315e73e33|21815b7ab3af1404c86b99df1bd52c8d73a656d5ffa2229c6ba6e7b95402b58f",
@@ -279,6 +282,9 @@ const EXPECTED_TOOL_ROWS: &[&str] = &[
                 "loop_report_blocker|9fb9038c5d224015aa25b157730b99339dd91372deb3c1460abb1e5e4fad2081|8659fd458ed655692eb594522433fe42ab4a7c69f8164862571038fa7b254192",
                 "loop_schedule_autorun|1e53058a7dad22cc057ce87b32d9fbaa20cca2b0e7721cc121e5c16b2b2677dd|e944f37adcf8af70ea07acb64a916306c54a4bf3b998ddf4bd0ca0fb52026163",
                 "mutex|8451e497d2312801bd69e0c0d17a9977ef0a450c948592e7d749c1a52519faf4|05fa698c38dd86f99b62665294f300134ba08d32cac693e66826a47b8166a117",
+                "node_install|a2523e31abedffcd8d9edd5571ff949e6eb00556b9ae66df1d27236ae6f8c066|ea7f2a13e72b50f37564f050410045af09a773417d5378891f94db5b117fd0e0",
+                "node_list|dfc5a607d20014e21a26953f1237e62cb97a60c816a45b70fa137771139fc5d4|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
+                "node_remove|d8b9b2d56ff664fa3560cf511b6e55a11dfe59037ad865029e3af721762a5f59|413fb6bc5f33f458ea1d94114797d81de2738d90e0185e3412682145d37f8e5d",
                 "project_register|95d40d7773adb80b430d84f928d60d6a48d369505e8bf6c0d9f54aaa64b1d535|2fe9ec9ceb19c66e3a5f34a073529e6088506baa2e77dcca8d0d8f31081bcadd",
                 "project_remap|ee326ec962be9943ccf911a190168d71163903ab4370775a0a433d32e7721f25|9fb44ff73d1e90118188516f4eb03a9741b9ad7cc2a0309a81a1919179158c35",
                 "project_search|c0abdc269d287d6cf3465702f699e8464f18e0d6952f6870d2d1b4e37401b8da|4b6603ec8691bbbfa1813460965630dcdbc2613d655f1b3047e215a2a5693259",
@@ -318,7 +324,7 @@ const EXPECTED_TOOL_ROWS: &[&str] = &[
                 "sync_declare_intent|621ecbc55446f78d4050026a7554487c33116b0ca218f359fc4355207d92abfe|ec40954a22bc0559f68b428ff8071f9ffa02c9e5702620ad4432f33b5e384eba",
                 "sync_get_context|5bf5707dc316b32fa427141fab68b709dc07af8a52676da646958774a432a1ff|4bd69d426fd995f95a4bc3d546c79b60f85a0a282552cd0d9523052e2467216a",
                 "sync_report_status|ee93a882c476cc2792fa68bce24c1f187de5947c08b72bb55400dd114bdc07a4|ca10e912be130d9d76d33ccb1ced7bfce5f119e46d3d222fda29af25b4fd95a1",
-    ];
+            ];
 
 fn spec_with_status(graph_id: &str, id: &str, position: i64, status: GraphSpecStatus) -> GraphSpec {
     GraphSpec {

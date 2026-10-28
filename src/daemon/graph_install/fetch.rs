@@ -21,12 +21,17 @@ pub(crate) struct FetchedDocument {
     pub source_url: String,
 }
 
-/// GET the export document for `reference` from the catalogue at `base`:
-/// `<base>/i/graph/<slug>` for an official ref,
-/// `<base>/i/<owner>/<repo>/graph/<slug>` for a community one, with the
-/// `@<ref>` suffix (if any) as the `ref` query parameter.
-pub(crate) fn fetch_document(base: &str, reference: &GraphRef) -> Result<FetchedDocument, String> {
-    let url = request_url(base, reference)?;
+/// GET the document for `reference` from the catalogue at `base`:
+/// `<base>/i/<kind>/<slug>` for an official ref,
+/// `<base>/i/<owner>/<repo>/<kind>/<slug>` for a community one, with the
+/// `@<ref>` suffix (if any) as the `ref` query parameter. `kind` is
+/// `"graph"` or `"node"` — the catalogue's two shareable document kinds.
+pub(crate) fn fetch_document(
+    base: &str,
+    reference: &GraphRef,
+    kind: &str,
+) -> Result<FetchedDocument, String> {
+    let url = request_url(base, reference, kind)?;
     let attempted = url.to_string();
     let display = reference.display();
     let allow_http = url.scheme() == "http";
@@ -83,11 +88,11 @@ pub(crate) fn fetch_document(base: &str, reference: &GraphRef) -> Result<Fetched
 
 /// The catalogue URL for a ref: the install-counting endpoint, not the raw
 /// document host.
-fn request_url(base: &str, reference: &GraphRef) -> Result<reqwest::Url, String> {
+fn request_url(base: &str, reference: &GraphRef, kind: &str) -> Result<reqwest::Url, String> {
     let base = base.trim_end_matches('/');
     let without_query = match &reference.scope {
-        None => format!("{base}/i/graph/{}", reference.slug),
-        Some((owner, repo)) => format!("{base}/i/{owner}/{repo}/graph/{}", reference.slug),
+        None => format!("{base}/i/{kind}/{}", reference.slug),
+        Some((owner, repo)) => format!("{base}/i/{owner}/{repo}/{kind}/{}", reference.slug),
     };
     let mut url = reqwest::Url::parse(&without_query)
         .map_err(|error| format!("Invalid catalogue URL '{base}': {error}."))?;
@@ -139,7 +144,7 @@ mod tests {
             StubRoute::ok("{\"ok\":true}"),
         )]));
         let reference = super::super::parse_ref("my-graph").unwrap();
-        let fetched = fetch_document(&stub.base_url(), &reference).unwrap();
+        let fetched = fetch_document(&stub.base_url(), &reference, "graph").unwrap();
         assert_eq!(fetched.body, "{\"ok\":true}");
         assert_eq!(
             fetched.source_url,
@@ -159,7 +164,7 @@ mod tests {
             StubRoute::ok("{}"),
         )]));
         let reference = super::super::parse_ref("acme/widgets/my-graph@v1.2").unwrap();
-        fetch_document(&stub.base_url(), &reference).unwrap();
+        fetch_document(&stub.base_url(), &reference, "graph").unwrap();
         let hits = stub.hits();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].target, "/i/acme/widgets/graph/my-graph?ref=v1.2");
@@ -169,7 +174,7 @@ mod tests {
     fn fetch_tolerates_a_trailing_slash_on_the_base() {
         let stub = StubCatalogue::start(routes(vec![("/i/graph/my-graph", StubRoute::ok("{}"))]));
         let reference = super::super::parse_ref("my-graph").unwrap();
-        fetch_document(&format!("{}/", stub.base_url()), &reference).unwrap();
+        fetch_document(&format!("{}/", stub.base_url()), &reference, "graph").unwrap();
         assert_eq!(stub.hits()[0].target, "/i/graph/my-graph");
     }
 
@@ -180,7 +185,7 @@ mod tests {
             ("/doc", StubRoute::ok("{\"ok\":true}")),
         ]));
         let reference = super::super::parse_ref("my-graph").unwrap();
-        let fetched = fetch_document(&stub.base_url(), &reference).unwrap();
+        let fetched = fetch_document(&stub.base_url(), &reference, "graph").unwrap();
         assert_eq!(fetched.body, "{\"ok\":true}");
         assert_eq!(
             fetched.source_url,
@@ -204,8 +209,8 @@ mod tests {
             ("/r4", StubRoute::ok("{\"ok\":true}")),
         ]));
         let reference = super::super::parse_ref("my-graph").unwrap();
-        let error =
-            fetch_document(&stub.base_url(), &reference).expect_err("redirect chain must fail");
+        let error = fetch_document(&stub.base_url(), &reference, "graph")
+            .expect_err("redirect chain must fail");
         assert!(error.contains("redirect"), "{error}");
         assert!(error.contains("/i/graph/my-graph"), "{error}");
         assert_eq!(
@@ -219,7 +224,8 @@ mod tests {
     fn fetch_reports_404_as_not_found_with_status_and_url() {
         let stub = StubCatalogue::start(routes(vec![]));
         let reference = super::super::parse_ref("missing").unwrap();
-        let error = fetch_document(&stub.base_url(), &reference).expect_err("404 must fail");
+        let error =
+            fetch_document(&stub.base_url(), &reference, "graph").expect_err("404 must fail");
         assert!(error.contains("not found in the catalogue"), "{error}");
         assert!(error.contains("404"), "{error}");
         assert!(error.contains(&stub.base_url()), "{error}");
@@ -237,7 +243,8 @@ mod tests {
             },
         )]));
         let reference = super::super::parse_ref("my-graph").unwrap();
-        let error = fetch_document(&stub.base_url(), &reference).expect_err("oversize must fail");
+        let error =
+            fetch_document(&stub.base_url(), &reference, "graph").expect_err("oversize must fail");
         assert!(error.contains("1 MiB"), "{error}");
     }
 

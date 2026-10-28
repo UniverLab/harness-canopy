@@ -21,6 +21,7 @@ async fn graph_get_reports_infra_config_with_source() {
                 kind: Some("agent".to_string()),
                 config: Some(explicit_config),
                 blueprint: None,
+                node: None,
                 config_overrides: None,
             }))
             .await
@@ -36,6 +37,7 @@ async fn graph_get_reports_infra_config_with_source() {
                 kind: Some("agent".to_string()),
                 config: Some(agent_node_config("cm30-test-platform-xyz")),
                 blueprint: None,
+                node: None,
                 config_overrides: None,
             }))
             .await
@@ -92,6 +94,7 @@ async fn graph_audit_node_configs_lists_infra_overrides() {
                 kind: Some("agent".to_string()),
                 config: Some(differing),
                 blueprint: None,
+                node: None,
                 config_overrides: None,
             }))
             .await
@@ -109,6 +112,7 @@ async fn graph_audit_node_configs_lists_infra_overrides() {
                 kind: Some("agent".to_string()),
                 config: Some(restating),
                 blueprint: None,
+                node: None,
                 config_overrides: None,
             }))
             .await
@@ -124,6 +128,7 @@ async fn graph_audit_node_configs_lists_infra_overrides() {
                 kind: Some("agent".to_string()),
                 config: Some(agent_node_config("cm30-test-platform-xyz")),
                 blueprint: None,
+                node: None,
                 config_overrides: None,
             }))
             .await
@@ -174,6 +179,7 @@ async fn graph_update_ensemble_shrink_below_min_pass_is_refused() {
             prompt_template: Some("Review {{spec_name}}".to_string()),
             members: Some(vec![member(), member(), member()]),
             blueprint: None,
+            node: None,
             from_node: entry,
             condition: "always".to_string(),
             min_pass: Some(3),
@@ -259,6 +265,7 @@ async fn graph_update_ensemble_raise_min_pass_above_count_is_refused() {
             prompt_template: Some("Review {{spec_name}}".to_string()),
             members: Some(vec![member(), member()]),
             blueprint: None,
+            node: None,
             from_node: entry,
             condition: "always".to_string(),
             min_pass: Some(2),
@@ -344,6 +351,7 @@ async fn graph_update_ensemble_shrink_with_adjusted_min_pass_succeeds() {
             prompt_template: Some("Review {{spec_name}}".to_string()),
             members: Some(vec![member(), member(), member()]),
             blueprint: None,
+            node: None,
             from_node: entry,
             condition: "always".to_string(),
             min_pass: Some(2),
@@ -426,6 +434,7 @@ async fn graph_preflight_reports_ensemble_with_invalid_min_pass() {
             prompt_template: Some("Review {{spec_name}}".to_string()),
             members: Some(vec![member(), member()]),
             blueprint: None,
+            node: None,
             from_node: entry,
             condition: "always".to_string(),
             min_pass: Some(2),
@@ -495,6 +504,7 @@ async fn graph_preflight_rejects_unsafe_optional_model_token() {
             kind: Some("agent".to_string()),
             config: Some(agent_node_config("bad-template-cli")),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -650,6 +660,7 @@ async fn graph_preflight_warns_on_stale_loop_complete_node_in_ensemble_prompt() 
             prompt_template: Some("end with exactly one loop_complete_node call".to_string()),
             members: Some(vec![member(), member()]),
             blueprint: None,
+            node: None,
             from_node: entry,
             condition: "always".to_string(),
             min_pass: Some(2),
@@ -1162,6 +1173,7 @@ async fn graph_preflight_refuses_partial_multi_source_ensemble() {
             prompt_template: Some("Draft it".to_string()),
             members: Some(vec![member(), member(), member()]),
             blueprint: None,
+            node: None,
             from_node: entry.clone(),
             condition: "always".to_string(),
             min_pass: None,

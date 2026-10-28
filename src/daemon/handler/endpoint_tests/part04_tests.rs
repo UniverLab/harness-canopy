@@ -717,6 +717,7 @@ async fn graph_add_node_happy_path_and_invalid_config() {
             kind: Some("agent".to_string()),
             config: Some(agent_node_config("claude")),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -732,6 +733,7 @@ async fn graph_add_node_happy_path_and_invalid_config() {
             kind: Some("agent".to_string()),
             config: Some(agent_node_config("claude")),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -746,6 +748,7 @@ async fn graph_add_node_happy_path_and_invalid_config() {
             kind: Some("agent".to_string()),
             config: Some(serde_json::Map::new()),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -760,6 +763,7 @@ async fn graph_add_node_happy_path_and_invalid_config() {
             kind: Some("join".to_string()),
             config: Some(serde_json::Map::new()),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -791,6 +795,7 @@ async fn graph_add_node_rejects_prompt_key_naming_prompt_template() {
             kind: Some("agent".to_string()),
             config: Some(config),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -832,6 +837,7 @@ async fn graph_add_node_rejects_interactive_only_platform() {
             kind: Some("agent".to_string()),
             config: Some(agent_node_config("freebuff")),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -868,6 +874,7 @@ async fn graph_update_node_rejects_interactive_only_platform() {
             kind: Some("agent".to_string()),
             config: Some(agent_node_config("claude")),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -914,6 +921,7 @@ async fn graph_update_node_records_config_changed_only_for_running_graph() {
             kind: Some("agent".to_string()),
             config: Some(agent_node_config("claude")),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -977,6 +985,7 @@ async fn graph_update_node_renames_and_validates() {
             kind: Some("agent".to_string()),
             config: Some(agent_node_config("claude")),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -1047,6 +1056,7 @@ async fn graph_add_node_accepts_skills_on_agent_and_preserves_order() {
             kind: Some("agent".to_string()),
             config: Some(config),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -1087,6 +1097,7 @@ async fn graph_update_node_accepts_skills_on_agent_and_preserves_order() {
             kind: Some("agent".to_string()),
             config: Some(agent_node_config("claude")),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -1143,6 +1154,7 @@ async fn graph_update_node_partial_config_merge_preserves_prompt() {
             kind: Some("agent".to_string()),
             config: Some(config),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -1199,6 +1211,7 @@ async fn graph_update_node_partial_config_merge_timeout_leaves_others() {
             kind: Some("agent".to_string()),
             config: Some(config),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -1247,6 +1260,7 @@ async fn graph_update_node_full_replacement_drops_keys() {
             kind: Some("agent".to_string()),
             config: Some(config),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -1296,6 +1310,7 @@ async fn graph_update_node_unknown_key_rejected_in_both_modes() {
             kind: Some("agent".to_string()),
             config: Some(agent_node_config("claude")),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await

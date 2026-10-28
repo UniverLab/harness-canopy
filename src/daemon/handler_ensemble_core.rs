@@ -28,7 +28,7 @@ pub(crate) use crate::daemon::handler_ensemble_plan::{
 impl TaskTriggerHandler {
     #[tool(
         name = "graph_add_ensemble",
-        description = "Create an ensemble in ONE call: N (2–8 parallel, 2–16 cascade/round_robin) agent-node members sharing one prompt by default, plus the quorum that waits for all of them, consolidates their outputs (attributed per member), and routes onward. Set `commit_rights: true` to make this ensemble the graph's designated committer (B37) — whichever member the running strategy dispatches becomes the committer for that run. Members differ by platform/model, and each may set its own prompt_override to review the same input from a different angle instead of sharing the template. Each member may also set its own timeout_minutes, overriding the ensemble's shared value for that member only. Each member (and the ensemble as a whole) may also set `infra_retry_limit`/`infra_crash_max_seconds`/`infra_backoff_seconds`, overriding the platform's config.toml value (then the engine default 2/60/30) for the infra-crash retry budget — member wins over ensemble. (Formerly called 'fusion' — retired to avoid colliding with OpenRouter's fusion technology.) on_pass_to/on_fail_to accept a node id or another ensemble's id (chained: the quorum fans out to every member of that ensemble, no intermediate node). Entry rewiring, extra entry sources, and deletion are graph_update_ensemble/graph_delete_ensemble. Pass `crew` to bind an existing crew's ordered members instead of a literal `members` list (mutually exclusive with `members`/blueprint members); later crew edits reach this ensemble at its next dispatch. Pass `mutex` (e.g. [\"cpu\"]) to hold named shared resources for every member run."
+        description = "Create an ensemble in ONE call: N (2–8 parallel, 2–16 cascade/round_robin) agent-node members sharing one prompt by default, plus the quorum that waits for all of them, consolidates their outputs (attributed per member), and routes onward. Set `commit_rights: true` to make this ensemble the graph's designated committer (B37) — whichever member the running strategy dispatches becomes the committer for that run. Members differ by platform/model, and each may set its own prompt_override to review the same input from a different angle instead of sharing the template. Each member may also set its own timeout_minutes, overriding the ensemble's shared value for that member only. Each member (and the ensemble as a whole) may also set `infra_retry_limit`/`infra_crash_max_seconds`/`infra_backoff_seconds`, overriding the platform's config.toml value (then the engine default 2/60/30) for the infra-crash retry budget — member wins over ensemble. (Formerly called 'fusion' — retired to avoid colliding with OpenRouter's fusion technology.) on_pass_to/on_fail_to accept a node id or another ensemble's id (chained: the quorum fans out to every member of that ensemble, no intermediate node). Entry rewiring, extra entry sources, and deletion are graph_update_ensemble/graph_delete_ensemble. Pass `node: <name>` to instantiate an ensemble node document (see node_list, e.g. ensemble-proposers): it supplies the shared prompt, the member count and the ensemble shape, while `members` must still be passed with a platform for each one. Pass `crew` to bind an existing crew's ordered members instead of a literal `members` list (mutually exclusive with `members`/blueprint members); later crew edits reach this ensemble at its next dispatch. Pass `mutex` (e.g. [\"cpu\"]) to hold named shared resources for every member run."
     )]
     pub(crate) async fn graph_add_ensemble(
         &self,
@@ -48,6 +48,26 @@ impl TaskTriggerHandler {
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty());
+        let node_name = params
+            .node
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if node_name.is_some() && (blueprint_name.is_some() || params.crew.is_some()) {
+            return Ok(error_result(
+                "Pass node or blueprint/crew, never both: an ensemble node document supplies the prompt and members on its own.",
+            ));
+        }
+        let ensemble_node = match node_name {
+            Some(node_name) => {
+                match crate::daemon::handler_node_lib::resolve_ensemble_node_document(node_name) {
+                    Ok(document) => Some(document),
+                    Err(e) => return Ok(error_result(&e)),
+                }
+            }
+            None => None,
+        };
+        let ensemble_node_config = ensemble_node.as_ref().map(|(_, config)| config);
         let blueprint = match blueprint_name {
             Some(blueprint_name) => match self
                 .db
@@ -71,26 +91,37 @@ impl TaskTriggerHandler {
             .filter(|value| !value.is_empty())
         {
             Some(explicit) => explicit.to_string(),
-            None => match &blueprint {
-                Some(bp) => bp.prompt_template.clone(),
-                None => {
-                    return Ok(error_result(
-                        "Provide prompt_template, or a blueprint that supplies one.",
-                    ))
-                }
+            None => match (&blueprint, ensemble_node_config) {
+                (Some(bp), _) => bp.prompt_template.clone(),
+                (None, Some(config)) => config.prompt_template.clone(),
+                (None, None) => return Ok(error_result(
+                    "Provide prompt_template, or a blueprint or node document that supplies one.",
+                )),
             },
         };
         let prompt_template = prompt_template.as_str();
 
-        let kind = match params.kind.as_deref().map(str::trim).unwrap_or("parallel") {
-            "parallel" => EnsembleKind::Parallel,
-            "cascade" => EnsembleKind::Cascade,
-            "round_robin" => EnsembleKind::RoundRobin,
-            other => {
+        let kind = match params
+            .kind
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some("parallel") => EnsembleKind::Parallel,
+            Some("cascade") => EnsembleKind::Cascade,
+            Some("round_robin") => EnsembleKind::RoundRobin,
+            Some(other) => {
                 return Ok(error_result(&format!(
                 "Invalid ensemble kind '{other}'. Must be one of: parallel, cascade, round_robin."
             )))
             }
+            None => match ensemble_node_config {
+                Some(config) => match config.strategy() {
+                    Ok(kind) => kind,
+                    Err(e) => return Ok(error_result(&e)),
+                },
+                None => EnsembleKind::Parallel,
+            },
         };
 
         // CM49: a crew binding is mutually exclusive with a literal member
@@ -129,19 +160,15 @@ impl TaskTriggerHandler {
                     )))
                 }
             },
-            None => match &params.members {
-                Some(explicit) => match validate_ensemble_members(explicit, kind, caps) {
-                    Ok(members) => members,
-                    Err(e) => return Ok(error_result(&e)),
-                },
-                None => match &blueprint {
-                    Some(bp) => bp.members.clone(),
-                    None => {
-                        return Ok(error_result(
-                            "Provide members, or a blueprint that supplies them.",
-                        ))
-                    }
-                },
+            None => match resolve_ensemble_members(
+                params.members.as_ref(),
+                ensemble_node.as_ref(),
+                blueprint.as_ref(),
+                kind,
+                caps,
+            ) {
+                Ok(members) => members,
+                Err(e) => return Ok(error_result(&e)),
             },
         };
         // Blueprint-supplied members bypass `validate_ensemble_members` above
@@ -284,8 +311,14 @@ impl TaskTriggerHandler {
             None => None,
         };
 
+        let mutex = params
+            .mutex
+            .clone()
+            .or_else(|| ensemble_node_config.and_then(|config| config.mutex.clone()))
+            .unwrap_or_default();
         let min_pass = params
             .min_pass
+            .or_else(|| ensemble_node_config.and_then(|config| config.min_pass))
             .or_else(|| blueprint.as_ref().and_then(|bp| bp.min_pass))
             .unwrap_or(members.len() as i64);
         if let Err(e) =
@@ -295,15 +328,23 @@ impl TaskTriggerHandler {
         }
         if let Err(e) = crate::domain::validation::validate_mutex_list(
             &format!("Ensemble '{name}'"),
-            params.mutex.as_deref(),
+            Some(mutex.as_slice()),
         ) {
             return Ok(error_result(&e));
         }
-        let timeout_minutes = default_member_timeout(&graphs, params.timeout_minutes);
+        let timeout_minutes = default_member_timeout(
+            &graphs,
+            params
+                .timeout_minutes
+                .or_else(|| ensemble_node_config.and_then(|config| config.timeout_minutes)),
+        );
         if timeout_minutes < 0 {
             return Ok(error_result("timeout_minutes must not be negative."));
         }
-        if let Some(straggler) = params.straggler_timeout_minutes {
+        let straggler_timeout_minutes = params
+            .straggler_timeout_minutes
+            .or_else(|| ensemble_node_config.and_then(|config| config.straggler_timeout_minutes));
+        if let Some(straggler) = straggler_timeout_minutes {
             if straggler < 0 {
                 return Ok(error_result(
                     "straggler_timeout_minutes must not be negative.",
@@ -320,6 +361,7 @@ impl TaskTriggerHandler {
         }
         let quorum_grace_minutes = params
             .quorum_grace_minutes
+            .or_else(|| ensemble_node_config.and_then(|config| config.quorum_grace_minutes))
             .or_else(|| blueprint.as_ref().and_then(|bp| bp.quorum_grace_minutes));
         if let Some(grace) = quorum_grace_minutes {
             if grace < 0 {
@@ -333,10 +375,19 @@ impl TaskTriggerHandler {
                 )));
             }
         }
+        let infra_retry_limit = params
+            .infra_retry_limit
+            .or_else(|| ensemble_node_config.and_then(|config| config.infra_retry_limit));
+        let infra_crash_max_seconds = params
+            .infra_crash_max_seconds
+            .or_else(|| ensemble_node_config.and_then(|config| config.infra_crash_max_seconds));
+        let infra_backoff_seconds = params
+            .infra_backoff_seconds
+            .or_else(|| ensemble_node_config.and_then(|config| config.infra_backoff_seconds));
         for (field_name, value) in [
-            ("infra_retry_limit", params.infra_retry_limit),
-            ("infra_crash_max_seconds", params.infra_crash_max_seconds),
-            ("infra_backoff_seconds", params.infra_backoff_seconds),
+            ("infra_retry_limit", infra_retry_limit),
+            ("infra_crash_max_seconds", infra_crash_max_seconds),
+            ("infra_backoff_seconds", infra_backoff_seconds),
         ] {
             if value.is_some_and(|v| v < 0) {
                 return Ok(error_result(&format!("{field_name} must not be negative.")));
@@ -377,15 +428,18 @@ impl TaskTriggerHandler {
             on_fail_fan_out,
             min_pass,
             timeout_minutes,
-            straggler_timeout_minutes: params.straggler_timeout_minutes,
+            straggler_timeout_minutes,
             quorum_grace_minutes,
-            infra_retry_limit: params.infra_retry_limit,
-            infra_crash_max_seconds: params.infra_crash_max_seconds,
-            infra_backoff_seconds: params.infra_backoff_seconds,
+            infra_retry_limit,
+            infra_crash_max_seconds,
+            infra_backoff_seconds,
             start_position,
             kind,
-            commit_rights: params.commit_rights.unwrap_or(false),
-            mutex: params.mutex.clone().unwrap_or_default(),
+            commit_rights: params
+                .commit_rights
+                .or_else(|| ensemble_node_config.and_then(|config| config.commit_rights))
+                .unwrap_or(false),
+            mutex,
         });
 
         // The shared prompt and every member override are refused here when
@@ -531,6 +585,76 @@ pub(crate) fn default_member_timeout(
     requested: Option<i64>,
 ) -> i64 {
     requested.unwrap_or(graphs.straggler_timeout_minutes as i64)
+}
+
+/// Resolve `graph_add_ensemble`'s members from the caller's list, an
+/// ensemble node document (which carries no harnesses), or an ensemble
+/// blueprint. A document's members match the caller's one-for-one: each
+/// caller entry supplies the platform the document deliberately omits, and
+/// the document fills in the per-member prompt override, timeout and infra
+/// budget the caller left out.
+fn resolve_ensemble_members(
+    explicit: Option<&Vec<EnsembleMemberParams>>,
+    ensemble_node: Option<&(String, crate::domain::nodes::EnsembleNodeConfig)>,
+    blueprint: Option<&crate::domain::blueprints::EnsembleBlueprint>,
+    kind: EnsembleKind,
+    caps: crate::domain::graphs::MemberCaps,
+) -> Result<Vec<EnsembleMemberSpec>, String> {
+    match (explicit, ensemble_node) {
+        (Some(explicit), Some((document_name, config))) => {
+            let merged = merge_node_members(document_name, config, explicit)?;
+            validate_ensemble_members(&merged, kind, caps)
+        }
+        (Some(explicit), None) => validate_ensemble_members(explicit, kind, caps),
+        (None, Some((document_name, config))) => Err(format!(
+            "Ensemble node document '{document_name}' carries no member harnesses; pass members with a non-empty 'platform' for each of its {} members (and 'model' when the platform needs one).",
+            config.members.len()
+        )),
+        (None, None) => match blueprint {
+            Some(bp) => Ok(bp.members.clone()),
+            None => Err(
+                "Provide members, or a blueprint or node document that supplies them."
+                    .to_string(),
+            ),
+        },
+    }
+}
+
+/// Merge the caller's member list with a document's member templates: the
+/// caller's keys win where set, the document fills in the rest.
+fn merge_node_members(
+    document_name: &str,
+    config: &crate::domain::nodes::EnsembleNodeConfig,
+    explicit: &[EnsembleMemberParams],
+) -> Result<Vec<EnsembleMemberParams>, String> {
+    if explicit.len() != config.members.len() {
+        return Err(format!(
+            "Ensemble node document '{document_name}' defines {} members; pass exactly {} entries in 'members' with a platform for each, got {}.",
+            config.members.len(),
+            config.members.len(),
+            explicit.len()
+        ));
+    }
+    Ok(explicit
+        .iter()
+        .zip(&config.members)
+        .map(|(caller, template)| EnsembleMemberParams {
+            platform: caller.platform.clone(),
+            model: caller.model.clone(),
+            prompt_override: caller
+                .prompt_override
+                .clone()
+                .or_else(|| template.prompt_override.clone()),
+            timeout_minutes: caller.timeout_minutes.or(template.timeout_minutes),
+            infra_retry_limit: caller.infra_retry_limit.or(template.infra_retry_limit),
+            infra_crash_max_seconds: caller
+                .infra_crash_max_seconds
+                .or(template.infra_crash_max_seconds),
+            infra_backoff_seconds: caller
+                .infra_backoff_seconds
+                .or(template.infra_backoff_seconds),
+        })
+        .collect())
 }
 
 pub(crate) fn validate_ensemble_members(

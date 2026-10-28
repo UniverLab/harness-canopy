@@ -9,6 +9,7 @@
 //! own count.
 
 mod fetch;
+pub(crate) use fetch::fetch_document;
 #[cfg(test)]
 pub(crate) mod stub;
 
@@ -42,17 +43,27 @@ impl GraphRef {
     }
 }
 
-/// Parse a catalogue ref: `<slug>` or `<owner>/<repo>/<slug>`, each with an
-/// optional `@<ref>` suffix. The slug is `[a-z0-9-]{1,48}`; owner and repo
-/// follow GitHub's rules. Anything else is refused with the accepted forms
-/// in the message.
+/// Parse a graph catalogue ref: `<slug>` or `<owner>/<repo>/<slug>`, each
+/// with an optional `@<ref>` suffix. The slug is `[a-z0-9-]{1,48}`; owner and
+/// repo follow GitHub's rules. Anything else is refused with the accepted
+/// forms in the message.
 pub(crate) fn parse_ref(raw: &str) -> Result<GraphRef, String> {
+    parse_ref_for("graph", raw)
+}
+
+/// Parse a node catalogue ref — the same grammar as a graph ref, with the
+/// refusal naming a node ref.
+pub(crate) fn parse_ref_node(raw: &str) -> Result<GraphRef, String> {
+    parse_ref_for("node", raw)
+}
+
+fn parse_ref_for(kind: &str, raw: &str) -> Result<GraphRef, String> {
     let trimmed = raw.trim();
     let (path, git_ref) = match trimmed.split_once('@') {
         None => (trimmed, None),
         Some((path, git_ref)) => {
             if path.is_empty() || !is_git_ref(git_ref) {
-                return Err(invalid_ref_message(raw));
+                return Err(invalid_ref_message(kind, raw));
             }
             (path, Some(git_ref.to_string()))
         }
@@ -71,13 +82,13 @@ pub(crate) fn parse_ref(raw: &str) -> Result<GraphRef, String> {
                 git_ref,
             })
         }
-        _ => Err(invalid_ref_message(raw)),
+        _ => Err(invalid_ref_message(kind, raw)),
     }
 }
 
-fn invalid_ref_message(raw: &str) -> String {
+fn invalid_ref_message(kind: &str, raw: &str) -> String {
     format!(
-        "Invalid graph ref '{raw}'. Accepted forms: <slug> or <owner>/<repo>/<slug>, \
+        "Invalid {kind} ref '{raw}'. Accepted forms: <slug> or <owner>/<repo>/<slug>, \
          each with an optional @<ref> suffix (for example 'my-graph', \
          'acme/widgets/my-graph' or 'acme/widgets/my-graph@v1.2'). \
          The slug is 1-48 lowercase letters, digits, or '-'."
@@ -148,7 +159,7 @@ pub(crate) fn prepare_install(
     prompts_dir: &Path,
 ) -> Result<PreparedInstall, String> {
     let parsed = parse_ref(reference)?;
-    let fetched = fetch::fetch_document(base, &parsed)?;
+    let fetched = fetch::fetch_document(base, &parsed, "graph")?;
     let report = crate::daemon::graph_validate::validate_document_str(&fetched.body);
     reject_invalid_report(reference, &report)?;
     let document = parse_export_document_str(&fetched.body)?;

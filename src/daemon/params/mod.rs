@@ -11,6 +11,8 @@ mod misc;
 pub use misc::*;
 mod graph_core;
 pub use graph_core::*;
+mod nodes;
+pub use nodes::*;
 mod graph_access;
 pub use graph_access::*;
 mod graph_crew;

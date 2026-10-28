@@ -15,6 +15,7 @@ async fn graph_update_node_router_enforces_route_coverage_and_edge_consistency()
             kind: Some("router".to_string()),
             config: Some(router_node_config(&two_routes(), "retry")),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -119,6 +120,7 @@ async fn graph_add_ensemble_happy_path_and_validation_errors() {
             prompt_template: Some("Review {{spec_name}}".to_string()),
             members: Some(members.clone()),
             blueprint: None,
+            node: None,
             from_node: entry.clone(),
             condition: "always".to_string(),
             min_pass: Some(2),
@@ -149,6 +151,7 @@ async fn graph_add_ensemble_happy_path_and_validation_errors() {
             prompt_template: None,
             members: Some(members.clone()),
             blueprint: None,
+            node: None,
             from_node: entry.clone(),
             condition: "always".to_string(),
             min_pass: None,
@@ -179,6 +182,7 @@ async fn graph_add_ensemble_happy_path_and_validation_errors() {
             prompt_template: Some("Review".to_string()),
             members: Some(members.clone()),
             blueprint: None,
+            node: None,
             from_node: entry.clone(),
             condition: "always".to_string(),
             min_pass: Some(99),
@@ -209,6 +213,7 @@ async fn graph_add_ensemble_happy_path_and_validation_errors() {
             prompt_template: Some("Review".to_string()),
             members: Some(members.clone()),
             blueprint: None,
+            node: None,
             from_node: "not-a-node".to_string(),
             condition: "always".to_string(),
             min_pass: None,
@@ -239,6 +244,7 @@ async fn graph_add_ensemble_happy_path_and_validation_errors() {
             prompt_template: Some("Review".to_string()),
             members: Some(vec![members[0].clone()]),
             blueprint: None,
+            node: None,
             from_node: entry,
             condition: "always".to_string(),
             min_pass: None,
@@ -296,6 +302,7 @@ async fn graph_add_ensemble_rejects_interactive_only_member() {
             prompt_template: Some("Review".to_string()),
             members: Some(vec![member("freebuff"), member("claude")]),
             blueprint: None,
+            node: None,
             from_node: entry,
             condition: "always".to_string(),
             min_pass: None,
@@ -352,6 +359,7 @@ async fn graph_add_ensemble_rejects_negative_quorum_grace() {
             prompt_template: Some("Review".to_string()),
             members: Some(vec![member(), member()]),
             blueprint: None,
+            node: None,
             from_node: entry.clone(),
             condition: "always".to_string(),
             min_pass: None,
@@ -386,6 +394,7 @@ async fn graph_add_ensemble_rejects_negative_quorum_grace() {
             prompt_template: Some("Review".to_string()),
             members: Some(vec![member(), member()]),
             blueprint: None,
+            node: None,
             from_node: entry,
             condition: "always".to_string(),
             min_pass: None,
@@ -438,6 +447,7 @@ async fn graph_update_ensemble_sets_and_clears_quorum_grace() {
             prompt_template: Some("Review".to_string()),
             members: Some(vec![member(), member()]),
             blueprint: None,
+            node: None,
             from_node: entry,
             condition: "always".to_string(),
             min_pass: None,
@@ -575,6 +585,7 @@ async fn graph_get_reports_prompt_source_for_agent_nodes() {
                 kind: Some("agent".to_string()),
                 config: Some(explicit_config),
                 blueprint: None,
+                node: None,
                 config_overrides: None,
             }))
             .await
@@ -596,6 +607,7 @@ async fn graph_get_reports_prompt_source_for_agent_nodes() {
                 kind: Some("agent".to_string()),
                 config: Some(preset_config),
                 blueprint: None,
+                node: None,
                 config_overrides: None,
             }))
             .await
@@ -612,6 +624,7 @@ async fn graph_get_reports_prompt_source_for_agent_nodes() {
                 kind: Some("agent".to_string()),
                 config: Some(agent_node_config("claude")),
                 blueprint: None,
+                node: None,
                 config_overrides: None,
             }))
             .await

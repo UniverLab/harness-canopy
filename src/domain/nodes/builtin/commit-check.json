@@ -1,0 +1,9 @@
+{
+  "format_version": 1,
+  "name": "commit-check",
+  "kind": "check",
+  "description": "Check that the spec left a commit behind.",
+  "config": {
+    "command": "test \"$(git rev-parse HEAD)\" != \"{{spec_start_head}}\""
+  }
+}

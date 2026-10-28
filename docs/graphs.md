@@ -1380,29 +1380,95 @@ exports its path as `CANOPY_SPEC_NOTES_FILE`. A presence check like
 `grep -q '^## Designer' "$CANOPY_SPEC_NOTES_FILE"` needs no `canopy`
 binary inside a check command.
 
-## Node blueprints
+## Nodes
 
-Rather than pasting a full `config` into every `graph_add_node` call, a
-node can reference a **blueprint** — a reusable `{name, kind, config}`
-template — by name:
+A **node document** is one reusable node — a Rust Designer, a Python
+Validator, the classic implementer — that is shared and installed like a
+whole graph, then added to any graph by name:
+
+```json
+{
+  "format_version": 1,
+  "name": "auditor",
+  "kind": "agent",
+  "description": "Audits a change against the spec.",
+  "config": { "prompt_template": "audit this", "timeout_minutes": 10 },
+  "preset": { "name": "auditor-preset", "content": "audit well" }
+}
+```
+
+`kind` is `agent`, `check`, `gate`, `router`, or `ensemble`. An `ensemble`
+document carries the ensemble shape in `config`: `prompt_template`,
+`members` (each **without** `platform`/`model`), `min_pass`, and the same
+fields `graph_add_ensemble` accepts (`kind`, timeouts, infra budgets,
+`commit_rights`, `mutex`). A document never carries a harness — who runs a
+node is the installer's decision, not the author's. `canopy graph validate
+<path>` checks a node document exactly as it checks a graph document
+(`ok` with `node_kind`, or every problem with its JSON path).
+
+**Install** one from the catalogue:
 
 ```
-graph_add_node { spec_id, name, blueprint: "cargo-gates" }
-graph_add_node { spec_id, name, blueprint: "implementer-claude", config_overrides: { "model": "opus" } }
+canopy node install <slug>
+canopy node install <owner>/<repo>/<slug>@<ref>
+canopy node install <ref> --overwrite-presets --json
 ```
 
-`config_overrides` is a shallow merge on top of the blueprint's config
-template — override keys win, every other templated key is preserved.
-An unknown blueprint name returns an actionable error listing every
-available blueprint.
+The ref grammar is the graph ref grammar (`<slug>` or
+`<owner>/<repo>/<slug>`, optional `@<ref>`); the document is fetched
+through `graphs.catalogue_url`, validated, and written to
+`~/.canopy/nodes/<name>.json`. Its bundled `preset` is installed as
+`~/.canopy/prompts/<preset.name>.md` with the same no-silent-overwrite rule
+as a graph's presets: a local file with different content aborts the
+install unless `--overwrite-presets` is given. A graph document fetched
+from a node endpoint is refused.
 
-Five builtins are seeded automatically at daemon startup if missing
-(re-seeded if deleted from the DB directly): `implementer-claude`,
-`cargo-gates`, `reviewer-committer-mimo`, `commit-check`,
-`resilience-mimo`. Builtins can't be deleted. Manage blueprints with
-`blueprint_list`, `blueprint_create`, and `blueprint_delete` (custom
-only). The TUI sidebar lists available blueprints, and the graph editor
-validates blueprint references inline.
+**List** what is available:
+
+```
+canopy node list
+canopy node list --json
+```
+
+The list shows installed copies and the builtins embedded in the binary,
+each marked `installed` or `builtin`. The builtins are `implementer`,
+`cargo-gates`, `reviewer-committer`, `commit-check`, `resilience`, and
+`ensemble-proposers`; they resolve offline, with no install step. An
+installed copy of a builtin's name wins over the builtin.
+
+**Add** one to a graph:
+
+```
+graph_add_node { spec_id, name: "audit", node: "auditor",
+                 config_overrides: { "platform": "claude", "model": "opus" } }
+graph_add_ensemble { spec_id, name: "Proposers", node: "ensemble-proposers",
+                     members: [{ "platform": "openrouter" }, …],
+                     from_node: "<kickoff>", condition: "always",
+                     on_pass_to: "<arbiter>" }
+```
+
+`node` is the alternative to `kind` + `config` (or a `blueprint`), and
+`config_overrides` shallow-merges on top of the document's config — the
+override wins, the rest of the document is preserved. An agent node
+document has no harness, so the call is refused with a message naming the
+document unless the overrides supply `platform` (or `cli`, or `crew`). An
+ensemble document supplies the shared prompt, the member count and the
+ensemble shape, but its members still need a platform each from the
+caller's `members` list.
+
+**Remove** an installed copy:
+
+```
+canopy node remove <name>
+```
+
+A builtin with no installed copy cannot be removed; an installed copy that
+overrides a builtin is removed like any other, and the builtin resolves
+again afterwards.
+
+The `blueprint_list`/`blueprint_create`/`blueprint_delete` tools and the
+`blueprint` parameter still exist for now; the MCP surface redesign removes
+them once node documents replace every use.
 
 ## Tuning the engine
 
@@ -1420,7 +1486,7 @@ retry budgets and caps. Each keeps its default until you set it.
 | `graphs.ensemble_max_members_sequential` | 16 (range 2–32) | Largest member count for a `cascade`/`round_robin` ensemble, and the largest crew. |
 | `graphs.check_output_max_kib` | 64 (range 16–4096) | Check-output tail kept, in KiB. |
 | `graphs.verdict_grace_seconds` | 15 (range 0–300) | Seconds an agent has to exit after filing its verdict before canopy terminates it. 0 disables the shutdown. |
-| `graphs.catalogue_url` | `https://graphs.univerlab.org` | Base URL of the graph catalogue `canopy graph install` fetches from. |
+| `graphs.catalogue_url` | `https://graphs.univerlab.org` | Base URL of the catalogue `canopy graph install` and `canopy node install` fetch from. |
 
 Two more engine settings sit outside the `graphs.` prefix (see
 [CLI reference](cli-reference.md#settings-reference)):

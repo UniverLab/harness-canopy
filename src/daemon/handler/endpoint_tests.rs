@@ -205,6 +205,7 @@ async fn build_simple_graph(
             kind: Some("agent".to_string()),
             config: Some(agent_node_config("claude")),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -219,6 +220,7 @@ async fn build_simple_graph(
             kind: Some("check".to_string()),
             config: Some(check_node_config("cargo test")),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -233,6 +235,7 @@ async fn build_simple_graph(
             kind: Some("agent".to_string()),
             config: Some(agent_node_config("claude")),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -313,6 +316,7 @@ async fn graph_with_unexited_quorum(
                 },
             ]),
             blueprint: None,
+            node: None,
             from_node: entry.id.clone(),
             condition: "always".to_string(),
             min_pass: None,
@@ -486,6 +490,7 @@ async fn add_agent_node(handler: &TaskTriggerHandler, spec_id: &str, name: &str)
             kind: Some("agent".to_string()),
             config: Some(agent_node_config("claude")),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -524,6 +529,7 @@ async fn add_cb52_ensemble(
             prompt_template: Some("Review {{spec_name}}".to_string()),
             members: Some(vec![member(), member()]),
             blueprint: None,
+            node: None,
             from_node: entry.to_string(),
             condition: "always".to_string(),
             min_pass: Some(2),
@@ -692,6 +698,7 @@ async fn add_two_member_ensemble(
                 },
             ]),
             blueprint: None,
+            node: None,
             from_node: from_node.to_string(),
             condition: "always".to_string(),
             min_pass: None,
@@ -774,6 +781,7 @@ async fn build_two_source_ensemble_graph(
             prompt_template: Some("Draft it".to_string()),
             members: Some((0..member_count).map(|_| member()).collect()),
             blueprint: None,
+            node: None,
             from_node: entry.clone(),
             condition: "always".to_string(),
             min_pass: None,
@@ -1066,6 +1074,7 @@ async fn build_crew_ensemble(
             kind: Some("check".to_string()),
             config: Some(check_node_config("true")),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -1079,6 +1088,7 @@ async fn build_crew_ensemble(
             kind: Some("agent".to_string()),
             config: Some(agent_node_config("claude")),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -1094,6 +1104,7 @@ async fn build_crew_ensemble(
             name: "Proposers".to_string(),
             prompt_template: Some("draft it".to_string()),
             blueprint: None,
+            node: None,
             members: None,
             condition: "always".to_string(),
             from_node: kickoff_id,
@@ -1142,6 +1153,7 @@ async fn build_literal_ensemble(
             kind: Some("check".to_string()),
             config: Some(check_node_config("true")),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -1155,6 +1167,7 @@ async fn build_literal_ensemble(
             kind: Some("agent".to_string()),
             config: Some(agent_node_config("claude")),
             blueprint: None,
+            node: None,
             config_overrides: None,
         }))
         .await
@@ -1190,6 +1203,7 @@ async fn build_literal_ensemble(
             name: "Proposers".to_string(),
             prompt_template: Some("draft it".to_string()),
             blueprint: None,
+            node: None,
             members: Some(members),
             condition: "always".to_string(),
             from_node: kickoff_id,
@@ -1250,3 +1264,4 @@ mod part11_tests;
 mod part12_tests;
 mod part13_tests;
 mod part14_tests;
+mod part15_tests;

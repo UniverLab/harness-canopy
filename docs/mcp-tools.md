@@ -262,6 +262,14 @@ readable until `spec_convert` migrates them.
 | `blueprint_create` | Create a reusable node config template |
 | `blueprint_delete` | Delete a custom blueprint (builtins protected) |
 
+## Node documents (3)
+
+| Tool | Description |
+|---|---|
+| `node_list` | List installed node documents and the builtins embedded in the binary, marking each `installed` or `builtin` |
+| `node_install` | Install a node document from the catalogue by ref, with its bundled preset |
+| `node_remove` | Remove an installed node document (a builtin with no override is refused) |
+
 ## Project (4)
 
 | Tool | Description |

@@ -7,21 +7,20 @@ use crate::daemon::handler_formatting::{
     build_id_result, build_node_update_response_with_changes, internal_error,
 };
 use crate::daemon::handler_helpers::record_config_change_if_running;
+use crate::daemon::handler_node_lib::{resolve_node_document, resolve_node_kind_and_config};
 use crate::daemon::handler_specs_helpers::validate_at_least_one_bool;
 use crate::daemon::handler_templates::{check_new_node, check_updated_node};
 use crate::daemon::handler_validate::{
     config_has_agent_harness, json_value_kind_name, parse_router_routes,
     reject_interactive_only_platform, resolve_prefix_or_error, validate_agent_crew_exclusive,
-    validate_blueprint_agent_harness, validate_node_exists, validate_node_kind,
-    validate_node_mutex_config, validate_node_not_ensemble_owned, validate_node_position_conflict,
-    validate_non_empty, validate_not_join_kind, validate_topology_mutation_allowed,
+    validate_node_exists, validate_node_kind, validate_node_mutex_config,
+    validate_node_not_ensemble_owned, validate_node_position_conflict, validate_non_empty,
+    validate_not_join_kind, validate_topology_mutation_allowed,
 };
 use crate::daemon::helpers::error_result;
 use crate::daemon::params::*;
 use crate::daemon::params_extract::Parameters;
 use crate::db::Database;
-use crate::domain::blueprints::merge_blueprint_config;
-use crate::domain::blueprints::Blueprint;
 use crate::domain::graphs::{
     validate_router_edges_declared, validate_router_route_coverage, validate_router_routes,
     GraphEdge, GraphEdgeCondition, GraphNode, GraphNodeKind,
@@ -35,7 +34,7 @@ use rmcp::ErrorData as McpError;
 impl TaskTriggerHandler {
     #[tool(
         name = "graph_add_node",
-        description = "Add a graph node to an existing graph spec, or (via graph_id instead of spec_id) to the graph's top-level graph. Provide either a full 'config' (with 'kind'), or a 'blueprint' name (see blueprint_list) optionally shallow-merged with 'config_overrides'. An agent node also accepts `infra_retry_limit`/`infra_crash_max_seconds`/`infra_backoff_seconds` (defaults 2/60/30) to override the infra-crash retry budget for this node alone, taking precedence over its platform's config.toml value. An agent, check, or gate node also accepts `mutex` (e.g. [\"cpu\"]) to hold named shared resources while it runs. A router node with {\"decision\": true} classifies via the platform's decision model instead of spawning an agent (optional \"min_confidence\" 0-1, default 0); e.g. routes quota_with_reset/transient_glitch/other with fallback other."
+        description = "Add a graph node to an existing graph spec, or (via graph_id instead of spec_id) to the graph's top-level graph. Provide either a full 'config' (with 'kind'), a 'blueprint' name (see blueprint_list), or a 'node' document name (see node_list, e.g. implementer or cargo-gates), each template optionally shallow-merged with 'config_overrides'. An agent node also accepts `infra_retry_limit`/`infra_crash_max_seconds`/`infra_backoff_seconds` (defaults 2/60/30) to override the infra-crash retry budget for this node alone, taking precedence over its platform's config.toml value. An agent, check, or gate node also accepts `mutex` (e.g. [\"cpu\"]) to hold named shared resources while it runs. A router node with {\"decision\": true} classifies via the platform's decision model instead of spawning an agent (optional \"min_confidence\" 0-1, default 0); e.g. routes quota_with_reset/transient_glitch/other with fallback other."
     )]
     pub(crate) async fn graph_add_node(
         &self,
@@ -54,15 +53,38 @@ impl TaskTriggerHandler {
             Err(e) => return Ok(error_result(&e)),
         };
 
-        let (kind, config) = match resolve_node_kind_and_config(
-            &self.db,
-            params.kind.as_deref(),
-            params.config,
-            params.blueprint.as_deref(),
-            params.config_overrides,
-        ) {
-            Ok(result) => result,
-            Err(e) => return Ok(error_result(&e)),
+        let node_name = params
+            .node
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let (kind, config) = match node_name {
+            Some(node_name) => {
+                if params.config.is_some() || params.blueprint.is_some() {
+                    return Ok(error_result(
+                        "Pass one of 'config', 'blueprint', or 'node', never more than one.",
+                    ));
+                }
+                if params.kind.is_some() {
+                    return Ok(error_result(
+                        "Pass 'node' without 'kind': the node document already declares its kind.",
+                    ));
+                }
+                match resolve_node_document(node_name, params.config_overrides) {
+                    Ok(result) => result,
+                    Err(e) => return Ok(error_result(&e)),
+                }
+            }
+            None => match resolve_node_kind_and_config(
+                &self.db,
+                params.kind.as_deref(),
+                params.config,
+                params.blueprint.as_deref(),
+                params.config_overrides,
+            ) {
+                Ok(result) => result,
+                Err(e) => return Ok(error_result(&e)),
+            },
         };
         if let Err(e) = validate_not_join_kind(kind) {
             return Ok(error_result(&e));
@@ -725,74 +747,4 @@ fn validate_router_decision_config(
         }
     }
     Ok(())
-}
-
-/// Look up a blueprint by name, or an actionable error listing every
-/// available blueprint name (builtin and custom) so the caller can pick a
-/// valid one without a separate `blueprint_list` round trip.
-pub(crate) fn validate_blueprint_exists(db: &Database, name: &str) -> Result<Blueprint, String> {
-    match db.get_blueprint_by_name(name).map_err(|e| e.to_string())? {
-        Some(blueprint) => Ok(blueprint),
-        None => {
-            let available = db
-                .list_blueprints()
-                .map_err(|e| e.to_string())?
-                .iter()
-                .map(|b| b.name.clone())
-                .collect::<Vec<_>>()
-                .join(", ");
-            Err(format!(
-                "Unknown blueprint '{name}'. Available blueprints: {available}."
-            ))
-        }
-    }
-}
-
-/// Resolve a `graph_add_node` call's kind/config, either from an explicit
-/// `kind`+`config` pair or from a named blueprint (optionally shallow-merged
-/// with `config_overrides`). Exactly one of `config`/`blueprint` must be
-/// usable — this is the "blueprint as an alternative to a full config"
-/// surface described in R7.
-pub(crate) fn resolve_node_kind_and_config(
-    db: &Database,
-    kind: Option<&str>,
-    config: Option<serde_json::Map<String, serde_json::Value>>,
-    blueprint: Option<&str>,
-    config_overrides: Option<serde_json::Map<String, serde_json::Value>>,
-) -> Result<(GraphNodeKind, serde_json::Value), String> {
-    let blueprint_name = blueprint.map(str::trim).filter(|s| !s.is_empty());
-    let explicit_kind = kind.map(str::trim).filter(|s| !s.is_empty());
-
-    match blueprint_name {
-        Some(blueprint_name) => {
-            let bp = validate_blueprint_exists(db, blueprint_name)?;
-            let node_kind = match explicit_kind {
-                Some(explicit) => validate_node_kind(explicit)?,
-                None => bp.kind,
-            };
-            let overrides = config_overrides.map(serde_json::Value::Object);
-            let merged = merge_blueprint_config(&bp.config, overrides.as_ref());
-            // Blueprints intentionally carry no platform/cli/crew (see
-            // `builtin_blueprint_specs`) — which harness runs a node is the
-            // caller's decision, supplied here via `config_overrides`, never
-            // a default this resolver falls back to. Catching the missing
-            // case here (rather than only via `validate_node_config`'s
-            // generic message) lets the error name the blueprint and say
-            // *why* the field is missing instead of just that it is.
-            if node_kind == GraphNodeKind::Agent {
-                validate_blueprint_agent_harness(blueprint_name, &merged)?;
-            }
-            Ok((node_kind, merged))
-        }
-        None => {
-            let node_kind = validate_node_kind(
-                explicit_kind
-                    .ok_or_else(|| "Provide 'kind' when not using a blueprint.".to_string())?,
-            )?;
-            let config = config
-                .map(serde_json::Value::Object)
-                .ok_or_else(|| "Provide either 'config' or 'blueprint'.".to_string())?;
-            Ok((node_kind, config))
-        }
-    }
 }
