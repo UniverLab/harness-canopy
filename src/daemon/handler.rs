@@ -282,6 +282,7 @@ impl TaskTriggerHandler {
         let mut router = ToolRouter::new();
         router.merge(TaskTriggerHandler::tool_router_agents());
         router.merge(TaskTriggerHandler::tool_router_scheduled_sends());
+        router.merge(TaskTriggerHandler::tool_router_sandbox());
         router.merge(TaskTriggerHandler::tool_router_resource_tools());
         router.merge(TaskTriggerHandler::tool_router_resource_tools_final());
         router.merge(TaskTriggerHandler::tool_router_intel());
@@ -544,6 +545,7 @@ pub(crate) async fn call_resource_action_value(
                 .scheduled_send(parameters, OptionalExtension(None))
                 .await
         }
+        "sandbox" => handler.sandbox(parameters).await,
         "skill" => handler.skill(parameters).await,
         "subagent" => handler.subagent(parameters, OptionalExtension(None)).await,
         "rag" => handler.rag(parameters, OptionalExtension(None)).await,

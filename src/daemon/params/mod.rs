@@ -23,6 +23,8 @@ mod crew;
 pub use crew::*;
 mod settings;
 pub use settings::*;
+mod sandbox;
+pub use sandbox::*;
 
 #[cfg(test)]
 mod tests {

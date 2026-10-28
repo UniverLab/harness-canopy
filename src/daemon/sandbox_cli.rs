@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Result};
 use clap::Subcommand;
 
-use crate::db::sandbox::SandboxRun;
+use crate::daemon::sandbox_ops;
 use crate::db::Database;
 use crate::domain::db_paths::database_path;
 use crate::domain::sandbox::{self, SandboxInfo};
@@ -63,25 +63,6 @@ pub(crate) async fn handle_sandbox_action(action: SandboxAction) -> Result<()> {
             sandbox_id,
             discard_unique,
         } => handle_discard(&db, &sandbox_id, discard_unique).await,
-    }
-}
-
-fn enrich(row: &SandboxRun) -> SandboxInfo {
-    SandboxInfo {
-        id: row.id.clone(),
-        path: PathBuf::from(&row.worktree_path),
-        graph_id: if row.owner_type == "graph" {
-            row.owner_id.clone()
-        } else {
-            format!("{}:{}", row.owner_type, row.owner_id)
-        },
-        branch: row.sandbox_branch.clone(),
-        base_branch: row.base_branch.clone(),
-        original_workdir: row.original_workdir.clone(),
-        status: row.status.clone(),
-        has_unique_commits: sandbox::has_unique_commits(row),
-        behind_count: sandbox::behind_count(row),
-        worktree_registered: sandbox::worktree_is_registered(row),
     }
 }
 
@@ -163,7 +144,7 @@ fn untracked_info(path: &Path) -> SandboxInfo {
 
 fn handle_list(db: &Database, json: bool) -> Result<()> {
     let rows = db.list_all_sandbox_runs()?;
-    let mut infos: Vec<SandboxInfo> = rows.iter().map(enrich).collect();
+    let mut infos: Vec<SandboxInfo> = rows.iter().map(sandbox_ops::enrich).collect();
     let known: HashSet<String> = rows.into_iter().map(|r| r.id).collect();
     infos.extend(
         untracked_sandbox_dirs(&known)
@@ -212,54 +193,23 @@ fn handle_list(db: &Database, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn resolve_row(db: &Database, sandbox_id: &str) -> Result<SandboxRun> {
-    let trimmed = sandbox_id.trim();
-    match db.resolve_sandbox_id_by_prefix(trimmed)? {
-        Some(id) => db.get_sandbox_run(&id)?.ok_or_else(|| {
-            anyhow::anyhow!("sandbox '{trimmed}' resolved to '{id}' but the row is gone")
-        }),
-        None => bail!("no sandbox found for '{trimmed}'"),
-    }
-}
-
 async fn handle_land(db: &Database, sandbox_id: &str) -> Result<()> {
-    let row = resolve_row(db, sandbox_id)?;
-    match sandbox::land_sandbox(&row).await? {
-        sandbox::LandOutcome::Landed => {
-            db.update_sandbox_run_status(&row.id, "merged")?;
-            println!(
-                "Landed sandbox {} (branch {}) onto {}.",
-                row.id, row.sandbox_branch, row.base_branch
-            );
-            Ok(())
-        }
-        sandbox::LandOutcome::RefusedWrongBranch(reason) => {
-            bail!("refusing to land sandbox {}: {reason}", row.id)
-        }
-        sandbox::LandOutcome::RefusedNonClean(reason) => {
-            bail!("refusing to land sandbox {}: {reason}", row.id)
-        }
-        sandbox::LandOutcome::RefusedConflict(paths) => {
-            if paths.is_empty() {
-                bail!(
-                    "refusing to land sandbox {}: merge conflict (no paths reported)",
-                    row.id
-                );
-            }
-            bail!(
-                "refusing to land sandbox {}: merge conflict in:\n  {}",
-                row.id,
-                paths.join("\n  ")
-            );
-        }
+    let row = sandbox_ops::resolve_row(db, sandbox_id)?;
+    let outcome = sandbox_ops::land_and_record(db, &row).await?;
+    if let Some(refusal) = sandbox_ops::land_refusal(&row, &outcome) {
+        bail!("{refusal}");
     }
+    println!(
+        "Landed sandbox {} (branch {}) onto {}.",
+        row.id, row.sandbox_branch, row.base_branch
+    );
+    Ok(())
 }
 
 async fn handle_discard(db: &Database, sandbox_id: &str, discard_unique: bool) -> Result<()> {
-    let row = resolve_row(db, sandbox_id)?;
-    match sandbox::discard_sandbox(&row, discard_unique).await? {
+    let row = sandbox_ops::resolve_row(db, sandbox_id)?;
+    match sandbox_ops::discard_and_record(db, &row, discard_unique).await? {
         sandbox::DiscardOutcome::Discarded => {
-            db.update_sandbox_run_status(&row.id, "discarded")?;
             println!(
                 "Discarded sandbox {} ({}, branch {}).",
                 row.id, row.worktree_path, row.sandbox_branch
@@ -267,10 +217,8 @@ async fn handle_discard(db: &Database, sandbox_id: &str, discard_unique: bool) -
             Ok(())
         }
         sandbox::DiscardOutcome::RefusedUniqueCommits => bail!(
-            "refusing to discard sandbox {}: branch '{}' holds commits that exist nowhere else; \
-             re-run with --discard-unique-commits to discard them",
-            row.id,
-            row.sandbox_branch
+            "{}",
+            sandbox_ops::discard_refusal(&row, "--discard-unique-commits")
         ),
     }
 }

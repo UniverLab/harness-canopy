@@ -127,6 +127,29 @@ impl Database {
         Ok(row)
     }
 
+    /// The newest sandbox run of one owner, whatever its status — what the
+    /// graph detail view reports so a graph whose last run was sandboxed
+    /// names that sandbox (and whether it is `kept`, `merged`, …).
+    pub fn latest_sandbox_run_for_owner(
+        &self,
+        owner_type: &str,
+        owner_id: &str,
+    ) -> Result<Option<SandboxRun>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let row = conn
+            .query_row(
+                &format!(
+                    "SELECT {SANDBOX_RUN_COLUMNS} FROM sandbox_runs \
+                     WHERE owner_type = ?1 AND owner_id = ?2 \
+                     ORDER BY created_at DESC LIMIT 1",
+                ),
+                params![owner_type, owner_id],
+                sandbox_run_from_row,
+            )
+            .optional()?;
+        Ok(row)
+    }
+
     pub fn list_active_sandbox_runs(&self) -> Result<Vec<SandboxRun>> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         let mut stmt = conn.prepare(&format!(
@@ -366,6 +389,76 @@ mod tests {
         assert_eq!(
             finished[0].cleanup_error,
             Some("/tmp/wt: failed: boom".to_string())
+        );
+    }
+
+    #[test]
+    fn test_latest_sandbox_run_for_owner_returns_newest_of_that_owner() {
+        let db = test_db();
+
+        let mut older = test_sandbox();
+        older.id = "older-run".to_string();
+        older.created_at = Utc::now() - chrono::Duration::hours(2);
+        let mut newer = test_sandbox();
+        newer.id = "newer-run".to_string();
+        newer.created_at = Utc::now();
+        let mut other = test_sandbox();
+        other.id = "other-owner-run".to_string();
+        other.created_at = Utc::now() + chrono::Duration::hours(1);
+
+        // Insert out of order so the answer can only come from the ORDER BY.
+        db.insert_sandbox_run(&newer, "graph", "graph-123").unwrap();
+        db.insert_sandbox_run(&older, "graph", "graph-123").unwrap();
+        db.insert_sandbox_run(&other, "graph", "graph-456").unwrap();
+
+        let latest = db
+            .latest_sandbox_run_for_owner("graph", "graph-123")
+            .unwrap()
+            .expect("graph-123 has sandbox rows");
+        assert_eq!(latest.id, "newer-run");
+
+        // The status is whatever the row holds — a `kept` run still counts.
+        db.update_sandbox_run_status("newer-run", "kept").unwrap();
+        let latest = db
+            .latest_sandbox_run_for_owner("graph", "graph-123")
+            .unwrap()
+            .expect("kept rows are still the newest");
+        assert_eq!(latest.id, "newer-run");
+        assert_eq!(latest.status, "kept");
+
+        // Another owner's newer row is never returned.
+        assert_eq!(
+            db.latest_sandbox_run_for_owner("graph", "graph-456")
+                .unwrap()
+                .unwrap()
+                .id,
+            "other-owner-run"
+        );
+
+        // An owner with no sandbox gets None, not an error.
+        assert!(db
+            .latest_sandbox_run_for_owner("graph", "graph-none")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_latest_sandbox_run_for_owner_respects_owner_type() {
+        let db = test_db();
+        let sandbox = test_sandbox();
+        db.insert_sandbox_run(&sandbox, "graph", "shared-id")
+            .unwrap();
+
+        assert!(db
+            .latest_sandbox_run_for_owner("agent", "shared-id")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            db.latest_sandbox_run_for_owner("graph", "shared-id")
+                .unwrap()
+                .unwrap()
+                .id,
+            "test-sandbox-id"
         );
     }
 }

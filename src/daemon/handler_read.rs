@@ -428,10 +428,25 @@ pub(crate) fn graph_details_json(
     let consistency_warning = running_graph_consistency_warning(db, &lp.lp);
     out["consistency_warning"] = serde_json::json!(consistency_warning);
     out["consistency_warnings"] = serde_json::json!(consistency_warning.iter().collect::<Vec<_>>());
+    // CB42 follow-up: a sandboxed last run must say which sandbox holds its
+    // work and what became of it (`kept`, `merged`, `discarded`, …), so an
+    // agent can land or discard it through the `sandbox` tool without
+    // guessing an id from `canopy sandbox list`.
+    out["sandbox"] = graph_sandbox_json(db, &lp.lp.id)?;
     if matches!(ctx, ActiveGraphSpec::Idea { .. }) && out.get("queue").is_none() {
         out["mode"] = serde_json::json!("idea");
     }
     Ok(out)
+}
+
+/// The sandbox holding this graph's newest run's work: `{id, status}` as the
+/// row records it, or `null` when the graph never ran sandboxed. Kept out of
+/// [`graph_details_json`] so that function stays within the size limit.
+fn graph_sandbox_json(db: &Database, graph_id: &str) -> anyhow::Result<serde_json::Value> {
+    Ok(match db.latest_sandbox_run_for_owner("graph", graph_id)? {
+        Some(row) => serde_json::json!({ "id": row.id, "status": row.status }),
+        None => serde_json::Value::Null,
+    })
 }
 
 /// Serialize an ensemble (F1) as the one unit `graph`/`graph_ensemble`

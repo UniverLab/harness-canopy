@@ -1,12 +1,12 @@
 ---
 title: MCP Tools
-description: All 31 MCP tools exposed by the canopy daemon, by category.
+description: All 32 MCP tools exposed by the canopy daemon, by category.
 order: 11
 ---
 
 # MCP Tools
 
-The daemon exposes **31 MCP tools** over Streamable HTTP (port 7755) and
+The daemon exposes **32 MCP tools** over Streamable HTTP (port 7755) and
 stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 
 Writes wait up to 5 seconds for a concurrent writer. If the database is still
@@ -69,7 +69,7 @@ session later instead of polling), and `intelligence_upsert` /
 |---|---|
 | `skill` | Discover and fetch skills from the dynamic skill store. Actions: `list` (skills available from the store and configured catalogs; an installed skill that its git source no longer lists is marked `orphaned`, and its description starts with `[removed upstream]`), `get` (a skill's full instructions by name, cloning or refreshing it on demand) — pass `action` plus the params the refusal/table lists |
 
-## Graph engine (8)
+## Graph engine (9)
 
 | Tool | Description |
 |---|---|
@@ -81,6 +81,7 @@ session later instead of polling), and `intelligence_upsert` /
 | `graph_control` | Run and manage graph execution. Actions: `run`, `pause`, `continue` (required `mode`: retry_current_node / skip_next_spec / run_from_node), `reset`, `preflight`, `schedule_continue` (optional `mode`: retry_current_node / skip_next_spec), `schedule_autorun` |
 | `graph_complete_node` | Complete an active graph node |
 | `graph_report_blocker` | Report a blocker for an active graph node |
+| `sandbox` | List, inspect, land and discard the sandbox worktrees a sandboxed graph run leaves behind. Actions: `list` (optional `graph_id`/`status` — every sandbox with its path, graph, branch, base branch, original workdir, status, whether its branch holds unique commits, how far behind its base it is, and whether its worktree is still registered), `get` (`id` — one sandbox by id or unambiguous prefix), `land` (`id` — merges onto the base branch, marks it `merged` and removes the worktree; refuses rather than forcing when the base checkout is on another branch, has uncommitted changes, or the merge conflicts, naming the conflicting paths, and leaves the sandbox untouched), `discard` (`id`, optional `force` — removes the worktree and branch, marks it `discarded`; refuses unique commits unless `force: true`) — pass `action` plus the params the refusal/table lists. The same operations as `canopy sandbox`, which is the CLI form ([Sandboxes](cli-reference.md#sandboxes)) |
 
 ## Crews (1)
 
@@ -111,7 +112,7 @@ See [Graphs](graphs.md).
 
 Kept callable for the whole 3.x line, but excluded from tool listings
 (`tools/list`) so nothing new adopts them — call the 3.x name instead. Not
-counted in the 31 tools above.
+counted in the 32 tools above.
 
 | Deprecated name | Renamed to (3.0.0) |
 |---|---|
