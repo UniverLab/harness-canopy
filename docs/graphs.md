@@ -65,9 +65,9 @@ Outputs are read from nodes, never from ensembles: `{{output:<name>}}`
 naming an ensemble is refused, and the message names the ensemble's quorum
 node when one exists — that node is the source meant instead. Any other
 placeholder nothing can bind is refused when the template is **written** —
-`graph_add_node`, `graph_update_node`, `graph_add_ensemble` and
-`graph_update_ensemble` (the shared prompt and every member
-`prompt_override`), and `graph_import` (all-or-nothing) — naming the node
+`graph_node` `add`, `graph_node` `update`, `graph_ensemble` `add` and
+`graph_ensemble` `update` (the shared prompt and every member
+`prompt_override`), and `graph_edit` `import` (all-or-nothing) — naming the node
 or ensemble and the placeholder, plus the forms it accepts when the fix is
 a different marker, instead of failing member by member at run time. A
 marker meant as literal text stays
@@ -77,7 +77,7 @@ only `{{previous_feedback}}`, `{{previous_output}}`, `{{spec_content}}`
 and `{{spec_name}}`: it reads no node output, so an `{{output:…}}` marker
 there is refused as well.
 
-A template stored before this validation is reported by `graph_preflight`
+A template stored before this validation is reported by `graph_control` `preflight`
 in `graph_warnings`, one entry per offending placeholder naming the node or
 ensemble — advisory only, since the spawn-time refusal still applies. The
 exception is an unknown `{{output:…}}` target in a graph node's
@@ -109,7 +109,7 @@ literal text. The raw markers expand unquoted exactly as before.
 
 Any other `{{…}}` marker fails the check node before the command runs: the
 run records `unknown marker {{x}} in check command` and nothing reaches
-the shell. `graph_preflight` reports the same defect as an error before
+the shell. `graph_control` `preflight` reports the same defect as an error before
 spending any probe quota.
 
 Every check command also runs with these environment variables (there is
@@ -141,15 +141,15 @@ spec's work actually get committed" should use
 workdir is not a Git repository or when reading a legacy run, rather
 than being reported as clean.
 
-`spec_end_dirty`/`spec_end_dirty_paths` (readable via `graph_get`/
-`graph_node_runs_list`, not a template placeholder) record the same count and
+`spec_end_dirty`/`spec_end_dirty_paths` (readable via `graph` `get`/
+`graph` `node_runs`, not a template placeholder) record the same count and
 the first 20 paths at the moment the spec's attempt actually ends —
 `Completed`, `Failed`, or `Interrupted`. A spec that ends `Failed` or
 `Interrupted` with a dirty tree folds a one-line note onto its own failure
 summary/blocker text and (for a plain `Failed` ending) onto the `on_failed`
 hook's `{{node}}` value.
 
-`graph_run` and the autorun scheduler refuse to launch the next spec when the
+`graph_control` `run` and the autorun scheduler refuse to launch the next spec when the
 workdir is currently dirty and a *different* spec on that same workdir ended
 `Failed` or `Interrupted` with recorded dirty paths that overlap the ones
 dirty now. `Completed` specs never block, and neither do `Skipped` ones: a
@@ -170,9 +170,9 @@ When the launch proceeds, the warning says why — `allow_dirty_start` is
 set on the graph, or the next spec is resuming the dirty work it left itself —
 instead of telling you to set a flag. When it blocks, the message says
 `not launched` before the `Set allow_dirty_start` hint. Set
-`allow_dirty_start: true` via `graph_update` to downgrade a refusal to a
-warning. `graph_preflight` separately reports a dirty workdir as a warning
-unconditionally, with no "previous spec" logic — call it before `graph_run` to
+`allow_dirty_start: true` via `graph_edit` `update` to downgrade a refusal to a
+warning. `graph_control` `preflight` separately reports a dirty workdir as a warning
+unconditionally, with no "previous spec" logic — call it before `graph_control` `run` to
 see this regardless of history. A queue run applies the same guard between
 its specs, not only at launch — see [Spec queues](#spec-queues).
 
@@ -197,11 +197,12 @@ raise `graphs.ensemble_max_members_parallel`). A `cascade` or `round_robin`
 ensemble runs its members one at a time, so it takes 2–16 by default (up to
 32 with `graphs.ensemble_max_members_sequential`). Both caps are listed in
 [Tuning the engine](#tuning-the-engine). It replaces what would otherwise be N member
-nodes, N prompts, and 2N+2 edges wired by hand — `graph_add_ensemble`
+nodes, N prompts, and 2N+2 edges wired by hand — `graph_ensemble` `add`
 creates the whole unit in one call:
 
 ```json
-graph_add_ensemble {
+graph_ensemble {
+  action: "add",
   graph_id, name: "proposers",
   prompt_template: "...",              # one prompt, shared by every member
   members: [
@@ -233,7 +234,7 @@ field existed. The difference matters at scale: a 3-minute leash instead of
 a 60-minute one on a stalling member saves 57 minutes of wall clock per
 rotation, on a graph that rotates many times a night.
 
-`graph_update_ensemble` changes the shared prompt
+`graph_ensemble` `update` changes the shared prompt
 (propagated to every member without its own override), the member list,
 quorum config (`min_pass`, `straggler_timeout_minutes`,
 `quorum_grace_minutes`), exit wiring
@@ -244,9 +245,9 @@ several nodes can enter with no relay), all without touching member nodes
 directly. Every entry source fans out to every member after a member-list
 growth or shrink, and that replacement is atomic. `add_entry_from` completes
 missing edges when the source already exists, so it does not require a
-remove-then-add cycle. `graph_preflight` reports incomplete source reachability
-with the source and member counts before `graph_run` spends probe quota.
-`graph_delete_ensemble` removes the whole unit. `graph_get` returns the
+remove-then-add cycle. `graph_control` `preflight` reports incomplete source reachability
+with the source and member counts before `graph_control` `run` spends probe quota.
+`graph_ensemble` `delete` removes the whole unit. `graph` `get` returns the
 ensemble as one unit (`ensemble_id`, members, quorum config, every entry
 source) alongside its expanded nodes.
 
@@ -254,10 +255,10 @@ source) alongside its expanded nodes.
 ends the spec when the quorum fails: a member that reports FAIL — even with
 partial work — leaves the quorum with nowhere to route, so the run stops
 there and the graph ends `failed` instead of routing the failure onward. This
-is sometimes deliberate, so it is never an error; `graph_preflight` warns
+is sometimes deliberate, so it is never an error; `graph_control` `preflight` warns
 about it in `graph_warnings` for every ensemble whose quorum has no
-`fail`/`always` exit. Set `on_fail_to` with `graph_update_ensemble`, or add
-the edge with `graph_add_edge`, when a failed quorum should route somewhere.
+`fail`/`always` exit. Set `on_fail_to` with `graph_ensemble` `update`, or add
+the edge with `graph_edge` `add`, when a failed quorum should route somewhere.
 
 The quorum's consolidated output is one document with a
 `## <platform/model> [pass|fail]` section per member, in member order. The
@@ -280,7 +281,7 @@ carries `quorum_met_at` and `grace_minutes`. `None` (the default)
 keeps the wait-for-all behaviour.
 
 `straggler_timeout_minutes` and `quorum_grace_minutes` are both
-**parallel-only** — `graph_add_ensemble`/`graph_update_ensemble` refuse
+**parallel-only** — `graph_ensemble` `add`/`graph_ensemble` `update` refuse
 to set either on a `cascade` or `round_robin` ensemble, and switching
 an ensemble's `kind` to one of those clears both fields automatically.
 The reason: a **cascade** or **round_robin** ensemble runs its members
@@ -328,7 +329,7 @@ agent hook whose pair is unavailable blocks the spec the same way. These
 blocks go through the ordinary blocked path — the graph pauses with a
 blocker naming the pair and its reason, `on_blocked` fires, and no attempt
 is spent, so an availability block never burns the attempt ceiling; clear
-the entry (or wait out its `until`) and relaunch. `graph_preflight` never
+the entry (or wait out its `until`) and relaunch. `graph_control` `preflight` never
 probes an unavailable pair: it lists them under `skipped_unavailable` and
 counts an ensemble the roster would block as `would_fail`.
 
@@ -344,8 +345,8 @@ is MCP/TUI only). `from_ensemble` refuses an ensemble whose members carry a
 per-member `prompt_override` — a review panel with its own angles stays
 literal.
 
-An ensemble binds to a crew with `graph_add_ensemble {crew}` or
-`graph_update_ensemble {crew: "name"}`; `crew: null` unbinds and keeps the
+An ensemble binds to a crew with `graph_ensemble` `add` (`crew`) or
+`graph_ensemble` `update` (`crew: "name"`); `crew: null` unbinds and keeps the
 current member rows as literal members. A crew change is its own call — it
 is never combined with a literal `members` list (or any other ensemble
 field) in one update. A bound ensemble renders the shared
@@ -370,14 +371,15 @@ outgoing `Error` edge cannot route — every member infra-failed or walked
 off without filing a verdict. Rather than failing the spec, the graph
 pauses with a blocker that names the ensemble and the member reasons,
 and the spec is marked `interrupted` (not `failed`). That makes the
-block resumable in place: `graph_continue retry_current_node` re-enters
+block resumable in place: `graph_control` `continue` with `mode: retry_current_node` re-enters
 the ensemble at its join cursor (already-passed nodes such as the entry
-node are not re-run), and `graph_update_ensemble` lets you rewire the
-members before retrying. A `graph_run` on a blocked (paused + blocker)
+node are not re-run), and `graph_ensemble` `update` lets you rewire the
+members before retrying. A `graph_control` `run` on a blocked (paused + blocker)
 graph refuses and reports the blocker, so a blind relaunch never masks a
 crew that is silently filing nothing; clear the blocker first, or
-`graph_reset` the spec. A **directed run** —
-`graph_continue run_from_node` (or `graph_run --from`) — is the general
+`graph_control` `reset` the spec. A **directed run** —
+`graph_control` `continue` with `run_from_node` (or `graph_control` `run` with
+`start_node_id`) — is the general
 escape hatch: it starts a spec at a node you choose, reusing the recorded
 outputs of every earlier node, and accepts a paused, completed or failed
 graph as long as it has no active run.
@@ -443,11 +445,11 @@ merely that HEAD differs from wherever the spec started — see
 
 **Editing the recommended check command text here does not retroactively
 touch any graph.** A node's `command` is whatever text was written into
-its config when the graph was authored (`graph_add_node`, or copied from
+its config when the graph was authored (`graph_node` `add`, or copied from
 a blueprint) — the engine reads it fresh at execution time but never
 rewrites it. A spec already using the old `{{spec_start_head}}`-only
 comparison keeps using it until someone explicitly runs
-`graph_update_node` on it; only graphs authored or edited after adopting
+`graph_node` `update` on it; only graphs authored or edited after adopting
 `{{spec_committed_head}}` get the stronger check.
 
 ## Self-report requirement
@@ -512,14 +514,14 @@ overrides win; absent everything, the engine default (2/60/30) applies.
 
 A retry-skipped (`infra_retry_limit: 0`) crash is recorded with
 `infra_retry_skipped: "limit 0"` alongside `infra_crash`/`infra_attempt`,
-readable via `graph_node_run_get` (which already surfaces the
+readable via `graph` `node_run` (which already surfaces the
 `infra_attempt`/`infra_crash` markers when present).
 
-`graph_get` reports the effective value and its source
+`graph` `get` reports the effective value and its source
 (`"node"`/`"platform"`/`"default"`) per node under `infra_config`, and
 the ensemble's own JSON carries the raw ensemble-level fields plus each
 member's `*_override` fields so member vs ensemble vs platform can be
-told apart. `graph_audit_node_configs` lists every node/member whose
+told apart. `graph` `audit` lists every node/member whose
 effective budget differs from its platform's own under
 `infra_config_overrides`.
 
@@ -532,12 +534,12 @@ instead of failing again. Infrastructure failures do not count.
 
 To clear the limit, do one of these:
 
-- **Reset the spec by id.** `graph_reset` with `specs: [<spec id>]` zeroes
+- **Reset the spec by id.** `graph_control` `reset` with `specs: [<spec id>]` zeroes
   that spec's execution count and leaves its worktree untouched. Then
-  `graph_run` or `graph_continue run_from_node` relaunches it. A `graph_reset`
+  `graph_control` `run` or a directed `graph_control` `continue` (`run_from_node`) relaunches it. A `graph_control` `reset`
   without `specs` keeps every spec's count.
-- **Give an explicit directive.** `graph_run` with `start_node_id`,
-  `graph_continue` with `run_from_node`, or `graph_continue` with
+- **Give an explicit directive.** `graph_control` `run` with `start_node_id`,
+  `graph_control` `continue` with `run_from_node`, or `graph_control` `continue` with
   `retry_current_node` (on a failed graph, or on a pending spec with a
   recorded node) resets the targeted spec's count before its run starts. The
   response says `Execution limit reset for spec '<name>'`.
@@ -546,12 +548,12 @@ Automatic re-runs (cron auto-continue, autorun) never reset the count.
 
 ## Lifecycle
 
-Create → run → (pause / continue) → complete. `graph_continue`
+Create → run → (pause / continue) → complete. `graph_control` `continue`
 supports **retry** and **skip** strategies for stuck nodes, and
 `graph_report_blocker` escalates to a human when intervention is
-needed. Iteration limits prevent infinite retry graphs. `graph_reset`
-returns a completed/failed graph to pending so `graph_run` can restart
-it, and `graph_schedule_autorun` sets a future time at which the graph
+needed. Iteration limits prevent infinite retry graphs. `graph_control` `reset`
+returns a completed/failed graph to pending so `graph_control` `run` can restart
+it, and `graph_control` `schedule_autorun` sets a future time at which the graph
 auto-resumes (useful for quota-limited graphs that fail and need to
 wait before retrying). Call it again with `at` omitted to cancel a
 pending schedule.
@@ -560,7 +562,7 @@ If the daemon stops while a node is running — a graceful shutdown or a
 crash — the killed run is finalized as interrupted and routes no edge
 (in particular, never its fail edge). On the next start the graph is
 reconciled to `Paused` with the spec `Interrupted`, and
-`graph_continue` with `retry` re-runs the interrupted node itself with
+`graph_control` `continue` with `retry` re-runs the interrupted node itself with
 the same input it had (the same command for a check node, the same
 `previous_feedback` for an ensemble member) — not whichever node an
 edge would have led to.
@@ -574,7 +576,7 @@ working directory, so the session list the end step searches is the same
 one the node created. The outcome is recorded on the run's output as
 `session_end` — `"ended <id>"`, `"not configured"` (the platform declares
 no way to end a session), `"not found"` (no id on the run and no title
-match), or `"failed: <reason>"` — readable via `graph_node_run_get`.
+match), or `"failed: <reason>"` — readable via `graph` `node_run`.
 
 An agent node that has filed its verdict must not keep running. Once the
 verdict is recorded, its process gets a grace period to exit on its own
@@ -586,21 +588,22 @@ ensemble each member gets the same grace period and is ended without waiting
 for the others. Termination never changes the verdict: a pass stays a pass.
 The node's output records `ended_after_verdict` — `"exited"` when the process
 left on its own, `"terminated"` when canopy ended it — readable via
-`graph_node_run_get`.
+`graph` `node_run`.
 
 A spec interrupted by a no-verdict ensemble block (see
 [No-verdict blocks](#no-verdict-blocks)) is resumed the same way:
-`graph_continue` with `retry` re-enters the blocked ensemble with its
+`graph_control` `continue` with `retry` re-enters the blocked ensemble with its
 current member list, without re-running nodes or specs that already
-passed, and `graph_continue` with `skip` marks that blocked spec
-`skipped` and moves on to the next one. `graph_reset` still restarts
+passed, and `graph_control` `continue` with `skip` marks that blocked spec
+`skipped` and moves on to the next one. `graph_control` `reset` still restarts
 the blocked spec from its entry node.
 
 When the work up to some node is already done and good — after a crash,
 a rewired ensemble, or a hand fix — a **directed run** starts a spec at
-a node you choose instead of at Start: `graph_continue run_from_node
-[--spec <spec>]` (or `graph_run --from` for the first spec the run
-executes). `--spec` is optional: on a queue-driven graph it defaults to the
+a node you choose instead of at Start: `graph_control` `continue` with
+`run_from_node` and optional `spec_id` (CLI: `canopy graph continue --from
+<node> [--spec <spec>]`), or `graph_control` `run` with `start_node_id` for
+the first spec the run executes. `--spec` is optional: on a queue-driven graph it defaults to the
 graph's current spec — an in-flight member (`running` or `interrupted`)
 first, else a `failed` one, else the next `pending` one — so a bare directed
 run restarts the failed spec rather than the next fresh one. It reuses the
@@ -642,15 +645,15 @@ still carries the failed run's feedback) are kept rather than purged — no
 `spec_id` is needed. An idea run that predates the graph remembering its
 idea (older databases) resumes the same way: the idea is read from that
 bookkeeping spec's text and remembered from then on. An idea graph that has
-never run has nothing to resume: `graph_continue` with `run_from_node`
-(and `retry_current_node`) refuses it, naming `graph_run` with an `idea`
+never run has nothing to resume: `graph_control` `continue` with `run_from_node`
+(and `retry_current_node`) refuses it, naming `graph_control` `run` with an `idea`
 as the way to start one.
 If a reachable prompt or check references a node with no recorded output
 for the spec, the run is refused and the missing node is named.
 
 **Bound specs are read live.** Every advance re-reads the graph's bound
 specs and picks the first one still `pending`, instead of working through a
-list captured when the run started. A spec added with `graph_add_spec`
+list captured when the run started. A spec added with `graph_edit` `attach_spec`
 while the graph runs is therefore never left behind: one bound at a position
 after the current spec runs later, in position order, and one bound at an
 earlier position runs right after the current spec. `graph_completed` is
@@ -658,11 +661,11 @@ emitted only when no bound spec is left runnable; if a run would settle
 with one still `pending` — or one left `running` or `interrupted` by a
 stale state — the graph fails instead, naming those spec ids in its
 `graph_failed` event, and `on_completed` hooks do not fire.
-`graph_continue` then picks the pending spec up.
+`graph_control` `continue` then picks the pending spec up.
 
 ## Sandboxes
 
-`graph_run` accepts `sandbox: true`: canopy creates a temporary git worktree
+`graph_control` `run` accepts `sandbox: true`: canopy creates a temporary git worktree
 under `~/.canopy/worktrees/<project-hash>/<sandbox-id>`, on a new
 `canopy/sandbox-*` branch cut from the workdir's current branch, and runs
 every node of that run inside it — your checkout is never edited. The canopy
@@ -682,7 +685,7 @@ A sandbox is temporary, but never at the cost of work:
   — the sandbox is kept too. Uncertain means keep, like an unknown commit
   count.
 
-`graph_continue` on a failed sandboxed graph resumes **inside the kept
+`graph_control` `continue` on a failed sandboxed graph resumes **inside the kept
 worktree**, so a retry keeps the work that is already there. If that worktree
 is gone, the continue is refused, naming the sandbox id, instead of quietly
 running the graph against your original workdir.
@@ -725,8 +728,8 @@ both at once (it never holds one while waiting for the other), and
 grants go in FIFO order except that a waiter whose full set is free is
 never stuck behind an earlier waiter for a different resource.
 
-While waiting the run has status `waiting` — visible in `graph_get`,
-`graph_node_runs_list`, and the TUI graph view together with who holds
+While waiting the run has status `waiting` — visible in `graph` `get`,
+`graph` `node_runs`, and the TUI graph view together with who holds
 each resource — and the node's timeout only starts when the lease is
 granted. The `graph_events` log records `mutex_waiting` and
 `mutex_acquired` for every wait. The lease is released when the run
@@ -741,7 +744,7 @@ priorities.
 
 A graph carries hooks keyed by event, over four events: `on_completed`,
 `on_failed`, `on_blocked`, `on_spec_completed`. More than one hook may be
-registered for a single event, via `graph_update`'s `hooks` map (each key is
+registered for a single event, via `graph_edit` `update`'s `hooks` map (each key is
 an event name, each value is an ordered array of hook configs). Hooks
 registered for one event run in declaration order. There are three hook
 modes — exactly one per hook:
@@ -757,7 +760,7 @@ modes — exactly one per hook:
 
 - `on_completed` fires exactly once when a run transitions to `completed`
   (only when the dispatch completed at least one spec). A completed →
-  `graph_reset` → completed cycle fires it again, once per completing run.
+  `graph_control` `reset` → completed cycle fires it again, once per completing run.
 - `on_failed` fires when the graph reaches `failed`.
 - `on_blocked` fires when it stops with a blocker set (transition to
   `paused` with blocker data).
@@ -770,17 +773,17 @@ changes the graph's own status, and never stops the remaining hooks of that
 event from running.
 
 Editing hooks on a running graph takes effect for that run: the engine reads
-the graph's stored hooks at the moment each event fires, so a `graph_update`
+the graph's stored hooks at the moment each event fires, so a `graph_edit` `update`
 landing before an event fires is the edit that fires on the current run's
 remaining events — the same way ensembles, nodes and prompts already take
-effect at the next dispatch. When `graph_update` changes hooks while a run is
+effect at the next dispatch. When `graph_edit` `update` changes hooks while a run is
 active, its response names those remaining events. An edit made after an
 event already fired does not re-fire it.
 
 Every hook run records the event it served and which hook of that event it
 was (`event`, `hook_index`), plus a copy of the exact hook config that
 actually fired (`hook_config`) — so a later reader can see what ran even
-after the hooks are edited again. Hook runs are readable from `graph_get`'s
+after the hooks are edited again. Hook runs are readable from `graph` `get`'s
 `completion_hook_runs` and `canopy graph info`'s hook-runs listing alongside
 the graph's node runs.
 
@@ -793,12 +796,12 @@ each spec this run completed, one per line); `on_spec_completed` provides
 `{{blocker}}` and `{{node}}` (the name of the node that ended the run).
 Every known marker with no value for the event renders exactly `(none)` in
 command, agent, interactive, and graph-idea hooks. Unknown marker names are
-rejected by `graph_update` with the marker name and supported list; no hook
+rejected by `graph_edit` `update` with the marker name and supported list; no hook
 firing leaves a marker literal.
 
 The existing configuration keeps working, unchanged and unattended:
 whatever a graph has in its `on_completed` column becomes a hook on the
-`on_completed` event with no user action and no loss, and a `graph_update`
+`on_completed` event with no user action and no loss, and a `graph_edit` `update`
 call passing today's `on_completed` shape still registers that hook.
 
 The first intended use is a documentation-maintenance agent: on
@@ -876,7 +879,7 @@ bound specs:
 | `queue_reorder` | Full replacement of a queue's order |
 | `queue_set_group` | Set or clear a member's context group |
 
-Pass a queue to `graph_run` via `queue_id` (or `canopy graph run <graph>
+Pass a queue to `graph_control` `run` via `queue_id` (or `canopy graph run <graph>
 --queue <queue-id>`).
 
 **Context groups.** A queue member may carry a `group` label. Grouped
@@ -889,17 +892,17 @@ of one group share a warm harness session: a grouped spec resumes the
 session captured by its previous successfully-completed sibling instead of
 analysing the repo from cold. Ungrouped members never share a session.
 
-Queue membership is unaffected by `graph_run` — specs stay standalone.
-The `graph info` CLI and `graph_get` MCP tool show queue-driven progress
+Queue membership is unaffected by `graph_control` `run` — specs stay standalone.
+The `graph info` CLI and `graph` `get` MCP tool show queue-driven progress
 by reconstructing what ran from the run history.
 
 **Dirty-tree guard between specs.** The launch guard that refuses a dirty
-worktree at `graph_run` also runs every time a queue run moves from one spec
+worktree at `graph_control` `run` also runs every time a queue run moves from one spec
 to the next: after a completed, failed, skipped, interrupted or limit-blocked
 spec alike. A refusal pauses the graph (it does not fail it). The blocker
-lists the first 20 dirty paths and the ways out: `graph_continue run_from_node`
-on the next spec, cleaning the tree by hand and then `graph_continue
-skip_next_spec`, or `allow_dirty_start` on the graph. A directed start on that
+lists the first 20 dirty paths and the ways out: `graph_control` `continue`
+with `run_from_node` on the next spec, cleaning the tree by hand and then
+`graph_control` `continue` with `skip_next_spec`, or `allow_dirty_start` on the graph. A directed start on that
 spec is not refused again by the guard. `allow_dirty_start` lets the run
 advance.
 
@@ -907,16 +910,16 @@ When a queue run drains all runnable members, the graph settles on its own:
 `completed` if every member completed or was skipped, or `failed` — naming
 the failed members in its blocker/summary — if any member failed. A graph
 reported as `running` that has no node run in progress and no scheduled
-resume surfaces a `consistency_warning` in `graph_get`.
+resume surfaces a `consistency_warning` in `graph` `get`.
 
 ## The 38 MCP tools
 
 | Stage | Tools |
 |---|---|
-| Authoring | `graph_create`, `graph_update`, `graph_add_spec`, `graph_update_spec`, `graph_remove_spec`, `graph_add_node`, `graph_update_node`, `graph_add_edge`, `graph_update_edge`, `graph_delete_edge`, `graph_delete_node`, `graph_add_ensemble`, `graph_update_ensemble`, `graph_delete_ensemble`, `graph_copy_node`, `graph_copy_ensemble`, `graph_audit_node_configs` |
-| Sharing | `graph_export`, `graph_import`, `graph_install`, `graph_validate`, `graph_archive`, `graph_restore` |
-| Inspection | `graph_get`, `graph_list`, `graph_crew`, `graph_node_runs_list`, `graph_node_run_get`, `graph_events` |
-| Runtime | `graph_run`, `graph_reset`, `graph_schedule_autorun`, `graph_schedule_continue`, `graph_pause`, `graph_continue`, `graph_complete_node`, `graph_report_blocker`, `graph_preflight` |
+| Authoring | `graph_edit` `create`, `graph_edit` `update`, `graph_edit` `attach_spec`, `graph_edit` `update_spec`, `graph_edit` `detach_spec`, `graph_node` `add`, `graph_node` `update`, `graph_edge` `add`, `graph_edge` `update`, `graph_edge` `delete`, `graph_node` `delete`, `graph_ensemble` `add`, `graph_ensemble` `update`, `graph_ensemble` `delete`, `graph_node` `copy`, `graph_ensemble` `copy`, `graph` `audit` |
+| Sharing | `graph` `export`, `graph_edit` `import`, `graph_edit` `install`, `graph` `validate`, `graph_edit` `archive`, `graph_edit` `restore` |
+| Inspection | `graph` `get`, `graph` `list`, `graph_crew`, `graph` `node_runs`, `graph` `node_run`, `graph` `events` |
+| Runtime | `graph_control` `run`, `graph_control` `reset`, `graph_control` `schedule_autorun`, `graph_control` `schedule_continue`, `graph_control` `pause`, `graph_control` `continue`, `graph_complete_node`, `graph_report_blocker`, `graph_control` `preflight` |
 
 Graphs can be authored programmatically by agents through these tools,
 or edited in the [TUI graph editor](tui.md) with inline JSON config
@@ -934,7 +937,7 @@ an MCP client can't reach it. See the
 A graph's design — its name, description, nodes, edges, and ensembles —
 can leave one machine as a single JSON file and be recreated on
 another. Sharing a graph becomes sending a file, not narrating the
-`graph_add_node`/`graph_add_edge`/`graph_add_ensemble` calls that built
+`graph_node` `add`/`graph_edge` `add`/`graph_ensemble` `add` calls that built
 it, and the file is also a diff: review a change to a graph, or keep
 one in a repo next to the code it operates on.
 
@@ -949,15 +952,15 @@ merges, or overwrites an existing one; `--workdir` defaults to the
 current directory, and `--name` overrides the file's own name. If the
 resolved name is already taken in the target workdir, import still
 succeeds under a numeric suffix (`"My Graph (2)"`) and reports which
-name it used. The same two operations exist as MCP tools,
-`graph_export { graph_id }` and
-`graph_import { document, workdir?, name? }`, so a graph is drivable end
+name it used. The same two operations exist over MCP as
+`graph` `export` (`graph_id`) and
+`graph_edit` `import` (`document`, `workdir?`, `name?`), so a graph is drivable end
 to end through MCP as well as the CLI.
 
 Every daemon database connection waits up to 5 s for a concurrent writer
 before giving up, so imports normally queue behind a busy database rather
-than failing. If the wait still expires, `graph_import` returns
-`graph_import: database busy after 5 s — nothing was written, retry`:
+than failing. If the wait still expires, `graph_edit` `import` returns
+`graph_edit: database busy after 5 s — nothing was written, retry`:
 the import is all-or-nothing, nothing partial is left behind, and the
 call is safe to retry as-is.
 
@@ -977,7 +980,7 @@ for the unset fields. Import accepts both `format_version: 1`
 (members with no binding, reported as missing a platform) and `2`
 (bindings restored verbatim); it never rejects a platform the
 importing machine has not configured — validating that a pair is
-usable belongs to `graph_preflight`. `import`'s response always lists
+usable belongs to `graph_control` `preflight`. `import`'s response always lists
 every agent node left without a platform, so there's exactly one
 thing to check before running an imported graph:
 `nodes_missing_platform` in the MCP response, or the same list
@@ -1022,18 +1025,18 @@ changes: at spawn time an explicit `prompt_template` still wins, then
 before.
 
 A [crew](#crews)-bound design travels by name, never by its members:
-`graph_export` writes `crew: "<name>"` on a bound ensemble (with no
+`graph` `export` writes `crew: "<name>"` on a bound ensemble (with no
 `members` array), on a bound agent node's config, and on a bound agent
 hook — and, since version 5, a graph's event-keyed `hooks` ride along
 in the document as well, which is what gives a bound hook something to
-travel in. `graph_import` keeps the reference when a crew of that name
+travel in. `graph_edit` `import` keeps the reference when a crew of that name
 exists locally: the ensemble binds and re-materializes the crew's
 members, and a bound node or hook resolves its pair at dispatch from
 the crew. When the name is missing locally the import still succeeds,
 lists every unresolved binding under `missing_crews` (next to
 `nodes_missing_platform`) in the MCP response or the CLI output, and
 leaves the binding pending — a pending ensemble cannot dispatch until
-a crew of that name is created, and `graph_preflight` reports it as
+a crew of that name is created, and `graph_control` `preflight` reports it as
 `would_fail`.
 
 A crew-bound ensemble travels without `members` (the crew supplies them)
@@ -1058,7 +1061,7 @@ plain node with the same name; import resolves that table to the target
 ensemble's join node and restores its member fan-out edges.
 
 An ensemble may be entered from more than one node
-(`graph_update_ensemble`'s `add_entry_from`). Export writes every such
+(`graph_ensemble` `update`'s `add_entry_from`). Export writes every such
 source in `extra_entry_sources`, an array of
 `{"from_node": "<node name>", "condition": "<pass|fail|always|error>"}` entries
 beyond the primary (`entry_from_node` + `entry_condition`). Import restores each as
@@ -1139,8 +1142,8 @@ touching the database:
 canopy graph validate <path> [--json]
 ```
 
-The same check exists as the MCP tool
-`graph_validate { path?, document? }` (exactly one of the two). Both
+The same check exists as the MCP
+`graph` `validate` (`path?` or `document?`, exactly one of the two). Both
 detect the document kind on their own: an object with `nodes` is a graph
 document, one with `kind` plus `config` is a node document. Neither needs
 a workdir, and neither writes anything.
@@ -1280,7 +1283,7 @@ The report carries the graph id and name, its source, the workdir, the
 presets written, the review, and the agent nodes still needing a
 platform/model with the next command to assign them (`--json` prints
 the machine-readable report). The same operation exists as the MCP tool
-`graph_install { ref, workdir, name?, overwrite_presets?, accept? }`:
+`graph_edit` `install` (`ref`, `workdir`, `name?`, `overwrite_presets?`, `accept?`):
 called **without** `accept: true` it installs nothing and returns
 `{ needs_review: true, review: { source, commands, prompts,
 attention } }` — the same review printed above; called with
@@ -1297,7 +1300,7 @@ see [Tuning the engine](#tuning-the-engine)).
 ## Archive and restore
 
 Graphs can be archived instead of deleted — they leave the main
-`graph_list`/sidebar view but their row, specs, and full run history
+`graph` `list`/sidebar view but their row, specs, and full run history
 are untouched and can be restored at any time:
 
 ```
@@ -1305,9 +1308,9 @@ canopy graph archive <graph_id>
 canopy graph restore <graph_id>
 ```
 
-Over MCP: `graph_archive { graph_id }` and `graph_restore { graph_id }`.
+Over MCP: `graph_edit` `archive` / `restore` (`graph_id`).
 Archiving refuses a `running` graph — pause it first. The archived graph
-is still reachable directly by id via `graph_get` regardless of
+is still reachable directly by id via `graph` `get` regardless of
 archived state. Restoring is a plain flag flip — no data is lost or
 moved.
 
@@ -1317,9 +1320,9 @@ When a graph fails, the node run history lets you diagnose exactly what
 happened:
 
 The CLI prints the most recent node runs in `canopy graph info <graph>`.
-Over MCP: `graph_node_runs_list { graph_id, node_id?, spec_id?, limit? }`
+Over MCP: `graph` `node_runs` (`graph_id`, `node_id?`, `spec_id?`, `limit?`)
 returns the most recent runs first (default 20, capped at 200).
-`graph_node_run_get { run_id }` fetches one run's full stored input and
+`graph` `node_run` (`run_id`) fetches one run's full stored input and
 output, including `infra_attempt`/`infra_crash` markers when present, and
 `ended_after_verdict`/`session_end` when an agent filed a verdict.
 Secret-shaped substrings are redacted before the output crosses the
@@ -1351,8 +1354,8 @@ canopy graph log <graph-id-or-name> [--since <id|RFC3339>] [--kind <k>] [--spec 
 
 Each line is `<created_at> <KIND> spec=<name> node=<name> <message>`.
 `--follow` polls the daemon every 2 s and prints new events until Ctrl+C.
-Over MCP, `graph_events { graph_id, since_id?, spec_id?, kinds?, limit?,
-include_payload? }` returns events oldest-first with `next_since_id` for
+Over MCP, `graph` `events` (`graph_id`, `since_id?`, `spec_id?`, `kinds?`, `limit?`,
+`include_payload?`) returns events oldest-first with `next_since_id` for
 paging.
 
 **This replaces the `printf … >> file` logging-hook pattern.** You no longer
@@ -1381,7 +1384,7 @@ as a quick reference and counts features and bugs.
    assigns its code at that moment; changing the type afterwards does not
    renumber it.
 
-2. **Conventional titles.** When `spec_create`/`graph_add_spec` receive a
+2. **Conventional titles.** When `spec_create`/`graph_edit` `attach_spec` receive a
    name of the form `<type>(<scope>)?!?: <subject>` and no explicit `type`,
    canopy parses it and stores the subject as the name, with type and scope
    extracted. An explicit `type` wins over the parsed one.
@@ -1394,7 +1397,7 @@ as a quick reference and counts features and bugs.
 
 4. **Opt-in enforcement.** A graph created or updated with
    `require_spec_type: true` (default `false`) refuses a spec without a type
-   in `graph_add_spec`, and `graph_run` refuses a queue holding one, naming
+   in `graph_edit` `attach_spec`, and `graph_control` `run` refuses a queue holding one, naming
    the spec. `queue_add_spec` refuses an untyped spec while any graph has the
    setting on, because queues are not tied to a single graph. Legacy specs
    keep working everywhere else.
@@ -1446,8 +1449,8 @@ or ensemble after Start), then the rest newest-first. A note is included
 whole or as a stub naming its owner, size and time — never truncated — so
 the same notes always give the same section bytes.
 
-**Lifetime.** Notes survive bounces, resumes, `graph_continue` and node
-retries of the same spec. `graph_reset` keeps them unless called with
+**Lifetime.** Notes survive bounces, resumes, `graph_control` `continue` and node
+retries of the same spec. `graph_control` `reset` keeps them unless called with
 `clear_notes: true`. Deleting the spec deletes its notes.
 
 **Check nodes.** Before a check node's command runs, the engine writes the
@@ -1476,7 +1479,7 @@ whole graph, then added to any graph by name:
 `kind` is `agent`, `check`, `gate`, `router`, or `ensemble`. An `ensemble`
 document carries the ensemble shape in `config`: `prompt_template`,
 `members` (each **without** `platform`/`model`), `min_pass`, and the same
-fields `graph_add_ensemble` accepts (`kind`, timeouts, infra budgets,
+fields `graph_ensemble` `add` accepts (`kind`, timeouts, infra budgets,
 `commit_rights`, `mutex`). A document never carries a harness — who runs a
 node is the installer's decision, not the author's. `canopy graph validate
 <path>` checks a node document exactly as it checks a graph document
@@ -1547,12 +1550,12 @@ installed copy of a builtin's name wins over the builtin.
 **Add** one to a graph:
 
 ```
-graph_add_node { spec_id, name: "audit", node: "auditor",
-                 config_overrides: { "platform": "claude", "model": "opus" } }
-graph_add_ensemble { spec_id, name: "Proposers", node: "ensemble-proposers",
-                     members: [{ "platform": "openrouter" }, …],
-                     from_node: "<kickoff>", condition: "always",
-                     on_pass_to: "<arbiter>" }
+graph_node { action: "add", spec_id, name: "audit", node: "auditor",
+             config_overrides: { "platform": "claude", "model": "opus" } }
+graph_ensemble { action: "add", spec_id, name: "Proposers", node: "ensemble-proposers",
+                 members: [{ "platform": "openrouter" }, …],
+                 from_node: "<kickoff>", condition: "always",
+                 on_pass_to: "<arbiter>" }
 ```
 
 `node` is the alternative to `kind` + `config` (or a `blueprint`), and

@@ -30,7 +30,7 @@ a shape that exists only in a diagram deserve different levels of trust:
 **Per-graph logging is built in.** You no longer need a `printf … >> file`
 command hook on `on_completed`/`on_failed` to keep a per-graph log — the
 engine records that history itself. Read it with `canopy graph log <graph-id>`
-(or the `graph_events` MCP tool). See the
+(or the `graph` tool's `events` action). See the
 [Event log](graphs.md#event-log) section.
 
 ---
@@ -121,7 +121,7 @@ The resilience node is a cheap model on a *different quota* from the
 implementer — otherwise it is dead exactly when you need it. It reads the
 dead node's output and either repairs a transient failure and reports pass
 (so implement retries), or recognizes exhaustion, calls
-`graph_schedule_autorun` with the reset time, and reports fail — the spec
+`graph_control` `schedule_autorun` with the reset time, and reports fail — the spec
 fails, but the graph wakes itself at that instant.
 
 Give it the clock. Models do not know what time it is, and "resets 6am" is
@@ -156,7 +156,7 @@ graph LR
 ```
 
 The ensemble is **one unit**, not three hand-wired nodes:
-`graph_add_ensemble` creates the members, the quorum, and the entry and exit
+`graph_ensemble` `add` creates the members, the quorum, and the entry and exit
 edges in a single call. Wiring three parallel `pass` edges out of one node by
 hand is the "ambiguous outgoing edges" mistake, and it aborts the run.
 
@@ -225,7 +225,7 @@ graph LR
     ENS --> F["paid fallback"]
 ```
 
-`graph_add_ensemble` with `kind: "cascade"` creates the four members, orders them
+`graph_ensemble` `add` with `kind: "cascade"` creates the four members, orders them
 from cheapest to dearest, and wires a single exit — `on_pass_to` the next node once
 a member passes, `on_fail_to` (or dead end) if every member fails. The members are
 the same prompt on different harnesses; you choose the order, and the engine walks
@@ -292,7 +292,7 @@ usually what you want. A router reading the output generalizes across both.
 **The engine has no memory of a spent harness.** If spec 1 burns cursor and antigravity,
 spec 2 starts at cursor again and spends an iteration rediscovering that it is dead —
 and it does that for every remaining spec in the queue. Today the only lever is
-`graph_schedule_autorun`, which parks the *whole graph* until a reset. A per-harness
+`graph_control` `schedule_autorun`, which parks the *whole graph* until a reset. A per-harness
 "unavailable until" that a router could read does not exist yet.
 
 ---
@@ -319,7 +319,7 @@ graph LR
 ```
 
 Per-member prompt overrides are available — each member can carry its own
-`prompt_override` in `graph_add_ensemble`, so a specialist panel runs all
+`prompt_override` in `graph_ensemble` `add`, so a specialist panel runs all
 four axes in parallel with one call instead of four sequential nodes.
 
 **`min_pass` means the wrong thing here.** With homogeneous members,
@@ -405,16 +405,16 @@ it lands.
 
 Three levers, from least to most intrusive:
 
-- **Retry or skip the stuck node.** `graph_continue` with
+- **Retry or skip the stuck node.** `graph_control` `continue` with
   `retry_current_node` re-runs the node the run stopped on; `skip_next_spec`
   moves past the spec. Use these first. `retry_current_node` (and a directed
   run, below) also work on an idea-driven graph — one run with an `idea`
   instead of specs: the run resumes with the idea it last ran with, so a
   failed idea graph no longer has to be relaunched from Start. An idea graph
-  that has never run is refused, naming `graph_run` with an `idea` as the
+  that has never run is refused, naming `graph_control` `run` with an `idea` as the
   way to start one.
 - **Start a spec at a node you choose.** When everything before a node is
-  already right, a directed run (`graph_continue run_from_node`, or
+  already right, a directed run (`graph_control` `continue` with `run_from_node`, or
   `canopy graph run <graph> --from <node>`) begins at that node and reuses the
   recorded output of each node upstream of it (the start node and everything
   downstream always run again, and its own old output is never reused). Use it

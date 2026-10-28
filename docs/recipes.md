@@ -53,7 +53,7 @@ This is the graph that built most of canopy. Four nodes, six edges.
 ### The graph
 
 ```json
-graph_create {
+graph_edit { action: "create",
   name: "bugs-then-features",
   workdir: "/path/to/repo"
 }
@@ -62,7 +62,7 @@ graph_create {
 ### The nodes
 
 ```json
-graph_add_node {
+graph_node { action: "add", 
   graph_id, name: "implement", kind: "agent", position: 1,
   config: {
     platform: "claude", model: "sonnet",
@@ -71,14 +71,14 @@ graph_add_node {
   }
 }
 
-graph_add_node {
+graph_node { action: "add", 
   graph_id, name: "gates", kind: "check", position: 2,
   config: {
     command: "cargo fmt --all && cargo clippy --all-targets -- -D warnings && cargo nextest run --locked"
   }
 }
 
-graph_add_node {
+graph_node { action: "add", 
   graph_id, name: "review", kind: "agent", position: 3,
   config: {
     platform: "opencode", model: "some-free-model",
@@ -88,7 +88,7 @@ graph_add_node {
   }
 }
 
-graph_add_node {
+graph_node { action: "add", 
   graph_id, name: "resilience", kind: "agent", position: 4,
   config: {
     platform: "opencode", model: "some-other-free-model",
@@ -179,7 +179,7 @@ The previous node's CLI died. Decide whether it can be retried.
 # [HOW]
 1. Read the failure output below. Do not open files, do not run git.
 2. If it names a usage, session or quota limit: call
-   graph_schedule_autorun with the failure text copied verbatim as
+   graph_control with action schedule_autorun, the failure text copied verbatim as
    quota_reset_message. Do NOT compute a time yourself — the engine
    derives it from the message. Then report FAIL.
 3. If the engine answers that it could not derive a reset instant:
@@ -219,11 +219,11 @@ See [Spec notes](graphs.md#spec-notes).
 ### Running it
 
 ```json
-graph_run { graph_id, queue_id }
+graph_control { action: "run", graph_id, queue_id }
 ```
 
 The graph drains the queue's pending specs in order. Completed specs are
-skipped on relaunch, so recovery after a crash is just `graph_run` again.
+skipped on relaunch, so recovery after a crash is just `graph_control` `run` again.
 
 ### What will bite you
 
@@ -247,7 +247,7 @@ skipped on relaunch, so recovery after a crash is just `graph_run` again.
 
 ### The idea
 
-One `graph_add_ensemble` call with `kind: "cascade"` and four members ordered from
+One `graph_ensemble` `add` call with `kind: "cascade"` and four members ordered from
 cheapest to dearest. The engine walks the members one at a time, falls through to the
 next on failure or infra crash, and exits on the first pass — `min_pass: 1`. The
 ensemble is entered by a node before it (e.g. the spec's start or a check node) and
@@ -256,7 +256,7 @@ exits to the next stage on pass, or to a dead end on total failure.
 ### The ensemble
 
 ```json
-graph_add_ensemble {
+graph_ensemble { action: "add",
   graph_id, name: "free-tier-cascade",
   kind: "cascade",
   prompt_template: "...",                    // one prompt, shared by every member
@@ -281,10 +281,10 @@ through to the next member immediately — no retry, no wasted wall clock). Per-
 `infra_retry_limit` overrides the ensemble's default; omitting it would inherit the
 engine default of 2 retries, which you do not want here.
 
-You can tune the cascade after creation with `graph_update_ensemble`:
+You can tune the cascade after creation with `graph_ensemble` `update`:
 
 ```json
-graph_update_ensemble {
+graph_ensemble { action: "update",
   ensemble_id,
   members: [
     { platform: "cursor",      timeout_minutes: 8,  infra_retry_limit: 0 },
@@ -315,7 +315,7 @@ subsection for the full variant.
 There is still no memory of a spent harness across spec boundaries. If spec 1 burns
 cursor and antigravity, spec 2 re-enters the cascade at cursor and spends an iteration
 rediscovering it is dead — for every remaining spec in the queue. Today the only lever is
-`graph_schedule_autorun`, which parks the *whole graph* until a reset. A per-harness
+`graph_control` `schedule_autorun`, which parks the *whole graph* until a reset. A per-harness
 "unavailable until" that the cascade could skip past does not exist yet.
 
 ---
@@ -418,7 +418,7 @@ half an issue.
 ### The back half: the graph watches that file
 
 ```json
-graph_create {
+graph_edit { action: "create",
   name: "issue-autofix",
   workdir: "/path/to/repo",
   trigger: { type: "watch", path: "~/.canopy/inbox/github-issue.json", events: ["modify"] }

@@ -1,12 +1,12 @@
 ---
 title: MCP Tools
-description: All 122 MCP tools exposed by the canopy daemon, by category.
+description: All 93 MCP tools exposed by the canopy daemon, by category.
 order: 11
 ---
 
 # MCP Tools
 
-The daemon exposes **122 MCP tools** over Streamable HTTP (port 7755) and
+The daemon exposes **93 MCP tools** over Streamable HTTP (port 7755) and
 stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 
 Writes wait up to 5 seconds for a concurrent writer. If the database is still
@@ -36,7 +36,7 @@ any other tool still work. All other sessions keep the full list.
 | `agent_logs` | Read execution logs |
 | `agent_update` | Update an agent's definition |
 | `agent_report` | Report execution status for scheduled tasks |
-| `agent_probe` | Test platform+model liveness before graph_run |
+| `agent_probe` | Test platform+model liveness before a `graph_control` `run` |
 | `agent_probe_recent` | Sweep recently-used platform+model pairs before a run |
 | `subagent_spawn` | Launch an ephemeral subagent, asynchronously or blocking; the subagent runs with the given `workdir` as its working directory (default: the caller's project), and a missing or non-directory `workdir` is refused before anything spawns, naming the path |
 | `subagent_collect` | Collect an ephemeral subagent result and mark it for cleanup |
@@ -80,7 +80,7 @@ any other tool still work. All other sessions keep the full list.
 | `skill_list` | List skills available from the dynamic skill store and configured catalogs; an installed skill that its git source no longer lists is marked `orphaned`, and its description starts with `[removed upstream]` |
 | `skill_get` | Fetch a skill's full instructions by name, cloning or refreshing it on demand |
 
-## Graph engine (47)
+## Graph engine (18)
 
 | Tool | Description |
 |---|---|
@@ -103,13 +103,13 @@ any other tool still work. All other sessions keep the full list.
 | `graph_complete_node` | Complete an active graph node |
 | `graph_report_blocker` | Report a blocker for an active graph node |
 
-Every authoring tool that stores prompt text — `graph_add_node`,
-`graph_update_node`, `graph_add_ensemble`, `graph_update_ensemble`,
-`graph_import` — refuses a template whose `{{…}}` placeholder nothing can
+Every authoring tool that stores prompt text — `graph_node` `add`,
+`graph_node` `update`, `graph_ensemble` `add`, `graph_ensemble` `update`,
+`graph_edit` `import` — refuses a template whose `{{…}}` placeholder nothing can
 bind, naming the node or ensemble, the placeholder and the forms accepted;
 `{{output:<name>}}` must name a node in the same graph, never an ensemble
 (use its quorum node), and a literal marker must be escaped as `\{{...}}`.
-`graph_preflight` reports templates written before this validation as
+`graph_control` `preflight` reports templates written before this validation as
 `graph_warnings`.
 
 See [Graphs](graphs.md).
@@ -120,17 +120,17 @@ See [Graphs](graphs.md).
 
 Kept callable for the whole 3.x line, but excluded from tool listings
 (`tools/list`) so nothing new adopts them — call the 3.x name instead. Not
-counted in the 122 tools above.
+counted in the 93 tools above.
 
 | Deprecated name | Renamed to (3.0.0) |
 |---|---|
 | `loop_complete_node` | `graph_complete_node` |
 | `loop_report_blocker` | `graph_report_blocker` |
 
-A successful call through any of these three carries an extra `deprecated`
+A successful call through either carries an extra `deprecated`
 field naming the rename. No other `loop_*` tool has a 3.x alias — every
 other 2.x `loop_*` MCP tool name and the `canopy loop` CLI subcommand
-(now `canopy graph`) are gone for good; `graph_preflight` and `canopy
+(now `canopy graph`) are gone for good; `graph_control` `preflight` and `canopy
 doctor` both warn if a stored prompt or hook still mentions one.
 
 <!-- RETIRED-VOCAB-END -->
@@ -148,7 +148,7 @@ available as `CANOPY_HOOK_LOOP_NAME` (alias `CANOPY_HOOK_GRAPH_NAME`),
 `"$CANOPY_HOOK_SPEC_NAME"` without interpolation.
 Agent, interactive, and graph-idea hooks substitute the same markers without
 shell quoting. A known marker with no value for the event renders `(none)` in
-all hook modes. Unknown marker names are rejected during `graph_update`, so a
+all hook modes. Unknown marker names are rejected during `graph_edit` `update`, so a
 hook never fires with a marker left literal.
 
 An interactive hook targets a session by `target_session_id` or by

@@ -148,12 +148,12 @@ A platform whose CLI has no headless/print mode (e.g. `freebuff`) declares
 `headless = false`. Such a platform stays available for live interactive
 sessions and appears in `canopy doctor` and the new-session picker marked
 **interactive only**, but canopy refuses to use it anywhere a headless run
-is required: `graph_add_node` / `graph_update_node`, ensemble members,
+is required: `graph_node` `add` / `graph_node` `update`, ensemble members,
 `agent_add`, and `agent_probe` (reported `interactive_only`, nothing
 spawned) all reject it with
 `platform '<name>' is interactive-only (no headless mode)`, and
 `agent_models` returns an empty list with that reason instead of
-enumerating. `graph_preflight` flags every existing node that uses one.
+enumerating. `graph_control` `preflight` flags every existing node that uses one.
 Omit the field — the default is `true` — and the platform behaves exactly
 as before.
 

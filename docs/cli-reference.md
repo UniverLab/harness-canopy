@@ -114,8 +114,8 @@ prefix. Ambiguous references list the candidates.
 
 ## Graph control
 
-Mirrors the `graph_run`/`graph_pause`/`graph_continue`/`graph_reset`/
-`graph_schedule_autorun` MCP tools — a second way to reach the same daemon
+Mirrors the `graph_control` actions `run`/`pause`/`continue`/`reset`/
+`schedule_autorun` — a second way to reach the same daemon
 operations when an MCP client can't. Every command resolves `<id-or-name>`
 locally (same rule as graph inspection above) and then delegates the actual
 state change to the daemon over its existing MCP endpoint; it never writes
@@ -277,7 +277,7 @@ hand.
 
 ## Sandboxes
 
-Sandboxed graph runs (`graph_run` with `sandbox: true`) leave their worktree
+Sandboxed graph runs (`graph_control` `run` with `sandbox: true`) leave their worktree
 behind whenever it holds work; see [Sandboxes](graphs.md#sandboxes). These
 commands are how you deal with them, and none of them guesses.
 
