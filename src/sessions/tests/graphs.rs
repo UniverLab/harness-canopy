@@ -513,6 +513,51 @@ async fn the_fifth_graph_watch_answers_busy_and_starts_nothing() {
 
 // ── connection lifetime ─────────────────────────────────────────────────
 
+/// A watch whose graph vanished ends on its own; the connection must be able
+/// to spend that slot again instead of answering `busy` forever.
+#[tokio::test]
+async fn a_watch_that_ended_frees_its_slot_for_a_new_one() {
+    let (db, _dir) = test_db();
+    for index in 1..=5 {
+        db.insert_graph(&graph_row(
+            &format!("g-{index}"),
+            GraphStatus::Draft,
+            "/srv/work/w",
+        ))
+        .unwrap();
+    }
+
+    let (mut client, server) = connected_client(&db).await;
+    for index in 1..=4 {
+        send_json(
+            &mut client,
+            &json!({"t": "graph_watch", "req": format!("w{index}"), "id": format!("g-{index}")}),
+        )
+        .await;
+    }
+    for _ in 0..4 {
+        assert_eq!(recv_json(&mut client, "graph").await["t"], "graph");
+    }
+
+    // g-1 vanishes: its watch's next poll finds no graph and ends the watch.
+    db.delete_graph("g-1").unwrap();
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+
+    send_json(
+        &mut client,
+        &json!({"t": "graph_watch", "req": "w5", "id": "g-5"}),
+    )
+    .await;
+    let frame = recv_json(&mut client, "graph").await;
+    assert_eq!(
+        frame["t"], "graph",
+        "three live watches plus a freed slot accept a fourth: {frame}"
+    );
+    assert_eq!(frame["id"], "g-5");
+    assert_eq!(frame["req"], "w5");
+    server.abort();
+}
+
 #[tokio::test]
 async fn closing_the_socket_ends_every_watch_task_promptly() {
     let (db, _dir) = test_db();
@@ -545,9 +590,11 @@ async fn closing_the_socket_ends_every_watch_task_promptly() {
         "four live watches on the connection"
     );
 
-    // Close the socket: every watch task must end with it.
+    // Close the socket: every watch task must end with it, not on its next
+    // 2-second tick — the deadline is deliberately shorter than one poll
+    // period, so a watch left running until `out_tx` closes fails here.
     drop(client);
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(1500);
     while state.live_graph_watches() > 0 && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }

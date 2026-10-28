@@ -185,6 +185,10 @@ pub async fn handle_graph_watch(
     req: String,
     id: String,
 ) {
+    // A watch whose graph vanished ends on its own, but its handle stays in
+    // the map until the connection drops. Count only live watches, or that
+    // finished watch would spend a slot the connection no longer holds.
+    watches.retain(|_, task| !task.is_finished());
     if watches.len() >= MAX_WATCHES && !watches.contains_key(&id) {
         let _ = out_tx.send(error_frame(Some(&req), ERR_BUSY, "too many graph watches"));
         return;
