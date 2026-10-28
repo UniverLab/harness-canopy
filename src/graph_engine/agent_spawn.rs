@@ -1043,13 +1043,31 @@ mod tests {
         );
     }
 
+    /// A spawn with no identity must scrub all three vars even when the
+    /// parent's own environment carries a stale identity — so seed stale
+    /// values first: without them a missing `env_remove` would let the child
+    /// inherit an empty ambient env and the test would pass vacuously.
     #[tokio::test]
     async fn spawn_without_identity_scrubs_identity_env() {
+        use crate::shared::sync_identity::{
+            CANOPY_GRAPH_ID_ENV, CANOPY_NODE_ID_ENV, CANOPY_NODE_RUN_ID_ENV,
+        };
+        unsafe {
+            std::env::set_var(CANOPY_GRAPH_ID_ENV, "stale-graph");
+            std::env::set_var(CANOPY_NODE_ID_ENV, "stale-node");
+            std::env::set_var(CANOPY_NODE_RUN_ID_ENV, "stale-run");
+        }
         let seen = identity_env_seen_by_child(None).await;
+        unsafe {
+            std::env::remove_var(CANOPY_GRAPH_ID_ENV);
+            std::env::remove_var(CANOPY_NODE_ID_ENV);
+            std::env::remove_var(CANOPY_NODE_RUN_ID_ENV);
+        }
         assert_eq!(
             seen,
             vec!["".to_string(), "".to_string(), "".to_string()],
-            "a spawn with no identity must unset all three vars, never inherit them"
+            "a spawn with no identity must unset all three vars, never inherit them \
+             (stale-graph/stale-node/stale-run were seeded in the parent env)"
         );
     }
 }

@@ -216,6 +216,68 @@ async fn graph_complete_node_with_wrong_prefix_ids_fails_naming_env_run() {
     );
 }
 
+/// A partial transcription error — only the run id's tail is invented, the
+/// node id is exactly right — is corrected for the run id alone: the result
+/// must not claim it also "corrected" a node id that never changed (FR3:
+/// the result says which ids it corrected).
+#[tokio::test]
+async fn graph_complete_node_corrects_only_the_ids_that_were_wrong() {
+    let (dir, db, handler) = endpoint_test_handler();
+    let lp = insert_test_graph(&db, dir.path());
+    let run = insert_running_node_run(&db, &lp.id);
+    let _guard = IdentityEnv::set(&lp.id, &run.node_id, &run.id);
+
+    let bad_run = format!("{}ffffffff-ffff-ffff-ffff-ffffffffffff", &run.id[..8]);
+    assert_ne!(bad_run, run.id);
+
+    let result = complete_node(
+        &handler,
+        Some(bad_run.clone()),
+        Some(run.node_id.clone()),
+        None,
+    )
+    .await;
+    assert!(!is_err(&result), "{}", text(&result));
+    let body = raw_text(&result);
+    assert!(body.contains("Corrected"), "{body}");
+    for id in [&bad_run, &run.id] {
+        assert!(body.contains(id), "result must name {id}: {body}");
+    }
+    assert!(
+        !body.contains("node_id"),
+        "the node id was already right; the result must not report correcting it: {body}"
+    );
+
+    let stored = db.get_graph_run(&run.id).unwrap().unwrap();
+    assert_eq!(stored.status, GraphRunStatus::Pass);
+}
+
+/// FR2's "when either is omitted": one id supplied, the other omitted, and
+/// no identity anywhere — still the missing-identity error, naming the env
+/// var, regardless of the supplied id.
+#[tokio::test]
+async fn graph_complete_node_with_one_id_omitted_and_no_identity_fails() {
+    let (dir, db, handler) = endpoint_test_handler();
+    let lp = insert_test_graph(&db, dir.path());
+    let run = insert_running_node_run(&db, &lp.id);
+    let _guard = IdentityEnv::clear();
+
+    let result = complete_node(&handler, Some(run.id.clone()), None, None).await;
+    assert!(is_err(&result), "{}", text(&result));
+    assert!(
+        text(&result).contains("CANOPY_NODE_RUN_ID"),
+        "{}",
+        text(&result)
+    );
+
+    let stored = db.get_graph_run(&run.id).unwrap().unwrap();
+    assert_eq!(
+        stored.status,
+        GraphRunStatus::Running,
+        "a rejected report must not touch the run"
+    );
+}
+
 /// No ids and no identity anywhere: the call fails naming the missing
 /// environment variable.
 #[tokio::test]

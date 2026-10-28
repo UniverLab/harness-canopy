@@ -167,7 +167,7 @@ fn unknown_run_report(
         return match lookup_verified_run(db, &identity.run_id, &identity.node_id)? {
             RunLookup::Found(run) => Ok(Ok(ResolvedReport {
                 run: *run,
-                correction: Some(correction),
+                correction,
             })),
             RunLookup::Rejected(result) => Ok(Err(result)),
             RunLookup::UnknownRun { resolved_run_id } => Ok(Err(error_result(&format!(
@@ -186,7 +186,7 @@ fn unknown_run_report(
 /// run to report against at all.
 fn missing_identity_result() -> CallToolResult {
     error_result(&format!(
-        "run_id/node_id were omitted but this process carries no graph identity \
+        "an id was omitted but this process carries no graph identity \
          ({CANOPY_NODE_RUN_ID_ENV} is unset); pass run_id and node_id explicitly."
     ))
 }
@@ -204,21 +204,29 @@ fn shares_prefix8_opt(supplied: Option<&str>, identity_id: &str) -> bool {
 }
 
 /// The applied correction, one `'<kind> '<given>' -> '<used>'` pair per
-/// supplied id: `run_id 'x' -> 'y', node_id 'a' -> 'b'`.
+/// supplied id that actually differed from the identity's: `run_id 'x' ->
+/// 'y', node_id 'a' -> 'b'`. An id that already equalled the environment's
+/// was not corrected, so it must not be reported as if it had been — and a
+/// correction naming nothing (both ids already right, unreachable in
+/// practice) stays `None`.
 fn correction_text(
     supplied_run: Option<&str>,
     identity_run: &str,
     supplied_node: Option<&str>,
     identity_node: &str,
-) -> String {
+) -> Option<String> {
     let mut pairs = Vec::new();
-    if let Some(supplied) = supplied_run {
+    if let Some(supplied) = supplied_run.filter(|supplied| *supplied != identity_run) {
         pairs.push(format!("run_id '{supplied}' -> '{identity_run}'"));
     }
-    if let Some(supplied) = supplied_node {
+    if let Some(supplied) = supplied_node.filter(|supplied| *supplied != identity_node) {
         pairs.push(format!("node_id '{supplied}' -> '{identity_node}'"));
     }
-    pairs.join(", ")
+    if pairs.is_empty() {
+        None
+    } else {
+        Some(pairs.join(", "))
+    }
 }
 
 impl TaskTriggerHandler {
