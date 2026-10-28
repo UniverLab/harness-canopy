@@ -60,14 +60,24 @@ pub struct RemoteBridge {
 }
 
 impl RemoteBridge {
-    /// Bridge the hub behind `state` for one device peer.
+    /// Bridge the hub behind `state` for one device peer. Files already on
+    /// a terminal shelf hide from the start, so their later `shelf_removed`
+    /// stays hidden too (one indexed query per terminal session).
     pub fn new(state: Arc<SessionsState>) -> Self {
+        let mut hidden_files = HashSet::new();
+        for session in state.hub.list() {
+            if session.kind == SessionKind::Terminal {
+                for item in state.shelf.list(Some(&session.id)) {
+                    hidden_files.insert(item.file_id);
+                }
+            }
+        }
         Self {
             state,
             attached: HashMap::new(),
             transfers: Arc::new(Semaphore::new(2)),
             shelf_tasks: Vec::new(),
-            hidden_files: HashSet::new(),
+            hidden_files,
         }
     }
 
@@ -196,11 +206,7 @@ impl RemoteBridge {
                 }
             }
             HubEvent::ShelfAdded(item) => {
-                if item
-                    .session_id
-                    .as_deref()
-                    .is_some_and(|id| self.terminal(id))
-                {
+                if self.hidden_terminal_file(item.session_id.as_deref()) {
                     self.hidden_files.insert(item.file_id.clone());
                 } else {
                     send(out, shelf_added_frame(&item));
@@ -227,11 +233,35 @@ impl RemoteBridge {
         }
     }
 
+    /// Record a shelf event's hidden-ness without forwarding it. The serve
+    /// loop feeds pre-greeting events here: nothing may overtake `hello`,
+    /// but a terminal file that lands during the handshake must still hide
+    /// its later removal.
+    pub fn note_hidden(&mut self, event: &HubEvent) {
+        match event {
+            HubEvent::ShelfAdded(item) => {
+                if self.hidden_terminal_file(item.session_id.as_deref()) {
+                    self.hidden_files.insert(item.file_id.clone());
+                }
+            }
+            HubEvent::ShelfRemoved { file_id } => {
+                self.hidden_files.remove(file_id);
+            }
+            _ => {}
+        }
+    }
+
     fn terminal(&self, id: &str) -> bool {
         self.state
             .hub
             .get(id)
             .is_some_and(|session| session.kind == SessionKind::Terminal)
+    }
+
+    /// A file that stays hidden from this peer: it belongs to a live
+    /// terminal session.
+    fn hidden_terminal_file(&self, session_id: Option<&str>) -> bool {
+        session_id.is_some_and(|id| self.terminal(id))
     }
 
     /// Run `allowed` unless `id` names a terminal session.
@@ -405,11 +435,7 @@ impl RemoteBridge {
             ));
             return;
         };
-        if row
-            .session_id
-            .as_deref()
-            .is_some_and(|id| self.terminal(id))
-        {
+        if self.hidden_terminal_file(row.session_id.as_deref()) {
             let _ = out.send(error_frame(
                 Some(&req),
                 ERR_FORBIDDEN,
@@ -473,6 +499,7 @@ impl RemoteBridge {
                 }
             }
         });
+        self.shelf_tasks.retain(|task| !task.is_finished());
         self.shelf_tasks.push(task);
     }
 }

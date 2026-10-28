@@ -217,8 +217,13 @@ async fn serve(session: &mut PeerSession) {
                 Ok(event) => {
                     // Held until the greeting is queued: nothing may overtake
                     // `hello`, and nothing is attached yet to miss a removal.
+                    // Pre-greeting shelf events still feed the hidden set, so
+                    // a terminal file that lands during the handshake hides
+                    // its later removal.
                     if greeted {
                         bridge.handle_event(event, &out_tx);
+                    } else {
+                        bridge.note_hidden(&event);
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,

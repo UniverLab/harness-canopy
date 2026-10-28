@@ -1140,3 +1140,131 @@ async fn bridge_restrictions_hide_and_refuse_terminal_sessions() {
     assert_eq!(first["t"], "snapshot");
     assert_eq!(first["id"], cat.id);
 }
+
+/// Terminal files already on the shelf hide their later removal from a new
+/// bridge — including one that lands during the handshake — while host
+/// removals still push.
+#[tokio::test]
+async fn a_new_bridge_hides_pre_existing_terminal_files_removals() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db =
+        Arc::new(crate::db::Database::new(&dir.path().join("test.db")).expect("test database"));
+    let hub = SessionHub::with_broadcast_capacity(db, "test-host".to_string(), 256);
+    let workdir = tempfile::tempdir().expect("workdir");
+    let (_cat, _kill_cat) = spawn_session(&hub, SessionKind::Agent, workdir.path());
+    let (terminal, _kill_terminal) = spawn_session(&hub, SessionKind::Terminal, workdir.path());
+    let state = SessionsState::for_test(hub, "token".to_string());
+
+    let hidden = insert_shelf_png(&state, "term.png", &small_png_bytes(), Some(&terminal.id));
+    let shown = insert_shelf_png(&state, "host.png", &small_png_bytes(), None);
+
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    let mut bridge = crate::remote::bridge::RemoteBridge::new(Arc::clone(&state));
+
+    bridge.handle_event(
+        crate::sessions::HubEvent::ShelfRemoved { file_id: hidden },
+        &out_tx,
+    );
+    assert!(
+        out_rx.try_recv().is_err(),
+        "a hidden file's removal must not push"
+    );
+
+    bridge.handle_event(
+        crate::sessions::HubEvent::ShelfRemoved { file_id: shown },
+        &out_tx,
+    );
+    let pushed = out_rx.try_recv().expect("a host removal pushes");
+    let frame: Value = serde_json::from_str(&pushed).expect("removal frame");
+    assert_eq!(frame["t"], "shelf_removed");
+
+    // A terminal file that lands before the greeting (the serve loop feeds
+    // those to `note_hidden`, never forwarding them) hides its removal too.
+    let handshake = insert_shelf_png(&state, "term2.png", &small_png_bytes(), Some(&terminal.id));
+    let row = state.shelf.get(&handshake).expect("the new row");
+    let item = crate::sessions::protocol::ShelfItem::from(&row);
+    bridge.note_hidden(&crate::sessions::HubEvent::ShelfAdded(Box::new(item)));
+    assert!(
+        out_rx.try_recv().is_err(),
+        "noting a hidden arrival forwards nothing"
+    );
+    bridge.handle_event(
+        crate::sessions::HubEvent::ShelfRemoved { file_id: handshake },
+        &out_tx,
+    );
+    assert!(
+        out_rx.try_recv().is_err(),
+        "a handshake arrival's removal must not push"
+    );
+}
+
+/// Aborting the bridge stops its shelf transfers: no more parts arrive and
+/// both download slots free up for new ones.
+#[tokio::test]
+async fn aborting_the_bridge_cancels_its_shelf_transfers() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db =
+        Arc::new(crate::db::Database::new(&dir.path().join("test.db")).expect("test database"));
+    let hub = SessionHub::with_broadcast_capacity(db, "test-host".to_string(), 256);
+    let workdir = tempfile::tempdir().expect("workdir");
+    let (_cat, _kill_cat) = spawn_session(&hub, SessionKind::Agent, workdir.path());
+    let state = SessionsState::for_test(hub, "token".to_string());
+    let source = big_png_bytes();
+    let file_id = insert_shelf_png(&state, "photo.png", &source, None);
+
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    let mut bridge = crate::remote::bridge::RemoteBridge::new(Arc::clone(&state));
+    bridge.handle_text(
+        &json!({"t": "shelf_get", "req": "g1", "file_id": file_id}).to_string(),
+        &out_tx,
+    );
+    let first = tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
+        .await
+        .expect("the first part arrives")
+        .expect("the channel stays open");
+    let frame: Value = serde_json::from_str(&first).expect("file frame");
+    assert_eq!(frame["t"], "file");
+    assert_eq!(frame["req"], "g1");
+
+    bridge.abort();
+
+    // Drain anything the task queued before the abort landed; after that the
+    // transfer stays silent — an uncancelled task would stream on, one part
+    // per millisecond, through the whole quiet window.
+    while out_rx.try_recv().is_ok() {}
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut stragglers = 0usize;
+    while out_rx.try_recv().is_ok() {
+        stragglers += 1;
+    }
+    assert_eq!(
+        stragglers, 0,
+        "the aborted transfer must send no more parts"
+    );
+
+    // Both slots are free again: two new downloads start, none answers busy.
+    bridge.handle_text(
+        &json!({"t": "shelf_get", "req": "g2", "file_id": file_id}).to_string(),
+        &out_tx,
+    );
+    bridge.handle_text(
+        &json!({"t": "shelf_get", "req": "g3", "file_id": file_id}).to_string(),
+        &out_tx,
+    );
+    let mut seen_g2 = false;
+    let mut seen_g3 = false;
+    while !(seen_g2 && seen_g3) {
+        let next = tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
+            .await
+            .expect("the new downloads answer")
+            .expect("the channel stays open");
+        let frame: Value = serde_json::from_str(&next).expect("transfer frame");
+        assert_ne!(
+            frame["t"], "error",
+            "no download answers busy after the abort: {frame}"
+        );
+        seen_g2 |= frame["req"] == "g2";
+        seen_g3 |= frame["req"] == "g3";
+    }
+    bridge.abort();
+}
