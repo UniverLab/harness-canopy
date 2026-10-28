@@ -231,16 +231,60 @@ WebSocket — the CLI never writes the shelf itself. `file_id` is the
 | `canopy remote devices [--json]` | List paired browsers (`id`, `label`, `paired_at`, `last_seen`) |
 | `canopy remote revoke <device_id>` | Delete a paired browser and close its live connection at once |
 
-Pairing turns a browser into a revocable device: the code is 10 Crockford
-base32 characters shown as `XXXXX-XXXXX`, works once for ten minutes, and
-is burned after one success or five failed MAC checks. A new `canopy remote
-pair` replaces the previous code. The browser and this host exchange P-256
-public keys authenticated by the code, so later connections need no code
+### Pairing a browser
+
+Pairing turns a browser into a revocable device of this host. The code is
+ten Crockford base32 characters shown as `XXXXX-XXXXX`, works once for ten
+minutes, and is burned after one success or five failed code checks. One
+code is live per host: `canopy remote pair` replaces the previous one, and
+the old code stops working at once. Case, spaces and dashes do not matter
+when the code is typed, `I`/`L` are read as `1` and `O` as `0`.
+
+`canopy remote pair` prints the code, the link and the expiry time, then
+the link as a terminal QR code:
+
+```text
+Pairing code: 7K3QH-M9P2X
+Link: https://remote.univerlab.org/pair#7K3QH-M9P2X
+Expires: 2026-10-28 15:04:05 UTC
+<the link as a QR code, drawn with half blocks>
+```
+
+The browser opens that link and exchanges long-term P-256 public keys with
+this host, authenticated by the code, so later connections need no code
 and the relay never learns anything that lets it impersonate either side.
-The host key lives in `~/.canopy/remote/host_key` (PKCS#8 DER, mode 0600);
-`host_id` is the first 16 hex chars of SHA-256 over its public key. Paired
-browsers are recorded in the `remote_devices` table and identified by the
-first 16 hex chars of SHA-256 over their own key.
+The exchange rides the daemon's relay connection, so pairing completes
+only while the daemon is running, `remote status` shows a login, and
+remote is on. A failed exchange tells the browser only `no_code`,
+`expired` or `bad_code`: run `canopy remote pair` again for a fresh code.
+
+`canopy remote devices [--json]` prints `id`, `label`, `paired_at` and
+`last_seen` (`never` when the registry has no time), one line per device
+or as a JSON array; `no paired devices` when there are none. `canopy
+remote revoke <device_id>` deletes the device and closes its live
+connection within a second, printing `revoked <device_id>`, and refuses
+an unknown id with `no paired device with id <device_id>`. Re-pairing the
+same browser updates its label and `paired_at` instead of adding a row.
+
+The host key lives in `~/.canopy/remote/host_key` (PKCS#8 DER, mode 0600)
+and `host_id` is the first 16 hex chars of SHA-256 over its public key;
+the live code and its derived key sit in `~/.canopy/remote/pairing.json`
+(mode 0600, removed once the code is used, refused as expired, or burned —
+deleting it cancels the code). Paired browsers are recorded in the
+`remote_devices` table and identified by the first 16 hex chars of SHA-256
+over their own key.
+
+### The relay connection
+
+With `remote on` and a stored identity, the daemon keeps one WebSocket to
+`<relay_url>/ws/host`, carrying the GitHub token and this host's id and
+label, and answers the pairing frames the relay forwards to it. A dropped
+socket is retried after one second, doubling to one minute, with jitter.
+`canopy remote off` closes the socket and `on` reconnects within a second
+— neither needs a daemon restart. If the relay answers HTTP 401, the
+daemon stops retrying that token and logs `github token rejected: run
+canopy remote login` (see `canopy daemon logs`); a fresh `canopy remote
+login` makes it connect again.
 
 Remote control is owner-only: the relay admits only hosts signed in with
 the same GitHub account. `login` prints the device URL and the code to
