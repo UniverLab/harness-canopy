@@ -41,9 +41,17 @@ no external services, no cloud account.
 - [The TUI — Canopy Hub](tui.md) — the interactive terminal interface.
 - [Agents](agents.md) — interactive, background and terminal agents; seed identities.
 - [Intelligence & Sync](intelligence-and-sync.md) — knowledge graph and multi-agent coordination.
-- [Graphs](graphs.md) — the DAG graph engine.
-- [Usage Patterns](usage-patterns.md) — the shapes a graph can take, and where each breaks.
-- [Recipes](recipes.md) — those shapes built end to end, with real calls and prompts.
+- [Graphs](graphs.md) — the DAG graph engine: overview and structure.
+- [Template Variables](graphs-templates.md) — placeholders in agent prompts and check commands.
+- [Ensembles](graphs-ensembles.md) — parallel, cascade and round-robin member groups, crews, availability.
+- [Execution](graphs-execution.md) — commit rights, self-reports, retries, the execution limit, lifecycle, deterministic commits, spec notes.
+- [Isolation](graphs-isolation.md) — sandboxes, concurrency, and named mutexes.
+- [Hooks and Queues](graphs-hooks-and-queues.md) — event-keyed hooks, the spec backlog, and spec queues.
+- [Sharing Graphs](graphs-sharing.md) — export and import, validate, and install from the catalogue.
+- [Node Documents](graphs-nodes.md) — reusable node documents.
+- [Graph Operations](graphs-operations.md) — archive and restore, node run history, the event log, engine tuning.
+- [Graph patterns](https://graphs.univerlab.org/patterns) — the shapes a graph can take, and where each breaks.
+- [Graph catalogue](https://graphs.univerlab.org) — ready-made graphs to install.
 - [RAG Pipeline](rag.md) — personal document search.
 - [MCP Tools](mcp-tools.md) — all 32 tools by category.
 - [CLI Reference](cli-reference.md) — every `canopy` command.

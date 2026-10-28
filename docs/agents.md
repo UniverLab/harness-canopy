@@ -40,7 +40,7 @@ a target session — by **name** is recommended, because the name is resolved
 against the live sessions on every fire, and a resume canopy recognizes keeps
 both the session's id and its name. A resume it does not recognize comes back
 with a fresh id and a fresh generated name (see
-[Graphs](graphs.md#event-keyed-hooks)). Every time the agent's cron or watch
+[Graphs](graphs-hooks-and-queues.md#event-keyed-hooks)). Every time the agent's cron or watch
 trigger fires, canopy enqueues the prompt as a scheduled send to that session,
 and the TUI delivers it on its next refresh tick. Delivery happens when a TUI
 is open: a message that fires while no TUI is running waits for the next TUI —

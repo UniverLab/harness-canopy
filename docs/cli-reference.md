@@ -1,7 +1,7 @@
 ---
 title: CLI Reference
 description: Every canopy command and flag.
-order: 12
+order: 18
 ---
 
 # CLI Reference
@@ -95,7 +95,7 @@ refresh also restarts that 24-hour window.
 
 `canopy graph validate` runs entirely locally — no daemon, no database,
 no workdir — so it works before anything is installed. The rules it
-enforces are in [Graphs](graphs.md#validate-before-you-share).
+enforces are in [Graphs](graphs-sharing.md#validate-before-you-share).
 
 Graph ids can be specified by exact id, exact name, or unambiguous id
 prefix. Ambiguous references list the candidates.
@@ -110,7 +110,7 @@ prefix. Ambiguous references list the candidates.
 | `canopy node remove <name> [--json]` | Remove an installed node document. A builtin with no installed copy cannot be removed; an installed override can |
 
 `canopy node` runs entirely locally — no daemon needed. See
-[Graphs](graphs.md#nodes).
+[Graphs](graphs-nodes.md#nodes).
 
 ## Graph control
 
@@ -150,13 +150,13 @@ missing.
 
 `canopy graph log` prints `<created_at> <KIND> spec=<name> node=<name> <message>`
 and goes through the daemon like the other `graph` subcommands. See the
-[Event log](graphs.md#event-log) section.
+[Event log](graphs-operations.md#event-log) section.
 
 A `continue` on a sandboxed graph resumes inside that run's sandbox worktree;
 when the worktree is gone the continue is refused, naming the sandbox id,
 rather than running the graph against the original workdir. A failed
 sandboxed graph always keeps its worktree — see
-[Sandboxes](graphs.md#sandboxes).
+[Sandboxes](graphs-isolation.md#sandboxes).
 
 ## Agents
 
@@ -191,7 +191,7 @@ served from the local database — no daemon required.
 | `canopy spec complete <spec-id> --reason <text>` | Mark a standalone spec as completed |
 | `canopy spec skip <spec-id> --reason <text>` | Mark a standalone spec as skipped |
 | `canopy spec reopen <spec-id> --reason <text>` | Reopen a completed/skipped spec back to pending |
-| `canopy spec notes <spec-id>` | Print every spec note of a spec, newest first, with its owner, last update and body (see [Spec notes](graphs.md#spec-notes)) |
+| `canopy spec notes <spec-id>` | Print every spec note of a spec, newest first, with its owner, last update and body (see [Spec notes](graphs-execution.md#spec-notes)) |
 
 ## Availability roster
 
@@ -277,7 +277,7 @@ hand.
 ## Sandboxes
 
 Sandboxed graph runs (`graph_control` `run` with `sandbox: true`) leave their worktree
-behind whenever it holds work; see [Sandboxes](graphs.md#sandboxes). These
+behind whenever it holds work; see [Sandboxes](graphs-isolation.md#sandboxes). These
 commands — or the [`sandbox` MCP tool](mcp-tools.md), which shares their
 implementation and refusals — are how you deal with them, and none of them
 guesses.
@@ -352,7 +352,7 @@ it came from. **Apply** says when a change takes effect: `applied` (at once),
 | `scheduler.retry_max` | 3 | 0–20 | next run | Retries of a failed scheduled run |
 | `spec_attempt_limit` | 3 | 1–20 | restart the daemon | Separate graph executions a spec may fail with a verdict before it is blocked |
 | `ensemble_concurrency_cap` | 4 | 1–64 | restart the daemon | Ensemble members that run at once across every graph |
-| `graphs.*` | see [Tuning the engine](graphs.md#tuning-the-engine) | see there | see there | Graph engine retry budgets, ensemble member caps, check output, and the graph catalogue URL |
+| `graphs.*` | see [Tuning the engine](graphs-operations.md#tuning-the-engine) | see there | see there | Graph engine retry budgets, ensemble member caps, check output, and the graph catalogue URL |
 | `clean.retention_days` | 7 | 1–3650 days | next run | Days kept before `canopy clean` removes sessions and files |
 | `graph_event_retention_days` | 90 | 1–3650 days | next run | Days a graph's event log is kept before `canopy clean` prunes it |
 | `clean.reclaim_min_deleted_rows` | 50 | 0–100000 | applied | Deleted rows that trigger VACUUM during `canopy clean` |

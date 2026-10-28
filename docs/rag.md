@@ -1,7 +1,7 @@
 ---
 title: RAG Pipeline
 description: Local-first semantic search over your own documents.
-order: 10
+order: 16
 ---
 
 # RAG Pipeline

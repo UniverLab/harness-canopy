@@ -1,7 +1,7 @@
 ---
 title: MCP Tools
 description: All 32 MCP tools exposed by the canopy daemon, by category.
-order: 11
+order: 17
 ---
 
 # MCP Tools
@@ -144,7 +144,7 @@ all hook modes. Unknown marker names are rejected during `graph_edit` `update`, 
 hook never fires with a marker left literal.
 
 An interactive hook targets a session by `target_session_id` or by
-`target_session_name` (exactly one) — see [Graphs](graphs.md#event-keyed-hooks)
+`target_session_name` (exactly one) — see [Graphs](graphs-hooks-and-queues.md#event-keyed-hooks)
 for how name resolution and its failure modes work. `session_list` remains
 the way to see both the names and ids of every live session a hook can
 target.
@@ -186,7 +186,7 @@ readable.
 
 | Tool | Description |
 |---|---|
-| `node` | Manage shareable node documents. Actions: `list` (installed documents and the builtins embedded in the binary, marking each `installed` or `builtin`), `get` (one document with its kind, source, and full config), `install` (a node document from the catalogue by `ref` — `<slug>`, `<owner>/<repo>/<slug>`, each with an optional `@<ref>`, or `draft:<id>` for a one-use editor draft — with its bundled preset; `overwrite_presets?`, `accept?`. Without `accept: true` it writes nothing and returns `{needs_review: true, review}` (commands, prompts, attention marks) for the agent to show its user first; with `accept: true` it installs and echoes the review), `remove` (an installed document; a builtin with no override is refused) — pass `action` plus the params the refusal/table lists ([Nodes](graphs.md#nodes)) |
+| `node` | Manage shareable node documents. Actions: `list` (installed documents and the builtins embedded in the binary, marking each `installed` or `builtin`), `get` (one document with its kind, source, and full config), `install` (a node document from the catalogue by `ref` — `<slug>`, `<owner>/<repo>/<slug>`, each with an optional `@<ref>`, or `draft:<id>` for a one-use editor draft — with its bundled preset; `overwrite_presets?`, `accept?`. Without `accept: true` it writes nothing and returns `{needs_review: true, review}` (commands, prompts, attention marks) for the agent to show its user first; with `accept: true` it installs and echoes the review), `remove` (an installed document; a builtin with no override is refused) — pass `action` plus the params the refusal/table lists ([Nodes](graphs-nodes.md#nodes)) |
 
 Node documents replaced the retired blueprint tools outright: `graph_node`
 and `graph_ensemble` `add` take `node`, `kind` + `config`, or — for
