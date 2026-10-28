@@ -316,18 +316,22 @@ Once the data channel is open, the browser speaks the same protocol v1 as
 `/sessions/ws`, with four restrictions: terminal sessions are hidden from
 the list and cannot be attached, written to, prompted or killed, `resize`
 is always refused (the browser renders the host's size scaled), and `spawn`
-creates `agent` sessions only. A browser `spawn` also sends a directory
-rather than a project: `workdir` accepts an absolute path or one starting
-with `~/` (a bare `~` means the home directory), and a relative or
-non-existent path is refused with `error{code:"bad_request"}` naming it.
-The `yolo` field (default `false`) asks the host to launch the harness with
-its approval prompts off — the same switch the TUI's New dialog offers. The
-host appends that harness's registry `yolo_flag` to the interactive args;
-`yolo` on a `terminal` spawn, or on a harness with no `yolo_flag`, is
-refused the same way, and each `catalog` CLI row carries `yolo: true|false`
-so the browser only offers the switch where the host can honor it. Output
-and snapshot frames are chunked to
-stay under 16 KiB; a snapshot's first part carries `cols`/`rows` and the
+creates `agent` sessions only. A `spawn` names a directory (`workdir`)
+rather than a project. `workdir` may be absolute or start with `~/` (`~` and
+`~/` alone mean the host user's home), and the expanded path must be an
+existing directory; the browser's New dialog types that directory. A
+relative path is refused with `spawn: field 'workdir' must be an
+absolute path`, and a path that does not exist or is not a directory with
+`spawn: workdir '<expanded>' does not exist or is not a directory`; both are
+`error{code:"bad_request"}`. The `yolo` field (default `false`) launches the
+harness with its approval prompts off — the switch the TUI's New dialog
+offers — by appending that harness's registry `yolo_flag` after whatever
+interactive args the frame sent; a harness with no `yolo_flag` refuses it
+with `spawn: harness '<cli>' has no yolo mode`, and a `terminal` spawn with
+`spawn: field 'yolo' is not allowed for kind 'terminal'`. Each `catalog` CLI
+row carries `yolo: true|false`, so the browser only offers the switch where
+the host can honor it. Output and snapshot frames are chunked to stay under
+16 KiB; a snapshot's first part carries `cols`/`rows` and the
 rest travels as `snapshot_more`. The shelf rides the same channel:
 `shelf_list` and `shelf_get` answer `shelf` and `file` frames, and
 `shelf_added` / `shelf_removed` push arrivals and removals. Files from
