@@ -349,9 +349,10 @@ Graphs ride the same channel, read-only. `graphs{req}` answers
 graphs plus completed graphs active within the last 24 hours — running
 first, then paused, failed, completed, most recent activity first, at
 most 50 — each row carrying `id`, `name`, `status`, `workdir` as a
-basename (never the host's absolute path), `current_spec`,
-`current_node` (the node's *name*, never its id), `done`/`total` over
-the graph's queue or specs, `blocked` and `updated_at`:
+basename (never the host's absolute path), `current_spec` (the current
+spec's name), `current_node` (the node's *name*, never its id),
+`done`/`total` over the graph's queue or specs, `blocked` and
+`updated_at`:
 
 ```json
 {"t": "graphs", "req": "g1"}
@@ -381,8 +382,10 @@ such as `FEAT-12` or null, `name`, `status`, `attempts`) and
 A connection holds at most four watches — a fifth answers
 `error{code:"busy"}` and starts nothing — an unknown or archived graph
 id answers `error{code:"not_found"}` and starts no watch either, and
-every watch ends with the connection. None of these frames ever changes
-a graph, a spec or a queue: pausing and continuing stay local.
+every watch ends with the connection — or as soon as its graph is
+deleted, which stops the pushes and frees the slot for another watch.
+None of these frames ever changes a graph, a spec or a queue: pausing
+and continuing stay local.
 
 The `[remote]` table in `~/.canopy/config.toml` carries `enabled` (default
 `false`), `relay_url`, `github_client_id` (the public Client ID of
