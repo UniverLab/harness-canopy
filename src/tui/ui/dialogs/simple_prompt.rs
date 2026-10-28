@@ -1058,4 +1058,59 @@ mod tests {
             "unfocused sections must sit on stage_bg, found none"
         );
     }
+
+    #[test]
+    fn prompt_builder_focused_section_sits_on_selected_bg() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        // The modern theme is the only one that can pin this branch: in
+        // classic, `selected_bg` equals the old `field_bg_focused`, so a
+        // classic render would pass even with the focused mapping reverted.
+        let mut app = app_for_prompt(Color::Rgb(255, 0, 0));
+        let dialog = app.simple_prompt_dialog.as_mut().unwrap();
+        // The fresh dialog focuses its first section but leaves it empty —
+        // fill it so the focused row actually paints cells, and add an
+        // unfocused second section with content.
+        dialog
+            .sections
+            .insert("instruction_1".to_string(), "do the thing".to_string());
+        dialog
+            .sections
+            .insert("context_1".to_string(), "some context".to_string());
+        dialog.enabled_sections.push("context_1".to_string());
+        let theme = Theme::modern();
+        assert_ne!(
+            theme.selected_bg, theme.field_bg_focused,
+            "test needs the modern theme to tell selected_bg apart"
+        );
+        let backend = TestBackend::new(200, 50);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_simple_prompt_dialog(frame, &app, &theme);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let mut focused_cells = 0;
+        let mut unfocused_cells = 0;
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                let cell = &buffer[(x, y)];
+                if cell.bg == theme.selected_bg {
+                    focused_cells += 1;
+                }
+                if cell.bg == theme.stage_bg {
+                    unfocused_cells += 1;
+                }
+            }
+        }
+        assert!(
+            focused_cells >= 1,
+            "focused section must sit on selected_bg, found none"
+        );
+        assert!(
+            unfocused_cells >= 1,
+            "unfocused sections must sit on stage_bg, found none"
+        );
+    }
 }

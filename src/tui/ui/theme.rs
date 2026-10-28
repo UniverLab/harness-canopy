@@ -297,13 +297,21 @@ mod tests {
 
     #[test]
     fn text_stays_readable_on_the_new_tinted_grounds() {
+        // The builder draws body text, dimmed hints/previews and muted
+        // secondary text directly on the new grounds, so all three must
+        // clear 4.5:1 (same bar as `modern_sidebar_text_contrast`).
         for theme in [Theme::classic(), Theme::modern()] {
             for background in [theme.info_bg, theme.stage_bg] {
-                assert!(
-                    contrast_ratio(theme.text_primary, background) >= 4.5,
-                    "{:?} on {background:?} must clear 4.5:1",
-                    theme.text_primary
-                );
+                for (name, foreground) in [
+                    ("text_primary", theme.text_primary),
+                    ("dim_text", theme.dim_text),
+                    ("muted_text", theme.muted_text),
+                ] {
+                    assert!(
+                        contrast_ratio(foreground, background) >= 4.5,
+                        "{name} {foreground:?} on {background:?} must clear 4.5:1",
+                    );
+                }
             }
         }
     }
