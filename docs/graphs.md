@@ -448,6 +448,16 @@ tell "the harness ran and chose not to report" apart from "the harness
 never ran," without needing `require_report` itself. Ensemble members
 are judged individually, exactly like a lone node.
 
+An agent never retypes its run's ids to file a verdict: every agent
+process starts with `CANOPY_GRAPH_ID`, `CANOPY_NODE_ID` and
+`CANOPY_NODE_RUN_ID` in its environment, and its prompt's `[REPORTING]`
+section tells it to call `graph_complete_node`/`graph_report_blocker`
+without ids — the daemon resolves them from that identity. A supplied
+id with the right 8-character prefix but a mistyped tail is corrected
+to the environment's run (the reply says `Corrected ...`); any other
+unknown id fails naming the run id the environment carries, and an
+explicit id naming a different, still-running run is honored as before.
+
 ## Infra-retry budget
 
 An agent attempt that never files a verdict (no `graph_complete_node`,
