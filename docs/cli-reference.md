@@ -298,6 +298,26 @@ appears in logs, errors, or status output. `logout` deletes that file and
 succeeds when it is already gone. `status` prints `login: <login>` (or
 `not signed in`), `enabled: …` and `relay_url: …`.
 
+### A paired browser's connection
+
+The relay only carries signaling. A paired browser sends a signed WebRTC
+offer through it; the host verifies the signature against
+`remote_devices` and refuses `unknown_device`, `stale` (over 120 seconds
+off) or `bad_signature`, then answers with a signature of its own. Both
+signatures cover the SDP, so the DTLS fingerprints are pinned end to end
+and neither the relay nor a TURN server can read or impersonate the
+session. Nothing but those signaling bodies reaches the relay.
+
+Once the data channel is open, the browser speaks the same protocol v1 as
+`/sessions/ws`, with four restrictions: terminal sessions are hidden from
+the list and cannot be attached, written to, prompted or killed, `resize`
+is always refused (the browser renders the host's size scaled), and `spawn`
+creates `agent` sessions only. Frames are capped at 16 KiB, so output and
+snapshots are chunked; a snapshot continues with `snapshot_more`. A host
+serves at most four device connections at once — a fifth is told `busy` —
+each success refreshes the device's `last_seen`, and `canopy remote revoke`
+closes a live connection within a second.
+
 The `[remote]` table in `~/.canopy/config.toml` carries `enabled` (default
 `false`), `relay_url`, `github_client_id` (the public Client ID of
 UniverLab's "Canopy Remote" OAuth App — no configuration needed), and

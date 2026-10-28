@@ -75,9 +75,28 @@ pub struct Offer {
     pub sig_b64: String,
 }
 
-/// The exact bytes a device signs.
+/// The exact bytes a device signs, for tests and vector checks.
+#[cfg(test)]
 pub fn offer_message(host_id: &str, ts: i64, sdp: &str) -> String {
+    offer_message_text(host_id, &ts.to_string(), sdp)
+}
+
+/// [`offer_message`] with the timestamp verbatim, so a device that signs its
+/// own spelling of `ts` verifies byte for byte.
+fn offer_message_text(host_id: &str, ts: &str, sdp: &str) -> String {
     format!("{OFFER_PREFIX}{host_id}\n{ts}\n{sdp}")
+}
+
+/// The offer's timestamp: its signed text plus the value used for the clock
+/// window. The contract sends `ts` as a unix-seconds string (`"1793100000"`);
+/// a JSON number is accepted too, and both keep the spelling the device
+/// signed.
+fn offer_ts(body: &Value) -> Option<(i64, String)> {
+    match body.get("ts")? {
+        Value::String(text) => Some((text.parse().ok()?, text.clone())),
+        Value::Number(number) => Some((number.as_i64()?, number.to_string())),
+        _ => None,
+    }
 }
 
 /// The exact bytes the host signs for an answer.
@@ -101,10 +120,7 @@ pub fn verify_offer(
         .get(device_id)
         .map_err(|_| Refusal::BadSignature)?
         .ok_or(Refusal::UnknownDevice)?;
-    let ts = body
-        .get("ts")
-        .and_then(Value::as_i64)
-        .ok_or(Refusal::BadSignature)?;
+    let (ts, ts_text) = offer_ts(body).ok_or(Refusal::BadSignature)?;
     if (ts - now).abs() > MAX_CLOCK_SKEW_SECS {
         return Err(Refusal::Stale);
     }
@@ -120,7 +136,7 @@ pub fn verify_offer(
     if sig.len() != 64 {
         return Err(Refusal::BadSignature);
     }
-    let message = offer_message(host_id, ts, sdp);
+    let message = offer_message_text(host_id, &ts_text, sdp);
     if !verify_p1363(&device.spki, message.as_bytes(), &sig) {
         return Err(Refusal::BadSignature);
     }

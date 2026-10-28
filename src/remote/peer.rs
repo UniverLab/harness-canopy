@@ -156,6 +156,8 @@ pub async fn fetch_ice_servers(relay_url: &str, token: &str) -> Result<Vec<IceSe
 /// What a [`Peer`] reports as the session progresses.
 #[derive(Debug)]
 pub enum PeerEvent {
+    /// The accepted data channel exists: frames can be sent.
+    Open,
     /// A local ICE candidate to forward to the other side verbatim.
     LocalCandidate(String),
     /// Inbound bytes from the accepted data channel.
@@ -248,9 +250,17 @@ impl PeerConnectionEventHandler for Handler {
     {
         Box::pin(async move {
             let label = data_channel.label().await.unwrap_or_default();
-            if label != CHANNEL_LABEL {
-                // A device may open whatever it likes; anything but the session
-                // channel is closed unanswered.
+            let ordered = data_channel.ordered().await.unwrap_or(false);
+            // Reliable means neither a retransmit cap nor a lifetime cap.
+            // webrtc 0.21.1 derives `ordered` from the wire channel type but
+            // hardcodes both caps to `None` for inbound channels, so this half
+            // of the check is vacuous until the transport reports them; the
+            // label and ordering are what actually exclude a wrong channel.
+            let reliable = matches!(data_channel.max_retransmits().await, Ok(None))
+                && matches!(data_channel.max_packet_life_time().await, Ok(None));
+            if label != CHANNEL_LABEL || !ordered || !reliable {
+                // A device may open whatever it likes; anything but one
+                // ordered, reliable session channel is closed unanswered.
                 let _ = data_channel.close().await;
                 return;
             }
@@ -259,14 +269,41 @@ impl PeerConnectionEventHandler for Handler {
     }
 }
 
-/// Publishes an accepted channel and starts forwarding its inbound messages.
+/// Publishes the first accepted channel and starts forwarding its inbound
+/// messages. A later channel never replaces the one already in use.
 async fn attach_channel(
     slot: &Arc<Mutex<Option<Arc<dyn DataChannel>>>>,
     events: &mpsc::Sender<PeerEvent>,
     data_channel: Arc<dyn DataChannel>,
 ) {
-    *slot.lock().await = Some(data_channel.clone());
-    spawn_pump(data_channel, slot.clone(), events.clone());
+    let accepted = {
+        let mut guard = slot.lock().await;
+        if guard.is_some() {
+            false
+        } else {
+            *guard = Some(data_channel.clone());
+            true
+        }
+    };
+    if !accepted {
+        let _ = data_channel.close().await;
+        return;
+    }
+    // Before this the host has nowhere to send: reporting the open channel
+    // lets the connection greet the device without dropping that frame. One
+    // task sends the report and then starts the pump, so `Open` always
+    // precedes any `Channel` from the same channel (mpsc is FIFO per sender
+    // ordering: the send completes before the pump can send), and the
+    // driver never waits on a reader even when the queue is momentarily
+    // full of trickled candidates.
+    let events = events.clone();
+    let slot = slot.clone();
+    tokio::spawn(async move {
+        if events.send(PeerEvent::Open).await.is_err() {
+            return;
+        }
+        spawn_pump(data_channel, slot, events);
+    });
 }
 
 /// Drains a data channel into `events` until it closes.
@@ -437,13 +474,19 @@ impl Peer {
 
     /// Sends one text frame on the accepted channel.
     ///
+    /// A frame that arrives before the device opens `canopy-session-v1` is
+    /// dropped: there is nowhere to put it yet, and a hub event in that window
+    /// must never end the peer. The device resynchronises with `list` and
+    /// `attach` once its channel is open.
+    ///
     /// # Errors
     ///
-    /// Returns an error when no channel is accepted yet, or the channel is no
-    /// longer open.
+    /// Returns an error only when the channel exists and no longer accepts
+    /// writes.
     pub async fn send_text(&self, text: &str) -> Result<()> {
-        let data_channel = self.channel.lock().await.clone();
-        let data_channel = data_channel.ok_or_else(|| anyhow!("the data channel is not open"))?;
+        let Some(data_channel) = self.channel.lock().await.clone() else {
+            return Ok(());
+        };
         data_channel
             .send_text(text)
             .await
@@ -648,6 +691,16 @@ pub mod device_side {
         /// Returns an error when the connection or the channel cannot be built
         /// or the offer cannot be created and applied.
         pub async fn offer() -> Result<(String, Self)> {
+            Self::offer_channel(CHANNEL_LABEL, true).await
+        }
+
+        /// Open a channel with a chosen label or ordering, so a test can play
+        /// a device that asks for something the host must refuse.
+        ///
+        /// # Errors
+        ///
+        /// Same as [`offer`](Self::offer).
+        pub async fn offer_channel(label: &str, ordered: bool) -> Result<(String, Self)> {
             let (events_tx, events) = tokio::sync::mpsc::channel(64);
             let (gathered, mut gathered_rx) = tokio::sync::mpsc::channel(1);
             let pump_events = events_tx.clone();
@@ -664,11 +717,11 @@ pub mod device_side {
                     .context("build the device peer connection")?,
             );
             let options = RTCDataChannelInit {
-                ordered: true,
+                ordered,
                 ..Default::default()
             };
             let channel = pc
-                .create_data_channel(CHANNEL_LABEL, Some(options))
+                .create_data_channel(label, Some(options))
                 .await
                 .context("create the session channel")?;
             let pump_channel = Arc::clone(&channel);

@@ -225,7 +225,7 @@ async fn connected_loopback() -> Loopback {
     let connections = ConnectionRegistry::default();
     let token = connections.register(DEVICE_ID);
     let (control_tx, control_rx) = mpsc::unbounded_channel();
-    assert!(peers.register(DEVICE_ID, token.clone(), control_tx));
+    assert!(peers.register(DEVICE_ID, FROM, token.clone(), control_tx));
     let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
 
     // The device demultiplexes its peer: trickle to the host, frames here.
@@ -237,7 +237,7 @@ async fn connected_loopback() -> Loopback {
             while let Some(event) = device.next().await {
                 match event {
                     peer::device_side::DeviceEvent::Candidate(candidate) => {
-                        let _ = peers.route(DEVICE_ID, Control::Ice(candidate));
+                        let _ = peers.route(FROM, Control::Ice(candidate));
                     }
                     peer::device_side::DeviceEvent::Frame(bytes) => {
                         let _ = events_tx.send(DeviceEvent::Frame(Frame::parse(bytes)));
@@ -571,6 +571,11 @@ async fn close_by_revoking(loopback: &mut Loopback) {
 async fn a_paired_device_gets_the_session_hub_over_a_webrtc_data_channel() {
     let mut loopback = connected_loopback().await;
 
+    // The device is greeted exactly like a local socket: hello, then list.
+    let hello = loopback.recv("the hello").await;
+    assert_eq!(hello.json["t"], "hello", "got {}", hello.raw);
+    assert_eq!(hello.json["proto"], 1);
+
     // The listing the device sees: the agent session in, the terminal out.
     loopback.send(json!({"t": "list", "req": "l1"})).await;
     let frame = loopback.recv("the sessions answer").await;
@@ -622,25 +627,121 @@ fn the_fifth_concurrent_peer_is_refused_busy() {
         kept.push(rx);
         assert!(peers.register(
             &format!("device-{index}"),
-            CancellationToken::new(),
+            &format!("d:{index}"),
+            Arc::new(CancellationToken::new()),
             control
         ));
     }
     let (control, rx) = mpsc::unbounded_channel();
     kept.push(rx);
     assert!(
-        !peers.register("device-5", CancellationToken::new(), control),
+        !peers.register(
+            "device-5",
+            "d:5",
+            Arc::new(CancellationToken::new()),
+            control
+        ),
         "the fifth concurrent peer must be refused"
     );
     assert_eq!(peers.len(), MAX_DEVICE_PEERS);
-    assert!(peers.route("device-0", Control::Ice("candidate".to_string())));
-    assert!(!peers.route("device-5", Control::Ice("candidate".to_string())));
+    // `ice` bodies carry no device id: they route by their relay connection.
+    assert!(peers.route("d:0", Control::Ice("candidate".to_string())));
+    assert!(!peers.route("d:5", Control::Ice("candidate".to_string())));
     // A revoke frees the slot for the next device.
     peers.close("device-0");
     assert_eq!(peers.len(), MAX_DEVICE_PEERS - 1);
     let (control, rx) = mpsc::unbounded_channel();
     kept.push(rx);
-    assert!(peers.register("device-5", CancellationToken::new(), control));
+    assert!(peers.register(
+        "device-5",
+        "d:5",
+        Arc::new(CancellationToken::new()),
+        control
+    ));
+}
+
+/// A device that offers again before its old peer noticed keeps its new slot:
+/// the old peer's cleanup must not remove the new handle.
+#[test]
+fn a_reconnected_device_keeps_its_new_slot_when_the_old_peer_cleans_up() {
+    let peers = DevicePeers::default();
+    let old = Arc::new(CancellationToken::new());
+    let (old_control, mut old_rx) = mpsc::unbounded_channel();
+    assert!(peers.register("device-a", "d:old", Arc::clone(&old), old_control));
+    let new = Arc::new(CancellationToken::new());
+    let (new_control, mut new_rx) = mpsc::unbounded_channel();
+    assert!(peers.register("device-a", "d:new", Arc::clone(&new), new_control));
+    assert_eq!(peers.len(), 1, "a reconnect reuses its own slot");
+
+    // The replaced handle is dropped, so the old peer wakes and cleans up.
+    assert!(matches!(
+        old_rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Disconnected)
+    ));
+    peers.remove("device-a", &old);
+    assert_eq!(peers.len(), 1);
+    assert!(
+        peers.route("d:new", Control::Ice("candidate".to_string())),
+        "the reconnected peer still answers on its own connection"
+    );
+    assert!(new_rx.try_recv().is_ok());
+    assert!(!new.is_cancelled());
+}
+
+/// A frame that arrives before the device opens its channel is dropped, not
+/// fatal: a hub event in the setup window must never end the peer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_frame_before_the_channel_opens_is_not_fatal() {
+    let (offer, device) = peer::device_side::DeviceSide::offer()
+        .await
+        .expect("the device offer");
+    let (_answer, host) = peer::Peer::answer_offer(Vec::new(), &offer)
+        .await
+        .expect("the host answer");
+    // The device has not accepted the answer, so the host has no channel yet.
+    assert!(
+        host.send_text(r#"{"t":"session_added"}"#).await.is_ok(),
+        "the setup window must not end the peer"
+    );
+    drop(device);
+}
+
+/// FR3: only the `canopy-session-v1` channel, ordered and reliable, is
+/// accepted; a device that asks for another one has it closed unanswered.
+/// (Reliability has no case: webrtc 0.21.1 reports both caps as `None` for
+/// inbound channels, so an unreliable channel is indistinguishable on the
+/// host side and the reliable half of the check cannot be exercised.)
+async fn assert_channel_refused(label: &str, ordered: bool) {
+    let (offer, device) = peer::device_side::DeviceSide::offer_channel(label, ordered)
+        .await
+        .expect("the device offer");
+    let (answer, host) = peer::Peer::answer_offer(Vec::new(), &offer)
+        .await
+        .expect("the host answer");
+    device.accept(&answer).await.expect("the device accepts");
+    let closed = tokio::time::timeout(OPEN_TIMEOUT, async {
+        loop {
+            match device.next().await {
+                Some(peer::device_side::DeviceEvent::Closed) | None => return,
+                Some(_) => {}
+            }
+        }
+    })
+    .await;
+    assert!(
+        closed.is_ok(),
+        "the host must close a channel {label:?} ordered={ordered}"
+    );
+    assert!(
+        host.send_text("{}").await.is_ok(),
+        "a refused channel never becomes the session channel"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn only_an_ordered_reliable_session_channel_is_accepted() {
+    assert_channel_refused("some-other-channel", true).await;
+    assert_channel_refused(peer::CHANNEL_LABEL, false).await;
 }
 
 /// One bridge answer through a channel: the remote-restriction half of the

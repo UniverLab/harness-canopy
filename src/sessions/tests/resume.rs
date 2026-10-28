@@ -321,7 +321,14 @@ fn terminal_history_survives_a_hub_shutdown_and_restart() {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         let contents = session.test_contents().unwrap_or_default();
-        if contents.contains("canopy-history-probe") {
+        // The PTY echoes the typed line back before `sh` runs it, and the
+        // echoed `$ …` prompt line is filtered out of saved scrollback
+        // (`is_ui_line`); wait for the command's own output line, which is
+        // what the history capture keeps.
+        if contents
+            .lines()
+            .any(|line| line.trim() == "canopy-history-probe")
+        {
             break;
         }
         assert!(

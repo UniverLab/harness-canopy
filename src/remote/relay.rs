@@ -32,7 +32,7 @@ use crate::remote::devices::RemoteDevices;
 use crate::remote::hostkey::HostKey;
 use crate::remote::pairing::PairingState;
 use crate::remote::peer;
-use crate::remote::signaling::{self, Refusal, MAX_DEVICE_PEERS};
+use crate::remote::signaling::{self, Refusal};
 use crate::sessions::ws::SessionsState;
 
 /// `daemon_state` key carrying the last terminal relay error.
@@ -142,17 +142,16 @@ pub async fn connect_ws(url: &str, headers: &HostHeaders) -> Result<WsStream, Co
 /// Live device connections, keyed by `device_id`.
 #[derive(Clone, Default)]
 pub struct ConnectionRegistry {
-    inner: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    inner: Arc<Mutex<HashMap<String, Arc<CancellationToken>>>>,
 }
 
 impl ConnectionRegistry {
     /// Register a live connection for `device_id`; cancelling the returned
-    /// token closes it. Used by the connection layer the next spec adds.
-    #[allow(dead_code)]
-    pub fn register(&self, device_id: &str) -> CancellationToken {
-        let token = CancellationToken::new();
+    /// token closes it.
+    pub fn register(&self, device_id: &str) -> Arc<CancellationToken> {
+        let token = Arc::new(CancellationToken::new());
         if let Ok(mut map) = self.inner.lock() {
-            map.insert(device_id.to_string(), token.clone());
+            map.insert(device_id.to_string(), Arc::clone(&token));
         }
         token
     }
@@ -162,6 +161,20 @@ impl ConnectionRegistry {
         if let Ok(mut map) = self.inner.lock() {
             if let Some(token) = map.remove(device_id) {
                 token.cancel();
+            }
+        }
+    }
+
+    /// Forget one peer's registration. A newer connection of the same device
+    /// already replaced it, so only the exact token may be removed: the
+    /// reconnect must survive the old peer's cleanup.
+    pub fn release(&self, device_id: &str, token: &Arc<CancellationToken>) {
+        if let Ok(mut map) = self.inner.lock() {
+            if map
+                .get(device_id)
+                .is_some_and(|current| Arc::ptr_eq(current, token))
+            {
+                map.remove(device_id);
             }
         }
     }
@@ -216,17 +229,18 @@ impl RelayRuntime {
                 None
             }
             Some("ice") => {
-                let device_id = body.get("device_id").and_then(Value::as_str);
-                if let (Some(id), Some(candidate)) = (device_id, signaling::ice_candidate(body)) {
-                    self.peers.route(id, Control::Ice(candidate.to_string()));
+                if let Some(candidate) = signaling::ice_candidate(body) {
+                    // The contract's `ice{candidate}` carries no device id;
+                    // the relay envelope's `from` is the connection.
+                    self.peers.route(from, Control::Ice(candidate.to_string()));
                 }
                 None
             }
             Some("bye") => {
-                if let Some(id) = body.get("device_id").and_then(Value::as_str) {
-                    self.peers.close(id);
-                    self.connections.close(id);
-                }
+                // The contract's `bye` carries no fields: it closes the
+                // sender's own peer. A body `device_id` is never honored —
+                // otherwise any paired device could close another one.
+                self.peers.close_from(from);
                 None
             }
             _ => Some(json!({"t": "error", "reason": "unknown_type"})),
@@ -247,14 +261,14 @@ impl RelayRuntime {
             let _ = signal.send((from.to_string(), signaling::connect_fail(Refusal::Busy)));
             return;
         };
-        if self.peers.len() >= MAX_DEVICE_PEERS {
-            let _ = signal.send((from.to_string(), signaling::connect_fail(Refusal::Busy)));
-            return;
-        }
         let device_id = offer.device.id.clone();
         let token = self.connections.register(&device_id);
         let (control_tx, control_rx) = tokio::sync::mpsc::unbounded_channel();
-        if !self.peers.register(&device_id, token.clone(), control_tx) {
+        if !self
+            .peers
+            .register(&device_id, from, Arc::clone(&token), control_tx)
+        {
+            self.connections.release(&device_id, &token);
             let _ = signal.send((from.to_string(), signaling::connect_fail(Refusal::Busy)));
             return;
         }
@@ -267,12 +281,17 @@ impl RelayRuntime {
         let signal = signal.clone();
         let from = from.to_string();
         tokio::spawn(async move {
-            let servers = peer::fetch_ice_servers(&relay_url, &bearer)
-                .await
-                .unwrap_or_default();
+            let servers = match peer::fetch_ice_servers(&relay_url, &bearer).await {
+                Ok(servers) => servers,
+                Err(error) => {
+                    tracing::warn!("remote: no ICE servers from the relay: {error:#}");
+                    Vec::new()
+                }
+            };
             let answered = peer::Peer::answer_offer(servers, &offer.sdp).await;
             let Ok((sdp, peer)) = answered else {
-                peers.remove(&device_id);
+                peers.remove(&device_id, &token);
+                connections.release(&device_id, &token);
                 let _ = signal.send((from, signaling::connect_fail(Refusal::BadSignature)));
                 return;
             };

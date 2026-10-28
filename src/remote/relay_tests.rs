@@ -18,6 +18,7 @@ use crate::domain::canopy_config::CanopyConfig;
 use crate::remote::devices::device_id;
 use crate::remote::hostkey::HostKey;
 use crate::remote::pairing::{derive_k_pair, mac_init, normalize_code};
+use crate::remote::signaling::MAX_DEVICE_PEERS;
 
 fn test_db() -> Database {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -316,6 +317,21 @@ async fn revoke_deletes_the_row_and_closes_a_live_connection() {
     );
 }
 
+/// An old peer's cleanup must not close the same device's newer registration.
+#[test]
+fn an_old_peers_release_leaves_the_reconnect_live() {
+    let registry = ConnectionRegistry::default();
+    let old = registry.register("device-a");
+    let new = registry.register("device-a");
+    registry.release("device-a", &old);
+    assert!(
+        !new.is_cancelled(),
+        "the reconnect must survive the old cleanup"
+    );
+    registry.close("device-a");
+    assert!(new.is_cancelled(), "the current registration still closes");
+}
+
 #[test]
 fn live_connections_survive_a_reconnect() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -471,4 +487,171 @@ async fn the_fifth_concurrent_offer_is_answered_busy() {
         .expect("the fifth offer is refused at once");
     assert_eq!(to, "d:5");
     assert_eq!(refusal, json!({"t": "connect_fail", "reason": "busy"}));
+}
+
+/// The contract's `ice{candidate}` and `bye` bodies carry no device id: the
+/// relay envelope's `from` is the only address, so routing must not need one.
+#[tokio::test]
+async fn ice_and_bye_are_routed_by_the_relay_connection() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = test_db();
+    let mut runtime = RelayRuntime::new(
+        HostKey::load_or_create(dir.path()).expect("host key"),
+        db,
+        "octocat".to_string(),
+        crate::remote::pairing::PairingState::new(dir.path()),
+        ConnectionRegistry::default(),
+    );
+    let peers = crate::remote::connection::DevicePeers::default();
+    let token = Arc::new(tokio_util::sync::CancellationToken::new());
+    let (control, mut inbox) = tokio::sync::mpsc::unbounded_channel();
+    assert!(peers.register("bfcba2b742a807bb", "d:7", Arc::clone(&token), control));
+    runtime.peers = peers;
+    let (signal, _signal_rx) = tokio::sync::mpsc::unbounded_channel();
+    let now = chrono::Utc::now().timestamp();
+
+    let ice = json!({
+        "t": "ice",
+        "candidate": "candidate:1 1 UDP 1694498815 127.0.0.1 5000 typ host",
+    });
+    assert_eq!(runtime.route(&ice, now, "d:7", &signal), None);
+    match inbox.try_recv() {
+        Ok(crate::remote::connection::Control::Ice(candidate)) => {
+            assert!(candidate.contains("candidate:1"), "candidate: {candidate}");
+        }
+        other => panic!("the ice body must reach the peer: {other:?}"),
+    }
+
+    // `bye` closes that peer; no device id in the body.
+    assert_eq!(
+        runtime.route(&json!({"t": "bye"}), now, "d:7", &signal),
+        None
+    );
+    assert!(token.is_cancelled(), "bye must close the peer");
+}
+
+/// A `bye` body `device_id` is never honored: only the sender's own peer
+/// closes, so one paired device cannot knock another one off.
+#[test]
+fn bye_naming_another_device_does_not_close_it() {
+    let peers = crate::remote::connection::DevicePeers::default();
+    let token_a = Arc::new(tokio_util::sync::CancellationToken::new());
+    let (control_a, _rx_a) = tokio::sync::mpsc::unbounded_channel();
+    assert!(peers.register("device-a", "d:a", Arc::clone(&token_a), control_a));
+    let token_b = Arc::new(tokio_util::sync::CancellationToken::new());
+    let (control_b, _rx_b) = tokio::sync::mpsc::unbounded_channel();
+    assert!(peers.register("device-b", "d:b", Arc::clone(&token_b), control_b));
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = test_db();
+    let mut runtime = RelayRuntime::new(
+        HostKey::load_or_create(dir.path()).expect("host key"),
+        db,
+        "octocat".to_string(),
+        crate::remote::pairing::PairingState::new(dir.path()),
+        ConnectionRegistry::default(),
+    );
+    runtime.peers = peers;
+    let (signal, _signal_rx) = tokio::sync::mpsc::unbounded_channel();
+    let now = chrono::Utc::now().timestamp();
+
+    // From b's connection, naming a: only b closes.
+    assert_eq!(
+        runtime.route(
+            &json!({"t": "bye", "device_id": "device-a"}),
+            now,
+            "d:b",
+            &signal
+        ),
+        None
+    );
+    assert!(!token_a.is_cancelled(), "a's peer must survive b's bye");
+    assert!(token_b.is_cancelled(), "bye closes the sender's own peer");
+}
+
+/// A verified offer over the real signaling path gets a signed answer and
+/// refreshes `last_seen`: the offer half of FR2/FR4 through `route`, with a
+/// live SDP (the vector stub is not an SDP any peer could parse) signed with
+/// the contract's string `ts`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_verified_offer_gets_a_signed_answer_and_updates_last_seen() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = test_db();
+    let host = HostKey::load_or_create(dir.path()).expect("host key");
+    let host_id = host.host_id();
+    let host_spki = host.spki_der().to_vec();
+    let devices = crate::remote::devices::RemoteDevices::new(db.clone());
+    let device_key = HostKey::from_scalar_bytes(&[0x22; 32]).expect("device key");
+    let id = device_id(device_key.spki_der());
+    devices
+        .pair(
+            device_key.spki_der().to_vec(),
+            "browser",
+            "octocat",
+            "2026-01-01T00:00:00Z",
+        )
+        .expect("pair the device");
+    assert!(
+        devices
+            .get(&id)
+            .expect("get")
+            .expect("row")
+            .last_seen
+            .is_none(),
+        "unseen before the offer"
+    );
+
+    let mut runtime = RelayRuntime::new(
+        host,
+        db.clone(),
+        "octocat".to_string(),
+        crate::remote::pairing::PairingState::new(dir.path()),
+        ConnectionRegistry::default(),
+    );
+    runtime.sessions = Some(test_sessions(&db));
+    // `relay_url` stays empty: the `/turn` fetch fails and the peer falls
+    // back to host candidates, which is all loopback needs.
+    let (signal, mut inbox) = tokio::sync::mpsc::unbounded_channel();
+
+    let (offer_sdp, device) = crate::remote::peer::device_side::DeviceSide::offer()
+        .await
+        .expect("the device offer");
+    let ts = chrono::Utc::now().timestamp();
+    let message = format!("canopy-remote/v1/offer\n{host_id}\n{ts}\n{offer_sdp}");
+    let sig = base64::engine::general_purpose::STANDARD.encode(device_key.sign(message.as_bytes()));
+    let body = json!({
+        "t": "offer", "device_id": id,
+        "ts": ts.to_string(), "sdp": offer_sdp, "sig": sig,
+    });
+    assert_eq!(runtime.route(&body, ts, "d:9", &signal), None);
+
+    let (to, answer) = tokio::time::timeout(Duration::from_secs(20), inbox.recv())
+        .await
+        .expect("the answer arrives in time")
+        .expect("the answer");
+    assert_eq!(to, "d:9");
+    assert_eq!(answer["t"], "answer");
+    let answer_sdp = answer["sdp"].as_str().expect("answer sdp");
+    let answer_sig: Vec<u8> = base64::engine::general_purpose::STANDARD
+        .decode(answer["sig"].as_str().expect("answer sig"))
+        .expect("sig base64");
+    assert_eq!(answer_sig.len(), 64, "P1363, not DER");
+    let expected = crate::remote::signaling::answer_message(&id, &sig, answer_sdp);
+    assert!(
+        crate::remote::hostkey::verify_p1363(&host_spki, expected.as_bytes(), &answer_sig),
+        "the answer must verify with the host key"
+    );
+
+    assert!(
+        devices
+            .get(&id)
+            .expect("get")
+            .expect("row")
+            .last_seen
+            .is_some(),
+        "success refreshes last_seen"
+    );
+
+    runtime.peers.close(&id);
+    drop(device);
 }

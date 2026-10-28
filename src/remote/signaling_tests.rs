@@ -150,6 +150,32 @@ fn unknown_or_missing_device_is_refused() {
 }
 
 #[test]
+fn a_string_timestamp_verifies_like_the_contract_sends_it() {
+    // The contract (d4eb8558) spells `ts` as a unix-seconds string; a browser
+    // sends `{"ts": "1793100000"}`, so the verifier must accept it and sign
+    // the same bytes as the number form.
+    let (_dir, devices) = registry();
+    let mut body = offer_body(VECTOR_TS, VECTOR_OFFER_SDP, VECTOR_OFFER_SIG);
+    body["ts"] = json!(VECTOR_TS.to_string());
+    let offer = verify_offer(&devices, HOST_ID, &body, VECTOR_TS)
+        .expect("a string ts is the contract's spelling");
+    assert_eq!(offer.ts, VECTOR_TS);
+    assert_eq!(offer.sdp, VECTOR_OFFER_SDP);
+    assert_eq!(offer.sig_b64, VECTOR_OFFER_SIG);
+    // A string ts is still refused outside the window.
+    assert_eq!(
+        verify_offer(
+            &devices,
+            HOST_ID,
+            &body,
+            VECTOR_TS + MAX_CLOCK_SKEW_SECS + 1
+        )
+        .err(),
+        Some(Refusal::Stale)
+    );
+}
+
+#[test]
 fn a_tampered_sdp_or_signature_is_refused() {
     let (_dir, devices) = registry();
     let tampered = verify_offer(
