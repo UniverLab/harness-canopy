@@ -93,6 +93,13 @@ refresh also restarts that 24-hour window.
 | `canopy graph install <ref>` | Install a graph from the catalogue in one command: `<slug>` or `<owner>/<repo>/<slug>`, each with an optional `@<ref>` suffix. Validates the fetched document, installs its bundled presets, and imports it as a new graph |
 | `canopy graph install <ref> [--workdir <dir>] [--name <name>] [--overwrite-presets] [--json]` | Install into another workdir (default: the current directory), under another name, overwriting differing local preset files instead of refusing, or print the machine-readable report |
 
+`canopy graph validate` runs entirely locally — no daemon, no database,
+no workdir — so it works before anything is installed. The rules it
+enforces are in [Graphs](graphs.md#validate-before-you-share).
+
+Graph ids can be specified by exact id, exact name, or unambiguous id
+prefix. Ambiguous references list the candidates.
+
 ## Nodes
 
 | Command | Description |
@@ -104,13 +111,6 @@ refresh also restarts that 24-hour window.
 
 `canopy node` runs entirely locally — no daemon needed. See
 [Graphs](graphs.md#nodes).
-
-`canopy graph validate` runs entirely locally — no daemon, no database,
-no workdir — so it works before anything is installed. The rules it
-enforces are in [Graphs](graphs.md#validate-before-you-share).
-
-Graph ids can be specified by exact id, exact name, or unambiguous id
-prefix. Ambiguous references list the candidates.
 
 ## Graph control
 

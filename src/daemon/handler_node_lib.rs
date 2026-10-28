@@ -343,6 +343,15 @@ mod tests {
     }
 
     #[test]
+    fn a_single_node_document_is_refused_by_graph_add_ensemble() {
+        let home = tempfile::tempdir().unwrap();
+        let _guard = OverrideHome::set(home.path());
+        let error = resolve_ensemble_node_document("implementer").unwrap_err();
+        assert!(error.contains("implementer"), "{error}");
+        assert!(error.contains("graph_add_node"), "{error}");
+    }
+
+    #[test]
     fn an_unknown_node_lists_the_available_names() {
         let home = tempfile::tempdir().unwrap();
         let _guard = OverrideHome::set(home.path());
