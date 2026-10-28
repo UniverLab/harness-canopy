@@ -725,3 +725,49 @@ fn phase_mappings_are_pure_and_total() {
         RelayPhase::Connecting
     );
 }
+
+#[tokio::test]
+async fn a_held_open_socket_reports_connected_while_it_serves() {
+    use crate::remote::live::{RelayPhase, RemoteLive};
+
+    // A relay that accepts the upgrade and holds the socket open: the
+    // phase must read `connected` for as long as the socket serves, not
+    // only in the pause after it closes.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = test_db();
+    let mut config = CanopyConfig::default();
+    config.remote.enabled = true;
+    let app = Router::new().route("/ws/host", get(hold_open_upgrade));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    config.remote.relay_url = format!("http://{addr}");
+    config.save_for_tests(dir.path()).expect("config");
+    crate::remote::auth::save_identity(
+        dir.path(),
+        &crate::remote::auth::GitHubIdentity {
+            token: "gho_live".to_string(),
+            login: "octocat".to_string(),
+            id: 1,
+        },
+    )
+    .expect("identity");
+    let live = Arc::new(RemoteLive::new());
+    let running = tokio::spawn(supervise(
+        dir.path().to_path_buf(),
+        db.clone(),
+        test_sessions(&db),
+        Arc::clone(&live),
+    ));
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    assert_eq!(
+        live.phase(),
+        RelayPhase::Connected,
+        "the panel must read connected while the socket is actually serving"
+    );
+    running.abort();
+}

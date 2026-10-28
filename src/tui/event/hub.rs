@@ -48,6 +48,11 @@ pub(super) fn handle_hub_key(app: &mut App, code: KeyCode, modifiers: KeyModifie
         hub_remote_confirm_key(app, code);
         return true;
     }
+    // The open pairing overlay owns every key but Esc (which hides it):
+    // no tab switch, digit jump or cursor move escapes it.
+    if app.hub.tab == HubTab::Remote && app.hub.remote.pair_open && code != KeyCode::Esc {
+        return true;
+    }
 
     match code {
         KeyCode::Esc => hub_escape(app),
@@ -627,6 +632,48 @@ mod tests {
 
         handle_hub_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
         assert!(!app.hub_open, "the second Esc closes the hub");
+    }
+
+    /// The open pairing overlay owns every key but Esc: tab switches,
+    /// digits, movement, `d` and Enter all bounce off it.
+    #[test]
+    fn the_pair_overlay_swallows_every_key_but_esc() {
+        let mut app = test_app();
+        app.open_hub();
+        app.set_hub_tab(HubTab::Remote);
+        app.hub.remote.pair = Some(crate::remote::panel::PairView {
+            code: "7K3QH-M9P2X".to_string(),
+            link: "https://remote.univerlab.org/pair#7K3QH-M9P2X".to_string(),
+            expires_at: chrono::Utc::now().timestamp() + 600,
+            qr: "qr".to_string(),
+        });
+        app.hub.remote.pair_open = true;
+        app.hub.remote.view.devices = vec![remote_device("bfcba2b742a807bb")];
+
+        handle_hub_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(app.hub.tab, HubTab::Remote, "Tab must not switch tabs");
+        handle_hub_key(&mut app, KeyCode::BackTab, KeyModifiers::NONE);
+        assert_eq!(app.hub.tab, HubTab::Remote, "BackTab must not either");
+        handle_hub_key(&mut app, KeyCode::Char('5'), KeyModifiers::NONE);
+        assert_eq!(app.hub.tab, HubTab::Remote, "digits must not jump tabs");
+        handle_hub_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(app.hub.remote.row_idx, 0, "the cursor cannot move");
+        handle_hub_key(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert_eq!(app.hub.remote.revoke_confirm, None, "no arming under it");
+        handle_hub_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(
+            matches!(
+                app.hub.remote.login,
+                crate::tui::app::hub_remote::LoginFlow::Idle
+            ),
+            "Enter must not start the device flow under the overlay"
+        );
+
+        handle_hub_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!app.hub.remote.pair_open, "Esc still hides the overlay");
+        assert!(app.hub_open, "the hub stays open");
+        handle_hub_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(app.hub.tab, HubTab::Settings, "keys work again after");
     }
 
     /// `d` on a device row arms the revoke, `n`/Esc cancel it, `y` revokes

@@ -231,6 +231,10 @@ WebSocket — the CLI never writes the shelf itself. `file_id` is the
 | `canopy remote devices [--json]` | List paired browsers (`id`, `label`, `paired_at`, `last_seen`) |
 | `canopy remote revoke <device_id>` | Delete a paired browser and close its live connection at once |
 
+The same actions live in the TUI: `F1`, then `5` opens the hub's **Remote**
+tab — GitHub sign-in with the device flow, the relay switch and phase,
+pairing with a QR overlay, and revoking devices ([TUI](tui.md)).
+
 ### Pairing a browser
 
 Pairing turns a browser into a revocable device of this host. The code is

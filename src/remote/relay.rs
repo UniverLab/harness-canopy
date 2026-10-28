@@ -578,7 +578,10 @@ enum After {
 }
 
 /// Connect once and serve the socket until it closes, classifying the
-/// outcome for the supervisor loop.
+/// outcome for the supervisor loop. The socket comes up inside this call,
+/// so `live` records `Connected` the moment the dial succeeds — the status
+/// surfaces must not read `connecting` for the whole life of a healthy
+/// connection.
 async fn connect_and_serve(
     ws_url: &str,
     headers: &HostHeaders,
@@ -586,9 +589,11 @@ async fn connect_and_serve(
     token: String,
     attempt: u32,
     data_dir: &Path,
+    live: &RemoteLive,
 ) -> After {
     match connect_ws(ws_url, headers).await {
         Ok(socket) => {
+            live.set_phase(RelayPhase::Connected);
             if let Err(error) = serve_socket(socket, runtime, data_dir.to_path_buf()).await {
                 tracing::warn!("remote: relay connection ended: {error}");
             }
@@ -676,7 +681,8 @@ pub async fn supervise(
             } => {
                 live.set_phase(RelayPhase::Connecting);
                 let after =
-                    connect_and_serve(&ws_url, &headers, runtime, token, attempt, &data_dir).await;
+                    connect_and_serve(&ws_url, &headers, runtime, token, attempt, &data_dir, &live)
+                        .await;
                 live.set_phase(after_phase(&after));
                 match after {
                     After::Served => {

@@ -17,7 +17,8 @@ pub enum RelayPhase {
     Off,
     /// Dialling the relay, or backing off between attempts.
     Connecting,
-    /// The last connection attempt reached the relay and served.
+    /// The relay socket is up: the dial succeeded and the connection is
+    /// serving (or just finished a served session).
     Connected,
     /// The token got a 401: sign in again, this one is never retried.
     TokenRejected,
