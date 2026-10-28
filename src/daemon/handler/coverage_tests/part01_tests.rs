@@ -958,7 +958,7 @@ fn reported_run_rejects_pass_status() {
     insert_test_node(&db, "node-1", "s1");
     db.insert_graph_run(&graph_run_row("r1", "l1", "s1", GraphRunStatus::Pass))
         .unwrap();
-    let result = resolve_reported_run(&db, "r1", "n1").unwrap();
+    let result = resolve_reported_run(&db, Some("r1"), Some("n1"), None).unwrap();
     assert!(result
         .expect_err("pass run must be stale")
         .is_error
@@ -974,7 +974,7 @@ fn reported_run_rejects_fail_status() {
     insert_test_node(&db, "node-1", "s1");
     db.insert_graph_run(&graph_run_row("r1", "l1", "s1", GraphRunStatus::Fail))
         .unwrap();
-    let result = resolve_reported_run(&db, "r1", "n1").unwrap();
+    let result = resolve_reported_run(&db, Some("r1"), Some("n1"), None).unwrap();
     assert!(result
         .expect_err("fail run must be stale")
         .is_error

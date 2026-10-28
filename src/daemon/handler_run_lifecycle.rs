@@ -1,7 +1,7 @@
 //! MCP handler tools split out of `daemon::handler` (run lifecycle tools (reset, schedule, pause, complete, blockers)).
 //! Moved verbatim; tool names, schemas, and behaviour unchanged.
 
-use crate::daemon::handler::TaskTriggerHandler;
+use crate::daemon::handler::{OptionalExtension, TaskTriggerHandler};
 use crate::daemon::handler_formatting::internal_error;
 use crate::daemon::handler_run_directive::{
     limit_reset_note, not_continuable_refusal, reset_execution_limit, restart_at_node,
@@ -9,14 +9,16 @@ use crate::daemon::handler_run_directive::{
 };
 use crate::daemon::handler_run_exec::{
     directed_run_report, find_in_flight_run, handle_retry_current_node, handle_skip_next_spec,
-    in_flight_run_error, node_name_for_error, resolve_directed_spec, resolve_reported_run,
+    in_flight_run_error, node_name_for_error, resolve_directed_spec,
 };
 use crate::daemon::handler_validate::resolve_prefix_or_error;
 use crate::daemon::helpers::{error_result, success_result, with_deprecated_note};
 use crate::daemon::params::*;
 use crate::daemon::params_extract::Parameters;
 use crate::db::Database;
-use crate::domain::graphs::{ArchiveGraphOutcome, GraphResetOutcome, GraphRunStatus, GraphStatus};
+use crate::domain::graphs::{ArchiveGraphOutcome, GraphResetOutcome, GraphStatus};
+use crate::shared::sync_identity::graph_identity;
+use axum::http::request::Parts;
 use rmcp::model::CallToolResult;
 use rmcp::tool;
 use rmcp::tool_router;
@@ -471,13 +473,15 @@ impl TaskTriggerHandler {
 
     #[tool(
         name = "graph_complete_node",
-        description = "Mark the active run for a graph node as pass or fail and attach its output."
+        description = "Mark the active run for a graph node as pass or fail and attach its output. run_id/node_id may be omitted inside a node run: they resolve from the CANOPY_NODE_RUN_ID/CANOPY_NODE_ID environment the engine sets on every agent process."
     )]
     pub(crate) async fn graph_complete_node(
         &self,
         Parameters(params): Parameters<GraphCompleteNodeParams>,
+        OptionalExtension(parts): OptionalExtension<Parts>,
     ) -> Result<CallToolResult, McpError> {
-        self.complete_node_impl(params).await
+        self.complete_node_impl(params, graph_identity(parts.as_ref()))
+            .await
     }
 
     #[tool(
@@ -490,8 +494,11 @@ impl TaskTriggerHandler {
     pub(crate) async fn loop_complete_node(
         &self,
         Parameters(params): Parameters<GraphCompleteNodeParams>,
+        OptionalExtension(parts): OptionalExtension<Parts>,
     ) -> Result<CallToolResult, McpError> {
-        let result = self.complete_node_impl(params).await?;
+        let result = self
+            .complete_node_impl(params, graph_identity(parts.as_ref()))
+            .await?;
         Ok(with_deprecated_note(
             result,
             "loop_complete_node was renamed graph_complete_node in 3.0.0",
@@ -500,13 +507,15 @@ impl TaskTriggerHandler {
 
     #[tool(
         name = "graph_report_blocker",
-        description = "Pause a graph because the active node is blocked and needs human intervention."
+        description = "Pause a graph because the active node is blocked and needs human intervention. run_id/node_id may be omitted inside a node run: they resolve from the CANOPY_NODE_RUN_ID/CANOPY_NODE_ID environment the engine sets on every agent process."
     )]
     pub(crate) async fn graph_report_blocker(
         &self,
         Parameters(params): Parameters<GraphReportBlockerParams>,
+        OptionalExtension(parts): OptionalExtension<Parts>,
     ) -> Result<CallToolResult, McpError> {
-        self.report_blocker_impl(params).await
+        self.report_blocker_impl(params, graph_identity(parts.as_ref()))
+            .await
     }
 
     #[tool(
@@ -518,8 +527,11 @@ impl TaskTriggerHandler {
     pub(crate) async fn loop_report_blocker(
         &self,
         Parameters(params): Parameters<GraphReportBlockerParams>,
+        OptionalExtension(parts): OptionalExtension<Parts>,
     ) -> Result<CallToolResult, McpError> {
-        let result = self.report_blocker_impl(params).await?;
+        let result = self
+            .report_blocker_impl(params, graph_identity(parts.as_ref()))
+            .await?;
         Ok(with_deprecated_note(
             result,
             "loop_report_blocker was renamed graph_report_blocker in 3.0.0",
@@ -630,84 +642,6 @@ impl TaskTriggerHandler {
             graph_id,
             at.to_rfc3339()
         )))
-    }
-
-    /// Shared body of `graph_complete_node` and the deprecated
-    /// `loop_complete_node` alias (CB68) — identical params, identical
-    /// behaviour; only the alias's response gets a `deprecated` note.
-    pub(crate) async fn complete_node_impl(
-        &self,
-        params: GraphCompleteNodeParams,
-    ) -> Result<CallToolResult, McpError> {
-        let status = match params.status.trim() {
-            "pass" => Some(GraphRunStatus::Pass),
-            "fail" => Some(GraphRunStatus::Fail),
-            _ => None,
-        };
-        let Some(status) = status else {
-            return Ok(error_result(
-                "graph_complete_node status must be pass or fail.",
-            ));
-        };
-        let run = match resolve_reported_run(&self.db, &params.run_id, &params.node_id)? {
-            Ok(run) => run,
-            Err(result) => return Ok(result),
-        };
-
-        self.db
-            .update_graph_run_result(
-                &run.id,
-                status,
-                Some(&serde_json::json!({
-                    "reported_output": params.output,
-                    "summary": params.summary,
-                })),
-                Some(chrono::Utc::now()),
-            )
-            .map_err(internal_error)?;
-
-        Ok(success_result("Graph node result recorded."))
-    }
-
-    pub(crate) async fn report_blocker_impl(
-        &self,
-        params: GraphReportBlockerParams,
-    ) -> Result<CallToolResult, McpError> {
-        let run = match resolve_reported_run(&self.db, &params.run_id, &params.node_id)? {
-            Ok(run) => run,
-            Err(result) => return Ok(result),
-        };
-
-        self.db
-            .update_graph_run_result(
-                &run.id,
-                GraphRunStatus::Fail,
-                Some(&serde_json::json!({
-                    "blocker": params.description,
-                })),
-                Some(chrono::Utc::now()),
-            )
-            .map_err(internal_error)?;
-        self.db
-            .update_graph_status(&run.graph_id, GraphStatus::Paused, None, None)
-            .map_err(internal_error)?;
-        self.graph_engine
-            .notify_blocked(&run.graph_id, &params.description)
-            .map_err(internal_error)?;
-        // Resolve the human-readable node name for {{node}} before firing,
-        // falling back to the raw node id when the node row is gone.
-        let node_name = self
-            .db
-            .get_graph_node(&run.node_id)
-            .ok()
-            .flatten()
-            .map(|node| node.name)
-            .unwrap_or_else(|| run.node_id.clone());
-        self.graph_engine
-            .fire_on_blocked_hooks(&run.graph_id, &params.description, Some(&node_name))
-            .await;
-
-        Ok(success_result("Graph blocker recorded and graph paused."))
     }
 }
 

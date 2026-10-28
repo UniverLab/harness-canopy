@@ -475,7 +475,7 @@ fn resolve_reported_run_rejects_node_id_mismatch_even_if_running() {
     ))
     .unwrap();
 
-    let result = resolve_reported_run(&db, "run-1", "wrong-node").unwrap();
+    let result = resolve_reported_run(&db, Some("run-1"), Some("wrong-node"), None).unwrap();
     let err = result.expect_err("mismatched node_id must be rejected");
     assert!(err.is_error.unwrap_or(false));
 }

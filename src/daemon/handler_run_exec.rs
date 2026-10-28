@@ -12,7 +12,7 @@ use crate::daemon::params::*;
 use crate::daemon::params_extract::Parameters;
 use crate::db::Database;
 use crate::domain::graphs::{
-    GraphNode, GraphNodeKind, GraphNodeRun, GraphRunStatus, GraphSpec, GraphSpecStatus, GraphStatus,
+    GraphNode, GraphNodeKind, GraphNodeRun, GraphSpec, GraphSpecStatus, GraphStatus,
 };
 use crate::graph_engine::DirectedPlan;
 use rmcp::model::CallToolResult;
@@ -421,63 +421,10 @@ pub(crate) fn validate_graph_ensembles_for_run(
     Ok(())
 }
 
-/// Resolve the exact node run a `graph_complete_node`/`graph_report_blocker`
-/// report belongs to (B12). A node can be retried, so more than one run can
-/// exist for the same `node_id` over a spec's lifetime — matching on
-/// `node_id` alone (as this used to) means a report arriving late from a
-/// killed/superseded attempt (e.g. a timed-out or paused agent that ignores
-/// its own termination and calls the tool anyway) would get silently applied
-/// to whatever newer run is now active for that node. Requiring the exact
-/// `run_id` and verifying it's both still `running` and actually for the
-/// claimed `node_id` closes that gap: anything else is rejected outright
-/// rather than guessed at.
-///
-/// Returns `Err(McpError)` only for a genuine DB failure; a stale/malformed
-/// report is a normal `Ok(Err(CallToolResult))` — the tool call succeeded at
-/// the protocol level, it's just telling the caller its report didn't stick.
-pub(crate) fn resolve_reported_run(
-    db: &Database,
-    run_id: &str,
-    node_id: &str,
-) -> Result<Result<GraphNodeRun, CallToolResult>, McpError> {
-    let resolved_run_id = match db
-        .resolve_run_id_by_prefix(run_id)
-        .map_err(|e| e.to_string())
-    {
-        Ok(Some(id)) => id,
-        Ok(None) => run_id.to_string(),
-        Err(e) => return Ok(Err(error_result(&e))),
-    };
-    let resolved_node_id = match db
-        .resolve_graph_node_id_by_prefix(node_id)
-        .map_err(|e| e.to_string())
-    {
-        Ok(Some(id)) => id,
-        Ok(None) => node_id.to_string(),
-        Err(e) => return Ok(Err(error_result(&e))),
-    };
-    let run = db.get_graph_run(&resolved_run_id).map_err(internal_error)?;
-    let Some(run) = run else {
-        return Ok(Err(error_result(&format!(
-            "No graph run found with id '{resolved_run_id}'."
-        ))));
-    };
-    if run.node_id != resolved_node_id {
-        return Ok(Err(error_result(&format!(
-            "Run '{resolved_run_id}' belongs to node '{}', not '{resolved_node_id}'.",
-            run.node_id
-        ))));
-    }
-    if run.status != GraphRunStatus::Running {
-        return Ok(Err(error_result(&format!(
-            "Run '{resolved_run_id}' for node '{resolved_node_id}' is no longer active (status: {}); this report \
-             is stale — the run was already finalized (timed out, paused, reset, superseded by \
-             a retry, or already reported) — and was rejected.",
-            run.status.as_str()
-        ))));
-    }
-    Ok(Ok(run))
-}
+/// Re-export of the moved `resolve_reported_run` for its test-only
+/// callers (via `handler`'s `#[cfg(test)]` re-export).
+#[cfg(test)]
+pub(crate) use crate::daemon::handler_report_ids::resolve_reported_run;
 
 /// Find and skip `graph_id`'s current spec — its own bound spec, or, for a
 /// queue-driven run, the queue member currently in flight. "Current" means
