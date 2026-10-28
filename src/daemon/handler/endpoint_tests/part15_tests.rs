@@ -1,7 +1,7 @@
 //! Part 15 of `endpoint_tests`: shareable node documents end to end through
 //! the MCP surface — `node_install`/`node_list`/`node_remove` against a local
-//! HTTP stub standing in for the catalogue, and `graph_add_node` /
-//! `graph_add_ensemble` instantiating a node document by name.
+//! HTTP stub standing in for the catalogue, and `graph_node` /
+//! `graph_ensemble` instantiating a node document by name.
 
 use super::*;
 use crate::daemon::graph_install::stub::{StubCatalogue, StubRoute};
@@ -339,7 +339,7 @@ async fn node_remove_deletes_an_installed_override() {
     assert_eq!(resolved.source, nodes::Source::Builtin);
 }
 
-/// `graph_add_node` instantiates a node document by name and shallow-merges
+/// `graph_node` instantiates a node document by name and shallow-merges
 /// `config_overrides` on top: the document's prompt survives, the caller's
 /// harness lands in the stored node.
 #[tokio::test]
@@ -351,8 +351,11 @@ async fn graph_add_node_from_a_node_document_carries_the_overrides() {
     nodes::write(&nodes_dir, &document).unwrap();
     let workdir = dir.path().to_string_lossy().to_string();
 
-    let created = handler
-        .graph_create(Parameters(GraphCreateParams {
+    let created = call_graph_action(
+        &handler,
+        "graph_edit",
+        "create",
+        params_id(GraphCreateParams {
             name: "Node Document Graph".to_string(),
             description: None,
             workdir,
@@ -360,13 +363,17 @@ async fn graph_add_node_from_a_node_document_carries_the_overrides() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let graph_id = extract_id(&created, "graph_id");
 
-    let added = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let added = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: None,
             graph_id: Some(graph_id.clone()),
             name: "audit".to_string(),
@@ -375,9 +382,10 @@ async fn graph_add_node_from_a_node_document_carries_the_overrides() {
             blueprint: None,
             node: Some("auditor".to_string()),
             config_overrides: Some(overrides(&[("platform", "claude"), ("model", "opus")])),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&added), "{}", text(&added));
 
     let stored = db.list_graph_nodes_for_graph(&graph_id).unwrap();
@@ -403,8 +411,11 @@ async fn graph_add_node_from_a_node_document_without_harness_is_refused() {
     nodes::write(&nodes_dir, &document).unwrap();
     let workdir = dir.path().to_string_lossy().to_string();
 
-    let created = handler
-        .graph_create(Parameters(GraphCreateParams {
+    let created = call_graph_action(
+        &handler,
+        "graph_edit",
+        "create",
+        params_id(GraphCreateParams {
             name: "No Harness".to_string(),
             description: None,
             workdir,
@@ -412,13 +423,17 @@ async fn graph_add_node_from_a_node_document_without_harness_is_refused() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let graph_id = extract_id(&created, "graph_id");
 
-    let added = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let added = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: None,
             graph_id: Some(graph_id),
             name: "audit".to_string(),
@@ -427,9 +442,10 @@ async fn graph_add_node_from_a_node_document_without_harness_is_refused() {
             blueprint: None,
             node: Some("auditor".to_string()),
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&added), "{}", text(&added));
     let message = text(&added);
     assert!(message.contains("auditor"), "{message}");
@@ -437,7 +453,7 @@ async fn graph_add_node_from_a_node_document_without_harness_is_refused() {
     assert!(db.list_all_graph_nodes().unwrap().is_empty());
 }
 
-/// `graph_add_ensemble` instantiates `ensemble-proposers`: the document
+/// `graph_ensemble` instantiates `ensemble-proposers`: the document
 /// supplies the shared prompt and member count, the caller supplies each
 /// member's harness.
 #[tokio::test]
@@ -447,8 +463,11 @@ async fn graph_add_ensemble_from_ensemble_proposers() {
     let (_home, _guard, _nodes_dir, _prompts_dir) = node_home(&stub.base_url());
     let workdir = dir.path().to_string_lossy().to_string();
 
-    let created = handler
-        .graph_create(Parameters(GraphCreateParams {
+    let created = call_graph_action(
+        &handler,
+        "graph_edit",
+        "create",
+        params_id(GraphCreateParams {
             name: "Proposers Graph".to_string(),
             description: None,
             workdir,
@@ -456,13 +475,17 @@ async fn graph_add_ensemble_from_ensemble_proposers() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let graph_id = extract_id(&created, "graph_id");
 
-    let kickoff = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let kickoff = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: None,
             graph_id: Some(graph_id.clone()),
             name: "kickoff".to_string(),
@@ -471,12 +494,16 @@ async fn graph_add_ensemble_from_ensemble_proposers() {
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let kickoff_id = extract_id(&kickoff, "node_id");
-    let downstream = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let downstream = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: None,
             graph_id: Some(graph_id.clone()),
             name: "downstream".to_string(),
@@ -485,9 +512,10 @@ async fn graph_add_ensemble_from_ensemble_proposers() {
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let downstream_id = extract_id(&downstream, "node_id");
 
     let members = vec![
@@ -495,8 +523,11 @@ async fn graph_add_ensemble_from_ensemble_proposers() {
         openrouter_member("model-b"),
         openrouter_member("model-c"),
     ];
-    let ensemble = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let ensemble = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: None,
@@ -519,9 +550,10 @@ async fn graph_add_ensemble_from_ensemble_proposers() {
             straggler_timeout_minutes: None,
             quorum_grace_minutes: None,
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&ensemble), "{}", text(&ensemble));
 
     let ensembles = db.list_ensembles_for_graph(&graph_id).unwrap();
@@ -543,8 +575,11 @@ async fn graph_add_ensemble_from_ensemble_proposers() {
 
     // The document carries no harnesses: omitting `members` is refused,
     // naming the document instead of inventing a platform.
-    let missing = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let missing = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: None,
@@ -567,9 +602,10 @@ async fn graph_add_ensemble_from_ensemble_proposers() {
             straggler_timeout_minutes: None,
             quorum_grace_minutes: None,
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&missing), "{}", text(&missing));
     let message = text(&missing);
     assert!(message.contains("ensemble-proposers"), "{message}");

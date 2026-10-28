@@ -39,10 +39,10 @@ impl GraphEngine {
     /// launch may proceed.
     ///
     /// Exposed (not just inlined in [`Self::run_graph_dispatch`]) so the
-    /// synchronous `graph_run` MCP handler can hand this straight back to its
+    /// synchronous `graph_control` MCP handler can hand this straight back to its
     /// caller instead of the caller only finding out via a log line once the
     /// fire-and-forget background dispatch fails — every other launch path
-    /// (autorun, cron/watch triggers, `graph_continue`) still gets the same
+    /// (autorun, cron/watch triggers, `graph_control`) still gets the same
     /// check from `run_graph_dispatch` itself.
     ///
     /// Emptiness is defined per launch mode:
@@ -159,7 +159,7 @@ impl GraphEngine {
         Ok(Some(self.empty_spec_set_message(&lp, None)?))
     }
 
-    /// CM29: the spec `graph_run`/autorun would dispatch or resume next,
+    /// CM29: the spec `graph_control`/autorun would dispatch or resume next,
     /// without actually starting it — used only to exclude that spec from
     /// the dirty-start refusal's "previous spec" search (see
     /// `find_dirty_predecessor_specs`). Mirrors the picking logic in
@@ -260,12 +260,12 @@ impl GraphEngine {
         })
     }
 
-    /// the spec a *directed* `graph_run` (`start_node_id`) targets —
+    /// the spec a *directed* `graph_control` (`start_node_id`) targets —
     /// the first spec a FRESH dispatch would actually execute, so the plan
     /// the operator gets back names the spec the run really starts at. Unlike
     /// [`Self::preview_next_spec_id`] this never returns a queue member that
     /// is still `running`: a fresh dispatch re-enters such a member only via
-    /// the resumed-queue path (`graph_continue`), never through the pick
+    /// the resumed-queue path (`graph_control`), never through the pick
     /// loop, so planning a directed run at it would report a spec the run
     /// never executes. Bound specs are the same first non-terminal pick as
     /// [`Self::preview_next_spec_id`].
@@ -414,8 +414,8 @@ pub(crate) fn dirty_advance_blocker(next_spec: &str, message: &str, paths: &[Str
         listed.push_str(&format!(", ... (+{} more)", paths.len() - LISTED));
     }
     format!(
-        "{message}. Dirty paths: {listed}. Ways out: `graph_continue run_from_node` on spec \
-         '{next_spec}'; clean the tree by hand, then `graph_continue skip_next_spec`; or set \
-         `allow_dirty_start` on the graph."
+        "{message}. Dirty paths: {listed}. Ways out: `graph_control continue` with mode \
+         `run_from_node` on spec '{next_spec}'; clean the tree by hand, then `graph_control continue` \
+         with mode `skip_next_spec`; or set `allow_dirty_start` on the graph."
     )
 }

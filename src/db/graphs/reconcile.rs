@@ -33,7 +33,7 @@ impl Database {
     /// (`queue_next_pending_spec_id` only ever picks a `pending` or
     /// `interrupted` member), permanently orphaning it — `Interrupted` is
     /// just as selectable as `Pending`, so this still can't happen.
-    /// `graph_continue` alone is enough to resume it (no `graph_pause` detour
+    /// `graph_control` alone is enough to resume it (no `graph_control` detour
     /// needed). Idempotent: a graph already `Paused` isn't touched by a later
     /// call.
     ///
@@ -84,7 +84,7 @@ impl Database {
             // just as orphaned as a `Running` one — its dispatch is gone and
             // the pending pause will never complete on its own. Reconcile it
             // the same way: pause, mark the dangling run interrupted, mark the
-            // spec interrupted, so `graph_continue` alone can resume it.
+            // spec interrupted, so `graph_control` alone can resume it.
             let rows = stmt.query_map(
                 params![GraphStatus::Running.as_str(), GraphStatus::Pausing.as_str()],
                 map_graph_row,
@@ -122,7 +122,7 @@ impl Database {
                     reconciled.push((lp.clone(), run));
                 });
             // C1: flag this pause as reconciliation's own, distinct from an
-            // operator's `graph_pause`/`graph_report_blocker` (both go through
+            // operator's `graph_control`/`graph_report_blocker` (both go through
             // `update_graph_status`, which always clears this flag) — see
             // [`crate::domain::graphs::Graph::paused_by_reconciliation`].
             tx.execute(

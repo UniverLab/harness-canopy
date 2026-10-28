@@ -29,13 +29,9 @@ use rmcp::ErrorData as McpError;
 
 #[tool_router(router = tool_router_specs, vis = "pub(crate)")]
 impl TaskTriggerHandler {
-    #[tool(
-        name = "graph_add_spec",
-        description = "Add an ordered spec to an existing graph."
-    )]
-    pub(crate) async fn graph_add_spec(
+    pub(crate) async fn graph_add_spec_impl(
         &self,
-        Parameters(params): Parameters<GraphAddSpecParams>,
+        params: GraphAddSpecParams,
     ) -> Result<CallToolResult, McpError> {
         let name = params.name.trim();
         if let Err(e) = validate_non_empty(name, "Graph spec name") {
@@ -130,13 +126,9 @@ impl TaskTriggerHandler {
         Ok(build_id_result(&spec.id, "spec_id"))
     }
 
-    #[tool(
-        name = "graph_update_spec",
-        description = "Update an existing graph spec."
-    )]
-    pub(crate) async fn graph_update_spec(
+    pub(crate) async fn graph_update_spec_impl(
         &self,
-        Parameters(params): Parameters<GraphUpdateSpecParams>,
+        params: GraphUpdateSpecParams,
     ) -> Result<CallToolResult, McpError> {
         let spec_id = match resolve_prefix_or_error(
             &self.db,
@@ -180,7 +172,7 @@ impl TaskTriggerHandler {
             }
         }
 
-        // SPECCODE: graph_update_spec mirrors spec_update's type/scope flow,
+        // SPECCODE: graph_edit mirrors spec_update's type/scope flow,
         // including the legacy-spec code assignment on first type.
         if let Some(spec_type) = params.spec_type {
             let code: Option<String> = if spec.spec_code.is_some() {
@@ -223,7 +215,7 @@ impl TaskTriggerHandler {
                 params.spec_type.is_some(),
                 params.spec_scope.is_some(),
             ],
-            "graph_update_spec",
+            "graph_edit",
         ) {
             return Ok(error_result(&e));
         }
@@ -241,13 +233,9 @@ impl TaskTriggerHandler {
         Ok(build_spec_update_response(&spec_id))
     }
 
-    #[tool(
-        name = "graph_remove_spec",
-        description = "Unbind a spec from a graph, making it a standalone backlog spec. The spec's execution history is preserved. Refuses if the spec is currently running."
-    )]
-    pub(crate) async fn graph_remove_spec(
+    pub(crate) async fn graph_remove_spec_impl(
         &self,
-        Parameters(params): Parameters<GraphRemoveSpecParams>,
+        params: GraphRemoveSpecParams,
     ) -> Result<CallToolResult, McpError> {
         let graph_id = match resolve_prefix_or_error(
             &self.db,
@@ -384,7 +372,7 @@ impl TaskTriggerHandler {
             .into_iter()
             // The blank-name row a spec-less / idea-driven run binds to its
             // graph to carry `{{spec_content}}` is engine bookkeeping, not work
-            // — never a user-authored spec (`graph_add_spec` rejects an empty
+            // — never a user-authored spec (`graph_edit` rejects an empty
             // name), so it must not surface here. Trimmed to match the
             // engine's bookkeeping sentinel (`is_no_spec_placeholder`).
             .filter(|s| !s.name.trim().is_empty())

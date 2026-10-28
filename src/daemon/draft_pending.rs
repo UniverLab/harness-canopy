@@ -2,7 +2,7 @@
 //!
 //! A draft is deleted by its first install — in practice, by the first GET:
 //! the catalogue serves the document once and a second fetch 404s. The MCP
-//! `graph_install`/`node_install` tools fetch once per call (first for the
+//! `graph_edit`/`node_install` tools fetch once per call (first for the
 //! review, then again after `accept: true`), so the review call parks its
 //! body here and the accept call reuses it; without the cache `--yes` could
 //! never install a draft. Entries expire after 30 minutes and the map is

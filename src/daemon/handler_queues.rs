@@ -446,7 +446,7 @@ pub(crate) fn validate_queue_exists(db: &Database, queue_id: &str) -> Result<Que
 /// spec's most recent `graph_runs` row instead — the graph that most recently
 /// touched the spec is the only one that could have set it `running`.
 ///
-/// This is a start-time check, not a lock: two `graph_run` calls issued in
+/// This is a start-time check, not a lock: two `graph_control` calls issued in
 /// the same instant, before either has run a single node, can still race.
 pub(crate) fn validate_queue_not_consumed(
     db: &Database,

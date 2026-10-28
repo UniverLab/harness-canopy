@@ -91,7 +91,7 @@ pub(crate) fn resolve_node_prompt_template(
 /// set), `"preset"` (`prompt_preset` set), or `"default_fallback"` (neither,
 /// so the node silently runs on the bare fallback template nobody chose).
 /// Read-only mirror of that function's own precedence check — never the
-/// other way around, so the two can't drift. Surfaced in `graph_get`'s node
+/// other way around, so the two can't drift. Surfaced in `graph`'s node
 /// JSON (`daemon::handler::graph_node_json`) and recorded on every agent run's
 /// output, so a node running on the default is distinguishable from one
 /// running its author's prompt without having to inspect its raw config.

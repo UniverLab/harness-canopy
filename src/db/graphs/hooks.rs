@@ -87,7 +87,7 @@ impl Database {
     }
 
     /// Every past hook firing for a graph, oldest first — surfaced
-    /// via `graph_get`/`canopy graph info` alongside the graph's node runs.
+    /// via `graph`/`canopy graph info` alongside the graph's node runs.
     pub fn list_graph_completion_hook_runs(
         &self,
         graph_id: &str,

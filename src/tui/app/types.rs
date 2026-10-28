@@ -272,7 +272,7 @@ pub struct App {
     /// Permanent-delete confirmation, reachable only from the archived
     /// view on an already-archived graph — see [`App::permanent_delete_selected_archived_graph`].
     pub(crate) permanent_delete_graph_confirm: bool,
-    /// Confirmation gate for `graph_reset` (mirrors `archive_graph_confirm`) —
+    /// Confirmation gate for `graph_control` (mirrors `archive_graph_confirm`) —
     /// reset clears progress on every non-completed spec, so it asks first,
     /// with the same wording the CLI's own prompt uses (see
     /// `daemon::graph_cli::confirm_reset`) so the two surfaces never teach
@@ -410,8 +410,8 @@ pub struct App {
     /// CT28: usable body height (rows) of the tail pane on the last frame —
     /// the layout sets it so key handlers can page by half-height.
     pub(crate) node_tail_pane_body_height: usize,
-    /// True while a graph-control dispatch (`graph_run`/`graph_pause`/
-    /// `graph_continue`/`graph_reset`/`graph_schedule_autorun`) is in flight on
+    /// True while a graph-control dispatch (`graph_control`/`graph_control`/
+    /// `graph_control`/`graph_control`/`graph_control`) is in flight on
     /// `graph_action_rx` — guards against a second dispatch racing the first.
     pub(crate) graph_action_pending: bool,
     /// Receiver for the background thread running the current graph-control

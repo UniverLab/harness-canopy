@@ -9,23 +9,17 @@ use crate::daemon::handler_validate::{
 };
 use crate::daemon::helpers::error_result;
 use crate::daemon::params::*;
-use crate::daemon::params_extract::Parameters;
 use crate::db::Database;
 use crate::domain::graphs::{Graph, GraphStatus};
 use rmcp::model::CallToolResult;
-use rmcp::tool;
 use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
 
 #[tool_router(router = tool_router_transfer, vis = "pub(crate)")]
 impl TaskTriggerHandler {
-    #[tool(
-        name = "graph_export",
-        description = "Export a graph's design — name, description, nodes, edges, and ensembles — as a portable JSON document, so it can be shared as a file and recreated elsewhere with graph_import. Never includes ids, workdir, specs, or run/status state. Includes platform/model for every agent node and ensemble member, and each ensemble's kind ('cascade'/'round_robin'; omitted for the 'parallel' default); format_version 6. Bundles the full text of every custom prompt_preset the document's agent nodes reference in 'prompt_presets' (name + content), so the importing machine gets working nodes instead of name-only references; builtin presets (implementer, reviewer, resilience) are never bundled. A crew-bound ensemble exports its 'crew' name and no members, and a crew-bound agent node exports its 'crew' key. Ensembles carry every entry source: the primary in 'entry_from_node'/'entry_condition' plus 'extra_entry_sources' (node + condition) for sources added with 'add_entry_from' (omitted when there are none)."
-    )]
-    pub(crate) async fn graph_export(
+    pub(crate) async fn graph_export_impl(
         &self,
-        Parameters(params): Parameters<GraphExportParams>,
+        params: GraphExportParams,
     ) -> Result<CallToolResult, McpError> {
         let graph_id = match resolve_prefix_or_error(
             &self.db,
@@ -75,13 +69,9 @@ impl TaskTriggerHandler {
         ))
     }
 
-    #[tool(
-        name = "graph_import",
-        description = "Create a new graph from an exported document (the object graph_export returns). Always creates a new graph — never updates or overwrites an existing one; if the name is already taken in workdir, a numeric suffix is applied and the response says which name was used. Validates the document exactly as graph_add_node/graph_add_edge/graph_add_ensemble would, all-or-nothing: nothing is written if any part is rejected. It also refuses an agent node's prompt_preset when this machine cannot resolve it — no `<name>.md` in the prompts dir, not bundled in the document, and not a builtin (implementer, reviewer, resilience) — naming every unknown preset in the error, because the imported node would otherwise run on an empty prompt. A document's bundled 'prompt_presets' entries are installed into the prompts dir before the graph is created when no file with that name exists; a local file with identical content is a no-op, and one with different content refuses the import, naming the preset — a user's edited preset is never overwritten. Accepts format_version 1 (members with no binding, reported as missing a platform), 2 (bindings restored), 3 (graph/error vocabulary), 4 (every ensemble entry source: 'extra_entry_sources' restores each 'add_entry_from' source with its own condition), and 5 (crew-bound ensembles and nodes: 'crew' restores the binding when a crew of that name exists locally, else the response lists it under 'missing_crews' and the ensemble cannot dispatch until the crew is created), and 6 (ensemble 'mutex': restored per member run; older documents import with none). Restores each ensemble's kind, commit_rights, mutex, timeouts, member overrides, and entry/exit wiring exactly; a document field this build does not know how to restore — including an unknown 'kind' value — is a refusal naming the field, never a silent default. The response lists every agent node left without a platform, and every crew an imported ensemble references that does not exist locally, so the caller knows what to fill in before running the graph."
-    )]
-    pub(crate) async fn graph_import(
+    pub(crate) async fn graph_import_impl(
         &self,
-        Parameters(params): Parameters<GraphImportParams>,
+        params: GraphImportParams,
     ) -> Result<CallToolResult, McpError> {
         let workdir = params.workdir.trim();
         if let Err(e) = validate_non_empty(workdir, "Graph workdir") {
@@ -98,7 +88,7 @@ impl TaskTriggerHandler {
             };
 
         match self
-            .import_document_value(&document, workdir, params.name.as_deref(), "graph_import")
+            .import_document_value(&document, workdir, params.name.as_deref(), "graph_edit")
             .await
         {
             ImportedDocument::Done(value) => Ok(build_json_result(&value)),
@@ -107,13 +97,9 @@ impl TaskTriggerHandler {
         }
     }
 
-    #[tool(
-        name = "graph_install",
-        description = "Install a graph from the catalogue in one command: fetch the published export document for `ref` — `<slug>` for an official graph or `<owner>/<repo>/<slug>` for a community one, each with an optional `@<ref>` version suffix, or `draft:<id>` for an unreviewed editor draft (26 lowercase base32 characters, served directly, installable once within 30 minutes) — through `graphs.catalogue_url` (default https://graphs.univerlab.org), so the catalogue counts the install, and validate it exactly as `graph_validate` would (any problem aborts the install). BEFORE ANYTHING IS WRITTEN the call returns {needs_review: true, review: {source, commands, prompts, attention}}: every shell command (check/gate config.command and hook command, labelled by node or hook), every agent instruction (prompt_template, prompt_override, bundled or builtin preset content, hook prompt — first 3 lines with a total line count), and the attention marks for dangerous command shapes (pipe to shell, sudo, rm -rf, chmod 777, git push/--force, sensitive-path write, eval, base64 -d, pipe to python/node). AN AGENT MUST SHOW THIS REVIEW TO ITS USER before calling again with accept: true; without accept nothing is installed, and official documents are reviewed the same as community ones. With accept: true the bundled `prompt_presets` are installed into the prompts dir (a local file with different content aborts the install unless `overwrite_presets` is true), the document is imported exactly as `graph_import` would (always a new graph in `workdir`, a numeric suffix when the name is taken), and the response carries the same review plus the graph id and name, the workdir, the presets written, the agent nodes still needing a platform, and the next command to assign them."
-    )]
-    pub(crate) async fn graph_install(
+    pub(crate) async fn graph_install_impl(
         &self,
-        Parameters(params): Parameters<GraphInstallParams>,
+        params: GraphInstallParams,
     ) -> Result<CallToolResult, McpError> {
         let workdir = params.workdir.trim();
         if let Err(e) = validate_non_empty(workdir, "Graph workdir") {
@@ -187,7 +173,7 @@ impl TaskTriggerHandler {
 
         let name = params.name.clone();
         match self
-            .import_document_value(&fetched.document, workdir, name.as_deref(), "graph_install")
+            .import_document_value(&fetched.document, workdir, name.as_deref(), "graph_edit")
             .await
         {
             ImportedDocument::Done(mut value) => {
@@ -205,13 +191,9 @@ impl TaskTriggerHandler {
         }
     }
 
-    #[tool(
-        name = "graph_validate",
-        description = "Validate a shared graph or node document without importing it — no database access, no workdir needed. Provide exactly one of `path` (a JSON file) or `document` (the object itself). A graph document (has `nodes`) runs every structural check `graph_import` runs — format_version, known config keys, ensemble shape, template bindings — plus the sharing rule that every `prompt_preset` a node names is bundled in the document or a builtin (implementer, reviewer, resilience). A node document (`format_version`, `name`, `kind`, `config`, optional `description`/`preset`) checks the slug name, a known authorable kind (agent, check, gate, router, or ensemble), known config keys, no harness keys (`platform`/`model`/`cli`) anywhere in the config, an ensemble document's prompt/members/min_pass shape, and a bundled preset name matching the config's `prompt_preset`. Returns `ok` with the kind, name, node/edge/ensemble counts and the agent nodes that will need a harness — or `ok: false` with every problem found, each with a JSON path and a message."
-    )]
-    pub(crate) async fn graph_validate(
+    pub(crate) async fn graph_validate_impl(
         &self,
-        Parameters(params): Parameters<GraphValidateParams>,
+        params: GraphValidateParams,
     ) -> Result<CallToolResult, McpError> {
         match crate::daemon::graph_validate::validate_request(params.path, params.document) {
             Ok(report) => Ok(build_json_result(&report)),
@@ -229,8 +211,8 @@ enum ImportedDocument {
 }
 
 impl TaskTriggerHandler {
-    /// Import one parsed export document: the body `graph_import` and
-    /// `graph_install` share — same plan, same pending crews, same
+    /// Import one parsed export document: the body `graph_edit` and
+    /// `graph_edit` share — same plan, same pending crews, same
     /// unique-name resolution. `operation` names the caller for errors.
     async fn import_document_value(
         &self,
@@ -398,7 +380,7 @@ fn check_import_member_overrides(
     Ok(())
 }
 
-/// The `next` step of a `graph_install` response: which nodes still need a
+/// The `next` step of a `graph_edit` response: which nodes still need a
 /// harness assigned, and the command to assign them.
 fn install_next_step(value: &serde_json::Value) -> String {
     let graph_id = value.get("graph_id").and_then(|id| id.as_str());
@@ -408,11 +390,11 @@ fn install_next_step(value: &serde_json::Value) -> String {
         .map(|nodes| nodes.iter().filter_map(serde_json::Value::as_str).collect())
         .unwrap_or_default();
     match (graph_id, missing.as_slice()) {
-        (Some(id), []) => format!("All agent nodes have a harness; start the graph with graph_run (graph_id {id})."),
+        (Some(id), []) => format!("All agent nodes have a harness; start the graph with graph_control run (graph_id {id})."),
         (Some(id), missing) => format!(
-            "Assign a platform/model to {} with graph_update_node, then start the graph with graph_run (graph_id {id}).",
+            "Assign a platform/model to {} with graph_node update, then start the graph with graph_control run (graph_id {id}).",
             missing.join(", ")
         ),
-        _ => "Assign every node a platform/model with graph_update_node, then start the graph with graph_run.".to_string(),
+        _ => "Assign every node a platform/model with graph_node update, then start the graph with graph_control run.".to_string(),
     }
 }

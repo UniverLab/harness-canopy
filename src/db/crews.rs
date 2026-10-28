@@ -475,7 +475,7 @@ impl Database {
         let mut new_nodes = Vec::with_capacity(crew_members.len());
         // New member nodes (a fresh or growing binding) continue the scope's
         // position sequence after every existing node, exactly as
-        // `graph_add_ensemble`'s append convention does — never colliding with
+        // `graph_ensemble`'s append convention does — never colliding with
         // a plain node already in the graph.
         let mut next_position = self
             .scope_max_node_position(ensemble.spec_id.as_deref(), ensemble.graph_id.as_deref())?

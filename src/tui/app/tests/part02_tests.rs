@@ -1188,7 +1188,7 @@ fn save_router_routes_dialog_drops_the_edge_of_a_removed_route() {
 /// structured `AgentPrompt` mode instead), so it's the one that can
 /// reintroduce the exact incident shape (a config key the engine will
 /// never read) if left unvalidated. Saving must be rejected the same
-/// way `graph_add_node`/`graph_update_node` reject it, and the bad config
+/// way `graph_node`/`graph_node` reject it, and the bad config
 /// must never reach the DB.
 #[test]
 fn save_graph_editor_dialog_rejects_unknown_config_key_in_node_config_mode() {

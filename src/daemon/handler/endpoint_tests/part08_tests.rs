@@ -1,7 +1,7 @@
 //! Part 08 of `endpoint_tests` (split from `src/daemon/handler.rs`, pure move).
 use super::*;
 
-/// CM30/FR3: `graph_get` reports the effective infra budget and its
+/// CM30/FR3: `graph` reports the effective infra budget and its
 /// source per node — `"node"` for an explicit key, `"default"` when
 /// nothing (neither node nor platform) sets it.
 #[tokio::test]
@@ -13,8 +13,11 @@ async fn graph_get_reports_infra_config_with_source() {
     let mut explicit_config = agent_node_config("cm30-test-platform-xyz");
     explicit_config.insert("infra_retry_limit".to_string(), serde_json::Value::from(5));
     let explicit_id = extract_id(
-        &handler
-            .graph_add_node(Parameters(GraphAddNodeParams {
+        &call_graph_action(
+            &handler,
+            "graph_node",
+            "add",
+            params_id(GraphAddNodeParams {
                 spec_id: Some(spec.id.clone()),
                 graph_id: None,
                 name: "Explicit".to_string(),
@@ -23,14 +26,18 @@ async fn graph_get_reports_infra_config_with_source() {
                 blueprint: None,
                 node: None,
                 config_overrides: None,
-            }))
-            .await
-            .unwrap(),
+            }),
+        )
+        .await
+        .unwrap(),
         "node_id",
     );
     let plain_id = extract_id(
-        &handler
-            .graph_add_node(Parameters(GraphAddNodeParams {
+        &call_graph_action(
+            &handler,
+            "graph_node",
+            "add",
+            params_id(GraphAddNodeParams {
                 spec_id: Some(spec.id.clone()),
                 graph_id: None,
                 name: "Plain".to_string(),
@@ -39,18 +46,23 @@ async fn graph_get_reports_infra_config_with_source() {
                 blueprint: None,
                 node: None,
                 config_overrides: None,
-            }))
-            .await
-            .unwrap(),
+            }),
+        )
+        .await
+        .unwrap(),
         "node_id",
     );
 
-    let got = handler
-        .graph_get(Parameters(GraphGetParams {
+    let got = call_graph_action(
+        &handler,
+        "graph",
+        "get",
+        params_id(GraphGetParams {
             graph_id: lp.id.clone(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let json: serde_json::Value = serde_json::from_str(&raw_text(&got)).unwrap();
     let nodes = json["specs"][0]["nodes"].as_array().unwrap();
     let infra_of = |node_id: &str| -> serde_json::Value {
@@ -72,7 +84,7 @@ async fn graph_get_reports_infra_config_with_source() {
     assert_eq!(plain["infra_backoff_seconds"]["source"], "default");
 }
 
-/// CM30/FR5: `graph_audit_node_configs` lists a node/member whose
+/// CM30/FR5: `graph` lists a node/member whose
 /// effective budget differs from its platform's own, and omits one
 /// whose override merely restates the platform value (or that sets
 /// nothing). The platform here is unconfigured, so its baseline is the
@@ -86,8 +98,11 @@ async fn graph_audit_node_configs_lists_infra_overrides() {
     let mut differing = agent_node_config("cm30-test-platform-xyz");
     differing.insert("infra_retry_limit".to_string(), serde_json::Value::from(0));
     let differing_id = extract_id(
-        &handler
-            .graph_add_node(Parameters(GraphAddNodeParams {
+        &call_graph_action(
+            &handler,
+            "graph_node",
+            "add",
+            params_id(GraphAddNodeParams {
                 spec_id: Some(spec.id.clone()),
                 graph_id: None,
                 name: "Differing".to_string(),
@@ -96,16 +111,20 @@ async fn graph_audit_node_configs_lists_infra_overrides() {
                 blueprint: None,
                 node: None,
                 config_overrides: None,
-            }))
-            .await
-            .unwrap(),
+            }),
+        )
+        .await
+        .unwrap(),
         "node_id",
     );
     let mut restating = agent_node_config("cm30-test-platform-xyz");
     restating.insert("infra_retry_limit".to_string(), serde_json::Value::from(2));
     let restating_id = extract_id(
-        &handler
-            .graph_add_node(Parameters(GraphAddNodeParams {
+        &call_graph_action(
+            &handler,
+            "graph_node",
+            "add",
+            params_id(GraphAddNodeParams {
                 spec_id: Some(spec.id.clone()),
                 graph_id: None,
                 name: "Restating".to_string(),
@@ -114,14 +133,18 @@ async fn graph_audit_node_configs_lists_infra_overrides() {
                 blueprint: None,
                 node: None,
                 config_overrides: None,
-            }))
-            .await
-            .unwrap(),
+            }),
+        )
+        .await
+        .unwrap(),
         "node_id",
     );
     let plain_id = extract_id(
-        &handler
-            .graph_add_node(Parameters(GraphAddNodeParams {
+        &call_graph_action(
+            &handler,
+            "graph_node",
+            "add",
+            params_id(GraphAddNodeParams {
                 spec_id: Some(spec.id.clone()),
                 graph_id: None,
                 name: "Plain".to_string(),
@@ -130,13 +153,16 @@ async fn graph_audit_node_configs_lists_infra_overrides() {
                 blueprint: None,
                 node: None,
                 config_overrides: None,
-            }))
-            .await
-            .unwrap(),
+            }),
+        )
+        .await
+        .unwrap(),
         "node_id",
     );
 
-    let audited = handler.graph_audit_node_configs().await.unwrap();
+    let audited = call_graph_action(&handler, "graph", "audit", ())
+        .await
+        .unwrap();
     assert!(!is_err(&audited), "{}", text(&audited));
     let json: serde_json::Value = serde_json::from_str(&raw_text(&audited)).unwrap();
     let overrides = json["infra_config_overrides"].as_array().unwrap();
@@ -168,8 +194,11 @@ async fn graph_update_ensemble_shrink_below_min_pass_is_refused() {
         infra_backoff_seconds: None,
     };
 
-    let created = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let created = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
@@ -193,14 +222,18 @@ async fn graph_update_ensemble_shrink_below_min_pass_is_refused() {
             on_fail_to: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&created), "{}", text(&created));
     let ensemble_id = extract_id(&created, "ensemble_id");
 
-    let shrunk = handler
-        .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+    let shrunk = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "update",
+        params_id(GraphUpdateEnsembleParams {
             mutex: None,
             commit_rights: None,
             ensemble_id: ensemble_id.clone(),
@@ -223,9 +256,10 @@ async fn graph_update_ensemble_shrink_below_min_pass_is_refused() {
             remove_entry_from: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&shrunk), "shrink below min_pass should fail");
     let msg = text(&shrunk);
     assert!(msg.contains("has an invalid min_pass"), "{msg}");
@@ -254,8 +288,11 @@ async fn graph_update_ensemble_raise_min_pass_above_count_is_refused() {
         infra_backoff_seconds: None,
     };
 
-    let created = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let created = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
@@ -279,14 +316,18 @@ async fn graph_update_ensemble_raise_min_pass_above_count_is_refused() {
             on_fail_to: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&created), "{}", text(&created));
     let ensemble_id = extract_id(&created, "ensemble_id");
 
-    let raised = handler
-        .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+    let raised = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "update",
+        params_id(GraphUpdateEnsembleParams {
             mutex: None,
             commit_rights: None,
             ensemble_id: ensemble_id.clone(),
@@ -309,9 +350,10 @@ async fn graph_update_ensemble_raise_min_pass_above_count_is_refused() {
             remove_entry_from: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&raised), "raised min_pass should fail");
     assert!(
         text(&raised).contains("has an invalid min_pass"),
@@ -340,8 +382,11 @@ async fn graph_update_ensemble_shrink_with_adjusted_min_pass_succeeds() {
         infra_backoff_seconds: None,
     };
 
-    let created = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let created = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
@@ -365,14 +410,18 @@ async fn graph_update_ensemble_shrink_with_adjusted_min_pass_succeeds() {
             on_fail_to: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&created), "{}", text(&created));
     let ensemble_id = extract_id(&created, "ensemble_id");
 
-    let shrunk = handler
-        .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+    let shrunk = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "update",
+        params_id(GraphUpdateEnsembleParams {
             mutex: None,
             commit_rights: None,
             ensemble_id: ensemble_id.clone(),
@@ -395,16 +444,17 @@ async fn graph_update_ensemble_shrink_with_adjusted_min_pass_succeeds() {
             remove_entry_from: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&shrunk), "{}", text(&shrunk));
     let details = db.get_ensemble_details(&ensemble_id).unwrap().unwrap();
     assert_eq!(details.members.len(), 2);
     assert_eq!(details.ensemble.min_pass, 1);
 }
 
-/// CB40: `graph_preflight` names an ensemble stored with `min_pass`
+/// CB40: `graph_control` names an ensemble stored with `min_pass`
 /// above its member count (simulating a row predating validation).
 #[tokio::test]
 async fn graph_preflight_reports_ensemble_with_invalid_min_pass() {
@@ -423,8 +473,11 @@ async fn graph_preflight_reports_ensemble_with_invalid_min_pass() {
         infra_backoff_seconds: None,
     };
 
-    let created = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let created = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
@@ -448,9 +501,10 @@ async fn graph_preflight_reports_ensemble_with_invalid_min_pass() {
             on_fail_to: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&created), "{}", text(&created));
     let ensemble_id = extract_id(&created, "ensemble_id");
     db.update_ensemble_join_config(
@@ -462,14 +516,18 @@ async fn graph_preflight_reports_ensemble_with_invalid_min_pass() {
     )
     .unwrap();
 
-    let result = handler
-        .graph_preflight(Parameters(GraphPreflightParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "preflight",
+        params_id(GraphPreflightParams {
             graph_id: lp.id.clone(),
             timeout_seconds: None,
             reviewer: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&result), "preflight should flag invalid min_pass");
     let msg = text(&result);
     assert!(msg.contains("Stale Ensemble"), "{msg}");
@@ -496,8 +554,11 @@ async fn graph_preflight_rejects_unsafe_optional_model_token() {
     let (dir, db, handler) = endpoint_test_handler();
     let lp = insert_test_graph(&db, dir.path());
     let spec = insert_test_spec(&db, &lp.id, 1);
-    handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Entry".to_string(),
@@ -506,29 +567,34 @@ async fn graph_preflight_rejects_unsafe_optional_model_token() {
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
 
-    let result = handler
-        .graph_preflight(Parameters(GraphPreflightParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "preflight",
+        params_id(GraphPreflightParams {
             graph_id: lp.id.clone(),
             timeout_seconds: None,
             reviewer: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&result), "{}", text(&result));
     let msg = text(&result);
     assert!(msg.contains("bad-template-cli"), "{msg}");
     assert!(msg.contains("{{model?}}"), "{msg}");
 }
 
-/// CM35 FR2: `graph_preflight` flags every existing node that points at
+/// CM35 FR2: `graph_control` flags every existing node that points at
 /// an interactive-only platform — advisory (never a tool error), naming
 /// the node through `used_by` — and that pair's probe is
 /// `interactive_only` with nothing spawned. The node is written straight
-/// to the DB because `graph_add_node` now refuses this platform: this is
+/// to the DB because `graph_node` now refuses this platform: this is
 /// how a node created before the gate reaches preflight.
 #[tokio::test]
 async fn graph_preflight_flags_interactive_only_nodes() {
@@ -551,14 +617,18 @@ async fn graph_preflight_flags_interactive_only_nodes() {
     })
     .unwrap();
 
-    let result = handler
-        .graph_preflight(Parameters(GraphPreflightParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "preflight",
+        params_id(GraphPreflightParams {
             graph_id: lp.id.clone(),
             timeout_seconds: Some(5),
             reviewer: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(!is_err(&result), "{}", text(&result));
     let body: serde_json::Value = serde_json::from_str(&raw_text(&result)).unwrap();
@@ -606,14 +676,18 @@ async fn graph_preflight_names_ensemble_as_commit_rights_holder() {
     db.update_ensemble_commit_rights(&ensemble_id, true)
         .unwrap();
 
-    let result = handler
-        .graph_preflight(Parameters(GraphPreflightParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "preflight",
+        params_id(GraphPreflightParams {
             graph_id: lp.id.clone(),
             timeout_seconds: Some(5),
             reviewer: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(
         !is_err(&result),
         "preflight must succeed: {}",
@@ -649,8 +723,11 @@ async fn graph_preflight_warns_on_stale_loop_complete_node_in_ensemble_prompt() 
         infra_backoff_seconds: None,
     };
 
-    let created = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let created = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
@@ -674,19 +751,24 @@ async fn graph_preflight_warns_on_stale_loop_complete_node_in_ensemble_prompt() 
             on_fail_to: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&created), "{}", text(&created));
 
-    let result = handler
-        .graph_preflight(Parameters(GraphPreflightParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "preflight",
+        params_id(GraphPreflightParams {
             graph_id: lp.id.clone(),
             timeout_seconds: Some(5),
             reviewer: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(!is_err(&result), "{}", text(&result));
     let body = raw_text(&result);
@@ -709,14 +791,18 @@ async fn graph_preflight_reports_no_stale_name_warnings_on_clean_graph() {
     let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
     add_two_member_ensemble(&handler, &spec.id, "Clean Ensemble", &entry, &arbiter).await;
 
-    let result = handler
-        .graph_preflight(Parameters(GraphPreflightParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "preflight",
+        params_id(GraphPreflightParams {
             graph_id: lp.id.clone(),
             timeout_seconds: Some(5),
             reviewer: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&result), "{}", text(&result));
     let body = raw_text(&result);
     let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -762,14 +848,18 @@ async fn graph_preflight_hook_warning_names_the_firing_event() {
     );
     db.update_graph_hooks(&lp.id, &hooks).unwrap();
 
-    let result = handler
-        .graph_preflight(Parameters(GraphPreflightParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "preflight",
+        params_id(GraphPreflightParams {
             graph_id: lp.id.clone(),
             timeout_seconds: Some(5),
             reviewer: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&result), "{}", text(&result));
     let body = raw_text(&result);
     let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -811,8 +901,7 @@ async fn graph_update_ensemble_from_node_replaces_every_entry_edge() {
     let mut update = blank_ensemble_update(&ensemble_id);
     update.from_node = Some(new_entry.clone());
     update.condition = Some("pass".to_string());
-    let rewired = handler
-        .graph_update_ensemble(Parameters(update))
+    let rewired = call_graph_action(&handler, "graph_ensemble", "update", params_id(update))
         .await
         .unwrap();
     assert!(!is_err(&rewired), "{}", text(&rewired));
@@ -839,8 +928,7 @@ async fn graph_update_ensemble_from_node_replaces_every_entry_edge() {
     // A failed rewire (unknown source) changes nothing.
     let mut bad_update = blank_ensemble_update(&ensemble_id);
     bad_update.from_node = Some("ghost-node".to_string());
-    let failed = handler
-        .graph_update_ensemble(Parameters(bad_update))
+    let failed = call_graph_action(&handler, "graph_ensemble", "update", params_id(bad_update))
         .await
         .unwrap();
     assert!(is_err(&failed));
@@ -882,8 +970,7 @@ async fn graph_update_ensemble_multi_source_entry_reaches_every_member() {
     for source in [&gate, &reviewer] {
         let mut update = blank_ensemble_update(&ensemble_id);
         update.add_entry_from = Some(source.clone());
-        let added = handler
-            .graph_update_ensemble(Parameters(update))
+        let added = call_graph_action(&handler, "graph_ensemble", "update", params_id(update))
             .await
             .unwrap();
         assert!(!is_err(&added), "{}", text(&added));
@@ -910,13 +997,17 @@ async fn graph_update_ensemble_multi_source_entry_reaches_every_member() {
     crate::domain::validation::validate_ensembles_in_graph(&ensembles, &nodes, &edges)
         .expect("three-source entry must validate");
 
-    // `graph_get` shows every entry source, not just the primary.
-    let got = handler
-        .graph_get(Parameters(GraphGetParams {
+    // `graph` shows every entry source, not just the primary.
+    let got = call_graph_action(
+        &handler,
+        "graph",
+        "get",
+        params_id(GraphGetParams {
             graph_id: lp.id.clone(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let json: serde_json::Value = serde_json::from_str(&raw_text(&got)).unwrap();
     let ensembles_json = json["specs"][0]["ensembles"].as_array().unwrap();
     assert_eq!(ensembles_json.len(), 1);
@@ -948,8 +1039,7 @@ async fn graph_update_ensemble_entry_remove_detaches_one_source() {
     let mut add = blank_ensemble_update(&ensemble_id);
     add.add_entry_from = Some(second.clone());
     assert!(!is_err(
-        &handler
-            .graph_update_ensemble(Parameters(add))
+        &call_graph_action(&handler, "graph_ensemble", "update", params_id(add))
             .await
             .unwrap()
     ));
@@ -957,8 +1047,7 @@ async fn graph_update_ensemble_entry_remove_detaches_one_source() {
     // Detach the primary: the other source is promoted in its place.
     let mut remove = blank_ensemble_update(&ensemble_id);
     remove.remove_entry_from = Some(first.clone());
-    let removed = handler
-        .graph_update_ensemble(Parameters(remove))
+    let removed = call_graph_action(&handler, "graph_ensemble", "update", params_id(remove))
         .await
         .unwrap();
     assert!(!is_err(&removed), "{}", text(&removed));
@@ -976,8 +1065,7 @@ async fn graph_update_ensemble_entry_remove_detaches_one_source() {
     let edge_count = edges.len();
     let mut remove_last = blank_ensemble_update(&ensemble_id);
     remove_last.remove_entry_from = Some(second.clone());
-    let refused = handler
-        .graph_update_ensemble(Parameters(remove_last))
+    let refused = call_graph_action(&handler, "graph_ensemble", "update", params_id(remove_last))
         .await
         .unwrap();
     assert!(is_err(&refused));
@@ -986,15 +1074,15 @@ async fn graph_update_ensemble_entry_remove_detaches_one_source() {
 }
 
 /// CB54 FR5/FR6a (handler level, not just validate_ensembles_in_graph):
-/// growing then shrinking a two-source ensemble keeps `graph_run` accepting
-/// it at every member count, through the real graph_update_ensemble +
-/// graph_run tool path, with no manual rewiring in between.
+/// growing then shrinking a two-source ensemble keeps `graph_control` accepting
+/// it at every member count, through the real graph_ensemble +
+/// graph_control tool path, with no manual rewiring in between.
 ///
 /// Uses three independent graphs (one per step) rather than three
-/// sequential `graph_run` calls on one graph: `graph_run` returns as soon
+/// sequential `graph_control` calls on one graph: `graph_control` returns as soon
 /// as it spawns the background run task, so calling it twice on the same
 /// graph_id would race a real background run against the next resize.
-/// Three independent graphs keep each `graph_run` call deterministic
+/// Three independent graphs keep each `graph_control` call deterministic
 /// while still exercising resize-then-launch for every member count
 /// through the real tool path.
 #[tokio::test]
@@ -1025,8 +1113,7 @@ async fn graph_run_accepts_two_source_ensemble_through_grow_and_shrink() {
         for target in [resize_to, resize_again_to].into_iter().flatten() {
             let mut update = blank_ensemble_update(&ensemble_id);
             update.members = Some((0..target).map(|_| member()).collect());
-            let resized = handler
-                .graph_update_ensemble(Parameters(update))
+            let resized = call_graph_action(handler, "graph_ensemble", "update", params_id(update))
                 .await
                 .unwrap();
             assert!(!is_err(&resized), "resize to {target}: {}", text(&resized));
@@ -1047,20 +1134,24 @@ async fn graph_run_accepts_two_source_ensemble_through_grow_and_shrink() {
             .count();
         assert_eq!(entry_edges, 2 * final_count);
 
-        let result = handler
-            .graph_run(Parameters(GraphRunParams {
+        let result = call_graph_action(
+            handler,
+            "graph_control",
+            "run",
+            params_id(GraphRunParams {
                 graph_id: lp.id.clone(),
                 queue_id: None,
                 workdir: None,
                 idea: None,
                 sandbox: None,
                 start_node_id: None,
-            }))
-            .await
-            .unwrap();
+            }),
+        )
+        .await
+        .unwrap();
         assert!(
             !is_err(&result),
-            "graph_run must accept a fully-fanned-out {final_count}-member ensemble: {}",
+            "graph_control must accept a fully-fanned-out {final_count}-member ensemble: {}",
             text(&result)
         );
     }
@@ -1089,8 +1180,7 @@ async fn graph_update_ensemble_add_entry_from_completes_partial_source() {
 
     let mut add_alt = blank_ensemble_update(&ensemble_id);
     add_alt.add_entry_from = Some(alt_entry.clone());
-    let added = handler
-        .graph_update_ensemble(Parameters(add_alt))
+    let added = call_graph_action(&handler, "graph_ensemble", "update", params_id(add_alt))
         .await
         .unwrap();
     assert!(!is_err(&added), "{}", text(&added));
@@ -1119,8 +1209,7 @@ async fn graph_update_ensemble_add_entry_from_completes_partial_source() {
     // with "already an entry source".
     let mut repair = blank_ensemble_update(&ensemble_id);
     repair.add_entry_from = Some(alt_entry.clone());
-    let repaired = handler
-        .graph_update_ensemble(Parameters(repair))
+    let repaired = call_graph_action(&handler, "graph_ensemble", "update", params_id(repair))
         .await
         .unwrap();
     assert!(
@@ -1140,7 +1229,7 @@ async fn graph_update_ensemble_add_entry_from_completes_partial_source() {
     }
 }
 
-/// CB54 FR4/FR6c (handler level): graph_preflight refuses a partially-wired
+/// CB54 FR4/FR6c (handler level): graph_control refuses a partially-wired
 /// multi-source ensemble (a source that reaches some but not all members)
 /// before spending any probe quota, naming the source and the exact reach
 /// count.
@@ -1162,8 +1251,11 @@ async fn graph_preflight_refuses_partial_multi_source_ensemble() {
         infra_backoff_seconds: None,
     };
 
-    let created = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let created = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
@@ -1187,16 +1279,16 @@ async fn graph_preflight_refuses_partial_multi_source_ensemble() {
             on_fail_to: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&created), "{}", text(&created));
     let ensemble_id = extract_id(&created, "ensemble_id");
 
     let mut add_alt = blank_ensemble_update(&ensemble_id);
     add_alt.add_entry_from = Some(alt_entry.clone());
-    let added = handler
-        .graph_update_ensemble(Parameters(add_alt))
+    let added = call_graph_action(&handler, "graph_ensemble", "update", params_id(add_alt))
         .await
         .unwrap();
     assert!(!is_err(&added), "{}", text(&added));
@@ -1220,14 +1312,18 @@ async fn graph_preflight_refuses_partial_multi_source_ensemble() {
         .expect("alt_entry -> third member edge must exist before deletion");
     assert!(db.delete_graph_edge(&stale_edge.id).unwrap());
 
-    let result = handler
-        .graph_preflight(Parameters(GraphPreflightParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "preflight",
+        params_id(GraphPreflightParams {
             graph_id: lp.id.clone(),
             timeout_seconds: None,
             reviewer: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(
         is_err(&result),
         "partial multi-source ensemble must refuse preflight"
@@ -1240,7 +1336,7 @@ async fn graph_preflight_refuses_partial_multi_source_ensemble() {
     assert!(msg.contains("reaches 2 of 3 members"), "{msg}");
 }
 
-/// `graph_delete_ensemble` removes members, quorum and all their edges as
+/// `graph_ensemble` removes members, quorum and all their edges as
 /// one unit, leaves the rest of the graph intact, and strands no edge.
 #[tokio::test]
 async fn graph_delete_ensemble_removes_members_quorum_and_edges() {
@@ -1258,12 +1354,16 @@ async fn graph_delete_ensemble_removes_members_quorum_and_edges() {
         .chain(std::iter::once(details.ensemble.join_node_id.clone()))
         .collect();
 
-    let deleted = handler
-        .graph_delete_ensemble(Parameters(GraphDeleteEnsembleParams {
+    let deleted = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "delete",
+        params_id(GraphDeleteEnsembleParams {
             ensemble_id: ensemble_id.clone(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&deleted), "{}", text(&deleted));
 
     for node_id in &owned {
@@ -1284,10 +1384,14 @@ async fn graph_delete_ensemble_removes_members_quorum_and_edges() {
     }
 
     // Deleting twice reports not-found instead of succeeding silently.
-    let again = handler
-        .graph_delete_ensemble(Parameters(GraphDeleteEnsembleParams { ensemble_id }))
-        .await
-        .unwrap();
+    let again = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "delete",
+        params_id(GraphDeleteEnsembleParams { ensemble_id }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&again));
 }
 
@@ -1305,12 +1409,16 @@ async fn graph_delete_ensemble_refused_while_graph_running() {
 
     db.update_graph_status(&lp.id, GraphStatus::Running, None, None)
         .unwrap();
-    let refused = handler
-        .graph_delete_ensemble(Parameters(GraphDeleteEnsembleParams {
+    let refused = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "delete",
+        params_id(GraphDeleteEnsembleParams {
             ensemble_id: ensemble_id.clone(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&refused));
     assert!(text(&refused).contains("running"), "{}", text(&refused));
     assert!(db.get_ensemble_details(&ensemble_id).unwrap().is_some());
@@ -1319,8 +1427,7 @@ async fn graph_delete_ensemble_refused_while_graph_running() {
     // Entry rewiring is a topology change too — refused while running.
     let mut update = blank_ensemble_update(&ensemble_id);
     update.from_node = Some(entry.clone());
-    let rewired = handler
-        .graph_update_ensemble(Parameters(update))
+    let rewired = call_graph_action(&handler, "graph_ensemble", "update", params_id(update))
         .await
         .unwrap();
     assert!(is_err(&rewired));
@@ -1353,8 +1460,7 @@ async fn graph_update_ensemble_chains_quorum_into_another_ensemble() {
     // Chain: implementers' quorum passes straight into the reviewers.
     let mut chain = blank_ensemble_update(&implementers);
     chain.on_pass_to = Some(reviewers.clone());
-    let chained = handler
-        .graph_update_ensemble(Parameters(chain))
+    let chained = call_graph_action(&handler, "graph_ensemble", "update", params_id(chain))
         .await
         .unwrap();
     assert!(!is_err(&chained), "{}", text(&chained));
@@ -1385,29 +1491,36 @@ async fn graph_update_ensemble_chains_quorum_into_another_ensemble() {
     .expect("chained ensembles must validate");
 
     // The chained-into ensemble cannot be deleted while targeted.
-    let blocked = handler
-        .graph_delete_ensemble(Parameters(GraphDeleteEnsembleParams {
+    let blocked = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "delete",
+        params_id(GraphDeleteEnsembleParams {
             ensemble_id: reviewers.clone(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&blocked));
     assert!(text(&blocked).contains("routes its exit into it"));
 
     // Unchain, then the deletion goes through.
     let mut unchain = blank_ensemble_update(&implementers);
     unchain.on_pass_to = Some(end.clone());
-    let unchained = handler
-        .graph_update_ensemble(Parameters(unchain))
+    let unchained = call_graph_action(&handler, "graph_ensemble", "update", params_id(unchain))
         .await
         .unwrap();
     assert!(!is_err(&unchained), "{}", text(&unchained));
-    let deleted = handler
-        .graph_delete_ensemble(Parameters(GraphDeleteEnsembleParams {
+    let deleted = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "delete",
+        params_id(GraphDeleteEnsembleParams {
             ensemble_id: reviewers.clone(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&deleted), "{}", text(&deleted));
     assert!(db.get_ensemble_details(&reviewers).unwrap().is_none());
 }

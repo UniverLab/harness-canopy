@@ -294,7 +294,7 @@ pub struct CleanPlan {
     /// Anonymous leaked dirs proven safe: dangling gitdir + older than 2 h —
     /// deleted in soft mode.
     pub untracked_leaks: Vec<PathBuf>,
-    /// CM46: `graph_events` rows older than the graph-event retention window,
+    /// CM46: the graph event-log rows older than the graph-event retention window,
     /// for graphs that are not running.
     pub graph_event_deletions: usize,
     /// CM46: the RFC3339 cutoff the `graph_event_deletions` count was computed
@@ -319,7 +319,7 @@ impl CleanPlan {
     }
 
     /// Database rows this plan removes: `interactive_sessions` (soft mode's
-    /// original row-level deletion) plus CM46's aged-out `graph_events`.
+    /// original row-level deletion) plus CM46's aged-out graph event-log rows.
     /// `--hard`'s cascade counts are tracked separately in
     /// [`HardCascadeTarget::counts`].
     pub fn deleted_row_count(&self) -> usize {

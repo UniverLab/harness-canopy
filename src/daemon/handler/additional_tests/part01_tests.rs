@@ -158,7 +158,7 @@ fn validate_spec_workdir_root_path() {
 fn validate_not_join_kind_join_returns_error_with_actionable_message() {
     let err = validate_not_join_kind(GraphNodeKind::Join).unwrap_err();
     assert!(err.contains("engine-managed"), "{err}");
-    assert!(err.contains("graph_add_ensemble"), "{err}");
+    assert!(err.contains("graph_ensemble"), "{err}");
 }
 
 // ── validate_edge_condition edge cases ────────────────────────
@@ -301,7 +301,7 @@ fn node_copy_note_wired_mentions_both_ids() {
 #[test]
 fn node_copy_note_unwired_suggests_wiring_tool() {
     let note = node_copy_note("src", "dst", false);
-    assert!(note.contains("graph_add_edge"));
+    assert!(note.contains("graph_edge"));
     assert!(note.contains("entry_from_node") || note.contains("on_pass_to"));
 }
 
@@ -507,7 +507,7 @@ fn graph_run_status_guard_running_error_names_graph() {
 #[test]
 fn graph_run_status_guard_completed_error_names_reset() {
     let err = graph_run_status_guard("l", GraphStatus::Completed).unwrap_err();
-    assert!(err.contains("graph_reset"), "{err}");
+    assert!(err.contains("graph_control"), "{err}");
 }
 
 // ── validate_spec_deletable: no graph_id ───────────────────────

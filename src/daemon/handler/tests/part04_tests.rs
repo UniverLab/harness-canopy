@@ -96,7 +96,7 @@ fn validate_node_kind_rejects_invalid() {
 fn validate_not_join_kind_rejects_join() {
     let err = validate_not_join_kind(GraphNodeKind::Join).unwrap_err();
     assert!(err.contains("engine-managed"), "{err}");
-    assert!(err.contains("graph_add_ensemble"), "{err}");
+    assert!(err.contains("graph_ensemble"), "{err}");
 }
 
 #[test]
@@ -373,7 +373,7 @@ fn spec_summary_json_includes_completed_via_when_set() {
         spec_end_dirty_paths: None,
         spec_committed_head: None,
         workdir: None,
-        completed_via: Some("graph_reset".to_string()),
+        completed_via: Some("graph_control".to_string()),
         completed_via_reason: None,
         completed_via_at: None,
         spec_type: None,
@@ -381,7 +381,7 @@ fn spec_summary_json_includes_completed_via_when_set() {
         spec_code: None,
     };
     let json = spec_summary_json(&spec, true);
-    assert_eq!(json["completed_via"], "graph_reset");
+    assert_eq!(json["completed_via"], "graph_control");
 }
 
 // ── blueprint_json ──────────────────────────────────────────────
@@ -552,7 +552,7 @@ fn node_copy_note_unwired() {
     assert!(note.contains("src-2"), "{note}");
     assert!(note.contains("new-2"), "{note}");
     assert!(note.contains("NO"), "{note}");
-    assert!(note.contains("graph_add_edge"), "{note}");
+    assert!(note.contains("graph_edge"), "{note}");
 }
 
 // ── build_graph_update_response / build_spec_update_response ──

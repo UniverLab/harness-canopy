@@ -1,7 +1,7 @@
 //! `canopy graph install`: fetch a published graph from the catalogue,
 //! review what it runs, ask for confirmation, and import it — one command
 //! from ref to local graph. Like `import`, this changes graph state, so it
-//! delegates to the daemon's `graph_install` MCP tool rather than writing to
+//! delegates to the daemon's `graph_edit` MCP tool rather than writing to
 //! the database directly: first without `accept` to get the review, then
 //! with `accept: true` after the user confirmed.
 
@@ -51,13 +51,13 @@ pub(super) fn handle_graph_install(port_override: Option<u16>, args: InstallArgs
 /// The full install flow, with `tty` and the answer reader injected so tests
 /// can drive it:
 ///
-/// 1. call `graph_install` without `accept` — the daemon fetches, validates
+/// 1. call `graph_edit` without `accept` — the daemon fetches, validates
 ///    and returns the review, writing nothing;
 /// 2. print the summary (`--json` prints the review as JSON, the question
 ///    goes to stderr so stdout stays machine-readable);
 /// 3. ask `Install <name> from <source>? [y/N]` unless `--yes` — no TTY and
 ///    no `--yes` refuses after printing the summary;
-/// 4. call `graph_install` again with `accept: true` and print the report.
+/// 4. call `graph_edit` again with `accept: true` and print the report.
 pub(crate) fn run_install(
     port_override: Option<u16>,
     args: InstallArgs,
@@ -81,7 +81,8 @@ pub(crate) fn run_install(
             .to_string(),
     };
     let mut payload = install_args(&reference, &workdir, name.as_deref(), overwrite_presets);
-    let text = crate::daemon::cli_daemon::call_tool(port_override, "graph_install", &payload)?;
+    payload["action"] = serde_json::json!("install");
+    let text = crate::daemon::cli_daemon::call_tool(port_override, "graph_edit", &payload)?;
 
     // A response without `needs_review` carries no review (e.g. a daemon
     // that installed in one step): print it as the report it is.
@@ -120,7 +121,7 @@ pub(crate) fn run_install(
     })?;
 
     payload["accept"] = serde_json::json!(true);
-    let text = crate::daemon::cli_daemon::call_tool(port_override, "graph_install", &payload)?;
+    let text = crate::daemon::cli_daemon::call_tool(port_override, "graph_edit", &payload)?;
     print_final(&text, json)
 }
 
@@ -161,7 +162,7 @@ fn print_final(text: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// The `graph_install` arguments for a CLI invocation — without `accept`,
+/// The `graph_edit` arguments for a CLI invocation — without `accept`,
 /// so the daemon returns the review first.
 fn install_args(
     reference: &str,
@@ -179,7 +180,7 @@ fn install_args(
     args
 }
 
-/// Human-readable lines for a `graph_install` report: graph id and name,
+/// Human-readable lines for a `graph_edit` report: graph id and name,
 /// workdir, presets written, and the agent nodes still needing a
 /// platform/model with the next command to assign them.
 fn install_report_lines(report: &serde_json::Value) -> Vec<String> {
@@ -243,7 +244,7 @@ mod tests {
             "nodes_missing_platform": ["scout", "builder"],
             "missing_crews": [],
             "terminals": [],
-            "next": "Assign a platform/model to scout, builder with graph_update_node, then start the graph with graph_run (graph_id graph-1)."
+            "next": "Assign a platform/model to scout, builder with graph_node update, then start the graph with graph_control run (graph_id graph-1)."
         })
     }
 
@@ -320,9 +321,9 @@ mod tests {
             "{lines:?}"
         );
         assert!(
-            lines
-                .iter()
-                .any(|line| line.contains("graph_update_node") && line.contains("graph_run")),
+            lines.iter().any(
+                |line| line.contains("graph_node update") && line.contains("graph_control run")
+            ),
             "{lines:?}"
         );
     }
@@ -446,7 +447,7 @@ mod tests {
         .unwrap();
         let calls = fake.recorded_calls();
         assert_eq!(calls.len(), 1, "no review in the response, no second call");
-        assert_eq!(calls[0]["name"], "graph_install");
+        assert_eq!(calls[0]["name"], "graph_edit");
         assert_eq!(calls[0]["arguments"]["ref"], "acme/widgets/my-graph@v1.2");
         assert_eq!(calls[0]["arguments"]["workdir"], "/tmp/work");
         assert_eq!(calls[0]["arguments"]["name"], "renamed");

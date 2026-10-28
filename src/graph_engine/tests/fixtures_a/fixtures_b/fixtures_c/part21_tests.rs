@@ -571,7 +571,7 @@ async fn the_completion_message_never_reports_fewer_done_than_total() {
 
 // ── A directed run keeps the verdicts it does not touch ──────────────
 //
-// `graph_continue run_from_node` / `graph_run --from` accept a `completed`
+// `graph_control run_from_node` / `graph_control --from` accept a `completed`
 // spec (docs/graphs.md) and start past the bound specs before their target.
 // The live pick must therefore run the target whatever its status, and must
 // not rewrite an earlier `completed` into `skipped` — that erases the
@@ -579,7 +579,7 @@ async fn the_completion_message_never_reports_fewer_done_than_total() {
 // `Completed (n/m)` line with n < m that FR4 exists to make impossible.
 
 /// FR2/directed: the directed target runs even when its spec is already
-/// `completed` — the documented `graph_continue run_from_node` on a graph
+/// `completed` — the documented `graph_control run_from_node` on a graph
 /// whose specs are done. Handing a completed target to the terminal skip
 /// makes the operator's directed run silently do nothing.
 #[tokio::test]

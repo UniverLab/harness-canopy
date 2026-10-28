@@ -191,7 +191,7 @@ pub(crate) fn ensemble_roster_decision(
 
 /// Partition `members` by their pair's effective availability at `now`,
 /// querying each distinct platform at most once. A free function rather than
-/// a `GraphEngine` method so the engine's dispatch and `graph_preflight`
+/// a `GraphEngine` method so the engine's dispatch and `graph_control`
 /// partition through one code path.
 pub(crate) fn partition_members_by_availability(
     db: &Database,
@@ -224,7 +224,7 @@ pub(crate) fn partition_members_by_availability(
 /// Whether an ensemble would block at dispatch right now — requirement 5's
 /// rule evaluated read-only: no available member at all, or a `parallel`
 /// ensemble with fewer available members than `min_pass`. The engine's
-/// dispatch and `graph_preflight` share it, so the two can never disagree
+/// dispatch and `graph_control` share it, so the two can never disagree
 /// about which ensembles the roster makes unrunnable.
 pub(crate) fn ensemble_would_block(
     db: &Database,
@@ -529,7 +529,7 @@ mod tests {
         );
     }
 
-    /// The dispatch rule `graph_preflight` also consults: an ensemble with no
+    /// The dispatch rule `graph_control` also consults: an ensemble with no
     /// available member would block at dispatch.
     #[test]
     fn ensemble_with_no_available_member_would_block() {

@@ -178,7 +178,7 @@ const _: () = assert!(
 
 /// Default `spec_list` page derived from the budget, not a round number:
 /// `MCP_RESULT_BUDGET_BYTES / SPEC_LIST_COMPACT_ROW_BYTES`, clamped to
-/// `[1, 200]` like `graph_node_runs_list` (the quotient is 160, so the upper
+/// `[1, 200]` like `graph` (the quotient is 160, so the upper
 /// clamp is vacuous and the lower clamp is enforced by the const assert).
 pub(crate) const SPEC_LIST_DEFAULT_LIMIT: u32 =
     MCP_RESULT_BUDGET_BYTES as u32 / SPEC_LIST_COMPACT_ROW_BYTES as u32;
@@ -298,6 +298,7 @@ impl TaskTriggerHandler {
         router.merge(TaskTriggerHandler::tool_router_intel());
         router.merge(TaskTriggerHandler::tool_router_seeds_skills());
         router.merge(TaskTriggerHandler::tool_router_graphs());
+        router.merge(TaskTriggerHandler::tool_router_graph_tools());
         router.merge(TaskTriggerHandler::tool_router_graph_crew());
         router.merge(TaskTriggerHandler::tool_router_specs());
         router.merge(TaskTriggerHandler::tool_router_blueprints());
@@ -332,11 +333,7 @@ impl TaskTriggerHandler {
 /// `ToolRouter::disable_route`, because a disabled route also rejects
 /// `call()` (see `rmcp::handler::server::router::tool::ToolRouter::call`),
 /// which would break the alias's whole purpose.
-const HIDDEN_DEPRECATED_TOOLS: &[&str] = &[
-    "loop_complete_node",
-    "loop_report_blocker",
-    "loop_schedule_autorun",
-];
+const HIDDEN_DEPRECATED_TOOLS: &[&str] = &["loop_complete_node", "loop_report_blocker"];
 
 /// Fixed toolset handed to graph-node sessions so they stay far under the
 /// 128-tool provider cap regardless of how many tools canopy adds later.
@@ -429,6 +426,83 @@ impl ServerHandler for TaskTriggerHandler {
 
 #[cfg(test)]
 mod readme_docs_tool_sync;
+
+#[cfg(test)]
+mod removed_names_tests;
+
+/// Test-only dispatch seam: route a ported endpoint-test call through one of
+/// the six graph resource tools exactly as an MCP client would — the typed
+/// params struct is serialized, `action` is injected, and the call goes
+/// through the tool's own `Parameters<Value>` validation before reaching the
+/// same `_impl` logic the old one-operation tools held.
+#[cfg(test)]
+pub(crate) async fn call_graph_action<P: serde::Serialize>(
+    handler: &TaskTriggerHandler,
+    tool: &str,
+    action: &str,
+    params: P,
+) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+    let mut value = serde_json::to_value(&params).expect("params must serialize");
+    if value.is_null() {
+        value = serde_json::json!({});
+    }
+    // A typed `None` serializes as JSON `null`, which the wire cannot
+    // distinguish from an explicit "clear it" null on double-option fields
+    // — and every ported call site uses `None` for "omit". Explicit-null
+    // tests bypass this helper and send the raw JSON object.
+    if let Some(object) = value.as_object_mut() {
+        object.retain(|_, v| !v.is_null());
+    }
+    value["action"] = serde_json::Value::String(action.to_string());
+    let object = value.as_object().cloned().expect("object params");
+    let parameters =
+        crate::daemon::params_extract::Parameters(crate::daemon::actions::ActionObject(object));
+    match tool {
+        "graph" => handler.graph(parameters).await,
+        "graph_edit" => handler.graph_edit(parameters).await,
+        "graph_node" => handler.graph_node(parameters).await,
+        "graph_edge" => handler.graph_edge(parameters).await,
+        "graph_ensemble" => handler.graph_ensemble(parameters).await,
+        "graph_control" => handler.graph_control(parameters).await,
+        other => panic!("unknown graph resource tool '{other}'"),
+    }
+}
+
+/// Identity wrapper keeping call-site parentheses balanced when a ported
+/// test swaps `old_tool(Parameters(params))` for
+/// `call_graph_action(&handler, tool, action, params_id(params))`.
+#[cfg(test)]
+pub(crate) fn params_id<T>(value: T) -> T {
+    value
+}
+
+/// Explicit-null variant of [`call_graph_action`]: sends a raw JSON object
+/// (nulls kept — a null is a "clear it" instruction on double-option
+/// fields) through the tool's own dispatch.
+#[cfg(test)]
+pub(crate) async fn call_graph_action_value(
+    handler: &TaskTriggerHandler,
+    tool: &str,
+    action: &str,
+    mut params: serde_json::Value,
+) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+    params["action"] = serde_json::Value::String(action.to_string());
+    let object = params
+        .as_object()
+        .cloned()
+        .expect("object params must serialize");
+    let parameters =
+        crate::daemon::params_extract::Parameters(crate::daemon::actions::ActionObject(object));
+    match tool {
+        "graph" => handler.graph(parameters).await,
+        "graph_edit" => handler.graph_edit(parameters).await,
+        "graph_node" => handler.graph_node(parameters).await,
+        "graph_edge" => handler.graph_edge(parameters).await,
+        "graph_ensemble" => handler.graph_ensemble(parameters).await,
+        "graph_control" => handler.graph_control(parameters).await,
+        other => panic!("unknown graph resource tool '{other}'"),
+    }
+}
 
 #[cfg(test)]
 mod tests;

@@ -15,26 +15,21 @@ use crate::daemon::handler_helpers::record_config_change_if_running;
 use crate::daemon::handler_validate::{
     resolve_prefix_or_error, validate_non_empty, validate_topology_mutation_allowed,
 };
-use crate::daemon::helpers::{error_result, success_result};
+use crate::daemon::helpers::{error_result, success_result, EarlyReturn};
 use crate::daemon::params::*;
-use crate::daemon::params_extract::Parameters;
 use crate::db::ensembles::EnsembleJoinConfigPatch;
 use crate::db::Database;
 use crate::domain::graphs::{Ensemble, EnsembleDetails, EnsembleKind, GraphNode};
+use crate::or_early_return;
 use rmcp::model::CallToolResult;
-use rmcp::tool;
 use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
 
 #[tool_router(router = tool_router_ensemble_update, vis = "pub(crate)")]
 impl TaskTriggerHandler {
-    #[tool(
-        name = "graph_update_ensemble",
-        description = "Update an ensemble's shared prompt (propagated to every member without its own prompt_override), member list (platform/model/prompt_override/timeout_minutes/infra_retry_limit/infra_crash_max_seconds/infra_backoff_seconds — added/removed/replaced by position), quorum config (min_pass, straggler_timeout_minutes, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds — clearable with null like straggler_timeout_minutes), entry wiring (from_node/condition replaces every entry; add_entry_from/remove_entry_from add or detach one entry source so several nodes can enter with no relay), and/or exit wiring (on_pass_to/on_fail_to take a node id or another ensemble's id to chain quorums with no intermediate node) — all in one call, without touching individual member nodes directly. `commit_rights` sets whether this ensemble is the graph's designated committer (B37); editable on a running graph, same as prompt/quorum config. `crew` binds this ensemble to a crew by name, or `null` unbinds it (keeping the current members literal); a crew change is its own call and is never combined with the other fields. `mutex` replaces the named shared resources every member run holds (`[]` clears); editable on a running graph."
-    )]
-    pub(crate) async fn graph_update_ensemble(
+    pub(crate) async fn graph_update_ensemble_impl(
         &self,
-        Parameters(params): Parameters<GraphUpdateEnsembleParams>,
+        params: GraphUpdateEnsembleParams,
     ) -> Result<CallToolResult, McpError> {
         let ensemble_id = match resolve_prefix_or_error(
             &self.db,
@@ -59,244 +54,25 @@ impl TaskTriggerHandler {
             return Ok(error_result(&e));
         }
 
-        // CM49: binding/unbinding a crew is its own operation — never mixed
-        // with a literal member list or any other field (the arm below
-        // returns early, so a combined field would be silently dropped).
-        // `Some(name)` binds, `null` (`Some(None)`) unbinds and keeps the
-        // current rows as literal members.
-        if let Some(crew) = &params.crew {
-            if let Err(e) = reject_crew_update_combination(&params) {
-                return Ok(error_result(&e));
-            }
-            return match crew {
-                Some(name) => {
-                    if let Err(e) = validate_topology_mutation_allowed(
-                        &self.db,
-                        details.ensemble.spec_id.as_deref(),
-                        details.ensemble.graph_id.as_deref(),
-                    ) {
-                        return Ok(error_result(&e));
-                    }
-                    match self.db.bind_ensemble_to_crew(&ensemble_id, name) {
-                        Ok(_) => Ok(success_result(&format!(
-                            "Ensemble '{ensemble_id}' bound to crew '{name}'."
-                        ))),
-                        Err(e) => Ok(error_result(&e.to_string())),
-                    }
-                }
-                None => match self.db.unbind_ensemble_crew(&ensemble_id) {
-                    Ok(()) => Ok(success_result(&format!(
-                        "Ensemble '{ensemble_id}' unbound; its member rows are literal now."
-                    ))),
-                    Err(e) => Ok(error_result(&e.to_string())),
-                },
-            };
+        if let Some(result) = crew_binding_update_result(&self.db, &ensemble_id, &details, &params)
+        {
+            return Ok(result);
         }
 
-        if let Err(e) = validate_ensemble_infra_updates(&params) {
-            return Ok(error_result(&e));
-        }
-
-        if let Err(e) = crate::domain::validation::validate_mutex_list(
-            &format!("Ensemble '{}'", details.ensemble.name),
-            params.mutex.as_deref(),
-        ) {
-            return Ok(error_result(&e));
-        }
-
-        if let Err(e) = check_resulting_min_pass(&params, &details) {
-            return Ok(error_result(&e));
-        }
-
-        if params.kind.is_some() {
-            if let Err(e) = validate_topology_mutation_allowed(
-                &self.db,
-                details.ensemble.spec_id.as_deref(),
-                details.ensemble.graph_id.as_deref(),
-            ) {
-                return Ok(error_result(&e));
-            }
-        }
-
-        if let Some(prompt_template) = &params.prompt_template {
-            if let Err(e) = validate_non_empty(prompt_template.trim(), "Ensemble prompt_template") {
-                return Ok(error_result(&e));
-            }
-        }
-
-        let new_kind = match parse_ensemble_kind(&params) {
-            Ok(kind) => kind,
-            Err(e) => return Ok(e),
-        };
-        let effective_kind = new_kind.unwrap_or(details.ensemble.kind);
-
-        // FR3: a kind change may tighten the member-count ceiling (only
-        // switching TO parallel, max 8, can). Refuse before any write so a
-        // 12-member round_robin cannot silently become an over-cap parallel
-        // ensemble that only misbehaves at dispatch time. This checks the
-        // RESULTING member count (params.members when the call also resizes,
-        // else the stored count) against the effective kind — a combined
-        // shrink-to-8 plus switch-to-parallel is accepted, only an over-cap
-        // result is refused. A kind-only switch that leaves an over-cap
-        // count is refused here; a members-only resize to an over-cap count
-        // is refused below in `replace_ensemble_member_set` with the same
-        // message form.
-        let resulting_member_count = params
-            .members
-            .as_ref()
-            .map(|m| m.len())
-            .unwrap_or(details.members.len());
-        let caps =
-            crate::domain::graphs::MemberCaps::from_graphs(
-                &crate::domain::canopy_config::CanopyConfig::load(
-                    &crate::domain::prompts::canopy_dir(),
-                )
-                .graphs,
-            );
-        let (_, max_for_effective) = crate::domain::graphs::member_bounds(effective_kind, caps);
-        if resulting_member_count > max_for_effective {
-            return Ok(error_result(&crate::domain::graphs::member_count_message(
-                effective_kind,
-                caps,
-                resulting_member_count,
-            )));
-        }
+        let (new_kind, effective_kind) = or_early_return!(validate_ensemble_update_preamble(
+            &self.db, &params, &details
+        ));
 
         if let Err(e) = refuse_ensemble_kind_change(&params, effective_kind) {
             return Ok(error_result(&e));
         }
 
-        // Same write-time binding check as `graph_add_ensemble`, against the
-        // resulting shared prompt and member overrides: the scope already
-        // holds this ensemble (with its quorum name, so a self-reference gets
-        // the FR2 message) and its current member and quorum nodes.
-        if params.prompt_template.is_some() || params.members.is_some() {
-            let scope = crate::daemon::handler_templates::TemplateScope::load(
-                &self.db,
-                details.ensemble.spec_id.as_deref(),
-                details.ensemble.graph_id.as_deref(),
-            )
-            .map_err(internal_error)?;
-            let shared = params
-                .prompt_template
-                .as_deref()
-                .unwrap_or(&details.ensemble.prompt_template);
-            let owner = format!(
-                "Ensemble '{}' shared prompt template",
-                details.ensemble.name
-            );
-            if let Err(e) = crate::daemon::handler_templates::check_template_bindings(
-                &owner,
-                shared,
-                crate::graph_engine::AGENT_PROMPT_BINDINGS,
-                &scope.nodes,
-                &scope.ensembles,
-            ) {
-                return Ok(error_result(&e));
-            }
-            // The resulting overrides: the replacement set when members are
-            // resized, else the stored ones (a shared-prompt change still has
-            // to leave every override member spawnable).
-            let overrides: Vec<(usize, &str)> = match &params.members {
-                Some(new_members) => new_members
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, m)| m.prompt_override.as_deref().map(|t| (i, t)))
-                    .collect(),
-                None => details
-                    .members
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, m)| m.prompt_override.as_deref().map(|t| (i, t)))
-                    .collect(),
-            };
-            for (index, template) in overrides {
-                let member_owner = format!(
-                    "Ensemble '{}' member {} prompt override",
-                    details.ensemble.name,
-                    index + 1
-                );
-                if let Err(e) = crate::daemon::handler_templates::check_template_bindings(
-                    &member_owner,
-                    template,
-                    crate::graph_engine::AGENT_PROMPT_BINDINGS,
-                    &scope.nodes,
-                    &scope.ensembles,
-                ) {
-                    return Ok(error_result(&e));
-                }
-            }
-        }
+        let () = or_early_return!(check_update_template_bindings(&self.db, &params, &details));
 
-        let cleared_grace_fields_for_kind_change = self
-            .apply_ensemble_kind_change(&ensemble_id, &params, &mut details, new_kind)
-            .await?;
-
-        // CM28: `commit_rights` is CONFIG, not topology — free to edit on a
-        // running graph, same as prompt/quorum config, so deliberately not
-        // gated by `validate_topology_mutation_allowed`.
-        if let Some(commit_rights) = params.commit_rights {
-            self.db
-                .update_ensemble_commit_rights(&ensemble_id, commit_rights)
-                .map_err(internal_error)?;
-            details.ensemble.commit_rights = commit_rights;
-        }
-
-        // `mutex` is CONFIG like `commit_rights` (read fresh at each member
-        // dispatch) — editable on a running graph. `None` keeps, `[]` clears.
-        if let Some(mutex) = params.mutex.as_deref() {
-            self.db
-                .update_ensemble_mutex(&ensemble_id, mutex)
-                .map_err(internal_error)?;
-            details.ensemble.mutex = mutex.to_vec();
-        }
-
-        let owner_nodes = match (&details.ensemble.spec_id, &details.ensemble.graph_id) {
-            (Some(spec_id), None) => self.db.list_graph_nodes(spec_id).map_err(internal_error)?,
-            (None, Some(graph_id)) => self
-                .db
-                .list_graph_nodes_for_graph(graph_id)
-                .map_err(internal_error)?,
-            _ => Vec::new(),
-        };
-
-        match self
-            .apply_ensemble_member_updates(
-                &ensemble_id,
-                &params,
-                &mut details,
-                &owner_nodes,
-                effective_kind,
-            )
-            .await?
-        {
-            Ok(()) => {}
-            Err(e) => return Ok(e),
-        }
-
-        match self
-            .apply_ensemble_prompt_and_join_config(&ensemble_id, &params)
-            .await?
-        {
-            Ok(()) => {}
-            Err(e) => return Ok(e),
-        }
-
-        match self
-            .apply_ensemble_entry_wiring(&ensemble_id, &params, &mut details, &owner_nodes)
-            .await?
-        {
-            Ok(()) => {}
-            Err(e) => return Ok(e),
-        }
-
-        match self
-            .apply_ensemble_exit_wiring(&ensemble_id, &params, &details)
-            .await?
-        {
-            Ok(()) => {}
-            Err(e) => return Ok(e),
-        }
+        let cleared_grace_fields_for_kind_change = or_early_return!(
+            self.apply_ensemble_config_updates(&ensemble_id, &params, &mut details, new_kind)
+                .await
+        );
 
         let note = if cleared_grace_fields_for_kind_change {
             format!(
@@ -306,30 +82,83 @@ impl TaskTriggerHandler {
         } else {
             String::new()
         };
-        // CM46: an ensemble edit on a running graph is narratable history.
-        // A spec-owned ensemble carries no graph_id of its own — resolve the
-        // owning graph through its spec, the way node edits do, or the edit
-        // on a running graph's spec-owned ensemble would go unrecorded.
-        let owning_graph_id = details.ensemble.graph_id.clone().or_else(|| {
-            details.ensemble.spec_id.as_deref().and_then(|sid| {
-                self.db
-                    .get_graph_spec(sid)
-                    .ok()
-                    .flatten()
-                    .and_then(|spec| spec.graph_id)
-            })
-        });
-        record_config_change_if_running(
-            &self.db,
-            owning_graph_id.as_deref(),
-            details.ensemble.spec_id.as_deref(),
-            None,
-            "ensemble",
-            format!("Ensemble '{}' config updated.", details.ensemble.name),
-        );
+        record_ensemble_config_change(&self.db, &details.ensemble);
         Ok(success_result(&format!(
             "Ensemble '{ensemble_id}' updated.{note}"
         )))
+    }
+
+    async fn apply_ensemble_config_updates(
+        &self,
+        ensemble_id: &str,
+        params: &GraphUpdateEnsembleParams,
+        details: &mut EnsembleDetails,
+        new_kind: Option<EnsembleKind>,
+    ) -> Result<bool, EarlyReturn> {
+        let effective_kind = new_kind.unwrap_or(details.ensemble.kind);
+        let cleared_grace_fields_for_kind_change = self
+            .apply_ensemble_kind_change(ensemble_id, params, &mut *details, new_kind)
+            .await?;
+        // CM28: `commit_rights` is CONFIG, not topology — free to edit on a
+        // running graph, same as prompt/quorum config, so deliberately not
+        // gated by `validate_topology_mutation_allowed`.
+        if let Some(commit_rights) = params.commit_rights {
+            self.db
+                .update_ensemble_commit_rights(ensemble_id, commit_rights)
+                .map_err(internal_error)?;
+            details.ensemble.commit_rights = commit_rights;
+        }
+        // `mutex` is CONFIG like `commit_rights` (read fresh at each member
+        // dispatch) — editable on a running graph. `None` keeps, `[]` clears.
+        if let Some(mutex) = params.mutex.as_deref() {
+            self.db
+                .update_ensemble_mutex(ensemble_id, mutex)
+                .map_err(internal_error)?;
+            details.ensemble.mutex = mutex.to_vec();
+        }
+        let owner_nodes = match (&details.ensemble.spec_id, &details.ensemble.graph_id) {
+            (Some(spec_id), None) => self.db.list_graph_nodes(spec_id).map_err(internal_error)?,
+            (None, Some(graph_id)) => self
+                .db
+                .list_graph_nodes_for_graph(graph_id)
+                .map_err(internal_error)?,
+            _ => Vec::new(),
+        };
+        match self
+            .apply_ensemble_member_updates(
+                ensemble_id,
+                params,
+                &mut *details,
+                &owner_nodes,
+                effective_kind,
+            )
+            .await?
+        {
+            Ok(()) => {}
+            Err(e) => return Err(EarlyReturn::ok(e)),
+        }
+        match self
+            .apply_ensemble_prompt_and_join_config(ensemble_id, params)
+            .await?
+        {
+            Ok(()) => {}
+            Err(e) => return Err(EarlyReturn::ok(e)),
+        }
+        match self
+            .apply_ensemble_entry_wiring(ensemble_id, params, &mut *details, &owner_nodes)
+            .await?
+        {
+            Ok(()) => {}
+            Err(e) => return Err(EarlyReturn::ok(e)),
+        }
+        match self
+            .apply_ensemble_exit_wiring(ensemble_id, params, &*details)
+            .await?
+        {
+            Ok(()) => {}
+            Err(e) => return Err(EarlyReturn::ok(e)),
+        }
+        Ok(cleared_grace_fields_for_kind_change)
     }
 
     async fn apply_ensemble_kind_change(
@@ -579,6 +408,209 @@ impl TaskTriggerHandler {
         }
         Ok(Ok(()))
     }
+}
+
+/// CM49: binding/unbinding a crew is its own operation — never mixed
+/// with a literal member list or any other field. Returns `Some` result
+/// when `params.crew` is set (`Some(name)` binds, `null` unbinds and
+/// keeps the current rows as literal members).
+fn crew_binding_update_result(
+    db: &Database,
+    ensemble_id: &str,
+    details: &EnsembleDetails,
+    params: &GraphUpdateEnsembleParams,
+) -> Option<CallToolResult> {
+    let crew = params.crew.as_ref()?;
+    if let Err(e) = reject_crew_update_combination(params) {
+        return Some(error_result(&e));
+    }
+    Some(match crew {
+        Some(name) => {
+            if let Err(e) = validate_topology_mutation_allowed(
+                db,
+                details.ensemble.spec_id.as_deref(),
+                details.ensemble.graph_id.as_deref(),
+            ) {
+                return Some(error_result(&e));
+            }
+            match db.bind_ensemble_to_crew(ensemble_id, name) {
+                Ok(_) => {
+                    success_result(&format!("Ensemble '{ensemble_id}' bound to crew '{name}'."))
+                }
+                Err(e) => error_result(&e.to_string()),
+            }
+        }
+        None => match db.unbind_ensemble_crew(ensemble_id) {
+            Ok(()) => success_result(&format!(
+                "Ensemble '{ensemble_id}' unbound; its member rows are literal now."
+            )),
+            Err(e) => error_result(&e.to_string()),
+        },
+    })
+}
+
+/// Static validations before any write, plus the parsed kind change and
+/// the kind it results in.
+fn validate_ensemble_update_preamble(
+    db: &Database,
+    params: &GraphUpdateEnsembleParams,
+    details: &EnsembleDetails,
+) -> Result<(Option<EnsembleKind>, EnsembleKind), EarlyReturn> {
+    if let Err(e) = validate_ensemble_infra_updates(params) {
+        return Err(EarlyReturn::tool_error(&e));
+    }
+    if let Err(e) = crate::domain::validation::validate_mutex_list(
+        &format!("Ensemble '{}'", details.ensemble.name),
+        params.mutex.as_deref(),
+    ) {
+        return Err(EarlyReturn::tool_error(&e));
+    }
+    if let Err(e) = check_resulting_min_pass(params, details) {
+        return Err(EarlyReturn::tool_error(&e));
+    }
+    if params.kind.is_some() {
+        if let Err(e) = validate_topology_mutation_allowed(
+            db,
+            details.ensemble.spec_id.as_deref(),
+            details.ensemble.graph_id.as_deref(),
+        ) {
+            return Err(EarlyReturn::tool_error(&e));
+        }
+    }
+    if let Some(prompt_template) = &params.prompt_template {
+        if let Err(e) = validate_non_empty(prompt_template.trim(), "Ensemble prompt_template") {
+            return Err(EarlyReturn::tool_error(&e));
+        }
+    }
+    let new_kind = match parse_ensemble_kind(params) {
+        Ok(kind) => kind,
+        Err(e) => return Err(EarlyReturn::ok(e)),
+    };
+    let effective_kind = new_kind.unwrap_or(details.ensemble.kind);
+    // FR3: a kind change may tighten the member-count ceiling (only
+    // switching TO parallel, max 8, can). Refuse before any write so a
+    // 12-member round_robin cannot silently become an over-cap parallel
+    // ensemble that only misbehaves at dispatch time. This checks the
+    // RESULTING member count (params.members when the call also resizes,
+    // else the stored count) against the effective kind — a combined
+    // shrink-to-8 plus switch-to-parallel is accepted, only an over-cap
+    // result is refused. A kind-only switch that leaves an over-cap
+    // count is refused here; a members-only resize to an over-cap count
+    // is refused below in `replace_ensemble_member_set` with the same
+    // message form.
+    let resulting_member_count = params
+        .members
+        .as_ref()
+        .map(|m| m.len())
+        .unwrap_or(details.members.len());
+    let caps = crate::domain::graphs::MemberCaps::from_graphs(
+        &crate::domain::canopy_config::CanopyConfig::load(&crate::domain::prompts::canopy_dir())
+            .graphs,
+    );
+    let (_, max_for_effective) = crate::domain::graphs::member_bounds(effective_kind, caps);
+    if resulting_member_count > max_for_effective {
+        return Err(EarlyReturn::tool_error(
+            &crate::domain::graphs::member_count_message(
+                effective_kind,
+                caps,
+                resulting_member_count,
+            ),
+        ));
+    }
+    Ok((new_kind, effective_kind))
+}
+
+/// Same write-time binding check as `graph_ensemble`, against the
+/// resulting shared prompt and member overrides: the scope already
+/// holds this ensemble (with its quorum name, so a self-reference gets
+/// the FR2 message) and its current member and quorum nodes.
+fn check_update_template_bindings(
+    db: &Database,
+    params: &GraphUpdateEnsembleParams,
+    details: &EnsembleDetails,
+) -> Result<(), EarlyReturn> {
+    if params.prompt_template.is_none() && params.members.is_none() {
+        return Ok(());
+    }
+    let scope = crate::daemon::handler_templates::TemplateScope::load(
+        db,
+        details.ensemble.spec_id.as_deref(),
+        details.ensemble.graph_id.as_deref(),
+    )
+    .map_err(internal_error)?;
+    let shared = params
+        .prompt_template
+        .as_deref()
+        .unwrap_or(&details.ensemble.prompt_template);
+    let owner = format!(
+        "Ensemble '{}' shared prompt template",
+        details.ensemble.name
+    );
+    if let Err(e) = crate::daemon::handler_templates::check_template_bindings(
+        &owner,
+        shared,
+        crate::graph_engine::AGENT_PROMPT_BINDINGS,
+        &scope.nodes,
+        &scope.ensembles,
+    ) {
+        return Err(EarlyReturn::tool_error(&e));
+    }
+    // The resulting overrides: the replacement set when members are
+    // resized, else the stored ones (a shared-prompt change still has
+    // to leave every override member spawnable).
+    let overrides: Vec<(usize, &str)> = match &params.members {
+        Some(new_members) => new_members
+            .iter()
+            .enumerate()
+            .filter_map(|(i, m)| m.prompt_override.as_deref().map(|t| (i, t)))
+            .collect(),
+        None => details
+            .members
+            .iter()
+            .enumerate()
+            .filter_map(|(i, m)| m.prompt_override.as_deref().map(|t| (i, t)))
+            .collect(),
+    };
+    for (index, template) in overrides {
+        let member_owner = format!(
+            "Ensemble '{}' member {} prompt override",
+            details.ensemble.name,
+            index + 1
+        );
+        if let Err(e) = crate::daemon::handler_templates::check_template_bindings(
+            &member_owner,
+            template,
+            crate::graph_engine::AGENT_PROMPT_BINDINGS,
+            &scope.nodes,
+            &scope.ensembles,
+        ) {
+            return Err(EarlyReturn::tool_error(&e));
+        }
+    }
+    Ok(())
+}
+
+/// CM46: an ensemble edit on a running graph is narratable history.
+/// A spec-owned ensemble carries no graph_id of its own — resolve the
+/// owning graph through its spec, the way node edits do, or the edit
+/// on a running graph's spec-owned ensemble would go unrecorded.
+fn record_ensemble_config_change(db: &Database, ensemble: &Ensemble) {
+    let owning_graph_id = ensemble.graph_id.clone().or_else(|| {
+        ensemble.spec_id.as_deref().and_then(|sid| {
+            db.get_graph_spec(sid)
+                .ok()
+                .flatten()
+                .and_then(|spec| spec.graph_id)
+        })
+    });
+    record_config_change_if_running(
+        db,
+        owning_graph_id.as_deref(),
+        ensemble.spec_id.as_deref(),
+        None,
+        "ensemble",
+        format!("Ensemble '{}' config updated.", ensemble.name),
+    );
 }
 
 fn clear_stale_kind_fields(ensemble: &mut Ensemble, clear_straggler: bool, clear_grace: bool) {

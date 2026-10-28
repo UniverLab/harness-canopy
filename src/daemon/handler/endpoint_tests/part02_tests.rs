@@ -910,8 +910,11 @@ async fn graph_create_and_update_round_trip() {
     let (dir, db, handler) = endpoint_test_handler();
     let workdir = dir.path().to_string_lossy().to_string();
 
-    let created = handler
-        .graph_create(Parameters(GraphCreateParams {
+    let created = call_graph_action(
+        &handler,
+        "graph_edit",
+        "create",
+        params_id(GraphCreateParams {
             name: "My Graph".to_string(),
             description: None,
             workdir: workdir.clone(),
@@ -919,15 +922,19 @@ async fn graph_create_and_update_round_trip() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&created), "{}", text(&created));
     let graph_id = extract_id(&created, "graph_id");
     assert!(db.get_graph(&graph_id).unwrap().is_some());
 
-    let updated = handler
-        .graph_update(Parameters(GraphUpdateParams {
+    let updated = call_graph_action(
+        &handler,
+        "graph_edit",
+        "update",
+        params_id(GraphUpdateParams {
             graph_id: graph_id.clone(),
             name: Some("Renamed Graph".to_string()),
             description: None,
@@ -938,9 +945,10 @@ async fn graph_create_and_update_round_trip() {
             infra_node_id: None,
             allow_dirty_start: None,
             require_spec_type: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&updated), "{}", text(&updated));
     assert_eq!(
         db.get_graph(&graph_id).unwrap().unwrap().name,
@@ -952,8 +960,11 @@ async fn graph_create_and_update_round_trip() {
 async fn graph_update_response_names_remaining_events_when_run_active() {
     let (dir, db, handler) = endpoint_test_handler();
     let workdir = dir.path().to_string_lossy().to_string();
-    let created = handler
-        .graph_create(Parameters(GraphCreateParams {
+    let created = call_graph_action(
+        &handler,
+        "graph_edit",
+        "create",
+        params_id(GraphCreateParams {
             name: "Active Hook Graph".to_string(),
             description: None,
             workdir,
@@ -961,9 +972,10 @@ async fn graph_update_response_names_remaining_events_when_run_active() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&created), "{}", text(&created));
     let graph_id = extract_id(&created, "graph_id");
 
@@ -997,8 +1009,11 @@ async fn graph_update_response_names_remaining_events_when_run_active() {
             }],
         );
     }
-    let updated = handler
-        .graph_update(Parameters(GraphUpdateParams {
+    let updated = call_graph_action(
+        &handler,
+        "graph_edit",
+        "update",
+        params_id(GraphUpdateParams {
             graph_id: graph_id.clone(),
             name: None,
             description: None,
@@ -1009,9 +1024,10 @@ async fn graph_update_response_names_remaining_events_when_run_active() {
             infra_node_id: None,
             allow_dirty_start: None,
             require_spec_type: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&updated), "{}", text(&updated));
     let message = text(&updated);
     assert!(message.contains("remaining events"), "{message}");
@@ -1023,8 +1039,11 @@ async fn graph_update_response_names_remaining_events_when_run_active() {
 async fn graph_update_response_has_no_hook_note_without_active_run() {
     let (dir, _db, handler) = endpoint_test_handler();
     let workdir = dir.path().to_string_lossy().to_string();
-    let created = handler
-        .graph_create(Parameters(GraphCreateParams {
+    let created = call_graph_action(
+        &handler,
+        "graph_edit",
+        "create",
+        params_id(GraphCreateParams {
             name: "Idle Hook Graph".to_string(),
             description: None,
             workdir,
@@ -1032,9 +1051,10 @@ async fn graph_update_response_has_no_hook_note_without_active_run() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&created));
     let graph_id = extract_id(&created, "graph_id");
 
@@ -1058,8 +1078,11 @@ async fn graph_update_response_has_no_hook_note_without_active_run() {
             crew: None,
         }],
     );
-    let updated = handler
-        .graph_update(Parameters(GraphUpdateParams {
+    let updated = call_graph_action(
+        &handler,
+        "graph_edit",
+        "update",
+        params_id(GraphUpdateParams {
             graph_id: graph_id.clone(),
             name: None,
             description: None,
@@ -1070,9 +1093,10 @@ async fn graph_update_response_has_no_hook_note_without_active_run() {
             infra_node_id: None,
             allow_dirty_start: None,
             require_spec_type: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&updated), "{}", text(&updated));
     assert!(!text(&updated).contains("remaining events"));
 }
@@ -1081,8 +1105,11 @@ async fn graph_update_response_has_no_hook_note_without_active_run() {
 async fn graph_update_rejects_unknown_hook_placeholder_before_persisting() {
     let (dir, db, handler) = endpoint_test_handler();
     let workdir = dir.path().to_string_lossy().to_string();
-    let created = handler
-        .graph_create(Parameters(GraphCreateParams {
+    let created = call_graph_action(
+        &handler,
+        "graph_edit",
+        "create",
+        params_id(GraphCreateParams {
             name: "Hook Graph".to_string(),
             description: None,
             workdir,
@@ -1090,9 +1117,10 @@ async fn graph_update_rejects_unknown_hook_placeholder_before_persisting() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let graph_id = extract_id(&created, "graph_id");
 
     let mut valid_hooks = std::collections::BTreeMap::new();
@@ -1115,8 +1143,11 @@ async fn graph_update_rejects_unknown_hook_placeholder_before_persisting() {
             crew: None,
         }],
     );
-    let updated = handler
-        .graph_update(Parameters(GraphUpdateParams {
+    let updated = call_graph_action(
+        &handler,
+        "graph_edit",
+        "update",
+        params_id(GraphUpdateParams {
             graph_id: graph_id.clone(),
             name: None,
             description: None,
@@ -1127,9 +1158,10 @@ async fn graph_update_rejects_unknown_hook_placeholder_before_persisting() {
             infra_node_id: None,
             allow_dirty_start: None,
             require_spec_type: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&updated), "{}", text(&updated));
     let before = db.get_graph(&graph_id).unwrap().unwrap().hooks;
 
@@ -1153,8 +1185,11 @@ async fn graph_update_rejects_unknown_hook_placeholder_before_persisting() {
             crew: None,
         }],
     );
-    let rejected = handler
-        .graph_update(Parameters(GraphUpdateParams {
+    let rejected = call_graph_action(
+        &handler,
+        "graph_edit",
+        "update",
+        params_id(GraphUpdateParams {
             graph_id: graph_id.clone(),
             name: None,
             description: None,
@@ -1165,9 +1200,10 @@ async fn graph_update_rejects_unknown_hook_placeholder_before_persisting() {
             infra_node_id: None,
             allow_dirty_start: None,
             require_spec_type: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&rejected));
     let message = text(&rejected);
     assert!(message.contains("nodee"), "{message}");
@@ -1185,8 +1221,11 @@ async fn graph_update_rejects_unknown_hook_placeholder_before_persisting() {
 async fn graph_create_rejects_empty_name_and_relative_workdir() {
     let (_dir, _db, handler) = endpoint_test_handler();
 
-    let empty_name = handler
-        .graph_create(Parameters(GraphCreateParams {
+    let empty_name = call_graph_action(
+        &handler,
+        "graph_edit",
+        "create",
+        params_id(GraphCreateParams {
             name: "  ".to_string(),
             description: None,
             workdir: "/tmp".to_string(),
@@ -1194,13 +1233,17 @@ async fn graph_create_rejects_empty_name_and_relative_workdir() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&empty_name));
 
-    let bad_workdir = handler
-        .graph_create(Parameters(GraphCreateParams {
+    let bad_workdir = call_graph_action(
+        &handler,
+        "graph_edit",
+        "create",
+        params_id(GraphCreateParams {
             name: "Graph".to_string(),
             description: None,
             workdir: "relative/dir".to_string(),
@@ -1208,9 +1251,10 @@ async fn graph_create_rejects_empty_name_and_relative_workdir() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&bad_workdir));
     assert!(text(&bad_workdir).contains("absolute") || text(&bad_workdir).contains("exist"));
 }
@@ -1218,12 +1262,16 @@ async fn graph_create_rejects_empty_name_and_relative_workdir() {
 #[tokio::test]
 async fn graph_export_returns_error_for_unknown_graph() {
     let (_dir, _db, handler) = endpoint_test_handler();
-    let result = handler
-        .graph_export(Parameters(GraphExportParams {
+    let result = call_graph_action(
+        &handler,
+        "graph",
+        "export",
+        params_id(GraphExportParams {
             graph_id: "missing".to_string(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&result));
     assert!(text(&result).contains("not found"));
 }
@@ -1234,10 +1282,14 @@ async fn graph_export_always_includes_platform_and_model() {
     let workdir = dir.path().to_string_lossy().to_string();
     let (graph_id, ..) = build_simple_graph(&handler, &workdir, "Export Graph").await;
 
-    let exported = handler
-        .graph_export(Parameters(GraphExportParams { graph_id }))
-        .await
-        .unwrap();
+    let exported = call_graph_action(
+        &handler,
+        "graph",
+        "export",
+        params_id(GraphExportParams { graph_id }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&exported), "{}", text(&exported));
     let doc: serde_json::Value = serde_json::from_str(&raw_text(&exported)).unwrap();
     assert_eq!(doc["format_version"], 6);
@@ -1254,15 +1306,18 @@ async fn graph_export_always_includes_platform_and_model() {
     assert!(implementer["config"]["model"].is_null());
 }
 
-/// Decision 2's enforced consequence: `graph_add_node` doesn't itself
+/// Decision 2's enforced consequence: `graph_node` doesn't itself
 /// forbid two nodes sharing a name, so export must catch it — naming
 /// the offending node(s) rather than producing an ambiguous file.
 #[tokio::test]
 async fn graph_export_rejects_duplicate_node_names() {
     let (dir, _db, handler) = endpoint_test_handler();
     let workdir = dir.path().to_string_lossy().to_string();
-    let created = handler
-        .graph_create(Parameters(GraphCreateParams {
+    let created = call_graph_action(
+        &handler,
+        "graph_edit",
+        "create",
+        params_id(GraphCreateParams {
             name: "Dup Graph".to_string(),
             description: None,
             workdir,
@@ -1270,13 +1325,17 @@ async fn graph_export_rejects_duplicate_node_names() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let graph_id = extract_id(&created, "graph_id");
     for _ in 0..2 {
-        handler
-            .graph_add_node(Parameters(GraphAddNodeParams {
+        call_graph_action(
+            &handler,
+            "graph_node",
+            "add",
+            params_id(GraphAddNodeParams {
                 spec_id: None,
                 graph_id: Some(graph_id.clone()),
                 name: "dup".to_string(),
@@ -1285,15 +1344,20 @@ async fn graph_export_rejects_duplicate_node_names() {
                 blueprint: None,
                 node: None,
                 config_overrides: None,
-            }))
-            .await
-            .unwrap();
-    }
-
-    let result = handler
-        .graph_export(Parameters(GraphExportParams { graph_id }))
+            }),
+        )
         .await
         .unwrap();
+    }
+
+    let result = call_graph_action(
+        &handler,
+        "graph",
+        "export",
+        params_id(GraphExportParams { graph_id }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&result));
     assert!(text(&result).contains("dup"));
     assert!(text(&result).to_lowercase().contains("duplicate"));
@@ -1305,12 +1369,16 @@ async fn graph_import_creates_new_graph_and_reports_missing_platform() {
     let workdir = dir.path().to_string_lossy().to_string();
     let (source_graph_id, ..) = build_simple_graph(&handler, &workdir, "Source Graph").await;
 
-    let exported = handler
-        .graph_export(Parameters(GraphExportParams {
+    let exported = call_graph_action(
+        &handler,
+        "graph",
+        "export",
+        params_id(GraphExportParams {
             graph_id: source_graph_id,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let mut document: serde_json::Value = serde_json::from_str(&raw_text(&exported)).unwrap();
     // Simulate a v1-style unbound document: strip the harness bindings
     // the v2 export now always carries, so import must report them.
@@ -1322,14 +1390,18 @@ async fn graph_import_creates_new_graph_and_reports_missing_platform() {
         }
     }
 
-    let imported = handler
-        .graph_import(Parameters(GraphImportParams {
+    let imported = call_graph_action(
+        &handler,
+        "graph_edit",
+        "import",
+        params_id(GraphImportParams {
             document,
             workdir: workdir.clone(),
             name: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&imported), "{}", text(&imported));
     let body: serde_json::Value = serde_json::from_str(&raw_text(&imported)).unwrap();
     // The source graph itself is still named "Source Graph" in this same
@@ -1363,22 +1435,30 @@ async fn graph_import_name_param_overrides_document_name() {
     let (dir, _db, handler) = endpoint_test_handler();
     let workdir = dir.path().to_string_lossy().to_string();
     let (source_graph_id, ..) = build_simple_graph(&handler, &workdir, "Source Graph").await;
-    let exported = handler
-        .graph_export(Parameters(GraphExportParams {
+    let exported = call_graph_action(
+        &handler,
+        "graph",
+        "export",
+        params_id(GraphExportParams {
             graph_id: source_graph_id,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let document: serde_json::Value = serde_json::from_str(&raw_text(&exported)).unwrap();
 
-    let imported = handler
-        .graph_import(Parameters(GraphImportParams {
+    let imported = call_graph_action(
+        &handler,
+        "graph_edit",
+        "import",
+        params_id(GraphImportParams {
             document,
             workdir,
             name: Some("Custom Name".to_string()),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let body: serde_json::Value = serde_json::from_str(&raw_text(&imported)).unwrap();
     assert_eq!(body["name"], "Custom Name");
 }

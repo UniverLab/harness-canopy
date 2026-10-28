@@ -3,7 +3,7 @@
 //!
 //! A node document is `{format_version, name, kind, description?, config,
 //! preset?}`; `canopy graph validate` is its schema check (see
-//! `daemon::graph_validate`), and `graph_add_node`/`graph_add_ensemble` can
+//! `daemon::graph`), and `graph_node`/`graph_ensemble` can
 //! instantiate one by name instead of asking the caller for a full `config`.
 //! Installed copies live in `~/.canopy/nodes/<name>.json`; the six former
 //! builtin blueprints are embedded in the binary with `include_str!` and are

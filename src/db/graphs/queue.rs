@@ -45,7 +45,7 @@ impl Database {
     }
 
     /// Schedule a one-shot deferred resume for a *paused* graph at `at`: the
-    /// scheduler fires the `graph_continue` action `action` (defaults to
+    /// scheduler fires the `graph_control` action `action` (defaults to
     /// `retry_current_node` when `None`) once `at` is reached, but only if
     /// the graph is still `Paused` — see
     /// [`crate::domain::graphs::Graph::is_auto_continue_due`]. Distinct from
@@ -248,9 +248,9 @@ impl Database {
         Ok(rows > 0)
     }
 
-    /// Reset a graph back to `Draft` (the status `graph_run` accepts) and clear
+    /// Reset a graph back to `Draft` (the status `graph_control` accepts) and clear
     /// `completed_at`, so a `failed` or `completed` graph can be relaunched via
-    /// `graph_reset` + `graph_run` instead of being stuck forever.
+    /// `graph_control` + `graph_control` instead of being stuck forever.
     pub fn reset_graph_status(&self, graph_id: &str) -> Result<bool> {
         let conn = self
             .conn

@@ -9,8 +9,8 @@
 //! `list`/`info` already do — see [`resolve_graph`]) but then delegates the
 //! actual mutation to the daemon's MCP tool of the same name via
 //! `daemon::cli_daemon::call_tool`, never touching the database itself.
-//! This is the second surface for the operations `graph_import`/`graph_run`/
-//! `graph_pause`/`graph_continue`/`graph_reset`/`graph_schedule_autorun` already
+//! This is the second surface for the operations `graph_edit`/`graph_control`/
+//! `graph_control`/`graph_control`/`graph_control`/`graph_control` already
 //! expose over MCP — for when an MCP client can't reach them but the daemon
 //! and its database still can.
 
@@ -371,9 +371,10 @@ fn query_graph_events(
     if let Some(spec) = spec {
         args["spec_id"] = serde_json::json!(spec);
     }
-    let text = call_tool(port_override, "graph_events", &args)?;
+    args["action"] = serde_json::json!("events");
+    let text = call_tool(port_override, "graph", &args)?;
     let value: serde_json::Value = serde_json::from_str(&text)
-        .with_context(|| format!("unexpected graph_events response: {text}"))?;
+        .with_context(|| format!("unexpected graph events response: {text}"))?;
     Ok(value["events"].as_array().cloned().unwrap_or_default())
 }
 
@@ -472,8 +473,9 @@ fn handle_graph_run(
     if let Some(node) = from {
         args["start_node_id"] = serde_json::json!(node);
     }
+    args["action"] = serde_json::json!("run");
 
-    println!("{}", call_tool(port_override, "graph_run", &args)?);
+    println!("{}", call_tool(port_override, "graph_control", &args)?);
     Ok(())
 }
 
@@ -485,8 +487,8 @@ fn handle_graph_pause(db: &Database, port_override: Option<u16>, id_or_name: &st
         "{}",
         call_tool(
             port_override,
-            "graph_pause",
-            &serde_json::json!({ "graph_id": lp.id }),
+            "graph_control",
+            &serde_json::json!({ "action": "pause", "graph_id": lp.id }),
         )?
     );
     Ok(())
@@ -504,8 +506,9 @@ fn handle_graph_remove_spec(
         "{}",
         call_tool(
             port_override,
-            "graph_remove_spec",
+            "graph_edit",
             &serde_json::json!({
+                "action": "detach_spec",
                 "graph_id": lp.id,
                 "spec_id": spec_id,
             }),
@@ -533,12 +536,12 @@ fn handle_graph_continue(
             ));
         }
         let mut args = serde_json::json!({
-            "graph_id": lp.id, "action": "run_from_node", "node_id": node
+            "graph_id": lp.id, "action": "continue", "mode": "run_from_node", "node_id": node
         });
         if let Some(spec) = spec {
             args["spec_id"] = serde_json::json!(spec);
         }
-        println!("{}", call_tool(port_override, "graph_continue", &args)?);
+        println!("{}", call_tool(port_override, "graph_control", &args)?);
         return Ok(());
     }
 
@@ -561,8 +564,8 @@ fn handle_graph_continue(
         "{}",
         call_tool(
             port_override,
-            "graph_continue",
-            &serde_json::json!({ "graph_id": lp.id, "action": action }),
+            "graph_control",
+            &serde_json::json!({ "graph_id": lp.id, "action": "continue", "mode": action }),
         )?
     );
     Ok(())
@@ -592,7 +595,8 @@ fn handle_graph_reset(
         args["clear_notes"] = serde_json::json!(true);
     }
 
-    println!("{}", call_tool(port_override, "graph_reset", &args)?);
+    args["action"] = serde_json::json!("reset");
+    println!("{}", call_tool(port_override, "graph_control", &args)?);
     Ok(())
 }
 
@@ -645,7 +649,7 @@ fn handle_graph_export(db: &Database, id_or_name: &str, output: Option<&str>) ->
 
 /// Import creates a new graph, which needs the daemon's own side effects
 /// (project path registration, trigger activation) — so unlike `export`
-/// this delegates to the daemon's `graph_import` MCP tool rather than
+/// this delegates to the daemon's `graph_edit` MCP tool rather than
 /// writing to the database directly (see module doc: every mutation goes
 /// through the daemon).
 fn handle_graph_import(
@@ -657,7 +661,7 @@ fn handle_graph_import(
     let raw = std::fs::read_to_string(path).with_context(|| format!("could not read '{path}'"))?;
     // Validated locally first so a malformed file (bad JSON, missing
     // format_version) fails fast with a clear message instead of a round
-    // trip to the daemon — `graph_import` re-validates it anyway (decision
+    // trip to the daemon — `graph_edit` re-validates it anyway (decision
     // 5), so this is a UX nicety, not the source of truth.
     let document = crate::domain::graph_transfer::parse_export_document_str(&raw)
         .map_err(|e| anyhow!("'{path}': {e}"))?;
@@ -675,8 +679,9 @@ fn handle_graph_import(
     if let Some(name) = name {
         args["name"] = serde_json::json!(name);
     }
+    args["action"] = serde_json::json!("import");
 
-    println!("{}", call_tool(port_override, "graph_import", &args)?);
+    println!("{}", call_tool(port_override, "graph_edit", &args)?);
     Ok(())
 }
 
@@ -713,11 +718,10 @@ fn handle_graph_autorun(
     } else {
         serde_json::json!({ "graph_id": lp.id, "quota_reset_message": quota_reset_message })
     };
+    let mut args = args;
+    args["action"] = serde_json::json!("schedule_autorun");
 
-    println!(
-        "{}",
-        call_tool(port_override, "graph_schedule_autorun", &args)?
-    );
+    println!("{}", call_tool(port_override, "graph_control", &args)?);
     Ok(())
 }
 
@@ -1749,7 +1753,7 @@ mod tests {
 
         let calls = fake.recorded_calls();
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0]["name"], "graph_run");
+        assert_eq!(calls[0]["name"], "graph_control");
         assert_eq!(calls[0]["arguments"]["graph_id"], "graph-1");
         assert_eq!(calls[0]["arguments"]["queue_id"], "q1");
     }
@@ -1777,7 +1781,7 @@ mod tests {
         handle_graph_pause(&db, Some(port), "graph-1").expect("pause should succeed");
 
         let calls = fake.recorded_calls();
-        assert_eq!(calls[0]["name"], "graph_pause");
+        assert_eq!(calls[0]["name"], "graph_control");
         assert_eq!(calls[0]["arguments"]["graph_id"], "graph-1");
     }
 
@@ -1794,7 +1798,9 @@ mod tests {
             .expect("should succeed");
 
         let calls = fake.recorded_calls();
-        assert_eq!(calls[0]["arguments"]["action"], "retry_current_node");
+        assert_eq!(calls[0]["name"], "graph_control");
+        assert_eq!(calls[0]["arguments"]["action"], "continue");
+        assert_eq!(calls[0]["arguments"]["mode"], "retry_current_node");
     }
 
     #[test]
@@ -1810,7 +1816,9 @@ mod tests {
             .expect("should succeed");
 
         let calls = fake.recorded_calls();
-        assert_eq!(calls[0]["arguments"]["action"], "skip_next_spec");
+        assert_eq!(calls[0]["name"], "graph_control");
+        assert_eq!(calls[0]["arguments"]["action"], "continue");
+        assert_eq!(calls[0]["arguments"]["mode"], "skip_next_spec");
     }
 
     #[test]
@@ -1852,7 +1860,7 @@ mod tests {
         .expect("reset should succeed");
 
         let calls = fake.recorded_calls();
-        assert_eq!(calls[0]["name"], "graph_reset");
+        assert_eq!(calls[0]["name"], "graph_control");
         assert_eq!(calls[0]["arguments"]["graph_id"], "graph-1");
         assert_eq!(
             calls[0]["arguments"]["specs"],
@@ -1930,7 +1938,7 @@ mod tests {
         assert!(err.to_string().contains("No graph matches"));
     }
 
-    /// Import delegates to the daemon's `graph_import` MCP tool — unlike
+    /// Import delegates to the daemon's `graph_edit` MCP tool — unlike
     /// export, it has state-changing side effects (project registration,
     /// trigger activation) that only the running daemon can perform.
     #[test]
@@ -1965,7 +1973,7 @@ mod tests {
         .expect("import should succeed");
 
         let calls = fake.recorded_calls();
-        assert_eq!(calls[0]["name"], "graph_import");
+        assert_eq!(calls[0]["name"], "graph_edit");
         assert_eq!(calls[0]["arguments"]["workdir"], "/tmp/target");
         assert_eq!(calls[0]["arguments"]["name"], "Custom Name");
         assert_eq!(calls[0]["arguments"]["document"]["name"], "Shared Graph");

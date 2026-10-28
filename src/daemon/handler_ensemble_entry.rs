@@ -47,7 +47,7 @@ pub(crate) fn resolve_entry_source(
     }
     if let Err(e) = validate_node_not_ensemble_owned(db, &id) {
         return Err(format!(
-            "Cannot wire an ensemble's entry from an ensemble-owned node: {e} To chain ensembles, route the upstream ensemble's exit into this one instead (graph_update_ensemble on_pass_to/on_fail_to accept an ensemble id)."
+            "Cannot wire an ensemble's entry from an ensemble-owned node: {e} To chain ensembles, route the upstream ensemble's exit into this one instead (graph_ensemble on_pass_to/on_fail_to accept an ensemble id)."
         ));
     }
     Ok(id)
@@ -160,7 +160,7 @@ impl TaskTriggerHandler {
     ) -> Result<Result<(), CallToolResult>, McpError> {
         // ── entry wiring: from_node/condition (replace), add_entry_from,
         // remove_entry_from ─────────────────────────────────────────────
-        // Entry edges are the only ensemble wiring `graph_add_edge` can never
+        // Entry edges are the only ensemble wiring `graph_edge` can never
         // express (members refuse direct edges), so they are all managed here
         // as one unit: the caller names source nodes, never member ids.
         if params.from_node.is_none()
@@ -182,7 +182,7 @@ impl TaskTriggerHandler {
             && (params.add_entry_from.is_some() || params.remove_entry_from.is_some())
         {
             return Ok(Err(error_result(
-                "from_node replaces every entry edge on its own; pass add_entry_from/remove_entry_from in a separate graph_update_ensemble call.",
+                "from_node replaces every entry edge on its own; pass add_entry_from/remove_entry_from in a separate graph_ensemble call.",
             )));
         }
         if params.condition.is_some() && params.from_node.is_none() {

@@ -30,7 +30,7 @@ pub(crate) struct FetchedNode {
 }
 
 /// Fetch `reference` from the catalogue at `base` and validate it exactly as
-/// `graph_validate` would. Nothing is written: the caller builds the review
+/// `graph` would. Nothing is written: the caller builds the review
 /// first, and only [`write_node_install`] (after the user accepted) touches
 /// disk.
 pub(crate) fn fetch_node_document(base: &str, reference: &str) -> Result<FetchedNode, String> {
@@ -51,7 +51,7 @@ pub(crate) fn node_from_body(
     assemble_node(&parsed, reference, body, source_url)
 }
 
-/// Validate `body` exactly as `graph_validate` would and parse it for the
+/// Validate `body` exactly as `graph` would and parse it for the
 /// import path — the tail [`fetch_node_document`] and [`node_from_body`]
 /// share.
 fn assemble_node(

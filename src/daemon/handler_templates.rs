@@ -6,9 +6,9 @@
 //! (Designer is an ensemble, not a node) was accepted at write time, and at
 //! run time every member refused to spawn one after another, leaving the
 //! ensemble with no verdict and the graph blocked. Every authoring path —
-//! `graph_add_node`, `graph_update_node`, `graph_add_ensemble`,
-//! `graph_update_ensemble`, `graph_import` — now runs this check before
-//! persisting, and `graph_preflight` reports templates written before the fix
+//! `graph_node`, `graph_node`, `graph_ensemble`,
+//! `graph_ensemble`, `graph_edit` — now runs this check before
+//! persisting, and `graph_control` reports templates written before the fix
 //! as `graph_warnings`.
 //!
 //! Only literal templates stored in a config are checked (`prompt_template`,
@@ -262,7 +262,7 @@ pub(crate) fn check_node_templates(
     Ok(())
 }
 
-/// Write-time binding check for `graph_add_node`: the new node's templates
+/// Write-time binding check for `graph_node`: the new node's templates
 /// against its target scope, with its own name already bindable — at spawn
 /// the node is part of the graph's node names, so a self-reference renders
 /// "(not yet executed)" instead of refusing.
@@ -283,7 +283,7 @@ pub(crate) fn check_new_node(
     check_node_templates(kind, config, name, &node_names, &scope.ensembles)
 }
 
-/// Write-time binding check for `graph_update_node`: the merged config with
+/// Write-time binding check for `graph_node`: the merged config with
 /// the effective kind/name, against the node's own scope.
 pub(crate) fn check_updated_node(
     db: &Database,

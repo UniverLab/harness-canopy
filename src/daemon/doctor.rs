@@ -506,7 +506,7 @@ fn format_hits(names: &[StaleNameHit]) -> String {
 }
 
 /// CB93 FR4: when every affected graph is completed/failed, archiving is the
-/// clean remediation (`graph_archive`, reversible with `graph_restore`); the
+/// clean remediation (`graph_edit archive`, reversible with `graph_edit restore`); the
 /// scan already skips archived graphs, so archiving actually clears the
 /// report. Any graph in another status (or any scheduled agent) keeps the
 /// edit-to-3.x-names suggestion instead — archiving would not be enough.
@@ -519,7 +519,7 @@ fn stale_names_suggestion(report: &StaleNameReport, total: usize) -> String {
     if all_graphs_terminal && report.agents.is_empty() {
         format!(
             "{total} stale 2.x name(s) found in completed/failed graphs (listed above) — those \
-             graphs can be archived with `graph_archive` (reversible with `graph_restore`); the \
+             graphs can be archived with `graph_edit archive` (reversible with `graph_edit restore`); the \
              scan already skips archived graphs."
         )
     } else {

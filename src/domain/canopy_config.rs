@@ -70,7 +70,7 @@ pub struct CanopyConfig {
     /// single spec may fail with a genuine verdict before the graph is marked
     /// blocked instead of being left to burn another quota window on a
     /// relaunch. Persisted per spec (`graph_specs.cross_run_attempts`) so it
-    /// survives `graph_reset`, a relaunch, and a daemon restart — unlike the
+    /// survives `graph_control`, a relaunch, and a daemon restart — unlike the
     /// per-node in-run iteration budget, which resets with every execution.
     /// Lower than that per-node budget by design: these are whole attempts,
     /// not node cycles.
@@ -137,7 +137,7 @@ pub struct CanopyConfig {
     #[serde(default)]
     pub pinned_panel_face: Option<String>,
 
-    /// CM46: how long a graph's durable event log (`graph_events`) is kept
+    /// CM46: how long a graph durable event log is kept
     /// before `canopy clean` prunes it, in days. Separate from
     /// `clean.retention_days` (which governs sessions and files) so the two
     /// histories age independently.

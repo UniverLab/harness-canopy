@@ -151,7 +151,7 @@ fn sample_run(id: &str, agent_id: &str, status: RunStatus) -> RunLog {
     }
 }
 
-// ── graph_create / graph_update / graph tool handlers ─────
+// ── graph_edit / graph_edit / graph tool handlers ─────
 
 fn valid_spec_description() -> String {
     "<spec>\n  <objective>Ship the feature.</objective>\n  <functional_requirements>Does the thing.</functional_requirements>\n  <non_functional_requirements>Is fast.</non_functional_requirements>\n  <constraints>None extra.</constraints>\n  <guidelines>Follow house style.</guidelines>\n  <in_scope>This change.</in_scope>\n  <out_of_scope>Everything else.</out_of_scope>\n</spec>"
@@ -183,8 +183,11 @@ async fn build_simple_graph(
     workdir: &str,
     graph_name: &str,
 ) -> (String, String, String, String) {
-    let created = handler
-        .graph_create(Parameters(GraphCreateParams {
+    let created = call_graph_action(
+        handler,
+        "graph_edit",
+        "create",
+        params_id(GraphCreateParams {
             name: graph_name.to_string(),
             description: Some("A shareable design".to_string()),
             workdir: workdir.to_string(),
@@ -192,13 +195,17 @@ async fn build_simple_graph(
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let graph_id = extract_id(&created, "graph_id");
 
-    let n1 = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let n1 = call_graph_action(
+        handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: None,
             graph_id: Some(graph_id.clone()),
             name: "implementer".to_string(),
@@ -207,13 +214,17 @@ async fn build_simple_graph(
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let n1_id = extract_id(&n1, "node_id");
 
-    let n2 = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let n2 = call_graph_action(
+        handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: None,
             graph_id: Some(graph_id.clone()),
             name: "gate".to_string(),
@@ -222,13 +233,17 @@ async fn build_simple_graph(
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let n2_id = extract_id(&n2, "node_id");
 
-    let n3 = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let n3 = call_graph_action(
+        handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: None,
             graph_id: Some(graph_id.clone()),
             name: "committer".to_string(),
@@ -237,23 +252,28 @@ async fn build_simple_graph(
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let n3_id = extract_id(&n3, "node_id");
 
     for (from, to, condition) in [(&n1_id, &n2_id, "always"), (&n2_id, &n3_id, "always")] {
-        let edge = handler
-            .graph_add_edge(Parameters(GraphAddEdgeParams {
+        let edge = call_graph_action(
+            handler,
+            "graph_edge",
+            "add",
+            params_id(GraphAddEdgeParams {
                 spec_id: None,
                 graph_id: Some(graph_id.clone()),
                 from_node: from.clone(),
                 to_node: to.clone(),
                 condition: condition.to_string(),
                 route: None,
-            }))
-            .await
-            .unwrap();
+            }),
+        )
+        .await
+        .unwrap();
         assert!(!is_err(&edge), "{}", text(&edge));
     }
 
@@ -287,8 +307,11 @@ async fn graph_with_unexited_quorum(
     db.insert_graph_node(&entry).unwrap();
     db.insert_graph_node(&arbiter).unwrap();
 
-    let added = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let added = call_graph_action(
+        handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             spec_id: None,
             graph_id: Some(lp.id.clone()),
@@ -330,9 +353,10 @@ async fn graph_with_unexited_quorum(
             on_fail_to: None,
             commit_rights: None,
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&added), "{}", text(&added));
 
     let ensembles = db.list_ensembles_for_graph(&lp.id).unwrap();
@@ -346,7 +370,7 @@ async fn graph_with_unexited_quorum(
     )
 }
 
-/// Run `graph_preflight` and return the `graph_warnings` array. Shared by
+/// Run `graph_control` and return the `graph_warnings` array. Shared by
 /// the quorum tests so each can assert the baseline warning first: a
 /// negative test that only checks for silence would still pass if the
 /// warning never existed at all.
@@ -354,14 +378,18 @@ async fn preflight_warnings(
     handler: &TaskTriggerHandler,
     graph_id: &str,
 ) -> Vec<serde_json::Value> {
-    let result = handler
-        .graph_preflight(Parameters(GraphPreflightParams {
+    let result = call_graph_action(
+        handler,
+        "graph_control",
+        "preflight",
+        params_id(GraphPreflightParams {
             graph_id: graph_id.to_string(),
             timeout_seconds: Some(5),
             reviewer: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&result), "{}", text(&result));
     let body: serde_json::Value = serde_json::from_str(&raw_text(&result)).unwrap();
     body["graph_warnings"]
@@ -479,11 +507,14 @@ fn init_git_repo(path: &std::path::Path) {
     run(&["commit", "-q", "-m", "init"]);
 }
 
-// ── graph_add_edge / graph_update_edge ──────────────────────────
+// ── graph_edge / graph_edge ──────────────────────────
 
 async fn add_agent_node(handler: &TaskTriggerHandler, spec_id: &str, name: &str) -> String {
-    let result = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let result = call_graph_action(
+        handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: Some(spec_id.to_string()),
             graph_id: None,
             name: name.to_string(),
@@ -492,9 +523,10 @@ async fn add_agent_node(handler: &TaskTriggerHandler, spec_id: &str, name: &str)
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     extract_id(&result, "node_id")
 }
 
@@ -518,8 +550,11 @@ async fn add_cb52_ensemble(
         infra_crash_max_seconds: None,
         infra_backoff_seconds: None,
     };
-    let result = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let result = call_graph_action(
+        handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: Some(spec_id.to_string()),
@@ -543,9 +578,10 @@ async fn add_cb52_ensemble(
             on_fail_to: on_fail_to.map(str::to_string),
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&result), "{}", text(&result));
     extract_id(&result, "ensemble_id")
 }
@@ -569,7 +605,7 @@ fn two_routes() -> serde_json::Value {
     ])
 }
 
-// ── graph_node_runs_list / graph_node_run_get ────────────────────
+// ── graph / graph ────────────────────
 
 fn insert_named_node(db: &Database, spec_id: &str, name: &str, position: i64) -> GraphNode {
     let node = GraphNode {
@@ -668,8 +704,11 @@ async fn add_two_member_ensemble(
     from_node: &str,
     on_pass_to: &str,
 ) -> String {
-    let created = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let created = call_graph_action(
+        handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: Some(spec_id.to_string()),
@@ -712,9 +751,10 @@ async fn add_two_member_ensemble(
             on_fail_to: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&created), "{}", text(&created));
     extract_id(&created, "ensemble_id")
 }
@@ -770,8 +810,11 @@ async fn build_two_source_ensemble_graph(
         infra_crash_max_seconds: None,
         infra_backoff_seconds: None,
     };
-    let created = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let created = call_graph_action(
+        handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
@@ -795,15 +838,15 @@ async fn build_two_source_ensemble_graph(
             on_fail_to: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&created), "{}", text(&created));
     let ensemble_id = extract_id(&created, "ensemble_id");
     let mut add_alt = blank_ensemble_update(&ensemble_id);
     add_alt.add_entry_from = Some(alt_entry.clone());
-    let added = handler
-        .graph_update_ensemble(Parameters(add_alt))
+    let added = call_graph_action(handler, "graph_ensemble", "update", params_id(add_alt))
         .await
         .unwrap();
     assert!(!is_err(&added), "{}", text(&added));
@@ -1053,8 +1096,11 @@ async fn build_crew_ensemble(
     workdir: &str,
     graph_name: &str,
 ) -> (String, String) {
-    let created = handler
-        .graph_create(Parameters(GraphCreateParams {
+    let created = call_graph_action(
+        handler,
+        "graph_edit",
+        "create",
+        params_id(GraphCreateParams {
             name: graph_name.to_string(),
             description: None,
             workdir: workdir.to_string(),
@@ -1062,12 +1108,16 @@ async fn build_crew_ensemble(
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let graph_id = extract_id(&created, "graph_id");
-    let kickoff = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let kickoff = call_graph_action(
+        handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: None,
             graph_id: Some(graph_id.clone()),
             name: "kickoff".to_string(),
@@ -1076,12 +1126,16 @@ async fn build_crew_ensemble(
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let kickoff_id = extract_id(&kickoff, "node_id");
-    let downstream = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let downstream = call_graph_action(
+        handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: None,
             graph_id: Some(graph_id.clone()),
             name: "downstream".to_string(),
@@ -1090,12 +1144,16 @@ async fn build_crew_ensemble(
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let downstream_id = extract_id(&downstream, "node_id");
-    let ensemble = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let ensemble = call_graph_action(
+        handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: None,
@@ -1118,9 +1176,10 @@ async fn build_crew_ensemble(
             straggler_timeout_minutes: None,
             quorum_grace_minutes: None,
             crew: Some("eager".to_string()),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&ensemble), "{}", text(&ensemble));
     (graph_id, extract_id(&ensemble, "ensemble_id"))
 }
@@ -1132,8 +1191,11 @@ async fn build_literal_ensemble(
     workdir: &str,
     graph_name: &str,
 ) -> (String, String) {
-    let created = handler
-        .graph_create(Parameters(GraphCreateParams {
+    let created = call_graph_action(
+        handler,
+        "graph_edit",
+        "create",
+        params_id(GraphCreateParams {
             name: graph_name.to_string(),
             description: None,
             workdir: workdir.to_string(),
@@ -1141,12 +1203,16 @@ async fn build_literal_ensemble(
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let graph_id = extract_id(&created, "graph_id");
-    let kickoff = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let kickoff = call_graph_action(
+        handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: None,
             graph_id: Some(graph_id.clone()),
             name: "kickoff".to_string(),
@@ -1155,12 +1221,16 @@ async fn build_literal_ensemble(
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let kickoff_id = extract_id(&kickoff, "node_id");
-    let downstream = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let downstream = call_graph_action(
+        handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: None,
             graph_id: Some(graph_id.clone()),
             name: "downstream".to_string(),
@@ -1169,9 +1239,10 @@ async fn build_literal_ensemble(
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let downstream_id = extract_id(&downstream, "node_id");
     let members = vec![
         crate::daemon::params::EnsembleMemberParams {
@@ -1193,8 +1264,11 @@ async fn build_literal_ensemble(
             infra_backoff_seconds: None,
         },
     ];
-    let ensemble = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let ensemble = call_graph_action(
+        handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: None,
@@ -1217,9 +1291,10 @@ async fn build_literal_ensemble(
             straggler_timeout_minutes: None,
             quorum_grace_minutes: None,
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&ensemble), "{}", text(&ensemble));
     (graph_id, extract_id(&ensemble, "ensemble_id"))
 }

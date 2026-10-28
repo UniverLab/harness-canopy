@@ -203,7 +203,7 @@ pub(crate) fn redact_secrets(text: &str) -> String {
 }
 
 /// Recursively redacts every string leaf of a node run's stored `input`/
-/// `output` before it crosses the MCP boundary via `graph_node_run_get`.
+/// `output` before it crosses the MCP boundary via `graph`.
 pub(crate) fn redact_sensitive_value(value: &serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::String(s) => serde_json::Value::String(redact_secrets(s)),

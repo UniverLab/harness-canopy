@@ -1,6 +1,6 @@
 use super::*;
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphNodeRunsListParams {
     /// Graph ID whose node runs to list.
     pub graph_id: String,
@@ -19,14 +19,14 @@ pub struct GraphNodeRunsListParams {
     pub compact: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphNodeRunGetParams {
-    /// The node run ID (the `id` field from graph_node_runs_list's results).
+    /// The node run ID (the `id` field from graph's results).
     pub run_id: String,
 }
 
 /// CM46: read one graph's durable event log.
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphEventsParams {
     /// Graph ID (or unambiguous id prefix) whose events to read.
     pub graph_id: String,
@@ -45,7 +45,7 @@ pub struct GraphEventsParams {
     pub include_payload: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphPreflightReviewer {
     /// CLI platform to run the reviewer with (e.g. "opencode", "claude").
     pub platform: String,
@@ -54,7 +54,7 @@ pub struct GraphPreflightReviewer {
     pub model: Option<String>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphPreflightParams {
     /// Graph ID to preflight.
     pub graph_id: String,
@@ -69,25 +69,25 @@ pub struct GraphPreflightParams {
     pub reviewer: Option<GraphPreflightReviewer>,
 }
 
-#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphListParams {
     /// Optional absolute workdir filter.
     pub workdir: Option<String>,
     /// Include archived graphs in the results. Defaults to `false` — the
     /// same "browsing" view as the TUI's main Graphs list, which excludes
     /// archived graphs. An archived graph is still reachable directly by id
-    /// via `graph_get` regardless of this flag.
+    /// via `graph` regardless of this flag.
     #[serde(default)]
     pub include_archived: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphArchiveParams {
     /// Graph ID to archive.
     pub graph_id: String,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SessionListParams {
     /// Exact session id to look up. Omit to list live sessions.
     pub session_id: Option<String>,
@@ -95,7 +95,7 @@ pub struct SessionListParams {
     pub limit: Option<u32>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ScheduledSendCreateParams {
     /// The prompt text to deliver. Plain text only — delivered to the target
     /// session exactly as typed, the same as a promptbuilder send.
@@ -108,25 +108,25 @@ pub struct ScheduledSendCreateParams {
     pub in_seconds: Option<i64>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ScheduledSendListParams {
     /// Session id to list pending scheduled sends for. Omit for your own session.
     pub session_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ScheduledSendCancelParams {
     /// Scheduled send id, as returned by scheduled_send_create.
     pub id: String,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphRestoreParams {
     /// Graph ID to restore from the archive back to the main list.
     pub graph_id: String,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphRunParams {
     /// Graph ID.
     pub graph_id: String,
@@ -153,7 +153,7 @@ pub struct GraphRunParams {
     pub start_node_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphPauseParams {
     /// Graph ID.
     pub graph_id: String,
@@ -164,13 +164,13 @@ pub struct GraphPauseParams {
     pub interrupt: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphResetParams {
     /// Graph ID.
     pub graph_id: String,
     /// Specific spec IDs to reset to pending, even if already completed.
     /// Omit to reset every spec that isn't already completed, leaving
-    /// completed specs untouched so graph_run resumes at the first pending one.
+    /// completed specs untouched so graph_control run resumes at the first pending one.
     pub specs: Option<Vec<String>>,
     /// When true, delete every spec_note of the reset specs. Default false
     /// preserves notes across a reset (they are keyed by spec, not run).
@@ -178,12 +178,14 @@ pub struct GraphResetParams {
     pub clear_notes: bool,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphContinueParams {
     /// Graph ID.
     pub graph_id: String,
     /// Continue mode: retry_current_node, skip_next_spec or run_from_node.
-    pub action: String,
+    /// (Named `mode`, not `action`: `action` is the dispatch key of the
+    /// `graph_control` tool, and one JSON object cannot carry it twice.)
+    pub mode: String,
     /// Action argument for `run_from_node`: the node (id, unambiguous id prefix,
     /// node name, or ensemble name) the directed run starts at.
     #[serde(default)]
@@ -194,7 +196,7 @@ pub struct GraphContinueParams {
     pub spec_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphScheduleAutorunParams {
     /// Graph ID.
     pub graph_id: String,
@@ -214,20 +216,7 @@ pub struct GraphScheduleAutorunParams {
     pub quota_reset_message: Option<String>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LoopScheduleAutorunParams {
-    /// Graph ID. Also accepts `loop_id` — the 2.x parameter name, kept
-    /// working by `loop_schedule_autorun` (deprecated alias for
-    /// `graph_schedule_autorun`, CB68).
-    #[serde(alias = "loop_id")]
-    pub graph_id: String,
-    /// Same as `graph_schedule_autorun`'s `at`.
-    pub at: Option<String>,
-    /// Same as `graph_schedule_autorun`'s `quota_reset_message`.
-    pub quota_reset_message: Option<String>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphScheduleContinueParams {
     /// Graph ID.
     pub graph_id: String,
@@ -236,12 +225,14 @@ pub struct GraphScheduleContinueParams {
     /// cleared. Omit (or pass null) to cancel any pending auto-continue
     /// schedule instead of setting a new one.
     pub at: Option<String>,
-    /// `graph_continue` action to apply when it fires: retry_current_node or
+    /// `graph_control continue` mode to apply when it fires: retry_current_node or
     /// skip_next_spec. Defaults to retry_current_node when omitted.
-    pub action: Option<String>,
+    /// (Named `mode`, not `action`: `action` is the dispatch key of the
+    /// `graph_control` tool, and one JSON object cannot carry it twice.)
+    pub mode: Option<String>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphCompleteNodeParams {
     /// The exact node run ID this report belongs to (given to you in the
     /// [REPORTING] section of your prompt). Required so a report can never
@@ -257,7 +248,7 @@ pub struct GraphCompleteNodeParams {
     pub summary: String,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphReportBlockerParams {
     /// The exact node run ID this report belongs to (given to you in the
     /// [REPORTING] section of your prompt). Required so a report can never
@@ -272,7 +263,7 @@ pub struct GraphReportBlockerParams {
 /// CM47: write or replace one spec note. Exactly one of `run_id` / `spec_id`
 /// must be present: `run_id` resolves the owner from the active run (the
 /// node, or that node's ensemble), `spec_id` alone writes the `operator` note.
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SpecNoteWriteParams {
     /// The active run's id (from the [REPORTING] block). Refused when the run
     /// is no longer running. Mutually exclusive with `spec_id`.
@@ -284,7 +275,7 @@ pub struct SpecNoteWriteParams {
 }
 
 /// CM47: read every note of one spec, newest first.
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SpecNotesGetParams {
     /// Spec ID (or unambiguous id prefix) whose notes to read.
     pub spec_id: String,

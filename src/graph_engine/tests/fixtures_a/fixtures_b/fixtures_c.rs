@@ -246,7 +246,7 @@ fn sample_routes() -> Vec<RouterRoute> {
     ]
 }
 
-// ── CB31: graph_pause waits for the running node and spends no iteration ──
+// ── CB31: graph_control waits for the running node and spends no iteration ──
 
 /// A one-check-node graph whose command is `cmd` (node passes iff it exits
 /// 0). Returns an Arc'd engine ready to dispatch in the background.

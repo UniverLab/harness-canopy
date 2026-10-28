@@ -3,7 +3,7 @@
 //! An ensemble node document travels without harnesses: its `members` carry
 //! per-member prompt overrides and timeouts, never a `platform` or a
 //! `model` — which harness runs each member is the installer's decision,
-//! supplied to `graph_add_ensemble`'s own `members` parameter. Parsing is
+//! supplied to `graph_ensemble`'s own `members` parameter. Parsing is
 //! strict (`deny_unknown_fields`), so a document that pins a harness is
 //! refused instead of silently carrying a binding the caller cannot see.
 
@@ -29,7 +29,7 @@ pub struct EnsembleNodeMember {
 }
 
 /// An `ensemble` node document's `config`: the shared prompt, the member
-/// templates, and every shape field `graph_add_ensemble` accepts.
+/// templates, and every shape field `graph_ensemble` accepts.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnsembleNodeConfig {

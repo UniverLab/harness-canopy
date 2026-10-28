@@ -312,7 +312,7 @@ fn setup_multi_resume_cli_home(
 }
 
 /// Builds a real ensemble unit (kickoff -> N members -> join -> pass/fail
-/// exits) directly against the DB, the same shape `graph_add_ensemble`
+/// exits) directly against the DB, the same shape `graph_ensemble`
 /// assembles in one MCP call — but constructed here node-by-node so
 /// engine tests can drive it through the real `execute_ensemble` path
 /// via `GraphEngine::run_graph` without spinning up the MCP server.
@@ -1051,7 +1051,7 @@ fn insert_kind_ensemble(
 /// only on the ensemble row, which dispatch never reads for this).
 ///
 /// CB67 deviation from the original plan draft: `straggler_timeout_minutes`
-/// is `Some(0)` (the pre-CB67 legacy shape — `graph_add_ensemble` used to
+/// is `Some(0)` (the pre-CB67 legacy shape — `graph_ensemble` used to
 /// accept it on any kind), not `None`. FR1 requires sequential dispatch
 /// to never consult that field: with `None` the pre-fix fallback
 /// (`effective_straggler_timeout_minutes()`) equals `timeout_minutes`,

@@ -1341,7 +1341,7 @@ fn copy_note_wired() {
 #[test]
 fn copy_note_unwired() {
     let n = node_copy_note("src", "dst", false);
-    assert!(n.contains("Unwired") && n.contains("graph_add_edge"));
+    assert!(n.contains("Unwired") && n.contains("graph_edge"));
 }
 
 #[test]

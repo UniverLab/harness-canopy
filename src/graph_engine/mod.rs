@@ -246,7 +246,7 @@ pub(crate) enum SpecExecutionOutcome {
     Failed(String),
     /// This spec's in-flight node run was terminated out from under this
     /// dispatch by the engine itself — a newer attempt at the same node
-    /// (B42), a concurrent `graph_reset`, `graph_pause`, iteration-budget
+    /// (B42), a concurrent `graph_control`, `graph_control`, iteration-budget
     /// exhaustion, or `fail_graph`'s own sweep — see
     /// `run_was_terminated_out_of_band`. Pure engine bookkeeping, not a node
     /// failure: the dispatch that owned the run stops silently — it routes
@@ -262,12 +262,12 @@ pub(crate) enum SpecExecutionOutcome {
     /// ([`GraphEngine::spec_attempt_limit`]); the spec is left `Failed`, which
     /// every resume validation refuses (`retry_current_node` and
     /// `skip_next_spec` both, and the scheduler's auto-continue applies the
-    /// same two) — the way back in is an explicit `graph_reset` (naming the
-    /// spec also clears its cross-run count) followed by a fresh `graph_run`
+    /// same two) — the way back in is an explicit `graph_control` (naming the
+    /// spec also clears its cross-run count) followed by a fresh `graph_control`
     /// dispatch, and
     /// (b) FR4 — a parallel/round-robin ensemble exited with no verdict and no
     /// `Error` edge to absorb it; that spec is left `Interrupted`
-    /// (resumable via `retry_current_node` without a `graph_reset`) so an
+    /// (resumable via `retry_current_node` without a `graph_control`) so an
     /// operator can rewire or retry the ensemble. In both cases the `String` is
     /// the blocker text, and the graph is paused with exactly one `on_blocked`
     /// firing per transition.

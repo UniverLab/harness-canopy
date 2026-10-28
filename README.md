@@ -118,7 +118,7 @@ docs/ is published at univerlab.org/canopy/docs and holds user documentation onl
 - **Interactive PTY Agents** — Each agent runs in a dedicated pseudo-terminal with full vt100 emulation, 24-bit color support, cursor positioning, and interactive applications.
 - **Terminal Sessions** — Raw shell sessions with per-session command history (TOML-backed), cross-session autocomplete search, and Warp-like input mode for efficient command entry.
 - **Background Agents** — Cron-scheduled and file-watcher-triggered agents with configurable timeouts, automatic retries, execution logging (5 MB rotation), and per-run status tracking.
-- **Platform Liveness Probe** — `agent_probe` tests whether a platform+model pair can actually respond before graph_run spends real quota on it. Probes the exact pair a node would use, not just the platform default.
+- **Platform Liveness Probe** — `agent_probe` tests whether a platform+model pair can actually respond before the `graph_control` run action spends real quota on it. Probes the exact pair a node would use, not just the platform default.
 - **Seed Identity System** — Persistent, evolvable agent identities stored as structured TOML at `~/.canopy/seeds/<id>/identity.toml`. Each seed has a unique name, family, behavioral directives, and personality traits. Binded sessions receive the seed's prompt injection automatically. The `evolve_identity` MCP tool lets agents refine themselves over time. 4 KB size cap, case-insensitive name uniqueness, and mandatory field validation.
 - **Seed Nursery** — Collaborative workspace for creating new seed identities. Creates a temporary directory with a draft `identity.toml` and CLI-specific instruction files (e.g. `CLAUDE.md`, `AGENTS.md`) that guide the agent to interview the user and define the seed's personality. Validates and registers the seed on completion.
 - **Context Transfer** — Seamlessly transfer conversation context, prompts, and output between agents while preserving session state and scrollback history.
@@ -192,7 +192,7 @@ docs/ is published at univerlab.org/canopy/docs and holds user documentation onl
 
 ---
 
-## MCP Tools (122)
+## MCP Tools (93)
 
 Graph-node sessions (agent and ensemble nodes launched by the graph engine) receive a fixed node profile of 18 tools via `CANOPY_MCP_PROFILE=node`, so every node stays well under the 128-tool cap of OpenAI-compatible providers. All other sessions — the orchestrator, check nodes, hooks, TUI, subagents, and background agents — keep the full tool list.
 
@@ -203,7 +203,7 @@ Graph-node sessions (agent and ensemble nodes launched by the graph engine) rece
 | `intelligence_get_context`, `intelligence_upsert`, `intelligence_search`, `intelligence_graph_walk`, `intelligence_list_projects`, `intelligence_link_projects`, `intelligence_delete_node`, `intelligence_delete_relation` | **Intelligence** (8) |
 | `get_identity`, `evolve_identity`, `create_seed`, `list_seeds`, `remove_seed` | **Seed identity** (5) |
 | `skill_list`, `skill_get` | **Skills** (2) |
-| `graph_create`, `graph_update`, `graph_add_spec`, `graph_update_spec`, `graph_remove_spec`, `graph_add_node`, `graph_update_node`, `graph_add_edge`, `graph_update_edge`, `graph_delete_edge`, `graph_delete_node`, `graph_add_ensemble`, `graph_update_ensemble`, `graph_delete_ensemble`, `crew_list`, `crew_get`, `crew_create`, `crew_update`, `crew_delete`, `config_list`, `config_get`, `config_set`, `config_reset`, `graph_get`, `graph_list`, `graph_crew`, `graph_run`, `graph_reset`, `graph_schedule_autorun`, `graph_pause`, `graph_continue`, `graph_complete_node`, `graph_report_blocker`, `graph_export`, `graph_import`, `graph_install`, `graph_validate`, `graph_archive`, `graph_restore`, `graph_node_runs_list`, `graph_node_run_get`, `graph_events`, `graph_copy_node`, `graph_copy_ensemble`, `graph_audit_node_configs`, `graph_schedule_continue`, `graph_preflight` | **Graph engine** (47) |
+| `graph`, `graph_edit`, `graph_node`, `graph_edge`, `graph_ensemble`, `graph_control`, `crew_list`, `crew_get`, `crew_create`, `crew_update`, `crew_delete`, `config_list`, `config_get`, `config_set`, `config_reset`, `graph_crew`, `graph_complete_node`, `graph_report_blocker` | **Graph engine** (18) |
 | `roster_set`, `roster_clear`, `roster_list`, `roster_check` | **Availability roster** (4) |
 | `mutex` | **Named mutexes** (1) |
 | `spec_create`, `spec_list`, `spec_update`, `spec_delete`, `spec_set_status`, `spec_section_get`, `spec_convert`, `spec_note_write`, `spec_notes_get` | **Spec backlog** (9) |

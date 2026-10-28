@@ -1,6 +1,6 @@
 //! CM48: the pure availability decision for one platform/model pair.
 //!
-//! Both the engine (at dispatch) and `graph_preflight` call
+//! Both the engine (at dispatch) and `graph_control` call
 //! [`effective_state`], so the two can never disagree about whether a pair is
 //! runnable. It reads nothing and writes nothing: callers pass the roster rows
 //! they already queried, and an injected `now` makes expiry deterministic

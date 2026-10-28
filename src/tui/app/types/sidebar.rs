@@ -159,7 +159,7 @@ pub(crate) struct GraphSidebarMeta {
     pub last_run_label: String,
     pub blocked: bool,
     /// `"resumes 5m"`-style label when the graph has a pending
-    /// `graph_schedule_autorun`, `None` otherwise.
+    /// `graph_control`, `None` otherwise.
     pub autorun_label: Option<String>,
 }
 

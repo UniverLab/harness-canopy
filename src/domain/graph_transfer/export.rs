@@ -349,7 +349,7 @@ pub(super) fn export_ensemble_members(details: &EnsembleDetails) -> Vec<GraphExp
 ///
 /// CM49: a crew-bound ensemble whose members are not materialized yet has no
 /// fan-out edges; its extra entry sources come from `pending_entry_sources`
-/// instead (the rows `graph_import` recorded), with owned sources skipped
+/// instead (the rows `graph_edit` recorded), with owned sources skipped
 /// exactly as the edge-derived path skips them.
 pub(super) fn export_ensemble_entry_sources(
     details: &EnsembleDetails,
@@ -408,7 +408,7 @@ pub(super) fn export_ensemble_entry_sources(
 
 /// An agent node's config passes through untouched, except that a missing
 /// `model` key is injected as `null` so the export states "platform
-/// default" explicitly, field-for-field with `graph_get`. Every other kind's
+/// default" explicitly, field-for-field with `graph`. Every other kind's
 /// config passes through verbatim.
 pub(super) fn export_node_config(kind: GraphNodeKind, config: &Value) -> Value {
     if kind != GraphNodeKind::Agent {

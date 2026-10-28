@@ -8,7 +8,7 @@ use super::*;
 /// in-flight member `Interrupted` (not `Pending` — the run was cut short
 /// by something external, not a failure of the work) in the same pass it
 /// interrupts the dangling run, and the resumed dispatch (what
-/// `graph_continue`'s `retry_current_node` triggers via
+/// `graph_control`'s `retry_current_node` triggers via
 /// `resume_background`, simulated here by calling `run_graph_dispatch`
 /// directly with `is_resume: true`) must pick the interrupted member up
 /// FIRST — never skip straight past it to the next queued member, which
@@ -88,7 +88,7 @@ async fn graph_engine_restart_recovery_runs_interrupted_queue_spec_first() {
         "reconcile must mark the in-flight member interrupted, not leave it running"
     );
 
-    // `graph_continue { retry_current_node }`: resume with the graph's
+    // `graph_control { retry_current_node }`: resume with the graph's
     // persisted queue context, same as `resume_background`. The graph is left
     // `Paused` (as reconcile set it) — the dispatch's own atomic claim (B42)
     // owns the flip to `Running`, so no caller pre-flips it anymore.
@@ -309,11 +309,11 @@ fn skip_next_spec_on_held_queue_skips_held_spec_not_failed_predecessor() {
     );
 }
 
-/// C19/FR3: the execution-limit blocker names the named-spec `graph_reset`
-/// that clears the count, says the worktree is untouched, and gives the
-/// relaunch verbs.
+/// C19/FR3: the execution-limit blocker names the named-spec `graph_control
+/// reset` that clears the count, says the worktree is untouched, and gives
+/// the relaunch verbs.
 #[test]
-fn execution_limit_blocker_names_graph_reset_and_spec_id() {
+fn execution_limit_blocker_names_graph_control_reset_and_spec_id() {
     let (_dir, db, engine, _graph_id) = bare_graph_fixture().unwrap();
     let spec = standalone_spec("limit-blocker", 1);
     db.insert_graph_spec(&spec).unwrap();
@@ -322,20 +322,21 @@ fn execution_limit_blocker_names_graph_reset_and_spec_id() {
         blocker = engine.record_spec_attempt(&spec, "boom", false).unwrap();
     }
     let blocker = blocker.expect("the limit is reached");
-    assert!(blocker.contains("graph_reset"), "{blocker}");
+    assert!(blocker.contains("`graph_control reset`"), "{blocker}");
     assert!(
         blocker.contains(&format!("specs: [{}]", spec.id)),
         "names the spec id: {blocker}"
     );
     assert!(blocker.contains("worktree is not touched"), "{blocker}");
+    assert!(blocker.contains("`graph_control run`"), "{blocker}");
     assert!(
-        blocker.contains("`graph_run` or `run_from_node`"),
+        blocker.contains("`graph_control continue` with mode `run_from_node`"),
         "{blocker}"
     );
 }
 
 /// FR6: a completed graph's continue refusal names the status and the
-/// `graph_reset` way out.
+/// `graph_control` way out.
 #[test]
 fn completed_graph_continue_refusal_names_graph_reset() {
     let refusal = crate::daemon::handler_run_directive::not_continuable_refusal(
@@ -343,7 +344,7 @@ fn completed_graph_continue_refusal_names_graph_reset() {
         GraphStatus::Completed,
     );
     assert!(refusal.contains("'completed'"), "{refusal}");
-    assert!(refusal.contains("graph_reset"), "{refusal}");
+    assert!(refusal.contains("graph_control"), "{refusal}");
     assert!(refusal.contains("run_from_node"), "{refusal}");
 }
 
@@ -446,7 +447,7 @@ fn running_spec_keeps_resumable_path_not_directed_restart() {
     );
 }
 
-/// End to end: a directed `graph_continue run_from_node` on a
+/// End to end: a directed `graph_control run_from_node` on a
 /// queue-driven graph targets the operator-named spec even when another
 /// member is mistakenly still `running` — it must not be displaced by the
 /// queue's `running` cursor (`queue_running_spec_id`, which
@@ -782,7 +783,7 @@ async fn directed_queue_resume_reruns_failed_check_and_gates_reviewer_pass() {
 /// CB50 FR2+FR3, end to end: a daemon crash mid-ensemble (one member
 /// still `running`, no pid/boot_id — reconcile's dangling-run signature)
 /// followed by a resume (`run_graph_dispatch(is_resume: true)`, what
-/// `graph_continue`'s `retry_current_node` triggers via
+/// `graph_control`'s `retry_current_node` triggers via
 /// `resume_background`) must re-dispatch the WHOLE ensemble — every
 /// current member, not just the one that was still running (FR3) — and
 /// must not re-run "kickoff", which had already completed before the
@@ -1189,7 +1190,7 @@ async fn graph_engine_queue_run_retains_context_on_genuine_completion_for_progre
     // its real progress instead of a misleading `0/0`. B8's
     // anti-pollution guarantee is upheld elsewhere: every launch path
     // re-persists this field before the first spec runs, so a later
-    // fresh `graph_run` against a different queue overwrites it.
+    // fresh `graph_control` against a different queue overwrites it.
     assert_eq!(
         lp.active_run_queue_id.as_deref(),
         Some("queue-1"),

@@ -1,9 +1,9 @@
 //! Validate a shared graph or node document without importing it.
 //!
 //! The single entry point [`validate_request`] serves both `canopy graph
-//! validate` and the `graph_validate` MCP tool: exactly one of a file path
+//! validate` and the `graph` MCP tool: exactly one of a file path
 //! or an inline document, no database access, no workdir requirement. A
-//! graph document runs every structural check `graph_import` runs — through
+//! graph document runs every structural check `graph_edit` runs — through
 //! the same functions — plus the sharing rule for `prompt_preset` (bundled
 //! in the document or a builtin); a node document runs the slug, kind,
 //! config, and harness rules from the spec. Success reports the kind, name,
@@ -93,7 +93,7 @@ fn not_either_message() -> String {
 
 // ── Graph documents ───────────────────────────────────────────────────
 
-/// Run every check `graph_import` runs — through the same functions — plus
+/// Run every check `graph_edit` runs — through the same functions — plus
 /// the sharing rule for `prompt_preset`, collecting every problem found.
 fn validate_graph_document(value: &Value) -> Value {
     if let Some(failure) = reject_bad_graph_format_version(value) {
@@ -161,7 +161,7 @@ fn reject_bad_graph_format_version(value: &Value) -> Option<Value> {
     }
 }
 
-/// The same per-node config checks `graph_import` runs before building its
+/// The same per-node config checks `graph_edit` runs before building its
 /// plan: known keys for the kind, plus the `mutex` shape.
 fn validate_graph_node_configs(document: &GraphExportDocument, problems: &mut Vec<Problem>) {
     for (index, node) in document.nodes.iter().enumerate() {
@@ -184,7 +184,7 @@ fn validate_graph_node_configs(document: &GraphExportDocument, problems: &mut Ve
 /// half of import's check — refusing to overwrite a differing local file —
 /// needs the installer's prompts dir and belongs to import alone; without
 /// this half a document bundling, say, the builtin `reviewer` would validate
-/// here and then be refused by `graph_import` on every machine.
+/// here and then be refused by `graph_edit` on every machine.
 fn validate_bundled_preset_entries(document: &GraphExportDocument, problems: &mut Vec<Problem>) {
     let mut seen = BTreeSet::new();
     for (index, preset) in document.prompt_presets.iter().enumerate() {
@@ -236,7 +236,7 @@ fn validate_shared_presets(document: &GraphExportDocument, problems: &mut Vec<Pr
     }
 }
 
-/// The write-time template binding check from `graph_import`'s handler (every
+/// The write-time template binding check from `graph_edit`'s handler (every
 /// document node, ensemble shared prompt, and member override) — the same
 /// functions, with the expanded plan's node names as the binding scope.
 fn validate_graph_templates(
@@ -617,16 +617,17 @@ mod tests {
     }
 
     #[test]
-    fn advertised_schema_exposes_path_and_document() {
-        let tools = crate::daemon::handler::TaskTriggerHandler::tool_router().list_all();
-        let tool = tools
+    fn validate_action_declares_path_and_document() {
+        let spec = crate::daemon::handler_graph_tools::graph_action("validate")
+            .expect("graph has a validate action");
+        let declared: Vec<&str> = spec
+            .required
             .iter()
-            .find(|t| t.name.as_ref() == "graph_validate")
-            .expect("graph_validate is registered");
-        let schema = serde_json::to_value(&tool.input_schema).expect("schema serializes");
-        let props = schema["properties"].as_object().expect("properties object");
-        assert!(props.contains_key("path"), "schema: {schema}");
-        assert!(props.contains_key("document"), "schema: {schema}");
+            .chain(spec.optional.iter())
+            .copied()
+            .collect();
+        assert!(declared.contains(&"path"), "{declared:?}");
+        assert!(declared.contains(&"document"), "{declared:?}");
     }
 
     #[test]

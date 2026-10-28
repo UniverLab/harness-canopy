@@ -862,7 +862,7 @@ fn second_spec(graph_id: &str, id: &str, position: i64) -> GraphSpec {
         }
 }
 
-// ── R5: `graph_run` with a queue ──────────────────────────────────────
+// ── R5: `graph_control` with a queue ──────────────────────────────────────
 
 /// A graph with no bound specs — the queue's own standalone specs supply
 /// the work instead. Distinct from [`graph_fixture`], which always seeds
@@ -1136,7 +1136,7 @@ fn seed_stopped_at_check_node(db: &Database, graph_id: &str, spec_id: &str) {
     .unwrap();
 }
 
-/// The engine side of `graph_continue retry_current_node` where
+/// The engine side of `graph_control retry_current_node` where
 /// `retry_restart_target` picks a directed restart: the same target the
 /// handler resolves, dispatched synchronously (the handler backgrounds this
 /// call via `restart_at_node`, so it uses the resume dispatch that

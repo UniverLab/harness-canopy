@@ -19,7 +19,7 @@ impl GraphEngine {
             "Graph '{}' queue run against '{}' found no pending member to pick, but the \
              queue still has incomplete (non completed/skipped) member(s); leaving the \
              graph as-is rather than marking it completed. Reset the stuck member(s) via \
-             graph_reset to resume.",
+             graph_control reset to resume.",
             graph_id,
             queue_id
         );
@@ -104,7 +104,7 @@ impl GraphEngine {
         let blocker = format!(
             "Graph '{}' cannot complete: {} bound spec(s) still pending ({}). They were not \
              run — a pending spec is never reported as a completed graph. Resume with \
-             graph_continue to run them.",
+             graph_control continue to run them.",
             ctx.lp.name,
             pending.len(),
             pending.join(", ")

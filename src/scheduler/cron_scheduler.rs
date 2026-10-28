@@ -345,14 +345,14 @@ impl CronScheduler {
     /// and launch it once via the graph engine. Unlike cron graphs, this never
     /// repeats.
     ///
-    /// A `failed` graph is not launched as-is — `graph_run` refuses `failed`
+    /// A `failed` graph is not launched as-is — `graph_control` refuses `failed`
     /// graphs, so firing here performs an explicit auto-reset-and-resume
     /// first: the same transition [`Database::reset_graph`] that backs the
-    /// `graph_reset` MCP tool, logged at INFO. That is the sanctioned,
+    /// `graph_control` MCP tool, logged at INFO. That is the sanctioned,
     /// intentional way a quota-failed graph revives itself unattended (see
-    /// [`crate::daemon::handler`] `graph_reset`/`graph_schedule_autorun` tool
+    /// [`crate::daemon::handler`] `graph_control`/`graph_control` tool
     /// docs). A `completed` graph is deliberately left alone — re-running a
-    /// finished graph is a human decision via `graph_reset` + `graph_run` — so
+    /// finished graph is a human decision via `graph_control` + `graph_control` — so
     /// firing on one only logs a WARN and clears the schedule.
     async fn fire_due_autorun_graphs(&self, now_utc: chrono::DateTime<Utc>) -> anyhow::Result<()> {
         let Some(graph_engine) = self.graph_engine.as_ref() else {
@@ -373,7 +373,7 @@ impl CronScheduler {
     /// One-shot `auto_continue_at`: for each graph with a pending
     /// auto-continue schedule whose time has been reached, clear the
     /// schedule and — only if the graph is still `Paused` — fire the
-    /// requested `graph_continue` action (`retry_current_node` by default) and
+    /// requested `graph_control` action (`retry_current_node` by default) and
     /// resume it in place.
     ///
     /// Unlike [`Self::fire_due_autorun_graphs`], a graph that is no longer
@@ -382,7 +382,7 @@ impl CronScheduler {
     /// cleared right away without firing, so a stale deferred-resume can
     /// never double-run a graph that moved on some other way. This never
     /// resets or relaunches the graph (that's `autorun_at`'s job): it goes
-    /// straight through the same action-then-resume path the `graph_continue`
+    /// straight through the same action-then-resume path the `graph_control`
     /// MCP tool uses, preserving the paused cursor/context.
     fn fire_due_auto_continue_graphs(&self, now_utc: chrono::DateTime<Utc>) -> anyhow::Result<()> {
         let Some(graph_engine) = self.graph_engine.as_ref() else {
@@ -401,7 +401,7 @@ impl CronScheduler {
     }
 
     /// Not firing this tick: if the auto-continue time has passed but the
-    /// graph left `Paused` some other way (manual `graph_continue`, failure)
+    /// graph left `Paused` some other way (manual `graph_control`, failure)
     /// before the schedule fired, the schedule is stale — clear it now rather
     /// than leaving it to linger forever waiting for `Paused` to recur
     /// (unlike `autorun_at`, which does wait, since its target statuses

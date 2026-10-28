@@ -14,17 +14,21 @@ async fn graph_run_clean_workdir_unaffected_by_old_failure() {
     insert_named_spec(&db, &lp.id, "Spec B", 1, GraphSpecStatus::Pending);
 
     // No untracked files this time — the workdir is clean.
-    let result = handler
-        .graph_run(Parameters(GraphRunParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "run",
+        params_id(GraphRunParams {
             graph_id: lp.id.clone(),
             queue_id: None,
             workdir: None,
             idea: None,
             sandbox: None,
             start_node_id: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&result), "{}", text(&result));
 }
 
@@ -41,29 +45,36 @@ async fn graph_run_never_refused_for_non_git_workdir() {
 
     std::fs::write(plain_dir.path().join("a.txt"), "a").unwrap();
 
-    let result = handler
-        .graph_run(Parameters(GraphRunParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "run",
+        params_id(GraphRunParams {
             graph_id: lp.id.clone(),
             queue_id: None,
             workdir: None,
             idea: None,
             sandbox: None,
             start_node_id: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&result), "{}", text(&result));
 }
 
-// ── graph_add_spec / graph_update_spec ─────────────────────────
+// ── graph_edit / graph_edit ─────────────────────────
 
 #[tokio::test]
 async fn graph_add_spec_happy_path_and_position_conflict() {
     let (dir, db, handler) = endpoint_test_handler();
     let lp = insert_test_graph(&db, dir.path());
 
-    let added = handler
-        .graph_add_spec(Parameters(GraphAddSpecParams {
+    let added = call_graph_action(
+        &handler,
+        "graph_edit",
+        "attach_spec",
+        params_id(GraphAddSpecParams {
             graph_id: lp.id.clone(),
             name: "First Spec".to_string(),
             description: Some(valid_spec_description()),
@@ -71,13 +82,17 @@ async fn graph_add_spec_happy_path_and_position_conflict() {
             parallelizable: false,
             spec_type: None,
             spec_scope: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&added), "{}", text(&added));
 
-    let conflict = handler
-        .graph_add_spec(Parameters(GraphAddSpecParams {
+    let conflict = call_graph_action(
+        &handler,
+        "graph_edit",
+        "attach_spec",
+        params_id(GraphAddSpecParams {
             graph_id: lp.id.clone(),
             name: "Second Spec".to_string(),
             description: Some(valid_spec_description()),
@@ -85,14 +100,18 @@ async fn graph_add_spec_happy_path_and_position_conflict() {
             parallelizable: false,
             spec_type: None,
             spec_scope: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&conflict));
     assert!(text(&conflict).contains("already has a spec at position"));
 
-    let missing_desc = handler
-        .graph_add_spec(Parameters(GraphAddSpecParams {
+    let missing_desc = call_graph_action(
+        &handler,
+        "graph_edit",
+        "attach_spec",
+        params_id(GraphAddSpecParams {
             graph_id: lp.id.clone(),
             name: "Third Spec".to_string(),
             description: None,
@@ -100,13 +119,17 @@ async fn graph_add_spec_happy_path_and_position_conflict() {
             parallelizable: false,
             spec_type: None,
             spec_scope: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&missing_desc));
 
-    let bad_template = handler
-        .graph_add_spec(Parameters(GraphAddSpecParams {
+    let bad_template = call_graph_action(
+        &handler,
+        "graph_edit",
+        "attach_spec",
+        params_id(GraphAddSpecParams {
             graph_id: lp.id,
             name: "Fourth Spec".to_string(),
             description: Some("just a sentence".to_string()),
@@ -114,9 +137,10 @@ async fn graph_add_spec_happy_path_and_position_conflict() {
             parallelizable: false,
             spec_type: None,
             spec_scope: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&bad_template));
     assert!(
         text(&bad_template).contains("missing required tag")
@@ -130,8 +154,11 @@ async fn graph_update_spec_renames_and_rejects_no_op() {
     let lp = insert_test_graph(&db, dir.path());
     let spec = insert_test_spec(&db, &lp.id, 1);
 
-    let updated = handler
-        .graph_update_spec(Parameters(GraphUpdateSpecParams {
+    let updated = call_graph_action(
+        &handler,
+        "graph_edit",
+        "update_spec",
+        params_id(GraphUpdateSpecParams {
             spec_id: spec.id.clone(),
             name: Some("New Name".to_string()),
             description: None,
@@ -139,17 +166,21 @@ async fn graph_update_spec_renames_and_rejects_no_op() {
             parallelizable: None,
             spec_type: None,
             spec_scope: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&updated), "{}", text(&updated));
     assert_eq!(
         db.get_graph_spec(&spec.id).unwrap().unwrap().name,
         "New Name"
     );
 
-    let no_op = handler
-        .graph_update_spec(Parameters(GraphUpdateSpecParams {
+    let no_op = call_graph_action(
+        &handler,
+        "graph_edit",
+        "update_spec",
+        params_id(GraphUpdateSpecParams {
             spec_id: spec.id.clone(),
             name: None,
             description: None,
@@ -157,13 +188,17 @@ async fn graph_update_spec_renames_and_rejects_no_op() {
             parallelizable: None,
             spec_type: None,
             spec_scope: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&no_op));
 
-    let missing = handler
-        .graph_update_spec(Parameters(GraphUpdateSpecParams {
+    let missing = call_graph_action(
+        &handler,
+        "graph_edit",
+        "update_spec",
+        params_id(GraphUpdateSpecParams {
             spec_id: "ghost".to_string(),
             name: Some("x".to_string()),
             description: None,
@@ -171,9 +206,10 @@ async fn graph_update_spec_renames_and_rejects_no_op() {
             parallelizable: None,
             spec_type: None,
             spec_scope: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&missing));
 }
 
@@ -489,13 +525,17 @@ async fn graph_remove_spec_unbinds_bound_spec() {
     let lp = insert_test_graph(&db, dir.path());
     let spec = insert_test_spec(&db, &lp.id, 1);
 
-    let removed = handler
-        .graph_remove_spec(Parameters(GraphRemoveSpecParams {
+    let removed = call_graph_action(
+        &handler,
+        "graph_edit",
+        "detach_spec",
+        params_id(GraphRemoveSpecParams {
             graph_id: lp.id.clone(),
             spec_id: spec.id.clone(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&removed), "{}", text(&removed));
     assert!(text(&removed).contains("unbound"));
 
@@ -520,13 +560,17 @@ async fn graph_remove_spec_rejects_running_spec() {
     db.update_graph_spec_status(&spec.id, GraphSpecStatus::Running, None, None)
         .unwrap();
 
-    let refused = handler
-        .graph_remove_spec(Parameters(GraphRemoveSpecParams {
+    let refused = call_graph_action(
+        &handler,
+        "graph_edit",
+        "detach_spec",
+        params_id(GraphRemoveSpecParams {
             graph_id: lp.id.clone(),
             spec_id: spec.id.clone(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&refused));
     assert!(text(&refused).contains("running"));
 }
@@ -538,13 +582,17 @@ async fn graph_remove_spec_rejects_wrong_graph() {
     let lp_b = insert_test_graph(&db, dir.path());
     let spec = insert_test_spec(&db, &lp_a.id, 1);
 
-    let refused = handler
-        .graph_remove_spec(Parameters(GraphRemoveSpecParams {
+    let refused = call_graph_action(
+        &handler,
+        "graph_edit",
+        "detach_spec",
+        params_id(GraphRemoveSpecParams {
             graph_id: lp_b.id.clone(),
             spec_id: spec.id.clone(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&refused));
     assert!(text(&refused).contains(&lp_a.id));
 }
@@ -572,13 +620,17 @@ async fn graph_remove_spec_rejects_standalone_spec() {
         .unwrap()
         .id;
 
-    let refused = handler
-        .graph_remove_spec(Parameters(GraphRemoveSpecParams {
+    let refused = call_graph_action(
+        &handler,
+        "graph_edit",
+        "detach_spec",
+        params_id(GraphRemoveSpecParams {
             graph_id: lp.id.clone(),
             spec_id: standalone_id,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&refused));
     assert!(text(&refused).contains("not bound to any graph"));
 }
@@ -596,7 +648,7 @@ async fn spec_delete_error_message_names_graph_remove_spec() {
         .await
         .unwrap();
     assert!(is_err(&refused));
-    assert!(text(&refused).contains("graph_remove_spec"));
+    assert!(text(&refused).contains("graph_edit"));
 }
 
 #[tokio::test]
@@ -615,13 +667,17 @@ async fn graph_remove_spec_preserves_execution_history() {
         chrono::Utc::now(),
     );
 
-    let removed = handler
-        .graph_remove_spec(Parameters(GraphRemoveSpecParams {
+    let removed = call_graph_action(
+        &handler,
+        "graph_edit",
+        "detach_spec",
+        params_id(GraphRemoveSpecParams {
             graph_id: lp.id.clone(),
             spec_id: spec.id.clone(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&removed), "{}", text(&removed));
 
     let runs = db.list_graph_runs_for_spec(&spec.id).unwrap();
@@ -701,7 +757,7 @@ async fn blueprint_create_list_delete_round_trip() {
     assert!(is_err(&missing));
 }
 
-// ── graph_add_node / graph_update_node ──────────────────────────
+// ── graph_node / graph_node ──────────────────────────
 
 #[tokio::test]
 async fn graph_add_node_happy_path_and_invalid_config() {
@@ -709,8 +765,11 @@ async fn graph_add_node_happy_path_and_invalid_config() {
     let lp = insert_test_graph(&db, dir.path());
     let spec = insert_test_spec(&db, &lp.id, 1);
 
-    let added = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let added = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Kickoff".to_string(),
@@ -719,14 +778,18 @@ async fn graph_add_node_happy_path_and_invalid_config() {
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&added), "{}", text(&added));
     assert_eq!(db.list_graph_nodes(&spec.id).unwrap().len(), 1);
 
-    let missing_both_targets = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let missing_both_targets = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: None,
             graph_id: None,
             name: "Orphan".to_string(),
@@ -735,13 +798,17 @@ async fn graph_add_node_happy_path_and_invalid_config() {
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&missing_both_targets));
 
-    let bad_config = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let bad_config = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "No Platform".to_string(),
@@ -750,13 +817,17 @@ async fn graph_add_node_happy_path_and_invalid_config() {
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&bad_config));
 
-    let join_rejected = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let join_rejected = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: Some(spec.id),
             graph_id: None,
             name: "Quorum".to_string(),
@@ -765,14 +836,15 @@ async fn graph_add_node_happy_path_and_invalid_config() {
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&join_rejected));
     assert!(text(&join_rejected).contains("engine-managed"));
 }
 
-/// The exact incident shape, through the real `graph_add_node` tool
+/// The exact incident shape, through the real `graph_node` tool
 /// call: a `prompt` key (instead of `prompt_template`) must be rejected
 /// at write time, naming the correct key, and must never reach the DB.
 #[tokio::test]
@@ -787,8 +859,11 @@ async fn graph_add_node_rejects_prompt_key_naming_prompt_template() {
         serde_json::Value::String("implement the spec".to_string()),
     );
 
-    let rejected = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let rejected = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Implementer".to_string(),
@@ -797,16 +872,17 @@ async fn graph_add_node_rejects_prompt_key_naming_prompt_template() {
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&rejected), "{}", text(&rejected));
     assert!(text(&rejected).contains("prompt_template"));
     assert!(db.list_graph_nodes(&spec.id).unwrap().is_empty());
 }
 
 /// CM35 FR2: a node naming a platform whose registry entry is
-/// `headless = false` (freebuff) is rejected by `graph_add_node` with the
+/// `headless = false` (freebuff) is rejected by `graph_node` with the
 /// exact spec wording, and nothing reaches the DB. A platform left at the
 /// serde default (`headless` absent) is unaffected — the happy-path test
 /// above still adds its `claude` node with this check in place.
@@ -829,8 +905,11 @@ async fn graph_add_node_rejects_interactive_only_platform() {
     let lp = insert_test_graph(&db, dir.path());
     let spec = insert_test_spec(&db, &lp.id, 1);
 
-    let rejected = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let rejected = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Live Only".to_string(),
@@ -839,9 +918,10 @@ async fn graph_add_node_rejects_interactive_only_platform() {
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&rejected), "{}", text(&rejected));
     assert!(
         raw_text(&rejected).contains("platform 'freebuff' is interactive-only (no headless mode)"),
@@ -851,7 +931,7 @@ async fn graph_add_node_rejects_interactive_only_platform() {
     assert!(db.list_graph_nodes(&spec.id).unwrap().is_empty());
 }
 
-/// CM35 FR2: `graph_update_node` rejects the same platform with the same
+/// CM35 FR2: `graph_node` rejects the same platform with the same
 /// wording, and a rejected update leaves the stored node untouched. The
 /// node is created first and only then repointed — the ordering an
 /// operator actually hits when "fixing" a node onto an interactive-only
@@ -866,8 +946,11 @@ async fn graph_update_node_rejects_interactive_only_platform() {
     let lp = insert_test_graph(&db, dir.path());
     let spec = insert_test_spec(&db, &lp.id, 1);
 
-    let added = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let added = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Implementer".to_string(),
@@ -876,22 +959,27 @@ async fn graph_update_node_rejects_interactive_only_platform() {
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let node_id = extract_id(&added, "node_id");
 
-    let rejected = handler
-        .graph_update_node(Parameters(GraphUpdateNodeParams {
+    let rejected = call_graph_action(
+        &handler,
+        "graph_node",
+        "update",
+        params_id(GraphUpdateNodeParams {
             node_id: node_id.clone(),
             name: None,
             kind: None,
             config: Some(agent_node_config("freebuff")),
             config_replace: None,
             position: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&rejected), "{}", text(&rejected));
     assert!(
         raw_text(&rejected).contains("platform 'freebuff' is interactive-only (no headless mode)"),
@@ -906,15 +994,18 @@ async fn graph_update_node_rejects_interactive_only_platform() {
     );
 }
 
-/// CM46 req 7: `graph_update_node` records a `config_changed` event for a
+/// CM46 req 7: `graph_node` records a `config_changed` event for a
 /// RUNNING graph and none for an idle one.
 #[tokio::test]
 async fn graph_update_node_records_config_changed_only_for_running_graph() {
     let (dir, db, handler) = endpoint_test_handler();
     let lp = insert_test_graph(&db, dir.path());
     let spec = insert_test_spec(&db, &lp.id, 1);
-    let added = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let added = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Implementer".to_string(),
@@ -923,23 +1014,28 @@ async fn graph_update_node_records_config_changed_only_for_running_graph() {
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let node_id = extract_id(&added, "node_id");
 
     // Idle (Draft) graph: an edit is recorded nowhere.
-    handler
-        .graph_update_node(Parameters(GraphUpdateNodeParams {
+    call_graph_action(
+        &handler,
+        "graph_node",
+        "update",
+        params_id(GraphUpdateNodeParams {
             node_id: node_id.clone(),
             name: None,
             kind: None,
             config: Some(agent_node_config("claude")),
             config_replace: None,
             position: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(
         db.list_graph_events(&lp.id, None, None, None, 200)
             .unwrap()
@@ -950,17 +1046,21 @@ async fn graph_update_node_records_config_changed_only_for_running_graph() {
     // Running graph: the same edit now records exactly one event.
     db.update_graph_status(&lp.id, GraphStatus::Running, None, None)
         .unwrap();
-    handler
-        .graph_update_node(Parameters(GraphUpdateNodeParams {
+    call_graph_action(
+        &handler,
+        "graph_node",
+        "update",
+        params_id(GraphUpdateNodeParams {
             node_id: node_id.clone(),
             name: Some("Renamed".to_string()),
             kind: None,
             config: None,
             config_replace: None,
             position: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
 
     let events = db.list_graph_events(&lp.id, None, None, None, 200).unwrap();
     assert_eq!(events.len(), 1, "got: {events:?}");
@@ -977,8 +1077,11 @@ async fn graph_update_node_renames_and_validates() {
     let (dir, db, handler) = endpoint_test_handler();
     let lp = insert_test_graph(&db, dir.path());
     let spec = insert_test_spec(&db, &lp.id, 1);
-    let node_id = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let node_id = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Node A".to_string(),
@@ -987,52 +1090,65 @@ async fn graph_update_node_renames_and_validates() {
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let node_id = extract_id(&node_id, "node_id");
 
-    let renamed = handler
-        .graph_update_node(Parameters(GraphUpdateNodeParams {
+    let renamed = call_graph_action(
+        &handler,
+        "graph_node",
+        "update",
+        params_id(GraphUpdateNodeParams {
             node_id: node_id.clone(),
             name: Some("Node A Renamed".to_string()),
             kind: None,
             config: None,
             config_replace: None,
             position: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&renamed), "{}", text(&renamed));
     assert_eq!(
         db.get_graph_node(&node_id).unwrap().unwrap().name,
         "Node A Renamed"
     );
 
-    let no_op = handler
-        .graph_update_node(Parameters(GraphUpdateNodeParams {
+    let no_op = call_graph_action(
+        &handler,
+        "graph_node",
+        "update",
+        params_id(GraphUpdateNodeParams {
             node_id: node_id.clone(),
             name: None,
             kind: None,
             config: None,
             config_replace: None,
             position: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&no_op));
 
-    let missing = handler
-        .graph_update_node(Parameters(GraphUpdateNodeParams {
+    let missing = call_graph_action(
+        &handler,
+        "graph_node",
+        "update",
+        params_id(GraphUpdateNodeParams {
             node_id: "ghost".to_string(),
             name: Some("x".to_string()),
             kind: None,
             config: None,
             config_replace: None,
             position: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&missing));
 }
 
@@ -1048,8 +1164,11 @@ async fn graph_add_node_accepts_skills_on_agent_and_preserves_order() {
         serde_json::json!(["alpha", "beta", "gamma"]),
     );
 
-    let added = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let added = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Implementer".to_string(),
@@ -1058,9 +1177,10 @@ async fn graph_add_node_accepts_skills_on_agent_and_preserves_order() {
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&added), "{}", text(&added));
     let node_id = extract_id(&added, "node_id");
 
@@ -1089,8 +1209,11 @@ async fn graph_update_node_accepts_skills_on_agent_and_preserves_order() {
     let lp = insert_test_graph(&db, dir.path());
     let spec = insert_test_spec(&db, &lp.id, 1);
 
-    let added = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let added = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Implementer".to_string(),
@@ -1099,9 +1222,10 @@ async fn graph_update_node_accepts_skills_on_agent_and_preserves_order() {
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let node_id = extract_id(&added, "node_id");
 
     let mut new_config = agent_node_config("claude");
@@ -1110,17 +1234,21 @@ async fn graph_update_node_accepts_skills_on_agent_and_preserves_order() {
         serde_json::json!(["delta", "epsilon"]),
     );
 
-    let updated = handler
-        .graph_update_node(Parameters(GraphUpdateNodeParams {
+    let updated = call_graph_action(
+        &handler,
+        "graph_node",
+        "update",
+        params_id(GraphUpdateNodeParams {
             node_id: node_id.clone(),
             name: None,
             kind: None,
             config: Some(new_config),
             config_replace: None,
             position: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&updated), "{}", text(&updated));
 
     let stored = db.get_graph_node(&node_id).unwrap().unwrap();
@@ -1146,8 +1274,11 @@ async fn graph_update_node_partial_config_merge_preserves_prompt() {
     );
     config.insert("model".to_string(), serde_json::json!("old-model"));
 
-    let added = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let added = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Agent".to_string(),
@@ -1156,13 +1287,17 @@ async fn graph_update_node_partial_config_merge_preserves_prompt() {
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let node_id = extract_id(&added, "node_id");
 
-    let updated = handler
-        .graph_update_node(Parameters(GraphUpdateNodeParams {
+    let updated = call_graph_action(
+        &handler,
+        "graph_node",
+        "update",
+        params_id(GraphUpdateNodeParams {
             node_id: node_id.clone(),
             name: None,
             kind: None,
@@ -1173,9 +1308,10 @@ async fn graph_update_node_partial_config_merge_preserves_prompt() {
             }),
             config_replace: None,
             position: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&updated), "{}", text(&updated));
 
     let stored = db.get_graph_node(&node_id).unwrap().unwrap();
@@ -1203,8 +1339,11 @@ async fn graph_update_node_partial_config_merge_timeout_leaves_others() {
     config.insert("model".to_string(), serde_json::json!("some-model"));
     config.insert("commit_rights".to_string(), serde_json::json!(true));
 
-    let added = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let added = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Agent".to_string(),
@@ -1213,13 +1352,17 @@ async fn graph_update_node_partial_config_merge_timeout_leaves_others() {
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let node_id = extract_id(&added, "node_id");
 
-    let updated = handler
-        .graph_update_node(Parameters(GraphUpdateNodeParams {
+    let updated = call_graph_action(
+        &handler,
+        "graph_node",
+        "update",
+        params_id(GraphUpdateNodeParams {
             node_id: node_id.clone(),
             name: None,
             kind: None,
@@ -1230,9 +1373,10 @@ async fn graph_update_node_partial_config_merge_timeout_leaves_others() {
             }),
             config_replace: None,
             position: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&updated), "{}", text(&updated));
 
     let stored = db.get_graph_node(&node_id).unwrap().unwrap();
@@ -1252,8 +1396,11 @@ async fn graph_update_node_full_replacement_drops_keys() {
     config.insert("model".to_string(), serde_json::json!("some-model"));
     config.insert("timeout_minutes".to_string(), serde_json::json!(10));
 
-    let added = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let added = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Agent".to_string(),
@@ -1262,13 +1409,17 @@ async fn graph_update_node_full_replacement_drops_keys() {
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let node_id = extract_id(&added, "node_id");
 
-    let updated = handler
-        .graph_update_node(Parameters(GraphUpdateNodeParams {
+    let updated = call_graph_action(
+        &handler,
+        "graph_node",
+        "update",
+        params_id(GraphUpdateNodeParams {
             node_id: node_id.clone(),
             name: None,
             kind: None,
@@ -1279,9 +1430,10 @@ async fn graph_update_node_full_replacement_drops_keys() {
             }),
             config_replace: Some(true),
             position: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&updated), "{}", text(&updated));
 
     let stored = db.get_graph_node(&node_id).unwrap().unwrap();
@@ -1302,8 +1454,11 @@ async fn graph_update_node_unknown_key_rejected_in_both_modes() {
     let lp = insert_test_graph(&db, dir.path());
     let spec = insert_test_spec(&db, &lp.id, 1);
 
-    let added = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let added = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Agent".to_string(),
@@ -1312,13 +1467,17 @@ async fn graph_update_node_unknown_key_rejected_in_both_modes() {
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let node_id = extract_id(&added, "node_id");
 
-    let merge_result = handler
-        .graph_update_node(Parameters(GraphUpdateNodeParams {
+    let merge_result = call_graph_action(
+        &handler,
+        "graph_node",
+        "update",
+        params_id(GraphUpdateNodeParams {
             node_id: node_id.clone(),
             name: None,
             kind: None,
@@ -1329,9 +1488,10 @@ async fn graph_update_node_unknown_key_rejected_in_both_modes() {
             }),
             config_replace: None,
             position: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&merge_result));
     assert!(
         text(&merge_result).contains("totally_bogus_key"),
@@ -1344,8 +1504,11 @@ async fn graph_update_node_unknown_key_rejected_in_both_modes() {
         text(&merge_result)
     );
 
-    let replace_result = handler
-        .graph_update_node(Parameters(GraphUpdateNodeParams {
+    let replace_result = call_graph_action(
+        &handler,
+        "graph_node",
+        "update",
+        params_id(GraphUpdateNodeParams {
             node_id: node_id.clone(),
             name: None,
             kind: None,
@@ -1356,9 +1519,10 @@ async fn graph_update_node_unknown_key_rejected_in_both_modes() {
             }),
             config_replace: Some(true),
             position: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&replace_result));
     assert!(
         text(&replace_result).contains("another_bogus"),

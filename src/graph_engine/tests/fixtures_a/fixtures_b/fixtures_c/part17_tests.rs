@@ -239,7 +239,7 @@ async fn cm13_cascade_self_reported_fail_stops_walk_no_fallthrough() {
 
 /// CB67: `timeout_minutes: 1` (60s) is "the timeout"; half of it is 30s.
 /// The fixture carries the legacy `straggler_timeout_minutes: Some(0)`
-/// shape (pre-CB67 `graph_add_ensemble` accepted it on any kind). Before
+/// shape (pre-CB67 `graph_ensemble` accepted it on any kind). Before
 /// CB67 the no-override fallback was `effective_straggler_timeout_minutes()`
 /// — i.e. that 0 — so every member was bounded to a zero-second window
 /// and cut instantly; the join never sees m3 and this test fails. After
@@ -549,10 +549,10 @@ async fn cb66_no_verdict_without_error_edge_pauses_with_blocker() {
 /// `Designer` to `Completed`, then `Implementer`'s round-robin ensemble
 /// exits with every member unreported and no `Error` edge. The block must
 /// leave the spec `Interrupted` (resumable), not `Failed`; the blocker
-/// must name the ensemble and BOTH ways out (`graph_continue
-/// retry_current_node`, `graph_reset`); and after a `graph_update_ensemble`
-/// member swap plus `graph_continue retry_current_node` (the validation
-/// call `graph_continue` makes, then the same `is_resume: true` dispatch
+/// must name the ensemble and BOTH ways out (`graph_control
+/// retry_current_node`, `graph_control`); and after a `graph_ensemble`
+/// member swap plus `graph_control retry_current_node` (the validation
+/// call `graph_control` makes, then the same `is_resume: true` dispatch
 /// `resume_background` fires) the REWIRED member runs, the already-passed
 /// Designer node gets no new run row, and the spec and graph complete.
 #[tokio::test]
@@ -568,7 +568,7 @@ async fn no_verdict_block_is_resumable_via_retry_current_node() {
     db.insert_graph_spec(&implementer).unwrap();
 
     // Designer: one check node that passes on its own — the work the old
-    // `graph_reset`-only escape hatch made every resume pay for again.
+    // `graph_control`-only escape hatch made every resume pay for again.
     db.insert_graph_node(&GraphNode {
         id: "designer".to_string(),
         spec_id: Some(designer_id.clone()),
@@ -647,23 +647,25 @@ async fn no_verdict_block_is_resumable_via_retry_current_node() {
         "the blocker names the blocked node (the ensemble): {blocker}"
     );
     assert!(
-        blocker.contains("`graph_continue retry_current_node` resumes at this ensemble"),
+        blocker.contains(
+            "`graph_control continue` with mode `retry_current_node` resumes at this ensemble"
+        ),
         "FR5: the blocked text names retry_current_node as the way to resume here: {blocker}"
     );
     assert!(
-        blocker.contains("`graph_reset` restarts the spec from Start"),
-        "FR5: the blocked text names graph_reset as the way to restart the spec: {blocker}"
+        blocker.contains("`graph_control reset` restarts the spec from Start"),
+        "FR5: the blocked text names graph_control reset as the way to restart the spec: {blocker}"
     );
     assert!(
-        blocker.contains("`graph_continue run_from_node`"),
+        blocker.contains("`graph_control continue` with mode `run_from_node`"),
         "the blocked text names run_from_node as a way back in: {blocker}"
     );
 
-    // `graph_continue retry_current_node` must accept this spec…
+    // `graph_control retry_current_node` must accept this spec…
     crate::daemon::handler_run_exec::handle_retry_current_node(&db, &graph_id)
-        .expect("FR2: an interrupted no-verdict spec is resumable by graph_continue");
+        .expect("FR2: an interrupted no-verdict spec is resumable by graph_control");
 
-    // …and `graph_update_ensemble`'s member swap: the surviving slot keeps
+    // …and `graph_ensemble`'s member swap: the surviving slot keeps
     // its node row, the crew is now platform `m-new-1`, the other member
     // (node row included) is gone.
     db.replace_ensemble_members(
@@ -702,7 +704,7 @@ async fn no_verdict_block_is_resumable_via_retry_current_node() {
     let kickoff_runs_before = member_runs(&db, &implementer.id, "kickoff").len();
     let member_runs_before = member_runs(&db, &implementer.id, "m-old-1").len();
 
-    // The resume `graph_continue` fires (`retry_current_node` validates,
+    // The resume `graph_control` fires (`retry_current_node` validates,
     // then `resume_background` dispatches with `is_resume: true`).
     let _home = HomeGuard::set(fake_home.path());
     engine

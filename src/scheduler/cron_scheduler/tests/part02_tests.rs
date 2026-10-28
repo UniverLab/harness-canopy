@@ -126,7 +126,7 @@ fn fold_earliest_lands_graph_cron_at_local_wall_clock() {
 }
 
 /// A manual graph (no schedule) never contributes a fire time, so the
-/// scheduler never launches it on its own — it only runs via `graph_run`.
+/// scheduler never launches it on its own — it only runs via `graph_control`.
 #[test]
 fn fold_earliest_ignores_manual_graph() {
     let mut earliest: Option<chrono::DateTime<Utc>> = Some(Utc::now());

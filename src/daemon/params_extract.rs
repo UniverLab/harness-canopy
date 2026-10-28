@@ -66,7 +66,7 @@ where
 /// the received value, and a minimal example. Split out from
 /// [`FromContextPart::from_context_part`] so it can be exercised directly in
 /// tests without constructing a `ToolCallContext`.
-fn deserialize_params<P>(value: &Value) -> Result<P, ErrorData>
+pub(crate) fn deserialize_params<P>(value: &Value) -> Result<P, ErrorData>
 where
     P: DeserializeOwned + JsonSchema,
 {

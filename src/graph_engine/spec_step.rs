@@ -3,7 +3,7 @@ use super::*;
 impl GraphEngine {
     /// CB31: a wait-for-completion pause requested while this step was
     /// running. The step ran to completion and its verdict is recorded
-    /// normally; flag its runs so a `graph_continue` re-execution does
+    /// normally; flag its runs so a `graph_control` re-execution does
     /// not spend one of its iterations (the pause is not an attempt),
     /// then report paused and stop before the next step.
     pub(crate) async fn pause_after_step_if_requested(
@@ -199,11 +199,12 @@ impl GraphEngine {
         let ensemble_name = Self::ensemble_name_for_join(ctx.ensembles, &step.from_node_id);
         let blocker = format!(
             "Ensemble '{}' produced no verdict ({} members, none filed a verdict): {}. The graph is paused; \
-             this spec is marked interrupted (not failed). Three ways out: `graph_continue retry_current_node` \
-             resumes at this ensemble — its current member list, with the nodes that already passed in this \
-             spec left alone (rewire the members first with `graph_update_ensemble` if the crew itself is the \
-             problem); `graph_continue run_from_node` restarts the spec at a node you choose, reusing what \
-             earlier nodes already produced; while `graph_reset` restarts the spec from Start.",
+             this spec is marked interrupted (not failed). Three ways out: `graph_control continue` with mode \
+             `retry_current_node` resumes at this ensemble — its current member list, with the nodes that \
+             already passed in this spec left alone (rewire the members first with `graph_ensemble update` \
+             if the crew itself is the problem); `graph_control continue` with mode `run_from_node` restarts \
+             the spec at a node you choose, reusing what earlier nodes already produced; while `graph_control \
+             reset` restarts the spec from Start.",
             ensemble_name,
             member_texts.len(),
             member_texts.join("; "),
@@ -499,10 +500,10 @@ impl GraphEngine {
 
         // CB31: an operator pause or interrupt is not a node attempt. If
         // the previous run at this cursor was ended by the operator —
-        // recorded `Interrupted` (explicit `graph_pause(interrupt: true)`),
+        // recorded `Interrupted` (explicit `graph_control(interrupt: true)`),
         // or finalized with its own verdict while a wait-for-completion
         // pause was pending (`paused_through`) — the re-execution on
-        // `graph_continue` reuses the same iteration number instead of
+        // `graph_control` reuses the same iteration number instead of
         // consuming a fresh one. Only genuine node outcomes count against
         // `graphs.max_iterations_per_node`.
         let previous_was_operator_paused = self.db.last_spec_node_run_was_operator_paused(
@@ -540,7 +541,7 @@ impl GraphEngine {
                     max_iterations,
                 );
             // CB7: SIEMPRE escribir el blocker en el último run para que sea visible
-            // en graph_list/graph_get sin necesidad de encadenar graph_node_runs_list
+            // en graph/graph sin necesidad de encadenar graph
             if let Some(run) = self.db.list_graph_runs_for_spec(&ctx.spec.id)?.last() {
                 self.set_run_blocker(
                     &run.id,

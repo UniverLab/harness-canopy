@@ -991,13 +991,13 @@ mod hang_repro {
     /// Regression (a): while a node is mid-dispatch on graph L (agent process
     /// running, graph status == `Running`), a *second*, independent MCP
     /// session — standing in for that node's own bridge connection calling
-    /// back into the daemon — calls `graph_schedule_autorun` for the SAME
+    /// back into the daemon — calls `graph_control` for the SAME
     /// graph L over real Streamable HTTP, exactly as a resilience node
     /// scheduling its own graph's resume does in production. The response
     /// must arrive promptly (well under any node timeout) and the schedule
     /// must be durably persisted.
     ///
-    /// Also covers requirement 3 (fast-fail): `graph_run` and `graph_reset`
+    /// Also covers requirement 3 (fast-fail): `graph_control` and `graph_control`
     /// against the SAME graph, mid-dispatch, must reject immediately with an
     /// explanatory error rather than blocking — proven here under a real
     /// concurrent dispatch, not just against a synthetic `GraphStatus::Running`
@@ -1055,16 +1055,16 @@ mod hang_repro {
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(10),
             client.call_tool(
-                "graph_schedule_autorun",
-                serde_json::json!({"graph_id": graph_id, "at": at}),
+                "graph_control",
+                serde_json::json!({"action": "schedule_autorun", "graph_id": graph_id, "at": at}),
             ),
         )
         .await;
         let elapsed = start.elapsed();
 
         let schedule_response = result
-            .expect("node-initiated graph_schedule_autorun must respond promptly mid-dispatch")
-            .expect("graph_schedule_autorun call must succeed");
+            .expect("node-initiated graph_control must respond promptly mid-dispatch")
+            .expect("graph_control call must succeed");
         assert!(
             schedule_response.contains("scheduled to autorun"),
             "{schedule_response}"
@@ -1081,14 +1081,17 @@ mod hang_repro {
             "schedule must be durably persisted at the requested instant"
         );
 
-        // Requirement 3: graph_run / graph_reset against the SAME graph, still
+        // Requirement 3: graph_control / graph_control against the SAME graph, still
         // mid-dispatch, must fail fast (not hang, not queue).
         let run_result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            client.call_tool("graph_run", serde_json::json!({"graph_id": graph_id})),
+            client.call_tool(
+                "graph_control",
+                serde_json::json!({"action": "run", "graph_id": graph_id}),
+            ),
         )
         .await
-        .expect("graph_run must respond promptly against a running graph")
+        .expect("graph_control must respond promptly against a running graph")
         .unwrap();
         assert!(
             run_result.contains("already running"),
@@ -1097,15 +1100,18 @@ mod hang_repro {
 
         let reset_result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            client.call_tool("graph_reset", serde_json::json!({"graph_id": graph_id})),
+            client.call_tool(
+                "graph_control",
+                serde_json::json!({"action": "reset", "graph_id": graph_id}),
+            ),
         )
         .await
-        .expect("graph_reset must respond promptly against a running graph")
+        .expect("graph_control must respond promptly against a running graph")
         .unwrap();
         // The ground truth is the `graph_runs` table, not graph status (see
         // `Database::reset_graph`'s `InFlight` guard) — the refusal now names
         // the node and run still executing rather than just pointing at
-        // `graph_pause`.
+        // `graph_control`.
         assert!(
             reset_result.contains("sleep") && reset_result.contains("still executing"),
             "expected fast-fail error, got: {reset_result}"
@@ -1146,8 +1152,9 @@ mod hang_repro {
         let before = chrono::Utc::now();
         let result = client
             .call_tool(
-                "graph_schedule_autorun",
+                "graph_control",
                 serde_json::json!({
+                    "action": "schedule_autorun",
                     "graph_id": graph_id,
                     "quota_reset_message":
                         "You've hit your session limit · resets 1pm (America/Bogota)"
@@ -1197,8 +1204,9 @@ mod hang_repro {
 
         let result = client
             .call_tool(
-                "graph_schedule_autorun",
+                "graph_control",
                 serde_json::json!({
+                    "action": "schedule_autorun",
                     "graph_id": graph_id,
                     "at": chrono::Utc::now().to_rfc3339(),
                     "quota_reset_message": "resets 1pm (America/Bogota)",
@@ -1217,7 +1225,7 @@ mod hang_repro {
         );
     }
 
-    /// Requirement 4: a retried `graph_schedule_autorun` (simulating a lost
+    /// Requirement 4: a retried `graph_control` (simulating a lost
     /// ack whose write already committed) must not double-schedule — the
     /// second call with the same graph id + target instant leaves exactly one
     /// pending schedule, at that instant, not a queued second one.
@@ -1236,8 +1244,8 @@ mod hang_repro {
         for _ in 0..2 {
             let result = client
                 .call_tool(
-                    "graph_schedule_autorun",
-                    serde_json::json!({"graph_id": graph_id, "at": at.to_rfc3339()}),
+                    "graph_control",
+                    serde_json::json!({"action": "schedule_autorun", "graph_id": graph_id, "at": at.to_rfc3339()}),
                 )
                 .await
                 .unwrap();

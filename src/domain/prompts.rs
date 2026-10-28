@@ -135,7 +135,7 @@ fn resilience_preset() -> String {
     );
     out.push_str(&itemized_section(&PROCEDURE, &[
         "Read the failure/blocker context below (`{{previous_feedback}}`) and pick exactly ONE diagnosis: QUOTA, GLITCH, or OTHER.",
-        "QUOTA — the failure is a rate limit, quota exhaustion, or \"try again later\" from the platform/API itself. Action: call `graph_schedule_autorun` with `graph_id` set to this graph's ID and `quota_reset_message` set to the ENTIRE failure text below, copied verbatim — do NOT extract, truncate, reformat, or translate any part of it; the engine parses the raw text itself. Then report FAIL.",
+        "QUOTA — the failure is a rate limit, quota exhaustion, or \"try again later\" from the platform/API itself. Action: call `graph_control` with `action` set to `schedule_autorun`, `graph_id` set to this graph's ID and `quota_reset_message` set to the ENTIRE failure text below, copied verbatim — do NOT extract, truncate, reformat, or translate any part of it; the engine parses the raw text itself. Then report FAIL.",
         "GLITCH — the failure is a transient infrastructure hiccup (network blip, spurious timeout, a flaky check unrelated to the spec) with no sign of a real defect. Action: report GLITCH and recommend a plain retry of the same node.",
         "OTHER — the failure reflects a genuine problem with the work itself (wrong code, an unmet spec, a missing dependency, a decision only a human can make). Action: report OTHER with a precise, actionable explanation of what's wrong so a human or the next agent can address it.",
         "State your diagnosis and its one action clearly in your report; do not hedge between diagnoses.",
@@ -870,8 +870,12 @@ mod tests {
         let specs = builtin_prompt_preset_specs();
         let (_, content) = specs.iter().find(|(n, _)| *n == "resilience").unwrap();
         assert!(
-            content.contains("graph_schedule_autorun"),
-            "resilience preset must instruct calling graph_schedule_autorun for quota failures"
+            content.contains("graph_control"),
+            "resilience preset must instruct calling graph_control for quota failures"
+        );
+        assert!(
+            content.contains("schedule_autorun"),
+            "resilience preset must name the schedule_autorun action — the dispatch refuses a graph_control call without it"
         );
         assert!(
             content.contains("quota_reset_message"),

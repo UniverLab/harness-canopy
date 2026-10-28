@@ -1343,7 +1343,7 @@ fn self_report_verdict_writer() {
         let db = Database::new(&std::path::PathBuf::from(&db_path))?;
         let run = db
             .get_active_graph_run_for_node(&node_id)?
-            .ok_or_else(|| anyhow!("no running graph_run row for node {node_id:?}"))?;
+            .ok_or_else(|| anyhow!("no running graph_control row for node {node_id:?}"))?;
         let mut output = serde_json::json!({ "test_self_report": true });
         if let Some(text) = &stdout_text {
             output["stdout"] = Value::String(text.clone());
@@ -1356,7 +1356,7 @@ fn self_report_verdict_writer() {
         )?;
         if !updated {
             bail!(
-                "graph_run row {} vanished between lookup and update",
+                "graph_control row {} vanished between lookup and update",
                 run.id
             );
         }

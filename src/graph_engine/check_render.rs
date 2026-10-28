@@ -8,7 +8,7 @@ use anyhow::Result;
 /// The `{{...}}` markers a check command expands through POSIX shell
 /// quoting (CM38 FR1) — their values (graph/spec names, a directory) may
 /// contain spaces or quotes, so they must never be spliced in raw. Shared
-/// with `graph_preflight` via [`CHECK_COMMAND_MARKERS`]; the split matters
+/// with `graph_control` via [`CHECK_COMMAND_MARKERS`]; the split matters
 /// because the pre-quoted-marker stripping below applies only to these.
 pub(crate) const CHECK_COMMAND_QUOTED_MARKERS: &[&str] = &[
     "graph_name",
@@ -32,7 +32,7 @@ pub const CHECK_COMMAND_RAW_MARKERS: &[&str] =
     &["spec_start_head", "spec_start_dirty", "spec_committed_head"];
 
 /// Every marker a check command can bind (CM38) — the one vocabulary both
-/// [`render_check_command`] and `graph_preflight` enforce, so the engine and
+/// [`render_check_command`] and `graph_control` enforce, so the engine and
 /// the audit can never drift. Built from the quoted and raw vocabularies so
 /// the three can never drift from each other either.
 pub(crate) const CHECK_COMMAND_MARKERS: &[&str] = &[
@@ -122,7 +122,7 @@ pub(crate) fn render_check_command(template: &str, ctx: &CheckCommandCtx<'_>) ->
 
 /// The `unknown marker {{x}} in check command` error for one check node, or
 /// `None` when every marker binds. Scans a whole `GraphDetails` — the
-/// graph's own nodes and every spec's nodes — so `graph_preflight` can
+/// graph's own nodes and every spec's nodes — so `graph_control` can
 /// report the defect before spending any probe quota (CM38 FR4).
 pub fn check_command_marker_error(details: &crate::domain::graphs::GraphDetails) -> Option<String> {
     let all_nodes = details

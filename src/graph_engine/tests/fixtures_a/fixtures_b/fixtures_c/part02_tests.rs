@@ -725,7 +725,7 @@ async fn ancestry_check_skipped_in_non_git_workdir() {
 
 #[tokio::test]
 async fn graph_engine_resume_dispatch_reuses_persisted_spec_start_head_even_if_stale() {
-    // `resume_background` (`graph_continue`, autorun's plain resume) is
+    // `resume_background` (`graph_control`, autorun's plain resume) is
     // the one path allowed to inherit a spec's already-persisted
     // baseline while it's still `running` — this is what makes resuming
     // a daemon-restart-interrupted spec keep comparing against the HEAD
@@ -780,9 +780,9 @@ async fn graph_engine_fresh_relaunch_recaptures_even_when_spec_still_shows_runni
     // never-reset attempt kept having its stale baseline reused across
     // later relaunches ("12:56 relaunch compared against b9e8928, the
     // HEAD of the ORIGINAL 07:58 launch, two relaunches earlier"). A
-    // fresh dispatch — `graph_run`/`start_background_run`, including
+    // fresh dispatch — `graph_control`/`start_background_run`, including
     // relaunching a `paused` graph directly instead of via
-    // `graph_continue` — must never inherit that: it re-captures
+    // `graph_control` — must never inherit that: it re-captures
     // regardless of the spec's leftover `running` status.
     let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
     init_git_repo(dir.path());
@@ -810,7 +810,7 @@ async fn graph_engine_fresh_relaunch_recaptures_even_when_spec_still_shows_runni
     })
     .unwrap();
 
-    // `run_graph` is the fresh-dispatch entry point (same one `graph_run`
+    // `run_graph` is the fresh-dispatch entry point (same one `graph_control`
     // uses) — no `is_resume` flag reaches it.
     engine
         .run_graph(graph_id.clone(), None, None, None, None, None)
@@ -988,7 +988,7 @@ async fn cm15_node_redispatch_reads_config_from_db_not_launch_snapshot() {
     });
 
     // Wait until node-a has completed exactly once, then rewrite its command —
-    // this is the `graph_update_node` between two dispatches. Full-config replace,
+    // this is the `graph_node` between two dispatches. Full-config replace,
     // matching update_graph_node_details semantics.
     loop {
         let done = db

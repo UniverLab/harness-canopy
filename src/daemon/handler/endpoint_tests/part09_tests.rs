@@ -16,49 +16,65 @@ async fn graph_add_edge_still_refuses_ensemble_nodes_with_helpful_message() {
     let member_id = details.members[0].node_id.clone();
     let join_id = details.ensemble.join_node_id.clone();
 
-    let into_member = handler
-        .graph_add_edge(Parameters(GraphAddEdgeParams {
+    let into_member = call_graph_action(
+        &handler,
+        "graph_edge",
+        "add",
+        params_id(GraphAddEdgeParams {
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             from_node: entry.clone(),
             to_node: member_id.clone(),
             condition: "always".to_string(),
             route: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&into_member));
     let member_msg = text(&into_member);
-    assert!(member_msg.contains("graph_update_ensemble"), "{member_msg}");
-    assert!(member_msg.contains("graph_delete_ensemble"), "{member_msg}");
+    assert!(member_msg.contains("graph_ensemble"), "{member_msg}");
+    assert!(member_msg.contains("graph_ensemble"), "{member_msg}");
 
-    let out_of_quorum = handler
-        .graph_add_edge(Parameters(GraphAddEdgeParams {
+    let out_of_quorum = call_graph_action(
+        &handler,
+        "graph_edge",
+        "add",
+        params_id(GraphAddEdgeParams {
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             from_node: join_id.clone(),
             to_node: arbiter.clone(),
             condition: "pass".to_string(),
             route: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&out_of_quorum));
-    assert!(text(&out_of_quorum).contains("graph_update_ensemble"));
+    assert!(text(&out_of_quorum).contains("graph_ensemble"));
 
-    let delete_member = handler
-        .graph_delete_node(Parameters(GraphDeleteNodeParams { node_id: member_id }))
-        .await
-        .unwrap();
+    let delete_member = call_graph_action(
+        &handler,
+        "graph_node",
+        "delete",
+        params_id(GraphDeleteNodeParams { node_id: member_id }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&delete_member));
-    assert!(text(&delete_member).contains("graph_delete_ensemble"));
+    assert!(text(&delete_member).contains("graph_ensemble"));
 
-    let delete_quorum = handler
-        .graph_delete_node(Parameters(GraphDeleteNodeParams { node_id: join_id }))
-        .await
-        .unwrap();
+    let delete_quorum = call_graph_action(
+        &handler,
+        "graph_node",
+        "delete",
+        params_id(GraphDeleteNodeParams { node_id: join_id }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&delete_quorum));
-    assert!(text(&delete_quorum).contains("graph_delete_ensemble"));
+    assert!(text(&delete_quorum).contains("graph_ensemble"));
 }
 
 // ── intelligence_upsert / intelligence_search / intelligence_graph_walk

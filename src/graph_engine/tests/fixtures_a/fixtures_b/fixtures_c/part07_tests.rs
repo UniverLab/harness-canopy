@@ -720,7 +720,7 @@ async fn superseded_run_traverses_no_edge_and_creates_no_resilience_run() {
 
 /// The same mechanism, generalized (2026-08-05): a run terminated
 /// out-of-band for ANY reason — not just a same-node supersede — must be
-/// recognized and traverse no edge. `graph_reset` marks a run it kills
+/// recognized and traverse no edge. `graph_control` marks a run it kills
 /// with reason `"spec reset"`, not `SUPERSEDE_REASON`; before the fix
 /// this reason mismatch meant a spec reset out from under an executing
 /// node let its late completion route the fail edge anyway.
@@ -816,7 +816,7 @@ async fn run_terminated_for_any_out_of_band_reason_also_traverses_no_edge() {
 
 /// The defect this closes (2026-08-06, graph 824de730): a spec that dies
 /// because a FAILING node has no outgoing edge left NOTHING visible
-/// beyond a log line — no blocker anywhere `graph_list`/the TUI could
+/// beyond a log line — no blocker anywhere `graph`/the TUI could
 /// show. The engine must now derive one, naming the node and what it
 /// reported, onto the terminating run's `output.blocker` — the exact
 /// key `graph_run_blocker` (daemon/handler.rs) already reads.
@@ -1022,7 +1022,7 @@ async fn infra_marked_output_does_not_consume_the_cross_run_budget() {
     assert_eq!(db.get_graph_spec_cross_run_attempts(&spec_id).unwrap(), 1);
 }
 
-/// Decision 6: an EXPLICIT `graph_reset` of the specific spec that hit
+/// Decision 6: an EXPLICIT `graph_control` of the specific spec that hit
 /// the budget clears its count, so the next execution starts fresh
 /// rather than being blocked on its very first fail. The counter must
 /// still be shared across executions otherwise — this is the one
@@ -1088,7 +1088,7 @@ async fn explicit_spec_reset_clears_the_cross_run_attempt_count() {
 }
 
 /// The mirror image, and decision 6's other half: a BLANKET
-/// `graph_reset` (no `specs` named) resets the spec's status like any
+/// `graph_control` (no `specs` named) resets the spec's status like any
 /// other, but must NOT clear its attempt count — that's exactly the
 /// "operator resets and relaunches without fixing anything" recovery
 /// this whole spec exists to stop from silently resetting the budget.

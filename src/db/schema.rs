@@ -99,7 +99,7 @@ impl Database {
                 .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
 
-        // CM29: downgrades the dirty-start refusal (graph_run/autorun) to a
+        // CM29: downgrades the dirty-start refusal (graph_control/autorun) to a
         // warning instead of refusing to launch. `DEFAULT 0` — every
         // pre-existing graph keeps today's (implicit) refusal behavior.
         let has_allow_dirty_start: bool = conn
@@ -121,7 +121,7 @@ impl Database {
 
     /// Add graph `active_run_idea`: the idea an idea-driven run last ran
     /// with, persisted the moment that run starts so every resume path
-    /// (`graph_continue run_from_node`, `retry_current_node`, plain resume)
+    /// (`graph_control run_from_node`, `retry_current_node`, plain resume)
     /// can re-render `{{spec_content}}` from it. `NULL` on pre-existing rows
     /// and on spec-driven graphs (never written for them).
     pub(in crate::db) fn migrate_graph_active_run_idea(conn: &Connection) -> Result<()> {
@@ -255,7 +255,7 @@ impl Database {
         // spec has failed with a genuine (non-infrastructure) verdict.
         // Unlike the per-node iteration budget `run_spec` tracks in memory
         // for the duration of one execution, this is persisted so it
-        // survives `graph_reset`, a relaunch, and a daemon restart — the
+        // survives `graph_control`, a relaunch, and a daemon restart — the
         // whole point being that an unsatisfiable spec doesn't get a fresh
         // budget every time an operator resets and relaunches after a quota
         // failure. `DEFAULT 0` means every pre-existing spec reads as never
@@ -438,8 +438,8 @@ impl Database {
     /// CB31: add `graph_runs.paused_through`.
     pub(in crate::db) fn migrate_run_paused_through_column(conn: &Connection) -> Result<()> {
         // CB31: a node run finalized with its own verdict while a
-        // wait-for-completion `graph_pause` was pending is flagged here so
-        // `graph_continue` re-executing that node does not spend one of its
+        // wait-for-completion `graph_control` was pending is flagged here so
+        // `graph_control` re-executing that node does not spend one of its
         // `DEFAULT_MAX_ITERATIONS_PER_NODE` — an operator pause is not a node
         // attempt. Additive and idempotent; NOT NULL DEFAULT 0 backfills
         // every existing row as "not paused through".

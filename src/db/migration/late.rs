@@ -520,7 +520,7 @@ impl Database {
         // `active_run_queue_id` persists which queue (if any) a graph's current/
         // last run drew from, so an interrupted run (quota failure, daemon
         // crash) can be resumed against the same queue by every resume path
-        // (scheduled autorun, `graph_reset`) instead of falling back to the
+        // (scheduled autorun, `graph_control`) instead of falling back to the
         // graph's own bound specs. Older databases predate the column.
         let has_active_run_queue_id: bool = conn
             .query_row(

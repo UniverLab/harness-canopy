@@ -180,7 +180,7 @@ async fn check_node_failure_captures_stdout_stderr() {
         "stderr must contain FAIL_LINE_STDERR, got: {:?}",
         out["stderr"]
     );
-    // Verify persistence via graph_node_run_get equivalent
+    // Verify persistence via graph equivalent
     let fetched = db.get_graph_run(&check_run.id).unwrap().unwrap();
     assert_eq!(fetched.output, check_run.output);
 

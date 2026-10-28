@@ -70,7 +70,7 @@ impl GraphEngine {
     /// one recorded, and finalization of its DB row as `Fail` so it stops
     /// showing up as `running`. Every abnormal end that abandons a node run
     /// without letting it finish on its own — a stale row from a crashed
-    /// prior attempt, `graph_pause`, `graph_reset` of a running spec, or this
+    /// prior attempt, `graph_control`, `graph_control` of a running spec, or this
     /// run failing elsewhere — goes through here. A no-op beyond the
     /// status/summary update if `run` never got a pid recorded (e.g. a gate
     /// node, or an agent/check node that hadn't finished spawning yet).
@@ -206,7 +206,7 @@ impl GraphEngine {
         // A failed graph never tears down its sandbox automatically,
         // whatever its contents: the operator lands, continues or discards
         // it explicitly. Mark the row `kept` (the worktree and branch stay
-        // in place) so a later `graph_continue` resumes inside it.
+        // in place) so a later `graph_control` resumes inside it.
         if let Ok(Some(sb)) = self.db.get_active_sandbox_for_owner("graph", graph_id) {
             let _ = self.db.update_sandbox_run_status(&sb.id, "kept");
             let _ = self.db.set_sandbox_cleanup_error(
@@ -343,8 +343,8 @@ impl GraphEngine {
     /// `Failed`, `Paused` is not accepted by a pending autorun
     /// ([`crate::domain::graphs::Graph::is_autorun_due`] already excludes it
     /// unless `paused_by_reconciliation`, which `update_graph_status` always
-    /// clears) and is refused by `graph_run` once it carries a blocker (see
-    /// the daemon's `graph_run` tool) — exactly the "not started again until
+    /// clears) and is refused by `graph_control` once it carries a blocker (see
+    /// the daemon's `graph_control` tool) — exactly the "not started again until
     /// a human clears it" FR4 asks for, reusing the graph_report_blocker
     /// mechanism wholesale rather than inventing a parallel one.
     pub(crate) async fn block_graph(

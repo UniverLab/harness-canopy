@@ -19,7 +19,7 @@ use rmcp::ErrorData as McpError;
 impl TaskTriggerHandler {
     #[tool(
         name = "blueprint_list",
-        description = "List every node blueprint (builtin and custom) — predesigned, reusable node templates for graph_add_node."
+        description = "List every node blueprint (builtin and custom) — predesigned, reusable node templates for graph_node add."
     )]
     pub(crate) async fn blueprint_list(&self) -> Result<CallToolResult, McpError> {
         let blueprints = self.db.list_blueprints().map_err(internal_error)?;
@@ -34,7 +34,7 @@ impl TaskTriggerHandler {
 
     #[tool(
         name = "blueprint_create",
-        description = "Create a custom node blueprint: a reusable {name, kind, config template} that graph_add_node can reference by name."
+        description = "Create a custom node blueprint: a reusable {name, kind, config template} that graph_node add can reference by name."
     )]
     pub(crate) async fn blueprint_create(
         &self,

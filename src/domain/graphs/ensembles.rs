@@ -9,7 +9,7 @@ use crate::domain::graphs::GraphEdgeCondition;
 /// their own `prompt_override` (see [`EnsembleMember::prompt_override`]) so a
 /// panel can review the same input from several angles at once instead of
 /// just several models. Persisted as
-/// its own row so `graph_get`/`graph_update_ensemble` can address the whole
+/// its own row so `graph`/`graph_ensemble` can address the whole
 /// unit — the members and join themselves are ordinary [`GraphNode`] rows
 /// (see [`EnsembleMember`]), wired with ordinary [`GraphEdge`] rows, so the
 /// engine's existing graph-walking code needs only the ensemble-aware
@@ -211,8 +211,8 @@ impl Ensemble {
 
 /// `(platform, model, prompt_override, timeout_minutes, infra_retry_limit,
 /// infra_crash_max_seconds, infra_backoff_seconds)` — the normalized shape
-/// of one ensemble member's identity, shared by `graph_add_ensemble`/
-/// `graph_update_ensemble`'s validated input, [`EnsembleBlueprint`]'s stored
+/// of one ensemble member's identity, shared by `graph_ensemble`/
+/// `graph_ensemble`'s validated input, [`EnsembleBlueprint`]'s stored
 /// members, and [`EnsembleMember`] itself. `timeout_minutes` is this
 /// member's own timeout override, or `None` to use the ensemble's shared
 /// `timeout_minutes`. `infra_retry_limit`, `infra_crash_max_seconds` and
@@ -240,7 +240,7 @@ pub struct EnsembleMember {
     pub node_id: String,
     /// Position within the ensemble (0-based) — the deterministic order used
     /// for consolidation and for keying resize diffs in
-    /// `graph_update_ensemble`.
+    /// `graph_ensemble`.
     pub position: i64,
     pub platform: String,
     pub model: Option<String>,
@@ -269,7 +269,7 @@ pub struct EnsembleMember {
 pub struct EnsembleDetails {
     pub ensemble: Ensemble,
     /// Members in `position` order — the order consolidation and
-    /// `graph_update_ensemble` resize diffs rely on.
+    /// `graph_ensemble` resize diffs rely on.
     pub members: Vec<EnsembleMember>,
 }
 

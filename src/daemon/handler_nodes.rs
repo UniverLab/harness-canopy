@@ -2,43 +2,35 @@
 //! Moved verbatim; tool names, schemas, and behaviour unchanged.
 
 use crate::daemon::handler::TaskTriggerHandler;
-use crate::daemon::handler_edges::{resolve_graph_target, GraphTarget};
+use crate::daemon::handler_edges::resolve_graph_target;
 use crate::daemon::handler_formatting::{
     build_id_result, build_node_update_response_with_changes, internal_error,
 };
-use crate::daemon::handler_helpers::record_config_change_if_running;
-use crate::daemon::handler_node_lib::{resolve_node_document, resolve_node_kind_and_config};
+use crate::daemon::handler_nodes_sections::{
+    audit_infra_override_nodes, audit_unknown_key_nodes, autowire_infra_edge, merge_node_config,
+    next_node_position, parse_node_name_kind, record_node_config_change,
+    resolve_add_node_kind_config, resolve_updatable_node, validate_effective_node_config,
+};
 use crate::daemon::handler_specs_helpers::validate_at_least_one_bool;
-use crate::daemon::handler_templates::{check_new_node, check_updated_node};
+use crate::daemon::handler_templates::check_new_node;
 use crate::daemon::handler_validate::{
     config_has_agent_harness, json_value_kind_name, parse_router_routes,
-    reject_interactive_only_platform, resolve_prefix_or_error, validate_agent_crew_exclusive,
-    validate_node_exists, validate_node_kind, validate_node_mutex_config,
-    validate_node_not_ensemble_owned, validate_node_position_conflict, validate_non_empty,
-    validate_not_join_kind, validate_topology_mutation_allowed,
+    reject_interactive_only_platform, validate_agent_crew_exclusive, validate_node_mutex_config,
+    validate_node_position_conflict, validate_non_empty, validate_not_join_kind,
 };
 use crate::daemon::helpers::error_result;
 use crate::daemon::params::*;
-use crate::daemon::params_extract::Parameters;
-use crate::db::Database;
-use crate::domain::graphs::{
-    validate_router_edges_declared, validate_router_route_coverage, validate_router_routes,
-    GraphEdge, GraphEdgeCondition, GraphNode, GraphNodeKind,
-};
+use crate::domain::graphs::{validate_router_routes, GraphNode, GraphNodeKind};
+use crate::or_early_return;
 use rmcp::model::{CallToolResult, ContentBlock};
-use rmcp::tool;
 use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
 
 #[tool_router(router = tool_router_nodes, vis = "pub(crate)")]
 impl TaskTriggerHandler {
-    #[tool(
-        name = "graph_add_node",
-        description = "Add a graph node to an existing graph spec, or (via graph_id instead of spec_id) to the graph's top-level graph. Provide either a full 'config' (with 'kind'), a 'blueprint' name (see blueprint_list), or a 'node' document name (see node_list, e.g. implementer or cargo-gates), each template optionally shallow-merged with 'config_overrides'. An agent node also accepts `infra_retry_limit`/`infra_crash_max_seconds`/`infra_backoff_seconds` (defaults 2/60/30) to override the infra-crash retry budget for this node alone, taking precedence over its platform's config.toml value. An agent, check, or gate node also accepts `mutex` (e.g. [\"cpu\"]) to hold named shared resources while it runs. A router node with {\"decision\": true} classifies via the platform's decision model instead of spawning an agent (optional \"min_confidence\" 0-1, default 0); e.g. routes quota_with_reset/transient_glitch/other with fallback other."
-    )]
-    pub(crate) async fn graph_add_node(
+    pub(crate) async fn graph_add_node_impl(
         &self,
-        Parameters(params): Parameters<GraphAddNodeParams>,
+        params: GraphAddNodeParams,
     ) -> Result<CallToolResult, McpError> {
         let name = params.name.trim();
         if let Err(e) = validate_non_empty(name, "Graph node name") {
@@ -53,38 +45,16 @@ impl TaskTriggerHandler {
             Err(e) => return Ok(error_result(&e)),
         };
 
-        let node_name = params
-            .node
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
-        let (kind, config) = match node_name {
-            Some(node_name) => {
-                if params.config.is_some() || params.blueprint.is_some() {
-                    return Ok(error_result(
-                        "Pass one of 'config', 'blueprint', or 'node', never more than one.",
-                    ));
-                }
-                if params.kind.is_some() {
-                    return Ok(error_result(
-                        "Pass 'node' without 'kind': the node document already declares its kind.",
-                    ));
-                }
-                match resolve_node_document(node_name, params.config_overrides) {
-                    Ok(result) => result,
-                    Err(e) => return Ok(error_result(&e)),
-                }
-            }
-            None => match resolve_node_kind_and_config(
-                &self.db,
-                params.kind.as_deref(),
-                params.config,
-                params.blueprint.as_deref(),
-                params.config_overrides,
-            ) {
-                Ok(result) => result,
-                Err(e) => return Ok(error_result(&e)),
-            },
+        let (kind, config) = match resolve_add_node_kind_config(
+            &self.db,
+            params.node.as_deref(),
+            params.kind.as_deref(),
+            params.config,
+            params.blueprint.as_deref(),
+            params.config_overrides,
+        ) {
+            Ok(result) => result,
+            Err(e) => return Ok(e),
         };
         if let Err(e) = validate_not_join_kind(kind) {
             return Ok(error_result(&e));
@@ -102,28 +72,7 @@ impl TaskTriggerHandler {
             return Ok(error_result(&e));
         }
 
-        let (spec_id, graph_id, next_position) = match &target {
-            GraphTarget::Spec(spec_id) => {
-                let next_position = self
-                    .db
-                    .list_graph_nodes(spec_id)
-                    .map_err(internal_error)?
-                    .last()
-                    .map(|node| node.position + 1)
-                    .unwrap_or(1);
-                (Some(spec_id.clone()), None, next_position)
-            }
-            GraphTarget::Graph(graph_id) => {
-                let next_position = self
-                    .db
-                    .list_graph_nodes_for_graph(graph_id)
-                    .map_err(internal_error)?
-                    .last()
-                    .map(|node| node.position + 1)
-                    .unwrap_or(1);
-                (None, Some(graph_id.clone()), next_position)
-            }
-        };
+        let (spec_id, graph_id, next_position) = next_node_position(&self.db, &target)?;
 
         let node = GraphNode {
             id: uuid::Uuid::new_v4().to_string(),
@@ -137,86 +86,20 @@ impl TaskTriggerHandler {
         };
         self.db.insert_graph_node(&node).map_err(internal_error)?;
 
-        // CM2: auto-wire a `Error` edge to the graph's infra node if set.
-        if let Some(ref lid) = graph_id {
-            if let Ok(Some(lp)) = self.db.get_graph(lid) {
-                if let Some(ref infra_node_id) = lp.infra_node_id {
-                    let edge = GraphEdge {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        spec_id: node.spec_id.clone(),
-                        graph_id: Some(lid.clone()),
-                        from_node: node.id.clone(),
-                        to_node: infra_node_id.clone(),
-                        condition: GraphEdgeCondition::Error,
-                    };
-                    let _ = self.db.insert_graph_edge(&edge);
-                }
-            }
-        }
+        autowire_infra_edge(&self.db, &node, &graph_id);
 
         Ok(build_id_result(&node.id, "node_id"))
     }
 
-    #[tool(
-        name = "graph_update_node",
-        description = "Update an existing graph node. Config merges with the stored config by default (partial update: keys present are changed, keys absent are left as-is). Set `config_replace` to `true` to replace the entire config instead. An agent, check, or gate node also accepts `mutex` (e.g. [\"cpu\"]) to hold named shared resources while it runs. Router nodes accept \"decision\"/\"min_confidence\" (see graph_add_node)."
-    )]
-    pub(crate) async fn graph_update_node(
+    pub(crate) async fn graph_update_node_impl(
         &self,
-        Parameters(params): Parameters<GraphUpdateNodeParams>,
+        params: GraphUpdateNodeParams,
     ) -> Result<CallToolResult, McpError> {
-        let node_id = match resolve_prefix_or_error(
-            &self.db,
-            params.node_id.trim(),
-            Database::resolve_graph_node_id_by_prefix,
-            "node",
-        ) {
-            Ok(id) => id,
+        let (node_id, node) = or_early_return!(resolve_updatable_node(&self.db, &params));
+        let (name, kind) = match parse_node_name_kind(&params) {
+            Ok(parsed) => parsed,
             Err(e) => return Ok(e),
         };
-        let node = match validate_node_exists(&self.db, &node_id) {
-            Ok(node) => node,
-            Err(e) => return Ok(error_result(&e)),
-        };
-        if let Err(e) = validate_node_not_ensemble_owned(&self.db, &node_id) {
-            return Ok(error_result(&e));
-        }
-        // CM15 / FR5: `kind` and `position` are graph TOPOLOGY — the running
-        // engine resolves routing, entry-node selection and router-route
-        // coverage from a per-run snapshot and never re-reads them mid-run.
-        // Only node CONFIG (platform/model/effort/prompt/timeout/commit_rights/
-        // resume) is read fresh per dispatch. Accepting a kind/position change on
-        // a running graph would silently fail to affect routing — the exact
-        // "silent success" this spec removes — so refuse it, naming the graph's
-        // state. `name` and `config` stay editable while running.
-        if params.kind.is_some() || params.position.is_some() {
-            if let Err(e) = validate_topology_mutation_allowed(
-                &self.db,
-                node.spec_id.as_deref(),
-                node.graph_id.as_deref(),
-            ) {
-                return Ok(error_result(&e));
-            }
-        }
-
-        let name = match params.name.as_deref().map(str::trim) {
-            Some("") => return Ok(error_result("Graph node name must not be empty.")),
-            Some(value) => Some(value),
-            None => None,
-        };
-        let kind = match params.kind.as_deref().map(str::trim) {
-            Some("") => return Ok(error_result("Graph node kind must not be empty.")),
-            Some(value) => match validate_node_kind(value) {
-                Ok(kind) => Some(kind),
-                Err(e) => return Ok(error_result(&e)),
-            },
-            None => None,
-        };
-        if let Some(kind) = kind {
-            if let Err(e) = validate_not_join_kind(kind) {
-                return Ok(error_result(&e));
-            }
-        }
 
         if let Some(position) = params.position {
             if let Err(e) = validate_node_position_conflict(&self.db, &node, &node_id, position) {
@@ -231,90 +114,24 @@ impl TaskTriggerHandler {
                 params.config.is_some(),
                 params.position.is_some(),
             ],
-            "graph_update_node",
+            "graph_node",
         ) {
             return Ok(error_result(&e));
         }
 
         let config_replace = params.config_replace.unwrap_or(false);
-        let (effective_config, changed_keys) = match (&params.config, config_replace) {
-            (Some(provided), false) => {
-                let mut merged = node.config.as_object().cloned().unwrap_or_default();
-                let mut changed = Vec::new();
-                for (key, value) in provided {
-                    let old_value = merged.get(key);
-                    if old_value != Some(value) {
-                        changed.push(key.clone());
-                    }
-                    merged.insert(key.clone(), value.clone());
-                }
-                (serde_json::Value::Object(merged), changed)
-            }
-            (Some(provided), true) => {
-                let mut changed = Vec::new();
-                let default_map = serde_json::Map::new();
-                let stored_map = node.config.as_object().unwrap_or(&default_map);
-                for (key, value) in provided {
-                    if stored_map.get(key) != Some(value) {
-                        changed.push(key.clone());
-                    }
-                }
-                for key in stored_map.keys() {
-                    if !provided.contains_key(key) {
-                        changed.push(key.clone());
-                    }
-                }
-                (serde_json::Value::Object(provided.clone()), changed)
-            }
-            (None, _) => (node.config.clone(), Vec::new()),
-        };
+        let (effective_config, changed_keys) =
+            merge_node_config(&node.config, params.config.as_ref(), config_replace);
 
-        if kind.is_some() || params.config.is_some() {
-            let effective_kind = kind.unwrap_or(node.kind);
-            if let Err(e) = validate_node_config(effective_kind, &effective_config) {
-                return Ok(error_result(&e));
-            }
-            let effective_name = name.unwrap_or(&node.name);
-            if let Err(e) = validate_node_mutex_config(effective_name, &effective_config) {
-                return Ok(error_result(&e));
-            }
-            if let Some(msg) = reject_interactive_only_platform(&effective_config) {
-                return Ok(error_result(&msg));
-            }
-            // A router's routes must stay consistent with whatever edges
-            // already name them: no edge left pointing at a route that was
-            // just removed, and (once wiring has started) no declared route
-            // left without one — see `validate_router_route_coverage`.
-            if effective_kind == GraphNodeKind::Router {
-                let (routes, _fallback) = match parse_router_routes(&effective_config) {
-                    Ok(parsed) => parsed,
-                    Err(e) => return Ok(error_result(&e)),
-                };
-                let edges = match (&node.spec_id, &node.graph_id) {
-                    (Some(spec_id), _) => {
-                        self.db.list_graph_edges(spec_id).map_err(internal_error)?
-                    }
-                    (_, Some(graph_id)) => self
-                        .db
-                        .list_graph_edges_for_graph(graph_id)
-                        .map_err(internal_error)?,
-                    (None, None) => Vec::new(),
-                };
-                if let Err(e) = validate_router_edges_declared(&routes, &node_id, &edges) {
-                    return Ok(error_result(&e));
-                }
-                if let Err(e) = validate_router_route_coverage(&routes, &node_id, &edges) {
-                    return Ok(error_result(&e));
-                }
-            }
-        }
-
-        if params.config.is_some() {
-            let refused = check_updated_node(&self.db, &node, kind, name, &effective_config);
-            if let Err(e) = refused {
-                return Ok(error_result(&e));
-            }
-        }
+        let () = or_early_return!(validate_effective_node_config(
+            &self.db,
+            &node,
+            &node_id,
+            kind,
+            name,
+            &effective_config,
+            params.config.is_some()
+        ));
 
         let config_to_store = if params.config.is_some() {
             Some(&effective_config)
@@ -326,24 +143,7 @@ impl TaskTriggerHandler {
             .update_graph_node_details(&node_id, name, kind, config_to_store, params.position)
             .map_err(internal_error)?;
 
-        // CM46: a node edit on a running graph is narratable engine history.
-        let owning_graph_id = node.graph_id.clone().or_else(|| {
-            node.spec_id.as_deref().and_then(|sid| {
-                self.db
-                    .get_graph_spec(sid)
-                    .ok()
-                    .flatten()
-                    .and_then(|spec| spec.graph_id)
-            })
-        });
-        record_config_change_if_running(
-            &self.db,
-            owning_graph_id.as_deref(),
-            node.spec_id.as_deref(),
-            Some(&node_id),
-            "node",
-            format!("Node '{}' config updated.", name.unwrap_or(&node.name)),
-        );
+        record_node_config_change(&self.db, &node, &node_id, name);
 
         Ok(build_node_update_response_with_changes(
             &node_id,
@@ -351,86 +151,12 @@ impl TaskTriggerHandler {
         ))
     }
 
-    #[tool(
-        name = "graph_audit_node_configs",
-        description = "Scan every graph node in the database for a config key its kind will never read (e.g. 'prompt' on an agent node, which the engine silently ignores in favor of 'prompt_template'). Write-time validation (graph_add_node/graph_update_node) rejects this going forward; this tool finds nodes that predate it and are still silently degraded. Also lists every agent node/member whose effective infra-retry budget (infra_retry_limit/infra_crash_max_seconds/infra_backoff_seconds) differs from its platform's own value."
-    )]
-    pub(crate) async fn graph_audit_node_configs(&self) -> Result<CallToolResult, McpError> {
+    pub(crate) async fn graph_audit_node_configs_impl(&self) -> Result<CallToolResult, McpError> {
         let nodes = self.db.list_all_graph_nodes().map_err(internal_error)?;
 
-        let mut flagged = Vec::new();
-        for node in &nodes {
-            let Some(map) = node.config.as_object() else {
-                continue;
-            };
-            let unknown = unknown_config_keys(node.kind, map);
-            if unknown.is_empty() {
-                continue;
-            }
-            // A spec-scoped node's own row has no `graph_id` (only the spec
-            // does) — resolve it so a flagged node can be traced back to the
-            // graph that owns it without a second round-trip.
-            let graph_id = match &node.graph_id {
-                Some(graph_id) => Some(graph_id.clone()),
-                None => match &node.spec_id {
-                    Some(spec_id) => self
-                        .db
-                        .get_graph_spec(spec_id)
-                        .map_err(internal_error)?
-                        .and_then(|spec| spec.graph_id),
-                    None => None,
-                },
-            };
-            flagged.push(serde_json::json!({
-                "node_id": node.id,
-                "name": node.name,
-                "kind": node.kind.display_str(),
-                "spec_id": node.spec_id,
-                "graph_id": graph_id,
-                "unknown_keys": unknown,
-            }));
-        }
+        let flagged = audit_unknown_key_nodes(&self.db, &nodes)?;
 
-        let mut infra_overrides = Vec::new();
-        for node in &nodes {
-            if node.kind != GraphNodeKind::Agent {
-                continue;
-            }
-            let effective = crate::graph_engine::resolve_node_infra_config(node);
-            let platform = node
-                .config
-                .get("platform")
-                .or_else(|| node.config.get("cli"))
-                .and_then(serde_json::Value::as_str);
-            let baseline = crate::graph_engine::resolve_platform_only_infra_config(platform);
-            let differs = effective.retry_limit.value != baseline.retry_limit.value
-                || effective.crash_max_seconds.value != baseline.crash_max_seconds.value
-                || effective.backoff_seconds.value != baseline.backoff_seconds.value;
-            if !differs {
-                continue;
-            }
-            let graph_id = match &node.graph_id {
-                Some(graph_id) => Some(graph_id.clone()),
-                None => match &node.spec_id {
-                    Some(spec_id) => self
-                        .db
-                        .get_graph_spec(spec_id)
-                        .map_err(internal_error)?
-                        .and_then(|spec| spec.graph_id),
-                    None => None,
-                },
-            };
-            infra_overrides.push(serde_json::json!({
-                "node_id": node.id,
-                "name": node.name,
-                "spec_id": node.spec_id,
-                "graph_id": graph_id,
-                "platform": platform,
-                "infra_retry_limit": { "value": effective.retry_limit.value, "source": effective.retry_limit.source, "platform_value": baseline.retry_limit.value },
-                "infra_crash_max_seconds": { "value": effective.crash_max_seconds.value, "source": effective.crash_max_seconds.source, "platform_value": baseline.crash_max_seconds.value },
-                "infra_backoff_seconds": { "value": effective.backoff_seconds.value, "source": effective.backoff_seconds.source, "platform_value": baseline.backoff_seconds.value },
-            }));
-        }
+        let infra_overrides = audit_infra_override_nodes(&self.db, &nodes)?;
 
         let commit_rights_nodes: Vec<serde_json::Value> = nodes
             .iter()
@@ -470,7 +196,7 @@ impl TaskTriggerHandler {
     }
 }
 
-/// `graph_add_node`/`graph_update_node`'s interactive-only gate (CM35):
+/// `graph_node`/`graph_node`'s interactive-only gate (CM35):
 /// Every config key an `agent` node is actually read for — see
 /// `execute_agent_node`/`resolve_node_prompt_template` in `graph_engine.rs`.
 /// Notably absent: `prompt`. An agent's prompt is `prompt_template` (or
@@ -537,7 +263,7 @@ pub(crate) const ROUTER_CONFIG_KEYS: &[&str] = &[
 /// no caller-supplied key to check against). Shared by
 /// [`validate_known_config_keys`] (write-time rejection) and
 /// [`unknown_config_keys`] (read-only detection of already-stored nodes via
-/// the `graph_audit_node_configs` tool), so the two can never name a
+/// the `graph` tool), so the two can never name a
 /// different accepted set for the same kind.
 pub(crate) fn allowed_config_keys(kind: GraphNodeKind) -> Option<&'static [&'static str]> {
     match kind {
@@ -553,7 +279,7 @@ pub(crate) fn allowed_config_keys(kind: GraphNodeKind) -> Option<&'static [&'sta
 /// (see [`allowed_config_keys`]) and for a config that only carries
 /// recognized keys. Pure read-only classification — no error message, no
 /// early return — so it doubles as both [`validate_known_config_keys`]'s
-/// rejection check and `graph_audit_node_configs`'s detection query over
+/// rejection check and `graph`'s detection query over
 /// nodes that predate this validation.
 pub(crate) fn unknown_config_keys(
     kind: GraphNodeKind,
@@ -680,9 +406,9 @@ pub(crate) fn validate_node_config(
                 );
             }
         }
-        // A join node's config is engine-managed (see `graph_add_ensemble`) —
+        // A join node's config is engine-managed (see `graph_ensemble`) —
         // there is nothing for a caller to validate, and callers can never
-        // reach this arm anyway since `graph_add_node`/`graph_update_node`
+        // reach this arm anyway since `graph_node`/`graph_node`
         // refuse `kind: "join"` outright.
         GraphNodeKind::Join => {}
         GraphNodeKind::Router => {

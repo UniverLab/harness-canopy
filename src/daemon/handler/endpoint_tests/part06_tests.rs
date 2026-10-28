@@ -7,8 +7,11 @@ async fn graph_update_node_router_enforces_route_coverage_and_edge_consistency()
     let lp = insert_test_graph(&db, dir.path());
     let spec = insert_test_spec(&db, &lp.id, 1);
 
-    let router_result = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let router_result = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Router".to_string(),
@@ -17,48 +20,60 @@ async fn graph_update_node_router_enforces_route_coverage_and_edge_consistency()
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let router_id = extract_id(&router_result, "node_id");
     let retry_target = add_agent_node(&handler, &spec.id, "Retry target").await;
 
     // Wire only the "retry" route — "escalate" is declared but not yet
     // served by any edge.
-    let edge = handler
-        .graph_add_edge(Parameters(GraphAddEdgeParams {
+    let edge = call_graph_action(
+        &handler,
+        "graph_edge",
+        "add",
+        params_id(GraphAddEdgeParams {
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             from_node: router_id.clone(),
             to_node: retry_target,
             condition: "route".to_string(),
             route: Some("retry".to_string()),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&edge), "{}", text(&edge));
 
     // Re-asserting the same routes now that wiring has started must
     // fail: "escalate" has no outgoing edge.
-    let no_coverage = handler
-        .graph_update_node(Parameters(GraphUpdateNodeParams {
+    let no_coverage = call_graph_action(
+        &handler,
+        "graph_node",
+        "update",
+        params_id(GraphUpdateNodeParams {
             node_id: router_id.clone(),
             name: None,
             kind: None,
             config: Some(router_node_config(&two_routes(), "retry")),
             config_replace: None,
             position: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&no_coverage));
     assert!(text(&no_coverage).contains("'escalate' has no outgoing edge"));
 
     // Changing the declared routes so they no longer include "retry"
     // leaves the existing retry-labeled edge dangling on an undeclared
     // route.
-    let stale_edge = handler
-        .graph_update_node(Parameters(GraphUpdateNodeParams {
+    let stale_edge = call_graph_action(
+        &handler,
+        "graph_node",
+        "update",
+        params_id(GraphUpdateNodeParams {
             node_id: router_id.clone(),
             name: None,
             kind: None,
@@ -71,14 +86,15 @@ async fn graph_update_node_router_enforces_route_coverage_and_edge_consistency()
             )),
             config_replace: None,
             position: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&stale_edge));
     assert!(text(&stale_edge).contains("undeclared route 'retry'"));
 }
 
-// ── graph_add_ensemble ──────────────────────────────────────────
+// ── graph_ensemble ──────────────────────────────────────────
 
 #[tokio::test]
 async fn graph_add_ensemble_happy_path_and_validation_errors() {
@@ -109,8 +125,11 @@ async fn graph_add_ensemble_happy_path_and_validation_errors() {
         },
     ];
 
-    let created = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let created = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
@@ -134,14 +153,18 @@ async fn graph_add_ensemble_happy_path_and_validation_errors() {
             on_fail_to: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&created), "{}", text(&created));
     assert_eq!(db.list_ensembles_for_spec(&spec.id).unwrap().len(), 1);
 
-    let missing_prompt = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let missing_prompt = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
@@ -165,14 +188,18 @@ async fn graph_add_ensemble_happy_path_and_validation_errors() {
             on_fail_to: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&missing_prompt));
     assert!(text(&missing_prompt).contains("prompt_template"));
 
-    let bad_min_pass = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let bad_min_pass = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
@@ -196,14 +223,18 @@ async fn graph_add_ensemble_happy_path_and_validation_errors() {
             on_fail_to: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&bad_min_pass));
     assert!(text(&bad_min_pass).contains("has an invalid min_pass"));
 
-    let unknown_entry = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let unknown_entry = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
@@ -227,14 +258,18 @@ async fn graph_add_ensemble_happy_path_and_validation_errors() {
             on_fail_to: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&unknown_entry));
     assert!(text(&unknown_entry).contains("not found"));
 
-    let too_few_members = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let too_few_members = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id),
@@ -258,15 +293,16 @@ async fn graph_add_ensemble_happy_path_and_validation_errors() {
             on_fail_to: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&too_few_members));
 }
 
 /// CM35 FR2: an ensemble member naming an interactive-only platform is
 /// rejected with the spec wording and no ensemble is persisted.
-/// `graph_add_ensemble` and `graph_update_ensemble` both validate
+/// `graph_ensemble` and `graph_ensemble` both validate
 /// members through `validate_ensemble_members`, so the add arm pins the
 /// shared gate; a second member on a normal platform proves the check is
 /// per-member, not whole-ensemble.
@@ -291,8 +327,11 @@ async fn graph_add_ensemble_rejects_interactive_only_member() {
         infra_backoff_seconds: None,
     };
 
-    let rejected = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let rejected = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
@@ -316,9 +355,10 @@ async fn graph_add_ensemble_rejects_interactive_only_member() {
             on_fail_to: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&rejected), "{}", text(&rejected));
     assert!(
         raw_text(&rejected).contains("platform 'freebuff' is interactive-only (no headless mode)"),
@@ -348,8 +388,11 @@ async fn graph_add_ensemble_rejects_negative_quorum_grace() {
         infra_backoff_seconds: None,
     };
 
-    let negative = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let negative = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
@@ -373,9 +416,10 @@ async fn graph_add_ensemble_rejects_negative_quorum_grace() {
             on_fail_to: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&negative));
     assert!(
         text(&negative).contains("quorum_grace_minutes must not be negative."),
@@ -383,8 +427,11 @@ async fn graph_add_ensemble_rejects_negative_quorum_grace() {
         text(&negative)
     );
 
-    let immediate = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let immediate = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
@@ -408,9 +455,10 @@ async fn graph_add_ensemble_rejects_negative_quorum_grace() {
             on_fail_to: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&immediate), "{}", text(&immediate));
     let ensemble_id = extract_id(&immediate, "ensemble_id");
     let details = db.get_ensemble_details(&ensemble_id).unwrap().unwrap();
@@ -418,7 +466,7 @@ async fn graph_add_ensemble_rejects_negative_quorum_grace() {
 }
 
 /// CM24: `quorum_grace_minutes` can be set and cleared back to `None`
-/// (wait-for-all) via `graph_update_ensemble`, mirroring the
+/// (wait-for-all) via `graph_ensemble`, mirroring the
 /// `straggler_timeout_minutes` clear path.
 #[tokio::test]
 async fn graph_update_ensemble_sets_and_clears_quorum_grace() {
@@ -436,8 +484,11 @@ async fn graph_update_ensemble_sets_and_clears_quorum_grace() {
         infra_crash_max_seconds: None,
         infra_backoff_seconds: None,
     };
-    let created = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let created = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
@@ -461,20 +512,25 @@ async fn graph_update_ensemble_sets_and_clears_quorum_grace() {
             on_fail_to: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&created), "{}", text(&created));
     let ensemble_id = extract_id(&created, "ensemble_id");
 
-    let negative = handler
-        .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+    let negative = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "update",
+        params_id(GraphUpdateEnsembleParams {
             ensemble_id: ensemble_id.clone(),
             quorum_grace_minutes: Some(Some(-2)),
             ..blank_ensemble_update(&ensemble_id)
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&negative));
     assert!(
         text(&negative).contains("quorum_grace_minutes must not be negative."),
@@ -482,14 +538,18 @@ async fn graph_update_ensemble_sets_and_clears_quorum_grace() {
         text(&negative)
     );
 
-    let set = handler
-        .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+    let set = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "update",
+        params_id(GraphUpdateEnsembleParams {
             ensemble_id: ensemble_id.clone(),
             quorum_grace_minutes: Some(Some(5)),
             ..blank_ensemble_update(&ensemble_id)
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&set), "{}", text(&set));
     assert_eq!(
         db.get_ensemble(&ensemble_id)
@@ -499,12 +559,15 @@ async fn graph_update_ensemble_sets_and_clears_quorum_grace() {
         Some(5)
     );
 
+    // Clear back to deferring. The wire shape cannot carry the clear (a
+    // plain `Option<Option<_>>` reads JSON null as "leave unchanged"), so
+    // the clear path is exercised at the impl seam.
     let cleared = handler
-        .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+        .graph_update_ensemble_impl(GraphUpdateEnsembleParams {
             ensemble_id: ensemble_id.clone(),
             quorum_grace_minutes: Some(None),
             ..blank_ensemble_update(&ensemble_id)
-        }))
+        })
         .await
         .unwrap();
     assert!(!is_err(&cleared), "{}", text(&cleared));
@@ -517,50 +580,66 @@ async fn graph_update_ensemble_sets_and_clears_quorum_grace() {
     );
 }
 
-// ── graph_get / graph_list ──────────────────────────────────────
+// ── graph / graph ──────────────────────────────────────
 
 #[tokio::test]
 async fn graph_get_and_graph_list() {
     let (dir, db, handler) = endpoint_test_handler();
     let lp = insert_test_graph(&db, dir.path());
 
-    let got = handler
-        .graph_get(Parameters(GraphGetParams {
+    let got = call_graph_action(
+        &handler,
+        "graph",
+        "get",
+        params_id(GraphGetParams {
             graph_id: lp.id.clone(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&got), "{}", text(&got));
     assert!(raw_text(&got).contains(&lp.id));
 
-    let missing = handler
-        .graph_get(Parameters(GraphGetParams {
+    let missing = call_graph_action(
+        &handler,
+        "graph",
+        "get",
+        params_id(GraphGetParams {
             graph_id: "ghost".to_string(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&missing));
 
-    let listed = handler
-        .graph_list(Parameters(GraphListParams {
+    let listed = call_graph_action(
+        &handler,
+        "graph",
+        "list",
+        params_id(GraphListParams {
             workdir: None,
             include_archived: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(raw_text(&listed).contains(&lp.id));
 
-    let filtered_out = handler
-        .graph_list(Parameters(GraphListParams {
+    let filtered_out = call_graph_action(
+        &handler,
+        "graph",
+        "list",
+        params_id(GraphListParams {
             workdir: Some("/nowhere".to_string()),
             include_archived: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!raw_text(&filtered_out).contains(&lp.id));
 }
 
-/// `graph_get`'s node JSON must make an agent node's prompt source
+/// `graph`'s node JSON must make an agent node's prompt source
 /// visible: `"explicit"` for a `prompt_template`, `"preset"` for a
 /// `prompt_preset`, and — the case this spec exists for — the node
 /// running on the bare fallback nobody chose must be distinguishable
@@ -577,8 +656,11 @@ async fn graph_get_reports_prompt_source_for_agent_nodes() {
         serde_json::Value::String("do the thing".to_string()),
     );
     let explicit_id = extract_id(
-        &handler
-            .graph_add_node(Parameters(GraphAddNodeParams {
+        &call_graph_action(
+            &handler,
+            "graph_node",
+            "add",
+            params_id(GraphAddNodeParams {
                 spec_id: Some(spec.id.clone()),
                 graph_id: None,
                 name: "Explicit".to_string(),
@@ -587,9 +669,10 @@ async fn graph_get_reports_prompt_source_for_agent_nodes() {
                 blueprint: None,
                 node: None,
                 config_overrides: None,
-            }))
-            .await
-            .unwrap(),
+            }),
+        )
+        .await
+        .unwrap(),
         "node_id",
     );
 
@@ -599,8 +682,11 @@ async fn graph_get_reports_prompt_source_for_agent_nodes() {
         serde_json::Value::String("implementer".to_string()),
     );
     let preset_id = extract_id(
-        &handler
-            .graph_add_node(Parameters(GraphAddNodeParams {
+        &call_graph_action(
+            &handler,
+            "graph_node",
+            "add",
+            params_id(GraphAddNodeParams {
                 spec_id: Some(spec.id.clone()),
                 graph_id: None,
                 name: "Preset".to_string(),
@@ -609,15 +695,19 @@ async fn graph_get_reports_prompt_source_for_agent_nodes() {
                 blueprint: None,
                 node: None,
                 config_overrides: None,
-            }))
-            .await
-            .unwrap(),
+            }),
+        )
+        .await
+        .unwrap(),
         "node_id",
     );
 
     let default_id = extract_id(
-        &handler
-            .graph_add_node(Parameters(GraphAddNodeParams {
+        &call_graph_action(
+            &handler,
+            "graph_node",
+            "add",
+            params_id(GraphAddNodeParams {
                 spec_id: Some(spec.id.clone()),
                 graph_id: None,
                 name: "Default".to_string(),
@@ -626,18 +716,23 @@ async fn graph_get_reports_prompt_source_for_agent_nodes() {
                 blueprint: None,
                 node: None,
                 config_overrides: None,
-            }))
-            .await
-            .unwrap(),
+            }),
+        )
+        .await
+        .unwrap(),
         "node_id",
     );
 
-    let got = handler
-        .graph_get(Parameters(GraphGetParams {
+    let got = call_graph_action(
+        &handler,
+        "graph",
+        "get",
+        params_id(GraphGetParams {
             graph_id: lp.id.clone(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let json: serde_json::Value = serde_json::from_str(&raw_text(&got)).unwrap();
     let nodes = json["specs"][0]["nodes"].as_array().unwrap();
     let prompt_source_of = |node_id: &str| -> String {
@@ -654,7 +749,7 @@ async fn graph_get_reports_prompt_source_for_agent_nodes() {
     assert_eq!(prompt_source_of(&default_id), "default_fallback");
 }
 
-/// `graph_audit_node_configs` must find a node that predates write-time
+/// `graph` must find a node that predates write-time
 /// validation and still carries a key its kind never reads — verified
 /// against the exact incident shape (a `prompt` key on an agent node)
 /// and resolving the owning graph through the node's spec, since a
@@ -665,7 +760,7 @@ async fn graph_audit_node_configs_finds_node_with_ignored_prompt_key() {
     let lp = insert_test_graph(&db, dir.path());
     let spec = insert_test_spec(&db, &lp.id, 1);
 
-    // Bypass `graph_add_node`'s validation to simulate a node that was
+    // Bypass `graph_node`'s validation to simulate a node that was
     // written before this spec's check existed — exactly how graph
     // `824de730-7fec-4031-800a-7933d2cf94c1`'s node
     // `d0458fe0-24b8-4a29-8a69-7bb0e742e046` ended up carrying `prompt`.
@@ -684,7 +779,9 @@ async fn graph_audit_node_configs_finds_node_with_ignored_prompt_key() {
     // A clean node must not show up in the audit.
     let clean_node = insert_named_node(&db, &spec.id, "Clean", 2);
 
-    let audited = handler.graph_audit_node_configs().await.unwrap();
+    let audited = call_graph_action(&handler, "graph", "audit", ())
+        .await
+        .unwrap();
     assert!(!is_err(&audited), "{}", text(&audited));
     let json: serde_json::Value = serde_json::from_str(&raw_text(&audited)).unwrap();
     let flagged = json["flagged_nodes"].as_array().unwrap();
@@ -724,17 +821,21 @@ async fn graph_node_runs_list_defaults_to_most_recent_first_and_resolves_node_na
         now,
     );
 
-    let listed = handler
-        .graph_node_runs_list(Parameters(GraphNodeRunsListParams {
+    let listed = call_graph_action(
+        &handler,
+        "graph",
+        "node_runs",
+        params_id(GraphNodeRunsListParams {
             graph_id: lp.id.clone(),
             spec_id: None,
             node_id: None,
             limit: None,
             offset: None,
             compact: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&listed), "{}", text(&listed));
     let body = raw_text(&listed);
     let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -749,20 +850,24 @@ async fn graph_node_runs_list_defaults_to_most_recent_first_and_resolves_node_na
     assert_eq!(runs[0]["session_id"], "ses_test_123");
     assert!(
         runs[0].get("output").is_none(),
-        "list responses must omit output — fetch it via graph_node_run_get"
+        "list responses must omit output — fetch it via graph"
     );
 
-    let unknown_graph = handler
-        .graph_node_runs_list(Parameters(GraphNodeRunsListParams {
+    let unknown_graph = call_graph_action(
+        &handler,
+        "graph",
+        "node_runs",
+        params_id(GraphNodeRunsListParams {
             graph_id: "ghost".to_string(),
             spec_id: None,
             node_id: None,
             limit: None,
             offset: None,
             compact: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&unknown_graph));
 }
 
@@ -803,17 +908,21 @@ async fn graph_node_runs_list_filters_by_spec_and_node_and_respects_limit() {
         now,
     );
 
-    let by_spec = handler
-        .graph_node_runs_list(Parameters(GraphNodeRunsListParams {
+    let by_spec = call_graph_action(
+        &handler,
+        "graph",
+        "node_runs",
+        params_id(GraphNodeRunsListParams {
             graph_id: lp.id.clone(),
             spec_id: Some(spec2.id.clone()),
             node_id: None,
             limit: None,
             offset: None,
             compact: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let by_spec_runs = serde_json::from_str::<serde_json::Value>(&raw_text(&by_spec)).unwrap()
         ["runs"]
         .as_array()
@@ -822,17 +931,21 @@ async fn graph_node_runs_list_filters_by_spec_and_node_and_respects_limit() {
     assert_eq!(by_spec_runs.len(), 1);
     assert_eq!(by_spec_runs[0]["id"], spec2_run.id);
 
-    let limited = handler
-        .graph_node_runs_list(Parameters(GraphNodeRunsListParams {
+    let limited = call_graph_action(
+        &handler,
+        "graph",
+        "node_runs",
+        params_id(GraphNodeRunsListParams {
             graph_id: lp.id.clone(),
             spec_id: None,
             node_id: None,
             limit: Some(1),
             offset: None,
             compact: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let limited_runs = serde_json::from_str::<serde_json::Value>(&raw_text(&limited)).unwrap()
         ["runs"]
         .as_array()
@@ -867,12 +980,16 @@ async fn graph_node_run_get_returns_full_output_and_redacts_secrets() {
         chrono::Utc::now(),
     );
 
-    let got = handler
-        .graph_node_run_get(Parameters(GraphNodeRunGetParams {
+    let got = call_graph_action(
+        &handler,
+        "graph",
+        "node_run",
+        params_id(GraphNodeRunGetParams {
             run_id: run.id.clone(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&got), "{}", text(&got));
     let body = raw_text(&got);
     assert!(body.contains("Unsupported model mimo-auto"));
@@ -887,28 +1004,36 @@ async fn graph_node_run_get_returns_full_output_and_redacts_secrets() {
     );
     assert!(body.contains("[REDACTED]"));
 
-    let missing = handler
-        .graph_node_run_get(Parameters(GraphNodeRunGetParams {
+    let missing = call_graph_action(
+        &handler,
+        "graph",
+        "node_run",
+        params_id(GraphNodeRunGetParams {
             run_id: "ghost-run".to_string(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&missing));
 }
 
-// ── graph_pause / graph_continue ────────────────────────────────
+// ── graph_control / graph_control ────────────────────────────────
 
 #[tokio::test]
 async fn graph_pause_rejects_non_running_graph() {
     let (dir, db, handler) = endpoint_test_handler();
     let lp = insert_test_graph(&db, dir.path());
-    let result = handler
-        .graph_pause(Parameters(GraphPauseParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "pause",
+        params_id(GraphPauseParams {
             graph_id: lp.id.clone(),
             interrupt: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&result));
     assert!(text(&result).contains("not running"));
 }
@@ -918,45 +1043,57 @@ async fn graph_continue_requires_a_paused_graph() {
     let (dir, db, handler) = endpoint_test_handler();
     let lp = insert_test_graph(&db, dir.path());
 
-    let not_paused = handler
-        .graph_continue(Parameters(GraphContinueParams {
+    let not_paused = call_graph_action(
+        &handler,
+        "graph_control",
+        "continue",
+        params_id(GraphContinueParams {
             graph_id: lp.id.clone(),
-            action: "retry_current_node".to_string(),
+            mode: "retry_current_node".to_string(),
             node_id: None,
             spec_id: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&not_paused));
     assert!(text(&not_paused).contains("not paused"));
 
-    let missing = handler
-        .graph_continue(Parameters(GraphContinueParams {
+    let missing = call_graph_action(
+        &handler,
+        "graph_control",
+        "continue",
+        params_id(GraphContinueParams {
             graph_id: "ghost".to_string(),
-            action: "retry_current_node".to_string(),
+            mode: "retry_current_node".to_string(),
             node_id: None,
             spec_id: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&missing));
 
     db.update_graph_status(&lp.id, GraphStatus::Paused, None, None)
         .unwrap();
-    let bad_action = handler
-        .graph_continue(Parameters(GraphContinueParams {
+    let bad_action = call_graph_action(
+        &handler,
+        "graph_control",
+        "continue",
+        params_id(GraphContinueParams {
             graph_id: lp.id.clone(),
-            action: "sideways".to_string(),
+            mode: "sideways".to_string(),
             node_id: None,
             spec_id: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&bad_action));
     assert!(text(&bad_action).contains("retry_current_node, skip_next_spec or run_from_node"));
 }
 
-// ── graph_continue run_from_node ───────────
+// ── graph_control run_from_node ───────────
 
 #[tokio::test]
 async fn graph_continue_run_from_node_refuses_a_graph_with_an_active_run() {
@@ -969,15 +1106,19 @@ async fn graph_continue_run_from_node_refuses_a_graph_with_an_active_run() {
     db.update_graph_status(&lp.id, GraphStatus::Paused, None, None)
         .unwrap();
 
-    let refused = handler
-        .graph_continue(Parameters(GraphContinueParams {
+    let refused = call_graph_action(
+        &handler,
+        "graph_control",
+        "continue",
+        params_id(GraphContinueParams {
             graph_id: lp.id.clone(),
-            action: "run_from_node".to_string(),
+            mode: "run_from_node".to_string(),
             node_id: Some("Node".to_string()),
             spec_id: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&refused), "{}", text(&refused));
     let msg = text(&refused);
     assert!(msg.contains("still executing"), "{msg}");
@@ -988,15 +1129,19 @@ async fn graph_continue_run_from_node_refuses_a_graph_with_an_active_run() {
     db.interrupt_graph_run(&run.id, "test").unwrap();
     db.update_graph_status(&lp.id, GraphStatus::Running, None, None)
         .unwrap();
-    let running = handler
-        .graph_continue(Parameters(GraphContinueParams {
+    let running = call_graph_action(
+        &handler,
+        "graph_control",
+        "continue",
+        params_id(GraphContinueParams {
             graph_id: lp.id.clone(),
-            action: "run_from_node".to_string(),
+            mode: "run_from_node".to_string(),
             node_id: Some("Node".to_string()),
             spec_id: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&running), "{}", text(&running));
     assert!(text(&running).contains("pause it before a directed run"));
 }
@@ -1006,7 +1151,7 @@ async fn graph_continue_run_from_node_accepts_spec_paused_on_and_reports_directe
     let (dir, db, handler) = endpoint_test_handler();
     let lp = insert_test_graph(&db, dir.path());
 
-    // The state `graph_pause` mid-spec leaves behind: graph paused, no
+    // The state `graph_control` mid-spec leaves behind: graph paused, no
     // active run, paused-on spec reading `running`. FR2's "paused" is
     // exactly this — a directed run must accept it.
     insert_named_spec(&db, &lp.id, "Spec One", 1, GraphSpecStatus::Running);
@@ -1058,15 +1203,19 @@ async fn graph_continue_run_from_node_accepts_spec_paused_on_and_reports_directe
 
     // A `skipped` target is the one spec status outside FR2's accepted
     // states.
-    let refused = handler
-        .graph_continue(Parameters(GraphContinueParams {
+    let refused = call_graph_action(
+        &handler,
+        "graph_control",
+        "continue",
+        params_id(GraphContinueParams {
             graph_id: lp.id.clone(),
-            action: "run_from_node".to_string(),
+            mode: "run_from_node".to_string(),
             node_id: Some("B".to_string()),
             spec_id: Some(skipped.id.clone()),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&refused), "{}", text(&refused));
     assert!(
         text(&refused).contains("'skipped', which a directed run does not accept"),
@@ -1075,15 +1224,19 @@ async fn graph_continue_run_from_node_accepts_spec_paused_on_and_reports_directe
     );
 
     // An unknown node is refused with the list of valid names.
-    let unknown = handler
-        .graph_continue(Parameters(GraphContinueParams {
+    let unknown = call_graph_action(
+        &handler,
+        "graph_control",
+        "continue",
+        params_id(GraphContinueParams {
             graph_id: lp.id.clone(),
-            action: "run_from_node".to_string(),
+            mode: "run_from_node".to_string(),
             node_id: Some("Zed".to_string()),
             spec_id: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&unknown), "{}", text(&unknown));
     let unknown_msg = text(&unknown);
     assert!(
@@ -1095,15 +1248,19 @@ async fn graph_continue_run_from_node_accepts_spec_paused_on_and_reports_directe
 
     // The paused-on spec is accepted (spec_id defaults to it), and the
     // response reports the whole directed plan.
-    let accepted = handler
-        .graph_continue(Parameters(GraphContinueParams {
+    let accepted = call_graph_action(
+        &handler,
+        "graph_control",
+        "continue",
+        params_id(GraphContinueParams {
             graph_id: lp.id.clone(),
-            action: "run_from_node".to_string(),
+            mode: "run_from_node".to_string(),
             node_id: Some("B".to_string()),
             spec_id: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&accepted), "{}", text(&accepted));
     let msg = text(&accepted);
     assert!(msg.contains("resumed"), "{msg}");
@@ -1257,39 +1414,10 @@ async fn loop_report_blocker_pauses_the_graph_and_notes_deprecation() {
     );
 }
 
-#[tokio::test]
-async fn loop_schedule_autorun_accepts_loop_id_as_graph_id() {
-    let (dir, db, handler) = endpoint_test_handler();
-    let lp = insert_test_graph(&db, dir.path());
-
-    // Deserialize straight from JSON using the wire field name `loop_id`,
-    // proving the `#[serde(alias = "loop_id")]` on `graph_id` actually
-    // works end to end, not just as a Rust-level convenience constructor.
-    let raw = serde_json::json!({
-        "loop_id": lp.id,
-        "at": null,
-        "quota_reset_message": null,
-    });
-    let params: LoopScheduleAutorunParams = serde_json::from_value(raw).unwrap();
-    assert_eq!(params.graph_id, lp.id);
-
-    let result = handler
-        .loop_schedule_autorun(Parameters(params))
-        .await
-        .unwrap();
-    assert!(!is_err(&result), "{}", text(&result));
-    assert!(raw_text(&result)
-        .contains("loop_schedule_autorun was renamed graph_schedule_autorun in 3.0.0"));
-}
-
 #[test]
-fn tool_listing_hides_the_three_deprecated_aliases_but_keeps_them_registered() {
+fn tool_listing_hides_the_deprecated_aliases_but_keeps_them_registered() {
     let visible = super::visible_tool_list();
-    for hidden in [
-        "loop_complete_node",
-        "loop_report_blocker",
-        "loop_schedule_autorun",
-    ] {
+    for hidden in ["loop_complete_node", "loop_report_blocker"] {
         assert!(
             !visible.iter().any(|t| t.name == hidden),
             "{hidden} must not appear in the tool listing"
@@ -1297,11 +1425,7 @@ fn tool_listing_hides_the_three_deprecated_aliases_but_keeps_them_registered() {
     }
     // Still registered in the router (i.e. still callable) — just not listed.
     let all = TaskTriggerHandler::tool_router().list_all();
-    for still_registered in [
-        "loop_complete_node",
-        "loop_report_blocker",
-        "loop_schedule_autorun",
-    ] {
+    for still_registered in ["loop_complete_node", "loop_report_blocker"] {
         assert!(
             all.iter().any(|t| t.name == still_registered),
             "{still_registered} must remain registered in the router so call_tool still works"
@@ -1314,9 +1438,9 @@ fn tool_listing_hides_the_three_deprecated_aliases_but_keeps_them_registered() {
 
 /// C19 FR4 (reusing the same blocker mechanism `graph_report_blocker`
 /// uses): a graph paused with an active blocker must not be silently
-/// relaunched via `graph_run` — that's the whole "not started again
+/// relaunched via `graph_control` — that's the whole "not started again
 /// until a human clears it" the budget exists for. A plain
-/// `graph_pause` (`Paused`, no blocker) is unaffected — `graph_run`
+/// `graph_control` (`Paused`, no blocker) is unaffected — `graph_control`
 /// resuming that is the normal, sanctioned path and must keep working.
 #[tokio::test]
 async fn graph_run_refuses_a_paused_graph_with_an_active_blocker() {
@@ -1335,18 +1459,22 @@ async fn graph_run_refuses_a_paused_graph_with_an_active_blocker() {
         .unwrap();
     assert!(!is_err(&blocked), "{}", text(&blocked));
 
-    let result = handler
-        .graph_run(Parameters(GraphRunParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "run",
+        params_id(GraphRunParams {
             graph_id: lp.id.clone(),
             queue_id: None,
             workdir: None,
             idea: None,
             sandbox: None,
             start_node_id: None,
-        }))
-        .await
-        .unwrap();
-    assert!(is_err(&result), "a blocked graph must refuse graph_run");
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(is_err(&result), "a blocked graph must refuse graph_control");
     assert!(text(&result).contains("blocked"), "{}", text(&result));
     assert_eq!(
         db.get_graph(&lp.id).unwrap().unwrap().status,
@@ -1355,9 +1483,9 @@ async fn graph_run_refuses_a_paused_graph_with_an_active_blocker() {
     );
 }
 
-/// FR3: `graph_continue run_from_node` on an idea-driven graph that has
+/// FR3: `graph_control run_from_node` on an idea-driven graph that has
 /// never run (top-level graph, no specs, no stored idea) is refused with an
-/// error that names `graph_run` with an `idea` as the way to start it —
+/// error that names `graph_control` with an `idea` as the way to start it —
 /// instead of leaking the bare "no spec to target" from spec resolution.
 #[tokio::test]
 async fn graph_continue_run_from_node_refuses_never_run_idea_graph() {
@@ -1379,17 +1507,24 @@ async fn graph_continue_run_from_node_refuses_never_run_idea_graph() {
     })
     .unwrap();
 
-    let refused = handler
-        .graph_continue(Parameters(GraphContinueParams {
+    let refused = call_graph_action(
+        &handler,
+        "graph_control",
+        "continue",
+        params_id(GraphContinueParams {
             graph_id: lp.id.clone(),
-            action: "run_from_node".to_string(),
+            mode: "run_from_node".to_string(),
             node_id: Some("Check".to_string()),
             spec_id: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&refused), "{}", text(&refused));
     let msg = text(&refused);
-    assert!(msg.contains("graph_run"), "must name graph_run: {msg}");
+    assert!(
+        msg.contains("graph_control"),
+        "must name graph_control: {msg}"
+    );
     assert!(msg.contains("idea"), "must name the idea: {msg}");
 }

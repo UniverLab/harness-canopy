@@ -11,8 +11,11 @@ async fn graph_update_node_response_names_changed_keys() {
     config.insert("model".to_string(), serde_json::json!("old-model"));
     config.insert("timeout_minutes".to_string(), serde_json::json!(5));
 
-    let added = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let added = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Agent".to_string(),
@@ -21,13 +24,17 @@ async fn graph_update_node_response_names_changed_keys() {
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let node_id = extract_id(&added, "node_id");
 
-    let updated = handler
-        .graph_update_node(Parameters(GraphUpdateNodeParams {
+    let updated = call_graph_action(
+        &handler,
+        "graph_node",
+        "update",
+        params_id(GraphUpdateNodeParams {
             node_id: node_id.clone(),
             name: None,
             kind: None,
@@ -39,9 +46,10 @@ async fn graph_update_node_response_names_changed_keys() {
             }),
             config_replace: None,
             position: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&updated), "{}", text(&updated));
 
     let response_text = text(&updated);
@@ -61,12 +69,16 @@ async fn graph_import_preserves_skills_on_agent_nodes() {
     let workdir = dir.path().to_string_lossy().to_string();
     let (source_graph_id, ..) = build_simple_graph(&handler, &workdir, "Source Graph").await;
 
-    let exported = handler
-        .graph_export(Parameters(GraphExportParams {
+    let exported = call_graph_action(
+        &handler,
+        "graph",
+        "export",
+        params_id(GraphExportParams {
             graph_id: source_graph_id.clone(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let mut document: serde_json::Value = serde_json::from_str(&raw_text(&exported)).unwrap();
 
     let nodes = document["nodes"].as_array_mut().unwrap();
@@ -76,14 +88,18 @@ async fn graph_import_preserves_skills_on_agent_nodes() {
         }
     }
 
-    let imported = handler
-        .graph_import(Parameters(GraphImportParams {
+    let imported = call_graph_action(
+        &handler,
+        "graph_edit",
+        "import",
+        params_id(GraphImportParams {
             document,
             workdir: workdir.clone(),
             name: Some("Imported Graph".to_string()),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&imported), "{}", text(&imported));
     let body: serde_json::Value = serde_json::from_str(&raw_text(&imported)).unwrap();
     let new_graph_id = body["graph_id"].as_str().unwrap().to_string();
@@ -121,8 +137,11 @@ async fn graph_add_node_rejects_skills_on_check_gate_router() {
         let mut config = base_config;
         config.insert("skills".to_string(), serde_json::json!(["alpha", "beta"]));
 
-        let rejected = handler
-            .graph_add_node(Parameters(GraphAddNodeParams {
+        let rejected = call_graph_action(
+            &handler,
+            "graph_node",
+            "add",
+            params_id(GraphAddNodeParams {
                 spec_id: Some(spec.id.clone()),
                 graph_id: None,
                 name: format!("Node-{kind}"),
@@ -131,9 +150,10 @@ async fn graph_add_node_rejects_skills_on_check_gate_router() {
                 blueprint: None,
                 node: None,
                 config_overrides: None,
-            }))
-            .await
-            .unwrap();
+            }),
+        )
+        .await
+        .unwrap();
         assert!(is_err(&rejected), "kind={kind} should reject skills");
         // Must be the pre-existing generic unknown-key message for this
         // kind — not a new skills-specific special case (spec FR3).
@@ -155,12 +175,16 @@ async fn graph_import_rejects_skills_on_non_agent_nodes() {
     let workdir = dir.path().to_string_lossy().to_string();
     let (source_graph_id, ..) = build_simple_graph(&handler, &workdir, "Source Graph").await;
 
-    let exported = handler
-        .graph_export(Parameters(GraphExportParams {
+    let exported = call_graph_action(
+        &handler,
+        "graph",
+        "export",
+        params_id(GraphExportParams {
             graph_id: source_graph_id.clone(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let mut document: serde_json::Value = serde_json::from_str(&raw_text(&exported)).unwrap();
 
     let nodes = document["nodes"].as_array_mut().unwrap();
@@ -170,18 +194,22 @@ async fn graph_import_rejects_skills_on_non_agent_nodes() {
         }
     }
 
-    let rejected = handler
-        .graph_import(Parameters(GraphImportParams {
+    let rejected = call_graph_action(
+        &handler,
+        "graph_edit",
+        "import",
+        params_id(GraphImportParams {
             document,
             workdir: workdir.clone(),
             name: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&rejected), "{}", text(&rejected));
     // The node named "gate" in `build_simple_graph` is a `check` kind, so
     // import must reject it with the same generic unknown-key message
-    // `graph_add_node`/`graph_update_node` produce (spec FR3).
+    // `graph_node`/`graph_node` produce (spec FR3).
     let msg = text(&rejected);
     assert!(
         msg.contains("kind 'check'")
@@ -203,8 +231,11 @@ async fn graph_add_node_tolerates_malformed_skills_values() {
         serde_json::Value::String("not-an-array".to_string()),
     );
 
-    let added_string = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let added_string = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "StringSkills".to_string(),
@@ -213,9 +244,10 @@ async fn graph_add_node_tolerates_malformed_skills_values() {
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&added_string), "{}", text(&added_string));
     let node_id_string = extract_id(&added_string, "node_id");
     let stored_string = db.get_graph_node(&node_id_string).unwrap().unwrap();
@@ -227,8 +259,11 @@ async fn graph_add_node_tolerates_malformed_skills_values() {
         serde_json::json!(["alpha", 42, "beta"]),
     );
 
-    let added_mixed = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let added_mixed = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "MixedSkills".to_string(),
@@ -237,9 +272,10 @@ async fn graph_add_node_tolerates_malformed_skills_values() {
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&added_mixed), "{}", text(&added_mixed));
     let node_id_mixed = extract_id(&added_mixed, "node_id");
     let stored_mixed = db.get_graph_node(&node_id_mixed).unwrap().unwrap();
@@ -258,86 +294,110 @@ async fn graph_add_edge_wires_nodes_and_rejects_foreign_node() {
     let a = add_agent_node(&handler, &spec.id, "A").await;
     let b = add_agent_node(&handler, &spec.id, "B").await;
 
-    let edge = handler
-        .graph_add_edge(Parameters(GraphAddEdgeParams {
+    let edge = call_graph_action(
+        &handler,
+        "graph_edge",
+        "add",
+        params_id(GraphAddEdgeParams {
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             from_node: a.clone(),
             to_node: b.clone(),
             condition: "always".to_string(),
             route: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&edge), "{}", text(&edge));
     assert_eq!(db.list_graph_edges(&spec.id).unwrap().len(), 1);
 
-    let foreign = handler
-        .graph_add_edge(Parameters(GraphAddEdgeParams {
+    let foreign = call_graph_action(
+        &handler,
+        "graph_edge",
+        "add",
+        params_id(GraphAddEdgeParams {
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             from_node: a.clone(),
             to_node: "not-a-real-node".to_string(),
             condition: "always".to_string(),
             route: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&foreign));
 
-    let bad_condition = handler
-        .graph_add_edge(Parameters(GraphAddEdgeParams {
+    let bad_condition = call_graph_action(
+        &handler,
+        "graph_edge",
+        "add",
+        params_id(GraphAddEdgeParams {
             spec_id: Some(spec.id),
             graph_id: None,
             from_node: a,
             to_node: b,
             condition: "sideways".to_string(),
             route: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&bad_condition));
 
     let edges = db
         .list_graph_edges(&db.list_graph_specs(&lp.id).unwrap()[0].id)
         .unwrap();
     let edge_id = edges[0].id.clone();
-    let updated = handler
-        .graph_update_edge(Parameters(GraphUpdateEdgeParams {
+    let updated = call_graph_action(
+        &handler,
+        "graph_edge",
+        "update",
+        params_id(GraphUpdateEdgeParams {
             edge_id: edge_id.clone(),
             condition: "fail".to_string(),
             route: None,
             to_node: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&updated), "{}", text(&updated));
 
-    let same_condition = handler
-        .graph_update_edge(Parameters(GraphUpdateEdgeParams {
+    let same_condition = call_graph_action(
+        &handler,
+        "graph_edge",
+        "update",
+        params_id(GraphUpdateEdgeParams {
             edge_id: edge_id.clone(),
             condition: "fail".to_string(),
             route: None,
             to_node: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&same_condition));
     assert!(text(&same_condition).contains("already uses condition"));
 
-    let missing_edge = handler
-        .graph_update_edge(Parameters(GraphUpdateEdgeParams {
+    let missing_edge = call_graph_action(
+        &handler,
+        "graph_edge",
+        "update",
+        params_id(GraphUpdateEdgeParams {
             edge_id: "ghost-edge".to_string(),
             condition: "pass".to_string(),
             route: None,
             to_node: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&missing_edge));
 }
 
-// ── graph_update_edge(to_node) / graph_delete_edge / graph_delete_node ──
+// ── graph_edge(to_node) / graph_edge / graph_node ──
 
 #[tokio::test]
 async fn graph_update_edge_retargets_destination_without_changing_condition() {
@@ -348,29 +408,37 @@ async fn graph_update_edge_retargets_destination_without_changing_condition() {
     let b = add_agent_node(&handler, &spec.id, "B").await;
     let c = add_agent_node(&handler, &spec.id, "C").await;
 
-    let added = handler
-        .graph_add_edge(Parameters(GraphAddEdgeParams {
+    let added = call_graph_action(
+        &handler,
+        "graph_edge",
+        "add",
+        params_id(GraphAddEdgeParams {
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             from_node: a.clone(),
             to_node: b.clone(),
             condition: "pass".to_string(),
             route: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&added), "{}", text(&added));
     let edge_id = db.list_graph_edges(&spec.id).unwrap()[0].id.clone();
 
-    let retargeted = handler
-        .graph_update_edge(Parameters(GraphUpdateEdgeParams {
+    let retargeted = call_graph_action(
+        &handler,
+        "graph_edge",
+        "update",
+        params_id(GraphUpdateEdgeParams {
             edge_id: edge_id.clone(),
             condition: "pass".to_string(),
             route: None,
             to_node: Some(c.clone()),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&retargeted), "{}", text(&retargeted));
 
     let edge = db.get_graph_edge(&edge_id).unwrap().unwrap();
@@ -398,28 +466,36 @@ async fn graph_update_edge_rejects_retarget_to_a_node_in_another_graph() {
     let other_spec = insert_test_spec(&db, &other_lp.id, 1);
     let foreign = add_agent_node(&handler, &other_spec.id, "Foreign").await;
 
-    handler
-        .graph_add_edge(Parameters(GraphAddEdgeParams {
+    call_graph_action(
+        &handler,
+        "graph_edge",
+        "add",
+        params_id(GraphAddEdgeParams {
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             from_node: a.clone(),
             to_node: b.clone(),
             condition: "pass".to_string(),
             route: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let edge_id = db.list_graph_edges(&spec.id).unwrap()[0].id.clone();
 
-    let result = handler
-        .graph_update_edge(Parameters(GraphUpdateEdgeParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_edge",
+        "update",
+        params_id(GraphUpdateEdgeParams {
             edge_id: edge_id.clone(),
             condition: "pass".to_string(),
             route: None,
             to_node: Some(foreign),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&result));
 
     let edge = db.get_graph_edge(&edge_id).unwrap().unwrap();
@@ -433,34 +509,46 @@ async fn graph_delete_edge_removes_a_single_edge() {
     let spec = insert_test_spec(&db, &lp.id, 1);
     let a = add_agent_node(&handler, &spec.id, "A").await;
     let b = add_agent_node(&handler, &spec.id, "B").await;
-    handler
-        .graph_add_edge(Parameters(GraphAddEdgeParams {
+    call_graph_action(
+        &handler,
+        "graph_edge",
+        "add",
+        params_id(GraphAddEdgeParams {
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             from_node: a,
             to_node: b,
             condition: "pass".to_string(),
             route: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let edge_id = db.list_graph_edges(&spec.id).unwrap()[0].id.clone();
 
-    let deleted = handler
-        .graph_delete_edge(Parameters(GraphDeleteEdgeParams {
+    let deleted = call_graph_action(
+        &handler,
+        "graph_edge",
+        "delete",
+        params_id(GraphDeleteEdgeParams {
             edge_id: edge_id.clone(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&deleted), "{}", text(&deleted));
     assert!(db.get_graph_edge(&edge_id).unwrap().is_none());
 
-    let missing = handler
-        .graph_delete_edge(Parameters(GraphDeleteEdgeParams {
+    let missing = call_graph_action(
+        &handler,
+        "graph_edge",
+        "delete",
+        params_id(GraphDeleteEdgeParams {
             edge_id: "ghost-edge".to_string(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&missing));
 }
 
@@ -473,26 +561,34 @@ async fn graph_delete_node_cascades_to_its_edges() {
     let b = add_agent_node(&handler, &spec.id, "B").await;
     let c = add_agent_node(&handler, &spec.id, "C").await;
     for (from, to) in [(a.clone(), b.clone()), (b.clone(), c.clone())] {
-        handler
-            .graph_add_edge(Parameters(GraphAddEdgeParams {
+        call_graph_action(
+            &handler,
+            "graph_edge",
+            "add",
+            params_id(GraphAddEdgeParams {
                 spec_id: Some(spec.id.clone()),
                 graph_id: None,
                 from_node: from,
                 to_node: to,
                 condition: "pass".to_string(),
                 route: None,
-            }))
-            .await
-            .unwrap();
+            }),
+        )
+        .await
+        .unwrap();
     }
     assert_eq!(db.list_graph_edges(&spec.id).unwrap().len(), 2);
 
     // `b` (not the entry point — `a` is) sits between two edges; deleting
     // it must drop both, not just the ones naming it as `from_node`.
-    let deleted = handler
-        .graph_delete_node(Parameters(GraphDeleteNodeParams { node_id: b.clone() }))
-        .await
-        .unwrap();
+    let deleted = call_graph_action(
+        &handler,
+        "graph_node",
+        "delete",
+        params_id(GraphDeleteNodeParams { node_id: b.clone() }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&deleted), "{}", text(&deleted));
 
     assert!(db.get_graph_node(&b).unwrap().is_none());
@@ -506,22 +602,30 @@ async fn graph_delete_node_rejects_the_graphs_entry_point() {
     let spec = insert_test_spec(&db, &lp.id, 1);
     let a = add_agent_node(&handler, &spec.id, "A").await;
     let b = add_agent_node(&handler, &spec.id, "B").await;
-    handler
-        .graph_add_edge(Parameters(GraphAddEdgeParams {
+    call_graph_action(
+        &handler,
+        "graph_edge",
+        "add",
+        params_id(GraphAddEdgeParams {
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             from_node: a.clone(),
             to_node: b,
             condition: "pass".to_string(),
             route: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
 
-    let result = handler
-        .graph_delete_node(Parameters(GraphDeleteNodeParams { node_id: a.clone() }))
-        .await
-        .unwrap();
+    let result = call_graph_action(
+        &handler,
+        "graph_node",
+        "delete",
+        params_id(GraphDeleteNodeParams { node_id: a.clone() }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&result));
     assert!(db.get_graph_node(&a).unwrap().is_some());
 }
@@ -540,12 +644,16 @@ async fn graph_delete_node_refuses_entry_from_node_referenced_by_ensemble() {
     let ensemble_id =
         add_cb52_ensemble(&handler, &spec.id, "Reviewers", &entry, &arbiter, None).await;
 
-    let result = handler
-        .graph_delete_node(Parameters(GraphDeleteNodeParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_node",
+        "delete",
+        params_id(GraphDeleteNodeParams {
             node_id: entry.clone(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&result), "{}", text(&result));
     let msg = text(&result);
     assert!(msg.contains("entry_from_node"), "{msg}");
@@ -572,8 +680,11 @@ async fn graph_delete_node_refuses_extra_entry_source() {
     let ensemble_id =
         add_cb52_ensemble(&handler, &spec.id, "Reviewers", &entry, &arbiter, None).await;
 
-    let added = handler
-        .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+    let added = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "update",
+        params_id(GraphUpdateEnsembleParams {
             mutex: None,
             ensemble_id: ensemble_id.clone(),
             kind: None,
@@ -596,17 +707,22 @@ async fn graph_delete_node_refuses_extra_entry_source() {
             commit_rights: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&added), "{}", text(&added));
 
-    let result = handler
-        .graph_delete_node(Parameters(GraphDeleteNodeParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_node",
+        "delete",
+        params_id(GraphDeleteNodeParams {
             node_id: alt.clone(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&result), "{}", text(&result));
     let msg = text(&result);
     assert!(msg.contains("entry_source"), "{msg}");
@@ -628,12 +744,16 @@ async fn graph_delete_node_refuses_on_pass_to() {
     let ensemble_id =
         add_cb52_ensemble(&handler, &spec.id, "Reviewers", &entry, &arbiter, None).await;
 
-    let result = handler
-        .graph_delete_node(Parameters(GraphDeleteNodeParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_node",
+        "delete",
+        params_id(GraphDeleteNodeParams {
             node_id: arbiter.clone(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&result), "{}", text(&result));
     let msg = text(&result);
     assert!(msg.contains("on_pass_to"), "{msg}");
@@ -663,12 +783,16 @@ async fn graph_delete_node_refuses_on_fail_to() {
     )
     .await;
 
-    let result = handler
-        .graph_delete_node(Parameters(GraphDeleteNodeParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_node",
+        "delete",
+        params_id(GraphDeleteNodeParams {
             node_id: fallback.clone(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&result), "{}", text(&result));
     let msg = text(&result);
     assert!(msg.contains("on_fail_to"), "{msg}");
@@ -693,8 +817,11 @@ async fn after_remove_entry_from_primary_repoints_and_allows_deletion() {
     let ensemble_id =
         add_cb52_ensemble(&handler, &spec.id, "Reviewers", &entry, &arbiter, None).await;
 
-    let added = handler
-        .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+    let added = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "update",
+        params_id(GraphUpdateEnsembleParams {
             mutex: None,
             ensemble_id: ensemble_id.clone(),
             kind: None,
@@ -717,13 +844,17 @@ async fn after_remove_entry_from_primary_repoints_and_allows_deletion() {
             commit_rights: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&added), "{}", text(&added));
 
-    let detached = handler
-        .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+    let detached = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "update",
+        params_id(GraphUpdateEnsembleParams {
             mutex: None,
             ensemble_id: ensemble_id.clone(),
             kind: None,
@@ -746,9 +877,10 @@ async fn after_remove_entry_from_primary_repoints_and_allows_deletion() {
             commit_rights: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&detached), "{}", text(&detached));
     assert_eq!(
         db.get_ensemble(&ensemble_id)
@@ -758,12 +890,16 @@ async fn after_remove_entry_from_primary_repoints_and_allows_deletion() {
         alt
     );
 
-    let deleted = handler
-        .graph_delete_node(Parameters(GraphDeleteNodeParams {
+    let deleted = call_graph_action(
+        &handler,
+        "graph_node",
+        "delete",
+        params_id(GraphDeleteNodeParams {
             node_id: entry.clone(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&deleted), "{}", text(&deleted));
     assert!(db.get_graph_node(&entry).unwrap().is_none());
     assert!(db.get_ensemble(&ensemble_id).unwrap().is_some());
@@ -788,19 +924,23 @@ async fn graph_delete_node_still_refuses_ensemble_owned_nodes() {
         .node_id
         .clone();
 
-    let result = handler
-        .graph_delete_node(Parameters(GraphDeleteNodeParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_node",
+        "delete",
+        params_id(GraphDeleteNodeParams {
             node_id: member_id.clone(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&result), "{}", text(&result));
     let msg = text(&result);
     assert!(msg.contains("is a member of ensemble"), "{msg}");
     assert!(db.get_graph_node(&member_id).unwrap().is_some());
 }
 
-/// CB52 NFR1(d): `graph_preflight` on a graph with an orphan join
+/// CB52 NFR1(d): `graph_control` on a graph with an orphan join
 /// (simulated pre-CB52 damage: a `join` row with no ensemble row)
 /// reports it instead of spending probe quota.
 #[tokio::test]
@@ -820,14 +960,18 @@ async fn graph_preflight_reports_orphan_join() {
     })
     .unwrap();
 
-    let result = handler
-        .graph_preflight(Parameters(GraphPreflightParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "preflight",
+        params_id(GraphPreflightParams {
             graph_id: lp.id.clone(),
             timeout_seconds: None,
             reviewer: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&result), "{}", text(&result));
     let msg = text(&result);
     assert!(msg.contains("belongs to no ensemble"), "{msg}");
@@ -835,7 +979,7 @@ async fn graph_preflight_reports_orphan_join() {
     assert!(msg.contains("orphan-join"), "{msg}");
 }
 
-/// CB52 FR4: `graph_get` surfaces the same orphan under
+/// CB52 FR4: `graph` surfaces the same orphan under
 /// `orphan_join_warnings` without failing.
 #[tokio::test]
 async fn graph_get_includes_orphan_join_warnings() {
@@ -854,12 +998,16 @@ async fn graph_get_includes_orphan_join_warnings() {
     })
     .unwrap();
 
-    let result = handler
-        .graph_get(Parameters(GraphGetParams {
+    let result = call_graph_action(
+        &handler,
+        "graph",
+        "get",
+        params_id(GraphGetParams {
             graph_id: lp.id.clone(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&result), "{}", text(&result));
     let body = raw_text(&result);
     assert!(body.contains("orphan_join_warnings"), "{body}");
@@ -874,12 +1022,16 @@ async fn graph_get_running_without_run_or_schedule_warns() {
     db.update_graph_status(&lp.id, GraphStatus::Running, Some(chrono::Utc::now()), None)
         .unwrap();
 
-    let result = handler
-        .graph_get(Parameters(GraphGetParams {
+    let result = call_graph_action(
+        &handler,
+        "graph",
+        "get",
+        params_id(GraphGetParams {
             graph_id: lp.id.clone(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&result), "{}", text(&result));
     let body = raw_text(&result);
     assert!(body.contains("no node run in progress"), "{body}");
@@ -922,12 +1074,16 @@ async fn graph_get_running_with_live_run_does_not_warn() {
     })
     .unwrap();
 
-    let result = handler
-        .graph_get(Parameters(GraphGetParams {
+    let result = call_graph_action(
+        &handler,
+        "graph",
+        "get",
+        params_id(GraphGetParams {
             graph_id: lp.id.clone(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&result), "{}", text(&result));
     let body = raw_text(&result);
     assert!(body.contains("\"consistency_warning\": null"), "{body}");
@@ -960,12 +1116,16 @@ async fn graph_get_running_with_scheduled_resume_does_not_warn() {
     };
     db.insert_graph(&lp).unwrap();
 
-    let result = handler
-        .graph_get(Parameters(GraphGetParams {
+    let result = call_graph_action(
+        &handler,
+        "graph",
+        "get",
+        params_id(GraphGetParams {
             graph_id: lp.id.clone(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&result), "{}", text(&result));
     let body = raw_text(&result);
     assert!(body.contains("\"consistency_warning\": null"), "{body}");
@@ -979,40 +1139,52 @@ async fn topology_mutations_are_rejected_while_the_graph_is_running() {
     let a = add_agent_node(&handler, &spec.id, "A").await;
     let b = add_agent_node(&handler, &spec.id, "B").await;
     let c = add_agent_node(&handler, &spec.id, "C").await;
-    handler
-        .graph_add_edge(Parameters(GraphAddEdgeParams {
+    call_graph_action(
+        &handler,
+        "graph_edge",
+        "add",
+        params_id(GraphAddEdgeParams {
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             from_node: a,
             to_node: b.clone(),
             condition: "pass".to_string(),
             route: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let edge_id = db.list_graph_edges(&spec.id).unwrap()[0].id.clone();
 
     db.update_graph_status(&lp.id, GraphStatus::Running, None, None)
         .unwrap();
 
-    let retarget = handler
-        .graph_update_edge(Parameters(GraphUpdateEdgeParams {
+    let retarget = call_graph_action(
+        &handler,
+        "graph_edge",
+        "update",
+        params_id(GraphUpdateEdgeParams {
             edge_id: edge_id.clone(),
             condition: "pass".to_string(),
             route: None,
             to_node: Some(c),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&retarget));
     assert!(text(&retarget).contains("running"), "{}", text(&retarget));
 
-    let delete_edge = handler
-        .graph_delete_edge(Parameters(GraphDeleteEdgeParams {
+    let delete_edge = call_graph_action(
+        &handler,
+        "graph_edge",
+        "delete",
+        params_id(GraphDeleteEdgeParams {
             edge_id: edge_id.clone(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&delete_edge));
     assert!(
         text(&delete_edge).contains("running"),
@@ -1020,10 +1192,14 @@ async fn topology_mutations_are_rejected_while_the_graph_is_running() {
         text(&delete_edge)
     );
 
-    let delete_node = handler
-        .graph_delete_node(Parameters(GraphDeleteNodeParams { node_id: b.clone() }))
-        .await
-        .unwrap();
+    let delete_node = call_graph_action(
+        &handler,
+        "graph_node",
+        "delete",
+        params_id(GraphDeleteNodeParams { node_id: b.clone() }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&delete_node));
     assert!(
         text(&delete_node).contains("running"),
@@ -1046,31 +1222,39 @@ async fn cm15_running_graph_pins_node_kind_and_position_accepts_config() {
     db.update_graph_status(&lp.id, GraphStatus::Running, None, None)
         .unwrap();
 
-    let kind_res = handler
-        .graph_update_node(Parameters(GraphUpdateNodeParams {
+    let kind_res = call_graph_action(
+        &handler,
+        "graph_node",
+        "update",
+        params_id(GraphUpdateNodeParams {
             node_id: a.clone(),
             name: None,
             kind: Some("check".to_string()),
             config: None,
             config_replace: None,
             position: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&kind_res));
     assert!(text(&kind_res).contains("running"), "{}", text(&kind_res));
 
-    let pos_res = handler
-        .graph_update_node(Parameters(GraphUpdateNodeParams {
+    let pos_res = call_graph_action(
+        &handler,
+        "graph_node",
+        "update",
+        params_id(GraphUpdateNodeParams {
             node_id: a.clone(),
             name: None,
             kind: None,
             config: None,
             config_replace: None,
             position: Some(99),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&pos_res));
     assert!(text(&pos_res).contains("running"), "{}", text(&pos_res));
 
@@ -1079,17 +1263,21 @@ async fn cm15_running_graph_pins_node_kind_and_position_accepts_config() {
         .as_object()
         .unwrap()
         .clone();
-    let cfg_res = handler
-        .graph_update_node(Parameters(GraphUpdateNodeParams {
+    let cfg_res = call_graph_action(
+        &handler,
+        "graph_node",
+        "update",
+        params_id(GraphUpdateNodeParams {
             node_id: a.clone(),
             name: None,
             kind: None,
             config: Some(cfg),
             config_replace: None,
             position: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&cfg_res), "{}", text(&cfg_res));
     assert_eq!(
         db.get_graph_node(&a)
@@ -1114,31 +1302,42 @@ async fn cm15_running_graph_pins_ensemble_kind_accepts_member_replacement() {
     db.update_graph_status(&lp.id, GraphStatus::Running, None, None)
         .unwrap();
 
-    let kind_res = handler
-        .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+    let kind_res = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "update",
+        params_id(GraphUpdateEnsembleParams {
             kind: Some("cascade".to_string()),
             ..blank_ensemble_update(&ens)
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&kind_res));
     assert!(text(&kind_res).contains("running"), "{}", text(&kind_res));
 
     // Exit wiring is topology too — retargeting it mid-run is refused,
     // not accepted-and-dropped.
-    let exit_res = handler
-        .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+    let exit_res = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "update",
+        params_id(GraphUpdateEnsembleParams {
             on_pass_to: Some(entry.clone()),
             ..blank_ensemble_update(&ens)
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&exit_res));
     assert!(text(&exit_res).contains("running"), "{}", text(&exit_res));
 
     // Replacing the dead member set IS allowed while running.
-    let members_res = handler
-        .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+    let members_res = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "update",
+        params_id(GraphUpdateEnsembleParams {
             members: Some(vec![
                 EnsembleMemberParams {
                     platform: "opencode".to_string(),
@@ -1160,9 +1359,10 @@ async fn cm15_running_graph_pins_ensemble_kind_accepts_member_replacement() {
                 },
             ]),
             ..blank_ensemble_update(&ens)
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&members_res), "{}", text(&members_res));
 }
 
@@ -1172,8 +1372,11 @@ async fn graph_add_node_router_created_persisted_and_read_back_with_routes() {
     let lp = insert_test_graph(&db, dir.path());
     let spec = insert_test_spec(&db, &lp.id, 1);
 
-    let router_result = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let router_result = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Router".to_string(),
@@ -1182,9 +1385,10 @@ async fn graph_add_node_router_created_persisted_and_read_back_with_routes() {
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&router_result), "{}", text(&router_result));
     let router_id = extract_id(&router_result, "node_id");
 
@@ -1192,33 +1396,41 @@ async fn graph_add_node_router_created_persisted_and_read_back_with_routes() {
     let escalate_target = add_agent_node(&handler, &spec.id, "Escalate target").await;
 
     for (route, target) in [("retry", &retry_target), ("escalate", &escalate_target)] {
-        let edge = handler
-            .graph_add_edge(Parameters(GraphAddEdgeParams {
+        let edge = call_graph_action(
+            &handler,
+            "graph_edge",
+            "add",
+            params_id(GraphAddEdgeParams {
                 spec_id: Some(spec.id.clone()),
                 graph_id: None,
                 from_node: router_id.clone(),
                 to_node: target.clone(),
                 condition: "route".to_string(),
                 route: Some(route.to_string()),
-            }))
-            .await
-            .unwrap();
+            }),
+        )
+        .await
+        .unwrap();
         assert!(!is_err(&edge), "{}", text(&edge));
     }
 
-    let got = handler
-        .graph_get(Parameters(GraphGetParams {
+    let got = call_graph_action(
+        &handler,
+        "graph",
+        "get",
+        params_id(GraphGetParams {
             graph_id: lp.id.clone(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&got), "{}", text(&got));
     let json: serde_json::Value = serde_json::from_str(&raw_text(&got)).unwrap();
     let nodes = json["specs"][0]["nodes"].as_array().unwrap();
     let router_json = nodes
         .iter()
         .find(|n| n["id"] == router_id)
-        .expect("router node present in graph_get");
+        .expect("router node present in graph");
     assert_eq!(router_json["kind"], "router");
     let routes = router_json["routes"].as_array().expect("routes array");
     assert_eq!(routes.len(), 2);
@@ -1242,8 +1454,11 @@ async fn graph_add_node_router_rejects_fewer_than_two_routes_and_missing_fallbac
     let lp = insert_test_graph(&db, dir.path());
     let spec = insert_test_spec(&db, &lp.id, 1);
 
-    let too_few = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let too_few = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Router".to_string(),
@@ -1255,16 +1470,20 @@ async fn graph_add_node_router_rejects_fewer_than_two_routes_and_missing_fallbac
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&too_few));
     assert!(text(&too_few).contains("at least 2 routes"));
 
     let mut no_fallback_config = router_node_config(&two_routes(), "retry");
     no_fallback_config.remove("fallback");
-    let no_fallback = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let no_fallback = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: Some(spec.id),
             graph_id: None,
             name: "Router".to_string(),
@@ -1273,9 +1492,10 @@ async fn graph_add_node_router_rejects_fewer_than_two_routes_and_missing_fallbac
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&no_fallback));
     assert!(text(&no_fallback).contains("fallback"));
 }
@@ -1286,8 +1506,11 @@ async fn graph_add_edge_route_condition_rejects_undeclared_route_and_non_router_
     let lp = insert_test_graph(&db, dir.path());
     let spec = insert_test_spec(&db, &lp.id, 1);
 
-    let router_result = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let router_result = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Router".to_string(),
@@ -1296,38 +1519,47 @@ async fn graph_add_edge_route_condition_rejects_undeclared_route_and_non_router_
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let router_id = extract_id(&router_result, "node_id");
     let target = add_agent_node(&handler, &spec.id, "Target").await;
 
-    let undeclared = handler
-        .graph_add_edge(Parameters(GraphAddEdgeParams {
+    let undeclared = call_graph_action(
+        &handler,
+        "graph_edge",
+        "add",
+        params_id(GraphAddEdgeParams {
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             from_node: router_id.clone(),
             to_node: target.clone(),
             condition: "route".to_string(),
             route: Some("nonexistent".to_string()),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&undeclared));
     assert!(text(&undeclared).contains("undeclared route"));
 
     let non_router = add_agent_node(&handler, &spec.id, "Non-router source").await;
-    let wrong_source = handler
-        .graph_add_edge(Parameters(GraphAddEdgeParams {
+    let wrong_source = call_graph_action(
+        &handler,
+        "graph_edge",
+        "add",
+        params_id(GraphAddEdgeParams {
             spec_id: Some(spec.id),
             graph_id: None,
             from_node: non_router,
             to_node: target,
             condition: "route".to_string(),
             route: Some("retry".to_string()),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&wrong_source));
     assert!(text(&wrong_source).contains("router node"));
 }

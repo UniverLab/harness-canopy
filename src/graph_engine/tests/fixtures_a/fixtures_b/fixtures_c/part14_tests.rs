@@ -1271,7 +1271,7 @@ async fn waiting_pause_and_continue_consumes_no_iteration() {
     assert_eq!(before.len(), 1);
     assert_eq!(before[0].iteration, 1);
 
-    // Continue (the resume path behind graph_continue).
+    // Continue (the resume path behind graph_control).
     engine
         .run_graph_dispatch(
             graph_id.clone(),

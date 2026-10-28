@@ -118,7 +118,7 @@ impl Database {
     /// Delete every note of every spec bound to one graph, plus every note of
     /// the specs in the graph's active run queue (a queue run's own bound
     /// specs are typically empty — its members are what actually ran). Used
-    /// by `graph_reset` with `clear_notes: true` on a blanket reset.
+    /// by `graph_control` with `clear_notes: true` on a blanket reset.
     pub fn clear_spec_notes_for_graph(&self, graph_id: &str) -> Result<usize> {
         let conn = self
             .conn

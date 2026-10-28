@@ -1,8 +1,8 @@
 //! Node authoring helpers and node-catalogue MCP tools.
 //!
 //! A node document is the shareable alternative to a full `config`: the
-//! catalogue tools here install/list/remove them, and `graph_add_node` /
-//! `graph_add_ensemble` instantiate one by name. The resolvers live here
+//! catalogue tools here install/list/remove them, and `graph_node` /
+//! `graph_ensemble` instantiate one by name. The resolvers live here
 //! rather than in `handler_nodes` so the tool module and the node tools stay
 //! one cohesive surface.
 
@@ -25,7 +25,7 @@ use rmcp::ErrorData as McpError;
 impl TaskTriggerHandler {
     #[tool(
         name = "node_list",
-        description = "List every node document available to graph_add_node and graph_add_ensemble — the ones installed under ~/.canopy/nodes (source 'installed') and the builtins embedded in the binary (source 'builtin': implementer, cargo-gates, reviewer-committer, commit-check, resilience, ensemble-proposers). An installed copy of a builtin name shadows it and is listed once, as 'installed'. Install more with node_install."
+        description = "List every node document available to graph_node add and graph_ensemble add — the ones installed under ~/.canopy/nodes (source 'installed') and the builtins embedded in the binary (source 'builtin': implementer, cargo-gates, reviewer-committer, commit-check, resilience, ensemble-proposers). An installed copy of a builtin name shadows it and is listed once, as 'installed'. Install more with node_install."
     )]
     pub(crate) async fn node_list(&self) -> Result<CallToolResult, McpError> {
         let dir = nodes::nodes_dir(&crate::domain::prompts::canopy_dir());
@@ -39,7 +39,7 @@ impl TaskTriggerHandler {
 
     #[tool(
         name = "node_install",
-        description = "Install a shareable node document from the catalogue in one command: fetch the published document for `ref` — `<slug>` for an official node or `<owner>/<repo>/<slug>` for a community one, each with an optional `@<ref>` version suffix, or `draft:<id>` for an unreviewed editor draft (26 lowercase base32 characters, served directly, installable once within 30 minutes) — through `graphs.catalogue_url`, so the catalogue counts the install, and validate it exactly as `graph_validate` would (a graph document is refused). BEFORE ANYTHING IS WRITTEN the call returns {needs_review: true, review: {source, commands, prompts, attention}}: every shell command (config.command, labelled by node), every agent instruction (prompt_template, prompt_override, bundled or builtin preset content — first 3 lines with a total line count), and the attention marks for dangerous command shapes (pipe to shell, sudo, rm -rf, chmod 777, git push/--force, sensitive-path write, eval, base64 -d, pipe to python/node). AN AGENT MUST SHOW THIS REVIEW TO ITS USER before calling again with accept: true; without accept nothing is installed, and official documents are reviewed the same as community ones. With accept: true the bundled `preset` is installed into the prompts dir (a local file with different content aborts the install unless `overwrite_presets` is true), the document is written to ~/.canopy/nodes/<name>.json where it shadows a builtin of the same name, and the response carries the same review plus the name, kind, source URL, and presets written; add it to a graph with graph_add_node (node: <name>) or graph_add_ensemble (node: <name>)."
+        description = "Install a shareable node document from the catalogue in one command: fetch the published document for `ref` — `<slug>` for an official node or `<owner>/<repo>/<slug>` for a community one, each with an optional `@<ref>` version suffix, or `draft:<id>` for an unreviewed editor draft (26 lowercase base32 characters, served directly, installable once within 30 minutes) — through `graphs.catalogue_url`, so the catalogue counts the install, and validate it exactly as `graph validate` would (a graph document is refused). BEFORE ANYTHING IS WRITTEN the call returns {needs_review: true, review: {source, commands, prompts, attention}}: every shell command (config.command, labelled by node), every agent instruction (prompt_template, prompt_override, bundled or builtin preset content — first 3 lines with a total line count), and the attention marks for dangerous command shapes (pipe to shell, sudo, rm -rf, chmod 777, git push/--force, sensitive-path write, eval, base64 -d, pipe to python/node). AN AGENT MUST SHOW THIS REVIEW TO ITS USER before calling again with accept: true; without accept nothing is installed, and official documents are reviewed the same as community ones. With accept: true the bundled `preset` is installed into the prompts dir (a local file with different content aborts the install unless `overwrite_presets` is true), the document is written to ~/.canopy/nodes/<name>.json where it shadows a builtin of the same name, and the response carries the same review plus the name, kind, source URL, and presets written; add it to a graph with graph_node add (node: <name>) or graph_ensemble add (node: <name>)."
     )]
     pub(crate) async fn node_install(
         &self,
@@ -179,7 +179,7 @@ pub(crate) fn validate_blueprint_exists(db: &Database, name: &str) -> Result<Blu
     }
 }
 
-/// Resolve a `graph_add_node` call's kind/config, either from an explicit
+/// Resolve a `graph_node` call's kind/config, either from an explicit
 /// `kind`+`config` pair or from a named blueprint (optionally shallow-merged
 /// with `config_overrides`). Exactly one of `config`/`blueprint`/`node` must
 /// be usable — this is the "template as an alternative to a full config"
@@ -230,10 +230,10 @@ pub(crate) fn resolve_node_kind_and_config(
     }
 }
 
-/// Resolve a `node:` name into the kind/config `graph_add_node` stores: the
+/// Resolve a `node:` name into the kind/config `graph_node` stores: the
 /// installed copy if there is one, else the embedded builtin, with
 /// `config_overrides` shallow-merged on top. An ensemble node document is
-/// refused here — it belongs to `graph_add_ensemble`.
+/// refused here — it belongs to `graph_ensemble`.
 pub(crate) fn resolve_node_document(
     name: &str,
     config_overrides: Option<serde_json::Map<String, serde_json::Value>>,
@@ -244,7 +244,7 @@ pub(crate) fn resolve_node_document(
     };
     if entry.document.kind == "ensemble" {
         return Err(format!(
-            "Node document '{name}' is an ensemble; add it with graph_add_ensemble (node: \"{name}\") instead of graph_add_node."
+            "Node document '{name}' is an ensemble; add it with graph_ensemble add (node: \"{name}\") instead of graph_node add."
         ));
     }
     let kind = validate_node_kind(&entry.document.kind)?;
@@ -256,9 +256,9 @@ pub(crate) fn resolve_node_document(
     Ok((kind, merged))
 }
 
-/// Resolve an `ensemble` node document by name for `graph_add_ensemble`.
+/// Resolve an `ensemble` node document by name for `graph_ensemble`.
 /// Returns the document's name (for error messages) and its parsed config.
-/// A single-node document is refused here — it belongs to `graph_add_node`.
+/// A single-node document is refused here — it belongs to `graph_node`.
 pub(crate) fn resolve_ensemble_node_document(
     name: &str,
 ) -> Result<(String, crate::domain::nodes::EnsembleNodeConfig), String> {
@@ -268,7 +268,7 @@ pub(crate) fn resolve_ensemble_node_document(
     };
     if entry.document.kind != "ensemble" {
         return Err(format!(
-            "Node document '{name}' is a {} node, not an ensemble; add it with graph_add_node (node: \"{name}\") instead of graph_add_ensemble.",
+            "Node document '{name}' is a {} node, not an ensemble; add it with graph_node (node: \"{name}\") instead of graph_ensemble.",
             entry.document.kind
         ));
     }
@@ -382,7 +382,7 @@ mod tests {
         let _guard = OverrideHome::set(home.path());
         let error = resolve_node_document("ensemble-proposers", None).unwrap_err();
         assert!(error.contains("ensemble-proposers"), "{error}");
-        assert!(error.contains("graph_add_ensemble"), "{error}");
+        assert!(error.contains("graph_ensemble"), "{error}");
     }
 
     #[test]
@@ -391,7 +391,7 @@ mod tests {
         let _guard = OverrideHome::set(home.path());
         let error = resolve_ensemble_node_document("implementer").unwrap_err();
         assert!(error.contains("implementer"), "{error}");
-        assert!(error.contains("graph_add_node"), "{error}");
+        assert!(error.contains("graph_node"), "{error}");
     }
 
     #[test]

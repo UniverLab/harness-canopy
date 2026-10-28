@@ -338,10 +338,10 @@ pub(crate) fn ensemble_owning_node(node_id: &str, ensembles: &[EnsembleDetails])
 /// bound-spec (`None` queue) branch inserts for an explicit-`idea` run only:
 /// a graph launched with zero bound specs and a non-empty `idea` that
 /// `empty_launch_check` let through. The blank `name` keeps it hidden from
-/// work listings (`spec_list`/`graph_get` filter on it); the caller-supplied
+/// work listings (`spec_list`/`graph` filter on it); the caller-supplied
 /// idea text in `description` is what `{{spec_content}}` resolves from, so
 /// this row always carries content and is never the blank row CB22 refuses.
-/// `graph_add_spec` rejects an empty name for every real, user-authored spec,
+/// `graph_edit` rejects an empty name for every real, user-authored spec,
 /// so `""` can never collide with one. Never created for a no-idea launch —
 /// those are refused before reaching the dispatch body.
 pub(crate) fn no_spec_placeholder(graph_id: &str) -> GraphSpec {
@@ -375,7 +375,7 @@ pub(crate) fn no_spec_placeholder(graph_id: &str) -> GraphSpec {
 /// wrote). The blank `name` is the sentinel — idea text may live in
 /// `description` — so `run_graph_dispatch` can purge a prior attempt's
 /// terminal bookkeeping row without touching a still-live resume row or any
-/// real user-authored spec (`graph_add_spec` rejects an empty name).
+/// real user-authored spec (`graph_edit` rejects an empty name).
 pub(crate) fn is_no_spec_placeholder(spec: &GraphSpec) -> bool {
     spec.name.trim().is_empty()
 }

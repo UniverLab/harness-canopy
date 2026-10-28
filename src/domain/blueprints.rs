@@ -17,7 +17,7 @@ pub struct Blueprint {
     pub id: String,
     pub name: String,
     pub kind: GraphNodeKind,
-    /// Config template. `graph_add_node` uses this as-is, or shallow-merges
+    /// Config template. `graph_node` uses this as-is, or shallow-merges
     /// `config_overrides` on top of it (override keys win).
     pub config: Value,
     /// Builtins are seeded automatically and can't be deleted — see
@@ -34,7 +34,7 @@ pub struct Blueprint {
 /// None of these carry a `platform`/`cli`/`model`: a blueprint describes the
 /// *role* a node plays (its kind and its prompt), not which harness runs it.
 /// Which harness executes a node is a per-installation, per-budget decision
-/// that belongs to whoever assembles the graph, supplied via `graph_add_node`'s
+/// that belongs to whoever assembles the graph, supplied via `graph_node`'s
 /// `config_overrides` — never a default baked into the blueprint. See the
 /// module doc and `validate_node_config`'s `Agent` arm, which is what
 /// actually enforces this at node-creation time.
@@ -80,7 +80,7 @@ pub fn builtin_blueprint_specs() -> Vec<(&'static str, GraphNodeKind, Value)> {
 
 /// An ensemble blueprint (F1): unlike [`Blueprint`] (a single node's
 /// kind+config), this is a whole ensemble's shared prompt + member list, the
-/// pieces `graph_add_ensemble`'s `blueprint` param fills in when the caller
+/// pieces `graph_ensemble`'s `blueprint` param fills in when the caller
 /// omits `prompt_template`/`members` explicitly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnsembleBlueprint {
@@ -92,7 +92,7 @@ pub struct EnsembleBlueprint {
     /// member only — same convention as `EnsembleMember::prompt_override`.
     pub members: Vec<EnsembleMemberSpec>,
     /// Suggested `min_pass`. `None` means "every member" — the same default
-    /// `graph_add_ensemble` uses when the caller doesn't pass `min_pass`.
+    /// `graph_ensemble` uses when the caller doesn't pass `min_pass`.
     pub min_pass: Option<i64>,
     /// CM24: suggested `quorum_grace_minutes`. `None` means wait-for-all.
     pub quorum_grace_minutes: Option<i64>,
@@ -122,7 +122,7 @@ pub type EnsembleBlueprintSpec = (
 /// `deepseek/deepseek-chat-v3.1:free`) can be renamed, deprecated, or
 /// rate-limited out from under a blueprint that hardcodes it, exactly like
 /// pinning a harness in a single-node blueprint would; `model: None` lets
-/// OpenRouter (or whoever assembles the graph, via `graph_add_ensemble`'s
+/// OpenRouter (or whoever assembles the graph, via `graph_ensemble`'s
 /// `members` param) pick one.
 pub fn builtin_ensemble_blueprint_specs() -> Vec<EnsembleBlueprintSpec> {
     vec![(

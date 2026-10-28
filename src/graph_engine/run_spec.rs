@@ -346,7 +346,7 @@ impl GraphEngine {
 
         // B42/2026-08-05: something terminated this run out from
         // under us — a newer attempt at this node, a concurrent
-        // `graph_reset`, `graph_pause`, or budget/`fail_graph`
+        // `graph_control`, `graph_control`, or budget/`fail_graph`
         // sweep (see `run_was_terminated_out_of_band`). That is
         // engine bookkeeping, not a node failure — so this
         // dispatch stops here: it evaluates NO edge (never the
@@ -403,7 +403,7 @@ impl GraphEngine {
         // CB31: a wait-for-completion pause was requested while this
         // node was running. It ran to its own completion and its
         // verdict is now recorded normally; flag that run so
-        // `graph_continue` re-executing this node does not spend one
+        // `graph_control` re-executing this node does not spend one
         // of its iterations (the pause is not an attempt), then
         // transition to paused and stop before the next node.
         if let Some(outcome) = self
@@ -438,11 +438,11 @@ impl GraphEngine {
         // CM15: the ensemble's MEMBER SET and shared prompt are read
         // from the database HERE, once per dispatch of this ensemble
         // step (NFR3: the whole set in one read, never member-by-member
-        // across an await), so a graph_update_ensemble applied between
+        // across an await), so a graph_ensemble applied between
         // two dispatches lands on the second (FR2). The launch-time
         // `ensembles` snapshot stays authoritative for the ensemble's
         // WIRING (entry/exit edges, used by cursor_node_ids /
-        // select_next_step) and its `kind`, which graph_update_ensemble
+        // select_next_step) and its `kind`, which graph_ensemble
         // refuses to change while the graph is `running` (FR5).
         let details_fresh = self
             .db
@@ -510,7 +510,7 @@ impl GraphEngine {
         // CB31: as in the single-node step — a wait-for-completion
         // pause landed on this ensemble step. Its members ran to
         // completion; flag every run of this iteration so a
-        // `graph_continue` re-run of the step costs no iteration.
+        // `graph_control` re-run of the step costs no iteration.
         if let Some(outcome) = self
             .pause_after_step_if_requested(ctx, state, iteration_value)
             .await?

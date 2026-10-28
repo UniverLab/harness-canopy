@@ -14,26 +14,20 @@ use crate::daemon::handler_validate::{
 };
 use crate::daemon::helpers::error_result;
 use crate::daemon::params::*;
-use crate::daemon::params_extract::Parameters;
 use crate::db::Database;
 use crate::domain::graphs::{
     Ensemble, EnsembleKind, EnsembleMemberSpec, GraphEdge, GraphEdgeCondition, GraphNode,
     GraphNodeKind,
 };
 use rmcp::model::CallToolResult;
-use rmcp::tool;
 use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
 
 #[tool_router(router = tool_router_copy, vis = "pub(crate)")]
 impl TaskTriggerHandler {
-    #[tool(
-        name = "graph_copy_node",
-        description = "Duplicate a graph node's CONFIG (never its runtime state) into a graph — the source's own by default, or a different spec/graph for a cross-graph copy. Optional overrides: name, and config_overrides shallow-merged over the copied config (e.g. swap prompt_template, platform, model, timeout_minutes). Optional wiring: entry_from_node/entry_condition (incoming edge) and on_pass_to/on_fail_to (outgoing edges). All ids are new. An unwired copy is valid and is reported as such — no edges are assumed."
-    )]
-    pub(crate) async fn graph_copy_node(
+    pub(crate) async fn graph_copy_node_impl(
         &self,
-        Parameters(params): Parameters<GraphCopyNodeParams>,
+        params: GraphCopyNodeParams,
     ) -> Result<CallToolResult, McpError> {
         let plan = match plan_node_copy(&self.db, &params) {
             Ok(plan) => plan,
@@ -45,26 +39,7 @@ impl TaskTriggerHandler {
             .map_err(internal_error)?;
 
         // CM2: auto-wire a `Error` edge to the graph's infra node if set.
-        if let Some(ref lid) = plan.node.graph_id {
-            if let Ok(Some(lp)) = self.db.get_graph(lid) {
-                if let Some(ref infra_node_id) = lp.infra_node_id {
-                    let already_has_error = plan.edges.iter().any(|e| {
-                        e.from_node == plan.node.id && e.condition == GraphEdgeCondition::Error
-                    });
-                    if !already_has_error {
-                        let edge = GraphEdge {
-                            id: uuid::Uuid::new_v4().to_string(),
-                            spec_id: plan.node.spec_id.clone(),
-                            graph_id: Some(lid.clone()),
-                            from_node: plan.node.id.clone(),
-                            to_node: infra_node_id.clone(),
-                            condition: GraphEdgeCondition::Error,
-                        };
-                        let _ = self.db.insert_graph_edge(&edge);
-                    }
-                }
-            }
-        }
+        auto_wire_infra_error_edge(&self.db, &plan);
 
         let wired = !plan.edges.is_empty();
         let mut mapping = serde_json::Map::new();
@@ -80,13 +55,9 @@ impl TaskTriggerHandler {
         })))
     }
 
-    #[tool(
-        name = "graph_copy_ensemble",
-        description = "Duplicate a whole ensemble unit (members + quorum + shared prompt) — CONFIG only, never runtime state — in one call. Optional overrides: name, prompt_template (e.g. swap a proposer prompt for a review prompt), members (2–8 parallel, 2–16 cascade/round_robin replacement), min_pass, timeout_minutes, straggler_timeout_minutes, and wiring (from_node/condition entry, on_pass_to/on_fail_to exit). Wiring defaults to the source's; for a cross-graph copy pass wiring that exists in the target graph. Every id is new; the response returns the full old→new id mapping and the wiring actually applied."
-    )]
-    pub(crate) async fn graph_copy_ensemble(
+    pub(crate) async fn graph_copy_ensemble_impl(
         &self,
-        Parameters(params): Parameters<GraphCopyEnsembleParams>,
+        params: GraphCopyEnsembleParams,
     ) -> Result<CallToolResult, McpError> {
         let plan = match plan_ensemble_copy(&self.db, &params) {
             Ok(plan) => plan,
@@ -158,7 +129,7 @@ impl TaskTriggerHandler {
 /// A planned single-node copy: the new node, its optional wiring edges, and a
 /// report of the wiring actually applied. Pure of side effects — the caller
 /// persists it with [`Database::insert_node_with_edges`]. Split out from
-/// `graph_copy_node` so the copy/override/wiring logic is unit-testable with
+/// `graph_node` so the copy/override/wiring logic is unit-testable with
 /// just a `Database`.
 #[derive(Debug)]
 pub(crate) struct NodeCopyPlan {
@@ -166,6 +137,37 @@ pub(crate) struct NodeCopyPlan {
     pub(crate) node: GraphNode,
     pub(crate) edges: Vec<GraphEdge>,
     pub(crate) wiring: serde_json::Map<String, serde_json::Value>,
+}
+
+/// CM2: after a node copy into a graph with an infra node configured, wire
+/// the new node's `Error` edge to that infra node — unless one already
+/// exists (e.g. copied along with the node).
+fn auto_wire_infra_error_edge(db: &Database, plan: &NodeCopyPlan) {
+    let Some(lid) = plan.node.graph_id.as_deref() else {
+        return;
+    };
+    let Ok(Some(lp)) = db.get_graph(lid) else {
+        return;
+    };
+    let Some(infra_node_id) = lp.infra_node_id.as_deref() else {
+        return;
+    };
+    let already_has_error = plan
+        .edges
+        .iter()
+        .any(|e| e.from_node == plan.node.id && e.condition == GraphEdgeCondition::Error);
+    if already_has_error {
+        return;
+    }
+    let edge = GraphEdge {
+        id: uuid::Uuid::new_v4().to_string(),
+        spec_id: plan.node.spec_id.clone(),
+        graph_id: Some(lid.to_string()),
+        from_node: plan.node.id.clone(),
+        to_node: infra_node_id.to_string(),
+        condition: GraphEdgeCondition::Error,
+    };
+    let _ = db.insert_graph_edge(&edge);
 }
 
 pub(crate) fn plan_node_copy(
@@ -233,13 +235,13 @@ pub(crate) fn resolve_node_copy_source(
     let source = validate_node_exists(db, &source_id)?;
     if source.kind == GraphNodeKind::Join {
         return Err(
-            "Cannot copy a quorum node directly; copy its ensemble with graph_copy_ensemble."
+            "Cannot copy a quorum node directly; copy its ensemble with graph_ensemble copy."
                 .to_string(),
         );
     }
     if let Err(e) = validate_node_not_ensemble_owned(db, &source_id) {
         return Err(format!(
-            "Cannot copy an ensemble-owned node directly; copy the whole ensemble with graph_copy_ensemble instead. {e}"
+            "Cannot copy an ensemble-owned node directly; copy the whole ensemble with graph_ensemble copy instead. {e}"
         ));
     }
     Ok((source_id, source))
@@ -342,7 +344,7 @@ pub(crate) fn plan_node_copy_wiring(
     Ok(NodeCopyWiring { edges, wiring })
 }
 
-/// The `note` line a `graph_copy_node` response carries. An unwired copy is a
+/// The `note` line a `graph_node` response carries. An unwired copy is a
 /// valid outcome, but callers must never assume edges exist — so the note says
 /// so explicitly and points at how to wire it.
 pub(crate) fn node_copy_note(source_id: &str, new_id: &str, wired: bool) -> String {
@@ -351,7 +353,7 @@ pub(crate) fn node_copy_note(source_id: &str, new_id: &str, wired: bool) -> Stri
     } else {
         format!(
             "Unwired copy of '{source_id}': the new node '{new_id}' has NO incoming or \
-             outgoing edges yet. Wire it with graph_add_edge, or pass \
+             outgoing edges yet. Wire it with graph_edge add, or pass \
              entry_from_node/on_pass_to/on_fail_to."
         )
     }
@@ -533,7 +535,7 @@ pub(crate) fn copy_ensemble_members(
 /// Entry/pass/fail routing for the copy: params win over the source's own
 /// routing, and every target node must exist in the *target* graph
 /// (respecting that graph's own validation for a cross-graph copy) and must
-/// not be ensemble-owned — the same rules graph_add_ensemble enforces.
+/// not be ensemble-owned — the same rules graph_ensemble enforces.
 pub(crate) fn resolve_ensemble_copy_wiring(
     db: &Database,
     params: &GraphCopyEnsembleParams,
@@ -590,7 +592,7 @@ pub(crate) fn resolve_ensemble_copy_wiring(
 
 /// Validates one quorum exit target against the target graph: it must exist
 /// there and must not be ensemble-owned — the same rules
-/// graph_add_ensemble enforces.
+/// graph_ensemble enforces.
 pub(crate) fn validate_ensemble_copy_wiring(
     db: &Database,
     existing_nodes: &[GraphNode],
@@ -650,10 +652,10 @@ pub(crate) fn build_ensemble_copy_unit(
         infra_backoff_seconds: source.infra_backoff_seconds,
         start_position,
         kind: inputs.copy_kind,
-        // CM28: never copied from the source — graph_copy_ensemble is out of
+        // CM28: never copied from the source — graph_ensemble is out of
         // scope for commit rights, and silently duplicating the designation
         // would create two committers by accident. Set explicitly afterward
-        // via graph_update_ensemble if the copy should also commit.
+        // via graph_ensemble if the copy should also commit.
         commit_rights: false,
         // Unlike commit rights, the mutex list is ordinary config: the copy
         // guards the same resources as its source.

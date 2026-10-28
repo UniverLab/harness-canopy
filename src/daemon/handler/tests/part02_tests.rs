@@ -693,7 +693,7 @@ fn retry_current_node_error_names_spec_status_and_applicable_verb() {
     let error = handle_retry_current_node(&db, "graph-owner").unwrap_err();
     assert!(error.message.contains("spec-failed"), "{}", error.message);
     assert!(error.message.contains("failed"), "{}", error.message);
-    assert!(error.message.contains("graph_reset"), "{}", error.message);
+    assert!(error.message.contains("graph_control"), "{}", error.message);
     assert!(!error.message.contains("loop_"), "{}", error.message);
 }
 
@@ -844,7 +844,7 @@ fn resolve_graph_target_rejects_unknown_graph_id() {
 
 #[test]
 fn graph_get_response_includes_graph_level_graph_alongside_specs() {
-    // R1: `graph_get` (via `graph_details_json`) must surface the
+    // R1: `graph` (via `graph_details_json`) must surface the
     // top-level graph, not just each spec's own nodes/edges.
     let dir = tempdir().unwrap();
     let db = Database::new(&dir.path().join("test.db")).unwrap();
@@ -903,7 +903,7 @@ fn graph_get_reports_queue_spec_not_placeholder() {
     let specs = json["specs"].as_array().unwrap();
     assert!(
         !specs.is_empty(),
-        "queue-driven graph_get must name the running queue spec: {json}"
+        "queue-driven graph must name the running queue spec: {json}"
     );
     assert!(
         specs
@@ -914,7 +914,7 @@ fn graph_get_reports_queue_spec_not_placeholder() {
     let running = specs
         .iter()
         .find(|s| s["id"] == "spec-a")
-        .expect("running queue spec must appear in graph_get specs");
+        .expect("running queue spec must appear in graph specs");
     assert_eq!(running["name"], "CM4 — queue work");
     assert_eq!(json["queue"]["id"], "q1");
     assert_eq!(json["queue"]["name"], "q1-name");
@@ -956,12 +956,12 @@ fn graph_get_idea_run_shows_mode_idea_not_placeholder() {
     let json = graph_details_json(&db, &details).unwrap();
     assert!(
         json["specs"].as_array().unwrap().is_empty(),
-        "idea-driven graph_get must not list the placeholder: {json}"
+        "idea-driven graph must not list the placeholder: {json}"
     );
     assert_eq!(json["mode"], "idea");
     assert!(
         json.get("queue").is_none(),
-        "idea-driven graph_get must not carry a queue: {json}"
+        "idea-driven graph must not carry a queue: {json}"
     );
 
     let lp = db.get_graph("graph-idea").unwrap().unwrap();
@@ -1089,7 +1089,7 @@ fn completed_queue_graph_is_not_idea() {
 #[test]
 fn graph_get_response_surfaces_pinned_skills_on_a_node() {
     // S2: an agent node's pinned `skills` array must be visible to
-    // agents inspecting/building graphs via graph_get, not just used
+    // agents inspecting/building graphs via graph, not just used
     // internally at spawn time.
     let dir = tempdir().unwrap();
     let db = Database::new(&dir.path().join("test.db")).unwrap();
@@ -1143,7 +1143,7 @@ fn graph_get_response_surfaces_pinned_skills_on_a_node() {
 #[test]
 fn graph_get_response_exposes_autorun_at_so_agents_never_need_sql() {
     // B14: a failed graph's pending autorun schedule must be visible via
-    // `graph_get` — before this, an agent had to query
+    // `graph` — before this, an agent had to query
     // `background_agents.db` directly to learn whether a recovery wait
     // was already scheduled.
     let dir = tempdir().unwrap();
@@ -1196,8 +1196,6 @@ fn graph_get_response_exposes_autorun_at_so_agents_never_need_sql() {
 /// succeed and report the time that was cleared.
 #[tokio::test]
 async fn graph_schedule_autorun_cancels_pending_schedule_on_failed_graph() {
-    use crate::daemon::params_extract::Parameters;
-
     let (dir, db, handler) = queue_test_handler();
     let graph_id = "graph-failed-autorun";
     db.insert_graph(&autorun_test_graph(
@@ -1209,14 +1207,18 @@ async fn graph_schedule_autorun_cancels_pending_schedule_on_failed_graph() {
     let scheduled_at = chrono::Utc::now() + chrono::Duration::hours(1);
     db.schedule_graph_autorun(graph_id, scheduled_at).unwrap();
 
-    let result = handler
-        .graph_schedule_autorun(Parameters(GraphScheduleAutorunParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "schedule_autorun",
+        params_id(GraphScheduleAutorunParams {
             graph_id: graph_id.to_string(),
             at: None,
             quota_reset_message: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
 
     let text = result_text(&result);
     assert!(text.contains("cancelled"), "{text}");
@@ -1233,8 +1235,6 @@ async fn graph_schedule_autorun_cancels_pending_schedule_on_failed_graph() {
 /// status a graph with a pending autorun can hold.
 #[tokio::test]
 async fn graph_schedule_autorun_cancels_pending_schedule_on_completed_graph() {
-    use crate::daemon::params_extract::Parameters;
-
     let (dir, db, handler) = queue_test_handler();
     let graph_id = "graph-completed-autorun";
     db.insert_graph(&autorun_test_graph(
@@ -1246,14 +1246,18 @@ async fn graph_schedule_autorun_cancels_pending_schedule_on_completed_graph() {
     let scheduled_at = chrono::Utc::now() + chrono::Duration::hours(1);
     db.schedule_graph_autorun(graph_id, scheduled_at).unwrap();
 
-    let result = handler
-        .graph_schedule_autorun(Parameters(GraphScheduleAutorunParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "schedule_autorun",
+        params_id(GraphScheduleAutorunParams {
             graph_id: graph_id.to_string(),
             at: None,
             quota_reset_message: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(result_text(&result).contains("cancelled"));
     let lp = db.get_graph(graph_id).unwrap().unwrap();
@@ -1265,8 +1269,6 @@ async fn graph_schedule_autorun_cancels_pending_schedule_on_completed_graph() {
 /// already satisfied.
 #[tokio::test]
 async fn graph_schedule_autorun_cancel_with_nothing_scheduled_is_not_an_error() {
-    use crate::daemon::params_extract::Parameters;
-
     let (dir, db, handler) = queue_test_handler();
     let graph_id = "graph-no-autorun";
     db.insert_graph(&autorun_test_graph(
@@ -1276,28 +1278,30 @@ async fn graph_schedule_autorun_cancel_with_nothing_scheduled_is_not_an_error() 
     ))
     .unwrap();
 
-    let result = handler
-        .graph_schedule_autorun(Parameters(GraphScheduleAutorunParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "schedule_autorun",
+        params_id(GraphScheduleAutorunParams {
             graph_id: graph_id.to_string(),
             at: None,
             quota_reset_message: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(!result.is_error.unwrap_or(false), "{result:?}");
     let text = result_text(&result);
     assert!(text.contains("no pending autorun"), "{text}");
 }
 
-// ── graph_schedule_continue: deferred resume of a paused graph ───────
+// ── graph_control: deferred resume of a paused graph ───────
 
 /// Setting a schedule on a paused graph must persist `auto_continue_at`
-/// and default the action to `retry_current_node` when omitted.
+/// and default the mode to `retry_current_node` when omitted.
 #[tokio::test]
 async fn graph_schedule_continue_sets_pending_schedule_with_default_action() {
-    use crate::daemon::params_extract::Parameters;
-
     let (dir, db, handler) = queue_test_handler();
     let graph_id = "graph-paused-continue";
     db.insert_graph(&autorun_test_graph(
@@ -1312,14 +1316,18 @@ async fn graph_schedule_continue_sets_pending_schedule_with_default_action() {
     )
     .unwrap();
 
-    let result = handler
-        .graph_schedule_continue(Parameters(GraphScheduleContinueParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "schedule_continue",
+        params_id(GraphScheduleContinueParams {
             graph_id: graph_id.to_string(),
             at: Some(scheduled_at.to_rfc3339()),
-            action: None,
-        }))
-        .await
-        .unwrap();
+            mode: None,
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(!result.is_error.unwrap_or(false), "{result:?}");
     let text = result_text(&result);
@@ -1332,11 +1340,9 @@ async fn graph_schedule_continue_sets_pending_schedule_with_default_action() {
     );
 }
 
-/// An explicit `skip_next_spec` action must be persisted as given.
+/// An explicit `skip_next_spec` mode must be persisted as given.
 #[tokio::test]
 async fn graph_schedule_continue_persists_explicit_skip_action() {
-    use crate::daemon::params_extract::Parameters;
-
     let (dir, db, handler) = queue_test_handler();
     let graph_id = "graph-paused-continue-skip";
     db.insert_graph(&autorun_test_graph(
@@ -1346,24 +1352,29 @@ async fn graph_schedule_continue_persists_explicit_skip_action() {
     ))
     .unwrap();
 
-    handler
-        .graph_schedule_continue(Parameters(GraphScheduleContinueParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "schedule_continue",
+        params_id(GraphScheduleContinueParams {
             graph_id: graph_id.to_string(),
             at: Some((chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339()),
-            action: Some("skip_next_spec".to_string()),
-        }))
-        .await
-        .unwrap();
+            mode: Some("skip_next_spec".to_string()),
+        }),
+    )
+    .await
+    .unwrap();
 
+    assert!(!result.is_error.unwrap_or(false), "{result:?}");
+    let text = result_text(&result);
+    assert!(text.contains("skip_next_spec"), "{text}");
     let lp = db.get_graph(graph_id).unwrap().unwrap();
     assert_eq!(lp.auto_continue_action.as_deref(), Some("skip_next_spec"));
 }
 
-/// An invalid action must be rejected without touching the schedule.
+/// An invalid mode must be rejected without touching the schedule.
 #[tokio::test]
 async fn graph_schedule_continue_rejects_invalid_action() {
-    use crate::daemon::params_extract::Parameters;
-
     let (dir, db, handler) = queue_test_handler();
     let graph_id = "graph-paused-continue-bad-action";
     db.insert_graph(&autorun_test_graph(
@@ -1373,19 +1384,25 @@ async fn graph_schedule_continue_rejects_invalid_action() {
     ))
     .unwrap();
 
-    let result = handler
-        .graph_schedule_continue(Parameters(GraphScheduleContinueParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "schedule_continue",
+        params_id(GraphScheduleContinueParams {
             graph_id: graph_id.to_string(),
             at: Some((chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339()),
-            action: Some("not_a_real_action".to_string()),
-        }))
-        .await
-        .unwrap();
+            mode: Some("not_a_real_action".to_string()),
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(result.is_error.unwrap_or(false), "{result:?}");
+    let text = result_text(&result);
+    assert!(text.contains("mode must be"), "{text}");
     let lp = db.get_graph(graph_id).unwrap().unwrap();
     assert!(
         lp.auto_continue_at.is_none(),
-        "an invalid action must not schedule anything"
+        "an invalid mode must not schedule anything"
     );
 }

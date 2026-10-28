@@ -86,7 +86,7 @@ fn tool_router_still_advertises_real_input_schemas_for_swapped_parameters_type()
 /// the property level. A client that builds tool arguments from a
 /// shallow read of the property schema (never resolving `$ref`) sees no
 /// declared type there and falls back to sending the value as a string.
-/// This has already happened twice — `graph_add_node.config` and
+/// This has already happened twice — `graph_node.config` and
 /// `intelligence_upsert.node_data` — so this test walks every
 /// registered tool's whole surface instead of asserting on one tool.
 #[test]
@@ -665,7 +665,7 @@ fn graph_reset_preserves_notes_unless_clear_notes() {
 }
 
 /// `Interrupted` is treated like any other non-completed status: a plain
-/// `graph_reset` (no explicit `specs`) returns it to `pending`, same as it
+/// `graph_control` (no explicit `specs`) returns it to `pending`, same as it
 /// would `failed` — an interruption isn't the special case here, only
 /// `completed` is (preserved unless named explicitly).
 #[test]
@@ -872,7 +872,7 @@ fn graph_reset_no_skipped_specs_omits_preserved_note() {
 
 /// A graph whose last run was against a queue has empty (or irrelevant)
 /// bound specs — the queue's *members* are what actually need resetting.
-/// `graph_reset` must find them via the graph's persisted
+/// `graph_control` must find them via the graph's persisted
 /// `active_run_queue_id`, reset every non-completed one back to pending
 /// (completed members untouched), and report the real count — not "0
 /// spec(s) reset", the false report from the incident this spec fixes.
@@ -1056,20 +1056,20 @@ fn graph_reset_missing_graph_returns_not_found_error() {
     assert!(text.contains("not found"), "{text}");
 }
 
-/// `graph_run` must keep refusing a `failed` graph, and the refusal must
-/// point at both sanctioned ways out: `graph_reset` (manual) and
-/// `graph_schedule_autorun` (self-service, for a quota-failed graph).
+/// `graph_control` must keep refusing a `failed` graph, and the refusal must
+/// point at both sanctioned ways out: `graph_control` (manual) and
+/// `graph_control` (self-service, for a quota-failed graph).
 #[test]
 fn graph_run_status_guard_rejects_failed_graph_and_names_both_ways_out() {
     let err = graph_run_status_guard("graph-1", GraphStatus::Failed).unwrap_err();
-    assert!(err.contains("graph_reset"), "{err}");
-    assert!(err.contains("graph_schedule_autorun"), "{err}");
+    assert!(err.contains("graph_control"), "{err}");
+    assert!(err.contains("graph_control"), "{err}");
 }
 
 #[test]
 fn graph_run_status_guard_rejects_completed_graph() {
     let err = graph_run_status_guard("graph-1", GraphStatus::Completed).unwrap_err();
-    assert!(err.contains("graph_reset"), "{err}");
+    assert!(err.contains("graph_control"), "{err}");
 }
 
 #[test]
@@ -1085,7 +1085,7 @@ fn graph_run_status_guard_accepts_draft_and_paused_graphs() {
     assert!(graph_run_status_guard("graph-1", GraphStatus::Paused).is_ok());
 }
 
-// ── find_in_flight_run: graph_run's dispatch guard ────────────────────
+// ── find_in_flight_run: graph_control's dispatch guard ────────────────────
 
 #[test]
 fn find_in_flight_run_none_when_nothing_running() {
@@ -1093,7 +1093,7 @@ fn find_in_flight_run_none_when_nothing_running() {
     assert!(find_in_flight_run(&db, &graph_id).unwrap().is_none());
 }
 
-/// `graph_run` must refuse a duplicate dispatch while a node executes,
+/// `graph_control` must refuse a duplicate dispatch while a node executes,
 /// regardless of the graph's own status — a `paused` graph can still have
 /// a live run when a sibling node's blocker report flipped status
 /// without terminating it (see `graph_reset_rejects_graph_with_in_flight_run_even_when_status_is_paused`

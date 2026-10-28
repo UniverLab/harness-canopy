@@ -79,7 +79,7 @@ pub(crate) fn platform_cli_for_node(
 
 /// CM30: resolve a node's effective infra-retry config with provenance —
 /// used by `read_infra_config` (dispatch, values only) and by
-/// `graph_get`/`graph_audit_node_configs` in `daemon::handler` (values +
+/// `graph`/`graph` in `daemon::handler` (values +
 /// source, for read-back). `node_config` is `node.config` for a real node,
 /// or a bare `{"platform": ...}`/`Value::Null` to resolve a platform-only
 /// baseline (see `resolve_platform_only_infra_config`, used by the audit
@@ -127,13 +127,13 @@ pub(crate) fn resolve_infra_config_from_with(
 
 /// CM30: resolve a real node's effective config (node.config first, then
 /// its platform, then the engine default). Used by `read_infra_config` and
-/// by `graph_get`'s per-node `infra_config` block.
+/// by `graph`'s per-node `infra_config` block.
 pub(crate) fn resolve_node_infra_config(node: &GraphNode) -> NodeInfraConfig {
     resolve_infra_config_from(&node.config)
 }
 
 /// CM30: resolve what `platform` alone would give (node-level config never
-/// consulted) — the baseline `graph_audit_node_configs` compares the real
+/// consulted) — the baseline `graph` compares the real
 /// effective value against to decide "differs from platform's own value"
 /// (FR5). `platform: None` resolves straight to the engine default.
 pub(crate) fn resolve_platform_only_infra_config(platform: Option<&str>) -> NodeInfraConfig {
@@ -317,7 +317,7 @@ pub(crate) fn is_infra_crash_shape(
 /// been attempted, for the one case (`infra_retry_limit: 0`) where no retry
 /// ever runs to write it. Mutates `execution`/`run` in place (both the
 /// in-memory value used for immediate routing/consolidation and the value a
-/// later `graph_node_run_get`/`graph_audit_node_configs` reads must agree)
+/// later `graph`/`graph` reads must agree)
 /// and persists the tagged output. A no-op — returns the plain
 /// `is_infra_crash_shape` result — for every other case, including a
 /// retry_limit > 0 exhaustion (already partially visible via the retried

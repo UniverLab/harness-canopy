@@ -8,7 +8,7 @@ async fn cm15_round_robin_reads_member_set_from_db_between_dispatches() {
     // time, routing back to `kickoff`, which re-enters the ensemble; on
     // the second visit it passes and the spec completes. Between the two
     // dispatches the member set is swapped exactly the way
-    // `graph_update_ensemble` swaps it (the `ensemble_members` rows plus
+    // `graph_ensemble` swaps it (the `ensemble_members` rows plus
     // each member node's config). Dispatch 1 must record the launch-time
     // platform and dispatch 2 the replaced one — which only holds if the
     // engine re-reads the ensemble from the database per dispatch instead
@@ -90,7 +90,7 @@ async fn cm15_round_robin_reads_member_set_from_db_between_dispatches() {
     });
 
     // Wait for the first ensemble dispatch to land its join row, then swap
-    // the member set — this is the `graph_update_ensemble` between the two
+    // the member set — this is the `graph_ensemble` between the two
     // dispatches of the same ensemble step.
     loop {
         let joins = db
@@ -487,7 +487,7 @@ async fn ensemble_platform_retry_limit_zero_skips_retries_while_default_retries(
 }
 
 /// CM30: a member-level value (baked into the member node's own config by
-/// `graph_add_ensemble`/`graph_update_ensemble`, which is all the engine
+/// `graph_ensemble`/`graph_ensemble`, which is all the engine
 /// ever reads) overrides its platform: platform limit 5, node limit 0 —
 /// one attempt, tagged as retry-skipped.
 #[tokio::test]

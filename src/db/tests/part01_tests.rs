@@ -913,7 +913,7 @@ fn graph_details_roundtrip_preserves_order_and_graph() {
 fn graph_level_graph_round_trips_through_insert_and_get_graph_details() {
     // R1: a graph can define its graph once, at the graph level, instead of
     // repeating the same nodes/edges in every spec. `get_graph_details` is
-    // exactly what the `graph_get` MCP tool returns.
+    // exactly what the `graph` MCP tool returns.
     let db = test_db();
     let lp = sample_graph("wf-graph");
     let node_one = GraphNode {

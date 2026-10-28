@@ -32,7 +32,7 @@ impl Database {
     /// every wiring edge (entry fan-out, member→join fan-in, join exit
     /// routing), the `ensembles` row, and every `ensemble_members` row — in
     /// one transaction. This is the DB-layer half of the "one MCP call"
-    /// contract: `graph_add_ensemble` builds all these pieces and hands them
+    /// contract: `graph_ensemble` builds all these pieces and hands them
     /// here so a crash mid-creation can never leave a half-expanded ensemble.
     #[allow(clippy::too_many_arguments)]
     pub fn insert_ensemble_unit(
@@ -220,7 +220,7 @@ impl Database {
     }
 
     /// Every ensemble across every graph — CM28's global reporting surface
-    /// for `graph_audit_node_configs`, mirroring `list_all_graph_nodes`.
+    /// for `graph`, mirroring `list_all_graph_nodes`.
     pub fn list_all_ensembles(&self) -> Result<Vec<EnsembleDetails>> {
         let ids: Vec<String> = {
             let conn = self
@@ -337,8 +337,8 @@ impl Database {
     /// CB52: every `join`-kind node with no `ensembles` row — the state left
     /// behind when an ensemble row was deleted (pre-fix: silently, via `ON
     /// DELETE CASCADE` from a referenced node) while its member/join nodes
-    /// survived. Never auto-repaired (C1); reported via `graph_get`'s
-    /// `orphan_join_warnings`, `graph_preflight`, and `canopy doctor`.
+    /// survived. Never auto-repaired (C1); reported via `graph`'s
+    /// `orphan_join_warnings`, `graph_control`, and `canopy doctor`.
     pub fn list_all_orphan_join_nodes(&self) -> Result<Vec<GraphNode>> {
         let conn = self
             .conn
@@ -464,7 +464,7 @@ impl Database {
     /// Remove a member outright: deletes its `graph_nodes` row, which cascades
     /// away its `ensemble_members` row and both wiring edges (entry, join) —
     /// every one of those FKs is `ON DELETE CASCADE`. Test-only helper since
-    /// `graph_update_ensemble` moved to [`Self::replace_ensemble_members`].
+    /// `graph_ensemble` moved to [`Self::replace_ensemble_members`].
     #[allow(dead_code)]
     pub fn remove_ensemble_member(&self, node_id: &str) -> Result<bool> {
         self.delete_graph_node(node_id)
@@ -475,7 +475,7 @@ impl Database {
     /// `timeout_minutes` outright (never "leave unchanged"). The caller
     /// separately updates the member node's own `config` via
     /// [`Self::update_graph_node_details`]. Test-only helper since
-    /// `graph_update_ensemble` moved to [`Self::replace_ensemble_members`].
+    /// `graph_ensemble` moved to [`Self::replace_ensemble_members`].
     #[allow(dead_code)]
     pub fn update_ensemble_member(
         &self,
@@ -511,7 +511,7 @@ impl Database {
     }
 
     /// Delete every edge from `node_id` with the given `condition` — used by
-    /// `graph_update_ensemble` to retarget the join's exit routing (delete the
+    /// `graph_ensemble` to retarget the join's exit routing (delete the
     /// old pass/fail edge, then insert the new one).
     pub fn delete_graph_edges_from_node_with_condition(
         &self,
@@ -533,7 +533,7 @@ impl Database {
     /// and every edge naming any of them (entry fan-out, member→join fan-in,
     /// join exits), plus the `ensembles`/`ensemble_members` rows (via `ON
     /// DELETE CASCADE`) — in one transaction. The caller
-    /// (`graph_delete_ensemble`) owns the guards: graph not running, and no
+    /// (`graph_ensemble`) owns the guards: graph not running, and no
     /// other ensemble's exit chained into this one.
     pub fn delete_ensemble_unit(&self, ensemble_id: &str) -> Result<DeletedEnsembleUnit> {
         let mut conn = self

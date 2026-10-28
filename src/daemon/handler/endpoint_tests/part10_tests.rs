@@ -588,17 +588,21 @@ async fn graph_node_runs_list_compact_mode() {
         now,
     );
 
-    let listed = handler
-        .graph_node_runs_list(Parameters(GraphNodeRunsListParams {
+    let listed = call_graph_action(
+        &handler,
+        "graph",
+        "node_runs",
+        params_id(GraphNodeRunsListParams {
             graph_id: lp.id.clone(),
             spec_id: None,
             node_id: None,
             limit: None,
             offset: None,
             compact: Some(true),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&listed), "{}", text(&listed));
     let body = raw_text(&listed);
     let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -629,17 +633,21 @@ async fn graph_node_runs_list_compact_id_feeds_graph_node_run_get() {
         chrono::Utc::now(),
     );
 
-    let listed = handler
-        .graph_node_runs_list(Parameters(GraphNodeRunsListParams {
+    let listed = call_graph_action(
+        &handler,
+        "graph",
+        "node_runs",
+        params_id(GraphNodeRunsListParams {
             graph_id: lp.id.clone(),
             spec_id: None,
             node_id: None,
             limit: None,
             offset: None,
             compact: Some(true),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&listed), "{}", text(&listed));
     let body = raw_text(&listed);
     let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -660,12 +668,16 @@ async fn graph_node_runs_list_compact_id_feeds_graph_node_run_get() {
         "compact mode must omit output"
     );
 
-    let got = handler
-        .graph_node_run_get(Parameters(GraphNodeRunGetParams {
+    let got = call_graph_action(
+        &handler,
+        "graph",
+        "node_run",
+        params_id(GraphNodeRunGetParams {
             run_id: compact_id.to_string(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&got), "{}", text(&got));
     let detail: serde_json::Value = serde_json::from_str(&raw_text(&got)).unwrap();
     assert_eq!(detail["id"], run.id);
@@ -690,17 +702,21 @@ async fn graph_node_runs_list_reports_truncation() {
         );
     }
 
-    let capped = handler
-        .graph_node_runs_list(Parameters(GraphNodeRunsListParams {
+    let capped = call_graph_action(
+        &handler,
+        "graph",
+        "node_runs",
+        params_id(GraphNodeRunsListParams {
             graph_id: lp.id.clone(),
             spec_id: None,
             node_id: None,
             limit: Some(1),
             offset: None,
             compact: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&capped), "{}", text(&capped));
     let parsed: serde_json::Value = serde_json::from_str(&raw_text(&capped)).unwrap();
     assert_eq!(parsed["runs"].as_array().unwrap().len(), 1);
@@ -708,17 +724,21 @@ async fn graph_node_runs_list_reports_truncation() {
     assert_eq!(parsed["truncated"], true);
     assert_eq!(parsed["omitted"], 2);
 
-    let full = handler
-        .graph_node_runs_list(Parameters(GraphNodeRunsListParams {
+    let full = call_graph_action(
+        &handler,
+        "graph",
+        "node_runs",
+        params_id(GraphNodeRunsListParams {
             graph_id: lp.id.clone(),
             spec_id: None,
             node_id: None,
             limit: Some(50),
             offset: None,
             compact: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let parsed_full: serde_json::Value = serde_json::from_str(&raw_text(&full)).unwrap();
     assert_eq!(parsed_full["total"], 3);
     assert!(
@@ -1133,8 +1153,11 @@ async fn graph_add_ensemble_with_cascade_kind_rejects_single_member() {
     let entry = add_agent_node(&handler, &spec.id, "Entry").await;
     let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
 
-    let result = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
@@ -1166,9 +1189,10 @@ async fn graph_add_ensemble_with_cascade_kind_rejects_single_member() {
             on_fail_to: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(
         is_err(&result),
         "cascade ensemble with 1 member must now be refused: {:?}",
@@ -1189,8 +1213,11 @@ async fn graph_add_ensemble_with_parallel_kind_rejects_single_member() {
     let entry = add_agent_node(&handler, &spec.id, "Entry").await;
     let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
 
-    let result = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
@@ -1222,9 +1249,10 @@ async fn graph_add_ensemble_with_parallel_kind_rejects_single_member() {
             on_fail_to: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(
         is_err(&result),
         "parallel ensemble with 1 member should fail"
@@ -1239,8 +1267,11 @@ async fn graph_add_ensemble_rejects_straggler_timeout_on_cascade() {
     let entry = add_agent_node(&handler, &spec.id, "Entry").await;
     let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
 
-    let result = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
@@ -1283,9 +1314,10 @@ async fn graph_add_ensemble_rejects_straggler_timeout_on_cascade() {
             on_fail_to: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(
         is_err(&result),
         "cascade + straggler_timeout_minutes must be rejected"
@@ -1305,8 +1337,11 @@ async fn graph_update_ensemble_rejects_quorum_grace_on_round_robin() {
     let entry = add_agent_node(&handler, &spec.id, "Entry").await;
     let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
 
-    let created = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let created = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
@@ -1349,13 +1384,17 @@ async fn graph_update_ensemble_rejects_quorum_grace_on_round_robin() {
             on_fail_to: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let ensemble_id = extract_id(&created, "ensemble_id");
 
-    let result = handler
-        .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "update",
+        params_id(GraphUpdateEnsembleParams {
             mutex: None,
             commit_rights: None,
             ensemble_id: ensemble_id.clone(),
@@ -1378,9 +1417,10 @@ async fn graph_update_ensemble_rejects_quorum_grace_on_round_robin() {
             remove_entry_from: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(
         is_err(&result),
         "round_robin + quorum_grace_minutes must be rejected"

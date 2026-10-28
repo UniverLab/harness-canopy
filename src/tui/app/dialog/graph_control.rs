@@ -257,14 +257,14 @@ impl App {
     /// Run the selected graph (`r`) — valid for a `draft`, `completed`, or
     /// `failed` graph (see [`available_graph_actions`]); a no-op otherwise.
     ///
-    /// (CB22) Pure dispatch: sends `graph_run` with only `graph_id` — never a
-    /// `queue_id`, never an `idea`, and never a spec-creation request. A graph
-    /// with neither bound specs nor a selected queue is refused by the
-    /// daemon's launch validation (surfacing through
-    /// `dispatch_graph_action`'s error banner), not papered over with a blank
-    /// spec row. There is no MCP-dispatch seam to unit-test the payload
-    /// here, so the user-visible refusal is covered at the handler/engine
-    /// boundary instead.
+    /// (CB22) Pure dispatch: sends the `run` action with only `graph_id` —
+    /// never a `queue_id`, never an `idea`, and never a spec-creation
+    /// request. A graph with neither bound specs nor a selected queue is
+    /// refused by the daemon's launch validation (surfacing through
+    /// `dispatch_graph_action`'s error banner), not papered over with a
+    /// blank spec row. There is no MCP-dispatch seam to unit-test the
+    /// payload here, so the user-visible refusal is covered at the
+    /// handler/engine boundary instead.
     pub fn run_selected_graph(&mut self) {
         let Some(lp) = self.actionable_selected_graph() else {
             return;
@@ -273,7 +273,10 @@ impl App {
             return;
         }
         let graph_id = lp.id.clone();
-        self.dispatch_graph_action("graph_run", serde_json::json!({ "graph_id": graph_id }));
+        self.dispatch_graph_action(
+            "graph_control",
+            serde_json::json!({ "action": "run", "graph_id": graph_id }),
+        );
     }
 
     /// Pause the selected graph (`p`) — valid only while it is `running`.
@@ -285,7 +288,10 @@ impl App {
             return;
         }
         let graph_id = lp.id.clone();
-        self.dispatch_graph_action("graph_pause", serde_json::json!({ "graph_id": graph_id }));
+        self.dispatch_graph_action(
+            "graph_control",
+            serde_json::json!({ "action": "pause", "graph_id": graph_id }),
+        );
     }
 
     /// Continue the selected paused graph, retrying the node that was
@@ -309,8 +315,8 @@ impl App {
         }
         let graph_id = lp.id.clone();
         self.dispatch_graph_action(
-            "graph_continue",
-            serde_json::json!({ "graph_id": graph_id, "action": daemon_action }),
+            "graph_control",
+            serde_json::json!({ "action": "continue", "graph_id": graph_id, "mode": daemon_action }),
         );
     }
 
@@ -327,20 +333,23 @@ impl App {
         self.graph_reset_confirm = true;
     }
 
-    /// Dispatch `graph_reset` for the selected graph after the confirm modal's
-    /// `y`/Enter. Called only while `graph_reset_confirm` is set, so the
-    /// selected graph is whatever `open_graph_reset_confirm` validated.
+    /// Dispatch the `reset` action for the selected graph after the confirm
+    /// modal's `y`/Enter. Called only while `graph_reset_confirm` is set, so
+    /// the selected graph is whatever `open_graph_reset_confirm` validated.
     pub fn confirm_reset_selected_graph(&mut self) {
         let Some(lp) = self.actionable_selected_graph() else {
             return;
         };
         let graph_id = lp.id.clone();
-        self.dispatch_graph_action("graph_reset", serde_json::json!({ "graph_id": graph_id }));
+        self.dispatch_graph_action(
+            "graph_control",
+            serde_json::json!({ "action": "reset", "graph_id": graph_id }),
+        );
     }
 
     /// Open the autorun-scheduling input for the graph currently focused in
     /// the live view (`a`). Available regardless of the graph's status — the
-    /// underlying `graph_schedule_autorun` tool imposes no status guard
+    /// underlying `graph_control` tool imposes no status guard
     /// (cancelling in particular must work "regardless of the graph's current
     /// status", per its own description).
     pub fn open_graph_autorun_dialog(&mut self) {
@@ -372,7 +381,10 @@ impl App {
             return;
         };
         match autorun_dialog_arguments(&dialog, chrono::Utc::now()) {
-            Ok(arguments) => self.dispatch_graph_action("graph_schedule_autorun", arguments),
+            Ok(mut arguments) => {
+                arguments["action"] = serde_json::json!("schedule_autorun");
+                self.dispatch_graph_action("graph_control", arguments);
+            }
             Err(error) => {
                 dialog.error = Some(error);
                 self.graph_autorun_dialog = Some(dialog);
@@ -381,7 +393,7 @@ impl App {
     }
 }
 
-/// Compute the `graph_schedule_autorun` arguments for the dialog's current
+/// Compute the `graph_control` arguments for the dialog's current
 /// state, or the inline error to show instead of submitting. `now` is
 /// injected so the past/future boundary (requirement 7) is testable without
 /// depending on wall-clock time. Pure and `App`-free so the three submit

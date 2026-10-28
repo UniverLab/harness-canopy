@@ -641,7 +641,7 @@ async fn whitespace_only_idea_is_rejected_even_with_graph() {
 }
 
 /// (Requirement 3) When the graph's last run was queue-driven and a fresh
-/// `graph_run` arrives without `queue_id` and finds zero bound specs, the
+/// `graph_control` arrives without `queue_id` and finds zero bound specs, the
 /// error must name the last queue so a recovery agent can retry
 /// correctly instead of silently discarding the queue context.
 #[tokio::test]
@@ -793,7 +793,7 @@ async fn graph_engine_normal_queue_run_still_completes_and_fires_hook_once() {
 
 /// A graph whose bound specs are non-empty but were *all* already
 /// completed/skipped before this dispatch (e.g. the graph's last spec was
-/// explicitly skipped via `graph_continue`) legitimately completes — the
+/// explicitly skipped via `graph_control`) legitimately completes — the
 /// B17 guard only fires on *zero bound specs*, not "zero pending" — but
 /// must not fire the hook, since this dispatch executed nothing.
 #[tokio::test]

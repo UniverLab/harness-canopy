@@ -58,7 +58,7 @@ impl Database {
 
     /// Every graph node in the database, across every graph and spec — unlike
     /// [`list_graph_nodes`]/[`list_graph_nodes_for_graph`], which scope to one
-    /// graph. Used by the `graph_audit_node_configs` MCP tool to find nodes
+    /// graph. Used by the `graph` MCP tool to find nodes
     /// already carrying a config key their kind will never read (e.g. a
     /// `prompt` key on an agent node — see
     /// `daemon::handler::validate_node_config`), which write-time validation
@@ -145,7 +145,7 @@ impl Database {
     }
 
     /// Insert a node together with any edges wiring it, in one transaction, so
-    /// a copy (`graph_copy_node`) can never leave a node half-wired. Every edge
+    /// a copy (`graph_node`) can never leave a node half-wired. Every edge
     /// and the node must target the same single graph (spec or graph).
     pub fn insert_node_with_edges(&self, node: &GraphNode, edges: &[GraphEdge]) -> Result<()> {
         validate_single_target(node.spec_id.as_deref(), node.graph_id.as_deref())?;

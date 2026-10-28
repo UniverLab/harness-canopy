@@ -28,13 +28,13 @@ impl GraphEngine {
     /// Core of [`Self::run_graph`], plus the one bit `run_graph`'s public
     /// signature can't carry: whether this call is *resuming* an
     /// already-in-flight run ([`Self::resume_background`], the sole path
-    /// behind `graph_continue` and interrupted-queue/autorun resumption) or a
-    /// fresh dispatch (`graph_run`, including relaunching a `paused` graph
+    /// behind `graph_control` and interrupted-queue/autorun resumption) or a
+    /// fresh dispatch (`graph_control`, including relaunching a `paused` graph
     /// directly, and the graph's initial launch).
     ///
     /// That distinction is exactly what `{{spec_start_head}}` (B10) needs: a
     /// spec can be left `running` in the DB either because this exact run is
-    /// paused mid-node-graph (daemon restart, explicit `graph_pause`) — where
+    /// paused mid-node-graph (daemon restart, explicit `graph_control`) — where
     /// the previously captured baseline is still correct and must be kept —
     /// or because a *prior, distinct* run/launch died without ever being
     /// reset — where reusing that baseline would silently compare against a
@@ -82,13 +82,13 @@ impl GraphEngine {
     /// Core of [`Self::run_graph`], plus the one bit `run_graph`'s public
     /// signature can't carry: whether this call is *resuming* an
     /// already-in-flight run ([`Self::resume_background`], the sole path
-    /// behind `graph_continue` and interrupted-queue/autorun resumption) or a
-    /// fresh dispatch (`graph_run`, including relaunching a `paused` graph
+    /// behind `graph_control` and interrupted-queue/autorun resumption) or a
+    /// fresh dispatch (`graph_control`, including relaunching a `paused` graph
     /// directly, and the graph's initial launch).
     ///
     /// That distinction is exactly what `{{spec_start_head}}` (B10) needs: a
     /// spec can be left `running` in the DB either because this exact run is
-    /// paused mid-node-graph (daemon restart, explicit `graph_pause`) — where
+    /// paused mid-node-graph (daemon restart, explicit `graph_control`) — where
     /// the previously captured baseline is still correct and must be kept —
     /// or because a *prior, distinct* run/launch died without ever being
     /// reset — where reusing that baseline would silently compare against a
@@ -267,7 +267,7 @@ impl GraphEngine {
             tracing::warn!(
                 "Graph '{}' queue run against '{}': member spec '{}' is 'running' with no \
                  live node run in this daemon's lifetime; leaving it as-is. Reset it via \
-                 graph_reset to resume if it's genuinely stuck.",
+                 graph_control reset to resume if it's genuinely stuck.",
                 graph_id,
                 queue_id,
                 spec_id
@@ -573,7 +573,7 @@ impl GraphEngine {
 
     /// FR1/FR2: run the graph's bound specs to completion, deciding the next
     /// one from a **live** read of the graph at every advance — never from a
-    /// list captured when the run started. A spec bound with `graph_add_spec`
+    /// list captured when the run started. A spec bound with `graph_edit`
     /// while the run is in flight is therefore seen by the very next advance:
     /// at its own position when it comes after the spec that just ran, and
     /// right after it when it was bound at a lower position (the scan restarts
@@ -655,7 +655,7 @@ impl GraphEngine {
                 }
                 *reached_directed = true;
                 // The directed target runs whatever its status: a directed run
-                // accepts a `completed` spec (`graph_continue run_from_node`,
+                // accepts a `completed` spec (`graph_control run_from_node`,
                 // docs/graphs.md), and the queue path's resumed target runs
                 // unconditionally the same way. Falling through to the
                 // terminal skip would swallow the run the operator just asked

@@ -129,7 +129,7 @@ pub(crate) fn validate_position_conflict(
 pub(crate) fn validate_spec_deletable(spec: &GraphSpec) -> Result<(), String> {
     if let Some(graph_id) = &spec.graph_id {
         return Err(format!(
-            "Spec '{}' is bound to graph '{graph_id}'; use graph_remove_spec to unbind it from the graph first (or delete the graph), then delete the spec.",
+            "Spec '{}' is bound to graph '{graph_id}'; use graph_edit detach_spec to unbind it from the graph first (or delete the graph), then delete the spec.",
             spec.id
         ));
     }
@@ -194,7 +194,7 @@ pub(crate) fn validate_edge_condition(condition: &str) -> Result<GraphEdgeCondit
 }
 
 /// [`validate_edge_condition`] plus `route` support for
-/// `graph_add_edge`/`graph_update_edge`: a `"route"` condition requires a
+/// `graph_edge`/`graph_edge`: a `"route"` condition requires a
 /// non-empty `route` param naming the label. `pass`/`fail`/`always` are
 /// unaffected — delegated straight to [`validate_edge_condition`].
 pub(crate) fn validate_edge_condition_with_route(
@@ -252,32 +252,32 @@ pub(crate) fn validate_node_kind(kind: &str) -> Result<GraphNodeKind, String> {
         .ok_or_else(|| "Graph node kind must be one of: agent, check, gate, router.".to_string())
 }
 
-/// `graph_add_node`/`graph_update_node`'s `kind: "join"` guard — a quorum node is
-/// engine-managed and only ever created as part of `graph_add_ensemble`'s
+/// `graph_node`/`graph_node`'s `kind: "join"` guard — a quorum node is
+/// engine-managed and only ever created as part of `graph_ensemble`'s
 /// one-call expansion, never directly.
 pub(crate) fn validate_not_join_kind(kind: GraphNodeKind) -> Result<(), String> {
     if kind == GraphNodeKind::Join {
         return Err(
-            "Graph node kind 'quorum' is engine-managed; it can only be created via graph_add_ensemble."
+            "Graph node kind 'quorum' is engine-managed; it can only be created via graph_ensemble add."
                 .to_string(),
         );
     }
     Ok(())
 }
 
-/// Refuse to edit a node directly with `graph_update_node`/`graph_add_edge` if
+/// Refuse to edit a node directly with `graph_node`/`graph_edge` if
 /// it belongs to an ensemble (member or quorum) — a member's prompt/platform/
 /// model (including its optional `prompt_override`) and the quorum's own
 /// config are all owned by the ensemble unit, so every edit goes through
-/// `graph_update_ensemble`, never a direct node/edge tool. Deleting the whole
-/// unit is `graph_delete_ensemble`'s job, never `graph_delete_node`'s.
+/// `graph_ensemble`, never a direct node/edge tool. Deleting the whole
+/// unit is `graph_ensemble`'s job, never `graph_node`'s.
 pub(crate) fn validate_node_not_ensemble_owned(db: &Database, node_id: &str) -> Result<(), String> {
     if let Some(details) = db
         .get_ensemble_by_member_node(node_id)
         .map_err(|e| e.to_string())?
     {
         return Err(format!(
-            "Node '{node_id}' is a member of ensemble '{}' ('{}'); edit it via graph_update_ensemble instead (entry wiring: from_node/add_entry_from/remove_entry_from; commit rights: the commit_rights field, applying to whichever member the strategy runs), and delete the whole unit with graph_delete_ensemble instead of this node.",
+            "Node '{node_id}' is a member of ensemble '{}' ('{}'); edit it via graph_ensemble update instead (entry wiring: from_node/add_entry_from/remove_entry_from; commit rights: the commit_rights field, applying to whichever member the strategy runs), and delete the whole unit with graph_ensemble delete instead of this node.",
             details.ensemble.id, details.ensemble.name
         ));
     }
@@ -286,7 +286,7 @@ pub(crate) fn validate_node_not_ensemble_owned(db: &Database, node_id: &str) -> 
         .map_err(|e| e.to_string())?
     {
         return Err(format!(
-            "Node '{node_id}' is the quorum of ensemble '{}' ('{}'); edit it via graph_update_ensemble instead (exit wiring: on_pass_to/on_fail_to), and delete the whole unit with graph_delete_ensemble instead of this node.",
+            "Node '{node_id}' is the quorum of ensemble '{}' ('{}'); edit it via graph_ensemble update instead (exit wiring: on_pass_to/on_fail_to), and delete the whole unit with graph_ensemble delete instead of this node.",
             details.ensemble.id, details.ensemble.name
         ));
     }
@@ -316,7 +316,7 @@ pub(crate) fn validate_node_not_ensemble_referenced(
         .iter()
         .map(|(details, role)| {
             format!(
-                "Node '{node_id}' is referenced by ensemble '{}' ('{}') as {role}; detach it first with graph_update_ensemble (entry wiring: from_node/add_entry_from/remove_entry_from for entry_from_node/entry_source; exit wiring: on_pass_to/on_fail_to for on_pass_to/on_fail_to). Deleting this node would silently delete the ensemble and orphan its members/join.",
+                "Node '{node_id}' is referenced by ensemble '{}' ('{}') as {role}; detach it first with graph_ensemble update (entry wiring: from_node/add_entry_from/remove_entry_from for entry_from_node/entry_source; exit wiring: on_pass_to/on_fail_to for on_pass_to/on_fail_to). Deleting this node would silently delete the ensemble and orphan its members/join.",
                 details.ensemble.name, details.ensemble.id
             )
         })
@@ -357,7 +357,7 @@ pub(crate) fn resolve_owning_graph_status(
 /// node) while the owning graph is `running`. Deliberately stricter than node
 /// CONFIG edits. Since CM15 the engine re-reads a node's config (and an
 /// ensemble's member set) from the database at each dispatch
-/// (`GraphEngine::run_spec`), so a `graph_update_node` / `graph_update_ensemble`
+/// (`GraphEngine::run_spec`), so a `graph_node` / `graph_ensemble`
 /// config edit takes effect on that node's next dispatch within the same running
 /// spec. Topology is different: a node's `kind`/`position`, the ensemble `kind`,
 /// and entry/exit wiring (edges) are resolved once from the per-run snapshot and
@@ -372,7 +372,7 @@ pub(crate) fn validate_topology_mutation_allowed(
         resolve_owning_graph_status(db, spec_id, graph_id)?
     {
         return Err(format!(
-            "Graph '{graph_id}' is running; call graph_pause first, then retry this topology change."
+            "Graph '{graph_id}' is running; call graph_control pause first, then retry this topology change."
         ));
     }
     Ok(())
@@ -436,7 +436,7 @@ pub(crate) fn validate_node_not_entry_point(db: &Database, node: &GraphNode) -> 
 }
 
 /// Validated retarget of an existing edge's `to_node` — the shared path used
-/// by both the `graph_update_edge` MCP tool and the TUI's edge editor, so an
+/// by both the `graph_edge` MCP tool and the TUI's edge editor, so an
 /// ordinary `pass`/`fail` edge gets the same checks a router's route edges
 /// have always had.
 pub(crate) fn retarget_graph_edge(
@@ -458,7 +458,7 @@ pub(crate) fn retarget_graph_edge(
 }
 
 /// Validated deletion of a single edge — the shared path used by both the
-/// `graph_delete_edge` MCP tool and the TUI's edge editor.
+/// `graph_edge` MCP tool and the TUI's edge editor.
 pub(crate) fn delete_graph_edge_checked(db: &Database, edge_id: &str) -> Result<GraphEdge, String> {
     let edge = validate_edge_exists(db, edge_id)?;
     validate_topology_mutation_allowed(db, edge.spec_id.as_deref(), edge.graph_id.as_deref())?;
@@ -468,7 +468,7 @@ pub(crate) fn delete_graph_edge_checked(db: &Database, edge_id: &str) -> Result<
 
 /// Validated deletion of a node — cascades (at the DB layer, via `ON DELETE
 /// CASCADE` foreign keys on `graph_edges.from_node`/`to_node`) to every edge
-/// naming it. The shared path used by both the `graph_delete_node` MCP tool
+/// naming it. The shared path used by both the `graph_node` MCP tool
 /// and the TUI's graph editor.
 pub(crate) fn delete_graph_node_checked(db: &Database, node_id: &str) -> Result<GraphNode, String> {
     let node = validate_node_exists(db, node_id)?;
@@ -591,7 +591,7 @@ pub(crate) fn validate_agent_crew_exclusive(
 
 /// Parse a router node's `config` into its declared routes + fallback
 /// label. Shared by [`validate_node_config`]'s config-shape check and by
-/// edge validation (`graph_add_edge`/`graph_update_edge`/`graph_update_node`),
+/// edge validation (`graph_edge`/`graph_edge`/`graph_node`),
 /// which need to check a route name against what a router actually
 /// declares.
 pub(crate) fn parse_router_routes(
@@ -657,7 +657,7 @@ pub(crate) fn reject_interactive_only_platform(config: &serde_json::Value) -> Op
 /// Validate a node's `mutex` config value: absent is fine, otherwise it must
 /// be a list of strings and every name must match
 /// `^[a-z][a-z0-9-]{0,31}$`. Every refusal names the node and the value.
-/// Called from `graph_add_node`/`graph_update_node` (which know the node's
+/// Called from `graph_node`/`graph_node` (which know the node's
 /// name) rather than from `validate_node_config` (which does not).
 pub(crate) fn validate_node_mutex_config(
     node_name: &str,

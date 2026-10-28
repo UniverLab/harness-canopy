@@ -1,5 +1,5 @@
 //! Idea-driven (spec-less, mode "idea") runs: the idea such a graph last ran
-//! with, and the resume contract that lets `graph_continue run_from_node` /
+//! with, and the resume contract that lets `graph_control run_from_node` /
 //! `retry_current_node` pick that run back up instead of dying on the
 //! spec-less launch guard (or refusing with nothing but a bare "no specs").
 
@@ -70,7 +70,7 @@ impl GraphEngine {
         Ok(())
     }
 
-    /// Pre-dispatch gate for a directed resume (`graph_continue
+    /// Pre-dispatch gate for a directed resume (`graph_control
     /// run_from_node`, `retry_current_node`): `Ok(None)` means the call may
     /// proceed — the graph is not idea-driven, or it is and a stored idea
     /// exists (recreating the blank-name placeholder row from that idea when
@@ -85,7 +85,7 @@ impl GraphEngine {
         let Some(idea) = self.stored_idea(&lp.id)? else {
             return Ok(Some(format!(
                 "Graph '{}' is idea-driven and has no stored idea to resume: it has never run. \
-                 Start it with graph_run passing an `idea`.",
+                 Start it with graph_control run passing an `idea`.",
                 lp.name
             )));
         };

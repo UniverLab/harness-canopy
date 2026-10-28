@@ -9,8 +9,11 @@ async fn graph_update_ensemble_switching_to_cascade_clears_stale_straggler_and_g
     let entry = add_agent_node(&handler, &spec.id, "Entry").await;
     let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
 
-    let created = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let created = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
@@ -53,13 +56,17 @@ async fn graph_update_ensemble_switching_to_cascade_clears_stale_straggler_and_g
             on_fail_to: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let ensemble_id = extract_id(&created, "ensemble_id");
 
-    let updated = handler
-        .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+    let updated = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "update",
+        params_id(GraphUpdateEnsembleParams {
             mutex: None,
             commit_rights: None,
             ensemble_id: ensemble_id.clone(),
@@ -82,9 +89,10 @@ async fn graph_update_ensemble_switching_to_cascade_clears_stale_straggler_and_g
             remove_entry_from: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(
         !is_err(&updated),
         "switching to cascade must succeed: {:?}",
@@ -110,8 +118,11 @@ async fn graph_update_ensemble_can_change_kind() {
     let entry = add_agent_node(&handler, &spec.id, "Entry").await;
     let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
 
-    let created = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let created = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
@@ -154,13 +165,17 @@ async fn graph_update_ensemble_can_change_kind() {
             on_fail_to: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let ensemble_id = extract_id(&created, "ensemble_id");
 
-    let updated = handler
-        .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+    let updated = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "update",
+        params_id(GraphUpdateEnsembleParams {
             mutex: None,
             commit_rights: None,
             ensemble_id: ensemble_id.clone(),
@@ -183,9 +198,10 @@ async fn graph_update_ensemble_can_change_kind() {
             remove_entry_from: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(
         !is_err(&updated),
         "updating kind to cascade should succeed: {:?}",
@@ -218,8 +234,11 @@ async fn graph_update_ensemble_refuses_round_robin_to_parallel_above_eight() {
             infra_backoff_seconds: None,
         })
         .collect();
-    let created = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let created = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
@@ -243,19 +262,24 @@ async fn graph_update_ensemble_refuses_round_robin_to_parallel_above_eight() {
             on_fail_to: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&created), "{}", text(&created));
     let ensemble_id = extract_id(&created, "ensemble_id");
 
-    let updated = handler
-        .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+    let updated = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "update",
+        params_id(GraphUpdateEnsembleParams {
             kind: Some("parallel".to_string()),
             ..blank_ensemble_update(&ensemble_id)
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(
         is_err(&updated),
         "switching 12 members to parallel must be refused: {:?}",
@@ -300,8 +324,11 @@ async fn graph_add_ensemble_blueprint_members_enforce_requested_kind_bounds() {
     })
     .unwrap();
 
-    let refused = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let refused = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
@@ -325,9 +352,10 @@ async fn graph_add_ensemble_blueprint_members_enforce_requested_kind_bounds() {
             on_fail_to: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(
         is_err(&refused),
         "a 12-member blueprint with kind parallel must be refused: {:?}",
@@ -337,8 +365,11 @@ async fn graph_add_ensemble_blueprint_members_enforce_requested_kind_bounds() {
     assert!(msg.contains("parallel"), "{msg}");
     assert!(msg.contains("2-8") && msg.contains("12"), "{msg}");
 
-    let accepted = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let accepted = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
@@ -362,9 +393,10 @@ async fn graph_add_ensemble_blueprint_members_enforce_requested_kind_bounds() {
             on_fail_to: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&accepted), "{}", text(&accepted));
 }
 
@@ -391,8 +423,11 @@ async fn graph_update_ensemble_kind_plus_shrink_uses_resulting_count() {
             infra_backoff_seconds: None,
         })
         .collect();
-    let created = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let created = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: Some(spec.id.clone()),
@@ -416,9 +451,10 @@ async fn graph_update_ensemble_kind_plus_shrink_uses_resulting_count() {
             on_fail_to: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&created), "{}", text(&created));
     let ensemble_id = extract_id(&created, "ensemble_id");
 
@@ -433,17 +469,21 @@ async fn graph_update_ensemble_kind_plus_shrink_uses_resulting_count() {
             infra_backoff_seconds: None,
         })
         .collect();
-    let updated = handler
-        .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+    let updated = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "update",
+        params_id(GraphUpdateEnsembleParams {
             kind: Some("parallel".to_string()),
             members: Some(shrunk),
             // The 12-member creation defaulted min_pass to 12; a shrink
             // must lower it alongside, same as any members-only resize.
             min_pass: Some(8),
             ..blank_ensemble_update(&ensemble_id)
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(
         !is_err(&updated),
         "a shrink-to-8 plus switch-to-parallel must be accepted: {}",
@@ -459,17 +499,21 @@ async fn graph_run_idea_and_queue_mutually_exclusive() {
     let (dir, db, handler) = endpoint_test_handler();
     let lp = insert_test_graph(&db, dir.path());
 
-    let result = handler
-        .graph_run(Parameters(GraphRunParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "run",
+        params_id(GraphRunParams {
             graph_id: lp.id.clone(),
             queue_id: Some("some-queue".to_string()),
             workdir: None,
             idea: Some("build a landing page".to_string()),
             sandbox: None,
             start_node_id: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(
         is_err(&result),
         "idea and queue_id together must be rejected"
@@ -537,20 +581,24 @@ async fn idea_placeholder_spec_is_absent_from_spec_listings() {
         "the blank placeholder must not be counted in spec_list total: {listed}"
     );
 
-    let got = handler
-        .graph_get(Parameters(GraphGetParams {
+    let got = call_graph_action(
+        &handler,
+        "graph",
+        "get",
+        params_id(GraphGetParams {
             graph_id: lp.id.clone(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let got = raw_text(&got);
     assert!(
         !got.contains("hyperframes explainer"),
-        "the idea placeholder must not appear in graph_get specs: {got}"
+        "the idea placeholder must not appear in graph specs: {got}"
     );
 }
 
-/// (CB22) `graph_run` with a graph-bound spec whose name is `""` and
+/// (CB22) `graph_control` with a graph-bound spec whose name is `""` and
 /// description is `None` is refused synchronously: the error names the
 /// spec and the graph's status is untouched. The TUI's `run` flow sends
 /// only `graph_id`, so this is the user-visible refusal for a graph with
@@ -585,17 +633,21 @@ async fn graph_run_refuses_blank_bound_spec_and_leaves_graph_untouched() {
     })
     .unwrap();
 
-    let result = handler
-        .graph_run(Parameters(GraphRunParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "run",
+        params_id(GraphRunParams {
             graph_id: lp.id.clone(),
             queue_id: None,
             workdir: None,
             idea: None,
             sandbox: None,
             start_node_id: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(
         is_err(&result),
         "a blank bound spec must refuse the launch: {}",
@@ -627,17 +679,21 @@ async fn graph_run_refuses_when_no_specs_or_queue_are_selected() {
     let (dir, db, handler) = endpoint_test_handler();
     let lp = insert_test_graph(&db, dir.path());
 
-    let result = handler
-        .graph_run(Parameters(GraphRunParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "run",
+        params_id(GraphRunParams {
             graph_id: lp.id.clone(),
             queue_id: None,
             workdir: None,
             idea: None,
             sandbox: None,
             start_node_id: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(
         is_err(&result),
@@ -657,7 +713,7 @@ async fn graph_run_refuses_when_no_specs_or_queue_are_selected() {
     );
 }
 
-/// (CB22) Queue isolation at the handler boundary: a `graph_run` with a
+/// (CB22) Queue isolation at the handler boundary: a `graph_control` with a
 /// valid `queue_id` is accepted even when the graph has an unrelated
 /// blank bound spec — queue launches validate only the queue's own
 /// members.
@@ -723,17 +779,21 @@ async fn graph_run_with_queue_ignores_unrelated_blank_bound_spec() {
     .unwrap();
     db.append_queue_member(&queue_id, &member.id, None).unwrap();
 
-    let result = handler
-        .graph_run(Parameters(GraphRunParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "run",
+        params_id(GraphRunParams {
             graph_id: lp.id.clone(),
             queue_id: Some(queue_id),
             workdir: None,
             idea: None,
             sandbox: None,
             start_node_id: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(
         !is_err(&result),
         "a valid queue launch must ignore the unrelated blank bound spec: {}",
@@ -741,7 +801,7 @@ async fn graph_run_with_queue_ignores_unrelated_blank_bound_spec() {
     );
 }
 
-/// (CB22) `graph_preflight` reports a blank bound spec as a structured
+/// (CB22) `graph_control` reports a blank bound spec as a structured
 /// `spec_warnings` entry — advisory, not a tool error — including when
 /// the graph has no agent targets to probe.
 #[tokio::test]
@@ -774,14 +834,18 @@ async fn graph_preflight_warns_for_blank_bound_spec_without_probe_targets() {
     })
     .unwrap();
 
-    let result = handler
-        .graph_preflight(Parameters(GraphPreflightParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "preflight",
+        params_id(GraphPreflightParams {
             graph_id: lp.id.clone(),
             timeout_seconds: None,
             reviewer: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(
         !is_err(&result),
         "a preflight warning must not be a tool error: {}",
@@ -802,7 +866,7 @@ async fn graph_preflight_warns_for_blank_bound_spec_without_probe_targets() {
     );
 }
 
-/// (CB22) `graph_preflight` includes `spec_warnings` alongside real probe
+/// (CB22) `graph_control` includes `spec_warnings` alongside real probe
 /// results. The agent node references a deliberately unconfigured
 /// platform, so the probe reports `NotConfigured` immediately without
 /// spawning anything or spending quota.
@@ -847,14 +911,18 @@ async fn graph_preflight_includes_spec_warnings_alongside_probes() {
     })
     .unwrap();
 
-    let result = handler
-        .graph_preflight(Parameters(GraphPreflightParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "preflight",
+        params_id(GraphPreflightParams {
             graph_id: lp.id.clone(),
             timeout_seconds: Some(5),
             reviewer: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(
         !is_err(&result),
         "a preflight warning must not be a tool error: {}",
@@ -915,7 +983,7 @@ async fn agent_probe_result_names_the_product_beside_the_slug() {
     );
 }
 
-/// (CM32) `graph_preflight` probe entries carry the same
+/// (CM32) `graph_control` probe entries carry the same
 /// `platform_display` sibling, keyed beside the slug. A node stores
 /// `platform: "mistral"` — the slug — and preflight's result names
 /// Vibe. Binary unresolvable → fails fast without spawning.
@@ -938,14 +1006,18 @@ async fn graph_preflight_probe_entries_name_the_product() {
     })
     .unwrap();
 
-    let result = handler
-        .graph_preflight(Parameters(GraphPreflightParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "preflight",
+        params_id(GraphPreflightParams {
             graph_id: lp.id.clone(),
             timeout_seconds: Some(5),
             reviewer: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&result), "{}", text(&result));
     let body: serde_json::Value = serde_json::from_str(&raw_text(&result)).unwrap();
     let probes = body["probes"]
@@ -1026,14 +1098,18 @@ async fn graph_preflight_without_reviewer_has_null_review() {
     })
     .unwrap();
 
-    let result = handler
-        .graph_preflight(Parameters(GraphPreflightParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "preflight",
+        params_id(GraphPreflightParams {
             graph_id: lp.id.clone(),
             timeout_seconds: Some(5),
             reviewer: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(
         !is_err(&result),
         "preflight without reviewer must succeed: {}",
@@ -1055,14 +1131,18 @@ async fn graph_preflight_without_reviewer_has_null_review() {
 
     // No-target early return carries the same null review.
     let bare = insert_test_graph(&db, dir.path());
-    let early = handler
-        .graph_preflight(Parameters(GraphPreflightParams {
+    let early = call_graph_action(
+        &handler,
+        "graph_control",
+        "preflight",
+        params_id(GraphPreflightParams {
             graph_id: bare.id.clone(),
             timeout_seconds: None,
             reviewer: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&early), "{}", text(&early));
     let early_body: serde_json::Value = serde_json::from_str(&raw_text(&early)).unwrap();
     assert!(
@@ -1096,17 +1176,21 @@ async fn graph_preflight_with_reviewer_spawns_background_run() {
     })
     .unwrap();
 
-    let result = handler
-        .graph_preflight(Parameters(GraphPreflightParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "preflight",
+        params_id(GraphPreflightParams {
             graph_id: lp.id.clone(),
             timeout_seconds: Some(5),
             reviewer: Some(GraphPreflightReviewer {
                 platform: "opencode".to_string(),
                 model: None,
             }),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(
         !is_err(&result),
         "preflight with reviewer must succeed: {}",
@@ -1162,17 +1246,21 @@ async fn graph_preflight_reviewer_failure_never_fails_preflight() {
     })
     .unwrap();
 
-    let result = handler
-        .graph_preflight(Parameters(GraphPreflightParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "preflight",
+        params_id(GraphPreflightParams {
             graph_id: lp.id.clone(),
             timeout_seconds: Some(5),
             reviewer: Some(GraphPreflightReviewer {
                 platform: "no-such-platform-xyz".to_string(),
                 model: None,
             }),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(
         !is_err(&result),
         "a reviewer that cannot start must not fail preflight: {}",

@@ -1,10 +1,10 @@
-//! Install a graph from the catalogue (`canopy graph install` / `graph_install`).
+//! Install a graph from the catalogue (`canopy graph install` / `graph_edit`).
 //!
 //! One command turns a published graph into a local graph: parse the ref,
 //! GET the export document through the catalogue (so the catalogue counts
 //! the install), validate it exactly as `canopy graph validate` would,
 //! install its bundled presets, and hand the document to the same import
-//! path `graph_import` uses. The only network traffic is that one GET with
+//! path `graph_edit` uses. The only network traffic is that one GET with
 //! a `canopy/<version>` User-Agent — no telemetry beyond the catalogue's
 //! own count.
 
@@ -227,7 +227,7 @@ pub(crate) struct FetchedGraph {
 }
 
 /// Fetch the document for `reference` from the catalogue at `base` and
-/// validate it exactly as `graph_validate` would. Nothing is written: the
+/// validate it exactly as `graph` would. Nothing is written: the
 /// caller builds the review first, and only [`write_presets`] (after the
 /// user accepted) touches disk.
 pub(crate) fn fetch_graph(base: &str, reference: &str) -> Result<FetchedGraph, String> {
@@ -248,7 +248,7 @@ pub(crate) fn graph_from_body(
     assemble_graph(&parsed, reference, body, source_url)
 }
 
-/// Validate `body` exactly as `graph_validate` would and parse it for the
+/// Validate `body` exactly as `graph` would and parse it for the
 /// import path — the tail [`fetch_graph`] and [`graph_from_body`] share.
 fn assemble_graph(
     parsed: &GraphRef,
@@ -319,7 +319,7 @@ fn reject_invalid_report(reference: &str, report: &serde_json::Value) -> Result<
             .unwrap_or("?");
         return Err(format!(
             "The catalogue returned a node document '{name}', not a graph document; \
-             `graph_install` only installs graph documents."
+             `graph_edit` only installs graph documents."
         ));
     }
     Ok(())
@@ -419,23 +419,26 @@ mod tests {
     }
 
     #[test]
-    fn advertised_schema_exposes_ref_workdir_name_and_overwrite() {
-        let tools = crate::daemon::handler::TaskTriggerHandler::tool_router().list_all();
-        let tool = tools
+    fn install_action_declares_ref_workdir_name_and_overwrite() {
+        let spec = crate::daemon::handler_graph_tools::graph_edit_action("install")
+            .expect("graph_edit has an install action");
+        let declared: Vec<&str> = spec
+            .required
             .iter()
-            .find(|t| t.name.as_ref() == "graph_install")
-            .expect("graph_install is registered");
-        let schema = serde_json::to_value(&tool.input_schema).expect("schema serializes");
-        let props = schema["properties"].as_object().expect("properties object");
-        assert!(props.contains_key("ref"), "schema: {schema}");
-        assert!(!props.contains_key("reference"), "schema: {schema}");
-        assert!(props.contains_key("workdir"), "schema: {schema}");
-        assert!(props.contains_key("name"), "schema: {schema}");
-        assert!(props.contains_key("overwrite_presets"), "schema: {schema}");
-        assert!(props.contains_key("accept"), "schema: {schema}");
-        let required = schema["required"].as_array().expect("required array");
-        assert!(required.contains(&json!("ref")), "schema: {schema}");
-        assert!(required.contains(&json!("workdir")), "schema: {schema}");
+            .chain(spec.optional.iter())
+            .copied()
+            .collect();
+        assert!(declared.contains(&"ref"), "{declared:?}");
+        assert!(
+            !declared.contains(&"reference"),
+            "wire name is `ref`: {declared:?}"
+        );
+        assert!(declared.contains(&"workdir"), "{declared:?}");
+        assert!(declared.contains(&"name"), "{declared:?}");
+        assert!(declared.contains(&"overwrite_presets"), "{declared:?}");
+        assert!(declared.contains(&"accept"), "{declared:?}");
+        assert!(spec.required.contains(&"ref"), "{:?}", spec.required);
+        assert!(spec.required.contains(&"workdir"), "{:?}", spec.required);
     }
 
     /// A valid draft id: 26 lowercase base32 characters.

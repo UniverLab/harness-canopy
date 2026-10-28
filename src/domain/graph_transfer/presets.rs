@@ -69,7 +69,7 @@ pub fn collect(
 /// itself — a plain non-blank name that stays inside the prompts dir, not a
 /// builtin, not a repeat of an earlier entry, non-empty content. Import runs
 /// it through [`validate`] (followed by the target-machine overwrite checks);
-/// `graph_validate` runs it alone, since a share-check has no installer's
+/// `graph` runs it alone, since a share-check has no installer's
 /// prompts dir to read — so a document that validates on one machine is
 /// installable on every machine. `seen` carries the names already accepted,
 /// so a duplicate refuses with the same message in both paths.

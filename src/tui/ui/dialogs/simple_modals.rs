@@ -42,7 +42,7 @@ pub fn draw_permanent_delete_graph_confirm(frame: &mut Frame, theme: &Theme) {
     );
 }
 
-/// Confirmation for `graph_reset` (`x` on a completed/failed graph) — same
+/// Confirmation for `graph_control` (`x` on a completed/failed graph) — same
 /// wording as the CLI's own prompt (`daemon::graph_cli::confirm_reset`), so
 /// the two surfaces never teach different levels of caution.
 pub fn draw_graph_reset_confirm(frame: &mut Frame, app: &App, theme: &Theme) {

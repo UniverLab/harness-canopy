@@ -318,7 +318,7 @@ pub(crate) const SUPERSEDE_REASON: &str = "superseded by a new attempt at this n
 
 /// Whether `run` was terminated by the engine out from under the dispatch
 /// that owned it — a same-node supersede ([`SUPERSEDE_REASON`], B42), a
-/// concurrent `graph_reset`, `graph_pause`, iteration-budget exhaustion, or
+/// concurrent `graph_control`, `graph_control`, iteration-budget exhaustion, or
 /// `fail_graph`'s own sweep — rather than a genuine node outcome (a clean
 /// exit, or a self-report via `graph_complete_node`). Every one of those
 /// paths is pure engine bookkeeping, not a node failure: the dispatch that
@@ -329,7 +329,7 @@ pub(crate) const SUPERSEDE_REASON: &str = "superseded by a new attempt at this n
 /// 2026-08-05.
 ///
 /// Recognised by the `{ "terminated": true, "reason": … }` marker every one
-/// of those paths writes via [`terminate_run_row`] (or, for `graph_reset`,
+/// of those paths writes via [`terminate_run_row`] (or, for `graph_control`,
 /// the identically-shaped write in [`crate::db::Database::reset_graph`]) —
 /// matched on the `terminated` key alone, not a specific reason string, so
 /// nothing that terminates a run out-of-band can be missed here. A genuine

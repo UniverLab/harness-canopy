@@ -20,12 +20,16 @@ async fn graph_export_import_round_trip_with_crew() {
         .unwrap();
     let (graph_id, _ens) = build_crew_ensemble(&handler, &workdir, "Crew G").await;
 
-    let exported = handler
-        .graph_export(Parameters(GraphExportParams {
+    let exported = call_graph_action(
+        &handler,
+        "graph",
+        "export",
+        params_id(GraphExportParams {
             graph_id: graph_id.clone(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&exported), "{}", text(&exported));
     let doc: serde_json::Value = serde_json::from_str(&raw_text(&exported)).unwrap();
     let ensemble = &doc["ensembles"][0];
@@ -37,14 +41,18 @@ async fn graph_export_import_round_trip_with_crew() {
     );
 
     // Import WITH the local crew: bound, no missing_crews.
-    let imported = handler
-        .graph_import(Parameters(GraphImportParams {
+    let imported = call_graph_action(
+        &handler,
+        "graph_edit",
+        "import",
+        params_id(GraphImportParams {
             document: doc.clone(),
             workdir: workdir.clone(),
             name: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&imported), "{}", text(&imported));
     let imported_json: serde_json::Value = serde_json::from_str(&raw_text(&imported)).unwrap();
     assert_eq!(
@@ -60,14 +68,18 @@ async fn graph_export_import_round_trip_with_crew() {
     // Import WITHOUT a local crew of that name: still succeeds, reported.
     let mut doc_ghost = doc.clone();
     doc_ghost["ensembles"][0]["crew"] = serde_json::json!("ghost");
-    let imported2 = handler
-        .graph_import(Parameters(GraphImportParams {
+    let imported2 = call_graph_action(
+        &handler,
+        "graph_edit",
+        "import",
+        params_id(GraphImportParams {
             document: doc_ghost,
             workdir: workdir.clone(),
             name: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&imported2), "{}", text(&imported2));
     let imported2_json: serde_json::Value = serde_json::from_str(&raw_text(&imported2)).unwrap();
     assert_eq!(
@@ -76,7 +88,7 @@ async fn graph_export_import_round_trip_with_crew() {
     );
 }
 
-/// CM49 req 4: `graph_update_ensemble` binds an ensemble to a crew by
+/// CM49 req 4: `graph_ensemble` binds an ensemble to a crew by
 /// name and `crew: null` unbinds it, keeping the current rows literal.
 #[tokio::test]
 async fn graph_update_ensemble_binds_then_unbinds_a_crew() {
@@ -94,13 +106,17 @@ async fn graph_update_ensemble_binds_then_unbinds_a_crew() {
     let (_graph_id, ensemble_id) = build_literal_ensemble(&handler, &workdir, "Literal G").await;
 
     // Bind: the literal rows are replaced by the crew's members.
-    let bound = handler
-        .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+    let bound = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "update",
+        params_id(GraphUpdateEnsembleParams {
             crew: Some(Some("eager".to_string())),
             ..ensemble_update_params(&ensemble_id)
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&bound), "{}", text(&bound));
     let details = db.get_ensemble_details(&ensemble_id).unwrap().unwrap();
     assert!(details.ensemble.crew_id.is_some(), "bound to the crew");
@@ -116,13 +132,14 @@ async fn graph_update_ensemble_binds_then_unbinds_a_crew() {
     );
 
     // Unbind with an explicit null: the rows stay, the columns clear.
-    let unbound = handler
-        .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
-            crew: Some(None),
-            ..ensemble_update_params(&ensemble_id)
-        }))
-        .await
-        .unwrap();
+    let unbound = call_graph_action_value(
+        &handler,
+        "graph_ensemble",
+        "update",
+        serde_json::json!({ "ensemble_id": ensemble_id, "crew": null }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&unbound), "{}", text(&unbound));
     let details = db.get_ensemble_details(&ensemble_id).unwrap().unwrap();
     assert!(details.ensemble.crew_id.is_none(), "unbound");
@@ -140,22 +157,29 @@ async fn graph_update_ensemble_binds_then_unbinds_a_crew() {
 
     // A crew change is its own call: combining it with any other field is
     // refused rather than silently dropping that field.
-    let combined = handler
-        .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+    let combined = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "update",
+        params_id(GraphUpdateEnsembleParams {
             crew: Some(Some("eager".to_string())),
             min_pass: Some(1),
             ..ensemble_update_params(&ensemble_id)
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&combined), "{}", text(&combined));
     assert!(
         text(&combined).contains("cannot be combined"),
         "{}",
         text(&combined)
     );
-    let with_members = handler
-        .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+    let with_members = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "update",
+        params_id(GraphUpdateEnsembleParams {
             crew: Some(Some("eager".to_string())),
             members: Some(vec![crate::daemon::params::EnsembleMemberParams {
                 platform: "claude".to_string(),
@@ -167,9 +191,10 @@ async fn graph_update_ensemble_binds_then_unbinds_a_crew() {
                 infra_backoff_seconds: None,
             }]),
             ..ensemble_update_params(&ensemble_id)
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&with_members), "{}", text(&with_members));
     assert!(
         text(&with_members).contains("cannot be combined"),
@@ -178,7 +203,7 @@ async fn graph_update_ensemble_binds_then_unbinds_a_crew() {
     );
 }
 
-/// CM49 req 4: `graph_add_ensemble` refuses a crew beside literal members.
+/// CM49 req 4: `graph_ensemble` refuses a crew beside literal members.
 #[tokio::test]
 async fn graph_add_ensemble_crew_and_members_are_exclusive() {
     let (dir, _db, handler) = endpoint_test_handler();
@@ -193,8 +218,11 @@ async fn graph_add_ensemble_crew_and_members_are_exclusive() {
         .await
         .unwrap();
     let (graph_id, _ens) = build_literal_ensemble(&handler, &workdir, "Exclusive G").await;
-    let entry = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let entry = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: None,
             graph_id: Some(graph_id.clone()),
             name: "entry".to_string(),
@@ -203,13 +231,17 @@ async fn graph_add_ensemble_crew_and_members_are_exclusive() {
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let entry_id = extract_id(&entry, "node_id");
 
-    let refused = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let refused = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: None,
@@ -240,9 +272,10 @@ async fn graph_add_ensemble_crew_and_members_are_exclusive() {
             straggler_timeout_minutes: None,
             quorum_grace_minutes: None,
             crew: Some("eager".to_string()),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&refused), "{}", text(&refused));
     assert!(
         text(&refused).contains("pass crew or members, never both"),

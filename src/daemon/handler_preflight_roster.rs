@@ -1,4 +1,4 @@
-//! CM48: `graph_preflight`'s roster split — which of a graph's probe targets
+//! CM48: `graph_control`'s roster split — which of a graph's probe targets
 //! are off-limits right now, and which ensembles the roster would stop.
 //!
 //! Split out of `handler_preflight.rs` (which grew past the file-size gate)

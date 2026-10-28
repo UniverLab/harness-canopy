@@ -575,8 +575,8 @@ fn stale_names_suggestion_archives_when_all_graphs_terminal() {
     };
 
     let suggestion = stale_names_suggestion(&report, 3);
-    assert!(suggestion.contains("graph_archive"), "{suggestion}");
-    assert!(suggestion.contains("graph_restore"), "{suggestion}");
+    assert!(suggestion.contains("graph_edit"), "{suggestion}");
+    assert!(suggestion.contains("graph_edit"), "{suggestion}");
     assert!(suggestion.contains("skips archived graphs"), "{suggestion}");
 }
 
@@ -597,7 +597,7 @@ fn stale_names_suggestion_edits_when_graph_not_terminal() {
         suggestion.contains("edit them to the 3.x names"),
         "{suggestion}"
     );
-    assert!(!suggestion.contains("graph_archive"), "{suggestion}");
+    assert!(!suggestion.contains("graph_edit"), "{suggestion}");
 }
 
 #[tokio::test]

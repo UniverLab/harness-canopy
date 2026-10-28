@@ -3,7 +3,7 @@ use super::*;
 /// One ensemble unit built by [`build_import_plan`] — the join node, every
 /// member node, the `ensembles`/`ensemble_members` rows — mirroring the
 /// shape `daemon::handler::build_ensemble_unit` assembles for
-/// `graph_add_ensemble`, so the two authoring paths can never drift.
+/// `graph_ensemble`, so the two authoring paths can never drift.
 #[derive(Debug, Clone)]
 pub struct GraphImportEnsemblePlan {
     pub ensemble: Ensemble,
@@ -20,7 +20,7 @@ pub struct GraphImportEnsemblePlan {
 }
 
 /// Every fresh-id graph piece [`build_import_plan`] assembles for one
-/// `graph_import` call — ready to persist as-is (decision 5: import is
+/// `graph_edit` call — ready to persist as-is (decision 5: import is
 /// all-or-nothing, so the caller persists every field here in one
 /// transaction or none at all).
 #[derive(Debug, Clone)]
@@ -43,11 +43,11 @@ pub struct GraphImportPlan {
 
 /// Build a validated [`GraphImportPlan`] for `graph_id` from a parsed
 /// [`GraphExportDocument`] — every node/edge/ensemble gets a fresh id, names
-/// resolve to those ids, and every rule `graph_add_node`/`graph_add_edge`/
-/// `graph_add_ensemble` would enforce at authoring time is enforced here too
+/// resolve to those ids, and every rule `graph_node`/`graph_edge`/
+/// `graph_ensemble` would enforce at authoring time is enforced here too
 /// (decision 5), with one deliberate carve-out: an agent node's missing
 /// `platform`/`cli` is *not* rejected — decision 3 means a shared design may
-/// legitimately arrive without one, and the caller (`graph_import`) reports
+/// legitimately arrive without one, and the caller (`graph_edit`) reports
 /// exactly which nodes still need it rather than refusing the whole import.
 ///
 /// Returns `Err` (with nothing to persist) on: an unsupported/missing

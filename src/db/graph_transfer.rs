@@ -1,4 +1,4 @@
-//! DB layer for `graph_import`: persist an entire
+//! DB layer for `graph_edit`: persist an entire
 //! [`GraphImportPlan`](crate::domain::graph_transfer::GraphImportPlan) — the
 //! graph row, every plain node/edge, and every ensemble unit (join + member
 //! nodes, the wiring edges, the `ensembles`/`ensemble_members` rows) — in
@@ -137,7 +137,7 @@ impl Database {
     }
 
     /// Every pending entry source recorded for a graph's ensembles, keyed by
-    /// ensemble id — `graph_export` passes these to
+    /// ensemble id — `graph` passes these to
     /// [`build_export_document_with_pending`] so a crew-bound ensemble whose
     /// members are not materialised yet still exports its entry wiring
     /// (requirement 3). A literal-member ensemble has none.
@@ -946,7 +946,7 @@ mod tests {
         lp.infra_node_id = plan.infra_node_id.clone();
         db.import_graph(&lp, &plan).unwrap();
 
-        // Read back the imported graph exactly as graph_export does...
+        // Read back the imported graph exactly as graph does...
         let graph_nodes = db.list_graph_nodes_for_graph("graph-1").unwrap();
         let graph_edges = db.list_graph_edges_for_graph("graph-1").unwrap();
         let ensembles = db.list_ensembles_for_graph("graph-1").unwrap();
@@ -1301,7 +1301,7 @@ mod tests {
         lp
     }
 
-    /// `graph_export`'s document for a graph, reading the pending rows exactly
+    /// `graph`'s document for a graph, reading the pending rows exactly
     /// as the real handler does.
     fn export_graph(db: &Database, graph_id: &str) -> GraphExportDocument {
         let lp = db.get_graph(graph_id).unwrap().unwrap();
@@ -1312,7 +1312,7 @@ mod tests {
         build_export_document_with_pending(&lp, &nodes, &edges, &ensembles, &pending).unwrap()
     }
 
-    /// The same structural checks `graph_preflight` runs before spending probe
+    /// The same structural checks `graph_control` runs before spending probe
     /// quota: `validate_graph` (the entry-point check that reported "Graph has
     /// multiple entry points") and `validate_ensembles_in_graph` (every member
     /// wired in and both exits wired out).

@@ -1,7 +1,7 @@
 //! `GraphFormDialog` — state and logic for creating/editing a graph's
 //! metadata and trigger from the TUI.
 //!
-//! Saving goes through the daemon's MCP `graph_create`/`graph_update` tools
+//! Saving goes through the daemon's MCP `graph_edit`/`graph_edit` tools
 //! (via [`crate::tui::mcp_client`]) instead of writing the DB directly: the
 //! daemon owns the live trigger wiring (waking the cron scheduler, starting
 //! and stopping file watchers), so a direct DB write would leave a watch
@@ -197,7 +197,7 @@ impl GraphFormDialog {
     }
 
     /// Client-side validation reusing the daemon's own checks (the same
-    /// functions `graph_create`/`graph_update` run — not a reimplementation)
+    /// functions `graph_edit`/`graph_edit` run — not a reimplementation)
     /// for instant feedback before the MCP round-trip.
     pub fn validate(&self) -> Result<(), String> {
         validate_non_empty(&self.name, "Graph name")?;
@@ -207,7 +207,7 @@ impl GraphFormDialog {
         Ok(())
     }
 
-    /// Arguments for the MCP `graph_create` call.
+    /// Arguments for the MCP `graph_edit` call.
     pub fn create_arguments(&self) -> serde_json::Value {
         serde_json::json!({
             "name": self.name.trim(),
@@ -217,7 +217,7 @@ impl GraphFormDialog {
         })
     }
 
-    /// Arguments for the MCP `graph_update` call. Sends every field the form
+    /// Arguments for the MCP `graph_edit` call. Sends every field the form
     /// owns; an empty description clears the graph's description server-side.
     pub fn update_arguments(&self) -> serde_json::Value {
         serde_json::json!({
@@ -275,17 +275,21 @@ impl App {
             return Ok(());
         }
 
-        let (tool, arguments) = if dialog.is_edit_mode() {
-            ("graph_update", dialog.update_arguments())
+        let arguments = if dialog.is_edit_mode() {
+            let mut arguments = dialog.update_arguments();
+            arguments["action"] = serde_json::json!("update");
+            arguments
         } else {
-            ("graph_create", dialog.create_arguments())
+            let mut arguments = dialog.create_arguments();
+            arguments["action"] = serde_json::json!("create");
+            arguments
         };
         let port = self
             .db
             .get_state("port")?
             .unwrap_or_else(|| "7755".to_string());
 
-        match mcp_client::call_daemon_tool(&port, tool, &arguments) {
+        match mcp_client::call_daemon_tool(&port, "graph_edit", &arguments) {
             Ok(outcome) if outcome.is_error => dialog.error = Some(outcome.text),
             Ok(_) => {
                 self.close_graph_form_dialog();
@@ -522,7 +526,8 @@ mod tests {
         assert!(app.graph_form_dialog.is_none(), "dialog closes on success");
         let calls = fake.recorded_calls();
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0]["name"], "graph_create");
+        assert_eq!(calls[0]["name"], "graph_edit");
+        assert_eq!(calls[0]["arguments"]["action"], "create");
         assert_eq!(calls[0]["arguments"]["name"], "Fresh graph");
         assert_eq!(calls[0]["arguments"]["trigger"]["kind"], "cron");
     }
@@ -549,7 +554,8 @@ mod tests {
         assert!(app.graph_form_dialog.is_none());
         let calls = fake.recorded_calls();
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0]["name"], "graph_update");
+        assert_eq!(calls[0]["name"], "graph_edit");
+        assert_eq!(calls[0]["arguments"]["action"], "update");
         assert_eq!(calls[0]["arguments"]["graph_id"], "wf-edit");
         assert_eq!(calls[0]["arguments"]["name"], "Renamed graph");
     }

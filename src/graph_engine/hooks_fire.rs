@@ -14,7 +14,7 @@ pub(crate) struct HookFireCtx<'a> {
 impl GraphEngine {
     /// Fire all hooks registered for `event`, in declaration order. Each
     /// hook gets its own `GraphCompletionHookRun` row (visible via
-    /// `graph_get`/`canopy graph info`), and a failed hook is recorded and
+    /// `graph`/`canopy graph info`), and a failed hook is recorded and
     /// never stops the remaining hooks of that event from running. Never
     /// returns an `Err` — a malformed hook config or a failed process must
     /// never propagate past the caller.
@@ -26,7 +26,7 @@ impl GraphEngine {
     ) {
         // CM45: read the graph's hooks as stored RIGHT NOW. `lp` is the run
         // context's single `&Graph`, captured when the run was claimed/resumed;
-        // a `graph_update hooks=` made mid-run must be the edit that fires. Read
+        // a `graph_edit hooks=` made mid-run must be the edit that fires. Read
         // through the same accessor every other graph read uses
         // (`Database::get_graph`), never from `lp.hooks`.
         let Ok(Some(fresh)) = self.db.get_graph(&lp.id) else {
@@ -423,7 +423,7 @@ impl GraphEngine {
     /// Fire `lp`'s `on_completed` hook (N2), if configured — a no-op
     /// otherwise. Runs through the same spawn path as a graph agent node
     /// ([`run_agent_process`]/[`spawn_and_wait_cli_process`]), records the
-    /// firing in `graph_completion_hook_runs` (visible via `graph_get`/`canopy
+    /// firing in `graph_completion_hook_runs` (visible via `graph`/`canopy
     /// graph info`), and on failure logs a WARN plus a "post-completion hook
     /// failed" notification. Never returns an `Err` — a malformed hook
     /// config or a failed process must never propagate past the run that

@@ -5,14 +5,13 @@ use crate::daemon::handler::TaskTriggerHandler;
 use crate::daemon::handler_formatting::internal_error;
 use crate::daemon::handler_seeds_skills::redact_sensitive_value;
 use crate::daemon::handler_validate::resolve_prefix_or_error;
-use crate::daemon::helpers::error_result;
+use crate::daemon::helpers::{error_result, EarlyReturn};
 use crate::daemon::params::*;
-use crate::daemon::params_extract::Parameters;
 use crate::db::graphs::events::GraphEventRow;
 use crate::db::Database;
 use crate::domain::graphs::GraphNodeRun;
+use crate::or_early_return;
 use rmcp::model::{CallToolResult, ContentBlock};
-use rmcp::tool;
 use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
 use std::collections::HashMap;
@@ -42,13 +41,9 @@ const GRAPH_EVENT_KINDS: &[&str] = &[
 
 #[tool_router(router = tool_router_run_history, vis = "pub(crate)")]
 impl TaskTriggerHandler {
-    #[tool(
-        name = "graph_node_runs_list",
-        description = "List a graph's node run history — what `graph_get` omits (it only carries a graph's *bound* specs, empty for a queue-driven run). Defaults to the most recent runs first, so the run that failed a `failed` graph is normally the very first result without knowing any node id ahead of time. Narrow to one spec or node with `spec_id`/`node_id`. Output/input are omitted here since they can be large; fetch a specific run's full output with graph_node_run_get using its `id`."
-    )]
-    pub(crate) async fn graph_node_runs_list(
+    pub(crate) async fn graph_node_runs_list_impl(
         &self,
-        Parameters(params): Parameters<GraphNodeRunsListParams>,
+        params: GraphNodeRunsListParams,
     ) -> Result<CallToolResult, McpError> {
         let graph_id = match resolve_prefix_or_error(
             &self.db,
@@ -148,13 +143,9 @@ impl TaskTriggerHandler {
         )]))
     }
 
-    #[tool(
-        name = "graph_node_run_get",
-        description = "Fetch one node run's full stored input/output by run id (see graph_node_runs_list). This is the second step of failure diagnosis: list to find the offending run, then fetch its output here — the exact stderr/stdout/reported_output the engine recorded, including `infra_attempt`/`infra_crash` markers when present. Secret-shaped substrings (API keys, tokens, private key blocks) are redacted before the output crosses this boundary."
-    )]
-    pub(crate) async fn graph_node_run_get(
+    pub(crate) async fn graph_node_run_get_impl(
         &self,
-        Parameters(params): Parameters<GraphNodeRunGetParams>,
+        params: GraphNodeRunGetParams,
     ) -> Result<CallToolResult, McpError> {
         let run_id = match resolve_prefix_or_error(
             &self.db,
@@ -191,13 +182,9 @@ impl TaskTriggerHandler {
         )]))
     }
 
-    #[tool(
-        name = "graph_events",
-        description = "Read one graph's durable event log — the engine's own history for that graph, which the activity stream (pruned per workdir) and `graph_get` (bound specs only) cannot serve. Events are returned oldest-first. Filter with `since_id` (a paging cursor — pass the previous page's `next_since_id`), `spec_id`, or `kinds`. `include_payload: true` adds each event's structured `payload` (e.g. a node's `verdict`/`duration_s`, a hook's `event`/`ok`). CM46."
-    )]
-    pub(crate) async fn graph_events(
+    pub(crate) async fn graph_events_impl(
         &self,
-        Parameters(params): Parameters<GraphEventsParams>,
+        params: GraphEventsParams,
     ) -> Result<CallToolResult, McpError> {
         let graph_id = match resolve_prefix_or_error(
             &self.db,
@@ -223,38 +210,10 @@ impl TaskTriggerHandler {
                 }
             }
         }
-        let resolved_spec_id = match &params.spec_id {
-            Some(sid) => {
-                match resolve_prefix_or_error(
-                    &self.db,
-                    sid.trim(),
-                    |db, id| db.resolve_spec_id_by_prefix(id, None),
-                    "spec",
-                ) {
-                    Ok(id) => Some(id),
-                    Err(e) => return Ok(e),
-                }
-            }
-            None => None,
-        };
+        let (resolved_spec_id, since_id) =
+            or_early_return!(resolve_event_filters(&self.db, &graph_id, &params));
 
         let limit = params.limit.unwrap_or(200).clamp(1, 200) as usize;
-        // CM46: `--since <RFC3339>` is translated to the numeric cursor the
-        // list query speaks. An unknown/unparsable timestamp yields no events.
-        let since_id = match (params.since_id, params.since_ts.as_deref()) {
-            (Some(id), _) => Some(id),
-            (None, Some(ts)) => {
-                match self
-                    .db
-                    .first_graph_event_id_at_or_after(&graph_id, ts)
-                    .map_err(internal_error)?
-                {
-                    Some(id) => Some(id - 1),
-                    None => Some(i64::MAX),
-                }
-            }
-            (None, None) => None,
-        };
         let rows: Vec<GraphEventRow> = self
             .db
             .list_graph_events(
@@ -285,35 +244,7 @@ impl TaskTriggerHandler {
         let include_payload = params.include_payload.unwrap_or(false);
         let events: Vec<serde_json::Value> = rows
             .iter()
-            .map(|row| {
-                let spec_name = row
-                    .spec_id
-                    .as_ref()
-                    .and_then(|id| spec_names.get(id))
-                    .cloned();
-                let node_name = row
-                    .node_id
-                    .as_ref()
-                    .and_then(|id| node_names.get(id))
-                    .cloned();
-                let mut obj = serde_json::Map::from_iter([
-                    ("id".to_string(), serde_json::json!(row.id)),
-                    ("created_at".to_string(), serde_json::json!(row.created_at)),
-                    ("kind".to_string(), serde_json::json!(row.kind)),
-                    ("spec_name".to_string(), serde_json::json!(spec_name)),
-                    ("node_name".to_string(), serde_json::json!(node_name)),
-                    ("message".to_string(), serde_json::json!(row.message)),
-                ]);
-                if include_payload {
-                    let payload = row
-                        .payload
-                        .as_deref()
-                        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-                        .unwrap_or(serde_json::Value::Null);
-                    obj.insert("payload".to_string(), payload);
-                }
-                serde_json::Value::Object(obj)
-            })
+            .map(|row| event_row_json(row, &spec_names, &node_names, include_payload))
             .collect();
 
         let next_since_id = if rows.len() == limit {
@@ -330,6 +261,80 @@ impl TaskTriggerHandler {
             serde_json::to_string_pretty(&body).unwrap_or_default(),
         )]))
     }
+}
+
+/// Resolve the spec filter and the numeric `since` cursor for the list
+/// query. Returns `(resolved_spec_id, since_id)`.
+fn resolve_event_filters(
+    db: &Database,
+    graph_id: &str,
+    params: &GraphEventsParams,
+) -> Result<(Option<String>, Option<i64>), EarlyReturn> {
+    let resolved_spec_id = match &params.spec_id {
+        Some(sid) => {
+            match resolve_prefix_or_error(
+                db,
+                sid.trim(),
+                |db, id| db.resolve_spec_id_by_prefix(id, None),
+                "spec",
+            ) {
+                Ok(id) => Some(id),
+                Err(e) => return Err(EarlyReturn::ok(e)),
+            }
+        }
+        None => None,
+    };
+    // CM46: `--since <RFC3339>` is translated to the numeric cursor the
+    // list query speaks. An unknown/unparsable timestamp yields no events.
+    let since_id = match (params.since_id, params.since_ts.as_deref()) {
+        (Some(id), _) => Some(id),
+        (None, Some(ts)) => {
+            match db
+                .first_graph_event_id_at_or_after(graph_id, ts)
+                .map_err(internal_error)?
+            {
+                Some(id) => Some(id - 1),
+                None => Some(i64::MAX),
+            }
+        }
+        (None, None) => None,
+    };
+    Ok((resolved_spec_id, since_id))
+}
+
+fn event_row_json(
+    row: &GraphEventRow,
+    spec_names: &HashMap<String, String>,
+    node_names: &HashMap<String, String>,
+    include_payload: bool,
+) -> serde_json::Value {
+    let spec_name = row
+        .spec_id
+        .as_ref()
+        .and_then(|id| spec_names.get(id))
+        .cloned();
+    let node_name = row
+        .node_id
+        .as_ref()
+        .and_then(|id| node_names.get(id))
+        .cloned();
+    let mut obj = serde_json::Map::from_iter([
+        ("id".to_string(), serde_json::json!(row.id)),
+        ("created_at".to_string(), serde_json::json!(row.created_at)),
+        ("kind".to_string(), serde_json::json!(row.kind)),
+        ("spec_name".to_string(), serde_json::json!(spec_name)),
+        ("node_name".to_string(), serde_json::json!(node_name)),
+        ("message".to_string(), serde_json::json!(row.message)),
+    ]);
+    if include_payload {
+        let payload = row
+            .payload
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .unwrap_or(serde_json::Value::Null);
+        obj.insert("payload".to_string(), payload);
+    }
+    serde_json::Value::Object(obj)
 }
 
 /// CB43: the pair resolved at dispatch, as JSON object entries. Keys are
@@ -353,7 +358,7 @@ fn executed_pair_json(run: &GraphNodeRun) -> serde_json::Map<String, serde_json:
 }
 
 /// A waiting run's queue entries (what it waits for and who holds each
-/// resource) — the only surface `graph_node_runs_list` has for the queue.
+/// resource) — the only surface `graph` has for the queue.
 /// Empty otherwise so settled rows read exactly as before.
 fn waiting_for_json(
     db: &Database,
@@ -366,8 +371,8 @@ fn waiting_for_json(
     }
 }
 
-/// One row of `graph_node_runs_list` — deliberately excludes `input`/`output`
-/// (can be large; a caller wanting them calls `graph_node_run_get` with this
+/// One row of `graph` — deliberately excludes `input`/`output`
+/// (can be large; a caller wanting them calls `graph` with this
 /// row's `id`) but resolves `node_name` so a caller isn't left matching a
 /// bare node id back to the graph by hand.
 pub(crate) fn graph_node_run_summary_json(
@@ -472,7 +477,7 @@ pub(crate) fn graph_node_run_summary_json(
     }
 }
 
-/// The `graph_node_run_get` response: everything `graph_node_run_summary_json`
+/// The `graph` response: everything `graph_node_run_summary_json`
 /// carries, plus the full `input`/`output` the engine stored — redacted
 /// (see [`redact_sensitive_value`]) since either can carry secret-shaped
 /// content echoed by the wrapped CLI. `output` preserves whatever the engine

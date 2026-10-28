@@ -1887,7 +1887,7 @@ mod tests {
         assert_eq!(unknown_count(&reports), 0);
     }
 
-    /// `agent_probe` and `graph_preflight` (handler.rs) both build their JSON
+    /// `agent_probe` and `graph_control` (handler.rs) both build their JSON
     /// response exclusively from `ProbeReport::to_json()` and this module's
     /// `would_fail_count`/`unknown_count` — there is no second copy of the
     /// outcome vocabulary for either tool to drift from. This test pins the

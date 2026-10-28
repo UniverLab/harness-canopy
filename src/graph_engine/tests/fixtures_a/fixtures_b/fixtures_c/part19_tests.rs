@@ -135,7 +135,7 @@ async fn directed_queue_resume_runs_spec2_from_named_check_without_spec_id() {
 
     // No spec_id supplied: the directed default must be the Failed member
     // (s2), not the first Pending one (s1), so a bare
-    // `graph_continue run_from_node <node>` restarts the failed spec.
+    // `graph_control run_from_node <node>` restarts the failed spec.
     let resolved = crate::daemon::handler_run_exec::resolve_directed_spec(&db, &graph_id, None)
         .expect("resolve_directed_spec without spec_id returns the failed member");
     assert_eq!(

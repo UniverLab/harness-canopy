@@ -5,12 +5,12 @@ use crate::domain::graphs::SpecType;
 // ── Graph tool parameter types ────────────────────────────────────────
 
 /// Optional automatic trigger for a graph, mirroring agent triggers. A graph can
-/// fire on a cron schedule or a file-system watch instead of only `graph_run`.
+/// fire on a cron schedule or a file-system watch instead of only `graph_control run`.
 /// Also `Serialize` so the TUI's graph form can send it over MCP verbatim.
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphTriggerParams {
     /// Trigger kind: "cron", "watch", or "manual". "manual" (the default)
-    /// clears any existing trigger, so the graph only runs via graph_run.
+    /// clears any existing trigger, so the graph only runs via graph_control run.
     pub kind: String,
     /// 5-field cron expression (required when kind = "cron").
     pub schedule: Option<String>,
@@ -24,7 +24,7 @@ pub struct GraphTriggerParams {
     pub recursive: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphCreateParams {
     /// Human-readable graph name.
     pub name: String,
@@ -38,12 +38,12 @@ pub struct GraphCreateParams {
     /// When set, every new agent/check/gate node auto-creates a `Error` edge
     /// to this node.
     pub infra_node_id: Option<String>,
-    /// CM29: when true, graph_run/autorun downgrade the dirty-worktree
+    /// CM29: when true, graph_control run/autorun downgrade the dirty-worktree
     /// refusal to a warning instead of refusing to launch. Default false.
     #[serde(default)]
     pub allow_dirty_start: bool,
     /// SPECCODE: opt-in enforcement. When true, adding a spec to this graph
-    /// (graph_add_spec, queue_add_spec) and graph_run refuse a spec without
+    /// (graph_edit attach_spec, queue_add_spec) and graph_control run refuse a spec without
     /// a type, named. Default false — never enforced until asked.
     #[serde(default)]
     pub require_spec_type: bool,
@@ -54,8 +54,8 @@ pub struct GraphCreateParams {
 /// message into a live session (prompt + target_session_id or
 /// target_session_name). Exactly one mode must be configured; the engine
 /// refuses hooks that specify more than one mode or none.
-/// Used for every event via the `hooks` map on `graph_update`.
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+/// Used for every event via the `hooks` map on `graph_edit update`.
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphCompletionHookParams {
     /// CLI platform to run the hook with (e.g. "mimo", "claude").
     /// Required for agent hooks; must be omitted for command and
@@ -90,7 +90,7 @@ pub struct GraphCompletionHookParams {
     /// process that starts canopy triggers daemon-startup recovery, which
     /// SIGTERMs live graph runs including the run that spawned the hook.
     /// `on_spec_completed` fires while the graph is still running, so this is
-    /// not hypothetical. Use the native `graph_run` action instead.
+    /// not hypothetical. Use the native `graph_control run` action instead.
     pub command: Option<String>,
     /// Exact interactive session id to deliver to (interactive hooks only).
     /// Mutually exclusive with platform/model/effort/command. Requires
@@ -128,7 +128,7 @@ pub struct GraphCompletionHookParams {
     pub idea: Option<String>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphUpdateParams {
     /// Graph ID.
     pub graph_id: String,
@@ -157,16 +157,16 @@ pub struct GraphUpdateParams {
     /// New pre-wired target for infrastructure failures (`Error` edges), or
     /// null to clear. Omit to leave unchanged.
     pub infra_node_id: Option<Option<String>>,
-    /// CM29: set to change whether graph_run/autorun downgrade the
+    /// CM29: set to change whether graph_control run/autorun downgrade the
     /// dirty-worktree refusal to a warning. Omit to leave unchanged.
     pub allow_dirty_start: Option<bool>,
     /// SPECCODE: opt-in enforcement. When true, adding a spec to this graph
-    /// (graph_add_spec, queue_add_spec) and graph_run refuse a spec without
+    /// (graph_edit attach_spec, queue_add_spec) and graph_control run refuse a spec without
     /// a type, named. Default false — never enforced until asked.
     pub require_spec_type: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphAddSpecParams {
     /// Existing graph ID.
     pub graph_id: String,
@@ -194,7 +194,7 @@ pub struct GraphAddSpecParams {
     pub spec_scope: Option<String>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphUpdateSpecParams {
     /// Existing spec ID.
     pub spec_id: String,
@@ -218,7 +218,7 @@ pub struct GraphUpdateSpecParams {
     pub spec_scope: Option<String>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SpecCreateParams {
     /// Human-readable spec name.
     pub name: String,
@@ -241,7 +241,7 @@ pub struct SpecCreateParams {
     pub spec_scope: Option<String>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SpecListParams {
     /// Filter to specs tagged with this absolute workdir.
     pub workdir: Option<String>,
@@ -261,7 +261,7 @@ pub struct SpecListParams {
     pub offset: Option<u32>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SpecUpdateParams {
     /// Existing spec ID.
     pub spec_id: String,
@@ -282,7 +282,7 @@ pub struct SpecUpdateParams {
     pub spec_scope: Option<Option<String>>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SpecSetStatusParams {
     /// Existing spec ID.
     pub spec_id: String,
@@ -292,13 +292,13 @@ pub struct SpecSetStatusParams {
     pub reason: String,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SpecDeleteParams {
     /// Existing spec ID.
     pub spec_id: String,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SpecSectionGetParams {
     /// Existing spec ID.
     pub spec_id: String,
@@ -307,24 +307,24 @@ pub struct SpecSectionGetParams {
     pub section: String,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BlueprintCreateParams {
     /// Unique blueprint name.
     pub name: String,
     /// Node kind: agent, check, or gate.
     pub kind: String,
-    /// Config template. `graph_add_node` uses this as the node's config,
+    /// Config template. `graph_node add` uses this as the node's config,
     /// optionally shallow-merged with `config_overrides`.
     pub config: serde_json::Map<String, serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BlueprintDeleteParams {
     /// Existing custom blueprint name. Builtins can't be deleted.
     pub name: String,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphUpdateNodeParams {
     /// Existing node ID.
     pub node_id: String,
@@ -343,7 +343,7 @@ pub struct GraphUpdateNodeParams {
     pub position: Option<i64>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphAddEdgeParams {
     /// Existing spec ID. Provide exactly one of `spec_id`/`graph_id`.
     pub spec_id: Option<String>,
@@ -358,11 +358,11 @@ pub struct GraphAddEdgeParams {
     pub condition: String,
     /// Route label this edge serves — required when `condition` is
     /// `"route"`, and must name one of `from_node`'s declared routes (see
-    /// `graph_add_node`'s router `config.routes`). Ignored otherwise.
+    /// `graph_node add`'s router `config.routes`). Ignored otherwise.
     pub route: Option<String>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphUpdateEdgeParams {
     /// Existing edge ID.
     pub edge_id: String,
@@ -379,13 +379,13 @@ pub struct GraphUpdateEdgeParams {
     pub to_node: Option<String>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphDeleteEdgeParams {
     /// Existing edge ID to delete.
     pub edge_id: String,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphDeleteNodeParams {
     /// Existing node ID to delete. Cascades to every edge naming it as
     /// `from_node` or `to_node`. Rejected if the node is the graph's entry
@@ -394,8 +394,8 @@ pub struct GraphDeleteNodeParams {
 }
 
 /// One ensemble member: differs from its siblings by platform/model and,
-/// optionally, its own prompt — see `graph_add_ensemble`.
-#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+/// optionally, its own prompt — see `graph_ensemble add`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EnsembleMemberParams {
     /// CLI platform for this member (e.g. "claude", "openrouter").
     pub platform: String,
@@ -420,7 +420,7 @@ pub struct EnsembleMemberParams {
     /// ensemble's own default (which may itself defer to the platform's
     /// config.toml value, then the engine default of 2). Omit to use the
     /// ensemble's value. Must not be negative; 0 means "one attempt, no
-    /// retry" — see graph_add_node's infra_retry_limit doc.
+    /// retry" — see graph_node add's infra_retry_limit doc.
     pub infra_retry_limit: Option<i64>,
     /// CM30: see infra_retry_limit. Overrides infra_crash_max_seconds
     /// (engine default 60).
@@ -430,7 +430,7 @@ pub struct EnsembleMemberParams {
     pub infra_backoff_seconds: Option<i64>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphUpdateEnsembleParams {
     /// Existing ensemble ID.
     pub ensemble_id: String,
@@ -501,7 +501,7 @@ pub struct GraphUpdateEnsembleParams {
     pub mutex: Option<Vec<String>>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphDeleteEnsembleParams {
     /// Existing ensemble ID. Removes the ensemble as one unit — its member
     /// nodes, its quorum node, and every edge naming any of them. Refused
@@ -509,11 +509,11 @@ pub struct GraphDeleteEnsembleParams {
     pub ensemble_id: String,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphCopyNodeParams {
     /// Node to copy. Only its config is copied — never any runtime state
     /// (runs, iterations, statuses). Cannot be an ensemble member/quorum node
-    /// (copy those with graph_copy_ensemble).
+    /// (copy those with graph_ensemble copy).
     pub source_node_id: String,
     /// Target spec ID for the copy. Provide at most one of spec_id/graph_id;
     /// omit both to copy into the source node's own graph.
@@ -540,7 +540,7 @@ pub struct GraphCopyNodeParams {
     pub on_fail_to: Option<String>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphCopyEnsembleParams {
     /// Ensemble to copy. Members, join config, and shared prompt are copied
     /// (config only — never runtime state). Every id in the copy is new.
@@ -583,13 +583,13 @@ pub struct GraphCopyEnsembleParams {
     pub on_fail_to: Option<String>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct QueueCreateParams {
     /// Human-readable queue name.
     pub name: String,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct QueueAddSpecParams {
     /// Existing queue ID.
     pub queue_id: String,
@@ -604,7 +604,7 @@ pub struct QueueAddSpecParams {
     pub group: Option<String>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct QueueListParams {
     /// Existing queue ID. Omit to list every queue (summary only, no members).
     pub queue_id: Option<String>,
@@ -612,7 +612,7 @@ pub struct QueueListParams {
     pub include_descriptions: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct QueueRemoveSpecParams {
     /// Existing queue ID.
     pub queue_id: String,
@@ -620,7 +620,7 @@ pub struct QueueRemoveSpecParams {
     pub spec_id: String,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphRemoveSpecParams {
     /// Existing graph ID.
     pub graph_id: String,
@@ -628,7 +628,7 @@ pub struct GraphRemoveSpecParams {
     pub spec_id: String,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct QueueReorderParams {
     /// Existing queue ID.
     pub queue_id: String,
@@ -638,7 +638,7 @@ pub struct QueueReorderParams {
     pub spec_ids: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct QueueSetGroupParams {
     /// Existing queue ID.
     pub queue_id: String,
@@ -650,21 +650,21 @@ pub struct QueueSetGroupParams {
     pub group: Option<String>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphGetParams {
     /// Graph ID.
     pub graph_id: String,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphExportParams {
     /// Graph ID to export.
     pub graph_id: String,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphImportParams {
-    /// The exported graph document (the object `graph_export` returns).
+    /// The exported graph document (the object `graph` returns).
     #[schemars(schema_with = "arbitrary_json_value_schema")]
     pub document: serde_json::Value,
     /// Absolute workdir for the new graph.
@@ -673,7 +673,7 @@ pub struct GraphImportParams {
     pub name: Option<String>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphInstallParams {
     /// Catalogue ref: `<slug>` or `<owner>/<repo>/<slug>`, each with an
     /// optional `@<ref>` suffix selecting a version — or `draft:<id>` for
@@ -695,7 +695,7 @@ pub struct GraphInstallParams {
     pub accept: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphValidateParams {
     /// Path to a graph or node JSON document to validate. Provide exactly
     /// one of `path` or `document`.

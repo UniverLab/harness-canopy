@@ -5,8 +5,11 @@
 use super::*;
 
 async fn part13_graph(handler: &TaskTriggerHandler, workdir: &str, name: &str) -> String {
-    let created = handler
-        .graph_create(Parameters(GraphCreateParams {
+    let created = call_graph_action(
+        handler,
+        "graph_edit",
+        "create",
+        params_id(GraphCreateParams {
             name: name.to_string(),
             description: None,
             workdir: workdir.to_string(),
@@ -14,16 +17,20 @@ async fn part13_graph(handler: &TaskTriggerHandler, workdir: &str, name: &str) -
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&created), "{}", text(&created));
     extract_id(&created, "graph_id")
 }
 
 async fn part13_agent_node(handler: &TaskTriggerHandler, graph_id: &str, name: &str) -> String {
-    let added = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let added = call_graph_action(
+        handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: None,
             graph_id: Some(graph_id.to_string()),
             name: name.to_string(),
@@ -32,9 +39,10 @@ async fn part13_agent_node(handler: &TaskTriggerHandler, graph_id: &str, name: &
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&added), "{}", text(&added));
     extract_id(&added, "node_id")
 }
@@ -61,8 +69,11 @@ async fn part13_try_ensemble(
     from_node: &str,
     on_pass_to: &str,
 ) -> rmcp::model::CallToolResult {
-    handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    call_graph_action(
+        handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: None,
@@ -88,9 +99,10 @@ async fn part13_try_ensemble(
             straggler_timeout_minutes: None,
             quorum_grace_minutes: None,
             crew: None,
-        }))
-        .await
-        .unwrap()
+        }),
+    )
+    .await
+    .unwrap()
 }
 
 async fn part13_ensemble(
@@ -106,7 +118,7 @@ async fn part13_ensemble(
     extract_id(&added, "ensemble_id")
 }
 
-/// `graph_add_node` refuses a template whose `{{output:...}}` names no node
+/// `graph_node` refuses a template whose `{{output:...}}` names no node
 /// in the graph — at write time, not member by member at spawn time — and
 /// writes nothing.
 #[tokio::test]
@@ -121,8 +133,11 @@ async fn add_node_refuses_unknown_output() {
         "prompt_template".to_string(),
         serde_json::Value::String("Follow the plan: {{output:Ghost}}".to_string()),
     );
-    let result = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: None,
             graph_id: Some(graph_id.clone()),
             name: "beta".to_string(),
@@ -131,9 +146,10 @@ async fn add_node_refuses_unknown_output() {
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(
         is_err(&result),
         "expected a refusal, got: {}",
@@ -153,7 +169,7 @@ async fn add_node_refuses_unknown_output() {
     assert_eq!(nodes.len(), 1, "refused write must store nothing: {msg}");
 }
 
-/// `graph_add_ensemble` refuses a member `prompt_override` carrying an
+/// `graph_ensemble` refuses a member `prompt_override` carrying an
 /// unknown bare placeholder, and writes nothing.
 #[tokio::test]
 async fn add_ensemble_refuses_bad_override() {
@@ -163,8 +179,11 @@ async fn add_ensemble_refuses_bad_override() {
     let kickoff_id = part13_agent_node(&handler, &graph_id, "kickoff").await;
     let downstream_id = part13_agent_node(&handler, &graph_id, "downstream").await;
 
-    let result = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: None,
@@ -193,9 +212,10 @@ async fn add_ensemble_refuses_bad_override() {
             straggler_timeout_minutes: None,
             quorum_grace_minutes: None,
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(
         is_err(&result),
         "expected a refusal, got: {}",
@@ -217,7 +237,7 @@ async fn add_ensemble_refuses_bad_override() {
     );
 }
 
-/// The reported incident's own path: `graph_add_ensemble` with a shared
+/// The reported incident's own path: `graph_ensemble` with a shared
 /// prompt reading `{{output:<ensemble>}}` is refused — outputs are read from
 /// nodes, and the message names the ensemble's quorum node — instead of
 /// accepting the write and having every member refuse to spawn later. Nothing
@@ -267,7 +287,7 @@ async fn add_ensemble_refuses_ensemble_output() {
     );
 }
 
-/// `graph_update_ensemble` refuses a shared prompt whose `{{output:...}}`
+/// `graph_ensemble` refuses a shared prompt whose `{{output:...}}`
 /// names an ensemble: outputs are read from nodes, and the message names the
 /// ensemble's quorum node as the intended source. The stored prompt is left
 /// untouched.
@@ -281,8 +301,11 @@ async fn update_ensemble_refuses_ensemble_output() {
     part13_ensemble(&handler, &graph_id, "Designer", &kickoff_id, &downstream_id).await;
     let impl_id = part13_ensemble(&handler, &graph_id, "Impl", &kickoff_id, &downstream_id).await;
 
-    let result = handler
-        .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "update",
+        params_id(GraphUpdateEnsembleParams {
             mutex: None,
             ensemble_id: impl_id.clone(),
             kind: None,
@@ -304,9 +327,10 @@ async fn update_ensemble_refuses_ensemble_output() {
             remove_entry_from: None,
             commit_rights: None,
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(
         is_err(&result),
         "expected a refusal, got: {}",
@@ -328,7 +352,7 @@ async fn update_ensemble_refuses_ensemble_output() {
     );
 }
 
-/// `graph_update_node` accepts a template whose only unknown markers are
+/// `graph_node` accepts a template whose only unknown markers are
 /// escaped (`\{{...}}`): they are literal text, not binding sites.
 #[tokio::test]
 async fn update_node_accepts_escaped_placeholder() {
@@ -344,17 +368,21 @@ async fn update_node_accepts_escaped_placeholder() {
             "Literal \\{{output:Ghost}} and \\{{bogus}} plus {{spec_content}}".to_string(),
         ),
     );
-    let result = handler
-        .graph_update_node(Parameters(GraphUpdateNodeParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_node",
+        "update",
+        params_id(GraphUpdateNodeParams {
             node_id: alpha_id,
             name: None,
             kind: None,
             config: Some(config),
             config_replace: None,
             position: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(
         !is_err(&result),
         "escaped markers must be accepted: {}",
@@ -362,7 +390,7 @@ async fn update_node_accepts_escaped_placeholder() {
     );
 }
 
-/// `graph_update_node` refuses a template edit carrying an unknown output
+/// `graph_node` refuses a template edit carrying an unknown output
 /// target — in `prompt_template` and in `resume_prompt`.
 #[tokio::test]
 async fn update_node_refuses_unknown_output() {
@@ -377,17 +405,21 @@ async fn update_node_refuses_unknown_output() {
             field.to_string(),
             serde_json::Value::String("Follow the plan: {{output:Ghost}}".to_string()),
         );
-        let result = handler
-            .graph_update_node(Parameters(GraphUpdateNodeParams {
+        let result = call_graph_action(
+            &handler,
+            "graph_node",
+            "update",
+            params_id(GraphUpdateNodeParams {
                 node_id: alpha_id.clone(),
                 name: None,
                 kind: None,
                 config: Some(config),
                 config_replace: None,
                 position: None,
-            }))
-            .await
-            .unwrap();
+            }),
+        )
+        .await
+        .unwrap();
         assert!(
             is_err(&result),
             "expected a refusal for {field}, got: {}",
@@ -401,30 +433,38 @@ async fn update_node_refuses_unknown_output() {
     }
 }
 
-/// `graph_import` refuses a document whose node template carries an unknown
+/// `graph_edit` refuses a document whose node template carries an unknown
 /// placeholder, all-or-nothing: no graph is created.
 #[tokio::test]
 async fn import_refuses_unbindable() {
     let (dir, db, handler) = endpoint_test_handler();
     let workdir = dir.path().to_string_lossy().to_string();
     let (source_graph_id, ..) = build_simple_graph(&handler, &workdir, "Source Graph").await;
-    let exported = handler
-        .graph_export(Parameters(GraphExportParams {
+    let exported = call_graph_action(
+        &handler,
+        "graph",
+        "export",
+        params_id(GraphExportParams {
             graph_id: source_graph_id,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let mut document: serde_json::Value = serde_json::from_str(&raw_text(&exported)).unwrap();
     document["nodes"][0]["config"]["prompt_template"] = serde_json::json!("Do {{bogus_thing}} now");
 
-    let result = handler
-        .graph_import(Parameters(GraphImportParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_edit",
+        "import",
+        params_id(GraphImportParams {
             document,
             workdir: workdir.clone(),
             name: Some("Bad Import".to_string()),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(
         is_err(&result),
         "expected a refusal, got: {}",
@@ -488,7 +528,7 @@ fn part13_seed_prompt_graph(db: &Database, graph_id: &str, prompt: &str) {
         .unwrap();
 }
 
-/// `graph_preflight` reports a pre-existing template with an unbindable
+/// `graph_control` reports a pre-existing template with an unbindable
 /// placeholder as a `graph_warnings` entry naming node and placeholder —
 /// advisory, not a tool error. The row is inserted straight into the DB:
 /// the write path now refuses such a template, so only a graph written
@@ -499,14 +539,18 @@ async fn preflight_warns_preexisting_bad() {
     let lp = insert_test_graph(&db, dir.path());
     part13_seed_prompt_graph(&db, &lp.id, "Do {{bogus_marker}} now");
 
-    let result = handler
-        .graph_preflight(Parameters(GraphPreflightParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "preflight",
+        params_id(GraphPreflightParams {
             graph_id: lp.id.clone(),
             timeout_seconds: Some(5),
             reviewer: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(
         !is_err(&result),
         "a preflight warning must not be a tool error: {}",
@@ -527,7 +571,7 @@ async fn preflight_warns_preexisting_bad() {
 }
 
 /// An escaped `\{{output:Ghost}}` is literal text, not a reference: the write
-/// path accepts it (FR1), and `graph_preflight` must neither refuse it as an
+/// path accepts it (FR1), and `graph_control` must neither refuse it as an
 /// unknown node reference (CM1 scans escape-aware) nor warn about it.
 #[tokio::test]
 async fn preflight_accepts_escaped_output_marker() {
@@ -535,14 +579,18 @@ async fn preflight_accepts_escaped_output_marker() {
     let lp = insert_test_graph(&db, dir.path());
     part13_seed_prompt_graph(&db, &lp.id, "Literal \\{{output:Ghost}} stays literal.");
 
-    let result = handler
-        .graph_preflight(Parameters(GraphPreflightParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "preflight",
+        params_id(GraphPreflightParams {
             graph_id: lp.id.clone(),
             timeout_seconds: Some(5),
             reviewer: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(
         !is_err(&result),
         "an escaped marker is not a reference: {}",

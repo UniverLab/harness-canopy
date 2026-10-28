@@ -2,7 +2,7 @@ use super::*;
 
 /// Read a router node's `routes` + `fallback` straight from its `config`.
 /// The shape (`2`-`8` unique-labeled routes, a fallback naming one of them)
-/// is already enforced at `graph_add_node`/`graph_update_node` time (see
+/// is already enforced at `graph_node`/`graph_node` time (see
 /// `daemon::handler::validate_node_config`'s `Router` arm) — this only
 /// defends against that guard somehow having been bypassed, so it bails with
 /// a generic engine error rather than re-deriving the MCP layer's messages.

@@ -2,7 +2,7 @@
 use super::*;
 
 /// The DB-layer half of the "one call -> N+1 nodes" contract: given the
-/// exact node/edge/ensemble shape `graph_add_ensemble` assembles for 3
+/// exact node/edge/ensemble shape `graph_ensemble` assembles for 3
 /// members, one `insert_ensemble_unit` transaction must leave behind 1
 /// join node + 3 member nodes (4 new `graph_nodes` rows total), the
 /// entry fan-out edge per member, the member->join fan-in edge per
@@ -637,9 +637,9 @@ fn orphan_join_detection_lists_only_unowned_joins() {
         .is_empty());
 }
 
-/// `graph_update_ensemble`'s prompt-propagation contract: updating the
+/// `graph_ensemble`'s prompt-propagation contract: updating the
 /// ensemble's shared prompt must land on the `ensembles` row (the
-/// source of truth `graph_get` reads) *and* on every member node's own
+/// source of truth `graph` reads) *and* on every member node's own
 /// `config.prompt_template` — exercising the exact two-step sequence
 /// (`update_graph_node_details` per member, then `update_ensemble_prompt`)
 /// the handler performs.
@@ -801,7 +801,7 @@ fn update_ensemble_prompt_propagates_to_every_member_config() {
     db.insert_ensemble_unit(&ensemble, &members, &member_nodes, &join_node, &edges)
         .unwrap();
 
-    // Simulates `graph_update_ensemble`'s propagate-without-resize path:
+    // Simulates `graph_ensemble`'s propagate-without-resize path:
     // rewrite every member's config with the new prompt (preserving its
     // own platform/model), then update the ensemble row itself.
     for member in &members {

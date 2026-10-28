@@ -1144,7 +1144,7 @@ fn v2_export_import_export_preserves_bindings() {
 
 /// Import must not fail when the document names a platform the importing
 /// machine has not configured: the node is created as written, and
-/// reporting an unusable pair belongs to `graph_preflight`.
+/// reporting an unusable pair belongs to `graph_control`.
 #[test]
 fn import_v2_with_unconfigured_platform_succeeds() {
     let doc = GraphExportDocument {

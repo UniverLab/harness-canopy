@@ -3,7 +3,7 @@
 //!
 //! One list, [`PATTERNS`], mirrors the patterns the catalogue flags on its
 //! document pages (canopy-web's `runs.ts`), so a reader sees the same marks
-//! in `canopy graph install`'s summary, in the MCP `graph_install`/`node_install`
+//! in `canopy graph install`'s summary, in the MCP `graph_edit`/`node_install`
 //! review, and on the web. A match only earns a mark; it never hides or
 //! blocks anything.
 

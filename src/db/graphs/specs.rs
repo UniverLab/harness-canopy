@@ -3,7 +3,7 @@ use super::*;
 impl Database {
     /// Reset a graph spec back to `Pending`, clearing `started_at` and
     /// `completed_at` unconditionally (unlike [`Self::update_graph_spec_status`],
-    /// which only overwrites when a new value is given). Used by `graph_reset`.
+    /// which only overwrites when a new value is given). Used by `graph_control`.
     ///
     /// `clear_cross_run_attempts` (C19) additionally zeroes the spec's
     /// persisted cross-run attempt counter — but only when the caller passed
@@ -43,9 +43,9 @@ impl Database {
 
     /// FR1: zero one spec's cross-run attempt count and nothing else — the
     /// status, heads and worktree stay as they are. An explicit operator
-    /// directive (`graph_continue` / `graph_run` with a start node) calls this
+    /// directive (`graph_control` / `graph_control` with a start node) calls this
     /// before its run starts, so the human ruling clears the limit the same way
-    /// a named `graph_reset` does.
+    /// a named `graph_control` does.
     pub fn clear_graph_spec_cross_run_attempts(&self, spec_id: &str) -> Result<bool> {
         let conn = self
             .conn
@@ -160,10 +160,10 @@ impl Database {
         Ok(SpecAdminStatusOutcome::Success)
     }
 
-    /// The single state-transition path behind `graph_reset` — resets a graph
+    /// The single state-transition path behind `graph_control` — resets a graph
     /// (and, without `specs`, every non-completed spec except an
     /// administratively skipped spec) back to `pending` so it can be
-    /// relaunched. Shared by the `graph_reset` MCP tool and the scheduler's
+    /// relaunched. Shared by the `graph_control` MCP tool and the scheduler's
     /// auto-reset-and-resume of a `failed` graph on autorun, so there is exactly
     /// one place that knows how to unstick a graph. The returned
     /// `skipped_count` reports administratively skipped specs preserved by a
@@ -174,7 +174,7 @@ impl Database {
     /// graph's own bound specs are typically empty for a queue run — so they're
     /// folded into the same eligible set as the graph's bound specs, both for
     /// validating an explicit `specs` list and for the "every non-completed"
-    /// default. This is the one reset implementation both `graph_reset` and
+    /// default. This is the one reset implementation both `graph_control` and
     /// the scheduler's autorun share; it must not be forked.
     pub fn reset_graph(
         &self,
@@ -431,7 +431,7 @@ impl Database {
 
     /// Update a standalone/backlog spec's name, description, and/or workdir
     /// tag. Unlike [`Self::update_graph_spec_details`] (position/parallelizable,
-    /// used by `graph_update_spec`), this is for `spec_update` and never
+    /// used by `graph_edit`), this is for `spec_update` and never
     /// touches graph assignment or ordering.
     pub fn update_spec_tag_details(
         &self,

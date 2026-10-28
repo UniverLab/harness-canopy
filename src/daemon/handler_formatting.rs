@@ -556,7 +556,7 @@ pub(crate) fn build_id_result(id: &str, key: &str) -> CallToolResult {
 }
 
 /// Return an arbitrary JSON value as a tool result — used by the copy tools
-/// (`graph_copy_node`/`graph_copy_ensemble`) whose response carries an explicit
+/// (`graph_node`/`graph_ensemble`) whose response carries an explicit
 /// old→new id mapping and a wiring report, not just a single id.
 pub(crate) fn build_json_result(value: &serde_json::Value) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(
@@ -1237,28 +1237,28 @@ mod formatting_unit_tests {
 
     #[test]
     fn write_error_busy_names_operation_and_says_retry() {
-        let mcp = write_error("graph_import", &busy_anyhow());
+        let mcp = write_error("graph_edit", &busy_anyhow());
         assert_eq!(mcp.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
         assert_eq!(
             mcp.message.to_string(),
-            "graph_import: database busy after 5 s — nothing was written, retry"
+            "graph_edit: database busy after 5 s — nothing was written, retry"
         );
     }
 
     #[test]
     fn write_error_non_busy_passes_through_unchanged() {
-        let mcp = write_error("graph_import", &anyhow::anyhow!("disk full"));
+        let mcp = write_error("graph_edit", &anyhow::anyhow!("disk full"));
         assert_eq!(mcp.message.to_string(), "disk full");
     }
 
     #[test]
     fn write_error_message_busy_and_plain() {
         assert_eq!(
-            write_error_message("graph_import", &busy_anyhow()),
-            "graph_import: database busy after 5 s — nothing was written, retry"
+            write_error_message("graph_edit", &busy_anyhow()),
+            "graph_edit: database busy after 5 s — nothing was written, retry"
         );
         assert_eq!(
-            write_error_message("graph_import", &anyhow::anyhow!("disk full")),
+            write_error_message("graph_edit", &anyhow::anyhow!("disk full")),
             "disk full"
         );
     }

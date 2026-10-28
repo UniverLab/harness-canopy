@@ -25,7 +25,7 @@ const SCHEMA_VERSION: i64 = 11;
 
 /// CM40: how long every daemon SQLite connection waits for a concurrent writer
 /// before failing with `SQLITE_BUSY`. Applied once, at open, in
-/// `db::connection`; the `graph_import` busy message renders this same value so
+/// `db::connection`; the `graph_edit` busy message renders this same value so
 /// the timeout and the message can never disagree.
 pub(crate) const DB_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -399,7 +399,7 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
 
             -- F1: an ensemble unit -- the members and join are ordinary
             -- graph_nodes/graph_edges rows (the engine's graph-walking code is
-            -- reused as-is); this row is what lets graph_get/graph_update_ensemble
+            -- reused as-is); this row is what lets graph/graph_ensemble
             -- address the whole ensemble as one thing instead of N+1 nodes.
             CREATE TABLE IF NOT EXISTS ensembles (
                 id TEXT PRIMARY KEY,

@@ -26,21 +26,17 @@ use std::sync::Arc;
 #[tool_router(router = tool_router_run_lifecycle, vis = "pub(crate)")]
 impl TaskTriggerHandler {
     /// Reset a `completed`/`failed` (or otherwise stalled) graph back to
-    /// `pending` so it can be relaunched via `graph_run`, which otherwise
+    /// `pending` so it can be relaunched via `graph_control`, which otherwise
     /// refuses to resume a completed or failed graph.
     ///
     /// This is also the exact state transition the scheduler uses to
-    /// auto-reset a `failed` graph when its `graph_schedule_autorun` fires —
+    /// auto-reset a `failed` graph when its `graph_control` fires —
     /// both paths call [`crate::db::Database::reset_graph`], so a human
     /// calling this tool and the scheduler resuming a failed graph on its own
     /// can never diverge in behavior.
-    #[tool(
-        name = "graph_reset",
-        description = "Reset a completed/failed graph back to pending so graph_run can relaunch it. Without `specs`, resets every non-completed spec, leaving already-completed ones untouched so graph_run resumes at the first pending spec. With `specs`, resets exactly those spec IDs, even if they were completed, and zeroes each named spec's execution count (the per-spec limit that refuses relaunch after repeated failures). A reset without `specs` keeps every spec's execution count. The worktree is never touched. If the graph's last run was against a queue, its queue members are what get reset (same semantics), since a queue run's own bound specs are typically empty. Rejects a `running` graph — call graph_pause first. Note: a `failed` graph with a pending graph_schedule_autorun resets and resumes itself automatically when the schedule fires — call this manually only to reset sooner, reset a `completed` graph, or reset specific spec IDs."
-    )]
-    pub(crate) async fn graph_reset(
+    pub(crate) async fn graph_reset_impl(
         &self,
-        Parameters(params): Parameters<GraphResetParams>,
+        params: GraphResetParams,
     ) -> Result<CallToolResult, McpError> {
         let graph_id = match resolve_prefix_or_error(
             &self.db,
@@ -65,62 +61,35 @@ impl TaskTriggerHandler {
     /// time is reached and the graph is fireable, then clears the schedule.
     ///
     /// Firing on a `failed` graph performs an explicit, logged
-    /// auto-reset-and-resume: it runs the same transition as `graph_reset`
+    /// auto-reset-and-resume: it runs the same transition as `graph_control`
     /// (see [`crate::db::Database::reset_graph`]) and then resumes execution —
     /// this is the sanctioned way a quota-failed graph revives itself
     /// unattended. Firing on a `completed` graph does not re-run it: that is
-    /// a human decision, made via `graph_reset` + `graph_run`.
-    #[tool(
-        name = "graph_schedule_autorun",
-        description = "Schedule a one-shot resume for a graph at a future ISO 8601 time, or cancel a pending one. When the scheduler reaches that time: a `failed` graph is auto-reset (same transition as graph_reset) and resumed — useful for a graph that failed on a quota to reschedule its own resumption at the exact reset time; a `completed` graph is left alone (the schedule is cleared but the graph is not re-run — use graph_reset + graph_run to re-run a finished graph); any other fireable status launches normally. If the graph's last run was against a queue, the resume targets that same queue (its pending members, in queue order) instead of the graph's own bound specs. The schedule always clears after firing (one-shot). Omit both `at` and `quota_reset_message` to cancel any pending autorun instead of scheduling one — valid regardless of the graph's current status, and a no-op (not an error) if nothing was scheduled. After a quota failure, prefer `quota_reset_message` (the raw CLI text, e.g. \"resets 1pm (America/Bogota)\") over computing `at` yourself — the engine parses the stated local time/timezone and converts it deterministically, avoiding scheduling errors from doing that arithmetic by hand."
-    )]
-    pub(crate) async fn graph_schedule_autorun(
+    /// a human decision, made via `graph_control` + `graph_control`.
+    pub(crate) async fn graph_schedule_autorun_impl(
         &self,
-        Parameters(params): Parameters<GraphScheduleAutorunParams>,
+        params: GraphScheduleAutorunParams,
     ) -> Result<CallToolResult, McpError> {
         self.schedule_autorun_impl(params.graph_id, params.at, params.quota_reset_message)
             .await
     }
 
-    #[tool(
-        name = "loop_schedule_autorun",
-        description = "Deprecated: renamed graph_schedule_autorun in 3.0.0. Same parameters and \
-        behaviour as graph_schedule_autorun; `loop_id` is still accepted as the graph id. Hidden \
-        from tool listings; call graph_schedule_autorun instead."
-    )]
-    pub(crate) async fn loop_schedule_autorun(
-        &self,
-        Parameters(params): Parameters<LoopScheduleAutorunParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let result = self
-            .schedule_autorun_impl(params.graph_id, params.at, params.quota_reset_message)
-            .await?;
-        Ok(with_deprecated_note(
-            result,
-            "loop_schedule_autorun was renamed graph_schedule_autorun in 3.0.0",
-        ))
-    }
-
     /// Schedule a one-shot deferred resume for a graph that is (or will be)
-    /// `Paused` — the counterpart to `graph_schedule_autorun` for a graph a
+    /// `Paused` — the counterpart to `graph_control` for a graph a
     /// user paused on purpose (e.g. to stop burning quota right now) rather
     /// than one that failed. When the scheduler reaches `at` and the graph is
-    /// still `Paused`, it fires the exact `graph_continue` action requested
+    /// still `Paused`, it fires the exact `graph_control` action requested
     /// here — preserving the paused cursor/context — instead of
     /// `autorun_at`'s reset-and-relaunch. If the graph is no longer `Paused`
     /// by then (resumed manually, failed, completed, running), the schedule
     /// is cleared without firing; it never double-runs. Always one-shot.
-    #[tool(
-        name = "graph_schedule_continue",
-        description = "Schedule a one-shot deferred graph_continue for a paused graph at a future ISO 8601 time, or cancel a pending one. When the scheduler reaches that time and the graph is still `paused`, it fires graph_continue with `action` (retry_current_node by default, or skip_next_spec) — resuming with the paused cursor/context intact, never resetting or relaunching. If the graph is no longer paused by then (already continued manually, failed, completed, running), the schedule is cleared without firing. The schedule always clears after firing (one-shot). Omit `at` (or pass null) to cancel any pending auto-continue instead of scheduling one — a no-op (not an error) if nothing was scheduled. Use this instead of graph_schedule_autorun to defer resuming a graph you paused on purpose, e.g. to stop burning quota now and pick back up automatically at a later time."
-    )]
-    pub(crate) async fn graph_schedule_continue(
+    pub(crate) async fn graph_schedule_continue_impl(
         &self,
-        Parameters(GraphScheduleContinueParams {
+        GraphScheduleContinueParams {
             graph_id: raw_graph_id,
             at,
-            action,
-        }): Parameters<GraphScheduleContinueParams>,
+            mode,
+        }: GraphScheduleContinueParams,
     ) -> Result<CallToolResult, McpError> {
         let graph_id = match resolve_prefix_or_error(
             &self.db,
@@ -160,10 +129,10 @@ impl TaskTriggerHandler {
             }));
         };
 
-        let action = action.unwrap_or_else(|| "retry_current_node".to_string());
-        if action != "retry_current_node" && action != "skip_next_spec" {
+        let mode = mode.unwrap_or_else(|| "retry_current_node".to_string());
+        if mode != "retry_current_node" && mode != "skip_next_spec" {
             return Ok(error_result(
-                "graph_schedule_continue action must be retry_current_node or skip_next_spec.",
+                "The schedule_continue mode must be retry_current_node or skip_next_spec.",
             ));
         }
 
@@ -178,7 +147,7 @@ impl TaskTriggerHandler {
         };
 
         self.db
-            .schedule_graph_auto_continue(&graph_id, at, Some(&action))
+            .schedule_graph_auto_continue(&graph_id, at, Some(&mode))
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         self.scheduler_notify.notify_one();
@@ -186,18 +155,14 @@ impl TaskTriggerHandler {
         Ok(success_result(&format!(
             "Graph '{}' scheduled to auto-continue ({}) at {}",
             graph_id,
-            action,
+            mode,
             at.to_rfc3339()
         )))
     }
 
-    #[tool(
-        name = "graph_pause",
-        description = "Pause a running graph. By default, waits for the current node to finish before pausing. Set `interrupt: true` to immediately stop the running node (marked as interrupted, not failed)."
-    )]
-    pub(crate) async fn graph_pause(
+    pub(crate) async fn graph_pause_impl(
         &self,
-        Parameters(params): Parameters<GraphPauseParams>,
+        params: GraphPauseParams,
     ) -> Result<CallToolResult, McpError> {
         let graph_id = match resolve_prefix_or_error(
             &self.db,
@@ -233,13 +198,9 @@ impl TaskTriggerHandler {
         }
     }
 
-    #[tool(
-        name = "graph_archive",
-        description = "Archive a graph: it leaves the main graph_list/sidebar view but its row, specs, and full run history are untouched (never deleted, never moved to another table) and it can be restored with graph_restore at any time. Refuses a `running` graph — pause it first. Permanent deletion is a separate, deliberate act on an already-archived graph, not something F4/this tool does."
-    )]
-    pub(crate) async fn graph_archive(
+    pub(crate) async fn graph_archive_impl(
         &self,
-        Parameters(params): Parameters<GraphArchiveParams>,
+        params: GraphArchiveParams,
     ) -> Result<CallToolResult, McpError> {
         let graph_id = match resolve_prefix_or_error(
             &self.db,
@@ -252,7 +213,7 @@ impl TaskTriggerHandler {
         };
         match self.db.archive_graph(&graph_id).map_err(internal_error)? {
             ArchiveGraphOutcome::Archived => Ok(success_result(&format!(
-                "Graph '{}' archived. Its specs and run history are intact; restore it with graph_restore.",
+                "Graph '{}' archived. Its specs and run history are intact; restore it with graph_edit.",
                 graph_id
             ))),
             ArchiveGraphOutcome::AlreadyArchived => Ok(error_result(&format!(
@@ -270,13 +231,9 @@ impl TaskTriggerHandler {
         }
     }
 
-    #[tool(
-        name = "graph_restore",
-        description = "Restore an archived graph back to the main graph_list/sidebar view. The graph's row, specs, and run history were never touched by archiving, so this is a plain flag flip."
-    )]
-    pub(crate) async fn graph_restore(
+    pub(crate) async fn graph_restore_impl(
         &self,
-        Parameters(params): Parameters<GraphRestoreParams>,
+        params: GraphRestoreParams,
     ) -> Result<CallToolResult, McpError> {
         let graph_id = match resolve_prefix_or_error(
             &self.db,
@@ -301,13 +258,9 @@ impl TaskTriggerHandler {
         }
     }
 
-    #[tool(
-        name = "graph_continue",
-        description = "Continue a paused or failed graph by retrying the current node or skipping to the next spec, or start a spec at a chosen node with action run_from_node (requires node_id; optional spec_id defaults to the current spec). On a failed graph, or a paused one whose current spec is pending with a recorded node, retry_current_node re-runs that node as a directed run. Each of these directives clears the spec's execution limit before it runs (the response says so); automatic re-runs do not."
-    )]
-    pub(crate) async fn graph_continue(
+    pub(crate) async fn graph_continue_impl(
         &self,
-        Parameters(params): Parameters<GraphContinueParams>,
+        params: GraphContinueParams,
     ) -> Result<CallToolResult, McpError> {
         let graph_id = match resolve_prefix_or_error(
             &self.db,
@@ -323,7 +276,7 @@ impl TaskTriggerHandler {
             Ok(None) => return Ok(error_result(&format!("Graph '{}' not found.", graph_id))),
             Err(e) => return Err(internal_error(e.to_string())),
         };
-        if params.action.trim() == "run_from_node" {
+        if params.mode.trim() == "run_from_node" {
             return self
                 .graph_continue_run_from_node(graph_id, lp, params.node_id, params.spec_id)
                 .await;
@@ -333,7 +286,7 @@ impl TaskTriggerHandler {
             return Ok(error_result(&not_continuable_refusal(&graph_id, lp.status)));
         }
 
-        let limit = match params.action.trim() {
+        let limit = match params.mode.trim() {
             "retry_current_node" => {
                 // FR6/FR7: a failed graph, or a pending spec with a recorded
                 // current node, restarts as a directed run at that node.
@@ -368,7 +321,7 @@ impl TaskTriggerHandler {
             }
             _ => {
                 return Ok(error_result(
-                    "graph_continue action must be retry_current_node, skip_next_spec or run_from_node.",
+                    "The continue mode must be retry_current_node, skip_next_spec or run_from_node.",
                 ));
             }
         };
@@ -376,12 +329,12 @@ impl TaskTriggerHandler {
         Arc::clone(&self.graph_engine).resume_background(graph_id.clone(), None);
 
         Ok(success_result(&format!(
-            "Graph '{}' resumed with action '{}'.{limit}",
-            graph_id, params.action
+            "Graph '{}' resumed with mode '{}'.{limit}",
+            graph_id, params.mode
         )))
     }
 
-    /// `graph_continue { run_from_node }`: run `spec` starting at a chosen node,
+    /// `graph_control { run_from_node }`: run `spec` starting at a chosen node,
     /// reusing earlier nodes' recorded outputs. Accepts any graph with no active
     /// run (paused, or completed/failed) — a directed run is the operator's tool
     /// for exactly those states.
@@ -418,7 +371,7 @@ impl TaskTriggerHandler {
             .map(str::to_string)
         else {
             return Ok(error_result(
-                "graph_continue run_from_node requires a non-empty node_id.",
+                "graph_control run_from_node requires a non-empty node_id.",
             ));
         };
         // FR3: an idea graph that never ran has no stored idea to resume —
@@ -437,7 +390,7 @@ impl TaskTriggerHandler {
         };
         // FR2 accepts a spec the run is `paused` on — which this schema
         // stores as spec status `running` with a paused graph and no active
-        // run (the exact state `graph_pause` mid-spec leaves behind). Only
+        // run (the exact state `graph_control` mid-spec leaves behind). Only
         // `skipped` is outside the accepted states; an active run was already
         // refused above.
         if spec.status == crate::domain::graphs::GraphSpecStatus::Skipped {
@@ -609,7 +562,7 @@ impl TaskTriggerHandler {
         self.commit_graph_autorun(&graph_id, at)
     }
 
-    /// Shared tail of `graph_schedule_autorun`'s two entry points (`at` and
+    /// Shared tail of `graph_control`'s two entry points (`at` and
     /// `quota_reset_message`): persist the schedule (idempotent — a retry
     /// with the same `graph_id`/`at` after a lost ack just re-overwrites the
     /// same single-column schedule, never creating a second pending
@@ -711,7 +664,7 @@ impl TaskTriggerHandler {
     }
 }
 
-/// Core logic for `graph_reset`, factored out of the tool method so it only
+/// Core logic for `graph_control`, factored out of the tool method so it only
 /// needs `&Database` (no engine/executor) and can be unit-tested directly.
 ///
 /// Delegates the actual state transition to [`Database::reset_graph`] — the

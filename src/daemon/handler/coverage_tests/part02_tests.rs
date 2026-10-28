@@ -78,7 +78,7 @@ fn cb43_run_pair_appears_in_both_list_modes() {
 /// of what" purely from the session id a resumed run's own row carries
 /// verbatim — no dedicated column. Two rows on the same node share
 /// `session_id`; the later one (by insertion order) resumed the earlier
-/// one, never the reverse, and `graph_node_run_get`'s JSON surfaces it.
+/// one, never the reverse, and `graph`'s JSON surfaces it.
 #[test]
 fn graph_node_run_get_reports_resumed_from_run_id_for_ensemble_member() {
     let dir = tempdir().unwrap();

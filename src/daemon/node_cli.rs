@@ -246,9 +246,9 @@ fn install_report_lines(report: &serde_json::Value) -> Vec<String> {
         format!("presets_written: {}", presets.join(", "))
     });
     let add = if kind == "ensemble" {
-        "graph_add_ensemble"
+        "graph_ensemble add"
     } else {
-        "graph_add_node"
+        "graph_node add"
     };
     lines.push(format!(
         "next: add it to a graph with {add} (node: \"{name}\")."
@@ -369,7 +369,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains("graph_add_node") && line.contains("auditor")),
+                .any(|line| line.contains("graph_node add") && line.contains("auditor")),
             "{lines:?}"
         );
         let ensemble = install_report_lines(&serde_json::json!({
@@ -381,7 +381,7 @@ mod tests {
         assert!(
             ensemble
                 .iter()
-                .any(|line| line.contains("graph_add_ensemble")),
+                .any(|line| line.contains("graph_ensemble add")),
             "{ensemble:?}"
         );
         assert!(

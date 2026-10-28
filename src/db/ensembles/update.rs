@@ -26,7 +26,7 @@ impl Database {
     /// Update the shared prompt on the `ensembles` row itself. Propagating it
     /// onto every member node's `config` is the caller's job (via
     /// `update_graph_node_details`) — this only updates the source-of-truth
-    /// row `graph_get` reads back.
+    /// row `graph` reads back.
     pub fn update_ensemble_prompt(&self, ensemble_id: &str, prompt_template: &str) -> Result<bool> {
         let conn = self
             .conn

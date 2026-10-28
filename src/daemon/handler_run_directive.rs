@@ -124,18 +124,18 @@ pub(crate) fn restart_at_node(
         }),
     );
     Ok(success_result(&format!(
-        "Graph '{graph_id}' resumed with action 'retry_current_node'.{limit}{}",
+        "Graph '{graph_id}' resumed with mode 'retry_current_node'.{limit}{}",
         directed_run_report(Some(&plan))
     )))
 }
 
-/// Refusal for `graph_continue` on a graph that is neither `paused` nor
+/// Refusal for `graph_control` on a graph that is neither `paused` nor
 /// `failed`: names the status and the ways out.
 pub(crate) fn not_continuable_refusal(graph_id: &str, status: GraphStatus) -> String {
     format!(
-        "Graph '{graph_id}' is '{}', not paused or failed, so graph_continue cannot act on it. \
-         Use `run_from_node` with `spec_id`, or `graph_reset` with `specs: [<spec id>]` then \
-         `graph_run`.",
+        "Graph '{graph_id}' is '{}', not paused or failed, so graph_control continue cannot act on it. \
+         Use `graph_control continue` with mode `run_from_node` and `spec_id`, or `graph_control reset` \
+         with `specs: [<spec id>]` then `graph_control run`.",
         status.as_str()
     )
 }

@@ -7,7 +7,7 @@
 //! ensemble shared prompt and member `prompt_override`, bundled preset
 //! content, builtin preset content — and [`render`] turns the result into
 //! the summary `canopy graph install`/`canopy node install` print before
-//! asking. The MCP `graph_install`/`node_install` tools serialize the same
+//! asking. The MCP `graph_edit`/`node_install` tools serialize the same
 //! struct into their `review` field, so the CLI, the MCP surface and the web
 //! can never disagree about what a document runs.
 

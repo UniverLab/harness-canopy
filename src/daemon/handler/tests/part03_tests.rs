@@ -2,11 +2,9 @@
 use super::*;
 
 /// Omitting `at` must cancel a pending auto-continue schedule, mirroring
-/// `graph_schedule_autorun`'s cancel semantics (B41).
+/// `graph_control`'s cancel semantics (B41).
 #[tokio::test]
 async fn graph_schedule_continue_cancels_pending_schedule() {
-    use crate::daemon::params_extract::Parameters;
-
     let (dir, db, handler) = queue_test_handler();
     let graph_id = "graph-paused-continue-cancel";
     db.insert_graph(&autorun_test_graph(
@@ -22,14 +20,18 @@ async fn graph_schedule_continue_cancels_pending_schedule() {
     )
     .unwrap();
 
-    let result = handler
-        .graph_schedule_continue(Parameters(GraphScheduleContinueParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "schedule_continue",
+        params_id(GraphScheduleContinueParams {
             graph_id: graph_id.to_string(),
             at: None,
-            action: None,
-        }))
-        .await
-        .unwrap();
+            mode: None,
+        }),
+    )
+    .await
+    .unwrap();
 
     let text = result_text(&result);
     assert!(text.contains("cancelled"), "{text}");
@@ -48,8 +50,6 @@ async fn graph_schedule_continue_cancels_pending_schedule() {
 /// Cancelling when nothing is scheduled must succeed and say so.
 #[tokio::test]
 async fn graph_schedule_continue_cancel_with_nothing_scheduled_is_not_an_error() {
-    use crate::daemon::params_extract::Parameters;
-
     let (dir, db, handler) = queue_test_handler();
     let graph_id = "graph-paused-no-continue";
     db.insert_graph(&autorun_test_graph(
@@ -59,27 +59,29 @@ async fn graph_schedule_continue_cancel_with_nothing_scheduled_is_not_an_error()
     ))
     .unwrap();
 
-    let result = handler
-        .graph_schedule_continue(Parameters(GraphScheduleContinueParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "schedule_continue",
+        params_id(GraphScheduleContinueParams {
             graph_id: graph_id.to_string(),
             at: None,
-            action: None,
-        }))
-        .await
-        .unwrap();
+            mode: None,
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(!result.is_error.unwrap_or(false), "{result:?}");
     let text = result_text(&result);
     assert!(text.contains("no pending auto-continue"), "{text}");
 }
 
-/// Scheduling `graph_schedule_continue` must never touch `autorun_at`,
+/// Scheduling `graph_control` must never touch `autorun_at`,
 /// and vice versa — the two schedules must stay fully independent so
 /// they can never be conflated at fire time.
 #[tokio::test]
 async fn graph_schedule_continue_and_graph_schedule_autorun_are_independent() {
-    use crate::daemon::params_extract::Parameters;
-
     let (dir, db, handler) = queue_test_handler();
     let graph_id = "graph-independent-schedules";
     db.insert_graph(&autorun_test_graph(
@@ -89,20 +91,24 @@ async fn graph_schedule_continue_and_graph_schedule_autorun_are_independent() {
     ))
     .unwrap();
 
-    handler
-        .graph_schedule_continue(Parameters(GraphScheduleContinueParams {
+    call_graph_action(
+        &handler,
+        "graph_control",
+        "schedule_continue",
+        params_id(GraphScheduleContinueParams {
             graph_id: graph_id.to_string(),
             at: Some((chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339()),
-            action: None,
-        }))
-        .await
-        .unwrap();
+            mode: None,
+        }),
+    )
+    .await
+    .unwrap();
 
     let lp = db.get_graph(graph_id).unwrap().unwrap();
     assert!(lp.auto_continue_at.is_some());
     assert!(
         lp.autorun_at.is_none(),
-        "graph_schedule_continue must not set autorun_at"
+        "graph_control must not set autorun_at"
     );
 }
 
@@ -177,7 +183,7 @@ fn graph_copy_node_unwired_copy_is_valid_and_reported() {
     // The response note must flag the unwired state explicitly.
     let note = node_copy_note(&plan.source_id, &plan.node.id, false);
     assert!(note.contains("Unwired copy"), "{note}");
-    assert!(note.contains("graph_add_edge"), "{note}");
+    assert!(note.contains("graph_edge"), "{note}");
 }
 
 #[test]
@@ -203,7 +209,7 @@ fn graph_copy_node_rejects_ensemble_owned_source() {
     }))
     .unwrap();
     let err = plan_node_copy(&db, &params).unwrap_err();
-    assert!(err.contains("graph_copy_ensemble"), "{err}");
+    assert!(err.contains("graph_ensemble"), "{err}");
 }
 
 /// CM2: copying a node into a graph with `infra_node_id` set must

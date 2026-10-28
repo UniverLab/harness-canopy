@@ -84,20 +84,6 @@ any other tool still work. All other sessions keep the full list.
 
 | Tool | Description |
 |---|---|
-| `graph_create` | Create a graph container. `require_spec_type: true` (default `false`) makes it refuse specs without a type |
-| `graph_update` | Update graph metadata and hooks, including `require_spec_type` |
-| `graph_add_spec` | Add an ordered spec to a graph. Supports `spec_type` and `spec_scope` to enable automatic code generation. A graph with `require_spec_type: true` refuses specs without a type. A spec added while the graph runs joins the running dispatch in position order (bound specs are read live at every advance), and the run cannot report completion while it is pending — it fails naming the spec instead |
-| `graph_update_spec` | Update a graph spec. Accepts `spec_type` and `spec_scope` |
-| `graph_remove_spec` | Unbind a spec from a graph, making it a standalone backlog spec; execution history is preserved. |
-| `graph_add_node` | Add a node to a graph |
-| `graph_update_node` | Update a graph node |
-| `graph_add_edge` | Connect graph nodes |
-| `graph_update_edge` | Update a graph edge |
-| `graph_delete_edge` | Delete a graph edge |
-| `graph_delete_node` | Delete a graph node |
-| `graph_add_ensemble` | Add an ensemble to a graph |
-| `graph_update_ensemble` | Update an ensemble |
-| `graph_delete_ensemble` | Delete an ensemble |
 | `crew_list` | List every crew: name, description, version, ordered members, and how many ensembles/nodes/hooks bind it |
 | `crew_get` | Show one crew and every binding of it |
 | `crew_create` | Create a crew from an ordered member list, or seed it from an ensemble's current members |
@@ -107,30 +93,15 @@ any other tool still work. All other sessions keep the full list.
 | `config_get` | Read one setting by its dotted key (e.g. `clean.retention_days`) |
 | `config_set` | Change one setting, validated against its type and range first (nothing is written on refusal); returns the new effective value and what the user must do — `applied`, `applies on next run`, `restart the daemon`, or `restart the TUI` |
 | `config_reset` | Reset one setting to its registry default, through the same validating path as `config_set` |
-| `graph_get` | Get a graph with its specs, nodes, and edges |
-| `graph_list` | List graphs |
+| `graph` | Read graphs, specs, node runs, and events. Actions: `list`, `get`, `export`, `validate`, `audit`, `events`, `node_runs`, `node_run` — pass `action` plus the params the refusal/table lists (e.g. `get` needs `graph_id`; `node_run` needs `run_id`) |
+| `graph_edit` | Create, change, and archive graphs and their specs. Actions: `create`, `update`, `archive`, `restore`, `import`, `install`, `attach_spec`, `detach_spec`, `update_spec` — the old one-operation graph authoring tools, now one tool with an `action` parameter and the same per-action params |
+| `graph_node` | Author graph nodes. Actions: `add` (kind+config, blueprint, or node document + `config_overrides`), `update`, `delete`, `copy`. Never completes a node or reports a blocker — node sessions keep using `graph_complete_node` / `graph_report_blocker` |
+| `graph_edge` | Wire graph nodes. Actions: `add`, `update`, `delete` (params unchanged: `from_node`/`to_node`/`condition`/`route`, `edge_id`, …) |
+| `graph_ensemble` | Author multi-member ensembles. Actions: `add`, `update`, `delete`, `copy` (params unchanged: `members`, `min_pass`, `on_pass_to`, …) |
+| `graph_control` | Run and manage graph execution. Actions: `run`, `pause`, `continue` (required `mode`: retry_current_node / skip_next_spec / run_from_node), `reset`, `preflight`, `schedule_continue` (optional `mode`: retry_current_node / skip_next_spec), `schedule_autorun` |
 | `graph_crew` | List every graph's harness/model assignments — agent nodes outside ensembles, ensemble members and agent hooks with platform, model, timeout, crew and availability; `group_by: "pair"` summarises per platform/model pair. No prompt text is returned |
-| `graph_run` | Run a graph (optionally `start_node_id` to start the first spec at a chosen node — a directed start clears that spec's execution count before it runs and the reply says `Execution limit reset for spec '<name>'`). `sandbox: true` runs the graph in a temporary git worktree on a `canopy/sandbox-*` branch instead of your checkout; a completed run removes it only when it holds no unique commits and no uncommitted changes, while a failed run always keeps it ([Sandboxes](graphs.md#sandboxes)) |
-| `graph_reset` | Reset a graph's pending specs; with `specs: [<id>, …]` exactly those specs are reset and each named spec's execution count (the per-spec failure limit) is zeroed, while a reset without `specs` keeps every count — the worktree is never touched. `clear_notes: true` also deletes the reset specs' spec notes (kept by default) |
-| `graph_schedule_autorun` | Schedule a graph to resume or run |
-| `graph_pause` | Pause a running graph |
-| `graph_continue` | Continue a paused **or failed** graph (retry/skip), or start a spec at a chosen node with `run_from_node` (`node_id` names the node the spec starts at; `spec_id` names the spec and defaults to the graph's current spec — in a queue-driven graph: a running/interrupted member, else a failed one, else the next pending one). `retry_current_node` also resumes a paused graph whose current spec is `pending` with a recorded node (the state daemon recovery leaves after a reboot mid-node). `retry_current_node` and `run_from_node` (like `graph_run`'s `start_node_id`) clear the targeted spec's execution count before it runs and the reply says `Execution limit reset for spec '<name>'`; automatic re-runs keep the count. Any other graph status is refused naming the status and the ways out (`run_from_node` with `spec_id`, or `graph_reset` with `specs: [<spec id>]` then `graph_run`). The launch is refused, naming the node, if an upstream node's latest run failed, errored or was interrupted. On an idea-driven graph (one run with an `idea`), `run_from_node` and `retry_current_node` resume that idea run — `{{spec_content}}` renders the stored idea and `spec_id` defaults to the run's blank-name bookkeeping spec; an idea graph that has never run is refused, naming `graph_run` with an `idea` as the way to start one. On a sandboxed graph whose sandbox a failure kept, the resume runs inside that worktree; when the worktree is gone the continue is refused, naming the sandbox id, instead of running against the original workdir |
 | `graph_complete_node` | Complete an active graph node |
 | `graph_report_blocker` | Report a blocker for an active graph node |
-| `graph_export` | Export a graph design |
-| `graph_import` | Import a graph design |
-| `graph_install` | Install a graph from the catalogue in one command — `ref`, `workdir`, `name?`, `overwrite_presets?`, `accept?`. `ref` is a slug, `<owner>/<repo>/<slug>` (each with an optional `@<ref>`) or `draft:<id>` for an unreviewed editor draft, installable once in 30 minutes. Without `accept: true` it writes nothing and returns `{needs_review: true, review}`: every shell command labelled by node or hook, every agent prompt with its first 3 lines and line count, and the attention marks. An agent must show that review to its user before calling again with `accept: true`, which installs and echoes the same review ([Install a graph](graphs.md#install-a-graph)) |
-| `graph_validate` | Validate a shared graph or node document without importing it — `path` or `document`, exactly one |
-| `graph_archive` | Archive a graph |
-| `graph_restore` | Restore an archived graph |
-| `graph_node_runs_list` | List a graph's node run history |
-| `graph_node_run_get` | Fetch a graph node run's full input and output |
-| `graph_events` | Read a graph's durable event log (oldest-first, with `since_id` paging) |
-| `graph_copy_node` | Copy a graph node configuration |
-| `graph_copy_ensemble` | Copy an ensemble configuration |
-| `graph_audit_node_configs` | Audit graph node configurations |
-| `graph_schedule_continue` | Schedule a paused graph to continue |
-| `graph_preflight` | Probe graph agent platforms and models before running |
 
 Every authoring tool that stores prompt text — `graph_add_node`,
 `graph_update_node`, `graph_add_ensemble`, `graph_update_ensemble`,
@@ -155,7 +126,6 @@ counted in the 122 tools above.
 |---|---|
 | `loop_complete_node` | `graph_complete_node` |
 | `loop_report_blocker` | `graph_report_blocker` |
-| `loop_schedule_autorun` | `graph_schedule_autorun` (also still accepts a `loop_id` argument as `graph_id`) |
 
 A successful call through any of these three carries an extra `deprecated`
 field naming the rename. No other `loop_*` tool has a 3.x alias — every

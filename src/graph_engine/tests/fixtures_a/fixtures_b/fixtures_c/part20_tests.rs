@@ -319,7 +319,7 @@ async fn resumed_idea_run_carries_previous_feedback_and_stored_idea_to_agent() {
     assert_eq!(lp.status, GraphStatus::Failed);
     let placeholder = db.list_graph_specs(&graph_id).unwrap()[0].clone();
 
-    // The resume (graph_continue's non-directed path on a failed graph).
+    // The resume (graph_control's non-directed path on a failed graph).
     engine
         .run_graph_dispatch(
             graph_id.clone(),

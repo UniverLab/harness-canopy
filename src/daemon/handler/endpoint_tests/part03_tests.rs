@@ -8,33 +8,45 @@ async fn graph_import_dedupes_colliding_name_with_numeric_suffix() {
     let (dir, db, handler) = endpoint_test_handler();
     let workdir = dir.path().to_string_lossy().to_string();
     let (source_graph_id, ..) = build_simple_graph(&handler, &workdir, "Source Graph").await;
-    let exported = handler
-        .graph_export(Parameters(GraphExportParams {
+    let exported = call_graph_action(
+        &handler,
+        "graph",
+        "export",
+        params_id(GraphExportParams {
             graph_id: source_graph_id,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let document: serde_json::Value = serde_json::from_str(&raw_text(&exported)).unwrap();
 
-    let first = handler
-        .graph_import(Parameters(GraphImportParams {
+    let first = call_graph_action(
+        &handler,
+        "graph_edit",
+        "import",
+        params_id(GraphImportParams {
             document: document.clone(),
             workdir: workdir.clone(),
             name: Some("Collide".to_string()),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let first_body: serde_json::Value = serde_json::from_str(&raw_text(&first)).unwrap();
     assert_eq!(first_body["name"], "Collide");
 
-    let second = handler
-        .graph_import(Parameters(GraphImportParams {
+    let second = call_graph_action(
+        &handler,
+        "graph_edit",
+        "import",
+        params_id(GraphImportParams {
             document,
             workdir: workdir.clone(),
             name: Some("Collide".to_string()),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let second_body: serde_json::Value = serde_json::from_str(&raw_text(&second)).unwrap();
     assert_eq!(second_body["name"], "Collide (2)");
     assert_ne!(second_body["graph_id"], first_body["graph_id"]);
@@ -59,14 +71,18 @@ async fn graph_import_rejects_bad_edge_reference_and_writes_nothing() {
         "ensembles": []
     });
 
-    let result = handler
-        .graph_import(Parameters(GraphImportParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_edit",
+        "import",
+        params_id(GraphImportParams {
             document,
             workdir: workdir.clone(),
             name: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&result));
     assert!(text(&result).contains("ghost"));
     assert!(db.list_graphs(Some(&workdir), true).unwrap().is_empty());
@@ -83,14 +99,18 @@ async fn graph_import_rejects_missing_format_version() {
         "ensembles": []
     });
 
-    let result = handler
-        .graph_import(Parameters(GraphImportParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_edit",
+        "import",
+        params_id(GraphImportParams {
             document,
             workdir: workdir.clone(),
             name: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&result));
     assert!(text(&result).contains("format_version"));
     assert!(db.list_graphs(Some(&workdir), true).unwrap().is_empty());
@@ -105,8 +125,11 @@ async fn graph_export_import_v2_round_trip_preserves_ensemble() {
     let (dir, _db, handler) = endpoint_test_handler();
     let workdir = dir.path().to_string_lossy().to_string();
 
-    let created = handler
-        .graph_create(Parameters(GraphCreateParams {
+    let created = call_graph_action(
+        &handler,
+        "graph_edit",
+        "create",
+        params_id(GraphCreateParams {
             name: "Ensemble Graph".to_string(),
             description: Some("Has an ensemble".to_string()),
             workdir: workdir.clone(),
@@ -114,13 +137,17 @@ async fn graph_export_import_v2_round_trip_preserves_ensemble() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let graph_id = extract_id(&created, "graph_id");
 
-    let kickoff = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let kickoff = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: None,
             graph_id: Some(graph_id.clone()),
             name: "kickoff".to_string(),
@@ -129,13 +156,17 @@ async fn graph_export_import_v2_round_trip_preserves_ensemble() {
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let kickoff_id = extract_id(&kickoff, "node_id");
 
-    let downstream = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let downstream = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: None,
             graph_id: Some(graph_id.clone()),
             name: "downstream".to_string(),
@@ -144,13 +175,17 @@ async fn graph_export_import_v2_round_trip_preserves_ensemble() {
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let downstream_id = extract_id(&downstream, "node_id");
 
-    let ensemble = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let ensemble = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: None,
@@ -193,15 +228,20 @@ async fn graph_export_import_v2_round_trip_preserves_ensemble() {
             quorum_grace_minutes: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&ensemble), "{}", text(&ensemble));
 
-    let first_export = handler
-        .graph_export(Parameters(GraphExportParams { graph_id }))
-        .await
-        .unwrap();
+    let first_export = call_graph_action(
+        &handler,
+        "graph",
+        "export",
+        params_id(GraphExportParams { graph_id }),
+    )
+    .await
+    .unwrap();
     let first_doc: serde_json::Value = serde_json::from_str(&raw_text(&first_export)).unwrap();
     assert_eq!(first_doc["ensembles"].as_array().unwrap().len(), 1);
     // CM32: the export document carries slugs only — no display string
@@ -212,14 +252,18 @@ async fn graph_export_import_v2_round_trip_preserves_ensemble() {
     // The plain node list must exclude the ensemble's member/join nodes.
     assert_eq!(first_doc["nodes"].as_array().unwrap().len(), 2);
 
-    let imported = handler
-        .graph_import(Parameters(GraphImportParams {
+    let imported = call_graph_action(
+        &handler,
+        "graph_edit",
+        "import",
+        params_id(GraphImportParams {
             document: first_doc.clone(),
             workdir: workdir.clone(),
             name: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&imported), "{}", text(&imported));
     let imported_body: serde_json::Value = serde_json::from_str(&raw_text(&imported)).unwrap();
     let new_graph_id = imported_body["graph_id"].as_str().unwrap().to_string();
@@ -231,12 +275,16 @@ async fn graph_export_import_v2_round_trip_preserves_ensemble() {
         .unwrap()
         .is_empty());
 
-    let second_export = handler
-        .graph_export(Parameters(GraphExportParams {
+    let second_export = call_graph_action(
+        &handler,
+        "graph",
+        "export",
+        params_id(GraphExportParams {
             graph_id: new_graph_id,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let mut second_doc: serde_json::Value =
         serde_json::from_str(&raw_text(&second_export)).unwrap();
     // Identical except the name (decision 4 renamed it on collision).
@@ -248,15 +296,18 @@ async fn graph_export_import_v2_round_trip_preserves_ensemble() {
 async fn graph_export_import_round_trip_preserves_all_ensemble_kinds() {
     // CB62 end-to-end: cascade + round_robin ensembles survive export ->
     // import -> export identical (modulo the collision-rename), so
-    // `graph_get` on the imported graph shows cascade/round_robin, not
+    // `graph` on the imported graph shows cascade/round_robin, not
     // parallel. CB71 carries the cascade's second entry source in the
     // document. Infra budgets remain absent, and the round trip stays
     // identical for them because both exports omit them.
     let (dir, _db, handler) = endpoint_test_handler();
     let workdir = dir.path().to_string_lossy().to_string();
 
-    let created = handler
-        .graph_create(Parameters(GraphCreateParams {
+    let created = call_graph_action(
+        &handler,
+        "graph_edit",
+        "create",
+        params_id(GraphCreateParams {
             name: "Kind Graph".to_string(),
             description: None,
             workdir: workdir.clone(),
@@ -264,13 +315,17 @@ async fn graph_export_import_round_trip_preserves_all_ensemble_kinds() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let graph_id = extract_id(&created, "graph_id");
 
-    let kickoff = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let kickoff = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: None,
             graph_id: Some(graph_id.clone()),
             name: "kickoff".to_string(),
@@ -279,13 +334,17 @@ async fn graph_export_import_round_trip_preserves_all_ensemble_kinds() {
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let kickoff_id = extract_id(&kickoff, "node_id");
 
-    let alt = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let alt = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: None,
             graph_id: Some(graph_id.clone()),
             name: "alt".to_string(),
@@ -294,13 +353,17 @@ async fn graph_export_import_round_trip_preserves_all_ensemble_kinds() {
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let alt_id = extract_id(&alt, "node_id");
 
-    let downstream = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let downstream = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: None,
             graph_id: Some(graph_id.clone()),
             name: "downstream".to_string(),
@@ -309,26 +372,34 @@ async fn graph_export_import_round_trip_preserves_all_ensemble_kinds() {
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let downstream_id = extract_id(&downstream, "node_id");
 
-    let wired = handler
-        .graph_add_edge(Parameters(GraphAddEdgeParams {
+    let wired = call_graph_action(
+        &handler,
+        "graph_edge",
+        "add",
+        params_id(GraphAddEdgeParams {
             spec_id: None,
             graph_id: Some(graph_id.clone()),
             from_node: kickoff_id.clone(),
             to_node: alt_id.clone(),
             condition: "always".to_string(),
             route: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&wired), "{}", text(&wired));
 
-    let cascade = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let cascade = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: None,
@@ -371,14 +442,18 @@ async fn graph_export_import_round_trip_preserves_all_ensemble_kinds() {
             quorum_grace_minutes: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&cascade), "{}", text(&cascade));
     let cascade_id = extract_id(&cascade, "ensemble_id");
 
-    let round_robin = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let round_robin = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
             spec_id: None,
@@ -421,13 +496,17 @@ async fn graph_export_import_round_trip_preserves_all_ensemble_kinds() {
             quorum_grace_minutes: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&round_robin), "{}", text(&round_robin));
 
-    let second_source = handler
-        .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+    let second_source = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "update",
+        params_id(GraphUpdateEnsembleParams {
             mutex: None,
             ensemble_id: cascade_id.clone(),
             kind: None,
@@ -450,36 +529,49 @@ async fn graph_export_import_round_trip_preserves_all_ensemble_kinds() {
             commit_rights: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&second_source), "{}", text(&second_source));
 
-    let first_export = handler
-        .graph_export(Parameters(GraphExportParams { graph_id }))
-        .await
-        .unwrap();
+    let first_export = call_graph_action(
+        &handler,
+        "graph",
+        "export",
+        params_id(GraphExportParams { graph_id }),
+    )
+    .await
+    .unwrap();
     let first_doc: serde_json::Value = serde_json::from_str(&raw_text(&first_export)).unwrap();
     assert_eq!(first_doc["ensembles"].as_array().unwrap().len(), 2);
 
-    let imported = handler
-        .graph_import(Parameters(GraphImportParams {
+    let imported = call_graph_action(
+        &handler,
+        "graph_edit",
+        "import",
+        params_id(GraphImportParams {
             document: first_doc.clone(),
             workdir: workdir.clone(),
             name: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&imported), "{}", text(&imported));
     let imported_body: serde_json::Value = serde_json::from_str(&raw_text(&imported)).unwrap();
     let new_graph_id = imported_body["graph_id"].as_str().unwrap().to_string();
 
-    let second_export = handler
-        .graph_export(Parameters(GraphExportParams {
+    let second_export = call_graph_action(
+        &handler,
+        "graph",
+        "export",
+        params_id(GraphExportParams {
             graph_id: new_graph_id,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let mut second_doc: serde_json::Value =
         serde_json::from_str(&raw_text(&second_export)).unwrap();
     second_doc["name"] = first_doc["name"].clone();
@@ -518,8 +610,11 @@ async fn graph_export_import_round_trip_preserves_ensemble_commit_rights() {
     let (dir, db, handler) = endpoint_test_handler();
     let workdir = dir.path().to_string_lossy().to_string();
 
-    let created = handler
-        .graph_create(Parameters(GraphCreateParams {
+    let created = call_graph_action(
+        &handler,
+        "graph_edit",
+        "create",
+        params_id(GraphCreateParams {
             name: "Commit Rights Ensemble Graph".to_string(),
             description: None,
             workdir: workdir.clone(),
@@ -527,13 +622,17 @@ async fn graph_export_import_round_trip_preserves_ensemble_commit_rights() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let graph_id = extract_id(&created, "graph_id");
 
-    let kickoff = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let kickoff = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: None,
             graph_id: Some(graph_id.clone()),
             name: "kickoff".to_string(),
@@ -542,13 +641,17 @@ async fn graph_export_import_round_trip_preserves_ensemble_commit_rights() {
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let kickoff_id = extract_id(&kickoff, "node_id");
 
-    let downstream = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let downstream = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: None,
             graph_id: Some(graph_id.clone()),
             name: "downstream".to_string(),
@@ -557,13 +660,17 @@ async fn graph_export_import_round_trip_preserves_ensemble_commit_rights() {
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let downstream_id = extract_id(&downstream, "node_id");
 
-    let ensemble = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let ensemble = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: Some(true),
             spec_id: None,
@@ -606,15 +713,20 @@ async fn graph_export_import_round_trip_preserves_ensemble_commit_rights() {
             quorum_grace_minutes: None,
 
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&ensemble), "{}", text(&ensemble));
 
-    let exported = handler
-        .graph_export(Parameters(GraphExportParams { graph_id }))
-        .await
-        .unwrap();
+    let exported = call_graph_action(
+        &handler,
+        "graph",
+        "export",
+        params_id(GraphExportParams { graph_id }),
+    )
+    .await
+    .unwrap();
     let doc: serde_json::Value = serde_json::from_str(&raw_text(&exported)).unwrap();
     assert_eq!(doc["ensembles"].as_array().unwrap().len(), 1);
     assert_eq!(
@@ -623,14 +735,18 @@ async fn graph_export_import_round_trip_preserves_ensemble_commit_rights() {
         "export must carry the ensemble's commit_rights: {doc}"
     );
 
-    let imported = handler
-        .graph_import(Parameters(GraphImportParams {
+    let imported = call_graph_action(
+        &handler,
+        "graph_edit",
+        "import",
+        params_id(GraphImportParams {
             document: doc,
             workdir: workdir.clone(),
             name: Some("Commit Rights Ensemble Graph Imported".to_string()),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&imported), "{}", text(&imported));
     let imported_body: serde_json::Value = serde_json::from_str(&raw_text(&imported)).unwrap();
     let new_graph_id = imported_body["graph_id"].as_str().unwrap().to_string();
@@ -649,12 +765,15 @@ async fn graph_preflight_rejects_unknown_named_output_reference() {
     // prompt references `{{output:Ghost}}` — a node that isn't in the
     // graph. Preflight must reject it before spending any probe quota,
     // not leave the marker to surface unsubstituted at runtime (CM1).
-    // Inserted straight into the DB: `graph_add_node` now refuses such a
+    // Inserted straight into the DB: `graph_node` now refuses such a
     // template at write time, so only a pre-existing row can carry it.
     let (dir, db, handler) = endpoint_test_handler();
     let workdir = dir.path().to_string_lossy().to_string();
-    let created = handler
-        .graph_create(Parameters(GraphCreateParams {
+    let created = call_graph_action(
+        &handler,
+        "graph_edit",
+        "create",
+        params_id(GraphCreateParams {
             name: "Preflight Named Output Graph".to_string(),
             description: None,
             workdir,
@@ -662,13 +781,17 @@ async fn graph_preflight_rejects_unknown_named_output_reference() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let graph_id = extract_id(&created, "graph_id");
 
-    let alpha = handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    let alpha = call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: None,
             graph_id: Some(graph_id.clone()),
             name: "alpha".to_string(),
@@ -677,9 +800,10 @@ async fn graph_preflight_rejects_unknown_named_output_reference() {
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let alpha_id = extract_id(&alpha, "node_id");
 
     let mut beta_config = agent_node_config("claude");
@@ -700,27 +824,35 @@ async fn graph_preflight_rejects_unknown_named_output_reference() {
     })
     .unwrap();
 
-    let edge = handler
-        .graph_add_edge(Parameters(GraphAddEdgeParams {
+    let edge = call_graph_action(
+        &handler,
+        "graph_edge",
+        "add",
+        params_id(GraphAddEdgeParams {
             spec_id: None,
             graph_id: Some(graph_id.clone()),
             from_node: alpha_id,
             to_node: beta_id,
             condition: "always".to_string(),
             route: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&edge), "{}", text(&edge));
 
-    let result = handler
-        .graph_preflight(Parameters(GraphPreflightParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "preflight",
+        params_id(GraphPreflightParams {
             graph_id: graph_id.clone(),
             timeout_seconds: None,
             reviewer: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(
         is_err(&result),
         "preflight should reject the unknown named-output reference: {}",
@@ -738,8 +870,11 @@ async fn graph_preflight_reports_graph_validation_errors() {
     // Two agent nodes with no edge between them => multiple entry points.
     let (dir, _db, handler) = endpoint_test_handler();
     let workdir = dir.path().to_string_lossy().to_string();
-    let created = handler
-        .graph_create(Parameters(GraphCreateParams {
+    let created = call_graph_action(
+        &handler,
+        "graph_edit",
+        "create",
+        params_id(GraphCreateParams {
             name: "Preflight Graph".to_string(),
             description: None,
             workdir,
@@ -747,13 +882,17 @@ async fn graph_preflight_reports_graph_validation_errors() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let graph_id = extract_id(&created, "graph_id");
 
-    handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: None,
             graph_id: Some(graph_id.clone()),
             name: "alpha".to_string(),
@@ -762,11 +901,15 @@ async fn graph_preflight_reports_graph_validation_errors() {
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
-    handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+        }),
+    )
+    .await
+    .unwrap();
+    call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: None,
             graph_id: Some(graph_id.clone()),
             name: "beta".to_string(),
@@ -775,18 +918,23 @@ async fn graph_preflight_reports_graph_validation_errors() {
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
 
-    let result = handler
-        .graph_preflight(Parameters(GraphPreflightParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "preflight",
+        params_id(GraphPreflightParams {
             graph_id: graph_id.clone(),
             timeout_seconds: None,
             reviewer: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(
         is_err(&result),
         "preflight should report graph error: {}",
@@ -803,13 +951,16 @@ async fn graph_preflight_reports_graph_validation_errors() {
     );
 }
 
-/// (CM38 FR4) `graph_preflight` reports an unknown `{{...}}` marker in a
+/// (CM38 FR4) `graph_control` reports an unknown `{{...}}` marker in a
 /// check command as an error, before any probe quota is spent.
 #[tokio::test]
 async fn graph_preflight_reports_unknown_marker_in_check_command() {
     let (dir, _db, handler) = endpoint_test_handler();
-    let created = handler
-        .graph_create(Parameters(GraphCreateParams {
+    let created = call_graph_action(
+        &handler,
+        "graph_edit",
+        "create",
+        params_id(GraphCreateParams {
             name: "Marker Graph".to_string(),
             description: None,
             workdir: dir.path().to_string_lossy().to_string(),
@@ -817,13 +968,17 @@ async fn graph_preflight_reports_unknown_marker_in_check_command() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let graph_id = extract_id(&created, "graph_id");
 
-    handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: None,
             graph_id: Some(graph_id.clone()),
             name: "gatekeeper".to_string(),
@@ -832,18 +987,23 @@ async fn graph_preflight_reports_unknown_marker_in_check_command() {
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
 
-    let result = handler
-        .graph_preflight(Parameters(GraphPreflightParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "preflight",
+        params_id(GraphPreflightParams {
             graph_id: graph_id.clone(),
             timeout_seconds: None,
             reviewer: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(
         is_err(&result),
         "preflight must report the unknown marker: {}",
@@ -864,8 +1024,11 @@ async fn graph_preflight_reports_unknown_marker_in_check_command() {
 #[tokio::test]
 async fn graph_preflight_accepts_every_known_check_command_marker() {
     let (dir, _db, handler) = endpoint_test_handler();
-    let created = handler
-        .graph_create(Parameters(GraphCreateParams {
+    let created = call_graph_action(
+        &handler,
+        "graph_edit",
+        "create",
+        params_id(GraphCreateParams {
             name: "Marker Graph".to_string(),
             description: None,
             workdir: dir.path().to_string_lossy().to_string(),
@@ -873,13 +1036,17 @@ async fn graph_preflight_accepts_every_known_check_command_marker() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let graph_id = extract_id(&created, "graph_id");
 
-    handler
-        .graph_add_node(Parameters(GraphAddNodeParams {
+    call_graph_action(
+        &handler,
+        "graph_node",
+        "add",
+        params_id(GraphAddNodeParams {
             spec_id: None,
             graph_id: Some(graph_id.clone()),
             name: "gatekeeper".to_string(),
@@ -891,18 +1058,23 @@ async fn graph_preflight_accepts_every_known_check_command_marker() {
             blueprint: None,
             node: None,
             config_overrides: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
 
-    let result = handler
-        .graph_preflight(Parameters(GraphPreflightParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "preflight",
+        params_id(GraphPreflightParams {
             graph_id: graph_id.clone(),
             timeout_seconds: None,
             reviewer: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(
         !is_err(&result),
         "all seven check-command markers must clear preflight: {}",
@@ -910,7 +1082,7 @@ async fn graph_preflight_accepts_every_known_check_command_marker() {
     );
 }
 
-/// (CM19) `graph_preflight` reports a non-terminal node with no `fail`
+/// (CM19) `graph_control` reports a non-terminal node with no `fail`
 /// edge as a structured `graph_warnings` entry — advisory, not a tool
 /// error, and it does not change the verdict. A declared terminal with
 /// the same missing edge is not reported.
@@ -956,14 +1128,18 @@ async fn graph_preflight_warns_for_node_with_no_fail_edge() {
         .unwrap();
     // gamma: no outgoing edges -> deliberate terminal => NOT warned
 
-    let result = handler
-        .graph_preflight(Parameters(GraphPreflightParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "preflight",
+        params_id(GraphPreflightParams {
             graph_id: lp.id.clone(),
             timeout_seconds: Some(5),
             reviewer: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(
         !is_err(&result),
         "a preflight warning must not be a tool error: {}",
@@ -1014,14 +1190,18 @@ async fn graph_preflight_warns_quorum_without_fail_exit() {
     let (lp, ensemble_id, join_id, _arbiter_id) =
         graph_with_unexited_quorum(&dir, &db, &handler).await;
 
-    let result = handler
-        .graph_preflight(Parameters(GraphPreflightParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "preflight",
+        params_id(GraphPreflightParams {
             graph_id: lp.id.clone(),
             timeout_seconds: Some(5),
             reviewer: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(
         !is_err(&result),
         "a quorum warning must not be a tool error: {}",
@@ -1082,8 +1262,11 @@ async fn graph_preflight_quiet_with_on_fail_to() {
         "baseline: the null-on_fail_to graph must warn before the update"
     );
 
-    let updated = handler
-        .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+    let updated = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "update",
+        params_id(GraphUpdateEnsembleParams {
             mutex: None,
             ensemble_id: ensemble_id.clone(),
             kind: None,
@@ -1105,9 +1288,10 @@ async fn graph_preflight_quiet_with_on_fail_to() {
             add_entry_condition: None,
             remove_entry_from: None,
             commit_rights: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&updated), "{}", text(&updated));
 
     let warnings = preflight_warnings(&handler, &lp.id).await;
@@ -1185,8 +1369,11 @@ async fn graph_preflight_warns_spec_quorum_without_fail_exit() {
     db.insert_graph_node(&kickoff).unwrap();
     db.insert_graph_node(&arbiter).unwrap();
 
-    let added = handler
-        .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+    let added = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
             mutex: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
@@ -1228,9 +1415,10 @@ async fn graph_preflight_warns_spec_quorum_without_fail_exit() {
             on_fail_to: None,
             commit_rights: None,
             crew: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&added), "{}", text(&added));
 
     let ensembles = db.list_ensembles_for_spec(&spec.id).unwrap();
@@ -1252,8 +1440,11 @@ async fn graph_preflight_warns_spec_quorum_without_fail_exit() {
 #[tokio::test]
 async fn graph_update_rejects_unknown_graph_and_requires_a_field() {
     let (dir, db, handler) = endpoint_test_handler();
-    let missing = handler
-        .graph_update(Parameters(GraphUpdateParams {
+    let missing = call_graph_action(
+        &handler,
+        "graph_edit",
+        "update",
+        params_id(GraphUpdateParams {
             graph_id: "ghost".to_string(),
             name: Some("x".to_string()),
             description: None,
@@ -1264,14 +1455,18 @@ async fn graph_update_rejects_unknown_graph_and_requires_a_field() {
             infra_node_id: None,
             allow_dirty_start: None,
             require_spec_type: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&missing));
 
     let lp = insert_test_graph(&db, dir.path());
-    let no_fields = handler
-        .graph_update(Parameters(GraphUpdateParams {
+    let no_fields = call_graph_action(
+        &handler,
+        "graph_edit",
+        "update",
+        params_id(GraphUpdateParams {
             graph_id: lp.id.clone(),
             name: None,
             description: None,
@@ -1282,9 +1477,10 @@ async fn graph_update_rejects_unknown_graph_and_requires_a_field() {
             infra_node_id: None,
             allow_dirty_start: None,
             require_spec_type: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&no_fields));
     assert!(text(&no_fields).contains("at least one field"));
 }
@@ -1300,14 +1496,18 @@ async fn graph_preflight_reports_dirty_workdir_warning() {
     std::fs::write(git_dir.path().join("a.txt"), "a").unwrap();
     std::fs::write(git_dir.path().join("b.txt"), "b").unwrap();
 
-    let result = handler
-        .graph_preflight(Parameters(GraphPreflightParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "preflight",
+        params_id(GraphPreflightParams {
             graph_id: lp.id.clone(),
             timeout_seconds: None,
             reviewer: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&result), "{}", text(&result));
     let body: serde_json::Value = serde_json::from_str(&raw_text(&result)).unwrap();
     assert_eq!(body["dirty_workdir_warning"]["count"], 2);
@@ -1343,17 +1543,21 @@ async fn graph_run_refuses_when_previous_spec_left_workdir_dirty() {
     std::fs::write(git_dir.path().join("b.txt"), "b").unwrap();
     std::fs::write(git_dir.path().join("c.txt"), "c").unwrap();
 
-    let result = handler
-        .graph_run(Parameters(GraphRunParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "run",
+        params_id(GraphRunParams {
             graph_id: lp.id.clone(),
             queue_id: None,
             workdir: None,
             idea: None,
             sandbox: None,
             start_node_id: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&result), "{}", text(&result));
     let msg = text(&result);
     assert!(
@@ -1405,17 +1609,21 @@ async fn graph_run_allow_dirty_start_launches_with_warning() {
     std::fs::write(git_dir.path().join("b.txt"), "b").unwrap();
     std::fs::write(git_dir.path().join("c.txt"), "c").unwrap();
 
-    let result = handler
-        .graph_run(Parameters(GraphRunParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_control",
+        "run",
+        params_id(GraphRunParams {
             graph_id: lp.id.clone(),
             queue_id: None,
             workdir: None,
             idea: None,
             sandbox: None,
             start_node_id: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&result), "{}", text(&result));
     let msg = text(&result);
     assert!(
@@ -1455,14 +1663,18 @@ async fn graph_import_rejects_unknown_prompt_preset_and_writes_nothing() {
         "ensembles": []
     });
 
-    let result = handler
-        .graph_import(Parameters(GraphImportParams {
+    let result = call_graph_action(
+        &handler,
+        "graph_edit",
+        "import",
+        params_id(GraphImportParams {
             document,
             workdir: workdir.clone(),
             name: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(is_err(&result), "{}", text(&result));
     assert!(

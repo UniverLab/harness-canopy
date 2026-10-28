@@ -111,7 +111,7 @@ pub(super) fn reject_unknown_prompt_presets(
     ))
 }
 
-/// Authoring-time shape rules `graph_add_ensemble` enforces: member-count
+/// Authoring-time shape rules `graph_ensemble` enforces: member-count
 /// bounds, `min_pass` range, and non-negative timeout/grace fields (CM24).
 pub(super) fn validate_import_ensemble_shape(
     doc_ensemble: &GraphExportEnsemble,
@@ -197,7 +197,7 @@ pub(super) fn validate_import_ensemble_shape(
 
 /// Names of every agent node (plain or ensemble member) left without a
 /// `platform`/`cli` after import — a v1 document (or a hand-written one)
-/// may legitimately arrive without one, so `graph_import`'s response calls
+/// may legitimately arrive without one, so `graph_edit`'s response calls
 /// out exactly which nodes need one filled in before the graph can run
 /// (requirement 4).
 pub fn agent_nodes_missing_platform(plan: &GraphImportPlan) -> Vec<String> {

@@ -158,7 +158,7 @@ pub struct Graph {
     pub status: GraphStatus,
     /// Optional automatic trigger. Reuses the agent [`Trigger`] model so a graph
     /// can fire on a cron schedule or a file-system watch, exactly like an
-    /// agent. `None` means the graph is manual-only (`graph_run`).
+    /// agent. `None` means the graph is manual-only (`graph_control`).
     #[serde(default)]
     pub trigger: Option<Trigger>,
     pub created_at: DateTime<Utc>,
@@ -173,17 +173,17 @@ pub struct Graph {
     pub autorun_at: Option<DateTime<Utc>>,
     /// One-shot deferred resume for a *paused* graph: when set and reached
     /// while the graph is still `Paused`, the scheduler fires the equivalent
-    /// of `graph_continue` (see `auto_continue_action`) — preserving the
+    /// of `graph_control` (see `auto_continue_action`) — preserving the
     /// paused cursor/context — rather than `autorun_at`'s reset-and-relaunch.
     /// Lets a user pause a graph to stop burning quota now and have it pick
     /// back up automatically at a later time, without a human calling
-    /// `graph_continue`. Deliberately a separate field from `autorun_at`
+    /// `graph_control`. Deliberately a separate field from `autorun_at`
     /// rather than a shared one: the two fire through entirely different
     /// paths (`resume_background` alone vs. auto-reset-then-`resume_background`)
     /// and must never be conflated. See `is_auto_continue_due`.
     #[serde(default)]
     pub auto_continue_at: Option<DateTime<Utc>>,
-    /// The `graph_continue` action (`"retry_current_node"` or
+    /// The `graph_control` action (`"retry_current_node"` or
     /// `"skip_next_spec"`) to apply when `auto_continue_at` fires. `None`
     /// (or any value other than `"skip_next_spec"`) defaults to
     /// `retry_current_node` — see [`crate::scheduler::cron_scheduler`]'s
@@ -193,14 +193,14 @@ pub struct Graph {
     /// The queue a run against this graph is currently — or most recently —
     /// drew from, persisted the moment that run starts (`None` for a
     /// bound-spec run). Interrupted runs (a quota failure, a daemon restart)
-    /// leave this set so every resume path — scheduled autorun, `graph_reset`
+    /// leave this set so every resume path — scheduled autorun, `graph_control`
     /// — knows which queue to pick up rather than falling back to the graph's
     /// (often empty) bound specs. It survives genuine completion too (B31),
     /// giving a finished queue-driven graph the only link back to the queue it
     /// ran so `graph list` / `graph info` can render its real `n/n` progress
     /// instead of `0/0`. A stale value never pollutes a later run: every
     /// launch path overwrites this field before the first spec executes, so
-    /// a fresh `graph_run` against a different queue (or a bound-spec run,
+    /// a fresh `graph_control` against a different queue (or a bound-spec run,
     /// which writes `None`) replaces it.
     #[serde(default)]
     pub active_run_queue_id: Option<String>,
@@ -216,7 +216,7 @@ pub struct Graph {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub hooks: BTreeMap<GraphHookEvent, Vec<GraphCompletionHook>>,
     /// Archived graphs leave every browsing listing (sidebar, `canopy graph
-    /// list`, MCP `graph_list`) but keep their row, specs, and full run
+    /// list`, MCP `graph`) but keep their row, specs, and full run
     /// history — a deliberate, reversible, always-counted alternative to
     /// permanent deletion. `false` for every pre-existing graph after
     /// migration. See `Database::{archive_graph, restore_graph}`.
@@ -224,7 +224,7 @@ pub struct Graph {
     pub archived: bool,
     /// Set by `reconcile_orphaned_graphs` (and only by it) the moment it pauses
     /// a graph that was left `Running` by an unclean daemon exit — never by an
-    /// operator's `graph_pause`/`graph_report_blocker`, both of which go
+    /// operator's `graph_control`/`graph_report_blocker`, both of which go
     /// through `Database::update_graph_status`, which clears this on every
     /// call. Lets [`Self::is_autorun_due`] tell the two kinds of `Paused`
     /// apart: a pending `autorun_at` must survive a reconciliation pause
@@ -239,13 +239,13 @@ pub struct Graph {
     /// `None` preserves pre-CM2 behavior — no auto-wiring, no `Error` edges.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub infra_node_id: Option<String>,
-    /// CM29: when true, `graph_run`/autorun downgrade the dirty-start
+    /// CM29: when true, `graph_control`/autorun downgrade the dirty-start
     /// refusal to a warning instead of refusing to launch. `false` for
     /// every pre-existing graph (never silently permissive). Set through
-    /// `graph_update`.
+    /// `graph_edit`.
     #[serde(default)]
     pub allow_dirty_start: bool,
-    /// SPECCODE: opt-in enforcement. When true, `graph_add_spec` (and a
+    /// SPECCODE: opt-in enforcement. When true, `graph_edit` (and a
     /// queue add / run that would feed one) refuses a spec whose type is
     /// still `None`, named by id, so a graph can demand the conventional
     /// data its deterministic commit node needs. Default `false` — legacy
@@ -315,7 +315,7 @@ impl Graph {
     /// graph is fireable (not `Running`/`Paused`) or it is `Paused` *because
     /// `reconcile_orphaned_graphs` put it there* after an unclean daemon exit.
     /// That second branch is deliberate and narrow: an operator-requested
-    /// pause (`graph_pause`, `graph_report_blocker`) must still block the
+    /// pause (`graph_control`, `graph_report_blocker`) must still block the
     /// schedule — [`Self::is_fireable`] is unchanged and still says so for
     /// every other caller — but a pause reconciliation imposed on the graph's
     /// behalf must not silently swallow a schedule nobody asked to cancel.
@@ -337,12 +337,12 @@ impl Graph {
     }
 
     /// Whether this graph's one-shot `auto_continue_at` schedule should
-    /// actually fire a deferred `graph_continue` at `now`.
+    /// actually fire a deferred `graph_control` at `now`.
     ///
     /// Deliberately Paused-only — unlike [`Self::is_autorun_due`], which is
     /// due on any *fireable* (non-`Running`/`Paused`) status. Deferring a
     /// resume only makes sense while the graph is sitting `Paused`; if it left
-    /// that state some other way (manual `graph_continue`, failure) before the
+    /// that state some other way (manual `graph_control`, failure) before the
     /// scheduled time, the schedule is stale — the scheduler clears it
     /// without firing rather than waiting here for `Paused` to recur.
     pub fn is_auto_continue_due(&self, now: DateTime<Utc>) -> bool {

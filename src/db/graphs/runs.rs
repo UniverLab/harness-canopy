@@ -103,7 +103,7 @@ impl Database {
 
     /// The active (`running`) node run for `spec_id`, if any. Mirrors
     /// [`Self::get_active_graph_run_for_node`] but scoped to a whole spec —
-    /// used by `graph_reset`, which resets a spec wholesale rather than one
+    /// used by `graph_control`, which resets a spec wholesale rather than one
     /// node at a time.
     pub fn get_active_graph_run_for_spec(&self, spec_id: &str) -> Result<Option<GraphNodeRun>> {
         let conn = self
@@ -168,7 +168,7 @@ impl Database {
 
     /// Page through a graph's node runs, most-recent-first, optionally
     /// narrowed to one spec and/or one node — the query a failure
-    /// investigation needs (`graph_node_runs_list`): find what ran, in what
+    /// investigation needs (`graph`): find what ran, in what
     /// order, without knowing a node id ahead of time. Unlike
     /// [`Self::list_graph_runs_for_graph`] (oldest-first, unbounded — built for
     /// the engine replaying a whole run), this is bounded by `limit`/`offset`
@@ -353,9 +353,9 @@ impl Database {
 
     /// CB31: flag every run of `node_ids` under `spec_id` at `iteration` as
     /// `paused_through` — the node(s) finalized with their own verdict while a
-    /// wait-for-completion `graph_pause` was pending. A single node has one such
+    /// wait-for-completion `graph_control` was pending. A single node has one such
     /// row; an ensemble step has one per member plus its join. The flag tells
-    /// [`Self::last_spec_node_run_was_operator_paused`] that `graph_continue`
+    /// [`Self::last_spec_node_run_was_operator_paused`] that `graph_control`
     /// re-executing this cursor must reuse the same iteration number rather
     /// than spend a fresh one. Returns the number of rows flagged.
     pub fn mark_spec_node_runs_paused_through(
@@ -388,7 +388,7 @@ impl Database {
 
     /// CB31: whether the most recent run among `node_ids` under `spec_id` was
     /// ended by an operator rather than by the node's own work — recorded
-    /// `Interrupted` (explicit `graph_pause(interrupt: true)`), or finalized
+    /// `Interrupted` (explicit `graph_control(interrupt: true)`), or finalized
     /// with its own verdict while a wait-for-completion pause was pending
     /// (`paused_through`). The engine consults this before incrementing the
     /// per-node iteration counter on a resumed dispatch: an operator pause or

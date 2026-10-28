@@ -53,7 +53,7 @@ async fn fire_due_autorun_graphs_fires_past_schedule_once_and_clears_it() {
 }
 
 /// B41: a schedule cancelled via `clear_graph_autorun` (the path
-/// `graph_schedule_autorun` with `at` omitted takes) must not fire later,
+/// `graph_control` with `at` omitted takes) must not fire later,
 /// even past its original due time — cancelling must actually prevent
 /// the wake-up, not just delay it.
 #[tokio::test]
@@ -106,9 +106,9 @@ async fn fire_due_autorun_graphs_skips_running_and_paused_graphs() {
     }
 }
 
-/// `graph_run` refuses a `failed` graph directly, so firing autorun on one
+/// `graph_control` refuses a `failed` graph directly, so firing autorun on one
 /// must not call `start_background` on it as-is. Instead it must go
-/// through the same reset transition as `graph_reset`
+/// through the same reset transition as `graph_control`
 /// ([`Database::reset_graph`]) and then resume — the resilience pattern a
 /// quota-failed graph relies on to revive itself unattended.
 #[tokio::test]
@@ -374,11 +374,11 @@ async fn fire_due_autorun_graphs_preserves_admin_skipped_specs() {
 }
 /// `Running` when the daemon dies uncleanly; `reconcile_orphaned_graphs`
 /// (as it would run at the next boot) pauses it and marks its dangling
-/// run interrupted; the resilience node's `graph_schedule_autorun` is
+/// run interrupted; the resilience node's `graph_control` is
 /// already due by the time the scheduler next evaluates it. Before this
 /// fix, `is_autorun_due` excluded every `Paused` graph unconditionally, so
 /// this schedule would sit forever and never fire. It must fire now,
-/// through the same `resume_background` path a manual `graph_continue`
+/// through the same `resume_background` path a manual `graph_control`
 /// takes, and actually finish the interrupted spec.
 #[tokio::test]
 async fn fire_due_autorun_graphs_fires_reconciliation_paused_graph() {
@@ -530,7 +530,7 @@ async fn fire_due_autorun_graphs_on_reconciliation_paused_graph_is_one_shot() {
 }
 
 /// C1: a due `autorun_at` on a graph the operator paused (not
-/// reconciliation) must never fire — `graph_pause`/`graph_report_blocker`
+/// reconciliation) must never fire — `graph_control`/`graph_report_blocker`
 /// both route through `update_graph_status`, which clears
 /// `paused_by_reconciliation`, so this is the default state of any
 /// `Paused` graph that didn't come through reconciliation.
@@ -669,8 +669,8 @@ async fn fire_due_autorun_graphs_never_fires_a_c19_blocked_graph() {
 }
 
 /// The exact incident this spec fixes: a graph was launched with
-/// `graph_run { queue_id }`, failed mid-queue (e.g. a quota error), and its
-/// `graph_schedule_autorun` fired to revive it. Before this fix, autorun
+/// `graph_control { queue_id }`, failed mid-queue (e.g. a quota error), and its
+/// `graph_control` fired to revive it. Before this fix, autorun
 /// resumed the graph with its own bound specs — empty for a queue run — so
 /// the engine found nothing to do and marked the graph `completed` with
 /// queue members still pending. Firing autorun now must reset and resume
@@ -749,7 +749,7 @@ async fn fire_due_autorun_graphs_resumes_same_queue_after_failed_run() {
         db.append_queue_member("queue-1", spec_id, None).unwrap();
     }
     // No bound specs on the graph itself — this is what the real incident
-    // hit: a `graph_run { queue_id }` launch never binds specs to the graph.
+    // hit: a `graph_control { queue_id }` launch never binds specs to the graph.
     db.insert_graph_node(&GraphNode {
         id: "node-check".to_string(),
         spec_id: None,
@@ -882,7 +882,7 @@ async fn fire_due_autorun_graphs_refuses_dirty_predecessor_and_stays_cleared() {
 }
 
 /// Firing autorun on an already-`completed` graph must not silently
-/// re-run it — that's a human decision via `graph_reset` + `graph_run`.
+/// re-run it — that's a human decision via `graph_control` + `graph_control`.
 /// The scheduler should warn and clear the schedule instead.
 #[tokio::test]
 async fn fire_due_autorun_graphs_on_completed_graph_warns_and_does_not_run() {
@@ -1005,7 +1005,7 @@ async fn fire_due_auto_continue_graphs_clears_without_firing_when_not_paused() {
 
 /// The functional core of this feature: a `Paused` graph's
 /// `auto_continue_at` firing must go straight through the
-/// `graph_continue`/`resume_background` path — never `graph_reset` and
+/// `graph_control`/`resume_background` path — never `graph_control` and
 /// never a fresh dispatch — preserving the paused cursor. Verified by
 /// checking the in-flight spec's status is untouched *synchronously*,
 /// right after firing (a reset would flip it to `Pending` immediately,
@@ -1051,7 +1051,7 @@ async fn fire_due_auto_continue_graphs_resumes_paused_graph_without_reset_or_rel
             ),
             position: 1,
             parallelizable: false,
-            // A graph paused mid-spec leaves that spec `running` — `graph_pause`
+            // A graph paused mid-spec leaves that spec `running` — `graph_control`
             // never touches spec status, only the graph's own.
             status: GraphSpecStatus::Running,
             started_at: Some(Utc::now()),
@@ -1133,7 +1133,7 @@ async fn fire_due_auto_continue_graphs_resumes_paused_graph_without_reset_or_rel
 
 /// `skip_next_spec` must be honored too, not just the default
 /// `retry_current_node` — the scheduler must pass the configured action
-/// through exactly like the `graph_continue` MCP tool would.
+/// through exactly like the `graph_control` MCP tool would.
 #[tokio::test]
 async fn fire_due_auto_continue_graphs_applies_skip_next_spec_action() {
     use crate::domain::graphs::{Graph, GraphSpec, GraphSpecStatus, GraphStatus};

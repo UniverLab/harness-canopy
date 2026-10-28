@@ -365,7 +365,7 @@ pub struct EffortDeclaration {
 
 /// The one place the "why `effort = value` won't apply on `platform`" wording
 /// is produced. `None` means it WILL apply. Every surface that reports
-/// non-application — the graph run record, `graph_preflight`, the background
+/// non-application — the graph run record, `graph_control`, the background
 /// agent log — goes through this so the message can never drift between them
 /// (the CM7 pre-mortem: a notice that says one thing here and another there
 /// is a notice someone stops trusting).
@@ -391,7 +391,7 @@ pub fn effort_rejection_reason(
 /// platform never declared one) and a blank string (CB34 — antigravity's
 /// `model_flag = ""`, which was being emitted as a stray empty argv word the
 /// CLI rejects before the run starts) both mean "this platform cannot select
-/// a model explicitly". The invocation path, the probe and `graph_preflight`
+/// a model explicitly". The invocation path, the probe and `graph_control`
 /// all read this one function so they can never disagree.
 pub fn model_flag_selects_model(model_flag: Option<&str>) -> bool {
     matches!(model_flag, Some(f) if !f.trim().is_empty())
@@ -418,8 +418,8 @@ pub fn model_rejection_reason(
 
 /// The single wording every interactive-only rejection uses — a platform
 /// whose registry entry sets `headless = false` (freebuff v0.1.2). Produced
-/// here so `graph_add_node`/`graph_update_node`, the ensemble handlers,
-/// `agent_add`, `agent_probe` and `graph_preflight` can never drift apart on
+/// here so `graph_node`/`graph_node`, the ensemble handlers,
+/// `agent_add`, `agent_probe` and `graph_control` can never drift apart on
 /// the message a caller sees (CM35).
 pub fn interactive_only_reason(platform: &str) -> String {
     format!("platform '{platform}' is interactive-only (no headless mode)")

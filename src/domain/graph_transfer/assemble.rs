@@ -1,6 +1,6 @@
 //! Assembling a validated import plan from an export document without
 //! touching the database or installing anything — the structural half of
-//! `graph_import`, shared with `graph_validate`. Lives in its own module
+//! `graph_edit`, shared with `graph`. Lives in its own module
 //! (rather than `import.rs`) to keep every production file within the
 //! file-size gate; the node/edge/ensemble builders it orchestrates stay in
 //! `import.rs`.
@@ -8,10 +8,10 @@
 use super::*;
 
 /// Assemble a validated [`GraphImportPlan`] without touching the database or
-/// installing anything: the same structural checks `graph_import` runs, with
+/// installing anything: the same structural checks `graph_edit` runs, with
 /// the prompt-preset existence check only when `preset_dir` is `Some`.
 /// Import passes its prompts dir (a preset must exist on this machine);
-/// `graph_validate` passes `None` and applies the sharing rule itself — a
+/// `graph` passes `None` and applies the sharing rule itself — a
 /// referenced preset must be bundled in the document or a builtin — since
 /// validation must not depend on what this machine happens to have
 /// installed.
@@ -36,7 +36,7 @@ pub fn assemble_import_plan(
 
     // Ensemble-owned nodes continue the position sequence after every plain
     // node — the same "append after existing nodes" convention
-    // `graph_add_ensemble`'s `start_position` uses.
+    // `graph_ensemble`'s `start_position` uses.
     let mut next_position = nodes
         .iter()
         .map(|node| node.position)
@@ -98,7 +98,7 @@ pub fn assemble_import_plan(
         }
     }
 
-    // Defense in depth: the same structural check `graph_run` runs on every
+    // Defense in depth: the same structural check `graph_control` runs on every
     // ensemble reachable from a live graph (see `validate_ensembles_in_graph`)
     // confirms the plan's wiring is internally consistent before anything is
     // persisted — nothing above should ever be able to trip it, but a

@@ -764,7 +764,7 @@ pub(super) fn report_orphan_joins(canopy_dir: &Path, issues: &mut Vec<String>) {
         );
     }
     issues.push(
-        "Orphaned join nodes belong to no ensemble — run 'graph_get' to see orphan_join_warnings and delete them with graph_delete_node or repair via graph_update_ensemble (see CB52)."
+        "Orphaned join nodes belong to no ensemble — run 'graph get' to see orphan_join_warnings and delete them with graph_node delete or repair via graph_ensemble update (see CB52)."
             .to_string(),
     );
 }

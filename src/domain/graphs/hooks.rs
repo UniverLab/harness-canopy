@@ -147,7 +147,7 @@ pub struct GraphCompletionHookRun {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executed_model: Option<String>,
     /// CM45: the hook config that actually fired, captured at fire time. A
-    /// later read sees what ran even after `graph_update` replaces the hook.
+    /// later read sees what ran even after `graph_edit` replaces the hook.
     /// `None` for pre-migration rows and for rows whose hook was never stored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hook_config: Option<GraphCompletionHook>,

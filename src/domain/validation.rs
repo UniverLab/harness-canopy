@@ -83,12 +83,12 @@ pub fn validate_ensemble_min_pass(
 /// graph, or a single spec's own graph — never both mixed together, since an
 /// ensemble belongs to exactly one) as a unit: entry reachable, every member
 /// wired to the join, and both exits wired to nodes that actually exist in
-/// this same graph. Called at `graph_run` so a structurally broken ensemble
+/// this same graph. Called at `graph_control` so a structurally broken ensemble
 /// fails fast with an actionable message instead of surfacing as a runtime
 /// "ambiguous outgoing edges" or "node not found" deep into a run.
 ///
 /// In practice every one of these invariants is guaranteed by construction —
-/// `graph_add_ensemble`/`graph_update_ensemble` are the only writers of
+/// `graph_ensemble`/`graph_ensemble` are the only writers of
 /// ensemble-owned nodes/edges — so this exists as defense in depth against a
 /// future bug or direct DB edit, not because callers are expected to trip it
 /// today.
@@ -291,7 +291,7 @@ fn ensure_ensemble_entry_fanout(
     for ((from, _condition), count) in sources {
         if count != member_ids.len() {
             return Err(format!(
-                "{label} has incomplete entry wiring from '{from}': reaches {count} of {} members — rewire with graph_update_ensemble (from_node/add_entry_from).",
+                "{label} has incomplete entry wiring from '{from}': reaches {count} of {} members — rewire with graph_ensemble update (from_node/add_entry_from).",
                 member_ids.len()
             ));
         }
@@ -320,7 +320,7 @@ fn graph_has_edge(
 /// usually a node id (one edge join→node), but when ensembles are chained the
 /// row holds the *target ensemble's quorum id* instead — in which case every
 /// member of that ensemble must have an edge from this join (the fan-out
-/// `graph_update_ensemble` builds, with no intermediate node).
+/// `graph_ensemble` builds, with no intermediate node).
 fn has_ensemble_exit_edge(
     ensembles: &[EnsembleDetails],
     ensemble: &crate::domain::graphs::Ensemble,

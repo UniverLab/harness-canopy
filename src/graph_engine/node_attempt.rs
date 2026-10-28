@@ -87,7 +87,7 @@ impl GraphEngine {
         // prompt, timeout, commit_rights, resume — everything read by
         // execute_agent_node / execute_check_node / execute_router_node)
         // is read from the database HERE, at the moment of dispatch —
-        // not from the per-run `nodes` snapshot. So a graph_update_node
+        // not from the per-run `nodes` snapshot. So a graph_node
         // applied between two dispatches of this node lands on the
         // second dispatch (FR1). This read happens exactly once, before
         // the run row below is created, and the same `node` value is
@@ -97,7 +97,7 @@ impl GraphEngine {
         // execute_agent_node derives them from this same `node` (FR4).
         // `nodes_by_id` (the launch snapshot) stays authoritative for
         // graph TOPOLOGY — kind, position, edges, router routes — which
-        // graph_update_node / graph_update_ensemble refuse to change while
+        // graph_node / graph_ensemble refuse to change while
         // the graph is `running` (FR5).
         let node_fresh = self
             .db
@@ -613,8 +613,8 @@ impl GraphEngine {
     /// leaves no blocker anywhere a human can see unless something writes
     /// one — see the module-level defect this closes. Writes a derived
     /// blocker onto the terminating run's `output.blocker`, the exact key
-    /// `graph_run_blocker` (daemon/handler.rs) already reads for `graph_list`
-    /// and `graph_get`'s `blocked`/`blocker` fields, so no reader needs to
+    /// `graph_run_blocker` (daemon/handler.rs) already reads for `graph`
+    /// and `graph`'s `blocked`/`blocker` fields, so no reader needs to
     /// change. Never invoked for a PASSING termination (the normal, correct
     /// end of a spec — see `Check committed`) and never overwrites a
     /// blocker `graph_report_blocker` already recorded, since that text is
@@ -682,7 +682,7 @@ impl GraphEngine {
     /// A genuine failure increments the spec's own persisted
     /// `cross_run_attempts` counter (`graph_specs.cross_run_attempts`) —
     /// unlike the per-node `iterations` map `run_spec` builds fresh on every
-    /// call, this survives `graph_reset`, a relaunch, and a daemon restart,
+    /// call, this survives `graph_control`, a relaunch, and a daemon restart,
     /// which is the entire point: an unsatisfiable spec must not get a
     /// fresh budget every time an operator resets and relaunches after a
     /// quota failure. Once the count reaches `self.spec_attempt_limit`,
@@ -705,9 +705,9 @@ impl GraphEngine {
         }
         Ok(Some(format!(
             "Spec '{}' failed {} time(s) across separate graph executions (limit {}); last \
-             failure: {}. To clear the limit: `graph_reset` with `specs: [{}]` clears this \
-             spec's execution count (the worktree is not touched); then `graph_run` or \
-             `run_from_node`.",
+             failure: {}. To clear the limit: `graph_control reset` with `specs: [{}]` clears this \
+             spec's execution count (the worktree is not touched); then `graph_control run` or \
+             `graph_control continue` with mode `run_from_node`.",
             spec.name, attempts, self.spec_attempt_limit, summary, spec.id
         )))
     }

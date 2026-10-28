@@ -38,7 +38,7 @@ impl GraphStatus {
 }
 
 /// Result of [`crate::db::Database::reset_graph`] — the single state-transition
-/// path used by both the `graph_reset` MCP tool and the scheduler's
+/// path used by both the `graph_control` MCP tool and the scheduler's
 /// auto-reset-and-resume of a `failed` graph on autorun.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GraphResetOutcome {
@@ -171,7 +171,7 @@ pub enum GraphRunStatus {
     Pass,
     Fail,
     /// Operator-interrupted: the node was explicitly stopped by an operator
-    /// via `graph_pause(interrupt: true)`, not a failure of the node's work.
+    /// via `graph_control(interrupt: true)`, not a failure of the node's work.
     Interrupted,
     /// Quorum/ensemble settled with no filed verdict: every member ended as
     /// an infrastructure failure (crash, unreported, interrupted,

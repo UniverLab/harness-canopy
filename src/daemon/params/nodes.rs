@@ -2,7 +2,7 @@ use super::*;
 
 // ── Node authoring and node-catalogue parameter types ─────────────────
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphAddNodeParams {
     /// Existing spec ID. Provide exactly one of `spec_id`/`graph_id`.
     pub spec_id: Option<String>,
@@ -32,7 +32,7 @@ pub struct GraphAddNodeParams {
     pub config_overrides: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphAddEnsembleParams {
     /// Existing spec ID. Provide exactly one of `spec_id`/`graph_id`.
     pub spec_id: Option<String>,
@@ -115,7 +115,7 @@ pub struct GraphAddEnsembleParams {
     pub mutex: Option<Vec<String>>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct NodeInstallParams {
     /// Catalogue ref: `<slug>` or `<owner>/<repo>/<slug>`, each with an
     /// optional `@<ref>` suffix selecting a version — or `draft:<id>` for
@@ -133,7 +133,7 @@ pub struct NodeInstallParams {
     pub accept: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct NodeRemoveParams {
     /// Name of an installed node document to remove. A builtin with no
     /// installed override cannot be removed; its override can.

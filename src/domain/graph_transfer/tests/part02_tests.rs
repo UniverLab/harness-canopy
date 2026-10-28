@@ -329,7 +329,7 @@ fn import_plan_rejects_multiple_entry_points() {
 #[test]
 fn import_plan_accepts_agent_missing_fail_edge_as_terminal() {
     // Resilience node with only pass edge -> fail is a terminal exit,
-    // not an error (same verdict as graph_preflight).
+    // not an error (same verdict as graph_control).
     let doc = GraphExportDocument {
         prompt_presets: Vec::new(),
         format_version: 1,
@@ -769,7 +769,7 @@ fn import_rejects_unknown_document_field() {
 }
 
 /// CM49 import: a crew-bound ensemble travels without members —
-/// `graph_export` writes it with `crew` and no `members`, so a document
+/// `graph` writes it with `crew` and no `members`, so a document
 /// that omits the key entirely must parse rather than fail with a serde
 /// "missing field" error.
 #[test]

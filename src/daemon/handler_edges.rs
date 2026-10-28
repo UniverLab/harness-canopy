@@ -11,23 +11,17 @@ use crate::daemon::handler_validate::{
 };
 use crate::daemon::helpers::{error_result, success_result};
 use crate::daemon::params::*;
-use crate::daemon::params_extract::Parameters;
 use crate::db::Database;
 use crate::domain::graphs::{GraphEdge, GraphNode};
 use rmcp::model::{CallToolResult, ContentBlock};
-use rmcp::tool;
 use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
 
 #[tool_router(router = tool_router_edges, vis = "pub(crate)")]
 impl TaskTriggerHandler {
-    #[tool(
-        name = "graph_add_edge",
-        description = "Connect two nodes with a routing condition, inside a graph spec's graph or (via graph_id instead of spec_id) the graph's top-level graph."
-    )]
-    pub(crate) async fn graph_add_edge(
+    pub(crate) async fn graph_add_edge_impl(
         &self,
-        Parameters(params): Parameters<GraphAddEdgeParams>,
+        params: GraphAddEdgeParams,
     ) -> Result<CallToolResult, McpError> {
         let condition = match validate_edge_condition_with_route(
             params.condition.trim(),
@@ -108,13 +102,9 @@ impl TaskTriggerHandler {
         )]))
     }
 
-    #[tool(
-        name = "graph_update_edge",
-        description = "Update the routing condition and/or destination node of an existing graph edge. Omit to_node to leave the edge's target unchanged; provide it to retarget the edge in place (preserving its id and run history) instead of recreating it."
-    )]
-    pub(crate) async fn graph_update_edge(
+    pub(crate) async fn graph_update_edge_impl(
         &self,
-        Parameters(params): Parameters<GraphUpdateEdgeParams>,
+        params: GraphUpdateEdgeParams,
     ) -> Result<CallToolResult, McpError> {
         let edge_id = match resolve_prefix_or_error(
             &self.db,
@@ -195,13 +185,9 @@ impl TaskTriggerHandler {
         )))
     }
 
-    #[tool(
-        name = "graph_delete_edge",
-        description = "Delete a single graph edge by id. Rejected while the owning graph is running — pause it first."
-    )]
-    pub(crate) async fn graph_delete_edge(
+    pub(crate) async fn graph_delete_edge_impl(
         &self,
-        Parameters(params): Parameters<GraphDeleteEdgeParams>,
+        params: GraphDeleteEdgeParams,
     ) -> Result<CallToolResult, McpError> {
         let edge_id = match resolve_prefix_or_error(
             &self.db,
@@ -221,13 +207,9 @@ impl TaskTriggerHandler {
         }
     }
 
-    #[tool(
-        name = "graph_delete_node",
-        description = "Delete a graph node by id, cascading to every edge that names it as from_node or to_node. Rejected if the node is the graph's entry point, or while the owning graph is running — pause it first."
-    )]
-    pub(crate) async fn graph_delete_node(
+    pub(crate) async fn graph_delete_node_impl(
         &self,
-        Parameters(params): Parameters<GraphDeleteNodeParams>,
+        params: GraphDeleteNodeParams,
     ) -> Result<CallToolResult, McpError> {
         let node_id = match resolve_prefix_or_error(
             &self.db,

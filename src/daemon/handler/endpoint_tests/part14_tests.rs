@@ -1,4 +1,4 @@
-//! Part 14 of `endpoint_tests`: `graph_install` end to end through the MCP
+//! Part 14 of `endpoint_tests`: `graph_edit` end to end through the MCP
 //! surface — a local HTTP stub stands in for the catalogue, and
 //! `CANOPY_HOME_OVERRIDE` points the config (`[graphs] catalogue_url`) and
 //! the prompts dir at a temp home.
@@ -72,16 +72,20 @@ async fn install(
     overwrite_presets: Option<bool>,
     accept: Option<bool>,
 ) -> rmcp::model::CallToolResult {
-    handler
-        .graph_install(Parameters(GraphInstallParams {
+    call_graph_action(
+        handler,
+        "graph_edit",
+        "install",
+        params_id(GraphInstallParams {
             reference: reference.to_string(),
             workdir: workdir.to_string(),
             name,
             overwrite_presets,
             accept,
-        }))
-        .await
-        .unwrap()
+        }),
+    )
+    .await
+    .unwrap()
 }
 
 /// An install that already carries the user's acceptance — what every
@@ -104,7 +108,7 @@ async fn install_accepted(
     .await
 }
 
-/// `graph_install` follows the stub's redirect to the document, imports it
+/// `graph_edit` follows the stub's redirect to the document, imports it
 /// as a new graph, and reports the agent node still needing a harness with
 /// the next command to assign it.
 #[tokio::test]
@@ -144,7 +148,7 @@ async fn install_imports_through_the_catalogue_and_lists_nodes_without_harness()
     );
     let next = report["next"].as_str().expect("next step");
     assert!(next.contains("start"), "{next}");
-    assert!(next.contains("graph_update_node"), "{next}");
+    assert!(next.contains("graph_node"), "{next}");
     assert!(
         next.contains(report["graph_id"].as_str().unwrap()),
         "{next}"
@@ -183,7 +187,7 @@ async fn install_supports_a_community_ref_with_a_version() {
     assert_eq!(hits[0].target, "/i/acme/widgets/graph/my-graph?ref=v1.2");
 }
 
-/// `--name` overrides the document's name, exactly as `graph_import`.
+/// `--name` overrides the document's name, exactly as `graph_edit`.
 #[tokio::test]
 async fn install_honors_the_name_override() {
     let (dir, _db, handler) = endpoint_test_handler();

@@ -234,7 +234,7 @@ pub(crate) fn default_probe_timeout(agents: &crate::domain::canopy_config::Agent
     agents.probe_timeout_seconds
 }
 
-/// Resolve `agent_probe`/`graph_preflight`'s `timeout_seconds` param to an
+/// Resolve `agent_probe`/`graph_control`'s `timeout_seconds` param to an
 /// actual bound: the configured default when omitted, clamped to
 /// `[MIN_PROBE_TIMEOUT_SECS, MAX_PROBE_TIMEOUT_SECS]` otherwise — a probe is
 /// a liveness check, not a capability benchmark, so callers can't ask for an
@@ -603,7 +603,7 @@ pub(crate) fn model_result_footer(
              (refresh interval {ttl_str}) · fetched_at: {}\n\
              WARNING: This lists the PROVIDER'S CATALOG, not what your account can use.\n\
              Actual availability depends on your API key tier, account type, and region.\n\
-             A model listed here may still fail at runtime — use `agent_probe` or `graph_preflight`\n\
+             A model listed here may still fail at runtime — use `agent_probe` or `graph_control preflight`\n\
              to validate a specific platform+model pair before relying on it.{truncation_notice}",
             source.as_str(),
             format_system_time(fetched_at),

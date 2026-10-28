@@ -275,7 +275,7 @@ mod tests {
             rusqlite::params!["n1", "spec1", now],
         )
         .unwrap();
-        // Insert a graph_run
+        // Insert a graph_control
         conn.execute(
             "INSERT INTO graph_runs (id, graph_id, spec_id, node_id, status, started_at, iteration) VALUES (?1, ?2, ?3, ?4, 'success', ?5, 1)",
             rusqlite::params!["run1", "loop1", "spec1", "n1", now],

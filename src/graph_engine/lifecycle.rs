@@ -9,10 +9,10 @@ impl GraphEngine {
     /// pending queue specs (see [`Self::run_graph`]) and/or overrides the
     /// workdir for this run only.
     ///
-    /// This is a fresh dispatch, not a resume — it backs `graph_run`, the tool
+    /// This is a fresh dispatch, not a resume — it backs `graph_control`, the tool
     /// a human/scheduler calls to launch or *relaunch* a graph (including
     /// directly relaunching a `paused` graph instead of going through
-    /// `graph_continue`). Every spec it reaches is treated as newly entered
+    /// `graph_control`). Every spec it reaches is treated as newly entered
     /// for `{{spec_start_head}}` purposes (B10): even a spec left `running`
     /// from a stale, never-reset prior attempt gets a fresh baseline here,
     /// rather than silently inheriting one captured under a previous
@@ -192,7 +192,7 @@ impl GraphEngine {
         // Mark as interrupted (not fail)
         let _ = self.db.interrupt_graph_run(&run.id, reason);
         // CB84: end the harness session too, same as `terminate_run_row` —
-        // `graph_pause(interrupt: true)` kills a live node run for reason
+        // `graph_control(interrupt: true)` kills a live node run for reason
         // "graph pause", which the objective names explicitly; without this
         // the opencode v2 service-side session keeps ticking beside the
         // resumed attempt. Best-effort, detached, never fails the caller.
@@ -267,7 +267,7 @@ impl GraphEngine {
             .ok()
             .flatten()
             .and_then(|lp| lp.active_run_queue_id);
-        // A sandboxed graph that was paused (daemon restart, `graph_pause`)
+        // A sandboxed graph that was paused (daemon restart, `graph_control`)
         // or failed must resume inside its worktree and still merge back on
         // completion — otherwise the remaining nodes run against the user's
         // real repo and the sandbox is stranded. A resume that cannot find

@@ -9,11 +9,11 @@
 //! exported document round-trips its harness bindings.
 //!
 //! This module is pure — it never touches the database. `daemon::handler`'s
-//! `graph_export`/`graph_import` MCP tools (and their `canopy graph
+//! `graph`/`graph_edit` MCP tools (and their `canopy graph
 //! export`/`import` CLI counterparts) fetch/persist the surrounding data and
 //! call into here for the document shape and structural validation, so
-//! import is built on the same node/edge/ensemble shapes `graph_add_node`/
-//! `graph_add_edge`/`graph_add_ensemble` produce rather than a second,
+//! import is built on the same node/edge/ensemble shapes `graph_node`/
+//! `graph_edge`/`graph_ensemble` produce rather than a second,
 //! divergent write path.
 //!
 //! Import restores each ensemble's `kind` and every other field the document
@@ -48,7 +48,7 @@ pub use presets::*;
 mod validation;
 pub use validation::*;
 
-/// The latest `format_version` this build writes. `graph_import` accepts `1`
+/// The latest `format_version` this build writes. `graph_edit` accepts `1`
 /// (members with no binding), `2` (bindings included), `3` (graph/error
 /// vocabulary, `break` still read as `error` on import), `4` (every ensemble
 /// entry source), `5`, and `6` (current: ensemble `mutex` plus the bundled
@@ -137,7 +137,7 @@ pub struct GraphExportEnsembleMember {
 
 /// One extra entry source of an ensemble — a plain node that enters *every*
 /// member on its own condition, added at authoring time with
-/// `graph_update_ensemble`'s `add_entry_from`. The primary entry stays in the
+/// `graph_ensemble`'s `add_entry_from`. The primary entry stays in the
 /// ensemble's `entry_from_node`/`entry_condition` fields (CB71).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -182,7 +182,7 @@ pub struct GraphExportEnsemble {
     /// Every entry source beyond the primary (`entry_from_node` +
     /// `entry_condition`). Export omits it when the ensemble has only its
     /// primary; import re-creates one edge per source per member, exactly as
-    /// `graph_update_ensemble`'s `add_entry_from` wires it (CB71).
+    /// `graph_ensemble`'s `add_entry_from` wires it (CB71).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_entry_sources: Vec<GraphExportEntrySource>,
     pub on_pass_to: GraphExportEnsembleTarget,

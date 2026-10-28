@@ -1320,10 +1320,10 @@ async fn graph_engine_queue_run_walks_graph_across_queue_specs_in_queue_order() 
     );
 }
 
-/// `graph_run --from` must target the spec a FRESH dispatch would
+/// `graph_control --from` must target the spec a FRESH dispatch would
 /// actually execute. [`GraphEngine::preview_next_spec_id`] returns a
 /// queue's still-`running` member first (the resumed-queue path
-/// `graph_continue` takes), but a fresh pick loop never re-picks it — so
+/// `graph_control` takes), but a fresh pick loop never re-picks it — so
 /// the directed preview must skip it and name the next pickable member,
 /// keeping the plan the operator gets and the run the engine performs on
 /// the same spec.

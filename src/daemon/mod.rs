@@ -3,6 +3,7 @@
 //! Uses the `rmcp` SDK's `#[tool_router]` and `#[tool_handler]` macros
 //! with `Parameters<T>` for proper MCP protocol compliance.
 
+pub(crate) mod actions;
 pub(crate) mod agent_cli;
 pub(crate) mod announcements;
 pub(crate) mod bridge;
@@ -22,6 +23,7 @@ pub(crate) mod handler_blueprints;
 pub(crate) mod handler_copy;
 pub(crate) mod handler_crew;
 pub(crate) mod handler_edges;
+pub(crate) mod handler_ensemble_add;
 pub(crate) mod handler_ensemble_core;
 pub(crate) mod handler_ensemble_entry;
 pub(crate) mod handler_ensemble_exit;
@@ -29,6 +31,8 @@ pub(crate) mod handler_ensemble_plan;
 pub(crate) mod handler_ensemble_update;
 pub(crate) mod handler_formatting;
 pub(crate) mod handler_graph_crew;
+pub(crate) mod handler_graph_tools;
+pub(crate) mod handler_graph_updates;
 pub(crate) mod handler_graphs;
 pub(crate) mod handler_helpers;
 pub(crate) mod handler_intel;
@@ -37,10 +41,13 @@ pub(crate) mod handler_models_probes;
 pub(crate) mod handler_mutex;
 pub(crate) mod handler_node_lib;
 pub(crate) mod handler_nodes;
+pub(crate) mod handler_nodes_sections;
 pub(crate) mod handler_notes;
 pub(crate) mod handler_preflight;
+pub(crate) mod handler_preflight_report;
 pub(crate) mod handler_preflight_review;
 pub(crate) mod handler_preflight_roster;
+pub(crate) mod handler_preflight_sections;
 pub(crate) mod handler_queues;
 pub(crate) mod handler_read;
 pub(crate) mod handler_registry;
@@ -49,6 +56,7 @@ pub(crate) mod handler_run_directive;
 pub(crate) mod handler_run_exec;
 pub(crate) mod handler_run_history;
 pub(crate) mod handler_run_lifecycle;
+pub(crate) mod handler_run_prepare;
 pub(crate) mod handler_scheduled_sends;
 pub(crate) mod handler_seeds_skills;
 pub(crate) mod handler_send_session;
