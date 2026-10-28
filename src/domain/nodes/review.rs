@@ -125,7 +125,12 @@ pub fn review_graph(document: &GraphExportDocument, source: &str) -> InstallRevi
                     });
                 }
             }
-            crate::domain::graphs::GraphNodeKind::Agent => {
+            crate::domain::graphs::GraphNodeKind::Agent
+            | crate::domain::graphs::GraphNodeKind::Router => {
+                // A router's `prompt_template` steers its decision model
+                // (`gate_router::decision_instructions`), so it is an agent
+                // instruction like any agent node's — a document that hid
+                // steering text in a router node must still show it.
                 if let Some(template) = string_field(config, "prompt_template") {
                     prompts.push(prompt_review(label.clone(), template.to_string()));
                 }
@@ -220,6 +225,23 @@ pub fn review_node(document: &NodeDocument, source: &str) -> InstallReview {
     for key in ["prompt_template", "prompt_override"] {
         if let Some(template) = string_field(&document.config, key) {
             prompts.push(prompt_review(label.clone(), template.to_string()));
+        }
+    }
+    // An ensemble node document's per-member overrides steer its members
+    // the same way a graph ensemble's do — a document that hid steering
+    // text in a member override must still show it.
+    if document.kind == "ensemble" {
+        if let Some(members) = document.config.get("members").and_then(|v| v.as_array()) {
+            for (index, member) in members.iter().enumerate() {
+                if let Some(override_prompt) =
+                    member.get("prompt_override").and_then(|v| v.as_str())
+                {
+                    prompts.push(prompt_review(
+                        format!("{} member {}", label, index + 1),
+                        override_prompt.to_string(),
+                    ));
+                }
+            }
         }
     }
 
@@ -441,6 +463,30 @@ mod tests {
     }
 
     #[test]
+    fn graph_review_lists_a_router_decision_prompt() {
+        let mut doc = graph_doc();
+        doc.nodes
+            .push(crate::domain::graph_transfer::GraphExportNode {
+                name: "decide".to_string(),
+                kind: crate::domain::graphs::GraphNodeKind::Router,
+                position: 5,
+                config: serde_json::json!({
+                    "routes": [{"name": "a", "tokens": ["go"]}],
+                    "fallback": "a",
+                    "prompt_template": "route wisely",
+                }),
+            });
+        let review = review_graph(&doc, "official");
+        let router: Vec<&PromptReview> = review
+            .prompts
+            .iter()
+            .filter(|prompt| prompt.label == "node \"decide\"")
+            .collect();
+        assert_eq!(router.len(), 1, "{:#?}", review.prompts);
+        assert_eq!(router[0].text, "route wisely");
+    }
+
+    #[test]
     fn graph_review_marks_attention_on_commands_only() {
         let review = review_graph(&graph_doc(), "official");
         let patterns: Vec<&str> = review
@@ -581,6 +627,36 @@ mod tests {
             .collect();
         assert_eq!(labels, vec!["preset \"checker-preset\""]);
         assert_eq!(review.prompts[0].text, "check well");
+    }
+
+    #[test]
+    fn node_review_lists_ensemble_member_overrides() {
+        let document = NodeDocument {
+            format_version: 1,
+            name: "proposers".to_string(),
+            kind: "ensemble".to_string(),
+            description: None,
+            config: serde_json::json!({
+                "prompt_template": "draft it",
+                "members": [
+                    {"prompt_override": "argue against"},
+                    {},
+                ],
+            }),
+            preset: None,
+        };
+        let review = review_node(&document, "official");
+        let labels: Vec<&str> = review
+            .prompts
+            .iter()
+            .map(|prompt| prompt.label.as_str())
+            .collect();
+        assert_eq!(
+            labels,
+            vec!["node \"proposers\"", "node \"proposers\" member 1"],
+            "{labels:#?}"
+        );
+        assert_eq!(review.prompts[1].text, "argue against");
     }
 
     #[test]
