@@ -73,98 +73,105 @@ impl Database {
                 .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
             let tx = conn.transaction()?;
 
-            let old_path: String = tx
-                .query_row(
-                    "SELECT path FROM projects WHERE hash = ?1",
-                    params![old_hash],
-                    |row| row.get(0),
-                )
-                .map_err(|_| anyhow::anyhow!("No project registered with hash '{old_hash}'"))?;
-
-            let new_hash = workdir_hash(new_canonical_path);
-            if new_hash == old_hash {
-                anyhow::bail!(
-                    "New path resolves to the same project (hash unchanged) — nothing to remap"
-                );
-            }
-
-            let target_exists: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM projects WHERE hash = ?1)",
-                params![new_hash],
-                |row| row.get::<_, i64>(0),
-            )? != 0;
-            let kind = RemapKind::decide(target_exists);
-            let counts = count_remap_targets(&tx, &old_path, old_hash)?;
-
-            Self::rekey_project_dependents(
-                &tx,
-                &old_path,
-                old_hash,
-                new_canonical_path,
-                &new_hash,
-            )?;
-
-            // Keep the `project:{hash}` graph root in sync with the hash re-key:
-            // CASCADE won't fire here (no row delete in MOVE), so rename
-            // explicitly. MERGE drops the stale root (edges CASCADE).
-            let old_node_id = format!("project:{old_hash}");
-            let new_node_id = format!("project:{new_hash}");
-            let old_node: Option<(String, String, Option<String>)> = match tx.query_row(
-                "SELECT title, body, metadata FROM intelligence_nodes WHERE id = ?1",
-                params![old_node_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            ) {
-                Ok(v) => Some(v),
-                Err(rusqlite::Error::QueryReturnedNoRows) => None,
-                Err(e) => return Err(e.into()),
-            };
-            match kind {
-                RemapKind::Move => {
-                    Self::move_project_node_root(
-                        &tx,
-                        &old_node_id,
-                        &new_node_id,
-                        &new_hash,
-                        old_node,
-                        new_canonical_path,
-                    )?;
-                }
-                RemapKind::Merge => {
-                    tx.execute(
-                        "DELETE FROM intelligence_nodes WHERE id = ?1",
-                        params![old_node_id],
-                    )?;
-                }
-            }
-
-            match kind {
-                RemapKind::Move => {
-                    tx.execute(
-                        "UPDATE projects SET hash = ?2, path = ?3 WHERE hash = ?1",
-                        params![old_hash, new_hash, new_canonical_path],
-                    )?;
-                }
-                RemapKind::Merge => {
-                    tx.execute("DELETE FROM projects WHERE hash = ?1", params![old_hash])?;
-                }
-            }
-
+            let outcome = Self::remap_project_tx(&tx, old_hash, new_canonical_path)?;
             tx.commit()?;
-
-            Ok::<RemapOutcome, anyhow::Error>(RemapOutcome {
-                kind,
-                old_hash: old_hash.to_string(),
-                new_hash,
-                new_path: new_canonical_path.to_string(),
-                counts,
-            })
-        }?;
+            outcome
+        };
 
         if let Err(e) = self.rebuild_containment_edges() {
             tracing::debug!("rebuild_containment_edges after remap failed: {e}");
         }
 
         Ok(outcome)
+    }
+
+    /// The transaction body of [`Database::remap_project`], extracted so the
+    /// sandbox-attribution migration (`migrate_sandbox_intelligence_attribution`)
+    /// can reuse the exact same re-keying inside its own transaction. Caller
+    /// commits (or rolls back); `new_canonical_path` must already be resolved —
+    /// this function does no filesystem I/O.
+    pub(in crate::db) fn remap_project_tx(
+        tx: &rusqlite::Transaction<'_>,
+        old_hash: &str,
+        new_canonical_path: &str,
+    ) -> Result<RemapOutcome> {
+        let old_path: String = tx
+            .query_row(
+                "SELECT path FROM projects WHERE hash = ?1",
+                params![old_hash],
+                |row| row.get(0),
+            )
+            .map_err(|_| anyhow::anyhow!("No project registered with hash '{old_hash}'"))?;
+
+        let new_hash = workdir_hash(new_canonical_path);
+        if new_hash == old_hash {
+            anyhow::bail!(
+                "New path resolves to the same project (hash unchanged) — nothing to remap"
+            );
+        }
+
+        let target_exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE hash = ?1)",
+            params![new_hash],
+            |row| row.get::<_, i64>(0),
+        )? != 0;
+        let kind = RemapKind::decide(target_exists);
+        let counts = count_remap_targets(tx, &old_path, old_hash)?;
+
+        Self::rekey_project_dependents(tx, &old_path, old_hash, new_canonical_path, &new_hash)?;
+
+        // Keep the `project:{hash}` graph root in sync with the hash re-key:
+        // CASCADE won't fire here (no row delete in MOVE), so rename
+        // explicitly. MERGE drops the stale root (edges CASCADE).
+        let old_node_id = format!("project:{old_hash}");
+        let new_node_id = format!("project:{new_hash}");
+        let old_node: Option<(String, String, Option<String>)> = match tx.query_row(
+            "SELECT title, body, metadata FROM intelligence_nodes WHERE id = ?1",
+            params![old_node_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ) {
+            Ok(v) => Some(v),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(e.into()),
+        };
+        match kind {
+            RemapKind::Move => {
+                Self::move_project_node_root(
+                    tx,
+                    &old_node_id,
+                    &new_node_id,
+                    &new_hash,
+                    old_node,
+                    new_canonical_path,
+                )?;
+            }
+            RemapKind::Merge => {
+                tx.execute(
+                    "DELETE FROM intelligence_nodes WHERE id = ?1",
+                    params![old_node_id],
+                )?;
+            }
+        }
+
+        match kind {
+            RemapKind::Move => {
+                tx.execute(
+                    "UPDATE projects SET hash = ?2, path = ?3 WHERE hash = ?1",
+                    params![old_hash, new_hash, new_canonical_path],
+                )?;
+            }
+            RemapKind::Merge => {
+                tx.execute("DELETE FROM projects WHERE hash = ?1", params![old_hash])?;
+            }
+        }
+
+        Ok(RemapOutcome {
+            kind,
+            old_hash: old_hash.to_string(),
+            new_hash,
+            new_path: new_canonical_path.to_string(),
+            counts,
+        })
     }
 
     /// Re-key every dependent row of a remapped project from `old_path`/`old_hash`

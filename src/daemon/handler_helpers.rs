@@ -379,7 +379,10 @@ use crate::db::Database;
 use crate::shared::sync_identity::{self, header_str};
 
 /// Try to auto-detect the effective project_hash from session workdir,
-/// falling back to the caller-supplied value.
+/// falling back to the caller-supplied value. A workdir inside a sandbox
+/// worktree maps to the project the sandbox was cut from, so knowledge
+/// produced inside a sandbox is attributed to (and read back from) that
+/// project — never from a hash of the ephemeral worktree path.
 pub(crate) fn resolve_effective_project_hash(
     db: &Database,
     provided: Option<&str>,
@@ -388,10 +391,10 @@ pub(crate) fn resolve_effective_project_hash(
     if let Some(ph) = provided {
         return Some(ph.to_string());
     }
-    db.get_session_workdir(agent_id)
-        .ok()
-        .flatten()
-        .map(|wd| crate::domain::project::workdir_hash(&wd))
+    db.get_session_workdir(agent_id).ok().flatten().map(|wd| {
+        let mapped = db.map_workdir_out_of_sandbox(&wd).unwrap_or(wd);
+        crate::domain::project::workdir_hash(&mapped)
+    })
 }
 
 /// Load the seed identity bound to the current session agent.

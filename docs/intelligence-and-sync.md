@@ -12,7 +12,11 @@ Canopy persists what agents learn, scoped to projects.
 
 - **Project scoping** — knowledge is keyed by `project_hash` (SHA-256 of
   the canonical workdir path, truncated to 8 hex chars), auto-detected
-  from the session workdir. Agents never set it manually.
+  from the session workdir. A session inside a sandbox worktree resolves
+  to the project the sandbox was cut from, so knowledge written from a
+  sandboxed run lands with — and is read back into — that project's
+  context instead of a hash of the ephemeral worktree path. Agents never
+  set it manually.
 - **Node kinds** — facts, patterns and session summaries.
 - **Writes** — `intelligence_upsert` is all-or-nothing. A relation whose
   target cannot be resolved fails the whole call and leaves no half-written

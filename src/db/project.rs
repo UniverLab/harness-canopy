@@ -141,7 +141,11 @@ impl Database {
     }
 
     pub fn register_project_path(&self, path: &Path) -> Result<Project> {
-        let canonical = std::fs::canonicalize(path)?;
+        // A path inside a sandbox worktree registers the project the sandbox
+        // was cut from — a sandbox never registers itself as a project.
+        // `register_project_explicit` inherits this mapping.
+        let mapped = self.map_workdir_out_of_sandbox(&path.to_string_lossy())?;
+        let canonical = std::fs::canonicalize(&mapped)?;
         let canonical_str = canonical.to_string_lossy().to_string();
         let mut project = Project::new(&canonical_str);
 

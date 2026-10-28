@@ -208,7 +208,16 @@ impl TaskTriggerHandler {
                     .ok()
                     .and_then(|agent_id| self.db.get_session_workdir(&agent_id).ok())
                     .flatten()
-                    .map(|workdir| crate::domain::project::workdir_hash(&workdir));
+                    .map(|workdir| {
+                        // A sandboxed workdir maps to the original project, so
+                        // the node lands in the project the sandbox was cut
+                        // from instead of a hash of the worktree path.
+                        let mapped = self
+                            .db
+                            .map_workdir_out_of_sandbox(&workdir)
+                            .unwrap_or(workdir);
+                        crate::domain::project::workdir_hash(&mapped)
+                    });
                 Some(detected)
             }
         };

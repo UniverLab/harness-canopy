@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use super::{Database, SCHEMA_VERSION};
 
@@ -534,4 +534,51 @@ impl Database {
         Ok(())
     }
     // RETIRED-SCHEMA-NAME-END
+
+    /// One-off re-attribution: Intelligence written from inside a sandbox
+    /// worktree used to be hashed from the (ephemeral) worktree path instead
+    /// of the project the sandbox was cut from, orphaning it from that
+    /// project's context. For every sandbox run whose worktree path hashes
+    /// to a different project than its `original_workdir`, move the stray
+    /// attribution to the original project — the same re-keying
+    /// `remap_project_tx` (the transaction body of `remap_project`) does when a stray
+    /// project row exists at the worktree hash (which also rehomes its
+    /// sessions and drops the stray row and its `project:{hash}` root);
+    /// otherwise just re-point the nodes. Idempotent: after the first pass
+    /// nothing hashes to a worktree path any more, so every later startup
+    /// is a no-op for already-migrated rows.
+    pub(super) fn migrate_sandbox_intelligence_attribution(conn: &Connection) -> Result<()> {
+        let runs: Vec<(String, String)> = {
+            let mut stmt =
+                conn.prepare("SELECT worktree_path, original_workdir FROM sandbox_runs")?;
+            let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        if runs.is_empty() {
+            return Ok(());
+        }
+        let tx = conn.unchecked_transaction()?;
+        for (worktree_path, original_workdir) in runs {
+            let stray = crate::domain::project::workdir_hash(&worktree_path);
+            let target = crate::domain::project::workdir_hash(&original_workdir);
+            if stray == target {
+                continue;
+            }
+            let stray_row_exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM projects WHERE hash = ?1)",
+                params![stray],
+                |row| row.get::<_, i64>(0),
+            )? != 0;
+            if stray_row_exists {
+                Database::remap_project_tx(&tx, &stray, &original_workdir)?;
+            } else {
+                tx.execute(
+                    "UPDATE intelligence_nodes SET project_hash = ?2 WHERE project_hash = ?1",
+                    params![stray, target],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
 }

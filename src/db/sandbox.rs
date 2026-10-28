@@ -70,6 +70,31 @@ impl Database {
         Ok(())
     }
 
+    /// Map a workdir inside a sandbox worktree back to the original project
+    /// workdir the sandbox was cut from: the newest `sandbox_runs` row whose
+    /// `worktree_path` equals `workdir` or is a path-prefix of it (a
+    /// subdirectory of the worktree) decides. Any other path — and any
+    /// lookup failure — returns `workdir` unchanged, so callers can map
+    /// unconditionally. Deliberately never calls `worktrees_base_dir()`
+    /// (which panics outside a real home, e.g. in tests).
+    pub fn map_workdir_out_of_sandbox(&self, workdir: &str) -> Result<String> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let escaped = workdir
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let original: Option<String> = conn
+            .query_row(
+                "SELECT original_workdir FROM sandbox_runs
+                  WHERE worktree_path = ?1 OR ?1 LIKE worktree_path || '/%' ESCAPE '\\'
+                  ORDER BY created_at DESC LIMIT 1",
+                params![escaped],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(original.unwrap_or_else(|| workdir.to_string()))
+    }
+
     pub fn update_sandbox_run_status(&self, id: &str, status: &str) -> Result<()> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         conn.execute(
@@ -440,6 +465,64 @@ mod tests {
             .latest_sandbox_run_for_owner("graph", "graph-none")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn test_map_workdir_out_of_sandbox_exact_subdir_and_unknown() {
+        let db = test_db();
+        let sandbox = test_sandbox();
+        db.insert_sandbox_run(&sandbox, "graph", "graph-123")
+            .unwrap();
+
+        // Exact worktree path resolves to the original workdir.
+        assert_eq!(
+            db.map_workdir_out_of_sandbox("/tmp/test-worktree").unwrap(),
+            "/home/user/project"
+        );
+        // A subdirectory of the worktree resolves too (the agent's cwd may be
+        // anywhere inside the worktree).
+        assert_eq!(
+            db.map_workdir_out_of_sandbox("/tmp/test-worktree/src/db")
+                .unwrap(),
+            "/home/user/project"
+        );
+        // A sibling path sharing the worktree prefix is NOT inside it.
+        assert_eq!(
+            db.map_workdir_out_of_sandbox("/tmp/test-worktree-sibling")
+                .unwrap(),
+            "/tmp/test-worktree-sibling"
+        );
+        // An unrelated path passes through unchanged.
+        assert_eq!(
+            db.map_workdir_out_of_sandbox("/home/user/other").unwrap(),
+            "/home/user/other"
+        );
+        // The original workdir itself passes through unchanged.
+        assert_eq!(
+            db.map_workdir_out_of_sandbox("/home/user/project").unwrap(),
+            "/home/user/project"
+        );
+    }
+
+    #[test]
+    fn test_map_workdir_out_of_sandbox_prefers_newest_run() {
+        let db = test_db();
+        let mut older = test_sandbox();
+        older.id = "older-sbx".to_string();
+        older.created_at = Utc::now() - chrono::Duration::hours(2);
+        older.original_workdir = "/home/user/old-project".to_string();
+        let mut newer = test_sandbox();
+        newer.id = "newer-sbx".to_string();
+        newer.created_at = Utc::now();
+        newer.original_workdir = "/home/user/new-project".to_string();
+
+        db.insert_sandbox_run(&newer, "graph", "graph-123").unwrap();
+        db.insert_sandbox_run(&older, "graph", "graph-123").unwrap();
+
+        assert_eq!(
+            db.map_workdir_out_of_sandbox("/tmp/test-worktree").unwrap(),
+            "/home/user/new-project"
+        );
     }
 
     #[test]

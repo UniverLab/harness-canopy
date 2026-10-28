@@ -98,6 +98,10 @@ impl Database {
         session_type: &str,
         boot_id: Option<&str>,
     ) -> Result<()> {
+        // A sandboxed workdir registers under the original project path — a
+        // sandbox never registers itself as a project (mapping locks the
+        // connection, so it must happen before this function takes it).
+        let working_dir = self.map_workdir_out_of_sandbox(working_dir)?;
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         conn.execute(
             "INSERT OR REPLACE INTO interactive_sessions (id, name, cli, working_dir, args, started_at, status, session_type, pid, boot_id)
@@ -185,12 +189,16 @@ impl Database {
         &self,
         registration: &SessionRegistration<'_>,
     ) -> Result<RegistrationOutcome> {
+        // A sandboxed workdir resolves to the original project path before
+        // any row is written (mapping locks the connection, so it must run
+        // before this function locks it below).
+        let working_dir = self.map_workdir_out_of_sandbox(registration.working_dir)?;
         if let Some(harness_id) = registration.harness_conversation_id {
             if let Some(existing) = self.find_session_by_harness_id(harness_id)? {
                 self.reactivate_interactive_session(
                     &existing.id,
                     registration.pid,
-                    registration.working_dir,
+                    &working_dir,
                     registration.args,
                     registration.boot_id,
                 )?;
@@ -208,7 +216,7 @@ impl Database {
                 registration.id,
                 registration.name,
                 registration.cli,
-                registration.working_dir,
+                working_dir,
                 registration.args,
                 Utc::now().to_rfc3339(),
                 registration.session_type,

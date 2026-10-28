@@ -459,3 +459,4 @@ mod part04_tests;
 mod part05_tests;
 mod part06_tests;
 mod part07_tests;
+mod part08_tests;
