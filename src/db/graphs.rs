@@ -875,7 +875,7 @@ mod tests {
     }
 
     #[test]
-    fn find_dirty_predecessor_spec_excludes_given_id_and_completed_status() {
+    fn find_dirty_predecessor_specs_excludes_given_id_and_completed_status() {
         let db = test_db();
         let workdir = "/tmp/dirty-predecessor-test";
         let mk = |id: &str, status: GraphSpecStatus, workdir: Option<&str>| GraphSpec {
@@ -918,19 +918,25 @@ mod tests {
             Some("/tmp/unrelated-workdir"),
         ))
         .unwrap();
+        // Inserted last, so the most recently touched row on this workdir:
+        // a skipped spec never ran, so it must never be a candidate (FR1).
+        db.insert_graph_spec(&mk("spec-skipped", GraphSpecStatus::Skipped, Some(workdir)))
+            .unwrap();
 
-        let found = db
-            .find_dirty_predecessor_spec(workdir, None)
-            .unwrap()
-            .expect("the failed spec on this workdir should be found");
-        assert_eq!(found.id, "spec-failed");
+        let found = db.find_dirty_predecessor_specs(workdir, None).unwrap();
+        assert_eq!(
+            found.first().map(|spec| spec.id.as_str()),
+            Some("spec-failed"),
+            "the failed spec is the only candidate; the skipped one is not: {found:?}"
+        );
+        assert_eq!(found.len(), 1, "only the failed spec qualifies: {found:?}");
 
         let excluded = db
-            .find_dirty_predecessor_spec(workdir, Some("spec-failed"))
+            .find_dirty_predecessor_specs(workdir, Some("spec-failed"))
             .unwrap();
         assert!(
-            excluded.is_none(),
-            "excluding the only qualifying spec must fall through to None"
+            excluded.is_empty(),
+            "excluding the only qualifying spec must fall through to none"
         );
     }
 

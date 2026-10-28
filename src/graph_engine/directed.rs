@@ -386,7 +386,8 @@ impl GraphEngine {
             .map_err(|e| e.to_string())?;
         // Validate unsafe upstream prerequisites synchronously, before dispatch.
         let upstream_ids = directed_upstream_node_ids(&edges, &target.start_node_ids);
-        check_upstream_prerequisites(&nodes, &upstream_ids, &runs).map_err(|e| e.to_string())?;
+        check_upstream_prerequisites(&nodes, &upstream_ids, &runs, &ensembles)
+            .map_err(|e| e.to_string())?;
         let node_outputs = upstream_node_outputs(&nodes, &upstream_ids, &runs);
         // The same prompts dir the agent spawn path resolves presets from, so
         // a preset body's `{{output:X}}` is validated exactly as it will bind.
@@ -641,6 +642,105 @@ mod tests {
                 .unwrap_err();
             assert!(err.to_string().contains("prerequisite node 'A'"), "{err}");
         }
+    }
+
+    /// The node/edge shape of a round-robin ensemble sitting between A and B:
+    /// A → m1/m2/m3 → j → B.
+    fn round_robin_between_a_and_b() -> (Vec<GraphNode>, Vec<GraphEdge>, Vec<EnsembleDetails>) {
+        let nodes = vec![
+            node("A", "A", 0, Value::Null),
+            node("m1", "M1", 1, Value::Null),
+            node("m2", "M2", 2, Value::Null),
+            node("m3", "M3", 3, Value::Null),
+            node("j", "Join", 4, Value::Null),
+            node("B", "B", 5, Value::Null),
+        ];
+        let edges = vec![
+            edge("A", "m1", GraphEdgeCondition::Always),
+            edge("A", "m2", GraphEdgeCondition::Always),
+            edge("A", "m3", GraphEdgeCondition::Always),
+            edge("m1", "j", GraphEdgeCondition::Always),
+            edge("m2", "j", GraphEdgeCondition::Always),
+            edge("m3", "j", GraphEdgeCondition::Always),
+            edge("j", "B", GraphEdgeCondition::Pass),
+        ];
+        let mut details = ensemble_details("ens", "rr", "A", &["m1", "m2", "m3"], "j");
+        details.ensemble.kind = EnsembleKind::RoundRobin;
+        details.ensemble.min_pass = 1;
+        (nodes, edges, vec![details])
+    }
+
+    /// FR2: a round-robin ensemble passes through whichever member carried the
+    /// vote. Member 1 failing under a passed quorum is not an unmet
+    /// prerequisite for a directed start past the ensemble.
+    #[test]
+    fn directed_start_past_a_passed_round_robin_ensemble_ignores_a_failed_member() {
+        let s = spec("spec-1");
+        let (nodes, edges, ensembles) = round_robin_between_a_and_b();
+        let runs = vec![
+            run("m1", GraphRunStatus::Fail, Some(serde_json::json!(1)), None),
+            run("m3", GraphRunStatus::Pass, Some(serde_json::json!(3)), None),
+            run(
+                "j",
+                GraphRunStatus::Pass,
+                Some(serde_json::json!(true)),
+                None,
+            ),
+        ];
+        let directed = DirectedStart {
+            spec_id: s.id.clone(),
+            node_arg: "B".to_string(),
+        };
+        resolve_spec_start(
+            &nodes,
+            &edges,
+            &s,
+            &runs,
+            &ensembles,
+            false,
+            Some(&directed),
+        )
+        .expect("a passed quorum satisfies the ensemble prerequisite");
+    }
+
+    /// FR2/FR3: when the ensemble's own quorum result failed, the prerequisite
+    /// is unmet and the refusal names the ensemble's join node — not a member.
+    #[test]
+    fn directed_start_past_a_failed_round_robin_quorum_is_refused() {
+        let s = spec("spec-1");
+        let (nodes, edges, ensembles) = round_robin_between_a_and_b();
+        let runs = vec![
+            run("m1", GraphRunStatus::Fail, Some(serde_json::json!(1)), None),
+            run("m3", GraphRunStatus::Pass, Some(serde_json::json!(3)), None),
+            run(
+                "j",
+                GraphRunStatus::Fail,
+                Some(serde_json::json!(false)),
+                None,
+            ),
+        ];
+        let directed = DirectedStart {
+            spec_id: s.id.clone(),
+            node_arg: "B".to_string(),
+        };
+        let err = resolve_spec_start(
+            &nodes,
+            &edges,
+            &s,
+            &runs,
+            &ensembles,
+            false,
+            Some(&directed),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("prerequisite node 'Join'"),
+            "{err}"
+        );
+        assert!(
+            !err.to_string().contains("'M1'"),
+            "the quorum result, not a member, is the prerequisite: {err}"
+        );
     }
 
     #[test]

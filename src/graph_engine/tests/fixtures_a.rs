@@ -353,7 +353,7 @@ fn commit_line(path: &std::path::Path, rev: &str, subject: &str) -> String {
 }
 
 /// A spec not bound to `graph_id` at all, tagged with its own `workdir`
-/// (the shape `find_dirty_predecessor_spec` also matches) — the minimal
+/// (the shape `find_dirty_predecessor_specs` also matches) — the minimal
 /// "previous spec" fixture the `dirty_start_check` tests need, without
 /// having to actually run anything through it.
 fn dirty_predecessor_spec(id: &str, workdir: &str, status: GraphSpecStatus) -> GraphSpec {
@@ -1091,6 +1091,9 @@ fn dirty_queue_fixture(
     db.update_graph_allow_dirty_start(&graph_id, allow_dirty_start)?;
     if dirty {
         std::fs::write(dir.path().join("x.txt"), "x")?;
+        // FR1: the failed spec blocks only by its recorded paths, so the
+        // fixture records the dirt it is meant to have left.
+        db.set_graph_spec_end_state("pred-a", Some(1), &["x.txt".to_string()])?;
     }
     Ok((dir, db, engine, graph_id, next.id))
 }

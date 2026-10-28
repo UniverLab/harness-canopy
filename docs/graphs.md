@@ -150,13 +150,19 @@ summary/blocker text and (for a plain `Failed` ending) onto the `on_failed`
 hook's `{{node}}` value.
 
 `graph_run` and the autorun scheduler refuse to launch the next spec when the
-workdir is currently dirty and a spec on that same workdir ended `Failed`,
-`Interrupted`, or `Skipped` (never `Completed`). The warning names the spec
+workdir is currently dirty and a *different* spec on that same workdir ended
+`Failed` or `Interrupted` with recorded dirty paths that overlap the ones
+dirty now. `Completed` specs never block, and neither do `Skipped` ones: a
+skipped spec never ran, so its stale record must not make a later spec's own
+dirt look ambiguous. The comparison uses the (first 20) paths each spec
+recorded at its end, so a record naming files that are no longer dirty never
+blocks. A spec resuming interrupted work of its own proceeds when the dirty
+paths are exactly the ones its own latest run recorded. The warning names the spec
 whose last recorded run in **this graph** left the workdir dirty
 (`graph_runs` joined to `spec_end_dirty > 0`); when no run of this graph
 recorded dirt the warning says `dirty before this graph ran` and names no
-spec. A resuming spec is still refused while another spec on the same workdir
-ended dirty: the refusal names the blocking predecessor — its name (id when
+spec. A resuming spec is still refused while another spec's overlapping dirt is
+on the same workdir: the refusal names the blocking predecessor — its name (id when
 the name is empty), the graph it ran in, its end status and end time — and,
 when the next spec is resuming its own dirt, says so in the same line. Finish,
 reset or remove that blocking spec (or set `allow_dirty_start`) to proceed.
@@ -602,7 +608,11 @@ most recent recorded output of each node upstream of the start node for that
 spec; the start node and everything downstream of it always run again, and
 its own old output is never reused. If an upstream node's latest run is
 `failed`, `error` or `interrupted`, the directed run is refused and that node
-is named: a failed prerequisite is never treated as passed. The spec cursor
+is named: a failed prerequisite is never treated as passed. An upstream node
+that is a member of an ensemble is judged by the ensemble's quorum result —
+its join node's run for this spec — not by that member's own latest run: a
+member that failed while the quorum passed is a satisfied prerequisite, while
+a failed quorum refuses the run and names the join. The spec cursor
 is set to the start node, and the graph then runs with its normal edges,
 routers, ensembles and gates. On a queue-driven graph the chosen spec is
 what runs first: queue members before it are marked `skipped`, members

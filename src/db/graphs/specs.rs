@@ -579,37 +579,43 @@ impl Database {
         Ok(rows > 0)
     }
 
-    /// CM29: the most-recently-touched spec that ended without completing,
-    /// for `workdir` — either a graph-bound spec whose graph's `workdir`
-    /// matches, or a standalone spec whose own `workdir` tag matches.
+    /// CM29: the specs that ended without completing, for `workdir` — either
+    /// graph-bound specs whose graph's `workdir` matches, or standalone specs
+    /// whose own `workdir` tag matches — most recently touched first.
     /// Excludes `exclude_spec_id` (the spec about to be dispatched next) so
     /// a spec that is itself `Interrupted` and about to be legitimately
     /// resumed is never mistaken for "the previous spec" that left the mess
     /// (CM29 guideline). `pending`/`running` are never candidates — those
     /// are either not-yet-run or still in flight, never "previous".
-    pub fn find_dirty_predecessor_spec(
+    /// `skipped` is not a candidate either: a spec nobody ran never produced
+    /// dirt of its own, so its stale record must not block a later spec
+    /// (FR1). `completed` keeps its dirt as the *previous* run's record but
+    /// the caller compares paths, not just presence.
+    pub fn find_dirty_predecessor_specs(
         &self,
         workdir: &str,
         exclude_spec_id: Option<&str>,
-    ) -> Result<Option<GraphSpec>> {
+    ) -> Result<Vec<GraphSpec>> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
-        conn.query_row(
+        let mut stmt = conn.prepare(
             "SELECT gs.id, gs.graph_id, gs.name, gs.description, gs.position, gs.parallelizable, gs.status, gs.started_at, gs.completed_at, gs.spec_start_head, gs.spec_start_dirty, gs.workdir, gs.completed_via, gs.completed_via_reason, gs.completed_via_at, gs.spec_committed_head, gs.spec_end_dirty, gs.spec_end_dirty_paths, gs.spec_type, gs.spec_scope, gs.spec_code
              FROM graph_specs gs
              LEFT JOIN graphs g ON g.id = gs.graph_id
              WHERE (g.workdir = ?1 OR gs.workdir = ?1)
-               AND gs.status IN ('failed', 'interrupted', 'skipped')
+               AND gs.status IN ('failed', 'interrupted')
                AND (?2 IS NULL OR gs.id != ?2)
              ORDER BY gs.updated_at DESC
-             LIMIT 1",
-            params![workdir, exclude_spec_id],
-            map_graph_spec_row,
-        )
-        .optional()
-        .map_err(Into::into)
+             LIMIT 20",
+        )?;
+        let rows = stmt.query_map(params![workdir, exclude_spec_id], map_graph_spec_row)?;
+        let mut specs = Vec::new();
+        for spec in rows {
+            specs.push(spec?);
+        }
+        Ok(specs)
     }
 
     /// CB69: attribution for the dirty-start message — the spec whose most

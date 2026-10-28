@@ -405,7 +405,7 @@ pub(crate) fn resolve_spec_start(
         // The cursor's own node (and everything downstream) is executed
         // fresh, so its prior output/input is never seeded.
         let upstream_ids = directed_upstream_node_ids(edges, &target.start_node_ids);
-        check_upstream_prerequisites(nodes, &upstream_ids, existing_runs)?;
+        check_upstream_prerequisites(nodes, &upstream_ids, existing_runs, ensembles)?;
         let node_outputs = upstream_node_outputs(nodes, &upstream_ids, existing_runs);
         return Ok((target.cursor, node_outputs, None, HashMap::new()));
     }
@@ -483,6 +483,43 @@ pub(crate) fn directed_upstream_node_ids(
         .collect()
 }
 
+/// FR2: the run a directed start should judge `node` by. For a member of an
+/// ensemble (never the join node itself), that is the ensemble's quorum result
+/// — the latest run of `join_node_id` — because a round-robin ensemble passes
+/// through whichever member carried the vote: one member's failure under a
+/// passed quorum is not an unmet prerequisite. When the ensemble has not
+/// reported a quorum yet (no join run), fall back to the member's own latest
+/// run, which is then the only evidence there is.
+fn prerequisite_run<'a>(
+    node: &'a GraphNode,
+    nodes: &'a [GraphNode],
+    runs: &'a [GraphNodeRun],
+    ensembles: &'a [EnsembleDetails],
+) -> Option<(&'a GraphNode, &'a GraphNodeRun)> {
+    let quorum = ensembles
+        .iter()
+        .filter(|details| details.ensemble.join_node_id != node.id)
+        .find(|details| {
+            details
+                .members
+                .iter()
+                .any(|member| member.node_id == node.id)
+        })
+        .and_then(|details| {
+            runs.iter()
+                .rev()
+                .find(|run| run.node_id == details.ensemble.join_node_id)
+        });
+    if let Some(run) = quorum {
+        let join = nodes.iter().find(|candidate| candidate.id == run.node_id);
+        return Some((join.unwrap_or(node), run));
+    }
+    runs.iter()
+        .rev()
+        .find(|run| run.node_id == node.id)
+        .map(|run| (node, run))
+}
+
 /// Refuses a directed start when an upstream prerequisite (one whose output
 /// would be reused) last ran Fail, Error or Interrupted. Skipping it as if it
 /// had passed would route on work that never cleared its gates.
@@ -490,9 +527,10 @@ pub(crate) fn check_upstream_prerequisites(
     nodes: &[GraphNode],
     upstream_ids: &HashSet<String>,
     runs: &[GraphNodeRun],
+    ensembles: &[EnsembleDetails],
 ) -> anyhow::Result<()> {
     for node in nodes.iter().filter(|n| upstream_ids.contains(&n.id)) {
-        let Some(latest) = runs.iter().rev().find(|r| r.node_id == node.id) else {
+        let Some((judged, latest)) = prerequisite_run(node, nodes, runs, ensembles) else {
             continue;
         };
         if matches!(
@@ -501,7 +539,7 @@ pub(crate) fn check_upstream_prerequisites(
         ) {
             bail!(
                 "Directed run refused: prerequisite node '{}' last run was {} ({}). Re-run it first or start at an earlier node.",
-                node.name,
+                judged.name,
                 latest.status.as_str(),
                 latest.id
             );

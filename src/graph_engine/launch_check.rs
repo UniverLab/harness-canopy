@@ -162,7 +162,7 @@ impl GraphEngine {
     /// CM29: the spec `graph_run`/autorun would dispatch or resume next,
     /// without actually starting it — used only to exclude that spec from
     /// the dirty-start refusal's "previous spec" search (see
-    /// `find_dirty_predecessor_spec`). Mirrors the picking logic in
+    /// `find_dirty_predecessor_specs`). Mirrors the picking logic in
     /// `run_graph_dispatch` exactly: for a queue, the currently-running
     /// member if any, else the next pending/interrupted one; for bound
     /// specs, the first one (by position) that isn't `Completed`/`Skipped`.
@@ -224,6 +224,42 @@ impl GraphEngine {
         format!("spec '{display}' (graph '{graph}', {status} {time})")
     }
 
+    /// FR1: whether two recorded dirty-path sets are the same set. Both ends
+    /// come from the same `git status --porcelain` decoding (`spec_end_dirty_paths`)
+    /// and are already de-duplicated and capped, so equal length plus full
+    /// containment is set equality.
+    fn same_dirty_paths(a: &[String], b: &[String]) -> bool {
+        a.len() == b.len() && a.iter().all(|path| b.contains(path))
+    }
+
+    /// FR1: whether a recorded dirty-path set shares any entry with the paths
+    /// currently dirty in the workdir. A record with no paths (never captured,
+    /// or captured by an older version) overlaps nothing: it cannot be shown
+    /// to be the same dirt, so it must not block a resuming spec.
+    fn dirty_paths_overlap(recorded: &[String], current: &[String]) -> bool {
+        recorded.iter().any(|path| current.contains(path))
+    }
+
+    /// FR1: the predecessor that actually blocks this launch, among the
+    /// workdir's non-completing specs. `None` when the current spec is resuming
+    /// and the paths currently dirty are exactly the ones its own latest run
+    /// recorded (`own`) — that is its own work, not somebody else's. Otherwise
+    /// the first (most recently touched) candidate whose recorded paths overlap
+    /// `current`, so a stale record naming different files never blocks.
+    fn blocking_dirty_predecessor<'a>(
+        candidates: &'a [GraphSpec],
+        own: &[String],
+        resuming: bool,
+        current: &[String],
+    ) -> Option<&'a GraphSpec> {
+        if resuming && Self::same_dirty_paths(own, current) {
+            return None;
+        }
+        candidates.iter().find(|spec| {
+            Self::dirty_paths_overlap(spec.spec_end_dirty_paths.as_deref().unwrap_or(&[]), current)
+        })
+    }
+
     /// the spec a *directed* `graph_run` (`start_node_id`) targets —
     /// the first spec a FRESH dispatch would actually execute, so the plan
     /// the operator gets back names the spec the run really starts at. Unlike
@@ -246,15 +282,16 @@ impl GraphEngine {
 
     /// CM29/CB69: whether launching the next spec in `workdir` should be refused
     /// because a different, earlier spec on this same workdir ended without
-    /// completing and left the tree dirty (`find_dirty_predecessor_spec` — the
-    /// BLOCKING predicate, unchanged). On refusal the message names the blocking
-    /// predecessor from `find_dirty_predecessor_spec`; when the next spec is
+    /// completing and left overlapping dirt (`find_dirty_predecessor_specs` plus
+    /// [`Self::blocking_dirty_predecessor`] — the BLOCKING predicate). On
+    /// refusal the message names that predecessor; when the next spec is
     /// resuming its own dirt that sentence also names the next spec. On launch
     /// the attribution comes from `find_last_dirty_run_spec` (the spec whose
     /// recorded run in `graph_id` last left the workdir dirty; "dirty before
-    /// this graph ran" when none did). Read-only: two DB lookups plus one live
-    /// `git status --porcelain` call (captured only when a notice can exist —
-    /// same short-circuit cost as before, plus the resume case).
+    /// this graph ran" when none did). Read-only: two DB lookups (plus the next
+    /// spec's own row when resuming) and one live `git status --porcelain` call
+    /// (captured only when a notice can exist — same short-circuit cost as
+    /// before, plus the resume case).
     /// When the launch proceeds the message says WHY: the graph's
     /// `allow_dirty_start` flag, or — when no predecessor blocks and the next
     /// spec is resuming the dirt it left itself — the spec resuming its own
@@ -266,23 +303,39 @@ impl GraphEngine {
         next_spec_id: Option<&str>,
         allow_dirty_start: bool,
     ) -> Result<Option<DirtyStartNotice>> {
-        // Blocking predicate: unchanged from CM29. The result is used as a
-        // boolean (plus its existing exclusion of next_spec_id); on refusal
-        // the message names this predicate's spec (FR1/FR2), not the
-        // attribution below.
-        let predecessor = self.db.find_dirty_predecessor_spec(workdir, next_spec_id)?;
+        // Cheap predicate first: the workdir's non-completing specs (the
+        // current spec excluded). Whether any of them blocks depends on the
+        // paths, so it is decided after the capture below.
+        let candidates = self
+            .db
+            .find_dirty_predecessor_specs(workdir, next_spec_id)?;
         let attributed = self.db.find_last_dirty_run_spec(graph_id)?;
         let resuming = match (&attributed, next_spec_id) {
             (Some(spec), Some(next)) => spec.id == *next,
             _ => false,
         };
-        if predecessor.is_none() && !resuming {
+        if candidates.is_empty() && !resuming {
             return Ok(None);
         }
         let (dirty, paths) = capture_workdir_dirty_with_paths(workdir).await;
         let Some(count) = dirty.filter(|n| *n > 0) else {
             return Ok(None);
         };
+        // FR1: the current spec's own latest recorded dirt. When the workdir
+        // still holds exactly that, the dirty work is its own and nobody else
+        // is blamed for it.
+        let own = match next_spec_id {
+            Some(id) => self
+                .db
+                .get_graph_spec(id)?
+                .and_then(|spec| spec.spec_end_dirty_paths)
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let predecessor = Self::blocking_dirty_predecessor(&candidates, &own, resuming, &paths);
+        if predecessor.is_none() && !resuming {
+            return Ok(None);
+        }
         let plural = if count == 1 { "y" } else { "ies" };
         let attribution = match &attributed {
             Some(spec) => {
@@ -298,7 +351,7 @@ impl GraphEngine {
         let head = format!("workdir '{workdir}' is dirty ({count} entr{plural})");
         let refuse = predecessor.is_some() && !allow_dirty_start;
         let message = if refuse {
-            let pred = predecessor.as_ref().expect("refuse implies a predecessor");
+            let pred = predecessor.expect("refuse implies a predecessor");
             let detail = Self::dirty_predecessor_detail(pred);
             if resuming {
                 let next_name = match (&attributed, next_spec_id) {

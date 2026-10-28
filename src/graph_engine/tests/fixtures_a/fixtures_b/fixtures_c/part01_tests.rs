@@ -694,10 +694,11 @@ async fn dirty_start_check_refusal_names_blocking_predecessor_when_next_resumes_
     db.insert_graph_spec(&spec_a).unwrap();
     db.update_graph_spec_status("spec-a", GraphSpecStatus::Failed, Some(t1), Some(t1))
         .unwrap();
+    // Overlaps the file the workdir still has dirty (FR1).
     db.set_graph_spec_end_state(
         "spec-a",
         Some(3),
-        &["a".to_string(), "b".to_string(), "c".to_string()],
+        &["x.txt".to_string(), "b".to_string(), "c".to_string()],
     )
     .unwrap();
     insert_run_row(&db, "g1", "spec-a", "node-a", 1, t1.timestamp()).unwrap();
@@ -834,12 +835,19 @@ async fn dirty_start_check_refuses_when_predecessor_failed_dirty() {
     let workdir = dir.path().to_string_lossy().to_string();
     // The dirty-leaving spec is not this graph's — no run of `graph_id`
     // recorded the dirt — so there is no attribution; the refusal still
-    // names the blocking predecessor from `find_dirty_predecessor_spec`.
+    // names the blocking predecessor from `find_dirty_predecessor_specs`.
     db.insert_graph_spec(&dirty_predecessor_spec(
         "pred-a",
         &workdir,
         GraphSpecStatus::Failed,
     ))
+    .unwrap();
+    // FR1: the record must name the files still dirty, or it does not block.
+    db.set_graph_spec_end_state(
+        "pred-a",
+        Some(2),
+        &["x.txt".to_string(), "y.txt".to_string()],
+    )
     .unwrap();
     std::fs::write(dir.path().join("x.txt"), "x").unwrap();
     std::fs::write(dir.path().join("y.txt"), "y").unwrap();
@@ -890,9 +898,11 @@ async fn dirty_start_check_names_the_blocking_predecessor_not_the_attribution() 
         GraphSpecStatus::Pending,
     ))
     .unwrap();
-    db.set_graph_spec_end_state("spec-a-old", Some(5), &["a".to_string()])
+    db.set_graph_spec_end_state("spec-a-old", Some(5), &["x.txt".to_string()])
         .unwrap();
-    db.set_graph_spec_end_state("spec-b-new", Some(2), &["b".to_string()])
+    // Its own record names only y.txt, so it is resuming its own work yet
+    // x.txt is somebody else's (FR1).
+    db.set_graph_spec_end_state("spec-b-new", Some(2), &["y.txt".to_string()])
         .unwrap();
     let now = chrono::Utc::now().timestamp();
     insert_run_row(&db, &graph_id, "spec-a-old", "node-a", 1, now - 3600).unwrap();
@@ -953,9 +963,11 @@ async fn dirty_start_check_refusal_says_not_launched() {
         GraphSpecStatus::Pending,
     ))
     .unwrap();
-    db.set_graph_spec_end_state("spec-a-old", Some(5), &["a".to_string()])
+    db.set_graph_spec_end_state("spec-a-old", Some(5), &["x.txt".to_string()])
         .unwrap();
-    db.set_graph_spec_end_state("spec-b-new", Some(2), &["b".to_string()])
+    // Its own record names only y.txt, so it is resuming its own work yet
+    // x.txt is somebody else's (FR1).
+    db.set_graph_spec_end_state("spec-b-new", Some(2), &["y.txt".to_string()])
         .unwrap();
     let now = chrono::Utc::now().timestamp();
     insert_run_row(&db, &graph_id, "spec-a-old", "node-a", 1, now - 3600).unwrap();
@@ -1011,9 +1023,11 @@ async fn dirty_start_check_allow_dirty_start_states_reason_without_flag_hint() {
         GraphSpecStatus::Pending,
     ))
     .unwrap();
-    db.set_graph_spec_end_state("spec-a-old", Some(5), &["a".to_string()])
+    db.set_graph_spec_end_state("spec-a-old", Some(5), &["x.txt".to_string()])
         .unwrap();
-    db.set_graph_spec_end_state("spec-b-new", Some(2), &["b".to_string()])
+    // Its own record names only y.txt, so it is resuming its own work yet
+    // x.txt is somebody else's (FR1).
+    db.set_graph_spec_end_state("spec-b-new", Some(2), &["y.txt".to_string()])
         .unwrap();
     let now = chrono::Utc::now().timestamp();
     insert_run_row(&db, &graph_id, "spec-a-old", "node-a", 1, now - 3600).unwrap();
@@ -1058,6 +1072,12 @@ async fn dirty_start_check_warns_instead_of_refusing_with_allow_dirty_start() {
         &workdir,
         GraphSpecStatus::Failed,
     ))
+    .unwrap();
+    db.set_graph_spec_end_state(
+        "pred-a",
+        Some(2),
+        &["x.txt".to_string(), "y.txt".to_string()],
+    )
     .unwrap();
     std::fs::write(dir.path().join("x.txt"), "x").unwrap();
     std::fs::write(dir.path().join("y.txt"), "y").unwrap();
@@ -1202,6 +1222,8 @@ async fn dirty_start_check_attribution_empty_when_no_run_recorded_the_dirt() {
         GraphSpecStatus::Failed,
     ))
     .unwrap();
+    db.set_graph_spec_end_state("pred-a", Some(1), &["x.txt".to_string()])
+        .unwrap();
     std::fs::write(dir.path().join("x.txt"), "x").unwrap();
 
     let notice = engine
