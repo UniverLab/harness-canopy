@@ -305,7 +305,7 @@ Graph-node sessions (agent and ensemble nodes launched by the graph engine) rece
 
 7. **Install a graph from the catalogue:**
    ```bash
-   canopy graph install my-graph   # Fetch a published graph and import it as a new local graph
+   canopy graph install my-graph   # Review the commands and prompts it runs, confirm, then import it as a new local graph
    ```
 
 All state persists in `~/.canopy/`. The TUI shows an update notice at most every 24 hours — `canopy update` installs it.

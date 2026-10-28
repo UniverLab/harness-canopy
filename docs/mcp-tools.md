@@ -119,7 +119,7 @@ any other tool still work. All other sessions keep the full list.
 | `graph_report_blocker` | Report a blocker for an active graph node |
 | `graph_export` | Export a graph design |
 | `graph_import` | Import a graph design |
-| `graph_install` | Install a graph from the catalogue in one command — `ref`, `workdir`, `name?`, `overwrite_presets?` |
+| `graph_install` | Install a graph from the catalogue in one command — `ref`, `workdir`, `name?`, `overwrite_presets?`, `accept?`. Without `accept: true` it writes nothing and returns `{needs_review: true, review}`: every shell command labelled by node or hook, every agent prompt with its first 3 lines and line count, and the attention marks. An agent must show that review to its user before calling again with `accept: true`, which installs and echoes the same review ([Install a graph](graphs.md#install-a-graph)) |
 | `graph_validate` | Validate a shared graph or node document without importing it — `path` or `document`, exactly one |
 | `graph_archive` | Archive a graph |
 | `graph_restore` | Restore an archived graph |
@@ -267,7 +267,7 @@ readable until `spec_convert` migrates them.
 | Tool | Description |
 |---|---|
 | `node_list` | List installed node documents and the builtins embedded in the binary, marking each `installed` or `builtin` |
-| `node_install` | Install a node document from the catalogue by ref, with its bundled preset |
+| `node_install` | Install a node document from the catalogue by ref, with its bundled preset — `overwrite_presets?`, `accept?`. Without `accept: true` it writes nothing and returns `{needs_review: true, review}` (commands, prompts, attention marks) for the agent to show its user first; with `accept: true` it installs and echoes the review ([Nodes](graphs.md#nodes)) |
 | `node_remove` | Remove an installed node document (a builtin with no override is refused) |
 
 ## Project (4)
