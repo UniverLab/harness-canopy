@@ -109,7 +109,7 @@ impl TaskTriggerHandler {
 
     #[tool(
         name = "graph_install",
-        description = "Install a graph from the catalogue in one command: fetch the published export document for `ref` — `<slug>` for an official graph or `<owner>/<repo>/<slug>` for a community one, each with an optional `@<ref>` version suffix — through `graphs.catalogue_url` (default https://graphs.univerlab.org), so the catalogue counts the install. The fetched document is validated exactly as `graph_validate` would (any problem aborts the install), its bundled `prompt_presets` are installed into the prompts dir (a local file with different content aborts the install unless `overwrite_presets` is true), and it is imported exactly as `graph_import` would: always a new graph in `workdir` (an absolute existing directory), a numeric suffix when the name is taken. The response carries the graph id and name, the workdir, the presets written, the agent nodes still needing a platform, and the next command to assign them."
+        description = "Install a graph from the catalogue in one command: fetch the published export document for `ref` — `<slug>` for an official graph or `<owner>/<repo>/<slug>` for a community one, each with an optional `@<ref>` version suffix — through `graphs.catalogue_url` (default https://graphs.univerlab.org), so the catalogue counts the install, and validate it exactly as `graph_validate` would (any problem aborts the install). BEFORE ANYTHING IS WRITTEN the call returns {needs_review: true, review: {source, commands, prompts, attention}}: every shell command (check/gate config.command and hook command, labelled by node or hook), every agent instruction (prompt_template, prompt_override, bundled or builtin preset content, hook prompt — first 3 lines with a total line count), and the attention marks for dangerous command shapes (pipe to shell, sudo, rm -rf, chmod 777, git push/--force, sensitive-path write, eval, base64 -d, pipe to python/node). AN AGENT MUST SHOW THIS REVIEW TO ITS USER before calling again with accept: true; without accept nothing is installed, and official documents are reviewed the same as community ones. With accept: true the bundled `prompt_presets` are installed into the prompts dir (a local file with different content aborts the install unless `overwrite_presets` is true), the document is imported exactly as `graph_import` would (always a new graph in `workdir`, a numeric suffix when the name is taken), and the response carries the same review plus the graph id and name, the workdir, the presets written, the agent nodes still needing a platform, and the next command to assign them."
     )]
     pub(crate) async fn graph_install(
         &self,
@@ -123,40 +123,59 @@ impl TaskTriggerHandler {
             return Ok(error_result(&e));
         }
 
-        // The fetch is blocking I/O, so it runs off the async runtime.
+        // The fetch is blocking I/O, so it runs off the async runtime. It
+        // writes nothing: the review comes first.
         let reference = params.reference.clone();
-        let overwrite = params.overwrite_presets.unwrap_or(false);
-        let prepared = tokio::task::spawn_blocking(move || {
-            let canopy_dir = crate::domain::prompts::canopy_dir();
-            crate::daemon::graph_install::prepare_install(
+        let fetched = tokio::task::spawn_blocking(move || {
+            crate::daemon::graph_install::fetch_graph(
                 &crate::daemon::graph_install::catalogue_url(),
                 &reference,
+            )
+        })
+        .await
+        .map_err(|error| internal_error(error.to_string()))?;
+        let fetched = match fetched {
+            Ok(fetched) => fetched,
+            Err(message) => return Ok(error_result(&message)),
+        };
+
+        let review = crate::domain::nodes::review::review_graph(&fetched.document, &fetched.source);
+        if params.accept != Some(true) {
+            return Ok(build_json_result(&serde_json::json!({
+                "needs_review": true,
+                "review": review,
+            })));
+        }
+
+        // Only after the caller accepted does anything touch disk.
+        let overwrite = params.overwrite_presets.unwrap_or(false);
+        let document = fetched.document.clone();
+        let presets_written = tokio::task::spawn_blocking(move || {
+            let canopy_dir = crate::domain::prompts::canopy_dir();
+            crate::daemon::graph_install::write_presets(
+                &document,
                 overwrite,
                 &crate::domain::prompts::prompts_dir(&canopy_dir),
             )
         })
         .await
         .map_err(|error| internal_error(error.to_string()))?;
-        let prepared = match prepared {
-            Ok(prepared) => prepared,
+        let presets_written = match presets_written {
+            Ok(written) => written,
             Err(message) => return Ok(error_result(&message)),
         };
 
         let name = params.name.clone();
         match self
-            .import_document_value(
-                &prepared.document,
-                workdir,
-                name.as_deref(),
-                "graph_install",
-            )
+            .import_document_value(&fetched.document, workdir, name.as_deref(), "graph_install")
             .await
         {
             ImportedDocument::Done(mut value) => {
                 value["workdir"] = serde_json::json!(workdir);
                 value["ref"] = serde_json::json!(params.reference);
-                value["source_url"] = serde_json::json!(prepared.source_url);
-                value["presets_written"] = serde_json::json!(prepared.presets_written);
+                value["source_url"] = serde_json::json!(fetched.source_url);
+                value["presets_written"] = serde_json::json!(presets_written);
+                value["review"] = serde_json::to_value(&review).unwrap_or_default();
                 value["next"] = serde_json::json!(install_next_step(&value));
                 Ok(build_json_result(&value))
             }

@@ -19,9 +19,10 @@ pub(crate) enum NodeAction {
         #[arg(long)]
         json: bool,
     },
-    /// Install a node document from the catalogue — fetch the published
-    /// document for the ref, validate it, install its preset, and write it
-    /// to ~/.canopy/nodes.
+    /// Install a node document from the catalogue — fetch and validate the
+    /// published document for the ref, show what it runs, ask for
+    /// confirmation, then install its preset and write it to
+    /// ~/.canopy/nodes.
     Install {
         /// Catalogue ref: `<slug>` or `<owner>/<repo>/<slug>`, each with an
         /// optional `@<ref>` suffix.
@@ -30,6 +31,14 @@ pub(crate) enum NodeAction {
         /// refusing the install.
         #[arg(long = "overwrite-presets")]
         overwrite_presets: bool,
+        /// Install without the confirmation question (the review summary is
+        /// still printed).
+        #[arg(long)]
+        yes: bool,
+        /// Print every prompt in the review in full instead of its first 3
+        /// lines.
+        #[arg(long = "show-prompts")]
+        show_prompts: bool,
         /// Print the machine-readable report instead of human-readable lines.
         #[arg(long)]
         json: bool,
@@ -51,8 +60,22 @@ pub(crate) fn handle_node_action(action: NodeAction) -> Result<()> {
         NodeAction::Install {
             reference,
             overwrite_presets,
+            yes,
+            show_prompts,
             json,
-        } => install(&reference, overwrite_presets, json),
+        } => {
+            let tty = std::io::IsTerminal::is_terminal(&std::io::stdin())
+                && std::io::IsTerminal::is_terminal(&std::io::stdout());
+            run_install(
+                &reference,
+                overwrite_presets,
+                yes,
+                show_prompts,
+                json,
+                tty,
+                &mut std::io::stdin().lock(),
+            )
+        }
         NodeAction::Remove { name, json } => remove(&name, json),
     }
 }
@@ -95,22 +118,53 @@ fn list_rows(entries: &[NodeEntry]) -> Vec<serde_json::Value> {
         .collect()
 }
 
-fn install(reference: &str, overwrite_presets: bool, json: bool) -> Result<()> {
+/// The `canopy node install` flow, with `tty` and the answer reader injected
+/// so tests can drive it: fetch and validate the document (nothing written),
+/// print the summary (`--json` prints the review as JSON, the question goes
+/// to stderr), ask `Install <name> from <source>? [y/N]` unless `--yes`, and
+/// only then write the preset and the node — finally print the report with
+/// the review it was asked about.
+pub(crate) fn run_install(
+    reference: &str,
+    overwrite_presets: bool,
+    yes: bool,
+    show_prompts: bool,
+    json: bool,
+    tty: bool,
+    read: &mut impl std::io::BufRead,
+) -> Result<()> {
     let canopy_dir = crate::domain::prompts::canopy_dir();
-    let prepared = crate::daemon::node_install::prepare_node_install(
+    let fetched = crate::daemon::node_install::fetch_node_document(
         &crate::daemon::graph_install::catalogue_url(),
         reference,
+    )
+    .map_err(|e| anyhow!(e))?;
+    let review = crate::domain::nodes::review::review_node(&fetched.document, &fetched.source);
+    print_summary(&review, show_prompts, json);
+
+    let ask = crate::daemon::install_confirm::Ask {
+        name: review.name.clone(),
+        source: review.source.clone(),
+        yes,
+        tty,
+        to_stderr: json,
+    };
+    ask.confirm(read).map_err(|e| anyhow!(e))?;
+
+    let presets_written = crate::daemon::node_install::write_node_install(
+        &fetched.document,
         overwrite_presets,
         &nodes::nodes_dir(&canopy_dir),
         &crate::domain::prompts::prompts_dir(&canopy_dir),
     )
     .map_err(|e| anyhow!(e))?;
     let report = serde_json::json!({
-        "name": prepared.document.name,
-        "kind": prepared.document.kind,
+        "name": fetched.document.name,
+        "kind": fetched.document.kind,
         "ref": reference,
-        "source_url": prepared.source_url,
-        "presets_written": prepared.presets_written,
+        "source_url": fetched.source_url,
+        "presets_written": presets_written,
+        "review": review,
     });
     if json {
         println!("{report}");
@@ -120,6 +174,30 @@ fn install(reference: &str, overwrite_presets: bool, json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The summary before the question: rendered text on stdout in human mode,
+/// the review as JSON on stdout in `--json` mode — never skipped, even when
+/// the install is then refused for having no TTY.
+fn print_summary(
+    review: &crate::domain::nodes::review::InstallReview,
+    show_prompts: bool,
+    json: bool,
+) {
+    if json {
+        match serde_json::to_string(review) {
+            Ok(text) => println!("{text}"),
+            Err(_) => println!(
+                "{}",
+                crate::domain::nodes::review::render(review, show_prompts)
+            ),
+        }
+    } else {
+        println!(
+            "{}",
+            crate::domain::nodes::review::render(review, show_prompts)
+        );
+    }
 }
 
 /// Human-readable lines for a `node install` report: what was installed,
@@ -200,12 +278,14 @@ mod tests {
     }
 
     #[test]
-    fn install_parses_ref_overwrite_and_json() {
+    fn install_parses_ref_overwrite_yes_show_prompts_and_json() {
         let cli = TestCli::try_parse_from([
             "test",
             "install",
             "acme/widgets/auditor@v1",
             "--overwrite-presets",
+            "--yes",
+            "--show-prompts",
             "--json",
         ])
         .expect("install parses");
@@ -213,11 +293,25 @@ mod tests {
             NodeAction::Install {
                 reference,
                 overwrite_presets,
+                yes,
+                show_prompts,
                 json,
             } => {
                 assert_eq!(reference, "acme/widgets/auditor@v1");
                 assert!(overwrite_presets);
+                assert!(yes);
+                assert!(show_prompts);
                 assert!(json);
+            }
+            other => panic!("expected Install, got {other:?}"),
+        }
+        let cli = TestCli::try_parse_from(["test", "install", "auditor"]).expect("install parses");
+        match cli.action {
+            NodeAction::Install {
+                yes, show_prompts, ..
+            } => {
+                assert!(!yes, "--yes defaults to false");
+                assert!(!show_prompts, "--show-prompts defaults to false");
             }
             other => panic!("expected Install, got {other:?}"),
         }
@@ -281,5 +375,180 @@ mod tests {
                 .any(|line| line.contains("presets_written: none")),
             "{ensemble:?}"
         );
+    }
+
+    /// RAII guard: points `CANOPY_HOME_OVERRIDE` at `path` for the test
+    /// body, restoring the previous value on drop. Safe under `cargo
+    /// nextest` (one process per test) but would race under `cargo test`.
+    struct OverrideHome {
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl OverrideHome {
+        fn set(path: &std::path::Path) -> Self {
+            let prev = std::env::var_os("CANOPY_HOME_OVERRIDE");
+            unsafe { std::env::set_var("CANOPY_HOME_OVERRIDE", path) };
+            OverrideHome { prev }
+        }
+    }
+
+    impl Drop for OverrideHome {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(value) => unsafe { std::env::set_var("CANOPY_HOME_OVERRIDE", value) },
+                None => unsafe { std::env::remove_var("CANOPY_HOME_OVERRIDE") },
+            }
+        }
+    }
+
+    /// A temp home whose `config.toml` points the catalogue at the stub,
+    /// with empty nodes and prompts dirs.
+    fn install_home(
+        catalogue_url: &str,
+    ) -> (
+        tempfile::TempDir,
+        OverrideHome,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        let home = tempfile::tempdir().unwrap();
+        let canopy = home.path().join(".canopy");
+        let nodes = canopy.join("nodes");
+        let prompts = canopy.join("prompts");
+        std::fs::create_dir_all(&nodes).unwrap();
+        std::fs::create_dir_all(&prompts).unwrap();
+        std::fs::write(
+            canopy.join("config.toml"),
+            format!("[graphs]\ncatalogue_url = \"{catalogue_url}\"\n"),
+        )
+        .unwrap();
+        let guard = OverrideHome::set(home.path());
+        (home, guard, nodes, prompts)
+    }
+
+    fn auditor_doc() -> serde_json::Value {
+        serde_json::json!({
+            "format_version": 1,
+            "name": "auditor",
+            "kind": "agent",
+            "config": {"prompt_template": "audit this", "timeout_minutes": 10},
+            "preset": {"name": "auditor-preset", "content": "audit well"},
+        })
+    }
+
+    /// Without a TTY and without `--yes`: the summary was fetched (the
+    /// stub was hit), the refusal names `--yes`, and nothing was written.
+    #[test]
+    fn without_a_tty_and_without_yes_install_refuses_and_writes_nothing() {
+        use crate::daemon::graph_install::stub::{StubCatalogue, StubRoute};
+        let stub = StubCatalogue::start(
+            [(
+                "/i/node/auditor".to_string(),
+                StubRoute::ok(&auditor_doc().to_string()),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let (_home, _guard, nodes, prompts) = install_home(&stub.base_url());
+
+        let error = run_install(
+            "auditor",
+            false,
+            false,
+            false,
+            false,
+            false,
+            &mut "".as_bytes(),
+        )
+        .expect_err("non-TTY without --yes must refuse");
+        assert!(
+            error.to_string().contains(
+                "refusing to install without confirmation: re-run with --yes after \
+                     reviewing the commands above"
+            ),
+            "{error}"
+        );
+        assert_eq!(stub.hits().len(), 1, "the review was fetched first");
+        assert!(
+            !nodes.join("auditor.json").exists(),
+            "a refused install writes no node document"
+        );
+        assert!(
+            !prompts.join("auditor-preset.md").exists(),
+            "a refused install writes no preset"
+        );
+    }
+
+    /// `--yes` prints the same summary and installs without asking.
+    #[test]
+    fn yes_installs_the_node_document_after_printing_the_summary() {
+        use crate::daemon::graph_install::stub::{StubCatalogue, StubRoute};
+        let stub = StubCatalogue::start(
+            [(
+                "/i/node/auditor".to_string(),
+                StubRoute::ok(&auditor_doc().to_string()),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let (_home, _guard, nodes, prompts) = install_home(&stub.base_url());
+
+        run_install(
+            "auditor",
+            false,
+            true,
+            false,
+            false,
+            false,
+            &mut "".as_bytes(),
+        )
+        .expect("--yes installs without a TTY");
+        assert!(
+            nodes.join("auditor.json").exists(),
+            "the document was written after --yes"
+        );
+        assert_eq!(
+            std::fs::read_to_string(prompts.join("auditor-preset.md")).unwrap(),
+            "audit well"
+        );
+    }
+
+    /// A TTY answering `y` installs; answering empty refuses.
+    #[test]
+    fn a_tty_answering_y_installs_but_empty_refuses() {
+        use crate::daemon::graph_install::stub::{StubCatalogue, StubRoute};
+        let stub = StubCatalogue::start(
+            [(
+                "/i/node/auditor".to_string(),
+                StubRoute::ok(&auditor_doc().to_string()),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let (_home, _guard, nodes, _prompts) = install_home(&stub.base_url());
+
+        run_install(
+            "auditor",
+            false,
+            false,
+            false,
+            false,
+            true,
+            &mut b"y\n".as_slice(),
+        )
+        .expect("y installs");
+        assert!(nodes.join("auditor.json").exists());
+
+        let declined = run_install(
+            "auditor",
+            false,
+            false,
+            false,
+            false,
+            true,
+            &mut b"\n".as_slice(),
+        )
+        .expect_err("an empty answer refuses");
+        assert!(declined.to_string().contains("'auditor'"), "{declined}");
     }
 }

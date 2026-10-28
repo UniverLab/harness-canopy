@@ -686,6 +686,12 @@ pub struct GraphInstallParams {
     /// Overwrite a local preset file whose content differs from the bundled
     /// one instead of refusing the install. Default false.
     pub overwrite_presets: Option<bool>,
+    /// Confirmation that the install review was shown to the user. Omit (or
+    /// false) to fetch, validate and return `{needs_review: true, review}`
+    /// with every command, prompt and attention mark and install nothing;
+    /// true to install and echo the same review in the result. An agent must
+    /// show the review to its user before passing true.
+    pub accept: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]

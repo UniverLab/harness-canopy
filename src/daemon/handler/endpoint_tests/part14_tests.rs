@@ -70,6 +70,7 @@ async fn install(
     workdir: &str,
     name: Option<String>,
     overwrite_presets: Option<bool>,
+    accept: Option<bool>,
 ) -> rmcp::model::CallToolResult {
     handler
         .graph_install(Parameters(GraphInstallParams {
@@ -77,9 +78,30 @@ async fn install(
             workdir: workdir.to_string(),
             name,
             overwrite_presets,
+            accept,
         }))
         .await
         .unwrap()
+}
+
+/// An install that already carries the user's acceptance — what every
+/// "actually install it" test passes.
+async fn install_accepted(
+    handler: &TaskTriggerHandler,
+    reference: &str,
+    workdir: &str,
+    name: Option<String>,
+    overwrite_presets: Option<bool>,
+) -> rmcp::model::CallToolResult {
+    install(
+        handler,
+        reference,
+        workdir,
+        name,
+        overwrite_presets,
+        Some(true),
+    )
+    .await
 }
 
 /// `graph_install` follows the stub's redirect to the document, imports it
@@ -105,7 +127,7 @@ async fn install_imports_through_the_catalogue_and_lists_nodes_without_harness()
     );
     let (_home, _guard, _prompts) = install_home(&stub.base_url());
 
-    let installed = install(&handler, "my-graph", &workdir, None, None).await;
+    let installed = install_accepted(&handler, "my-graph", &workdir, None, None).await;
     assert!(!is_err(&installed), "{}", text(&installed));
     let report: serde_json::Value = serde_json::from_str(&raw_text(&installed)).unwrap();
     assert_eq!(report["name"], "shared");
@@ -150,7 +172,8 @@ async fn install_supports_a_community_ref_with_a_version() {
     );
     let (_home, _guard, _prompts) = install_home(&stub.base_url());
 
-    let installed = install(&handler, "acme/widgets/my-graph@v1.2", &workdir, None, None).await;
+    let installed =
+        install_accepted(&handler, "acme/widgets/my-graph@v1.2", &workdir, None, None).await;
     assert!(!is_err(&installed), "{}", text(&installed));
     let report: serde_json::Value = serde_json::from_str(&raw_text(&installed)).unwrap();
     assert_eq!(report["name"], "shared");
@@ -175,7 +198,7 @@ async fn install_honors_the_name_override() {
     );
     let (_home, _guard, _prompts) = install_home(&stub.base_url());
 
-    let installed = install(
+    let installed = install_accepted(
         &handler,
         "my-graph",
         &workdir,
@@ -211,7 +234,7 @@ async fn install_preset_conflict_creates_no_graph_and_writes_nothing() {
     let (_home, _guard, prompts) = install_home(&stub.base_url());
     std::fs::write(prompts.join("custom.md"), "old content").unwrap();
 
-    let installed = install(&handler, "my-graph", &workdir, None, None).await;
+    let installed = install_accepted(&handler, "my-graph", &workdir, None, None).await;
     assert!(is_err(&installed), "{}", text(&installed));
     assert!(
         text(&installed).contains("different content"),
@@ -236,7 +259,7 @@ async fn install_refuses_a_relative_workdir_without_fetching() {
     let stub = StubCatalogue::start(std::collections::HashMap::new());
     let (_home, _guard, _prompts) = install_home(&stub.base_url());
 
-    let installed = install(&handler, "my-graph", "relative/path", None, None).await;
+    let installed = install_accepted(&handler, "my-graph", "relative/path", None, None).await;
     assert!(is_err(&installed), "{}", text(&installed));
     assert!(
         text(&installed).contains("absolute"),
@@ -244,6 +267,136 @@ async fn install_refuses_a_relative_workdir_without_fetching() {
         text(&installed)
     );
     assert!(stub.hits().is_empty(), "refused before any fetch");
+}
+
+/// A call without `accept: true` installs nothing: the review comes back,
+/// the database stays empty, and the prompts dir is untouched.
+#[tokio::test]
+async fn install_without_accept_returns_the_review_and_writes_nothing() {
+    let (dir, db, handler) = endpoint_test_handler();
+    let workdir = dir.path().to_string_lossy().to_string();
+    let mut doc = install_doc();
+    doc["nodes"][0]["config"]["prompt_preset"] = serde_json::json!("custom");
+    doc["prompt_presets"] = serde_json::json!([
+        {"name": "custom", "content": "bundled content"},
+    ]);
+    doc["hooks"] = serde_json::json!({
+        "on_completed": [{"command": "sudo systemctl restart worker"}],
+    });
+    let stub = StubCatalogue::start(
+        [(
+            "/i/graph/my-graph".to_string(),
+            StubRoute::ok(&doc.to_string()),
+        )]
+        .into_iter()
+        .collect(),
+    );
+    let (_home, _guard, prompts) = install_home(&stub.base_url());
+
+    let pending = install(&handler, "my-graph", &workdir, None, None, None).await;
+    assert!(!is_err(&pending), "{}", text(&pending));
+    let body: serde_json::Value = serde_json::from_str(&raw_text(&pending)).unwrap();
+    assert_eq!(body["needs_review"], true);
+    let review = &body["review"];
+    assert_eq!(review["source"], "official");
+    let commands = review["commands"].as_array().expect("commands list");
+    assert_eq!(commands.len(), 2, "{commands:?}");
+    assert_eq!(commands[0]["label"], "node \"finish\"");
+    assert_eq!(commands[1]["label"], "hook 'on_completed' #1");
+    assert_eq!(commands[1]["command"], "sudo systemctl restart worker");
+    let prompts_list = review["prompts"].as_array().expect("prompts list");
+    assert!(
+        prompts_list
+            .iter()
+            .any(|prompt| prompt["label"] == "preset \"custom\""),
+        "{prompts_list:?}"
+    );
+    let attention = review["attention"].as_array().expect("attention list");
+    assert!(
+        attention.iter().any(|mark| mark["pattern"] == "sudo"),
+        "{attention:?}"
+    );
+
+    assert!(
+        db.list_graphs(None, true).unwrap().is_empty(),
+        "a call without accept imports nothing"
+    );
+    assert!(
+        !prompts.join("custom.md").exists(),
+        "a call without accept writes no preset"
+    );
+    let hits = stub.hits();
+    assert_eq!(hits.len(), 1, "one fetch builds the review");
+}
+
+/// With `accept: true` the same review comes back inside the install report.
+#[tokio::test]
+async fn install_with_accept_echoes_the_review_in_the_report() {
+    let (dir, db, handler) = endpoint_test_handler();
+    let workdir = dir.path().to_string_lossy().to_string();
+    let stub = StubCatalogue::start(
+        [(
+            "/i/graph/my-graph".to_string(),
+            StubRoute::ok(&install_doc().to_string()),
+        )]
+        .into_iter()
+        .collect(),
+    );
+    let (_home, _guard, _prompts) = install_home(&stub.base_url());
+
+    let installed = install_accepted(&handler, "my-graph", &workdir, None, None).await;
+    assert!(!is_err(&installed), "{}", text(&installed));
+    let report: serde_json::Value = serde_json::from_str(&raw_text(&installed)).unwrap();
+    let review = &report["review"];
+    assert_eq!(review["source"], "official");
+    assert_eq!(review["name"], "shared");
+    assert!(
+        review["commands"]
+            .as_array()
+            .expect("commands")
+            .iter()
+            .any(|command| command["label"] == "node \"finish\""),
+        "{review}"
+    );
+    assert!(!db.list_graphs(None, true).unwrap().is_empty());
+}
+
+/// A 410 block report from the catalogue aborts with the reason and the
+/// issue, and nothing is written.
+#[tokio::test]
+async fn install_reports_a_410_block_with_its_reason_and_writes_nothing() {
+    let (dir, db, handler) = endpoint_test_handler();
+    let workdir = dir.path().to_string_lossy().to_string();
+    let stub = StubCatalogue::start(
+        [(
+            "/i/graph/my-graph".to_string(),
+            StubRoute {
+                status: 410,
+                headers: Vec::new(),
+                body: br#"{"error":"blocked","reason":"exfiltrates tokens","issue":"CAT-42"}"#
+                    .to_vec(),
+            },
+        )]
+        .into_iter()
+        .collect(),
+    );
+    let (_home, _guard, _prompts) = install_home(&stub.base_url());
+
+    let refused = install_accepted(&handler, "my-graph", &workdir, None, None).await;
+    assert!(is_err(&refused), "{}", text(&refused));
+    let message = text(&refused);
+    assert!(
+        message.contains(
+            "my-graph was removed from the catalogue after a community report: \
+             exfiltrates tokens (CAT-42)"
+        ),
+        "{message}"
+    );
+    assert!(
+        db.list_graphs(None, true).unwrap().is_empty(),
+        "a blocked document is never imported"
+    );
+    assert!(!stub.hits().is_empty());
 }
 
 /// A catalogue 404 says the graph was not found in the catalogue.
@@ -254,7 +407,7 @@ async fn install_reports_a_catalogue_404_as_not_found() {
     let stub = StubCatalogue::start(std::collections::HashMap::new());
     let (_home, _guard, _prompts) = install_home(&stub.base_url());
 
-    let installed = install(&handler, "missing", &workdir, None, None).await;
+    let installed = install_accepted(&handler, "missing", &workdir, None, None).await;
     assert!(is_err(&installed), "{}", text(&installed));
     assert!(
         text(&installed).contains("not found in the catalogue"),
@@ -272,7 +425,7 @@ async fn install_refuses_an_invalid_ref_with_the_accepted_forms() {
     let stub = StubCatalogue::start(std::collections::HashMap::new());
     let (_home, _guard, _prompts) = install_home(&stub.base_url());
 
-    let installed = install(&handler, "Not A Ref", &workdir, None, None).await;
+    let installed = install_accepted(&handler, "Not A Ref", &workdir, None, None).await;
     assert!(is_err(&installed), "{}", text(&installed));
     assert!(
         text(&installed).contains("Accepted forms"),
@@ -301,7 +454,7 @@ async fn install_refuses_an_invalid_document_and_creates_no_graph() {
     );
     let (_home, _guard, _prompts) = install_home(&stub.base_url());
 
-    let installed = install(&handler, "my-graph", &workdir, None, None).await;
+    let installed = install_accepted(&handler, "my-graph", &workdir, None, None).await;
     assert!(is_err(&installed), "{}", text(&installed));
     let message = text(&installed);
     assert!(message.contains("nodes[0].config"), "{message}");
@@ -334,7 +487,7 @@ async fn install_overwrite_presets_replaces_a_conflicting_file() {
     let (_home, _guard, prompts) = install_home(&stub.base_url());
     std::fs::write(prompts.join("custom.md"), "old content").unwrap();
 
-    let installed = install(&handler, "my-graph", &workdir, None, Some(true)).await;
+    let installed = install_accepted(&handler, "my-graph", &workdir, None, Some(true)).await;
     assert!(!is_err(&installed), "{}", text(&installed));
     let report: serde_json::Value = serde_json::from_str(&raw_text(&installed)).unwrap();
     assert_eq!(

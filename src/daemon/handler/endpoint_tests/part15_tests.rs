@@ -80,14 +80,26 @@ async fn install_node(
     handler: &TaskTriggerHandler,
     reference: &str,
     overwrite_presets: Option<bool>,
+    accept: Option<bool>,
 ) -> rmcp::model::CallToolResult {
     handler
         .node_install(Parameters(NodeInstallParams {
             reference: reference.to_string(),
             overwrite_presets,
+            accept,
         }))
         .await
         .unwrap()
+}
+
+/// An install that already carries the user's acceptance — what every
+/// "actually install it" test passes.
+async fn install_node_accepted(
+    handler: &TaskTriggerHandler,
+    reference: &str,
+    overwrite_presets: Option<bool>,
+) -> rmcp::model::CallToolResult {
+    install_node(handler, reference, overwrite_presets, Some(true)).await
 }
 
 async fn remove_node(handler: &TaskTriggerHandler, name: &str) -> rmcp::model::CallToolResult {
@@ -118,6 +130,105 @@ fn openrouter_member(model: &str) -> EnsembleMemberParams {
     }
 }
 
+/// A call without `accept: true` installs nothing: the review comes back,
+/// the nodes dir and the prompts dir are untouched.
+#[tokio::test]
+async fn node_install_without_accept_returns_the_review_and_writes_nothing() {
+    let (_dir, _db, handler) = endpoint_test_handler();
+    let doc = serde_json::json!({
+        "format_version": 1,
+        "name": "checker",
+        "kind": "check",
+        "config": {"command": "chmod 777 /srv/app", "timeout_seconds": 60},
+    });
+    let stub = stub_serving("/i/node/checker", &doc.to_string());
+    let (_home, _guard, nodes_dir, prompts_dir) = node_home(&stub.base_url());
+
+    let pending = install_node(&handler, "checker", None, None).await;
+    assert!(!is_err(&pending), "{}", text(&pending));
+    let body: serde_json::Value = serde_json::from_str(&raw_text(&pending)).unwrap();
+    assert_eq!(body["needs_review"], true);
+    let review = &body["review"];
+    assert_eq!(review["source"], "official");
+    let commands = review["commands"].as_array().expect("commands list");
+    assert_eq!(commands.len(), 1, "{commands:?}");
+    assert_eq!(commands[0]["label"], "node \"checker\"");
+    assert_eq!(commands[0]["command"], "chmod 777 /srv/app");
+    let attention = review["attention"].as_array().expect("attention list");
+    assert!(
+        attention.iter().any(|mark| mark["pattern"] == "chmod 777"),
+        "{attention:?}"
+    );
+
+    assert!(
+        !nodes_dir.join("checker.json").exists(),
+        "a call without accept writes no node document"
+    );
+    assert!(
+        !prompts_dir.join("auditor-preset.md").exists(),
+        "a call without accept writes no preset"
+    );
+}
+
+/// With `accept: true` the same review comes back inside the report, and the
+/// document and its preset land on disk.
+#[tokio::test]
+async fn node_install_with_accept_echoes_the_review_and_writes() {
+    let (_dir, _db, handler) = endpoint_test_handler();
+    let stub = stub_serving("/i/node/auditor", &auditor_doc().to_string());
+    let (_home, _guard, nodes_dir, prompts_dir) = node_home(&stub.base_url());
+
+    let installed = install_node_accepted(&handler, "auditor", None).await;
+    assert!(!is_err(&installed), "{}", text(&installed));
+    let report: serde_json::Value = serde_json::from_str(&raw_text(&installed)).unwrap();
+    let review = &report["review"];
+    assert_eq!(review["source"], "official");
+    assert_eq!(review["name"], "auditor");
+    assert!(
+        review["prompts"]
+            .as_array()
+            .expect("prompts")
+            .iter()
+            .any(|prompt| prompt["label"] == "node \"auditor\""),
+        "{review}"
+    );
+    assert!(nodes_dir.join("auditor.json").exists());
+    assert!(prompts_dir.join("auditor-preset.md").exists());
+}
+
+/// A 410 block report from the catalogue aborts with the reason and the
+/// issue, and nothing is written.
+#[tokio::test]
+async fn node_install_reports_a_410_block_with_its_reason_and_writes_nothing() {
+    let (_dir, _db, handler) = endpoint_test_handler();
+    let stub = StubCatalogue::start(
+        [(
+            "/i/node/auditor".to_string(),
+            StubRoute {
+                status: 410,
+                headers: Vec::new(),
+                body: br#"{"error":"blocked","reason":"ships a backdoor","issue":"CAT-7"}"#
+                    .to_vec(),
+            },
+        )]
+        .into_iter()
+        .collect(),
+    );
+    let (_home, _guard, nodes_dir, _prompts_dir) = node_home(&stub.base_url());
+
+    let refused = install_node_accepted(&handler, "auditor", None).await;
+    assert!(is_err(&refused), "{}", text(&refused));
+    let message = text(&refused);
+    assert!(
+        message.contains(
+            "auditor was removed from the catalogue after a community report: \
+             ships a backdoor (CAT-7)"
+        ),
+        "{message}"
+    );
+    assert!(!nodes_dir.join("auditor.json").exists());
+}
+
 /// `node_install` writes the document under ~/.canopy/nodes and its bundled
 /// preset under ~/.canopy/prompts, and `node_list` reports it as installed.
 #[tokio::test]
@@ -126,7 +237,7 @@ async fn node_install_writes_the_document_and_its_preset() {
     let stub = stub_serving("/i/node/auditor", &auditor_doc().to_string());
     let (_home, _guard, nodes_dir, prompts_dir) = node_home(&stub.base_url());
 
-    let installed = install_node(&handler, "auditor", None).await;
+    let installed = install_node_accepted(&handler, "auditor", None).await;
     assert!(!is_err(&installed), "{}", text(&installed));
     let report: serde_json::Value = serde_json::from_str(&raw_text(&installed)).unwrap();
     assert_eq!(report["name"], "auditor");
@@ -176,7 +287,7 @@ async fn node_install_preset_conflict_writes_nothing() {
     let (_home, _guard, nodes_dir, prompts_dir) = node_home(&stub.base_url());
     std::fs::write(prompts_dir.join("auditor-preset.md"), "old content").unwrap();
 
-    let installed = install_node(&handler, "auditor", None).await;
+    let installed = install_node_accepted(&handler, "auditor", None).await;
     assert!(is_err(&installed), "{}", text(&installed));
     assert!(
         text(&installed).contains("different content"),

@@ -135,46 +135,54 @@ fn is_git_ref(git_ref: &str) -> bool {
             .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
 }
 
-/// A catalogue document fetched, validated, and with its presets installed —
-/// ready for the import path.
+/// A catalogue document fetched and validated — nothing written yet. Its
+/// `source` is the review's source label (`official`, `owner/repo`, each
+/// with `@<ref>`), so the CLI, MCP and docs name the origin the same way.
 #[derive(Debug)]
-pub(crate) struct PreparedInstall {
+pub(crate) struct FetchedGraph {
     pub document: GraphExportDocument,
-    /// Preset names whose files this install wrote (new or overwritten);
-    /// files already present with identical content are not listed.
-    pub presets_written: Vec<String>,
     /// The catalogue URL the document body was finally read from (after any
     /// redirects).
     pub source_url: String,
+    /// The source label for the install review.
+    pub source: String,
 }
 
-/// Fetch the document for `reference` from the catalogue at `base`,
-/// validate it exactly as `graph_validate` would, and install its bundled
-/// presets into `prompts_dir` — refusing (before anything is written) when
-/// a local preset file differs, unless `overwrite_presets` is set.
-pub(crate) fn prepare_install(
-    base: &str,
-    reference: &str,
-    overwrite_presets: bool,
-    prompts_dir: &Path,
-) -> Result<PreparedInstall, String> {
+/// Fetch the document for `reference` from the catalogue at `base` and
+/// validate it exactly as `graph_validate` would. Nothing is written: the
+/// caller builds the review first, and only [`write_presets`] (after the
+/// user accepted) touches disk.
+pub(crate) fn fetch_graph(base: &str, reference: &str) -> Result<FetchedGraph, String> {
     let parsed = parse_ref(reference)?;
+    let source = crate::domain::nodes::review::source_label(&parsed.scope, &parsed.git_ref);
     let fetched = fetch::fetch_document(base, &parsed, "graph")?;
     let report = crate::daemon::graph_validate::validate_document_str(&fetched.body);
     reject_invalid_report(reference, &report)?;
     let document = parse_export_document_str(&fetched.body)?;
-    let presets_written = presets_to_write(&document, prompts_dir);
+    Ok(FetchedGraph {
+        document,
+        source_url: fetched.source_url,
+        source,
+    })
+}
+
+/// Install the document's bundled presets into `prompts_dir` — refusing
+/// (before anything is written) when a local preset file differs, unless
+/// `overwrite_presets` is set — and return the preset names written (new or
+/// overwritten; files already present with identical content are not listed).
+pub(crate) fn write_presets(
+    document: &GraphExportDocument,
+    overwrite_presets: bool,
+    prompts_dir: &Path,
+) -> Result<Vec<String>, String> {
+    let presets_written = presets_to_write(document, prompts_dir);
     if overwrite_presets {
         crate::domain::graph_transfer::install_overwriting(&document.prompt_presets, prompts_dir)?;
     } else {
         crate::domain::graph_transfer::validate(&document.prompt_presets, prompts_dir)?;
         crate::domain::graph_transfer::install(&document.prompt_presets, prompts_dir)?;
     }
-    Ok(PreparedInstall {
-        document,
-        presets_written,
-        source_url: fetched.source_url,
-    })
+    Ok(presets_written)
 }
 
 /// Refuse a catalogue body that fails validation — listing every problem —
@@ -307,6 +315,7 @@ mod tests {
         assert!(props.contains_key("workdir"), "schema: {schema}");
         assert!(props.contains_key("name"), "schema: {schema}");
         assert!(props.contains_key("overwrite_presets"), "schema: {schema}");
+        assert!(props.contains_key("accept"), "schema: {schema}");
         let required = schema["required"].as_array().expect("required array");
         assert!(required.contains(&json!("ref")), "schema: {schema}");
         assert!(required.contains(&json!("workdir")), "schema: {schema}");
@@ -340,34 +349,47 @@ mod tests {
     }
 
     #[test]
-    fn prepare_install_succeeds_and_reports_nothing_written_without_presets() {
+    fn fetch_graph_succeeds_and_reports_the_source_and_url() {
         let stub = stub_serving(&graph_doc().to_string());
-        let prompts = tempfile::tempdir().unwrap();
-        let prepared =
-            prepare_install(&stub.base_url(), "my-graph", false, prompts.path()).unwrap();
-        assert_eq!(prepared.document.name, "shared");
-        assert!(prepared.presets_written.is_empty());
+        let fetched = fetch_graph(&stub.base_url(), "my-graph").unwrap();
+        assert_eq!(fetched.document.name, "shared");
+        assert_eq!(fetched.source, "official");
         assert_eq!(
-            prepared.source_url,
+            fetched.source_url,
             format!("{}/i/graph/my-graph", stub.base_url())
         );
+        let prompts = tempfile::tempdir().unwrap();
+        let written = write_presets(&fetched.document, false, prompts.path()).unwrap();
+        assert!(written.is_empty());
     }
 
     #[test]
-    fn prepare_install_lists_every_validation_problem() {
+    fn fetch_graph_names_the_community_source_with_its_ref() {
+        let stub = StubCatalogue::start(
+            [(
+                "/i/acme/widgets/graph/my-graph".to_string(),
+                StubRoute::ok(&graph_doc().to_string()),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let fetched = fetch_graph(&stub.base_url(), "acme/widgets/my-graph@v1.2").unwrap();
+        assert_eq!(fetched.source, "acme/widgets@v1.2");
+    }
+
+    #[test]
+    fn fetch_graph_lists_every_validation_problem() {
         let mut doc = graph_doc();
         doc["nodes"][0]["config"]["bogus_key"] = json!(1);
         doc["nodes"][1]["config"]["bogus_key"] = json!(2);
         let stub = stub_serving(&doc.to_string());
-        let prompts = tempfile::tempdir().unwrap();
-        let error = prepare_install(&stub.base_url(), "my-graph", false, prompts.path())
-            .expect_err("invalid doc must fail");
+        let error = fetch_graph(&stub.base_url(), "my-graph").expect_err("invalid doc must fail");
         assert!(error.contains("nodes[0].config"), "{error}");
         assert!(error.contains("nodes[1].config"), "{error}");
     }
 
     #[test]
-    fn prepare_install_refuses_a_node_document() {
+    fn fetch_graph_refuses_a_node_document() {
         let node = json!({
             "format_version": 1,
             "name": "auditor",
@@ -375,9 +397,7 @@ mod tests {
             "config": {"prompt_template": "audit this"},
         });
         let stub = stub_serving(&node.to_string());
-        let prompts = tempfile::tempdir().unwrap();
-        let error = prepare_install(&stub.base_url(), "my-graph", false, prompts.path())
-            .expect_err("node doc must fail");
+        let error = fetch_graph(&stub.base_url(), "my-graph").expect_err("node doc must fail");
         assert!(error.contains("node document"), "{error}");
     }
 
@@ -393,12 +413,13 @@ mod tests {
     }
 
     #[test]
-    fn prepare_install_preset_conflict_writes_nothing() {
+    fn write_presets_conflict_writes_nothing() {
         let stub = stub_serving(&preset_doc().to_string());
+        let fetched = fetch_graph(&stub.base_url(), "my-graph").unwrap();
         let prompts = tempfile::tempdir().unwrap();
         std::fs::write(prompts.path().join("custom.md"), "old content").unwrap();
         std::fs::write(prompts.path().join("same.md"), "same content").unwrap();
-        let error = prepare_install(&stub.base_url(), "my-graph", false, prompts.path())
+        let error = write_presets(&fetched.document, false, prompts.path())
             .expect_err("conflict must fail");
         assert!(error.contains("custom"), "{error}");
         assert!(error.contains("different content"), "{error}");
@@ -413,12 +434,13 @@ mod tests {
     }
 
     #[test]
-    fn prepare_install_overwrite_replaces_differing_presets() {
+    fn write_presets_overwrite_replaces_differing_presets() {
         let stub = stub_serving(&preset_doc().to_string());
+        let fetched = fetch_graph(&stub.base_url(), "my-graph").unwrap();
         let prompts = tempfile::tempdir().unwrap();
         std::fs::write(prompts.path().join("custom.md"), "old content").unwrap();
         std::fs::write(prompts.path().join("same.md"), "same content").unwrap();
-        let prepared = prepare_install(&stub.base_url(), "my-graph", true, prompts.path()).unwrap();
+        let written = write_presets(&fetched.document, true, prompts.path()).unwrap();
         assert_eq!(
             std::fs::read_to_string(prompts.path().join("custom.md")).unwrap(),
             "new content"
@@ -427,6 +449,6 @@ mod tests {
             std::fs::read_to_string(prompts.path().join("aaa.md")).unwrap(),
             "aaa content"
         );
-        assert_eq!(prepared.presets_written, vec!["aaa", "custom"]);
+        assert_eq!(written, vec!["aaa", "custom"]);
     }
 }

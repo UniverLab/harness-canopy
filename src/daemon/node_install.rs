@@ -14,41 +14,50 @@ use std::path::Path;
 use crate::domain::graph_transfer::GraphExportPromptPreset;
 use crate::domain::nodes::NodeDocument;
 
-/// A fetched node document, validated and written to the nodes dir, with its
-/// bundled preset installed.
+/// A fetched and validated node document — nothing written yet. Its
+/// `source` is the review's source label, matching the graph side.
 #[derive(Debug)]
-pub(crate) struct PreparedNodeInstall {
+pub(crate) struct FetchedNode {
     pub document: NodeDocument,
-    /// Preset names whose files this install wrote (new or overwritten);
-    /// files already present with identical content are not listed.
-    pub presets_written: Vec<String>,
     /// The catalogue URL the document body was finally read from (after any
     /// redirects).
     pub source_url: String,
+    /// The source label for the install review.
+    pub source: String,
 }
 
-/// Fetch `reference` from the catalogue at `base`, validate it, install its
-/// preset into `prompts_dir`, and write it to `nodes_dir`.
-pub(crate) fn prepare_node_install(
-    base: &str,
-    reference: &str,
-    overwrite_presets: bool,
-    nodes_dir: &Path,
-    prompts_dir: &Path,
-) -> Result<PreparedNodeInstall, String> {
+/// Fetch `reference` from the catalogue at `base` and validate it exactly as
+/// `graph_validate` would. Nothing is written: the caller builds the review
+/// first, and only [`write_node_install`] (after the user accepted) touches
+/// disk.
+pub(crate) fn fetch_node_document(base: &str, reference: &str) -> Result<FetchedNode, String> {
     let parsed = crate::daemon::graph_install::parse_ref_node(reference)?;
+    let source = crate::domain::nodes::review::source_label(&parsed.scope, &parsed.git_ref);
     let fetched = crate::daemon::graph_install::fetch_document(base, &parsed, "node")?;
     let report = crate::daemon::graph_validate::validate_document_str(&fetched.body);
     reject_invalid_report(reference, &report)?;
     let document = crate::domain::nodes::parse_document(&fetched.body)?;
-    let presets_written = presets_to_write(&document, prompts_dir);
-    install_preset(&document, overwrite_presets, prompts_dir)?;
-    crate::domain::nodes::write(nodes_dir, &document)?;
-    Ok(PreparedNodeInstall {
+    Ok(FetchedNode {
         document,
-        presets_written,
         source_url: fetched.source_url,
+        source,
     })
+}
+
+/// Install the document's preset into `prompts_dir` with the graph
+/// installer's rules, then write the document to `nodes_dir` — and return
+/// the preset names written (new or overwritten; a file already present
+/// with identical content is not listed).
+pub(crate) fn write_node_install(
+    document: &NodeDocument,
+    overwrite_presets: bool,
+    nodes_dir: &Path,
+    prompts_dir: &Path,
+) -> Result<Vec<String>, String> {
+    let presets_written = presets_to_write(document, prompts_dir);
+    install_preset(document, overwrite_presets, prompts_dir)?;
+    crate::domain::nodes::write(nodes_dir, document)?;
+    Ok(presets_written)
 }
 
 /// Refuse a catalogue body that fails validation — listing every problem —
@@ -156,17 +165,23 @@ mod tests {
     }
 
     #[test]
-    fn prepare_node_install_writes_the_document_and_reports_the_source() {
+    fn fetch_node_document_writes_nothing_and_reports_the_source() {
         let stub = stub_serving("/i/node/auditor", &node_doc().to_string());
         let (_home, nodes, prompts) = dirs();
-        let prepared =
-            prepare_node_install(&stub.base_url(), "auditor", false, &nodes, &prompts).unwrap();
-        assert_eq!(prepared.document.name, "auditor");
+        let fetched = fetch_node_document(&stub.base_url(), "auditor").unwrap();
+        assert_eq!(fetched.document.name, "auditor");
+        assert_eq!(fetched.source, "official");
         assert_eq!(
-            prepared.source_url,
+            fetched.source_url,
             format!("{}/i/node/auditor", stub.base_url())
         );
-        assert!(prepared.presets_written.is_empty());
+        assert!(
+            !nodes.join("auditor.json").exists(),
+            "the fetch writes nothing before the review is accepted"
+        );
+
+        let written = write_node_install(&fetched.document, false, &nodes, &prompts).unwrap();
+        assert!(written.is_empty());
         let stored = crate::domain::nodes::resolve(&nodes, "auditor")
             .unwrap()
             .expect("stored");
@@ -175,32 +190,25 @@ mod tests {
     }
 
     #[test]
-    fn prepare_node_install_requests_the_node_catalogue_path() {
+    fn fetch_node_document_requests_the_node_catalogue_path_and_names_the_source() {
         let stub = stub_serving("/i/acme/widgets/node/auditor", &node_doc().to_string());
-        let (_home, nodes, prompts) = dirs();
-        prepare_node_install(
-            &stub.base_url(),
-            "acme/widgets/auditor@v1",
-            false,
-            &nodes,
-            &prompts,
-        )
-        .unwrap();
+        let fetched = fetch_node_document(&stub.base_url(), "acme/widgets/auditor@v1").unwrap();
+        assert_eq!(fetched.source, "acme/widgets@v1");
         let hits = stub.hits();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].target, "/i/acme/widgets/node/auditor?ref=v1");
     }
 
     #[test]
-    fn prepare_node_install_installs_the_bundled_preset() {
+    fn write_node_install_installs_the_bundled_preset() {
         let mut doc = node_doc();
         doc["config"]["prompt_preset"] = serde_json::json!("auditor-preset");
         doc["preset"] = serde_json::json!({"name": "auditor-preset", "content": "audit well"});
         let stub = stub_serving("/i/node/auditor", &doc.to_string());
         let (_home, nodes, prompts) = dirs();
-        let prepared =
-            prepare_node_install(&stub.base_url(), "auditor", false, &nodes, &prompts).unwrap();
-        assert_eq!(prepared.presets_written, vec!["auditor-preset"]);
+        let fetched = fetch_node_document(&stub.base_url(), "auditor").unwrap();
+        let written = write_node_install(&fetched.document, false, &nodes, &prompts).unwrap();
+        assert_eq!(written, vec!["auditor-preset"]);
         assert_eq!(
             std::fs::read_to_string(prompts.join("auditor-preset.md")).unwrap(),
             "audit well"
@@ -208,15 +216,16 @@ mod tests {
     }
 
     #[test]
-    fn prepare_node_install_preset_conflict_writes_neither_preset_nor_node() {
+    fn write_node_install_preset_conflict_writes_neither_preset_nor_node() {
         let mut doc = node_doc();
         doc["preset"] = serde_json::json!({"name": "auditor-preset", "content": "new"});
         let stub = stub_serving("/i/node/auditor", &doc.to_string());
         let (_home, nodes, prompts) = dirs();
         std::fs::create_dir_all(&prompts).unwrap();
         std::fs::write(prompts.join("auditor-preset.md"), "old").unwrap();
+        let fetched = fetch_node_document(&stub.base_url(), "auditor").unwrap();
 
-        let error = prepare_node_install(&stub.base_url(), "auditor", false, &nodes, &prompts)
+        let error = write_node_install(&fetched.document, false, &nodes, &prompts)
             .expect_err("conflict must fail");
         assert!(error.contains("different content"), "{error}");
         assert_eq!(
@@ -230,7 +239,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_node_install_refuses_a_graph_document() {
+    fn fetch_node_document_refuses_a_graph_document() {
         let graph = serde_json::json!({
             "format_version": 6,
             "name": "shared",
@@ -246,23 +255,34 @@ mod tests {
             "ensembles": [],
         });
         let stub = stub_serving("/i/node/auditor", &graph.to_string());
-        let (_home, nodes, prompts) = dirs();
-        let error = prepare_node_install(&stub.base_url(), "auditor", false, &nodes, &prompts)
-            .expect_err("graph doc must fail");
+        let (_home, nodes, _prompts) = dirs();
+        let error =
+            fetch_node_document(&stub.base_url(), "auditor").expect_err("graph doc must fail");
         assert!(error.contains("graph document"), "{error}");
         assert!(!nodes.join("auditor.json").exists());
     }
 
     #[test]
-    fn prepare_node_install_lists_every_validation_problem() {
+    fn fetch_node_document_lists_every_validation_problem() {
         let mut doc = node_doc();
         doc["name"] = serde_json::json!("Not A Slug");
         doc["config"]["bogus"] = serde_json::json!(1);
         let stub = stub_serving("/i/node/auditor", &doc.to_string());
-        let (_home, nodes, prompts) = dirs();
-        let error = prepare_node_install(&stub.base_url(), "auditor", false, &nodes, &prompts)
-            .expect_err("invalid doc must fail");
+        let error =
+            fetch_node_document(&stub.base_url(), "auditor").expect_err("invalid doc must fail");
         assert!(error.contains("name"), "{error}");
         assert!(error.contains("config"), "{error}");
+    }
+
+    #[test]
+    fn write_node_install_writes_the_document() {
+        let stub = stub_serving("/i/node/auditor", &node_doc().to_string());
+        let (_home, nodes, prompts) = dirs();
+        let fetched = fetch_node_document(&stub.base_url(), "auditor").unwrap();
+        write_node_install(&fetched.document, false, &nodes, &prompts).unwrap();
+        let stored = crate::domain::nodes::resolve(&nodes, "auditor")
+            .unwrap()
+            .expect("stored");
+        assert_eq!(stored.document.name, "auditor");
     }
 }

@@ -50,13 +50,22 @@ pub(crate) fn fetch_document(
         ))
         .build()
         .map_err(|error| format!("Could not build the catalogue HTTP client: {error}."))?;
-    let response = client.get(url).send().map_err(|error| {
+    let mut response = client.get(url).send().map_err(|error| {
         format!("Could not fetch '{display}' from the catalogue (GET {attempted}): {error}.")
     })?;
     let status = response.status();
     if status == reqwest::StatusCode::NOT_FOUND {
         return Err(format!(
             "Graph '{display}' was not found in the catalogue (GET {attempted} returned 404)."
+        ));
+    }
+    if status == reqwest::StatusCode::GONE {
+        return Err(blocked_or_generic(
+            &reference.slug,
+            &display,
+            &attempted,
+            status,
+            &mut response,
         ));
     }
     if !status.is_success() {
@@ -84,6 +93,47 @@ pub(crate) fn fetch_document(
         format!("The catalogue response for '{display}' is not valid UTF-8 (GET {attempted}).")
     })?;
     Ok(FetchedDocument { body, source_url })
+}
+
+/// A 410 from the catalogue's `/i/` path: the document was removed after a
+/// community report, so the body's `reason`/`issue` become the refusal —
+/// and nothing is written. Any other 410 body keeps the generic status
+/// message.
+fn blocked_or_generic(
+    slug: &str,
+    display: &str,
+    attempted: &str,
+    status: reqwest::StatusCode,
+    response: &mut reqwest::blocking::Response,
+) -> String {
+    use std::io::Read;
+    let mut body = Vec::new();
+    let read = response
+        .take((MAX_BODY_BYTES + 1) as u64)
+        .read_to_end(&mut body);
+    match read {
+        Ok(_) => blocked_message(slug, &String::from_utf8_lossy(&body))
+            .unwrap_or_else(|| generic_status_message(display, attempted, status)),
+        Err(_) => generic_status_message(display, attempted, status),
+    }
+}
+
+/// The refusal for a blocked document: the catalogue's 410 body is
+/// `{error: "blocked", reason, issue}`; anything else is not a block report.
+fn blocked_message(slug: &str, body: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    if value.get("error")?.as_str()? != "blocked" {
+        return None;
+    }
+    let reason = value.get("reason")?.as_str()?;
+    let issue = value.get("issue")?.as_str()?;
+    Some(format!(
+        "{slug} was removed from the catalogue after a community report: {reason} ({issue})"
+    ))
+}
+
+fn generic_status_message(display: &str, attempted: &str, status: reqwest::StatusCode) -> String {
+    format!("Could not fetch '{display}' from the catalogue (GET {attempted} returned {status}).")
 }
 
 /// The catalogue URL for a ref: the install-counting endpoint, not the raw
@@ -229,6 +279,65 @@ mod tests {
         assert!(error.contains("not found in the catalogue"), "{error}");
         assert!(error.contains("404"), "{error}");
         assert!(error.contains(&stub.base_url()), "{error}");
+    }
+
+    #[test]
+    fn fetch_reports_a_410_block_with_the_reason_and_issue() {
+        let stub = StubCatalogue::start(routes(vec![(
+            "/i/graph/my-graph",
+            StubRoute {
+                status: 410,
+                headers: Vec::new(),
+                body:
+                    br#"{"error":"blocked","reason":"ships a credential stealer","issue":"CAT-17"}"#
+                        .to_vec(),
+            },
+        )]));
+        let reference = super::super::parse_ref("my-graph").unwrap();
+        let error =
+            fetch_document(&stub.base_url(), &reference, "graph").expect_err("410 must fail");
+        assert_eq!(
+            error,
+            "my-graph was removed from the catalogue after a community report: \
+             ships a credential stealer (CAT-17)"
+        );
+    }
+
+    #[test]
+    fn fetch_keeps_the_generic_message_for_a_410_that_is_not_a_block_report() {
+        let stub = StubCatalogue::start(routes(vec![(
+            "/i/graph/my-graph",
+            StubRoute {
+                status: 410,
+                headers: Vec::new(),
+                body: b"gone".to_vec(),
+            },
+        )]));
+        let reference = super::super::parse_ref("my-graph").unwrap();
+        let error =
+            fetch_document(&stub.base_url(), &reference, "graph").expect_err("410 must fail");
+        assert!(error.contains("Could not fetch"), "{error}");
+        assert!(error.contains("410"), "{error}");
+    }
+
+    fn blocked_message_body(body: &str) -> Option<String> {
+        super::blocked_message("slug", body)
+    }
+
+    #[test]
+    fn blocked_message_parses_only_the_catalogue_block_shape() {
+        assert_eq!(
+            blocked_message_body(r#"{"error":"blocked","reason":"r","issue":"I-1"}"#),
+            Some(
+                "slug was removed from the catalogue after a community report: r (I-1)".to_string()
+            )
+        );
+        assert_eq!(
+            blocked_message_body(r#"{"error":"other","reason":"r","issue":"I-1"}"#),
+            None
+        );
+        assert_eq!(blocked_message_body("not json"), None);
+        assert_eq!(blocked_message_body(r#"{"error":"blocked"}"#), None);
     }
 
     #[test]

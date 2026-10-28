@@ -39,21 +39,43 @@ impl TaskTriggerHandler {
 
     #[tool(
         name = "node_install",
-        description = "Install a shareable node document from the catalogue in one command: fetch the published document for `ref` — `<slug>` for an official node or `<owner>/<repo>/<slug>` for a community one, each with an optional `@<ref>` version suffix — through `graphs.catalogue_url`, so the catalogue counts the install. The document is validated exactly as `graph_validate` would (a graph document is refused), its bundled `preset` is installed into the prompts dir (a local file with different content aborts the install unless `overwrite_presets` is true), and it is written to ~/.canopy/nodes/<name>.json, where it shadows a builtin of the same name. The response carries the name, kind, source URL, and the presets written; add it to a graph with graph_add_node (node: <name>) or graph_add_ensemble (node: <name>)."
+        description = "Install a shareable node document from the catalogue in one command: fetch the published document for `ref` — `<slug>` for an official node or `<owner>/<repo>/<slug>` for a community one, each with an optional `@<ref>` version suffix — through `graphs.catalogue_url`, so the catalogue counts the install, and validate it exactly as `graph_validate` would (a graph document is refused). BEFORE ANYTHING IS WRITTEN the call returns {needs_review: true, review: {source, commands, prompts, attention}}: every shell command (config.command, labelled by node), every agent instruction (prompt_template, prompt_override, bundled or builtin preset content — first 3 lines with a total line count), and the attention marks for dangerous command shapes (pipe to shell, sudo, rm -rf, chmod 777, git push/--force, sensitive-path write, eval, base64 -d, pipe to python/node). AN AGENT MUST SHOW THIS REVIEW TO ITS USER before calling again with accept: true; without accept nothing is installed, and official documents are reviewed the same as community ones. With accept: true the bundled `preset` is installed into the prompts dir (a local file with different content aborts the install unless `overwrite_presets` is true), the document is written to ~/.canopy/nodes/<name>.json where it shadows a builtin of the same name, and the response carries the same review plus the name, kind, source URL, and presets written; add it to a graph with graph_add_node (node: <name>) or graph_add_ensemble (node: <name>)."
     )]
     pub(crate) async fn node_install(
         &self,
         Parameters(params): Parameters<NodeInstallParams>,
     ) -> Result<CallToolResult, McpError> {
         let reference = params.reference.clone();
-        let overwrite = params.overwrite_presets.unwrap_or(false);
-        // The fetch and the file writes are blocking, so they run off the
-        // async runtime.
-        let prepared = tokio::task::spawn_blocking(move || {
-            let canopy_dir = crate::domain::prompts::canopy_dir();
-            crate::daemon::node_install::prepare_node_install(
+        // The fetch is blocking, so it runs off the async runtime. It writes
+        // nothing: the review comes first.
+        let fetched = tokio::task::spawn_blocking(move || {
+            crate::daemon::node_install::fetch_node_document(
                 &crate::daemon::graph_install::catalogue_url(),
                 &reference,
+            )
+        })
+        .await
+        .map_err(|error| internal_error(error.to_string()))?;
+        let fetched = match fetched {
+            Ok(fetched) => fetched,
+            Err(message) => return Ok(error_result(&message)),
+        };
+
+        let review = crate::domain::nodes::review::review_node(&fetched.document, &fetched.source);
+        if params.accept != Some(true) {
+            return Ok(build_json_result(&serde_json::json!({
+                "needs_review": true,
+                "review": review,
+            })));
+        }
+
+        // Only after the caller accepted does anything touch disk.
+        let overwrite = params.overwrite_presets.unwrap_or(false);
+        let document = fetched.document.clone();
+        let written = tokio::task::spawn_blocking(move || {
+            let canopy_dir = crate::domain::prompts::canopy_dir();
+            crate::daemon::node_install::write_node_install(
+                &document,
                 overwrite,
                 &crate::domain::nodes::nodes_dir(&canopy_dir),
                 &crate::domain::prompts::prompts_dir(&canopy_dir),
@@ -61,13 +83,14 @@ impl TaskTriggerHandler {
         })
         .await
         .map_err(|error| internal_error(error.to_string()))?;
-        match prepared {
-            Ok(prepared) => Ok(build_json_result(&serde_json::json!({
-                "name": prepared.document.name,
-                "kind": prepared.document.kind,
+        match written {
+            Ok(presets_written) => Ok(build_json_result(&serde_json::json!({
+                "name": fetched.document.name,
+                "kind": fetched.document.kind,
                 "ref": params.reference,
-                "source_url": prepared.source_url,
-                "presets_written": prepared.presets_written,
+                "source_url": fetched.source_url,
+                "presets_written": presets_written,
+                "review": review,
             }))),
             Err(message) => Ok(error_result(&message)),
         }

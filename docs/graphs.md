@@ -1180,7 +1180,7 @@ graph catalogue at `graphs.univerlab.org` — fetching through the
 catalogue is what counts the install:
 
 ```
-canopy graph install <ref> [--workdir <dir>] [--name <name>] [--overwrite-presets] [--json]
+canopy graph install <ref> [--workdir <dir>] [--name <name>] [--overwrite-presets] [--yes] [--show-prompts] [--json]
 ```
 
 The ref is `<slug>` for an official graph or `<owner>/<repo>/<slug>`
@@ -1190,12 +1190,46 @@ version (`my-graph`, `acme/widgets/my-graph`,
 digits, or `-`; owner and repo follow GitHub's naming rules. Anything
 else is refused with the accepted forms in the message.
 
+**Review before anything is written.** A shared graph is code: check
+and gate nodes run shell commands with your permissions, hooks run
+commands too, and agent nodes carry prompts that steer an agent able to
+edit files and run tools. So the install first fetches and validates
+the document and prints a review summary of everything it will run:
+
+- every shell command — check/gate `config.command` and hook
+  `command` — labelled by node or hook, verbatim;
+- every agent instruction — `prompt_template`, `prompt_override`, the
+  bundled or builtin preset content behind `prompt_preset`, and hook
+  `prompt` — with its total line count and its first 3 lines;
+  `--show-prompts` prints each one in full;
+- **attention marks** for command shapes worth a second look: a pipe
+  into `sh`/`bash` (typically `curl … | sh`), `sudo`, `rm -rf`,
+  `chmod 777`, `git push` or `--force`, writes under `~/.ssh`,
+  `~/.config` or `/etc`, `eval`, `base64 -d`, and a pipe into
+  `python -c` or `node -e`. A mark is a flag for your eyes, never a
+  block — the same marks the catalogue pages show.
+
+Only then does it ask `Install <name> from <source>? [y/N]`, where the
+source is `official` or `owner/repo` (plus the ref, when given).
+Official graphs are asked about exactly like community ones — official
+is not exempt. Answering anything but `y`/`yes` installs nothing. When
+stdin or stdout is not a TTY (a pipe, a script, an agent) the install
+refuses after printing the summary, exiting 1 with
+`refusing to install without confirmation: re-run with --yes after
+reviewing the commands above` — re-run with `--yes` to proceed without
+the question, or `--json` to get the review as JSON on stdout (the
+question then goes to stderr). The summary is printed in every mode;
+`--yes` skips the question, never the review.
+
 The fetch is one GET with a `canopy/<version>` User-Agent, following
 redirects (at most 3, only ever to https — a catalogue URL you set to
 `http` yourself may redirect within http, and any other scheme is
 refused) with a 15 s timeout and the body capped at 1 MiB — no other
 network traffic. HTTP errors are reported with the status and the URL
-tried; a 404 says the graph was not found in the catalogue.
+tried; a 404 says the graph was not found in the catalogue, and a 410
+says `<name> was removed from the catalogue after a community report:
+<reason> (<issue>)` — a document the catalogue took down after a
+report is never installed.
 
 The fetched document goes through the same validation as
 [`validate`](#validate-before-you-share): any problem aborts the
@@ -1210,13 +1244,18 @@ name, `--workdir` defaulting to the current directory (which must be
 absolute and exist).
 
 The report carries the graph id and name, the workdir, the presets
-written, and the agent nodes still needing a platform/model, with the
-next command to assign them (`--json` prints the machine-readable
-report). The same operation exists as the MCP tool
-`graph_install { ref, workdir, name?, overwrite_presets? }`. The
-catalogue base URL is the `graphs.catalogue_url` setting (default
-`https://graphs.univerlab.org`, see
-[Tuning the engine](#tuning-the-engine)).
+written, the review, and the agent nodes still needing a platform/model
+with the next command to assign them (`--json` prints the
+machine-readable report). The same operation exists as the MCP tool
+`graph_install { ref, workdir, name?, overwrite_presets?, accept? }`:
+called **without** `accept: true` it installs nothing and returns
+`{ needs_review: true, review: { source, commands, prompts,
+attention } }` — the same review printed above; called with
+`accept: true` it installs and echoes that review in the result. An
+agent driving the MCP tool must show the review to its user before
+passing `accept: true`. The catalogue base URL is the
+`graphs.catalogue_url` setting (default `https://graphs.univerlab.org`,
+see [Tuning the engine](#tuning-the-engine)).
 
 ## Archive and restore
 
@@ -1411,17 +1450,43 @@ node is the installer's decision, not the author's. `canopy graph validate
 ```
 canopy node install <slug>
 canopy node install <owner>/<repo>/<slug>@<ref>
-canopy node install <ref> --overwrite-presets --json
+canopy node install <ref> --overwrite-presets --yes --show-prompts --json
 ```
 
 The ref grammar is the graph ref grammar (`<slug>` or
 `<owner>/<repo>/<slug>`, optional `@<ref>`); the document is fetched
-through `graphs.catalogue_url`, validated, and written to
+through `graphs.catalogue_url` and validated exactly as `canopy graph
+validate` validates it. Before anything is written, the same **review**
+`canopy graph install` prints comes first: every shell command
+(`config.command`) labelled by node, every agent instruction
+(`prompt_template`, `prompt_override`, and the preset content behind
+`prompt_preset` — bundled or builtin — with its first 3 lines and its
+total line count, full text with `--show-prompts`), and the attention
+marks for command shapes worth a second look (pipe to shell, `sudo`,
+`rm -rf`, `chmod 777`, `git push`/`--force`, writes under `~/.ssh`,
+`~/.config` or `/etc`, `eval`, `base64 -d`, pipe to `python -c`/`node
+-e`). Then it asks `Install <name> from <source>? [y/N]` — official
+documents are asked about exactly like community ones. Without a TTY
+and without `--yes` it prints the summary and refuses, exiting 1 with
+`refusing to install without confirmation: re-run with --yes after
+reviewing the commands above`; `--yes` installs after the summary
+without the question, and `--json` prints the review as JSON on stdout
+with the question on stderr.
+
+Only after the confirmation is the document written to
 `~/.canopy/nodes/<name>.json`. Its bundled `preset` is installed as
 `~/.canopy/prompts/<preset.name>.md` with the same no-silent-overwrite rule
 as a graph's presets: a local file with different content aborts the
 install unless `--overwrite-presets` is given. A graph document fetched
-from a node endpoint is refused.
+from a node endpoint is refused, and a 410 says `<name> was removed
+from the catalogue after a community report: <reason> (<issue>)`.
+
+Over MCP, `node_install { ref, overwrite_presets?, accept? }` follows
+the same gate: **without** `accept: true` it installs nothing and
+returns `{ needs_review: true, review: { source, commands, prompts,
+attention } }`; with `accept: true` it installs and echoes the same
+review in the result. An agent must show the review to its user before
+passing `accept: true`.
 
 **List** what is available:
 

@@ -20,6 +20,9 @@ use serde_json::Value;
 mod ensemble;
 pub use ensemble::EnsembleNodeConfig;
 
+pub(crate) mod attention;
+pub(crate) mod review;
+
 /// The optional prompt preset a node document bundles: installed into
 /// `~/.canopy/prompts/<name>.md` with the graph installer's no-silent-
 /// overwrite rule.
