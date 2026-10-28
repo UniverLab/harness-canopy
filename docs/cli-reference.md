@@ -229,7 +229,8 @@ WebSocket — the CLI never writes the shelf itself. `file_id` is the
 
 Remote control is owner-only: the relay admits only hosts signed in with
 the same GitHub account. `login` prints a code to enter at
-`https://github.com/login/device`, then stores `{token, login, id}` in
+`https://github.com/login/device` (plus the full verification URL when
+GitHub returns one), then stores `{token, login, id}` in
 `~/.canopy/remote/github.json` (mode 0600, directory 0700). The token
 never appears in logs, errors, or status output. The `[remote]` table in
 `~/.canopy/config.toml` carries `enabled` (default `false`), `relay_url`,
