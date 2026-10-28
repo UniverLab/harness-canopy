@@ -743,6 +743,44 @@ mod tests {
         );
     }
 
+    /// FR2/FR3: a quorum only judges the pass it settled. Here the member ran
+    /// again after the last join — a shutdown between a member and its join —
+    /// so that attempt has no verdict: its failure still refuses the start and
+    /// is named, instead of hiding behind an older passed quorum.
+    #[test]
+    fn directed_start_refuses_a_failed_member_of_an_unsettled_ensemble_pass() {
+        let s = spec("spec-1");
+        let (nodes, edges, ensembles) = round_robin_between_a_and_b();
+        let mut settled = run(
+            "j",
+            GraphRunStatus::Pass,
+            Some(serde_json::json!(true)),
+            None,
+        );
+        settled.iteration = 1;
+        let mut newer_attempt = run("m1", GraphRunStatus::Fail, Some(serde_json::json!(1)), None);
+        newer_attempt.iteration = 2;
+        let runs = vec![settled, newer_attempt];
+        let directed = DirectedStart {
+            spec_id: s.id.clone(),
+            node_arg: "B".to_string(),
+        };
+        let err = resolve_spec_start(
+            &nodes,
+            &edges,
+            &s,
+            &runs,
+            &ensembles,
+            false,
+            Some(&directed),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("prerequisite node 'M1'"),
+            "the unjudged attempt is the member's own, so it is named: {err}"
+        );
+    }
+
     #[test]
     fn directed_start_at_ensemble_resolves_to_ensemble_cursor() {
         let s = spec("spec-1");

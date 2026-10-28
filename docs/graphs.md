@@ -157,8 +157,8 @@ skipped spec never ran, so its stale record must not make a later spec's own
 dirt look ambiguous. The comparison uses the (first 20) paths each spec
 recorded at its end, so a record naming files that are no longer dirty never
 blocks. A spec resuming interrupted work of its own proceeds when the dirty
-paths are exactly the ones its own latest run recorded. The warning names the spec
-whose last recorded run in **this graph** left the workdir dirty
+paths are exactly the ones its own latest run recorded. The warning names the
+spec whose last recorded run in **this graph** left the workdir dirty
 (`graph_runs` joined to `spec_end_dirty > 0`); when no run of this graph
 recorded dirt the warning says `dirty before this graph ran` and names no
 spec. A resuming spec is still refused while another spec's overlapping dirt is
@@ -612,7 +612,10 @@ is named: a failed prerequisite is never treated as passed. An upstream node
 that is a member of an ensemble is judged by the ensemble's quorum result —
 its join node's run for this spec — not by that member's own latest run: a
 member that failed while the quorum passed is a satisfied prerequisite, while
-a failed quorum refuses the run and names the join. The spec cursor
+a failed quorum refuses the run and names the join. A quorum only governs the
+pass it settled: a member that ran again after the last join (a crash between
+the two) has no verdict yet and is judged on its own run, still naming the
+member. The spec cursor
 is set to the start node, and the graph then runs with its normal edges,
 routers, ensembles and gates. On a queue-driven graph the chosen spec is
 what runs first: queue members before it are marked `skipped`, members

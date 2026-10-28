@@ -589,8 +589,9 @@ impl Database {
     /// are either not-yet-run or still in flight, never "previous".
     /// `skipped` is not a candidate either: a spec nobody ran never produced
     /// dirt of its own, so its stale record must not block a later spec
-    /// (FR1). `completed` keeps its dirt as the *previous* run's record but
-    /// the caller compares paths, not just presence.
+    /// (FR1). `completed` was already excluded, and `failed` stays a
+    /// candidate on purpose: a spec that failed leaving uncommitted work must
+    /// not have the next spec build (and commit) on top of it.
     pub fn find_dirty_predecessor_specs(
         &self,
         workdir: &str,

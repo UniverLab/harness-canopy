@@ -490,12 +490,19 @@ pub(crate) fn directed_upstream_node_ids(
 /// passed quorum is not an unmet prerequisite. When the ensemble has not
 /// reported a quorum yet (no join run), fall back to the member's own latest
 /// run, which is then the only evidence there is.
+///
+/// A quorum only judges the pass it settled, though. A member whose latest run
+/// is *newer* than the last join ran again after that verdict — the daemon died
+/// between the member and its join — so that attempt has no quorum and is
+/// judged by its own run: accepting it would seed a failed member's output,
+/// exactly what this check exists to prevent.
 fn prerequisite_run<'a>(
     node: &'a GraphNode,
     nodes: &'a [GraphNode],
     runs: &'a [GraphNodeRun],
     ensembles: &'a [EnsembleDetails],
 ) -> Option<(&'a GraphNode, &'a GraphNodeRun)> {
+    let own = runs.iter().rev().find(|run| run.node_id == node.id);
     let quorum = ensembles
         .iter()
         .filter(|details| details.ensemble.join_node_id != node.id)
@@ -509,15 +516,16 @@ fn prerequisite_run<'a>(
             runs.iter()
                 .rev()
                 .find(|run| run.node_id == details.ensemble.join_node_id)
-        });
+        })
+        // One pass of an ensemble runs its members and its join under the same
+        // `iteration` (a bounce re-enters it within that iteration), so a join
+        // at the member's iteration or later has seen that member's attempt.
+        .filter(|join| own.is_none_or(|run| join.iteration >= run.iteration));
     if let Some(run) = quorum {
         let join = nodes.iter().find(|candidate| candidate.id == run.node_id);
         return Some((join.unwrap_or(node), run));
     }
-    runs.iter()
-        .rev()
-        .find(|run| run.node_id == node.id)
-        .map(|run| (node, run))
+    own.map(|run| (node, run))
 }
 
 /// Refuses a directed start when an upstream prerequisite (one whose output
