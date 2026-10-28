@@ -649,6 +649,8 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
     // No FK on `session_id` — files outlive the session by design.
     shelf::SHELF_FILES_SCHEMA,
     mutex_store::MUTEX_TABLES_SCHEMA,
+    // Browsers paired as revocable devices (remote control).
+    remote_devices::REMOTE_DEVICES_SCHEMA,
 ];
 
 impl Database {
@@ -703,6 +705,7 @@ impl Database {
         Self::migrate_spec_notes_table(&conn)?;
         Self::migrate_roster_entries_table(&conn)?;
         Self::migrate_crews_tables(&conn)?;
+        Self::migrate_remote_devices(&conn)?;
         Self::migrate_agent_action_columns(&conn)?;
         Self::migrate_ensemble_mutex_column(&conn)?;
         Self::migrate_graph_events_mutex_kinds(&conn)?;
@@ -769,6 +772,7 @@ mod migration;
 pub mod mutex_store;
 pub mod project;
 pub mod queues;
+pub mod remote_devices;
 pub(crate) mod roster_entries;
 pub mod run;
 pub mod sandbox;

@@ -453,7 +453,7 @@ pub static REGISTRY: &[SettingDef] = &[
         default: DefaultValue::Literal("false"),
         group: Group::General,
         description: "Whether this host accepts owner-only remote control via the relay.",
-        apply: Apply::NextRun,
+        apply: Apply::Hot,
         wizard: false,
     },
     SettingDef {

@@ -160,6 +160,11 @@ hf-hub = { version = "0.5", optional = true, default-features = false, features 
     "native-tls",
 ] }
 toml_edit = "0.25"
+p256 = { version = "0.14", features = ["ecdsa", "pkcs8"] }
+hmac = "0.13"
+pbkdf2 = "0.13"
+subtle = "2.6"
+qrcode = { version = "0.14", default-features = false }
 
 # Unix process management (kill, setsid)
 [target.'cfg(unix)'.dependencies]

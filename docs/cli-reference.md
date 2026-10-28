@@ -226,6 +226,21 @@ WebSocket — the CLI never writes the shelf itself. `file_id` is the
 | `canopy remote login` | Sign in to GitHub with the OAuth device flow (identity only, no scopes) |
 | `canopy remote logout` | Delete the stored GitHub identity |
 | `canopy remote status [--json]` | Show the sign-in state, whether remote is enabled, and the relay URL; `--json` prints `{signed_in, login, enabled, relay_url}` |
+| `canopy remote on` / `off` | Turn the relay connection on or off (`[remote] enabled`); the daemon picks the change up without a restart |
+| `canopy remote pair` | Create a one-time code, print it with its `<relay_url>/pair#<code>` link and expiry, and draw the link as a terminal QR code |
+| `canopy remote devices [--json]` | List paired browsers (`id`, `label`, `paired_at`, `last_seen`) |
+| `canopy remote revoke <device_id>` | Delete a paired browser and close its live connection at once |
+
+Pairing turns a browser into a revocable device: the code is 10 Crockford
+base32 characters shown as `XXXXX-XXXXX`, works once for ten minutes, and
+is burned after one success or five failed MAC checks. A new `canopy remote
+pair` replaces the previous code. The browser and this host exchange P-256
+public keys authenticated by the code, so later connections need no code
+and the relay never learns anything that lets it impersonate either side.
+The host key lives in `~/.canopy/remote/host_key` (PKCS#8 DER, mode 0600);
+`host_id` is the first 16 hex chars of SHA-256 over its public key. Paired
+browsers are recorded in the `remote_devices` table and identified by the
+first 16 hex chars of SHA-256 over their own key.
 
 Remote control is owner-only: the relay admits only hosts signed in with
 the same GitHub account. `login` prints the device URL and the code to
@@ -374,7 +389,7 @@ it came from. **Apply** says when a change takes effect: `applied` (at once),
 | `graph_event_retention_days` | 90 | 1–3650 days | next run | Days a graph's event log is kept before `canopy clean` prunes it |
 | `clean.reclaim_min_deleted_rows` | 50 | 0–100000 | applied | Deleted rows that trigger VACUUM during `canopy clean` |
 | `activity.retention_per_workdir` | 500 | 50–100000 | applied | Activity-log entries kept per workdir |
-| `remote.enabled` | `false` | bool | next run | Whether this host accepts owner-only remote control via the relay |
+| `remote.enabled` | `false` | bool | applied | Whether this host accepts owner-only remote control via the relay |
 | `remote.relay_url` | `https://remote.univerlab.org` | — | next run | Relay URL for owner-only remote control |
 | `remote.github_client_id` | `Ov23liVCfE58kUb3ssDy` | — | next run | Public Client ID of UniverLab's "Canopy Remote" OAuth App (identity only; empty disables `remote login`) |
 | `remote.host_label` | empty | — | next run | Label shown for this host; empty means the hostname |

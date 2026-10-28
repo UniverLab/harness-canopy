@@ -244,7 +244,7 @@ enum Commands {
         #[command(subcommand)]
         action: ShelfAction,
     },
-    /// Sign in to GitHub for owner-only remote control.
+    /// Owner-only remote control: sign in, pair browsers, manage the relay.
     Remote {
         #[command(subcommand)]
         action: RemoteAction,
