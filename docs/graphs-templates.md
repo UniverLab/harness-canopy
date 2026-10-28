@@ -45,7 +45,7 @@ ensemble — advisory only, since the spawn-time refusal still applies. The
 exception is an unknown `{{output:…}}` target in a graph node's
 `prompt_template`, which preflight has always refused as an error.
 
-### Check node commands
+## Check node commands
 
 Check node `command` strings have their own marker vocabulary, separate
 from the agent-prompt table above — a check command cannot use

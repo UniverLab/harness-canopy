@@ -48,6 +48,7 @@ table — the engine writes one row per event as the run happens:
 | Graph | `graph_started`, `graph_paused`, `graph_resumed`, `graph_completed`, `graph_failed`, `graph_blocked` |
 | Spec | `spec_started`, `spec_completed`, `spec_failed`, `spec_skipped` |
 | Node | `node_started`, `node_finished` (payload: `verdict`, `platform`, `model`, `duration_s`) |
+| Mutex | `mutex_waiting` (payload: `resources`, `waiting_for`), `mutex_acquired` (payload: `resources`) |
 | Hooks | `hook_fired` (payload: `event`, `mode`, `ok`, `error`) |
 | Config | `config_changed` (a node, ensemble or hook edit made while the graph runs) |
 | Notes | `note` (reserved for the CM47 spec-note mechanism; payload: `owner_name`, `chars`) |
@@ -60,7 +61,7 @@ canopy graph log <graph-id-or-name> [--since <id|RFC3339>] [--kind <k>] [--spec 
 
 Each line is `<created_at> <KIND> spec=<name> node=<name> <message>`.
 `--follow` polls the daemon every 2 s and prints new events until Ctrl+C.
-Over MCP, `graph` `events` (`graph_id`, `since_id?`, `spec_id?`, `kinds?`, `limit?`,
+Over MCP, `graph` `events` (`graph_id`, `since_id?`, `since_ts?`, `spec_id?`, `kinds?`, `limit?`,
 `include_payload?`) returns events oldest-first with `next_since_id` for
 paging.
 

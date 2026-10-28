@@ -28,7 +28,7 @@ resolved name is already taken in the target workdir, import still
 succeeds under a numeric suffix (`"My Graph (2)"`) and reports which
 name it used. The same two operations exist over MCP as
 `graph` `export` (`graph_id`) and
-`graph_edit` `import` (`document`, `workdir?`, `name?`), so a graph is drivable end
+`graph_edit` `import` (`document`, `workdir`, `name?`), so a graph is drivable end
 to end through MCP as well as the CLI.
 
 Every daemon database connection waits up to 5 s for a concurrent writer

@@ -184,7 +184,20 @@ fn graph_reference_is_split_into_focused_pages() {
             "{retired} belongs to the graphs catalogue now"
         );
     }
+    let overview = fs::read_to_string(docs.join("graphs.md")).expect("graphs.md must exist");
     let index = fs::read_to_string(docs.join("index.md")).expect("index.md must exist");
+    // The overview is the entry point: it must link every page below it, and
+    // the index must list each page, or a reader never finds the section.
+    for (name, _) in pages.iter().skip(1) {
+        assert!(
+            overview.contains(&format!("({name})")),
+            "graphs.md must link to {name}"
+        );
+        assert!(
+            index.contains(&format!("({name})")),
+            "index.md must list {name}"
+        );
+    }
     assert!(
         index.contains("https://graphs.univerlab.org/patterns"),
         "index.md must point at the graphs catalogue patterns page"

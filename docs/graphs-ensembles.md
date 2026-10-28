@@ -123,7 +123,7 @@ member's own `resume: false` still forces a cold start. The TUI graph view rende
 collapsed as one box (`name [N models]` + quorum) with live per-member
 state while running, expandable on inspect.
 
-### Availability at dispatch
+## Availability at dispatch
 
 The roster (`harness` `roster_set`, or `canopy roster set` — see the
 [CLI reference](cli-reference.md) and [MCP tools](mcp-tools.md)) declares a
@@ -149,7 +149,7 @@ the entry (or wait out its `until`) and relaunch. `graph_control` `preflight` ne
 probes an unavailable pair: it lists them under `skipped_unavailable` and
 counts an ensemble the roster would block as `would_fail`.
 
-### Crews
+## Crews
 
 A **crew** is a named, ordered list of members — `(platform, model, timeout,
 infra-retry budget)` — kept in one place, so the same "designer crew" or
@@ -180,7 +180,7 @@ its config (`{"crew": "name"}`) instead of `platform`; `crew` `delete` is
 refused while anything still binds the crew and the error lists every
 binding.
 
-### No-verdict blocks
+## No-verdict blocks
 
 A parallel or round-robin ensemble that exits with no verdict and no
 outgoing `Error` edge cannot route — every member infra-failed or walked
