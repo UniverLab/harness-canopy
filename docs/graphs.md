@@ -378,7 +378,7 @@ members before retrying. A `graph_control` `run` on a blocked (paused + blocker)
 graph refuses and reports the blocker, so a blind relaunch never masks a
 crew that is silently filing nothing; clear the blocker first, or
 `graph_control` `reset` the spec. A **directed run** —
-`graph_control` `continue` with `run_from_node` (or `graph_control` `run` with
+`graph_control` `continue` with `mode: run_from_node` (or `graph_control` `run` with
 `start_node_id`) — is the general
 escape hatch: it starts a spec at a node you choose, reusing the recorded
 outputs of every earlier node, and accepts a paused, completed or failed
@@ -536,11 +536,11 @@ To clear the limit, do one of these:
 
 - **Reset the spec by id.** `graph_control` `reset` with `specs: [<spec id>]` zeroes
   that spec's execution count and leaves its worktree untouched. Then
-  `graph_control` `run` or a directed `graph_control` `continue` (`run_from_node`) relaunches it. A `graph_control` `reset`
+  `graph_control` `run` or a directed `graph_control` `continue` (`mode: run_from_node`) relaunches it. A `graph_control` `reset`
   without `specs` keeps every spec's count.
 - **Give an explicit directive.** `graph_control` `run` with `start_node_id`,
-  `graph_control` `continue` with `run_from_node`, or `graph_control` `continue` with
-  `retry_current_node` (on a failed graph, or on a pending spec with a
+  `graph_control` `continue` with `mode: run_from_node`, or `graph_control` `continue` with
+  `mode: retry_current_node` (on a failed graph, or on a pending spec with a
   recorded node) resets the targeted spec's count before its run starts. The
   response says `Execution limit reset for spec '<name>'`.
 
@@ -562,7 +562,7 @@ If the daemon stops while a node is running — a graceful shutdown or a
 crash — the killed run is finalized as interrupted and routes no edge
 (in particular, never its fail edge). On the next start the graph is
 reconciled to `Paused` with the spec `Interrupted`, and
-`graph_control` `continue` with `retry` re-runs the interrupted node itself with
+`graph_control` `continue` with `mode: retry_current_node` re-runs the interrupted node itself with
 the same input it had (the same command for a check node, the same
 `previous_feedback` for an ensemble member) — not whichever node an
 edge would have led to.
@@ -592,16 +592,16 @@ left on its own, `"terminated"` when canopy ended it — readable via
 
 A spec interrupted by a no-verdict ensemble block (see
 [No-verdict blocks](#no-verdict-blocks)) is resumed the same way:
-`graph_control` `continue` with `retry` re-enters the blocked ensemble with its
+`graph_control` `continue` with `mode: retry_current_node` re-enters the blocked ensemble with its
 current member list, without re-running nodes or specs that already
-passed, and `graph_control` `continue` with `skip` marks that blocked spec
+passed, and `graph_control` `continue` with `mode: skip_next_spec` marks that blocked spec
 `skipped` and moves on to the next one. `graph_control` `reset` still restarts
 the blocked spec from its entry node.
 
 When the work up to some node is already done and good — after a crash,
 a rewired ensemble, or a hand fix — a **directed run** starts a spec at
 a node you choose instead of at Start: `graph_control` `continue` with
-`run_from_node` and optional `spec_id` (CLI: `canopy graph continue --from
+`mode: run_from_node` and optional `spec_id` (CLI: `canopy graph continue --from
 <node> [--spec <spec>]`), or `graph_control` `run` with `start_node_id` for
 the first spec the run executes. `--spec` is optional: on a queue-driven graph it defaults to the
 graph's current spec — an in-flight member (`running` or `interrupted`)
@@ -645,8 +645,8 @@ still carries the failed run's feedback) are kept rather than purged — no
 `spec_id` is needed. An idea run that predates the graph remembering its
 idea (older databases) resumes the same way: the idea is read from that
 bookkeeping spec's text and remembered from then on. An idea graph that has
-never run has nothing to resume: `graph_control` `continue` with `run_from_node`
-(and `retry_current_node`) refuses it, naming `graph_control` `run` with an `idea`
+never run has nothing to resume: `graph_control` `continue` with `mode: run_from_node`
+(and `mode: retry_current_node`) refuses it, naming `graph_control` `run` with an `idea`
 as the way to start one.
 If a reachable prompt or check references a node with no recorded output
 for the spec, the run is refused and the missing node is named.
@@ -731,7 +731,7 @@ never stuck behind an earlier waiter for a different resource.
 While waiting the run has status `waiting` — visible in `graph` `get`,
 `graph` `node_runs`, and the TUI graph view together with who holds
 each resource — and the node's timeout only starts when the lease is
-granted. The `graph_events` log records `mutex_waiting` and
+granted. The event log records `mutex_waiting` and
 `mutex_acquired` for every wait. The lease is released when the run
 ends for any reason. Export carries each node's and ensemble's `mutex`
 (`format_version` 6); older documents import with the field absent.
@@ -901,8 +901,8 @@ worktree at `graph_control` `run` also runs every time a queue run moves from on
 to the next: after a completed, failed, skipped, interrupted or limit-blocked
 spec alike. A refusal pauses the graph (it does not fail it). The blocker
 lists the first 20 dirty paths and the ways out: `graph_control` `continue`
-with `run_from_node` on the next spec, cleaning the tree by hand and then
-`graph_control` `continue` with `skip_next_spec`, or `allow_dirty_start` on the graph. A directed start on that
+with `mode: run_from_node` on the next spec, cleaning the tree by hand and then
+`graph_control` `continue` with `mode: skip_next_spec`, or `allow_dirty_start` on the graph. A directed start on that
 spec is not refused again by the guard. `allow_dirty_start` lets the run
 advance.
 

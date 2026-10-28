@@ -406,16 +406,17 @@ it lands.
 Three levers, from least to most intrusive:
 
 - **Retry or skip the stuck node.** `graph_control` `continue` with
-  `retry_current_node` re-runs the node the run stopped on; `skip_next_spec`
-  moves past the spec. Use these first. `retry_current_node` (and a directed
+  `mode: retry_current_node` re-runs the node the run stopped on;
+  `mode: skip_next_spec` moves past the spec. Use these first.
+  `retry_current_node` (and a directed
   run, below) also work on an idea-driven graph — one run with an `idea`
   instead of specs: the run resumes with the idea it last ran with, so a
   failed idea graph no longer has to be relaunched from Start. An idea graph
   that has never run is refused, naming `graph_control` `run` with an `idea` as the
   way to start one.
 - **Start a spec at a node you choose.** When everything before a node is
-  already right, a directed run (`graph_control` `continue` with `run_from_node`, or
-  `canopy graph run <graph> --from <node>`) begins at that node and reuses the
+  already right, a directed run (`graph_control` `continue` with `mode: run_from_node`,
+  or `canopy graph run <graph> --from <node>`) begins at that node and reuses the
   recorded output of each node upstream of it (the start node and everything
   downstream always run again, and its own old output is never reused). Use it
   after a crash, a rewired ensemble or a hand fix, instead of paying for the
