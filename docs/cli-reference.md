@@ -312,11 +312,12 @@ Once the data channel is open, the browser speaks the same protocol v1 as
 `/sessions/ws`, with four restrictions: terminal sessions are hidden from
 the list and cannot be attached, written to, prompted or killed, `resize`
 is always refused (the browser renders the host's size scaled), and `spawn`
-creates `agent` sessions only. Frames are capped at 16 KiB, so output and
-snapshots are chunked; a snapshot continues with `snapshot_more`. A host
-serves at most four device connections at once — a fifth is told `busy` —
-each success refreshes the device's `last_seen`, and `canopy remote revoke`
-closes a live connection within a second.
+creates `agent` sessions only. Output and snapshot frames are chunked to
+stay under 16 KiB; a snapshot's first part carries `cols`/`rows` and the
+rest travels as `snapshot_more`. A host serves at most four device
+connections at once — a fifth is told `busy` — each success refreshes the
+device's `last_seen`, and `canopy remote revoke` closes a live connection
+within a second.
 
 The `[remote]` table in `~/.canopy/config.toml` carries `enabled` (default
 `false`), `relay_url`, `github_client_id` (the public Client ID of
