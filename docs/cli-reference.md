@@ -344,6 +344,46 @@ connections at once — a fifth is told `busy` — each success refreshes the
 device's `last_seen`, and `canopy remote revoke` closes a live connection
 within a second.
 
+Graphs ride the same channel, read-only. `graphs{req}` answers
+`graphs{req,graphs}` with the non-archived running, paused and failed
+graphs plus completed graphs active within the last 24 hours — running
+first, then paused, failed, completed, most recent activity first, at
+most 50 — each row carrying `id`, `name`, `status`, `workdir` as a
+basename (never the host's absolute path), `current_spec`,
+`current_node` (the node's *name*, never its id), `done`/`total` over
+the graph's queue or specs, `blocked` and `updated_at`:
+
+```json
+{"t": "graphs", "req": "g1"}
+```
+
+`graph_watch{req,id}` first answers `graph{req,id,document,state}` — the
+graph's export document, exactly what `canopy graph export` writes, plus
+its live `state` — and then pushes `graph_state{id,state}` only when
+that state differs from the last one sent on the connection, re-read
+every 2 seconds. `state` carries `status`, `blocked`/`blocker`,
+`current_spec_id`, the `current_node` name, the `nodes` map of the
+current spec's latest iteration (`"running"`, `"pass"` or `"fail"`, a
+node with no run absent), the queue-ordered `specs` (each `id`, `code`
+such as `FEAT-12` or null, `name`, `status`, `attempts`) and
+`updated_at`:
+
+```json
+{"t": "graph_watch", "req": "w1", "id": "ebea3d93-d26b-4c78-9294-d08f6eba46c8"}
+```
+
+`graph_unwatch{id}` stops that watch and answers nothing:
+
+```json
+{"t": "graph_unwatch", "id": "ebea3d93-d26b-4c78-9294-d08f6eba46c8"}
+```
+
+A connection holds at most four watches — a fifth answers
+`error{code:"busy"}` and starts nothing — an unknown or archived graph
+id answers `error{code:"not_found"}` and starts no watch either, and
+every watch ends with the connection. None of these frames ever changes
+a graph, a spec or a queue: pausing and continuing stay local.
+
 The `[remote]` table in `~/.canopy/config.toml` carries `enabled` (default
 `false`), `relay_url`, `github_client_id` (the public Client ID of
 UniverLab's "Canopy Remote" OAuth App — no configuration needed), and

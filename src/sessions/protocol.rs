@@ -130,6 +130,21 @@ pub enum ClientFrame {
     Catalog {
         req: String,
     },
+    /// `graphs{req}`: the remote graph list (`graphs` answers).
+    Graphs {
+        req: String,
+    },
+    /// `graph_watch{req,id}`: follow one graph — answers `graph` with its
+    /// export document and state, then pushes `graph_state` while the state
+    /// differs. At most four watches live per connection.
+    GraphWatch {
+        req: String,
+        id: String,
+    },
+    /// `graph_unwatch{id}`: stop one watch; no answer frame.
+    GraphUnwatch {
+        id: String,
+    },
 }
 
 /// Explicit agent launch fields from the New dialog (boxed so the `Spawn`
@@ -225,6 +240,19 @@ pub fn parse_client_frame(text: &str) -> Result<ClientFrame, FrameError> {
         "catalog" => {
             let req = req_field(&value, &frame)?;
             Ok(ClientFrame::Catalog { req })
+        }
+        "graphs" => {
+            let req = req_field(&value, &frame)?;
+            Ok(ClientFrame::Graphs { req })
+        }
+        "graph_watch" => {
+            let req = req_field(&value, &frame)?;
+            let id = id_field(&value, &frame)?;
+            Ok(ClientFrame::GraphWatch { req, id })
+        }
+        "graph_unwatch" => {
+            let id = id_field(&value, &frame)?;
+            Ok(ClientFrame::GraphUnwatch { id })
         }
         _ => Err(bad_request(None, format!("unknown frame '{frame}'"))),
     }

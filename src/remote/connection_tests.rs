@@ -1025,10 +1025,10 @@ async fn only_an_ordered_reliable_session_channel_is_accepted() {
 
 /// One bridge answer through a channel: the remote-restriction half of the
 /// loopback scenario, driven directly against the hub without a transport.
-fn bridge_reply(state: &Arc<SessionsState>, frame: &Value) -> Vec<String> {
+async fn bridge_reply(state: &Arc<SessionsState>, frame: &Value) -> Vec<String> {
     let (out_tx, mut out_rx) = mpsc::unbounded_channel();
     let mut bridge = crate::remote::bridge::RemoteBridge::new(Arc::clone(state));
-    bridge.handle_text(&frame.to_string(), &out_tx);
+    bridge.handle_text(&frame.to_string(), &out_tx).await;
     drop(out_tx);
     let mut replies = Vec::new();
     while let Ok(reply) = out_rx.try_recv() {
@@ -1049,6 +1049,15 @@ fn assert_forbidden(replies: &[String], req: Option<&str>) {
     }
 }
 
+/// One bridge answer that must be exactly one error frame, returned parsed.
+async fn bridge_refusal(state: &Arc<SessionsState>, frame: Value) -> Value {
+    let replies = bridge_reply(state, &frame).await;
+    assert_eq!(replies.len(), 1, "exactly one refusal, got {replies:?}");
+    let error: Value = serde_json::from_str(&replies[0]).expect("error frame");
+    assert_eq!(error["t"], "error", "must be an error: {error}");
+    error
+}
+
 /// The remote restrictions of FR3 without the transport: terminal sessions
 /// are hidden from `list` and refused everywhere, `resize` always, `spawn`
 /// unless `kind` is `agent` — the same rules the loopback test drives over
@@ -1065,7 +1074,7 @@ async fn bridge_restrictions_hide_and_refuse_terminal_sessions() {
     let state = SessionsState::for_test(hub, "token".to_string());
 
     // The listing keeps the agent session and hides the terminal one.
-    let replies = bridge_reply(&state, &json!({"t": "list", "req": "l1"}));
+    let replies = bridge_reply(&state, &json!({"t": "list", "req": "l1"})).await;
     assert_eq!(replies.len(), 1);
     let listed: Value = serde_json::from_str(&replies[0]).expect("sessions frame");
     assert_eq!(listed["t"], "sessions");
@@ -1083,28 +1092,31 @@ async fn bridge_restrictions_hide_and_refuse_terminal_sessions() {
 
     // attach/input/prompt/kill aimed at a terminal answer forbidden.
     assert_forbidden(
-        &bridge_reply(&state, &json!({"t": "attach", "id": terminal.id})),
+        &bridge_reply(&state, &json!({"t": "attach", "id": terminal.id})).await,
         None,
     );
     assert_forbidden(
         &bridge_reply(
             &state,
             &json!({"t": "input", "id": terminal.id, "data": encode(b"x")}),
-        ),
+        )
+        .await,
         None,
     );
     assert_forbidden(
         &bridge_reply(
             &state,
             &json!({"t": "prompt", "req": "p1", "id": terminal.id, "text": "hi"}),
-        ),
+        )
+        .await,
         Some("p1"),
     );
     assert_forbidden(
         &bridge_reply(
             &state,
             &json!({"t": "kill", "req": "k1", "id": terminal.id}),
-        ),
+        )
+        .await,
         Some("k1"),
     );
 
@@ -1113,7 +1125,8 @@ async fn bridge_restrictions_hide_and_refuse_terminal_sessions() {
         &bridge_reply(
             &state,
             &json!({"t": "resize", "id": cat.id, "cols": 120, "rows": 40}),
-        ),
+        )
+        .await,
         None,
     );
 
@@ -1122,20 +1135,22 @@ async fn bridge_restrictions_hide_and_refuse_terminal_sessions() {
         &bridge_reply(
             &state,
             &json!({"t": "spawn", "req": "s1", "kind": "terminal", "cli": "cat", "workdir": "/tmp"}),
-        ),
+        )
+        .await,
         Some("s1"),
     );
     let bad = bridge_reply(
         &state,
         &json!({"t": "spawn", "req": "s2", "kind": "banana", "cli": "cat", "workdir": "/tmp"}),
-    );
+    )
+    .await;
     assert_eq!(bad.len(), 1);
     let error: Value = serde_json::from_str(&bad[0]).expect("error frame");
     assert_eq!(error["t"], "error");
     assert_eq!(error["code"], "bad_request");
 
     // The agent session answers attach with its snapshot.
-    let replies = bridge_reply(&state, &json!({"t": "attach", "id": cat.id}));
+    let replies = bridge_reply(&state, &json!({"t": "attach", "id": cat.id})).await;
     assert!(!replies.is_empty(), "attach answers at least a snapshot");
     let first: Value = serde_json::from_str(&replies[0]).expect("snapshot frame");
     assert_eq!(first["t"], "snapshot");
@@ -1155,18 +1170,14 @@ async fn bridge_spawn_validates_yolo_and_workdir() {
     let workdir = tempfile::tempdir().expect("workdir");
     let workdir = workdir.path().to_string_lossy().to_string();
 
-    let bad = |frame: Value| {
-        let replies = bridge_reply(&state, &frame);
-        assert_eq!(replies.len(), 1, "exactly one refusal, got {replies:?}");
-        let error: Value = serde_json::from_str(&replies[0]).expect("error frame");
-        assert_eq!(error["t"], "error", "must be an error: {error}");
-        error
-    };
-
-    let error = bad(json!({
-        "t": "spawn", "req": "b-yolo", "kind": "agent",
-        "cli": "no-such-harness-xyz", "workdir": workdir, "yolo": true,
-    }));
+    let error = bridge_refusal(
+        &state,
+        json!({
+            "t": "spawn", "req": "b-yolo", "kind": "agent",
+            "cli": "no-such-harness-xyz", "workdir": workdir, "yolo": true,
+        }),
+    )
+    .await;
     assert_eq!(error["code"], "bad_request");
     assert_eq!(error["req"], "b-yolo");
     assert_eq!(
@@ -1174,10 +1185,14 @@ async fn bridge_spawn_validates_yolo_and_workdir() {
         "must name the harness: {error}"
     );
 
-    let error = bad(json!({
-        "t": "spawn", "req": "b-rel", "kind": "agent",
-        "cli": "cat", "workdir": "relative/dir",
-    }));
+    let error = bridge_refusal(
+        &state,
+        json!({
+            "t": "spawn", "req": "b-rel", "kind": "agent",
+            "cli": "cat", "workdir": "relative/dir",
+        }),
+    )
+    .await;
     assert_eq!(error["code"], "bad_request");
     assert_eq!(
         error["message"], "spawn: field 'workdir' must be an absolute path",
@@ -1185,10 +1200,14 @@ async fn bridge_spawn_validates_yolo_and_workdir() {
     );
 
     let missing = format!("{workdir}/not-a-directory");
-    let error = bad(json!({
-        "t": "spawn", "req": "b-missing", "kind": "agent",
-        "cli": "cat", "workdir": missing,
-    }));
+    let error = bridge_refusal(
+        &state,
+        json!({
+            "t": "spawn", "req": "b-missing", "kind": "agent",
+            "cli": "cat", "workdir": missing,
+        }),
+    )
+    .await;
     assert_eq!(error["code"], "bad_request");
     assert_eq!(
         error["message"],
@@ -1204,7 +1223,8 @@ async fn bridge_spawn_validates_yolo_and_workdir() {
                 "t": "spawn", "req": "b-term", "kind": "terminal",
                 "cli": "sh", "workdir": workdir, "yolo": true,
             }),
-        ),
+        )
+        .await,
         Some("b-term"),
     );
 }
@@ -1282,10 +1302,12 @@ async fn aborting_the_bridge_cancels_its_shelf_transfers() {
 
     let (out_tx, mut out_rx) = mpsc::unbounded_channel();
     let mut bridge = crate::remote::bridge::RemoteBridge::new(Arc::clone(&state));
-    bridge.handle_text(
-        &json!({"t": "shelf_get", "req": "g1", "file_id": file_id}).to_string(),
-        &out_tx,
-    );
+    bridge
+        .handle_text(
+            &json!({"t": "shelf_get", "req": "g1", "file_id": file_id}).to_string(),
+            &out_tx,
+        )
+        .await;
     let first = tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
         .await
         .expect("the first part arrives")
@@ -1311,14 +1333,18 @@ async fn aborting_the_bridge_cancels_its_shelf_transfers() {
     );
 
     // Both slots are free again: two new downloads start, none answers busy.
-    bridge.handle_text(
-        &json!({"t": "shelf_get", "req": "g2", "file_id": file_id}).to_string(),
-        &out_tx,
-    );
-    bridge.handle_text(
-        &json!({"t": "shelf_get", "req": "g3", "file_id": file_id}).to_string(),
-        &out_tx,
-    );
+    bridge
+        .handle_text(
+            &json!({"t": "shelf_get", "req": "g2", "file_id": file_id}).to_string(),
+            &out_tx,
+        )
+        .await;
+    bridge
+        .handle_text(
+            &json!({"t": "shelf_get", "req": "g3", "file_id": file_id}).to_string(),
+            &out_tx,
+        )
+        .await;
     let mut seen_g2 = false;
     let mut seen_g3 = false;
     while !(seen_g2 && seen_g3) {

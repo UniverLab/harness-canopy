@@ -24,6 +24,7 @@ use crate::db::Database;
 
 use super::auth::{bearer_token, ensure_token, token_valid};
 use super::catalog::{handle_catalog, handle_compose, handle_prompt_draft};
+use super::graphs::{handle_graph_unwatch, handle_graph_watch, handle_graphs};
 use super::protocol::{
     error_frame, exited_frame, file_frame, hello_frame, ok_frame, out_frame, parse_client_frame,
     session_added_frame, session_removed_frame, sessions_frame, shelf_added_frame, shelf_frame,
@@ -42,6 +43,11 @@ pub struct SessionsState {
     pub hub: SessionHub,
     pub shelf: std::sync::Arc<ShelfStore>,
     token: String,
+    /// Live `graph_watch` poll tasks across this state's connections:
+    /// bumped when a watch registers and dropped with its task (abort on
+    /// `graph_unwatch` or socket close, or the watch's own exit), so a test
+    /// can show a closed socket ended every watch it held.
+    live_graph_watches: std::sync::atomic::AtomicUsize,
 }
 
 impl SessionsState {
@@ -57,7 +63,12 @@ impl SessionsState {
         let shelf = ShelfStore::new(db, data_dir.join("shelf"))?;
         hub.wire_shelf(shelf.clone());
         shelf.maintenance();
-        Ok(Arc::new(Self { hub, shelf, token }))
+        Ok(Arc::new(Self {
+            hub,
+            shelf,
+            token,
+            live_graph_watches: std::sync::atomic::AtomicUsize::new(0),
+        }))
     }
 
     #[cfg(test)]
@@ -65,7 +76,33 @@ impl SessionsState {
         let shelf = ShelfStore::for_test(hub.db());
         hub.wire_shelf(shelf.clone());
         shelf.maintenance();
-        Arc::new(Self { hub, shelf, token })
+        Arc::new(Self {
+            hub,
+            shelf,
+            token,
+            live_graph_watches: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
+    /// Count one `graph_watch` starting; paired with
+    /// [`Self::graph_watch_ended`] in the watch task's drop guard.
+    pub(crate) fn graph_watch_started(&self) {
+        self.live_graph_watches
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Count one `graph_watch` ending, whatever ended it.
+    pub(crate) fn graph_watch_ended(&self) {
+        self.live_graph_watches
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// How many `graph_watch` poll tasks are still alive on this state —
+    /// test-only, to assert that a closed connection ends its watches.
+    #[cfg(test)]
+    pub(crate) fn live_graph_watches(&self) -> usize {
+        self.live_graph_watches
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -135,13 +172,16 @@ async fn handle_connection(socket: WebSocket, state: Arc<SessionsState>) {
     let _ = out_tx.send(hello_frame(state.hub.host_label()));
     let mut events = state.hub.subscribe_events();
     let mut attached: Attached = HashMap::new();
+    // Per-connection `graph_watch` tasks: dropped (aborted) with the
+    // connection, so no watch outlives its socket.
+    let mut watches: HashMap<String, JoinHandle<()>> = HashMap::new();
     loop {
         tokio::select! {
             msg = stream.next() => {
                 let Some(msg) = msg else { break };
                 match msg {
                     Ok(Message::Text(text)) => {
-                        handle_client_text(&state, &out_tx, &mut attached, &text);
+                        handle_client_text(&state, &out_tx, &mut attached, &mut watches, &text).await;
                     }
                     Ok(Message::Close(_)) => break,
                     Ok(_) => {
@@ -172,13 +212,17 @@ async fn handle_connection(socket: WebSocket, state: Arc<SessionsState>) {
     for task in attached.into_values() {
         task.abort();
     }
+    for task in watches.into_values() {
+        task.abort();
+    }
     send_task.abort();
 }
 
-fn handle_client_text(
+async fn handle_client_text(
     state: &Arc<SessionsState>,
     out_tx: &OutTx,
     attached: &mut Attached,
+    watches: &mut HashMap<String, JoinHandle<()>>,
     text: &str,
 ) {
     let frame = match parse_client_frame(text) {
@@ -254,6 +298,15 @@ fn handle_client_text(
         }
         ClientFrame::Catalog { req } => {
             handle_catalog(state, out_tx, req);
+        }
+        ClientFrame::Graphs { req } => {
+            handle_graphs(state, out_tx, req);
+        }
+        ClientFrame::GraphWatch { req, id } => {
+            handle_graph_watch(state, out_tx, watches, req, id).await;
+        }
+        ClientFrame::GraphUnwatch { id } => {
+            handle_graph_unwatch(watches, &id);
         }
     }
 }

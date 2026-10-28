@@ -8,6 +8,7 @@
 pub mod auth;
 pub mod catalog;
 pub mod client;
+pub mod graphs;
 pub mod history;
 pub mod host_frame;
 pub mod hub;

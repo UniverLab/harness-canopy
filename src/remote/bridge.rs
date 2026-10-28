@@ -24,6 +24,7 @@ use tokio::sync::{broadcast, Semaphore};
 use tokio::task::JoinHandle;
 
 use crate::sessions::catalog::{handle_catalog, handle_compose, handle_prompt_draft};
+use crate::sessions::graphs::{handle_graph_unwatch, handle_graph_watch, handle_graphs};
 use crate::sessions::protocol::{
     error_frame, exited_frame, file_frame, ok_frame, out_frame, parse_client_frame,
     session_added_frame, session_removed_frame, sessions_frame, shelf_added_frame, shelf_frame,
@@ -50,6 +51,9 @@ type Attached = HashMap<String, JoinHandle<()>>;
 pub struct RemoteBridge {
     state: Arc<SessionsState>,
     attached: Attached,
+    /// Running `graph_watch` polls, by graph id: aborted with the bridge
+    /// (the data channel closed), so no watch outlives its connection.
+    watches: HashMap<String, JoinHandle<()>>,
     /// At most two `shelf_get` transfers in flight per device.
     transfers: Arc<Semaphore>,
     /// Running shelf transfers, aborted when the peer goes away.
@@ -103,6 +107,7 @@ impl RemoteBridge {
         Self {
             state,
             attached: HashMap::new(),
+            watches: HashMap::new(),
             transfers: Arc::new(Semaphore::new(2)),
             shelf_tasks: Vec::new(),
             hidden_files,
@@ -111,7 +116,9 @@ impl RemoteBridge {
 
     /// Answer one inbound client frame. Sync frames answer inline; `prompt`
     /// and `kill` answer from a blocking task, exactly like the local socket.
-    pub fn handle_text(&mut self, text: &str, out: &OutTx) {
+    /// `graph_watch` is awaited here (it validates and builds its first
+    /// answer off the executor) before the next frame is processed.
+    pub async fn handle_text(&mut self, text: &str, out: &OutTx) {
         let frame = match parse_client_frame(text) {
             Ok(frame) => frame,
             Err(error) => {
@@ -198,6 +205,13 @@ impl RemoteBridge {
             }
             ClientFrame::Compose { req, draft } => handle_compose(&self.state, out, req, draft),
             ClientFrame::Catalog { req } => handle_catalog(&self.state, out, req),
+            ClientFrame::Graphs { req } => handle_graphs(&self.state, out, req),
+            ClientFrame::GraphWatch { req, id } => {
+                handle_graph_watch(&self.state, out, &mut self.watches, req, id).await;
+            }
+            ClientFrame::GraphUnwatch { id } => {
+                handle_graph_unwatch(&mut self.watches, &id);
+            }
         }
     }
 
@@ -237,10 +251,13 @@ impl RemoteBridge {
         }
     }
 
-    /// Abort every output forwarder and shelf transfer (the data channel
-    /// closed or the device was revoked).
+    /// Abort every output forwarder, graph watch and shelf transfer (the
+    /// data channel closed or the device was revoked).
     pub fn abort(&mut self) {
         for task in self.attached.drain() {
+            task.1.abort();
+        }
+        for task in self.watches.drain() {
             task.1.abort();
         }
         for task in self.shelf_tasks.drain(..) {

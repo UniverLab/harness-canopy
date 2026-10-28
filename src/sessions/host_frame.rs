@@ -6,7 +6,9 @@
 use serde::{Deserialize, Deserializer};
 
 use super::catalog::{CatalogCli, CatalogData, CatalogPreset, CatalogProject, CatalogSkill};
+use super::graphs::{GraphState, GraphSummary};
 use super::protocol::{SessionItem, ShelfItem};
+use crate::domain::graph_transfer::GraphExportDocument;
 
 /// One frame sent by the hub, parsed by [`parse_host_frame`].
 #[derive(Debug)]
@@ -93,6 +95,37 @@ pub enum HostFrame {
         #[allow(dead_code)]
         data: CatalogData,
     },
+    /// `graphs{req,graphs}`: the answer to `graphs` — the remote graph
+    /// list, ordered running/paused/failed/completed by last activity.
+    Graphs {
+        req: String,
+        // Remote clients consume the graph list; the TUI parses it for
+        // protocol completeness but never sends `graphs` itself.
+        #[allow(dead_code)]
+        graphs: Vec<GraphSummary>,
+    },
+    /// `graph{req,id,document,state}`: the first answer to `graph_watch` —
+    /// the graph's catalogue-plate document plus its live state. Boxed so
+    /// the frame enum stays small (see `SessionAdded`).
+    Graph {
+        req: String,
+        // Parsed for protocol completeness and the round-trip tests; only
+        // remote clients actually consume the drawing.
+        #[allow(dead_code)]
+        id: String,
+        #[allow(dead_code)]
+        document: Box<GraphExportDocument>,
+        #[allow(dead_code)]
+        state: Box<GraphState>,
+    },
+    /// `graph_state{id,state}`: a `graph_watch` push, sent only when the
+    /// state differs from the last one on this connection.
+    GraphState {
+        #[allow(dead_code)]
+        id: String,
+        #[allow(dead_code)]
+        state: Box<GraphState>,
+    },
     /// Any frame this build does not know: parsed so a newer host can talk
     /// to an older client (and vice versa), then ignored.
     Unknown,
@@ -108,6 +141,8 @@ impl HostFrame {
             | HostFrame::File { req, .. }
             | HostFrame::Composed { req, .. }
             | HostFrame::Catalog { req, .. }
+            | HostFrame::Graphs { req, .. }
+            | HostFrame::Graph { req, .. }
             | HostFrame::Ok { req } => Some(req),
             HostFrame::Error { req, .. } => req.as_deref(),
             _ => None,
@@ -193,6 +228,20 @@ enum HostFrameWire {
         presets: Vec<CatalogPreset>,
         skills: Vec<CatalogSkill>,
     },
+    Graphs {
+        req: String,
+        graphs: Vec<GraphSummary>,
+    },
+    Graph {
+        req: String,
+        id: String,
+        document: Box<GraphExportDocument>,
+        state: Box<GraphState>,
+    },
+    GraphState {
+        id: String,
+        state: Box<GraphState>,
+    },
     /// Any `t` this build does not recognise: matches everything else, so
     /// an unknown frame from a newer peer parses (and is ignored) instead
     /// of failing the whole text.
@@ -256,6 +305,19 @@ pub fn parse_host_frame(text: &str) -> Result<HostFrame, String> {
             last,
         },
         HostFrameWire::Composed { req, text } => HostFrame::Composed { req, text },
+        HostFrameWire::Graphs { req, graphs } => HostFrame::Graphs { req, graphs },
+        HostFrameWire::Graph {
+            req,
+            id,
+            document,
+            state,
+        } => HostFrame::Graph {
+            req,
+            id,
+            document,
+            state,
+        },
+        HostFrameWire::GraphState { id, state } => HostFrame::GraphState { id, state },
         HostFrameWire::Catalog {
             req,
             clis,

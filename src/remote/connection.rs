@@ -208,7 +208,7 @@ async fn serve(session: &mut PeerSession) {
                 }
                 Some(PeerEvent::Channel(bytes)) => {
                     if let Ok(text) = String::from_utf8(bytes) {
-                        bridge.handle_text(&text, &out_tx);
+                        bridge.handle_text(&text, &out_tx).await;
                     }
                 }
                 Some(PeerEvent::Closed) | None => break,
