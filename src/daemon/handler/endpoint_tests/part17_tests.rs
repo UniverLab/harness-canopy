@@ -216,6 +216,7 @@ async fn new_tools_refuse_unknown_actions_with_their_full_table() {
         ("skill", &["list", "get"]),
         ("subagent", &["spawn", "collect"]),
         ("rag", &["search", "compact"]),
+        ("sandbox", &["list", "get", "land", "discard"]),
         (
             "identity",
             &["get", "evolve", "list_seeds", "create_seed", "remove_seed"],

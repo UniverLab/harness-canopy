@@ -690,8 +690,12 @@ worktree**, so a retry keeps the work that is already there. If that worktree
 is gone, the continue is refused, naming the sandbox id, instead of quietly
 running the graph against your original workdir.
 
-Leftover sandboxes are listed, landed or discarded explicitly — see
-[Sandboxes](cli-reference.md#sandboxes) in the CLI reference.
+Leftover sandboxes are dealt with explicitly, never guessed at, and both
+surfaces share one implementation: the [`sandbox` MCP tool](mcp-tools.md)
+(`list`, `get`, `land`, `discard`), or the commands in the
+[CLI reference](cli-reference.md#sandboxes). `graph` `get` reports the
+graph's newest sandbox as `{"id", "status"}`, so an agent can name the
+sandbox it is about to land or discard instead of inventing an id.
 
 ## Concurrency
 

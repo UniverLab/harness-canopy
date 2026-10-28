@@ -299,16 +299,50 @@ async fn sandbox_get_returns_one_sandbox_and_refuses_an_unknown_id() {
             id: "no-such-sandbox".to_string(),
         }),
     )
-    .await;
-    match missing {
-        Ok(result) => panic!("expected an error, got: {}", raw_text(&result)),
-        Err(err) => assert!(
-            err.message
-                .contains("no sandbox found for 'no-such-sandbox'"),
-            "{}",
-            err.message
-        ),
-    }
+    .await
+    .unwrap_or_else(|err| panic!("an unknown id is a tool refusal, not a protocol error: {err:?}"));
+    assert!(is_err(&missing), "{}", text(&missing));
+    assert!(
+        raw_text(&missing).contains("no sandbox found for 'no-such-sandbox'"),
+        "{}",
+        raw_text(&missing)
+    );
+
+    // `land` and `discard` resolve through the same path: a stale or mistyped
+    // id is the same tool refusal there, and neither is attempted.
+    let refused_land = call_resource_action(
+        &handler,
+        "sandbox",
+        "land",
+        params_id(SandboxIdParams {
+            id: "no-such-sandbox".to_string(),
+        }),
+    )
+    .await
+    .expect("land on an unknown id is a tool refusal");
+    assert!(is_err(&refused_land), "{}", text(&refused_land));
+    assert!(
+        raw_text(&refused_land).contains("no sandbox found for 'no-such-sandbox'"),
+        "{}",
+        raw_text(&refused_land)
+    );
+    let refused_discard = call_resource_action(
+        &handler,
+        "sandbox",
+        "discard",
+        params_id(SandboxDiscardParams {
+            id: "no-such-sandbox".to_string(),
+            force: None,
+        }),
+    )
+    .await
+    .expect("discard on an unknown id is a tool refusal");
+    assert!(is_err(&refused_discard), "{}", text(&refused_discard));
+    assert!(
+        raw_text(&refused_discard).contains("no sandbox found for 'no-such-sandbox'"),
+        "{}",
+        raw_text(&refused_discard)
+    );
 }
 
 // ── parameter refusals ───────────────────────────────────────────────

@@ -278,7 +278,9 @@ hand.
 
 Sandboxed graph runs (`graph_control` `run` with `sandbox: true`) leave their worktree
 behind whenever it holds work; see [Sandboxes](graphs.md#sandboxes). These
-commands are how you deal with them, and none of them guesses.
+commands — or the [`sandbox` MCP tool](mcp-tools.md), which shares their
+implementation and refusals — are how you deal with them, and none of them
+guesses.
 
 | Command | Description |
 |---|---|

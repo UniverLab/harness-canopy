@@ -65,7 +65,7 @@ impl TaskTriggerHandler {
         let action = SANDBOX.validate(&params)?;
         match action {
             "list" => self.sandbox_list_impl(action_params(&params)?),
-            "get" => self.sandbox_get_impl(action_params(&params)?),
+            "get" => self.sandbox_get_impl(&action_params(&params)?),
             "land" => self.sandbox_land_impl(action_params(&params)?).await,
             "discard" => self.sandbox_discard_impl(action_params(&params)?).await,
             _ => unreachable!("validated action"),
@@ -101,16 +101,19 @@ impl TaskTriggerHandler {
     }
 
     /// `sandbox` `get`: one row by id or unambiguous prefix.
-    fn sandbox_get_impl(&self, params: SandboxIdParams) -> Result<CallToolResult, McpError> {
-        let id = params.id;
-        let row = sandbox_ops::resolve_row(&self.db, &id).map_err(|e| internal_error(&e))?;
+    fn sandbox_get_impl(&self, params: &SandboxIdParams) -> Result<CallToolResult, McpError> {
+        let Some(row) = self.find_sandbox_row(&params.id)? else {
+            return Ok(not_found_result(&params.id));
+        };
         json_result(&sandbox_ops::enrich(&row))
     }
 
     /// `sandbox` `land`: the CLI's own land path, recording `merged`; a
     /// refusal comes back as a tool error result and the row is untouched.
     async fn sandbox_land_impl(&self, params: SandboxIdParams) -> Result<CallToolResult, McpError> {
-        let row = sandbox_ops::resolve_row(&self.db, &params.id).map_err(|e| internal_error(&e))?;
+        let Some(row) = self.find_sandbox_row(&params.id)? else {
+            return Ok(not_found_result(&params.id));
+        };
         let outcome = sandbox_ops::land_and_record(&self.db, &row)
             .await
             .map_err(|e| internal_error(&e))?;
@@ -126,7 +129,9 @@ impl TaskTriggerHandler {
         &self,
         params: SandboxDiscardParams,
     ) -> Result<CallToolResult, McpError> {
-        let row = sandbox_ops::resolve_row(&self.db, &params.id).map_err(|e| internal_error(&e))?;
+        let Some(row) = self.find_sandbox_row(&params.id)? else {
+            return Ok(not_found_result(&params.id));
+        };
         let force = params.force.unwrap_or(false);
         let outcome = sandbox_ops::discard_and_record(&self.db, &row, force)
             .await
@@ -139,6 +144,19 @@ impl TaskTriggerHandler {
         }
         json_result(&discarded_json(&row))
     }
+
+    /// One stored row by id or unambiguous prefix, `Ok(None)` when nothing
+    /// matches. Every action that names a sandbox resolves through here, so an
+    /// unknown id is the same tool-level refusal on all of them — never an
+    /// internal error, which would read as "canopy is broken" for a typo.
+    fn find_sandbox_row(&self, sandbox_id: &str) -> Result<Option<SandboxRun>, McpError> {
+        sandbox_ops::find_row(&self.db, sandbox_id).map_err(|e| internal_error(&e))
+    }
+}
+
+/// The refusal result for an id that matches no sandbox, in the CLI's words.
+fn not_found_result(sandbox_id: &str) -> CallToolResult {
+    error_result(&sandbox_ops::not_found_message(sandbox_id))
 }
 
 /// An optional filter value, trimmed, blank read as "no filter".

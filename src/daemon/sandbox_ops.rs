@@ -34,15 +34,38 @@ pub(crate) fn enrich(row: &SandboxRun) -> SandboxInfo {
     }
 }
 
-/// Look a sandbox up by exact id or unambiguous prefix.
-pub(crate) fn resolve_row(db: &Database, sandbox_id: &str) -> Result<SandboxRun> {
+/// Look a sandbox up by exact id or unambiguous prefix. `Ok(None)` means no
+/// sandbox carries that id or prefix at all — a caller mistake, which each
+/// surface reports its own way: the CLI refuses with [`not_found_message`],
+/// the MCP tool answers with the same text as a tool error result. A
+/// resolved id whose row vanished stays an `Err`: that is store corruption,
+/// not a bad argument.
+pub(crate) fn find_row(db: &Database, sandbox_id: &str) -> Result<Option<SandboxRun>> {
     let trimmed = sandbox_id.trim();
-    match db.resolve_sandbox_id_by_prefix(trimmed)? {
-        Some(id) => db.get_sandbox_run(&id)?.ok_or_else(|| {
-            anyhow::anyhow!("sandbox '{trimmed}' resolved to '{id}' but the row is gone")
-        }),
-        None => bail!("no sandbox found for '{trimmed}'"),
+    let Some(id) = db.resolve_sandbox_id_by_prefix(trimmed)? else {
+        return Ok(None);
+    };
+    match db.get_sandbox_run(&id)? {
+        Some(row) => Ok(Some(row)),
+        None => Err(anyhow::anyhow!(
+            "sandbox '{trimmed}' resolved to '{id}' but the row is gone"
+        )),
     }
+}
+
+/// [`find_row`] that refuses when nothing matches, for callers that only ever
+/// act on a row (`canopy sandbox land` / `discard`).
+pub(crate) fn resolve_row(db: &Database, sandbox_id: &str) -> Result<SandboxRun> {
+    match find_row(db, sandbox_id)? {
+        Some(row) => Ok(row),
+        None => bail!("{}", not_found_message(sandbox_id)),
+    }
+}
+
+/// The refusal for an id that matches no sandbox (or no unambiguous prefix),
+/// shared so the CLI and the MCP tool refuse with the same words.
+pub(crate) fn not_found_message(sandbox_id: &str) -> String {
+    format!("no sandbox found for '{}'", sandbox_id.trim())
 }
 
 /// Land one sandbox and record the outcome on its row (`merged`), exactly as

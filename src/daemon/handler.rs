@@ -476,11 +476,11 @@ pub(crate) async fn call_graph_action_value(
     }
 }
 
-/// Test-only dispatch seam for the sixteen second- and final-wave resource
+/// Test-only dispatch seam for the seventeen second- and final-wave resource
 /// tools (`spec`, `spec_edit`, `queue`, `agent`, `agent_edit`, `harness`,
 /// `config`, `crew`, `node`, `intelligence_admin`, `project`,
-/// `scheduled_send`, `skill`, `subagent`, `rag`, `identity`): the typed
-/// params struct is serialized with nulls stripped, `action` is injected,
+/// `scheduled_send`, `sandbox`, `skill`, `subagent`, `rag`, `identity`): the
+/// typed params struct is serialized with nulls stripped, `action` is injected,
 /// and the call goes through the tool's own `Parameters<ActionObject>`
 /// validation before reaching the same `_impl` logic the old one-operation
 /// tools held. Tools that take a caller session run without one, like the
