@@ -13,7 +13,7 @@ use std::sync::Mutex;
 use anyhow::{Context as _, Result};
 use base64::Engine as _;
 use hmac::{Hmac, KeyInit as _, Mac};
-use rand::Rng as _;
+use rand::{rngs::SysRng, TryRng as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::Sha256;
@@ -73,7 +73,7 @@ impl PairingState {
 
     /// Create a new code, replacing any live one. `now` is Unix seconds.
     pub fn create(&self, host_id: &str, now: i64) -> Result<CreatedCode> {
-        let code = generate_code();
+        let code = generate_code()?;
         let normalized = normalize_code(&code);
         let created = StoredCode {
             normalized: normalized.clone(),
@@ -100,7 +100,7 @@ impl PairingState {
         github_login: &str,
         now: i64,
     ) -> Result<Value> {
-        let nonce_h = random_bytes::<16>();
+        let nonce_h = random_bytes::<16>()?;
         self.respond_with_nonce(body, host, devices, github_login, now, nonce_h)
     }
 
@@ -178,14 +178,18 @@ impl PairingState {
         std::fs::create_dir_all(dir)?;
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
         let text = serde_json::to_string(code)?;
+        // Write-then-rename (the `settings::writer` shape): a crash between
+        // truncate and write must never leave a half-written code behind.
+        let temp = self.path.with_extension("json.tmp");
         std::fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
             .mode(0o600)
-            .open(&self.path)?
+            .open(&temp)?
             .write_all(text.as_bytes())?;
-        std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::rename(&temp, &self.path)?;
         Ok(())
     }
 
@@ -323,26 +327,29 @@ fn b64_decode(text: &str) -> Option<Vec<u8>> {
     base64::engine::general_purpose::STANDARD.decode(text).ok()
 }
 
-fn random_bytes<const N: usize>() -> [u8; N] {
+fn random_bytes<const N: usize>() -> Result<[u8; N]> {
     let mut out = [0u8; N];
-    rand::rng().fill_bytes(&mut out);
-    out
+    SysRng
+        .try_fill_bytes(&mut out)
+        .map_err(|e| anyhow::anyhow!("OS random source failed: {e}"))?;
+    Ok(out)
 }
 
 /// Ten Crockford characters from the OS CSPRNG, rejection-sampled so every
 /// symbol is equally likely.
-pub fn generate_code() -> String {
+pub fn generate_code() -> Result<String> {
     let mut out = String::with_capacity(CODE_LEN);
-    let mut rng = rand::rng();
     while out.len() < CODE_LEN {
         let mut byte = [0u8; 1];
-        rng.fill_bytes(&mut byte);
+        SysRng
+            .try_fill_bytes(&mut byte)
+            .map_err(|e| anyhow::anyhow!("OS random source failed: {e}"))?;
         // 224 = 7 * 32: the largest multiple of 32 below 256.
         if byte[0] < 224 {
             out.push(ALPHABET[(byte[0] % 32) as usize] as char);
         }
     }
-    out
+    Ok(out)
 }
 
 fn paired_at(now: i64) -> String {

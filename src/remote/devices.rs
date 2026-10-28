@@ -38,7 +38,7 @@ impl RemoteDevices {
     }
 
     /// Store a newly paired device, or refresh label and `paired_at` when
-    /// the same key pairs again. `None` on an empty label.
+    /// the same key pairs again. An empty label becomes `browser`.
     pub fn pair(
         &self,
         spki: Vec<u8>,
@@ -100,5 +100,27 @@ mod tests {
         assert_eq!(device_id(der), expected);
         assert_eq!(device_id(der).len(), 16);
         assert!(device_id(der).chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn re_pairing_the_same_key_updates_label_and_paired_at() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::new(&dir.path().join("test.db")).expect("database");
+        let devices = RemoteDevices::new(db);
+        let spki = b"device spki bytes".to_vec();
+        let id = device_id(&spki);
+        assert!(!devices.is_paired(&id).expect("unpaired at first"));
+        devices
+            .pair(spki.clone(), "laptop", "octocat", "2026-01-01T00:00:00Z")
+            .expect("pair");
+        assert!(devices.is_paired(&id).expect("paired"));
+        devices
+            .pair(spki, "renamed", "octocat", "2026-02-01T00:00:00Z")
+            .expect("re-pair");
+        let rows = devices.list().expect("list");
+        assert_eq!(rows.len(), 1, "re-pairing must not add a row");
+        assert_eq!(rows[0].id, id);
+        assert_eq!(rows[0].label, "renamed");
+        assert_eq!(rows[0].paired_at, "2026-02-01T00:00:00Z");
     }
 }

@@ -170,13 +170,21 @@ pub struct RelayRuntime {
 }
 
 impl RelayRuntime {
-    /// Build the runtime with the pairing state the CLI wrote.
-    pub fn new(host: HostKey, db: Database, github_login: String, pairing: PairingState) -> Self {
+    /// Build the runtime with the pairing state the CLI wrote. The live
+    /// connections stay with the supervisor across reconnects, so every
+    /// runtime of one daemon shares the one registry it is given.
+    pub fn new(
+        host: HostKey,
+        db: Database,
+        github_login: String,
+        pairing: PairingState,
+        connections: ConnectionRegistry,
+    ) -> Self {
         Self {
             host,
             pairing,
             devices: RemoteDevices::new(db.clone()),
-            connections: ConnectionRegistry::default(),
+            connections,
             github_login,
             db,
         }
@@ -213,10 +221,23 @@ impl RelayRuntime {
         let Ok(Some(value)) = self.db.get_state(REMOTE_REVOKE_KEY) else {
             return;
         };
-        for id in value.split(',').filter(|id| !id.is_empty()) {
+        let drained: Vec<&str> = value.split(',').filter(|id| !id.is_empty()).collect();
+        for id in &drained {
             self.connections.close(id);
         }
-        let _ = self.db.set_state(REMOTE_REVOKE_KEY, "");
+        // A revoke that lands while we close must survive: keep whatever we
+        // did not just drain instead of blanking the key.
+        let current = self
+            .db
+            .get_state(REMOTE_REVOKE_KEY)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let remaining: Vec<&str> = current
+            .split(',')
+            .filter(|id| !id.is_empty() && !drained.contains(id))
+            .collect();
+        let _ = self.db.set_state(REMOTE_REVOKE_KEY, &remaining.join(","));
     }
 }
 
@@ -356,7 +377,12 @@ enum Next {
 
 /// The cheap pre-connect checks — sign-in state, `remote.enabled`, the
 /// rejected token and the host key — as one synchronous decision.
-fn next_action(data_dir: &Path, db: &Database, rejected_token: Option<&str>) -> Next {
+fn next_action(
+    data_dir: &Path,
+    db: &Database,
+    rejected_token: Option<&str>,
+    connections: &ConnectionRegistry,
+) -> Next {
     let Some(identity) = auth::load_identity(data_dir) else {
         return Next::Wait(Wait::SignedOut);
     };
@@ -381,6 +407,7 @@ fn next_action(data_dir: &Path, db: &Database, rejected_token: Option<&str>) -> 
         db.clone(),
         identity.login.clone(),
         PairingState::new(data_dir),
+        connections.clone(),
     ));
     Next::Connect {
         ws_url: websocket_url(&config.remote.relay_url),
@@ -392,7 +419,7 @@ fn next_action(data_dir: &Path, db: &Database, rejected_token: Option<&str>) -> 
 
 /// How one connection attempt ended, for the supervisor loop.
 enum After {
-    /// The socket served and closed: connect again immediately.
+    /// The socket served and closed: pause a second, then connect again.
     Served,
     /// HTTP 401: record it and never retry this token.
     Rejected(String),
@@ -437,14 +464,16 @@ fn apply_wait(wait: &Wait, rejected_token: &mut Option<String>, attempt: &mut u3
     }
 }
 
-/// The supervisor loop, exposed so tests can drive one iteration. It
-/// re-reads config and identity on every iteration, so `canopy remote
-/// on|off` takes effect without a restart.
+/// The supervisor loop. It re-reads config and identity on every
+/// iteration, so `canopy remote on|off` takes effect without a restart;
+/// the live-connection registry outlives any one socket, so a revoke
+/// still closes connections that were registered before a reconnect.
 pub async fn supervise(data_dir: std::path::PathBuf, db: Database) {
     let mut attempt = 0u32;
     let mut rejected_token: Option<String> = None;
+    let connections = ConnectionRegistry::default();
     loop {
-        match next_action(&data_dir, &db, rejected_token.as_deref()) {
+        match next_action(&data_dir, &db, rejected_token.as_deref(), &connections) {
             Next::Wait(wait) => {
                 apply_wait(&wait, &mut rejected_token, &mut attempt);
                 tokio::time::sleep(Duration::from_secs(1)).await;
@@ -466,6 +495,9 @@ pub async fn supervise(data_dir: std::path::PathBuf, db: Database) {
                     After::Served => {
                         let _ = db.set_state(REMOTE_ERROR_KEY, "");
                         attempt = 0;
+                        // Bound the reconnect rate: a relay that accepts and
+                        // instantly drops must not spin this loop.
+                        tokio::time::sleep(Duration::from_secs(1)).await;
                     }
                     After::Rejected(token) => {
                         record_token_rejected(&db);

@@ -117,6 +117,7 @@ async fn fake_relay_carries_a_full_pairing() {
         db.clone(),
         "octocat".to_string(),
         crate::remote::pairing::PairingState::new(dir.path()),
+        ConnectionRegistry::default(),
     ));
     let serving = tokio::spawn(serve_socket(
         socket,
@@ -171,7 +172,9 @@ async fn http_401_stops_without_reconnecting() {
     )
     .expect("identity");
     let running = tokio::spawn(supervise(dir.path().to_path_buf(), db.clone()));
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Longer than the slowest first backoff (1200 ms): a 401 misclassified
+    // as transient would have retried by now.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
     running.abort();
     assert_eq!(counter.load(Ordering::SeqCst), 1, "must not retry a 401");
     let recorded = crate::application::ports::StateRepository::get_state(&db, REMOTE_ERROR_KEY)
@@ -201,6 +204,7 @@ async fn remote_off_ends_a_live_socket() {
         db,
         "octocat".to_string(),
         crate::remote::pairing::PairingState::new(dir.path()),
+        ConnectionRegistry::default(),
     ));
 
     let app = Router::new().route("/ws/host", get(hold_open_upgrade));
@@ -247,6 +251,7 @@ async fn revoke_deletes_the_row_and_closes_a_live_connection() {
         db.clone(),
         "octocat".to_string(),
         crate::remote::pairing::PairingState::new(dir.path()),
+        ConnectionRegistry::default(),
     );
     let devices = crate::remote::devices::RemoteDevices::new(db.clone());
     let spki = HostKey::from_scalar_bytes(&[0x22; 32])
@@ -294,6 +299,45 @@ async fn revoke_deletes_the_row_and_closes_a_live_connection() {
     queue_revocation(&db, &other_id);
     runtime.drain_remote_revocations();
     assert!(other_token.is_cancelled());
+    let queue = crate::application::ports::StateRepository::get_state(&db, REMOTE_REVOKE_KEY)
+        .expect("queue state");
+    assert!(
+        queue.as_deref().unwrap_or_default().is_empty(),
+        "drained ids must leave the queue, got {queue:?}"
+    );
+}
+
+#[test]
+fn live_connections_survive_a_reconnect() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = test_db();
+    let host = HostKey::load_or_create(dir.path()).expect("host key");
+    // One supervisor, two sockets: both runtimes share the supervisor's
+    // registry, so a revoke after a reconnect still finds the connection.
+    let connections = ConnectionRegistry::default();
+    let before = RelayRuntime::new(
+        HostKey::load_or_create(dir.path()).expect("host key"),
+        db.clone(),
+        "octocat".to_string(),
+        crate::remote::pairing::PairingState::new(dir.path()),
+        connections.clone(),
+    );
+    let after = RelayRuntime::new(
+        host,
+        db.clone(),
+        "octocat".to_string(),
+        crate::remote::pairing::PairingState::new(dir.path()),
+        connections,
+    );
+    let id = device_id(
+        HostKey::from_scalar_bytes(&[0x22; 32])
+            .expect("device")
+            .spki_der(),
+    );
+    let token = before.connections().register(&id);
+    queue_revocation(&db, &id);
+    after.drain_remote_revocations();
+    assert!(token.is_cancelled());
 }
 
 #[test]

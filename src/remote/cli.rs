@@ -188,7 +188,7 @@ fn handle_revoke(device_id: &str) -> Result<()> {
 }
 
 fn open_db(data_dir: &std::path::Path) -> Result<Database> {
-    Database::new(&crate::domain::db_paths::database_path(data_dir))
+    Database::new_safe(&crate::domain::db_paths::database_path(data_dir), data_dir)
 }
 
 fn open_devices(data_dir: &std::path::Path) -> Result<RemoteDevices> {

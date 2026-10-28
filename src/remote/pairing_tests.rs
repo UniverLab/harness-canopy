@@ -182,7 +182,7 @@ fn normalization_maps_ambiguous_letters_and_separators() {
 
 #[test]
 fn generated_codes_are_crockford_and_formatted() {
-    let code = generate_code();
+    let code = generate_code().expect("code");
     assert_eq!(code.len(), CODE_LEN);
     assert!(code.bytes().all(|byte| ALPHABET.contains(&byte)));
     let formatted = format_code(&code);
@@ -200,17 +200,39 @@ fn creating_a_new_code_replaces_the_old_one() {
     let second = state.create("76805a63a6980c18", 200).expect("second");
     assert_ne!(first.code, second.code);
     let device = device_key();
-    let key = derive_k_pair(&normalize_code(&second.code), "76805a63a6980c18");
     let nonce_b = b64(&(0u8..16).collect::<Vec<_>>());
-    let body = json!({
-        "t": "pair_init",
-        "device_spki": device.spki_b64(),
-        "device_label": "laptop",
-        "nonce_b": nonce_b,
-        "mac": b64(&mac_init(&key, &device.spki_b64(), &nonce_b)),
-    });
+    let attempt = |key: &[u8; 32]| {
+        json!({
+            "t": "pair_init",
+            "device_spki": device.spki_b64(),
+            "device_label": "laptop",
+            "nonce_b": nonce_b,
+            "mac": b64(&mac_init(key, &device.spki_b64(), &nonce_b)),
+        })
+    };
+    // The replaced code is dead while the new one is still live.
+    let old_key = derive_k_pair(&normalize_code(&first.code), "76805a63a6980c18");
+    let stale = state
+        .respond_with_nonce(
+            &attempt(&old_key),
+            &host_key(),
+            &devices,
+            "octocat",
+            201,
+            [0u8; 16],
+        )
+        .expect("stale");
+    assert_eq!(stale["reason"], "bad_code");
+    let new_key = derive_k_pair(&normalize_code(&second.code), "76805a63a6980c18");
     let reply = state
-        .respond_with_nonce(&body, &host_key(), &devices, "octocat", 201, [0u8; 16])
+        .respond_with_nonce(
+            &attempt(&new_key),
+            &host_key(),
+            &devices,
+            "octocat",
+            201,
+            [0u8; 16],
+        )
         .expect("respond");
     assert_eq!(reply["t"], "pair_ok");
 }
