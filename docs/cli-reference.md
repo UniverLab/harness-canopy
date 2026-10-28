@@ -228,15 +228,23 @@ WebSocket — the CLI never writes the shelf itself. `file_id` is the
 | `canopy remote status [--json]` | Show the sign-in state, whether remote is enabled, and the relay URL; `--json` prints `{signed_in, login, enabled, relay_url}` |
 
 Remote control is owner-only: the relay admits only hosts signed in with
-the same GitHub account. `login` prints a code to enter at
-`https://github.com/login/device` (plus the full verification URL when
-GitHub returns one), then stores `{token, login, id}` in
-`~/.canopy/remote/github.json` (mode 0600, directory 0700). The token
-never appears in logs, errors, or status output. The `[remote]` table in
-`~/.canopy/config.toml` carries `enabled` (default `false`), `relay_url`,
-`github_client_id` (the public Client ID of UniverLab's "Canopy Remote"
-OAuth App — no configuration needed), and `host_label` (empty means the
-hostname).
+the same GitHub account. `login` prints the device URL and the code to
+enter (`Open https://github.com/login/device and enter <user_code>`, plus
+the full verification URL when GitHub returns one), then polls GitHub at
+the interval it asks for — `slow_down` adds five seconds, an expired or
+denied code stops with a one-line message — and ends with `Signed in to
+GitHub as <login>.` It stores `{token, login, id}` in
+`~/.canopy/remote/github.json` (mode 0600, directory 0700); the token never
+appears in logs, errors, or status output. `logout` deletes that file and
+succeeds when it is already gone. `status` prints `login: <login>` (or
+`not signed in`), `enabled: …` and `relay_url: …`.
+
+The `[remote]` table in `~/.canopy/config.toml` carries `enabled` (default
+`false`), `relay_url`, `github_client_id` (the public Client ID of
+UniverLab's "Canopy Remote" OAuth App — no configuration needed), and
+`host_label` (empty means the hostname). Overriding `github_client_id`
+with an empty string makes `login` stop before any request:
+`remote.github_client_id is not set in ~/.canopy/config.toml`.
 
 ## Settings
 
