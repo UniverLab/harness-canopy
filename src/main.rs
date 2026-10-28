@@ -19,6 +19,7 @@ mod executor;
 mod graph_engine;
 mod mcp_wizard_module;
 mod rag;
+mod remote;
 mod scheduler;
 mod sessions;
 mod setup_module;
@@ -52,6 +53,7 @@ use daemon::settings_cli::{handle_settings_action, SettingsAction};
 use daemon::shelf_cli::{handle_shelf_action, ShelfAction};
 use daemon::spec_cli::{handle_spec_action, SpecAction};
 use daemon::subagent_cli::{handle_subagent_action, SubagentAction};
+use remote::cli::{handle_remote_action, RemoteAction};
 use setup_module::registry_cli::{handle_registry_action, RegistryAction};
 use std::path::PathBuf;
 
@@ -242,6 +244,11 @@ enum Commands {
         #[command(subcommand)]
         action: ShelfAction,
     },
+    /// Sign in to GitHub for owner-only remote control.
+    Remote {
+        #[command(subcommand)]
+        action: RemoteAction,
+    },
     /// Run a stdio sidecar proxy that injects canopy identity headers.
     Bridge {
         /// Agent session ID to bind this bridge process.
@@ -331,6 +338,7 @@ async fn main() -> Result<()> {
         Some(Commands::Subagent { action }) => handle_subagent_action(action, cli.port).await,
         Some(Commands::Sandbox { action }) => handle_sandbox_action(action).await,
         Some(Commands::Shelf { action }) => handle_shelf_action(action, cli.port).await,
+        Some(Commands::Remote { action }) => handle_remote_action(action).await,
         Some(Commands::Bridge {
             agent_id,
             port,

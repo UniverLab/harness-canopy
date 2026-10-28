@@ -104,8 +104,8 @@ portable-pty = "0.9"
 # Virtual terminal emulator for embedding agent output
 vt100 = "0.16"
 
-# HTTP client for registry fetch
-reqwest = { version = "0.13", features = ["blocking", "json"] }
+# HTTP client for registry fetch (`form` for the GitHub device flow)
+reqwest = { version = "0.13", features = ["blocking", "json", "form"] }
 
 # Interactive prompts for setup wizard
 inquire = "0.9"

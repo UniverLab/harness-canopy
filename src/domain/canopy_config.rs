@@ -173,6 +173,10 @@ pub struct CanopyConfig {
     /// `[tui]` settings for the terminal UI.
     #[serde(default)]
     pub tui: TuiConfig,
+
+    /// `[remote]` settings for owner-only remote control via the relay.
+    #[serde(default)]
+    pub remote: RemoteConfig,
 }
 
 /// Retry policy of the cron scheduler, read from the `[scheduler]` table in
@@ -434,6 +438,43 @@ fn default_scroll_step() -> usize {
 
 fn default_page_step() -> usize {
     settings::default_int("tui.page_step") as usize
+}
+
+/// Settings for owner-only remote control. Read from the `[remote]` table
+/// in `config.toml`. The relay admits only hosts signed in with the same
+/// GitHub account; `github_client_id` is the public Client ID of
+/// UniverLab's "Canopy Remote" OAuth App (device flow, identity only — the
+/// client secret never appears in canopy).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_relay_url")]
+    pub relay_url: String,
+    #[serde(default = "default_github_client_id")]
+    pub github_client_id: String,
+    /// Label shown for this host. Empty means the hostname.
+    #[serde(default)]
+    pub host_label: String,
+}
+
+impl Default for RemoteConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            relay_url: default_relay_url(),
+            github_client_id: default_github_client_id(),
+            host_label: String::new(),
+        }
+    }
+}
+
+fn default_relay_url() -> String {
+    "https://remote.univerlab.org".to_string()
+}
+
+fn default_github_client_id() -> String {
+    "Ov23liVCfE58kUb3ssDy".to_string()
 }
 
 /// Highest per-file indexing cap a user may configure, in MB. Text/PDF
@@ -747,6 +788,7 @@ impl Default for CanopyConfig {
             update: UpdateConfig::default(),
             notifications: NotificationsConfig::default(),
             tui: TuiConfig::default(),
+            remote: RemoteConfig::default(),
         }
     }
 }
@@ -1232,5 +1274,47 @@ mod tests {
         assert_eq!(names.len(), 2);
         assert!(names.contains(&"opencode"));
         assert!(names.contains(&"kiro"));
+    }
+
+    #[test]
+    fn remote_defaults_carry_device_flow_client_id() {
+        let remote = RemoteConfig::default();
+        assert!(!remote.enabled);
+        assert_eq!(remote.relay_url, "https://remote.univerlab.org");
+        assert_eq!(remote.github_client_id, "Ov23liVCfE58kUb3ssDy");
+        assert_eq!(remote.host_label, "");
+
+        // A config predating the `[remote]` table still gets these.
+        let dir = TempDir::new().unwrap();
+        let canopy_dir = dir.path().join(".canopy");
+        std::fs::create_dir_all(&canopy_dir).unwrap();
+        let toml = r#"embeddings_model = "intfloat/multilingual-e5-base""#;
+        std::fs::write(canopy_dir.join("config.toml"), toml).unwrap();
+        let loaded = CanopyConfig::load(&canopy_dir);
+        assert_eq!(loaded.remote.github_client_id, "Ov23liVCfE58kUb3ssDy");
+        assert!(!loaded.remote.enabled);
+    }
+
+    #[test]
+    fn remote_section_round_trips_via_config_toml() {
+        let dir = TempDir::new().unwrap();
+        let canopy_dir = dir.path().join(".canopy");
+
+        let config = CanopyConfig {
+            remote: RemoteConfig {
+                enabled: true,
+                relay_url: "https://relay.example".to_string(),
+                github_client_id: "custom-id".to_string(),
+                host_label: "home-server".to_string(),
+            },
+            ..CanopyConfig::default()
+        };
+        config.save_for_tests(&canopy_dir).unwrap();
+
+        let loaded = CanopyConfig::load(&canopy_dir);
+        assert!(loaded.remote.enabled);
+        assert_eq!(loaded.remote.relay_url, "https://relay.example");
+        assert_eq!(loaded.remote.github_client_id, "custom-id");
+        assert_eq!(loaded.remote.host_label, "home-server");
     }
 }

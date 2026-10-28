@@ -219,6 +219,24 @@ Both subcommands go through the running daemon over the session-protocol
 WebSocket — the CLI never writes the shelf itself. `file_id` is the
 16-lowercase-hex id printed by `canopy shelf list --json`.
 
+## Remote
+
+| Command | Description |
+|---|---|
+| `canopy remote login` | Sign in to GitHub with the OAuth device flow (identity only, no scopes) |
+| `canopy remote logout` | Delete the stored GitHub identity |
+| `canopy remote status [--json]` | Show the sign-in state, whether remote is enabled, and the relay URL; `--json` prints `{signed_in, login, enabled, relay_url}` |
+
+Remote control is owner-only: the relay admits only hosts signed in with
+the same GitHub account. `login` prints a code to enter at
+`https://github.com/login/device`, then stores `{token, login, id}` in
+`~/.canopy/remote/github.json` (mode 0600, directory 0700). The token
+never appears in logs, errors, or status output. The `[remote]` table in
+`~/.canopy/config.toml` carries `enabled` (default `false`), `relay_url`,
+`github_client_id` (the public Client ID of UniverLab's "Canopy Remote"
+OAuth App — no configuration needed), and `host_label` (empty means the
+hostname).
+
 ## Settings
 
 Every setting in `~/.canopy/config.toml` is declared once, in a typed
@@ -347,6 +365,10 @@ it came from. **Apply** says when a change takes effect: `applied` (at once),
 | `graph_event_retention_days` | 90 | 1–3650 days | next run | Days a graph's event log is kept before `canopy clean` prunes it |
 | `clean.reclaim_min_deleted_rows` | 50 | 0–100000 | applied | Deleted rows that trigger VACUUM during `canopy clean` |
 | `activity.retention_per_workdir` | 500 | 50–100000 | applied | Activity-log entries kept per workdir |
+| `remote.enabled` | `false` | bool | next run | Whether this host accepts owner-only remote control via the relay |
+| `remote.relay_url` | `https://remote.univerlab.org` | — | next run | Relay URL for owner-only remote control |
+| `remote.github_client_id` | `Ov23liVCfE58kUb3ssDy` | — | next run | Public Client ID of UniverLab's "Canopy Remote" OAuth App (identity only; empty disables `remote login`) |
+| `remote.host_label` | empty | — | next run | Label shown for this host; empty means the hostname |
 
 `scheduler.retry_*` and `spec_attempt_limit` are not in `graphs.*`, which is
 why they are listed here.
