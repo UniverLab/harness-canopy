@@ -17,8 +17,9 @@ use crate::domain::graphs::{
 mod entry_wiring;
 pub use entry_wiring::*;
 mod update;
+use update::decode_ensemble_mutex;
+pub(crate) use update::encode_ensemble_mutex;
 pub use update::EnsembleJoinConfigPatch;
-use update::{decode_ensemble_mutex, encode_ensemble_mutex};
 impl Database {
     /// Create an entire ensemble unit — the join node, every member node,
     /// every wiring edge (entry fan-out, member→join fan-in, join exit

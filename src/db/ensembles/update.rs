@@ -139,7 +139,7 @@ impl Database {
 
 /// Encode an ensemble mutex list for the `ensembles.mutex` column: NULL for
 /// none, else a JSON array.
-pub(super) fn encode_ensemble_mutex(mutex: &[String]) -> Result<Option<String>> {
+pub(crate) fn encode_ensemble_mutex(mutex: &[String]) -> Result<Option<String>> {
     if mutex.is_empty() {
         return Ok(None);
     }

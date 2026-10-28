@@ -958,3 +958,15 @@ fn v5_document_imports_without_mutex() {
     assert_eq!(plan.ensembles.len(), 1);
     assert!(plan.ensembles[0].ensemble.mutex.is_empty());
 }
+
+/// An ensemble `mutex` entry that breaks the name rule refuses the whole
+/// import, naming the ensemble and the offending value.
+#[test]
+fn import_refuses_invalid_ensemble_mutex_name() {
+    let mut doc = make_twelve_member_doc(Some("round_robin"));
+    doc.ensembles[0].members.truncate(2);
+    doc.ensembles[0].mutex = vec!["Bad Name!".to_string()];
+    let err = build_import_plan(&doc, "g").unwrap_err();
+    assert!(err.contains("team"), "{err}");
+    assert!(err.contains("Bad Name!"), "{err}");
+}

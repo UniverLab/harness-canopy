@@ -11,15 +11,16 @@
 //! encode one.
 //!
 //! The `ensembles`/`ensemble_members` writes mirror the authoring path's full
-//! column set — including `kind`, `round_robin_index` and the infra budget
-//! columns — so nothing the import plan carries is silently dropped to a
-//! column default (CB62).
+//! column set — including `kind`, `round_robin_index`, the infra budget
+//! columns and `mutex` — so nothing the import plan carries is silently
+//! dropped to a column default (CB62).
 
 use std::collections::HashMap;
 
 use anyhow::{anyhow, Result};
 use rusqlite::{params, Transaction};
 
+use crate::db::ensembles::encode_ensemble_mutex;
 use crate::db::Database;
 use crate::domain::graph_transfer::{GraphImportEnsemblePlan, GraphImportPlan};
 use crate::domain::graphs::{Graph, GraphEdge, GraphEdgeCondition, GraphNode};
@@ -212,8 +213,8 @@ fn insert_ensemble_unit_tx(
 ) -> Result<()> {
     let ensemble = &ensemble_plan.ensemble;
     tx.execute(
-        "INSERT INTO ensembles (id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds, on_pass_to, on_fail_to, kind, round_robin_index, commit_rights, created_at, crew_id, crew_name, crew_version_applied)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+        "INSERT INTO ensembles (id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds, on_pass_to, on_fail_to, kind, round_robin_index, commit_rights, created_at, crew_id, crew_name, crew_version_applied, mutex)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
         params![
             &ensemble.id,
             &ensemble.spec_id,
@@ -239,6 +240,7 @@ fn insert_ensemble_unit_tx(
             crew_id,
             &ensemble.crew_name,
             Option::<i64>::None,
+            encode_ensemble_mutex(&ensemble.mutex)?,
         ],
     )?;
     for member in &ensemble_plan.members {
@@ -525,6 +527,88 @@ mod tests {
             build_export_document(&lp_row, &graph_nodes, &graph_edges, &ensembles).unwrap();
         assert_eq!(redone.ensembles.len(), 1);
         assert_eq!(redone.nodes.len(), 2);
+    }
+
+    /// The mutex round trip: an ensemble's `mutex` list and a plain node's
+    /// `mutex` config survive import exactly, read back through the same rows
+    /// `graph_get` serializes.
+    #[test]
+    fn import_graph_persists_ensemble_and_node_mutex() {
+        use crate::domain::graph_transfer::{
+            GraphExportEnsemble, GraphExportEnsembleMember, GraphExportEnsembleTarget,
+            GraphExportNode,
+        };
+        let db = test_db();
+        let document = GraphExportDocument {
+            prompt_presets: Vec::new(),
+            format_version: 6,
+            name: "mutex-graph".to_string(),
+            description: None,
+            nodes: vec![
+                GraphExportNode {
+                    name: "kickoff".to_string(),
+                    kind: GraphNodeKind::Check,
+                    position: 1,
+                    config: serde_json::json!({"command": "true", "mutex": ["cpu"]}),
+                },
+                GraphExportNode {
+                    name: "downstream".to_string(),
+                    kind: GraphNodeKind::Agent,
+                    position: 2,
+                    config: serde_json::json!({"prompt_template": "wrap up"}),
+                },
+            ],
+            edges: vec![],
+            ensembles: vec![GraphExportEnsemble {
+                mutex: vec!["skills-repo".to_string()],
+                commit_rights: false,
+                name: "Proposers".to_string(),
+                kind: None,
+                prompt_template: "draft it".to_string(),
+                entry_from_node: GraphExportEnsembleTarget::Node("kickoff".to_string()),
+                entry_condition: GraphEdgeCondition::Always,
+                extra_entry_sources: vec![],
+                on_pass_to: GraphExportEnsembleTarget::Node("downstream".to_string()),
+                on_fail_to: None,
+                min_pass: 2,
+                timeout_minutes: 30,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                members: vec![
+                    GraphExportEnsembleMember {
+                        platform: Some("openrouter".to_string()),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                    },
+                    GraphExportEnsembleMember {
+                        platform: Some("openrouter".to_string()),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                    },
+                ],
+
+                crew: None,
+            }],
+            infra_node: None,
+
+            hooks: Default::default(),
+        };
+        let lp = draft_graph("graph-1", "mutex-graph", "/tmp/project");
+        let plan = build_import_plan(&document, &lp.id).unwrap();
+
+        db.import_graph(&lp, &plan).unwrap();
+
+        let ensembles = db.list_ensembles_for_graph("graph-1").unwrap();
+        assert_eq!(ensembles.len(), 1);
+        assert_eq!(ensembles[0].ensemble.mutex, vec!["skills-repo".to_string()]);
+        let nodes = db.list_graph_nodes_for_graph("graph-1").unwrap();
+        let kickoff = nodes
+            .iter()
+            .find(|node| node.name == "kickoff")
+            .expect("kickoff node");
+        assert_eq!(kickoff.config["mutex"], serde_json::json!(["cpu"]));
     }
 
     /// CM2: importing a document with `infra_node` set must persist the
@@ -1587,5 +1671,73 @@ mod tests {
             first.ensembles, redone.ensembles,
             "ensemble wiring must export from the pending rows"
         );
+    }
+
+    /// A `format_version: 5` document — written before ensembles carried
+    /// `mutex` — imports with empty mutexes: the ensemble reads back `[]`
+    /// and the node config carries no `mutex` key.
+    #[test]
+    fn import_graph_v5_document_yields_empty_mutex() {
+        let raw = serde_json::json!({
+            "format_version": 5,
+            "name": "old-graph",
+            "description": null,
+            "hooks": {},
+            "infra_node": null,
+            "nodes": [
+                {
+                    "name": "kickoff",
+                    "kind": "check",
+                    "position": 1,
+                    "config": {"command": "true"},
+                },
+                {
+                    "name": "next",
+                    "kind": "check",
+                    "position": 2,
+                    "config": {"command": "true"},
+                },
+            ],
+            "edges": [],
+            "ensembles": [
+                {
+                    "name": "team",
+                    "kind": "parallel",
+                    "commit_rights": false,
+                    "prompt_template": "go",
+                    "entry_from_node": "kickoff",
+                    "entry_condition": "always",
+                    "extra_entry_sources": [],
+                    "on_pass_to": "next",
+                    "on_fail_to": null,
+                    "min_pass": 1,
+                    "timeout_minutes": 30,
+                    "straggler_timeout_minutes": null,
+                    "quorum_grace_minutes": null,
+                    "crew": null,
+                    "members": [
+                        {"platform": "claude", "model": null, "prompt_override": null, "timeout_minutes": null},
+                        {"platform": "codex", "model": null, "prompt_override": null, "timeout_minutes": null},
+                    ],
+                },
+            ],
+        });
+        let document: GraphExportDocument =
+            serde_json::from_value(raw).expect("a v5 document parses without mutex");
+        let db = test_db();
+        let lp = draft_graph("graph-1", "old-graph", "/tmp/project");
+        let plan = build_import_plan(&document, &lp.id).unwrap();
+
+        db.import_graph(&lp, &plan).unwrap();
+
+        let ensembles = db.list_ensembles_for_graph("graph-1").unwrap();
+        assert_eq!(ensembles.len(), 1);
+        assert!(ensembles[0].ensemble.mutex.is_empty());
+        let nodes = db.list_graph_nodes_for_graph("graph-1").unwrap();
+        let kickoff = nodes
+            .iter()
+            .find(|node| node.name == "kickoff")
+            .expect("kickoff node");
+        assert!(kickoff.config.get("mutex").is_none());
     }
 }
