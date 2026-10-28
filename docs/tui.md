@@ -275,6 +275,29 @@ delivered` reads `<agent id> (<trigger>): message delivered to this
 session`. When the graph or agent no longer exists, the first 8
 characters of its id stand in for the name.
 
+## Colour and tinting
+
+The TUI speaks the same palette as the web surfaces. Both themes — `classic`
+(bordered, Canopy green) and `modern` (borderless) — paint the big views and
+the alert dialogs on meaning-tinted grounds instead of one flat green slab.
+In `classic` those grounds are the operator's dark palette: tints of the same
+lightness, differing only in hue, plus a neutral stage that big views stand
+on.
+
+- **Prompt Builder** — the window sits on the info tint, its section fields
+  on the near-black stage ground, and the focused section on the selection
+  colour. Borders and the title keep the theme's own colours, and the text
+  on the new grounds stays at 4.5:1 contrast or better.
+- **Graph view** — the canvas sits on the same info tint. Nodes and edges
+  keep their status colours, which stay at 3:1 or better against it.
+- **Alert dialogs** — confirmations of destructive actions are tinted for
+  warning: deleting a project, permanently deleting a graph, and resetting a
+  graph. A failed graph action is reported on the error tint. Every dialog
+  still spells out what it does in words, so the tint is never the only
+  signal; the quit and archive confirmations keep the neutral dialog ground.
+
+The sidebar, header, footer and session panes are unchanged.
+
 ## Appearance and behaviour settings
 
 The `[tui]` settings (see `canopy config list`) tune the interface without a
