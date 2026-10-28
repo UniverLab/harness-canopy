@@ -1,4 +1,4 @@
-//! CM50: the `graph_crew` result types — what runs each node, without any
+//! CM50: the `crew assignments` result types — what runs each node, without any
 //! prompt text ever travelling through them.
 //!
 //! The surface answers one question: "which graphs use this harness or
@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use super::Graph;
 
-/// One row in a `graph_crew` result: an agent node outside an ensemble, an
+/// One row in a `crew assignments` result: an agent node outside an ensemble, an
 /// ensemble member, or an agent-type hook.
 ///
 /// The `graph_*` fields identify which graph the row belongs to and are
@@ -104,7 +104,7 @@ impl CrewRowKind {
     }
 }
 
-/// One graph's slice of a `graph_crew` result — the exact wire shape: the
+/// One graph's slice of a `crew assignments` result — the exact wire shape: the
 /// graph's identity plus one row per agent node, ensemble member and agent
 /// hook it runs. `rows` is empty for a graph with no crew assignments of
 /// its own (e.g. only `check`/`gate` nodes) when no filter was asked for.
@@ -157,7 +157,7 @@ pub fn group_graph_crew_rows(graphs: &[&Graph], rows: Vec<GraphCrewRow>) -> Vec<
     groups
 }
 
-/// A summary row for `graph_crew { group_by: "pair" }`: everything that
+/// A summary row for `crew assignments { group_by: "pair" }`: everything that
 /// uses one distinct `platform`/`model` pair, counted by kind.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphCrewSummary {

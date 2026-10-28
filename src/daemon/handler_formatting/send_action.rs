@@ -1,5 +1,5 @@
-//! Formatting of an agent's delivery action (CM53) for the `agent_get`,
-//! `agent_list` and `agent_status` surfaces.
+//! Formatting of an agent's delivery action (CM53) for the `agent get`,
+//! `agent list` and `agent status` surfaces.
 
 use crate::domain::models::Agent;
 
@@ -12,7 +12,7 @@ pub(crate) struct ActionDescription {
     pub target: Option<String>,
 }
 
-/// Append the `agent_status` section naming every send-to-session agent and
+/// Append the `agent status` section naming every send-to-session agent and
 /// its target, so status shows the delivery action too (CM53).
 pub(crate) fn append_send_session_section(status: &mut String, agents: &[Agent]) {
     let send: Vec<&Agent> = agents.iter().filter(|a| a.is_send_to_session()).collect();

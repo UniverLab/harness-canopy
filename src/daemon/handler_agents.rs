@@ -2,7 +2,7 @@
 //! Moved verbatim; tool names, schemas, and behaviour unchanged.
 
 use crate::application::ports::{AgentRepository, RunRepository};
-use crate::daemon::handler::{OptionalExtension, TaskTriggerHandler, SESSION_LIST_DEFAULT_LIMIT};
+use crate::daemon::handler::{TaskTriggerHandler, SESSION_LIST_DEFAULT_LIMIT};
 use crate::daemon::handler_formatting::{
     agent_detail_json, append_send_session_section, append_temporal_agents_section,
     build_json_result, format_agent_info, format_log_output, format_session_info, format_uptime,
@@ -35,35 +35,19 @@ impl TaskTriggerHandler {
     /// Create or update an agent. Supports cron triggers (schedule), watch triggers
     /// (path + events), or manual-only agents (no trigger). When updating an existing
     /// agent, only the fields you provide are changed.
-    #[tool(
-        name = "agent_add",
-        description = "Create or update a scheduled background_agent. \
-         Use agent_models to see available model options. \
-         The schedule field must be a standard 5-field cron expression. \
-         Common patterns: '*/5 * * * *' (every 5 min), '0 9 * * *' (daily 9am), \
-         '0 9 * * 1-5' (weekdays 9am), '0 */2 * * *' (every 2 hours), \
-         '30 14 1,15 * *' (1st and 15th at 2:30pm). \
-         Fields: minute(0-59) hour(0-23) day(1-31) month(1-12) weekday(0-6, 0=Sun). \
-         Use duration_minutes for temporary agents that auto-expire. \
-         The cli parameter is optional — if omitted, auto-detects from registry. \
-         The model parameter is optional — if omitted, the CLI uses its configured default. \
-         Set action to send_to_session with target_session_name (recommended) or target_session_id \
-         to deliver the prompt into a live interactive session instead of running a CLI; omit both \
-         to target your own session. Delivery waits until a TUI is open."
-    )]
-    pub(crate) async fn task_add(
+    pub(crate) async fn agent_edit_add_impl(
         &self,
-        Parameters(params): Parameters<TaskAddParams>,
-        OptionalExtension(parts): OptionalExtension<Parts>,
+        params: TaskAddParams,
+        parts: Option<&Parts>,
     ) -> Result<CallToolResult, McpError> {
         use crate::scheduler::validate_cron;
 
         match classify_action(
-            params.action.as_deref(),
+            params.delivery_action.as_deref(),
             params.target_session_name.as_deref(),
             params.target_session_id.as_deref(),
         ) {
-            Ok(AddAction::Send) => return self.send_agent_add(&params, parts.as_ref()).await,
+            Ok(AddAction::Send) => return self.send_agent_add(&params, parts).await,
             Ok(AddAction::Headless) => {}
             Err(e) => return Ok(error_result(&e)),
         }
@@ -123,26 +107,17 @@ impl TaskTriggerHandler {
     }
 
     /// Register a file or directory watcher.
-    #[tool(
-        name = "agent_watch",
-        description = "Watch a file or directory for changes and execute a prompt when events occur. \
-         The cli parameter is optional — if omitted, auto-detects from registry. \
-         The model parameter is optional — if omitted, the CLI uses its configured default model. \
-         Set action to send_to_session with target_session_name (recommended) or target_session_id \
-         to deliver the prompt into a live interactive session instead of running a CLI; omit both \
-         to target your own session. Delivery waits until a TUI is open."
-    )]
-    pub(crate) async fn task_watch(
+    pub(crate) async fn agent_edit_watch_impl(
         &self,
-        Parameters(params): Parameters<TaskWatchParams>,
-        OptionalExtension(parts): OptionalExtension<Parts>,
+        params: TaskWatchParams,
+        parts: Option<&Parts>,
     ) -> Result<CallToolResult, McpError> {
         match classify_action(
-            params.action.as_deref(),
+            params.delivery_action.as_deref(),
             params.target_session_name.as_deref(),
             params.target_session_id.as_deref(),
         ) {
-            Ok(AddAction::Send) => return self.send_agent_watch(&params, parts.as_ref()).await,
+            Ok(AddAction::Send) => return self.send_agent_watch(&params, parts).await,
             Ok(AddAction::Headless) => {}
             Err(e) => return Ok(error_result(&e)),
         }
@@ -193,11 +168,7 @@ impl TaskTriggerHandler {
     }
 
     /// List all registered agents with status.
-    #[tool(
-        name = "agent_list",
-        description = "List all registered scheduled agents with their current status"
-    )]
-    pub(crate) async fn task_list(&self) -> Result<CallToolResult, McpError> {
+    pub(crate) async fn agent_list_impl(&self) -> Result<CallToolResult, McpError> {
         let agents = self
             .db
             .list_agents()
@@ -252,14 +223,8 @@ impl TaskTriggerHandler {
     }
 
     /// Get one agent's full stored definition.
-    #[tool(
-        name = "agent_get",
-        description = "Get one agent's complete stored definition as JSON — every field including the full, untruncated prompt. agent_list truncates the prompt to ~80 characters; call this with an agent's id when you need the exact prompt text (e.g. to fix a stale command reference before agent_update) or any other stored field: trigger_type, trigger_config (parsed), cli, model, effort, working_dir, enabled, timeout_minutes, expires_at, enable_at, notify_on_success, log_path, created_at, last_run_at, last_run_ok, last_triggered_at, trigger_count. Read-only."
-    )]
-    pub(crate) async fn agent_get(
-        &self,
-        Parameters(IdParam { id }): Parameters<IdParam>,
-    ) -> Result<CallToolResult, McpError> {
+    pub(crate) async fn agent_get_impl(&self, params: IdParam) -> Result<CallToolResult, McpError> {
+        let IdParam { id } = params;
         let Some(agent) = self.db.get_agent(&id).map_err(internal_error)? else {
             return Ok(error_result(&format!("agent '{}' not found", id)));
         };
@@ -322,14 +287,11 @@ impl TaskTriggerHandler {
     }
 
     /// Remove an agent completely.
-    #[tool(
-        name = "agent_remove",
-        description = "Remove an agent completely — deletes from database and stops any active watcher"
-    )]
-    pub(crate) async fn task_remove(
+    pub(crate) async fn agent_edit_remove_impl(
         &self,
-        Parameters(IdParam { id }): Parameters<IdParam>,
+        params: IdParam,
     ) -> Result<CallToolResult, McpError> {
+        let IdParam { id } = params;
         let _ = self.watcher_engine.stop_watcher(&id).await;
 
         // Deletes by id without parsing the stored row, so a corrupt row
@@ -349,14 +311,11 @@ impl TaskTriggerHandler {
     }
 
     /// Enable a disabled agent.
-    #[tool(
-        name = "agent_enable",
-        description = "Enable a disabled agent — resumes scheduling or file watching"
-    )]
-    pub(crate) async fn task_enable(
+    pub(crate) async fn agent_edit_enable_impl(
         &self,
-        Parameters(IdParam { id }): Parameters<IdParam>,
+        params: IdParam,
     ) -> Result<CallToolResult, McpError> {
+        let IdParam { id } = params;
         let Some(existing) = self
             .db
             .get_agent(&id)
@@ -387,14 +346,11 @@ impl TaskTriggerHandler {
     }
 
     /// Schedule a one-shot future enable for a disabled agent.
-    #[tool(
-        name = "agent_schedule_enable",
-        description = "Schedule a one-shot enable for an agent at a future ISO 8601 time — the agent stays disabled until then, when the scheduler enables it and clears the schedule"
-    )]
-    pub(crate) async fn task_schedule_enable(
+    pub(crate) async fn agent_edit_schedule_impl(
         &self,
-        Parameters(AgentScheduleEnableParams { id, at }): Parameters<AgentScheduleEnableParams>,
+        params: AgentScheduleEnableParams,
     ) -> Result<CallToolResult, McpError> {
+        let AgentScheduleEnableParams { id, at } = params;
         let Some(_existing) = self
             .db
             .get_agent(&id)
@@ -427,14 +383,11 @@ impl TaskTriggerHandler {
     }
 
     /// Disable an agent without removing it.
-    #[tool(
-        name = "agent_disable",
-        description = "Disable an agent without removing it — pauses scheduling or file watching"
-    )]
-    pub(crate) async fn task_disable(
+    pub(crate) async fn agent_edit_disable_impl(
         &self,
-        Parameters(IdParam { id }): Parameters<IdParam>,
+        params: IdParam,
     ) -> Result<CallToolResult, McpError> {
+        let IdParam { id } = params;
         let Some(existing) = self
             .db
             .get_agent(&id)
@@ -456,14 +409,11 @@ impl TaskTriggerHandler {
     }
 
     /// Execute an agent immediately, outside its schedule.
-    #[tool(
-        name = "agent_run",
-        description = "Execute an agent immediately outside its schedule — useful for testing"
-    )]
-    pub(crate) async fn agent_run(
+    pub(crate) async fn agent_edit_run_impl(
         &self,
-        Parameters(IdParam { id }): Parameters<IdParam>,
+        params: IdParam,
     ) -> Result<CallToolResult, McpError> {
+        let IdParam { id } = params;
         let existing = self
             .db
             .get_agent(&id)
@@ -483,17 +433,13 @@ impl TaskTriggerHandler {
         });
 
         Ok(success_result(&format!(
-            "Agent '{}' launched in background. Use agent_logs to check progress.",
+            "Agent '{}' launched in background. Use `agent logs` to check progress.",
             id
         )))
     }
 
     /// Get daemon status and statistics.
-    #[tool(
-        name = "agent_status",
-        description = "Get overall daemon health, scheduler state, and statistics"
-    )]
-    pub(crate) async fn task_status(&self) -> Result<CallToolResult, McpError> {
+    pub(crate) async fn agent_status_impl(&self) -> Result<CallToolResult, McpError> {
         let agents = self
             .db
             .list_agents()
@@ -552,13 +498,9 @@ impl TaskTriggerHandler {
     }
 
     /// Get log output for an agent.
-    #[tool(
-        name = "agent_logs",
-        description = "Get the log output for an agent with optional line and time filters"
-    )]
-    pub(crate) async fn task_logs(
+    pub(crate) async fn agent_logs_impl(
         &self,
-        Parameters(params): Parameters<TaskLogsParams>,
+        params: TaskLogsParams,
     ) -> Result<CallToolResult, McpError> {
         let log_path = resolve_log_path(&self.db, &params.id)?;
         let path = std::path::Path::new(&log_path);
@@ -585,14 +527,10 @@ impl TaskTriggerHandler {
     }
 
     /// Update fields of an existing agent without recreating it.
-    #[tool(
-        name = "agent_update",
-        description = "Modify an existing agent. Only the provided fields are updated — omitted fields remain unchanged. Auto-detects whether the agent is a cron or watch agent and applies the appropriate fields."
-    )]
-    pub(crate) async fn task_update(
+    pub(crate) async fn agent_edit_update_impl(
         &self,
-        Parameters(params): Parameters<TaskUpdateParams>,
-        OptionalExtension(parts): OptionalExtension<Parts>,
+        params: TaskUpdateParams,
+        parts: Option<&Parts>,
     ) -> Result<CallToolResult, McpError> {
         use crate::scheduler::validate_cron;
 
@@ -631,7 +569,7 @@ impl TaskTriggerHandler {
             return Ok(error_result(&e));
         }
 
-        if params.action.is_some()
+        if params.delivery_action.is_some()
             || params.target_session_name.is_some()
             || params.target_session_id.is_some()
         {
@@ -641,7 +579,7 @@ impl TaskTriggerHandler {
             // keeps its existing target instead of demanding a caller session.
             let has_target =
                 params.target_session_name.is_some() || params.target_session_id.is_some();
-            let effective_action = match params.action.as_deref() {
+            let effective_action = match params.delivery_action.as_deref() {
                 Some(action) => action,
                 None if has_target => agent.action.kind_str(),
                 None => "",
@@ -656,7 +594,7 @@ impl TaskTriggerHandler {
                     Some(effective_action),
                     params.target_session_name.clone(),
                     params.target_session_id.clone(),
-                    caller_session_id(parts.as_ref(), self),
+                    caller_session_id(parts, self),
                 ) {
                     Ok(action) => action,
                     Err(e) => return Ok(error_result(&e)),

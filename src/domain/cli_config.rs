@@ -109,7 +109,7 @@ pub struct CliConfig {
     pub session_end_args: Option<Vec<String>>,
     /// Subcommand/args that make this CLI print its own available model ids,
     /// one passable id per line (e.g. opencode's `models` → `opencode/big-pickle`,
-    /// `opencode-go/glm-5.2`). When set, `agent_models` uses this enumeration as
+    /// `opencode-go/glm-5.2`). When set, `harness models` uses this enumeration as
     /// the authoritative, guaranteed-passable catalog for the platform: each
     /// line is the literal string the model flag accepts, prefix and all —
     /// which models.dev cannot know for a universal gateway (it carries neither
@@ -141,7 +141,7 @@ pub struct CliConfig {
     /// platform "not installed" — `<platform>: '<path>' is not
     /// <platform_display> (identity check failed: <first line of its
     /// output>)` — on every surface that resolves the platform's binary
-    /// (probe, node dispatch, `agent_add` validation, doctor). The verdict
+    /// (probe, node dispatch, `agent_edit add` validation, doctor). The verdict
     /// is cached per resolved path + mtime for the daemon's lifetime.
     #[serde(default)]
     pub identity_pattern: Option<String>,
@@ -419,7 +419,7 @@ pub fn model_rejection_reason(
 /// The single wording every interactive-only rejection uses — a platform
 /// whose registry entry sets `headless = false` (freebuff v0.1.2). Produced
 /// here so `graph_node`/`graph_node`, the ensemble handlers,
-/// `agent_add`, `agent_probe` and `graph_control` can never drift apart on
+/// `agent_edit add`, `harness probe` and `graph_control` can never drift apart on
 /// the message a caller sees (CM35).
 pub fn interactive_only_reason(platform: &str) -> String {
     format!("platform '{platform}' is interactive-only (no headless mode)")

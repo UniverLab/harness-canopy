@@ -15,7 +15,6 @@ use crate::daemon::handler_validate::{
 };
 use crate::daemon::helpers::{error_result, success_result};
 use crate::daemon::params::*;
-use crate::daemon::params_extract::Parameters;
 use crate::db::Database;
 use crate::domain::graphs::{
     validate_spec_description_template, GraphSpec, GraphSpecStatus, SpecAdminStatusOutcome,
@@ -172,7 +171,7 @@ impl TaskTriggerHandler {
             }
         }
 
-        // SPECCODE: graph_edit mirrors spec_update's type/scope flow,
+        // SPECCODE: graph_edit mirrors spec_edit update's type/scope flow,
         // including the legacy-spec code assignment on first type.
         if let Some(spec_type) = params.spec_type {
             let code: Option<String> = if spec.spec_code.is_some() {
@@ -270,13 +269,9 @@ impl TaskTriggerHandler {
         self.do_graph_remove_spec(&graph_id, &spec_id).await
     }
 
-    #[tool(
-        name = "spec_create",
-        description = "Create a standalone spec (a backlog item) not yet assigned to any graph. Optionally tag it to a workdir for later filtering."
-    )]
-    pub(crate) async fn spec_create(
+    pub(crate) async fn spec_edit_create_impl(
         &self,
-        Parameters(params): Parameters<SpecCreateParams>,
+        params: SpecCreateParams,
     ) -> Result<CallToolResult, McpError> {
         let name = params.name.trim();
         if let Err(e) = validate_non_empty(name, "Spec name") {
@@ -342,15 +337,9 @@ impl TaskTriggerHandler {
         Ok(spec_create_result(&spec.id, &naming))
     }
 
-    #[tool(
-        name = "spec_list",
-        description = "List standalone/backlog specs, optionally filtered by workdir tag, status, type, or unassigned-only. \
-         Supports limit/offset pagination; the default page fits the result budget. \
-         Pass offset to page past it."
-    )]
-    pub(crate) async fn spec_list(
+    pub(crate) async fn spec_list_impl(
         &self,
-        Parameters(params): Parameters<SpecListParams>,
+        params: SpecListParams,
     ) -> Result<CallToolResult, McpError> {
         let status = match params.status.as_deref().map(str::trim) {
             Some(value) => match validate_spec_status(value) {
@@ -408,13 +397,25 @@ impl TaskTriggerHandler {
         )]))
     }
 
-    #[tool(
-        name = "spec_update",
-        description = "Update a standalone spec's name, description, and/or workdir tag."
-    )]
-    pub(crate) async fn spec_update(
+    /// The `spec` `get` action. No standalone `spec_get` tool ever existed;
+    /// this is the row `spec` `list` would return for the one spec, with its
+    /// full description.
+    pub(crate) async fn spec_get_impl(
         &self,
-        Parameters(params): Parameters<SpecUpdateParams>,
+        params: SpecGetParams,
+    ) -> Result<CallToolResult, McpError> {
+        let spec = match validate_spec_exists(&self.db, params.spec_id.trim()) {
+            Ok(spec) => spec,
+            Err(e) => return Ok(error_result(&e)),
+        };
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            serde_json::to_string_pretty(&spec_summary_json(&spec, true)).unwrap_or_default(),
+        )]))
+    }
+
+    pub(crate) async fn spec_edit_update_impl(
+        &self,
+        params: SpecUpdateParams,
     ) -> Result<CallToolResult, McpError> {
         let spec_id = match resolve_prefix_or_error(
             &self.db,
@@ -461,70 +462,7 @@ impl TaskTriggerHandler {
             None => None,
         };
 
-        // SPECCODE: type/scope flow like every other updatable field. A type
-        // set on a legacy spec (no code yet) assigns its immutable code at
-        // this moment; a later type change keeps the existing code (never
-        // renumbered). Where the code counts: the bound graph's workdir,
-        // else the spec's own workdir tag, both else "".
-        if let Some(spec_type) = params.spec_type {
-            let code: Option<String> = if spec.spec_code.is_some() {
-                None
-            } else {
-                let key = self
-                    .db
-                    .spec_code_counter_key(&spec)
-                    .map_err(internal_error)?;
-                Some(
-                    self.db
-                        .next_spec_code(&key, spec_type)
-                        .map_err(internal_error)?,
-                )
-            };
-            let scope: Option<String> = match params.spec_scope.as_ref().and_then(|s| s.as_deref())
-            {
-                Some(scope) if !scope.trim().is_empty() => Some(scope.trim().to_string()),
-                _ => spec.spec_scope.as_ref().cloned(),
-            };
-            self.db
-                .set_graph_spec_type(&spec_id, spec_type, scope.as_deref(), code.as_deref())
-                .map_err(internal_error)?;
-        } else if let Some(scope) = &params.spec_scope {
-            // Scope-only tweak: needs the existing type to keep the shape.
-            if let Some(existing_type) = spec.spec_type {
-                self.db
-                    .set_graph_spec_type(&spec_id, existing_type, scope.as_deref(), None)
-                    .map_err(internal_error)?;
-            }
-        } else if let Some(new_name) = name {
-            // A conventional title adopted through a name-only update on an
-            // untyped spec: the title's type and scope land with it, and the
-            // stored name becomes the subject alone.
-            if spec.spec_type.is_none() {
-                let naming = resolve_spec_naming(None, None, new_name);
-                if naming.spec_type.is_some() {
-                    let key = self
-                        .db
-                        .spec_code_counter_key(&spec)
-                        .map_err(internal_error)?;
-                    let spec_type = naming.spec_type.unwrap();
-                    let code = self
-                        .db
-                        .next_spec_code(&key, spec_type)
-                        .map_err(internal_error)?;
-                    self.db
-                        .set_graph_spec_type(
-                            &spec_id,
-                            spec_type,
-                            naming.scope.as_deref(),
-                            Some(&code),
-                        )
-                        .map_err(internal_error)?;
-                    self.db
-                        .update_spec_tag_details(&spec_id, Some(&naming.name), None, None)
-                        .map_err(internal_error)?;
-                }
-            }
-        }
+        self.apply_spec_type_update(&spec, &spec_id, &params, name)?;
 
         let adopts_type_by_name = params.spec_type.is_none()
             && params.spec_scope.is_none()
@@ -539,7 +477,7 @@ impl TaskTriggerHandler {
                 params.spec_scope.is_some(),
                 adopts_type_by_name,
             ],
-            "spec_update",
+            "spec_edit update",
         ) {
             return Ok(error_result(&e));
         }
@@ -560,13 +498,82 @@ impl TaskTriggerHandler {
         Ok(build_spec_update_response(&spec_id))
     }
 
-    #[tool(
-        name = "spec_set_status",
-        description = "Administratively transition a standalone spec's status (completed, skipped, or pending). Rejects if the spec is bound to a graph or has an active run."
-    )]
-    pub(crate) async fn spec_set_status(
+    // SPECCODE: type/scope flow like every other updatable field. A type
+    // set on a legacy spec (no code yet) assigns its immutable code at
+    // this moment; a later type change keeps the existing code (never
+    // renumbered). Where the code counts: the bound graph's workdir,
+    // else the spec's own workdir tag, both else "".
+    fn apply_spec_type_update(
         &self,
-        Parameters(params): Parameters<SpecSetStatusParams>,
+        spec: &GraphSpec,
+        spec_id: &str,
+        params: &SpecUpdateParams,
+        name: Option<&str>,
+    ) -> Result<(), McpError> {
+        if let Some(spec_type) = params.spec_type {
+            let code: Option<String> = if spec.spec_code.is_some() {
+                None
+            } else {
+                let key = self
+                    .db
+                    .spec_code_counter_key(spec)
+                    .map_err(internal_error)?;
+                Some(
+                    self.db
+                        .next_spec_code(&key, spec_type)
+                        .map_err(internal_error)?,
+                )
+            };
+            let scope: Option<String> = match params.spec_scope.as_ref().and_then(|s| s.as_deref())
+            {
+                Some(scope) if !scope.trim().is_empty() => Some(scope.trim().to_string()),
+                _ => spec.spec_scope.as_ref().cloned(),
+            };
+            self.db
+                .set_graph_spec_type(spec_id, spec_type, scope.as_deref(), code.as_deref())
+                .map_err(internal_error)?;
+        } else if let Some(scope) = &params.spec_scope {
+            // Scope-only tweak: needs the existing type to keep the shape.
+            if let Some(existing_type) = spec.spec_type {
+                self.db
+                    .set_graph_spec_type(spec_id, existing_type, scope.as_deref(), None)
+                    .map_err(internal_error)?;
+            }
+        } else if let Some(new_name) = name {
+            // A conventional title adopted through a name-only update on an
+            // untyped spec: the title's type and scope land with it, and the
+            // stored name becomes the subject alone.
+            if spec.spec_type.is_none() {
+                let naming = resolve_spec_naming(None, None, new_name);
+                if let Some(spec_type) = naming.spec_type {
+                    let key = self
+                        .db
+                        .spec_code_counter_key(spec)
+                        .map_err(internal_error)?;
+                    let code = self
+                        .db
+                        .next_spec_code(&key, spec_type)
+                        .map_err(internal_error)?;
+                    self.db
+                        .set_graph_spec_type(
+                            spec_id,
+                            spec_type,
+                            naming.scope.as_deref(),
+                            Some(&code),
+                        )
+                        .map_err(internal_error)?;
+                    self.db
+                        .update_spec_tag_details(spec_id, Some(&naming.name), None, None)
+                        .map_err(internal_error)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn spec_edit_set_status_impl(
+        &self,
+        params: SpecSetStatusParams,
     ) -> Result<CallToolResult, McpError> {
         let spec_id = match resolve_prefix_or_error(
             &self.db,
@@ -604,7 +611,7 @@ impl TaskTriggerHandler {
             },
             SpecAdminStatusOutcome::NotStandalone(graph_id) => {
                 Ok(error_result(&format!(
-                    "Spec '{spec_id}' is bound to graph '{graph_id}'; spec_set_status only \
+                    "Spec '{spec_id}' is bound to graph '{graph_id}'; spec_edit set_status only \
                      administers standalone specs."
                 )))
             },
@@ -617,13 +624,9 @@ impl TaskTriggerHandler {
         }
     }
 
-    #[tool(
-        name = "spec_delete",
-        description = "Delete a standalone spec. Refuses to delete a spec that's bound to a graph."
-    )]
-    pub(crate) async fn spec_delete(
+    pub(crate) async fn spec_edit_delete_impl(
         &self,
-        Parameters(params): Parameters<SpecDeleteParams>,
+        params: SpecDeleteParams,
     ) -> Result<CallToolResult, McpError> {
         let spec_id = match resolve_prefix_or_error(
             &self.db,
@@ -649,13 +652,9 @@ impl TaskTriggerHandler {
         Ok(success_result(&format!("Spec '{spec_id}' deleted.")))
     }
 
-    #[tool(
-        name = "spec_section_get",
-        description = "Extract a single section from a spec by its canonical tag name. Returns the markdown body of the requested section."
-    )]
-    pub(crate) async fn spec_section_get(
+    pub(crate) async fn spec_section_impl(
         &self,
-        Parameters(params): Parameters<SpecSectionGetParams>,
+        params: SpecSectionGetParams,
     ) -> Result<CallToolResult, McpError> {
         let spec_id = match resolve_prefix_or_error(
             &self.db,

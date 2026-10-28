@@ -204,7 +204,7 @@ impl Database {
     /// `graphs.require_spec_type` opt-in flag, and the `spec_code_counters`
     /// table (one counter row per (workdir, spec_type); never MAX+1). All
     /// pre-existing spec rows keep their columns NULL — legacy specs stay
-    /// untyped and get no code unless `spec_update` assigns one, per the
+    /// untyped and get no code unless `spec_edit update` assigns one, per the
     /// no-backfill guideline.
     pub(in crate::db) fn migrate_spec_type_columns(conn: &Connection) -> Result<()> {
         for column in ["spec_type", "spec_scope", "spec_code"] {

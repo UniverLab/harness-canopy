@@ -192,27 +192,28 @@ docs/ is published at univerlab.org/canopy/docs and holds user documentation onl
 
 ---
 
-## MCP Tools (93)
+## MCP Tools (57)
 
-Graph-node sessions (agent and ensemble nodes launched by the graph engine) receive a fixed node profile of 18 tools via `CANOPY_MCP_PROFILE=node`, so every node stays well under the 128-tool cap of OpenAI-compatible providers. All other sessions — the orchestrator, check nodes, hooks, TUI, subagents, and background agents — keep the full tool list.
+Graph-node sessions (agent and ensemble nodes launched by the graph engine) receive a fixed node profile of 17 tools via `CANOPY_MCP_PROFILE=node`, so every node stays well under the 128-tool cap of OpenAI-compatible providers. All other sessions — the orchestrator, check nodes, hooks, TUI, subagents, and background agents — keep the full tool list.
 
 | Tools | Category |
 |---|---|
-| `agent_add`, `agent_watch`, `agent_list`, `agent_get`, `agent_remove`, `agent_enable`, `agent_schedule_enable`, `agent_disable`, `agent_run`, `agent_status`, `agent_models`, `agent_logs`, `agent_update`, `agent_report`, `agent_probe`, `agent_probe_recent`, `subagent_spawn`, `subagent_collect` | **Agent management** (18) |
+| `agent`, `agent_edit`, `agent_report`, `subagent_spawn`, `subagent_collect` | **Agent management** (5) |
+| `harness` | **Harness** (1) |
 | `sync_declare_intent`, `sync_report_status`, `sync_broadcast`, `sync_get_context` | **Multi-agent sync** (4) |
 | `intelligence_get_context`, `intelligence_upsert`, `intelligence_search`, `intelligence_graph_walk`, `intelligence_list_projects`, `intelligence_link_projects`, `intelligence_delete_node`, `intelligence_delete_relation` | **Intelligence** (8) |
 | `get_identity`, `evolve_identity`, `create_seed`, `list_seeds`, `remove_seed` | **Seed identity** (5) |
 | `skill_list`, `skill_get` | **Skills** (2) |
-| `graph`, `graph_edit`, `graph_node`, `graph_edge`, `graph_ensemble`, `graph_control`, `crew_list`, `crew_get`, `crew_create`, `crew_update`, `crew_delete`, `config_list`, `config_get`, `config_set`, `config_reset`, `graph_crew`, `graph_complete_node`, `graph_report_blocker` | **Graph engine** (18) |
-| `roster_set`, `roster_clear`, `roster_list`, `roster_check` | **Availability roster** (4) |
+| `graph`, `graph_edit`, `graph_node`, `graph_edge`, `graph_ensemble`, `graph_control`, `graph_complete_node`, `graph_report_blocker` | **Graph engine** (8) |
+| `crew` | **Crews** (1) |
+| `config` | **Configuration** (1) |
 | `mutex` | **Named mutexes** (1) |
-| `spec_create`, `spec_list`, `spec_update`, `spec_delete`, `spec_set_status`, `spec_section_get`, `spec_convert`, `spec_note_write`, `spec_notes_get` | **Spec backlog** (9) |
-| `queue_create`, `queue_add_spec`, `queue_list`, `queue_remove_spec`, `queue_reorder`, `queue_set_group` | **Spec queues** (6) |
+| `spec`, `spec_edit`, `spec_convert` | **Spec backlog** (3) |
+| `queue` | **Spec queues** (1) |
 | `blueprint_list`, `blueprint_create`, `blueprint_delete` | **Node blueprints** (3) |
 | `node_list`, `node_install`, `node_remove` | **Node documents** (3) |
 | `project_search`, `project_update`, `project_remap`, `project_register` | **Project** (4) |
 | `rag_search`, `rag_compact` | **RAG** (2) |
-| `registry_refresh` | **Platform registry** (1) |
 | `get_tools` | **Protocol** (1) |
 | `session_list` | **Interactive sessions** (1) |
 | `scheduled_send_create`, `scheduled_send_list`, `scheduled_send_cancel` | **Scheduled sends** (3) |

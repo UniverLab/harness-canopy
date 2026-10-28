@@ -216,7 +216,7 @@ impl GraphEngine {
     /// A queue run is *live* (R6): the "next pending" spec is re-queried from
     /// the queue at every spec boundary via
     /// [`Database::queue_next_pending_spec_id`], never off a list captured at
-    /// launch. That's what lets `queue_add_spec`/`queue_reorder` calls made
+    /// launch. That's what lets `queue add_spec`/`queue reorder` calls made
     /// while the run is in flight actually change what runs next — the run
     /// ends only when a pick finds no pending member left. A bound run (no
     /// `queue_id`) keeps the pre-queue behavior below: its spec list is fixed

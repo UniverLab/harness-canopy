@@ -165,7 +165,7 @@ fn explain_no_platforms_detected(registry: &crate::setup_module::models::Registr
     println!("  installed one is failing to respond. If a platform IS installed");
     println!("  but setup still can't see it, its binary isn't on PATH; to check");
     println!("  whether an installed platform actually answers, run");
-    println!("  \x1b[1mcanopy doctor\x1b[0m or use \x1b[1magent_probe\x1b[0m.");
+    println!("  \x1b[1mcanopy doctor\x1b[0m or use \x1b[1mharness probe\x1b[0m.");
     println!();
     println!("  \"CLI\" here means the platform's command-line tool — the binary");
     println!("  canopy runs to drive it. canopy needs at least one platform's");

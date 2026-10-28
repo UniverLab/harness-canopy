@@ -559,8 +559,11 @@ async fn idea_placeholder_spec_is_absent_from_spec_listings() {
     .unwrap();
 
     let listed = raw_text(
-        &handler
-            .spec_list(Parameters(SpecListParams {
+        &call_resource_action(
+            &handler,
+            "spec",
+            "list",
+            params_id(SpecListParams {
                 workdir: None,
                 status: None,
                 unassigned_only: None,
@@ -568,9 +571,10 @@ async fn idea_placeholder_spec_is_absent_from_spec_listings() {
                 limit: None,
                 offset: None,
                 spec_type: None,
-            }))
-            .await
-            .unwrap(),
+            }),
+        )
+        .await
+        .unwrap(),
     );
     assert!(
         !listed.contains("hyperframes explainer"),
@@ -954,14 +958,18 @@ async fn agent_probe_result_names_the_product_beside_the_slug() {
     let _home_guard = HomeVar::set(home.path());
     let (_dir, _db, handler) = endpoint_test_handler();
 
-    let result = handler
-        .agent_probe(Parameters(AgentProbeParams {
+    let result = call_resource_action(
+        &handler,
+        "harness",
+        "probe",
+        params_id(AgentProbeParams {
             platform: Some("mistral".to_string()),
             model: None,
             timeout_seconds: Some(5),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&result), "{}", text(&result));
     let body: serde_json::Value = serde_json::from_str(&raw_text(&result)).unwrap();
     let probes = body["probes"].as_array().unwrap();
@@ -1047,14 +1055,18 @@ async fn agent_probe_reports_interactive_only_without_spawning() {
 
     let (_dir, _db, handler) = endpoint_test_handler();
 
-    let result = handler
-        .agent_probe(Parameters(AgentProbeParams {
+    let result = call_resource_action(
+        &handler,
+        "harness",
+        "probe",
+        params_id(AgentProbeParams {
             platform: Some("freebuff".to_string()),
             model: None,
             timeout_seconds: Some(5),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(!is_err(&result), "{}", text(&result));
     let body: serde_json::Value = serde_json::from_str(&raw_text(&result)).unwrap();
@@ -1432,15 +1444,19 @@ fn append_traversed_project_knowledge_appends_within_cap() {
 async fn crew_update_eager_sync_skips_a_running_graph() {
     let (dir, db, handler) = endpoint_test_handler();
     let workdir = dir.path().to_string_lossy().to_string();
-    handler
-        .crew_create(Parameters(CrewCreateParams {
+    call_resource_action(
+        &handler,
+        "crew",
+        "create",
+        params_id(CrewCreateParams {
             name: "eager".to_string(),
             description: None,
             members: Some(vec![crew_json_member("a"), crew_json_member("b")]),
             from_ensemble: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
 
     let (running_graph, running_ens) = build_crew_ensemble(&handler, &workdir, "Running G").await;
     let (_idle_graph, idle_ens) = build_crew_ensemble(&handler, &workdir, "Idle G").await;
@@ -1448,8 +1464,11 @@ async fn crew_update_eager_sync_skips_a_running_graph() {
         .unwrap();
 
     // Grow the crew to three members.
-    handler
-        .crew_update(Parameters(CrewUpdateParams {
+    call_resource_action(
+        &handler,
+        "crew",
+        "update",
+        params_id(CrewUpdateParams {
             name: "eager".to_string(),
             members: Some(vec![
                 crew_json_member("a"),
@@ -1458,9 +1477,10 @@ async fn crew_update_eager_sync_skips_a_running_graph() {
             ]),
             description: None,
             rename: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
 
     let running = db.get_ensemble_details(&running_ens).unwrap().unwrap();
     assert_eq!(

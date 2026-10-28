@@ -106,7 +106,7 @@ pub struct GraphAddEnsembleParams {
     pub commit_rights: Option<bool>,
     /// CM49: a crew name to bind instead of `members` — mutually exclusive
     /// with `members`/a blueprint that supplies members. The crew's ordered
-    /// members become this ensemble's members, and later `crew_update` calls
+    /// members become this ensemble's members, and later `crew update` calls
     /// reach it at its next dispatch.
     pub crew: Option<String>,
     /// Named mutexes (e.g. `["cpu"]`) every member run holds while it

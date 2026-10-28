@@ -68,20 +68,27 @@ async fn intelligence_delete_node_with_prefix() {
 #[tokio::test]
 async fn spec_list_default_compact_omits_description() {
     let (_dir, _db, handler) = endpoint_test_handler();
-    let created = handler
-        .spec_create(Parameters(SpecCreateParams {
+    let created = call_resource_action(
+        &handler,
+        "spec_edit",
+        "create",
+        params_id(SpecCreateParams {
             name: "Compact test".to_string(),
             description: valid_spec_description(),
             workdir: None,
             spec_type: None,
             spec_scope: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&created), "{}", text(&created));
 
-    let listed = handler
-        .spec_list(Parameters(SpecListParams {
+    let listed = call_resource_action(
+        &handler,
+        "spec",
+        "list",
+        params_id(SpecListParams {
             workdir: None,
             status: None,
             unassigned_only: None,
@@ -89,9 +96,10 @@ async fn spec_list_default_compact_omits_description() {
             limit: None,
             offset: None,
             spec_type: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let body = raw_text(&listed);
     assert!(
         !body.contains("Objective") && !body.contains("<objective>"),
@@ -104,20 +112,27 @@ async fn spec_list_default_compact_omits_description() {
 async fn spec_list_with_include_descriptions_returns_description() {
     let (_dir, _db, handler) = endpoint_test_handler();
     let desc = valid_spec_description();
-    let created = handler
-        .spec_create(Parameters(SpecCreateParams {
+    let created = call_resource_action(
+        &handler,
+        "spec_edit",
+        "create",
+        params_id(SpecCreateParams {
             name: "Verbose test".to_string(),
             description: desc.clone(),
             workdir: None,
             spec_type: None,
             spec_scope: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&created), "{}", text(&created));
 
-    let listed = handler
-        .spec_list(Parameters(SpecListParams {
+    let listed = call_resource_action(
+        &handler,
+        "spec",
+        "list",
+        params_id(SpecListParams {
             workdir: None,
             status: None,
             unassigned_only: None,
@@ -125,9 +140,10 @@ async fn spec_list_with_include_descriptions_returns_description() {
             limit: None,
             offset: None,
             spec_type: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let body = raw_text(&listed);
     assert!(
         body.contains("<objective>") || body.contains("Objective"),
@@ -462,8 +478,11 @@ async fn spec_list_pagination_respects_limit_and_offset() {
         insert_standalone_spec(&db, &format!("CB28 page spec {i:02}"));
     }
 
-    let first = handler
-        .spec_list(Parameters(SpecListParams {
+    let first = call_resource_action(
+        &handler,
+        "spec",
+        "list",
+        params_id(SpecListParams {
             workdir: None,
             status: None,
             unassigned_only: None,
@@ -471,9 +490,10 @@ async fn spec_list_pagination_respects_limit_and_offset() {
             limit: Some(3),
             offset: Some(0),
             spec_type: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let first_body = raw_text(&first);
     let first_parsed: serde_json::Value = serde_json::from_str(&first_body).unwrap();
     assert_eq!(first_parsed["returned"], 3);
@@ -483,8 +503,11 @@ async fn spec_list_pagination_respects_limit_and_offset() {
     let first_ids = spec_list_ids(&first_body);
     assert_eq!(first_ids.len(), 3);
 
-    let second = handler
-        .spec_list(Parameters(SpecListParams {
+    let second = call_resource_action(
+        &handler,
+        "spec",
+        "list",
+        params_id(SpecListParams {
             workdir: None,
             status: None,
             unassigned_only: None,
@@ -492,9 +515,10 @@ async fn spec_list_pagination_respects_limit_and_offset() {
             limit: Some(3),
             offset: Some(3),
             spec_type: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let second_body = raw_text(&second);
     let second_ids = spec_list_ids(&second_body);
     assert_eq!(second_ids.len(), 3);
@@ -505,8 +529,11 @@ async fn spec_list_pagination_respects_limit_and_offset() {
         );
     }
 
-    let last = handler
-        .spec_list(Parameters(SpecListParams {
+    let last = call_resource_action(
+        &handler,
+        "spec",
+        "list",
+        params_id(SpecListParams {
             workdir: None,
             status: None,
             unassigned_only: None,
@@ -514,9 +541,10 @@ async fn spec_list_pagination_respects_limit_and_offset() {
             limit: Some(3),
             offset: Some(9),
             spec_type: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let last_body = raw_text(&last);
     let last_parsed: serde_json::Value = serde_json::from_str(&last_body).unwrap();
     assert_eq!(last_parsed["returned"], 1);
@@ -538,8 +566,11 @@ async fn spec_list_default_page_fits_budget() {
         insert_standalone_spec(&db, &format!("CB28 budget probe spec {i:03}"));
     }
 
-    let listed = handler
-        .spec_list(Parameters(SpecListParams {
+    let listed = call_resource_action(
+        &handler,
+        "spec",
+        "list",
+        params_id(SpecListParams {
             workdir: None,
             status: None,
             unassigned_only: None,
@@ -547,9 +578,10 @@ async fn spec_list_default_page_fits_budget() {
             limit: None,
             offset: None,
             spec_type: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let body = raw_text(&listed);
     let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(
@@ -751,33 +783,41 @@ async fn graph_node_runs_list_reports_truncation() {
 #[tokio::test]
 async fn spec_update_with_prefix_resolves() {
     let (_dir, db, handler) = endpoint_test_handler();
-    let created = handler
-        .spec_create(Parameters(SpecCreateParams {
+    let created = call_resource_action(
+        &handler,
+        "spec_edit",
+        "create",
+        params_id(SpecCreateParams {
             name: "Prefix test".to_string(),
             description: valid_spec_description(),
             workdir: None,
             spec_type: None,
             spec_scope: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&created), "{}", text(&created));
 
     let all_specs = db.list_specs(None, None, false, None).unwrap();
     let full_id = all_specs[0].id.clone();
     let prefix = &full_id[..8];
 
-    let updated = handler
-        .spec_update(Parameters(SpecUpdateParams {
+    let updated = call_resource_action(
+        &handler,
+        "spec_edit",
+        "update",
+        params_id(SpecUpdateParams {
             spec_id: prefix.to_string(),
             name: Some("Renamed via prefix".to_string()),
             description: None,
             workdir: None,
             spec_type: None,
             spec_scope: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&updated), "{}", text(&updated));
     assert_eq!(
         db.get_graph_spec(&full_id).unwrap().unwrap().name,
@@ -788,29 +828,37 @@ async fn spec_update_with_prefix_resolves() {
 #[tokio::test]
 async fn spec_section_get_returns_section_from_tagged_spec() {
     let (_dir, db, handler) = endpoint_test_handler();
-    let created = handler
-        .spec_create(Parameters(SpecCreateParams {
+    let created = call_resource_action(
+        &handler,
+        "spec_edit",
+        "create",
+        params_id(SpecCreateParams {
             name: "Section test".to_string(),
             description: valid_spec_description(),
             workdir: None,
             spec_type: None,
             spec_scope: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&created), "{}", text(&created));
 
     let spec_id = db.list_specs(None, None, false, None).unwrap()[0]
         .id
         .clone();
 
-    let result = handler
-        .spec_section_get(Parameters(SpecSectionGetParams {
+    let result = call_resource_action(
+        &handler,
+        "spec",
+        "section",
+        params_id(SpecSectionGetParams {
             spec_id: spec_id.clone(),
             section: "objective".to_string(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&result), "{}", text(&result));
     let body = raw_text(&result);
     assert!(body.contains("Ship the feature"));
@@ -820,29 +868,37 @@ async fn spec_section_get_returns_section_from_tagged_spec() {
 #[tokio::test]
 async fn spec_section_get_rejects_unknown_section() {
     let (_dir, db, handler) = endpoint_test_handler();
-    let created = handler
-        .spec_create(Parameters(SpecCreateParams {
+    let created = call_resource_action(
+        &handler,
+        "spec_edit",
+        "create",
+        params_id(SpecCreateParams {
             name: "Section test 2".to_string(),
             description: valid_spec_description(),
             workdir: None,
             spec_type: None,
             spec_scope: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&created));
 
     let spec_id = db.list_specs(None, None, false, None).unwrap()[0]
         .id
         .clone();
 
-    let result = handler
-        .spec_section_get(Parameters(SpecSectionGetParams {
+    let result = call_resource_action(
+        &handler,
+        "spec",
+        "section",
+        params_id(SpecSectionGetParams {
             spec_id,
             section: "bogus".to_string(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&result));
     assert!(text(&result).contains("unknown section"));
     assert!(text(&result).contains("bogus"));
@@ -878,16 +934,20 @@ async fn spec_convert_converts_legacy_and_skips_tagged() {
     })
     .unwrap();
 
-    let created = handler
-        .spec_create(Parameters(SpecCreateParams {
+    let created = call_resource_action(
+        &handler,
+        "spec_edit",
+        "create",
+        params_id(SpecCreateParams {
             name: "Already tagged".to_string(),
             description: valid_spec_description(),
             workdir: None,
             spec_type: None,
             spec_scope: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&created));
 
     let result = handler.spec_convert().await.unwrap();

@@ -240,6 +240,6 @@ fn coalesced_summary(send_id: &str, display: &str) -> String {
 fn failure_summary(agent_id: &str, target: &str, reason: &str) -> String {
     format!(
         "Agent '{agent_id}' could not deliver to session '{target}': {reason}. \
-         Open the session or change the target with agent_update."
+         Open the session or change the target with `agent_edit update`."
     )
 }

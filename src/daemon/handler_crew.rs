@@ -12,11 +12,8 @@ use crate::daemon::handler::TaskTriggerHandler;
 use crate::daemon::handler_formatting::internal_error;
 use crate::daemon::helpers::{error_result, success_result};
 use crate::daemon::params::*;
-use crate::daemon::params_extract::Parameters;
 use crate::domain::crews::CrewMember;
 use rmcp::model::CallToolResult;
-use rmcp::tool;
-use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
 
 fn member_json(member: &CrewMember) -> serde_json::Value {
@@ -31,13 +28,8 @@ fn member_json(member: &CrewMember) -> serde_json::Value {
     })
 }
 
-#[tool_router(router = tool_router_crew, vis = "pub(crate)")]
 impl TaskTriggerHandler {
-    #[tool(
-        name = "crew_list",
-        description = "List every crew: its name, description, version, ordered members, and how many ensembles/nodes/hooks bind it. Member order is meaningful — cascade tries it in order, round_robin rotates through it, a bound agent node takes the first available member."
-    )]
-    pub(crate) async fn crew_list(&self) -> Result<CallToolResult, McpError> {
+    pub(crate) async fn crew_list_impl(&self) -> Result<CallToolResult, McpError> {
         let crews = self.db.crew_list().map_err(internal_error)?;
         let counts = self.db.crew_binding_counts().map_err(internal_error)?;
         let body: Vec<serde_json::Value> = crews
@@ -62,13 +54,9 @@ impl TaskTriggerHandler {
         ))
     }
 
-    #[tool(
-        name = "crew_get",
-        description = "Show one crew — its description, version, ordered members — and every binding of it as {graph, kind, name}, where kind is ensemble, node, or hook."
-    )]
-    pub(crate) async fn crew_get(
+    pub(crate) async fn crew_get_impl(
         &self,
-        Parameters(params): Parameters<CrewGetParams>,
+        params: CrewGetParams,
     ) -> Result<CallToolResult, McpError> {
         let Some((crew, members)) = self.db.crew_get(&params.name).map_err(internal_error)? else {
             return Ok(error_result(&format!("crew '{}' not found.", params.name)));
@@ -99,23 +87,15 @@ impl TaskTriggerHandler {
         ))
     }
 
-    #[tool(
-        name = "crew_create",
-        description = "Create a crew from an ordered member list (`members`) or by seeding from an existing ensemble's current members (`from_ensemble`) — pass exactly one. `from_ensemble` refuses when any member has a per-member prompt_override. Member order is meaningful: cascade tries it in order, round_robin rotates through it, a bound agent node takes the first available member."
-    )]
-    pub(crate) async fn crew_create(
+    pub(crate) async fn crew_create_impl(
         &self,
-        Parameters(params): Parameters<CrewCreateParams>,
+        params: CrewCreateParams,
     ) -> Result<CallToolResult, McpError> {
         match (params.members.as_ref(), params.from_ensemble.as_ref()) {
-            (Some(_), Some(_)) => {
-                return Ok(error_result(
-                    "pass crew members or from_ensemble, never both.",
-                ));
-            }
-            (None, None) => {
-                return Ok(error_result("pass either crew members or from_ensemble."));
-            }
+            (Some(_), Some(_)) => Ok(error_result(
+                "pass crew members or from_ensemble, never both.",
+            )),
+            (None, None) => Ok(error_result("pass either crew members or from_ensemble.")),
             (Some(members), None) => {
                 let members = members_from_json(members.clone());
                 match self
@@ -145,13 +125,9 @@ impl TaskTriggerHandler {
         }
     }
 
-    #[tool(
-        name = "crew_update",
-        description = "Update a crew: replace the ordered member list (`members`), set `description`, and/or `rename`. A member-list write bumps the version; every bound ensemble picks it up at its next dispatch (graphs not currently running are synced eagerly)."
-    )]
-    pub(crate) async fn crew_update(
+    pub(crate) async fn crew_update_impl(
         &self,
-        Parameters(params): Parameters<CrewUpdateParams>,
+        params: CrewUpdateParams,
     ) -> Result<CallToolResult, McpError> {
         let members = params
             .members
@@ -197,13 +173,9 @@ impl TaskTriggerHandler {
         ))
     }
 
-    #[tool(
-        name = "crew_delete",
-        description = "Delete a crew. Refused while any ensemble, agent node or agent hook still binds it; the error lists every binding."
-    )]
-    pub(crate) async fn crew_delete(
+    pub(crate) async fn crew_delete_impl(
         &self,
-        Parameters(params): Parameters<CrewDeleteParams>,
+        params: CrewDeleteParams,
     ) -> Result<CallToolResult, McpError> {
         match self.db.crew_delete(&params.name) {
             Ok(()) => Ok(success_result(&format!("Crew '{}' deleted.", params.name))),

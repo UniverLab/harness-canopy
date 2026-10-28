@@ -42,7 +42,7 @@ pub enum Kind {
     },
     /// A TOML array of directory paths; every entry must exist.
     PathList,
-    /// A table or array-of-tables that `config_set` refuses (D6).
+    /// A table or array-of-tables that `config set` refuses (D6).
     Structured,
 }
 
@@ -65,7 +65,7 @@ impl DurationUnit {
 }
 
 impl Apply {
-    /// Short badge for the hub and `config_list`: hot / next run /
+    /// Short badge for the hub and `config list`: hot / next run /
     /// restart daemon / restart tui.
     pub fn badge(self) -> &'static str {
         match self {
@@ -174,7 +174,7 @@ impl SettingDef {
         self.default_value().to_string()
     }
 
-    /// A short label for the kind, used in `config_list` and error messages.
+    /// A short label for the kind, used in `config list` and error messages.
     pub fn kind_label(&self) -> String {
         match self.kind {
             Kind::Bool => "bool".to_string(),
@@ -273,7 +273,7 @@ pub fn env_name_for(key: &str) -> Option<&'static str> {
 
 /// Whether an environment override applies to `key`: the variable is set
 /// *and* its value parses the way [`apply_env_overrides`] will use it, so
-/// `config_list`'s `source` column never claims `env` for a value that is
+/// `config list`'s `source` column never claims `env` for a value that is
 /// ignored. The lookup is injected so tests never touch the process
 /// environment (D1).
 pub fn env_override_applies(key: &str, env: &dyn Fn(&str) -> Option<String>) -> bool {
@@ -326,7 +326,7 @@ pub fn apply_env_overrides(config: &mut CanopyConfig, env: &dyn Fn(&str) -> Opti
 static RUNNING_SNAPSHOT: OnceLock<CanopyConfig> = OnceLock::new();
 
 /// Remember the config the running daemon loaded at startup, so
-/// `config_list` can report `pending_restart` for keys that changed on disk
+/// `config list` can report `pending_restart` for keys that changed on disk
 /// since. Called once, from the daemon.
 pub fn set_running_snapshot(config: CanopyConfig) {
     let _ = RUNNING_SNAPSHOT.set(config);

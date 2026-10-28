@@ -2,7 +2,7 @@ use super::*;
 
 // ── CM49 crew tool parameter types ─────────────────────────────────
 
-/// One member in a `crew_create`/`crew_update` request. `position` is the
+/// One member in a `crew create`/`crew update` request. `position` is the
 /// array index.
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct CrewMemberJson {

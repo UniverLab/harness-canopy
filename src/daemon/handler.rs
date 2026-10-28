@@ -152,12 +152,12 @@ const MISSING_SYNC_IDENTITY_MESSAGE: &str =
 
 /// MCP result budget in bytes. Read surfaces must fit within this limit so
 /// that reading state never requires the database. Both
-/// `intelligence_graph_walk` and `spec_list` read this constant; the next
+/// `intelligence_graph_walk` and `spec list` read this constant; the next
 /// surface that needs paging should reuse it instead of a new hardcoded
 /// number.
 pub(crate) const MCP_RESULT_BUDGET_BYTES: usize = 32_000;
 
-/// Measured serialised size of one compact `spec_list` row in bytes: 339
+/// Measured serialised size of one compact `spec list` row in bytes: 339
 /// compact specs measured 55,605 characters on 2026-09-02, i.e. ~164
 /// bytes/row. Budgeted at 200 bytes/row so the default page keeps headroom
 /// against longer-than-average names.
@@ -176,7 +176,7 @@ const _: () = assert!(
     "session_list default page must stay within [1, 200]"
 );
 
-/// Default `spec_list` page derived from the budget, not a round number:
+/// Default `spec list` page derived from the budget, not a round number:
 /// `MCP_RESULT_BUDGET_BYTES / SPEC_LIST_COMPACT_ROW_BYTES`, clamped to
 /// `[1, 200]` like `graph` (the quotient is 160, so the upper
 /// clamp is vacuous and the lower clamp is enforced by the const assert).
@@ -185,7 +185,7 @@ pub(crate) const SPEC_LIST_DEFAULT_LIMIT: u32 =
 
 const _: () = assert!(
     SPEC_LIST_DEFAULT_LIMIT >= 1 && SPEC_LIST_DEFAULT_LIMIT <= 200,
-    "spec_list default page must stay within [1, 200]"
+    "spec list default page must stay within [1, 200]"
 );
 
 /// Estimated serialised size of one `intelligence_upsert` duplicate-candidate
@@ -293,22 +293,17 @@ impl TaskTriggerHandler {
         let mut router = ToolRouter::new();
         router.merge(TaskTriggerHandler::tool_router_agents());
         router.merge(TaskTriggerHandler::tool_router_scheduled_sends());
-        router.merge(TaskTriggerHandler::tool_router_models_probes());
+        router.merge(TaskTriggerHandler::tool_router_resource_tools());
         router.merge(TaskTriggerHandler::tool_router_sync());
         router.merge(TaskTriggerHandler::tool_router_intel());
         router.merge(TaskTriggerHandler::tool_router_seeds_skills());
         router.merge(TaskTriggerHandler::tool_router_graphs());
         router.merge(TaskTriggerHandler::tool_router_graph_tools());
-        router.merge(TaskTriggerHandler::tool_router_graph_crew());
         router.merge(TaskTriggerHandler::tool_router_specs());
         router.merge(TaskTriggerHandler::tool_router_blueprints());
-        router.merge(TaskTriggerHandler::tool_router_queues());
         router.merge(TaskTriggerHandler::tool_router_nodes());
         router.merge(TaskTriggerHandler::tool_router_node_lib());
-        router.merge(TaskTriggerHandler::tool_router_notes());
-        router.merge(TaskTriggerHandler::tool_router_roster());
         router.merge(TaskTriggerHandler::tool_router_mutex());
-        router.merge(TaskTriggerHandler::tool_router_crew());
         router.merge(TaskTriggerHandler::tool_router_edges());
         router.merge(TaskTriggerHandler::tool_router_ensemble_core());
         router.merge(TaskTriggerHandler::tool_router_copy());
@@ -320,8 +315,6 @@ impl TaskTriggerHandler {
         router.merge(TaskTriggerHandler::tool_router_run_exec());
         router.merge(TaskTriggerHandler::tool_router_run_lifecycle());
         router.merge(TaskTriggerHandler::tool_router_meta());
-        router.merge(TaskTriggerHandler::tool_router_settings());
-        router.merge(TaskTriggerHandler::tool_router_registry());
         router
     }
 }
@@ -338,9 +331,8 @@ const HIDDEN_DEPRECATED_TOOLS: &[&str] = &["loop_complete_node", "loop_report_bl
 /// Fixed toolset handed to graph-node sessions so they stay far under the
 /// 128-tool provider cap regardless of how many tools canopy adds later.
 pub const NODE_TOOLS: &[&str] = &[
-    "spec_section_get",
-    "spec_notes_get",
-    "spec_note_write",
+    "spec",
+    "spec_edit",
     "graph_complete_node",
     "graph_report_blocker",
     "intelligence_get_context",
@@ -417,8 +409,8 @@ impl ServerHandler for TaskTriggerHandler {
             ))
             .with_instructions(
                 "MCP server for registering, managing, and executing scheduled and event-driven agents. \
-                 Use agent_add to create scheduled agents, agent_watch for file watchers, \
-                 agent_run to test immediately, and agent_status for daemon health."
+                 Use agent_edit (add) to create scheduled agents, agent_edit (watch) for file watchers, \
+                 agent_edit (run) to test immediately, and agent (status) for daemon health."
                     .to_string(),
             )
     }
@@ -504,6 +496,65 @@ pub(crate) async fn call_graph_action_value(
     }
 }
 
+/// Test-only dispatch seam for the eight second-wave resource tools
+/// (`spec`, `spec_edit`, `queue`, `agent`, `agent_edit`, `harness`,
+/// `config`, `crew`): the typed params struct is serialized with nulls
+/// stripped, `action` is injected, and the call goes through the tool's own
+/// `Parameters<ActionObject>` validation before reaching the same `_impl`
+/// logic the old one-operation tools held. `agent_edit` runs without a
+/// caller session, like the ported tests' old `OptionalExtension(None)`.
+#[cfg(test)]
+pub(crate) async fn call_resource_action<P: serde::Serialize>(
+    handler: &TaskTriggerHandler,
+    tool: &str,
+    action: &str,
+    params: P,
+) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+    let mut value = serde_json::to_value(&params).expect("params must serialize");
+    if value.is_null() {
+        value = serde_json::json!({});
+    }
+    // Same null-stripping contract as [`call_graph_action`]: a typed `None`
+    // means "omit", never an explicit "clear it" null.
+    if let Some(object) = value.as_object_mut() {
+        object.retain(|_, v| !v.is_null());
+    }
+    call_resource_action_value(handler, tool, action, value).await
+}
+
+/// Explicit-null variant of [`call_resource_action`]: sends a raw JSON
+/// object (nulls kept) through the tool's own dispatch.
+#[cfg(test)]
+pub(crate) async fn call_resource_action_value(
+    handler: &TaskTriggerHandler,
+    tool: &str,
+    action: &str,
+    mut params: serde_json::Value,
+) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+    params["action"] = serde_json::Value::String(action.to_string());
+    let object = params
+        .as_object()
+        .cloned()
+        .expect("object params must serialize");
+    let parameters =
+        crate::daemon::params_extract::Parameters(crate::daemon::actions::ActionObject(object));
+    match tool {
+        "spec" => handler.spec(parameters).await,
+        "spec_edit" => handler.spec_edit(parameters).await,
+        "queue" => handler.queue(parameters).await,
+        "agent" => handler.agent(parameters).await,
+        "agent_edit" => {
+            handler
+                .agent_edit(parameters, OptionalExtension(None))
+                .await
+        }
+        "harness" => handler.harness(parameters).await,
+        "config" => handler.config(parameters).await,
+        "crew" => handler.crew(parameters).await,
+        other => panic!("unknown resource tool '{other}'"),
+    }
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -524,7 +575,7 @@ mod coverage_tests;
 //
 // The three test modules above almost exclusively exercise *pure* helper
 // functions (validate_*, build_*, format_*). The `#[tool]` methods on
-// `TaskTriggerHandler` itself — `task_add`, `task_watch`, `sync_*`,
+// `TaskTriggerHandler` itself — `agent_edit`, `sync_*`,
 // `intelligence_*`, `graph_*`, `spec_*`, `blueprint_*`, etc. — are called
 // directly here instead: construct `Parameters<...>`, call the method on a
 // real handler wired to a real (tempdir) SQLite database, assert on the

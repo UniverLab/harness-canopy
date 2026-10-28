@@ -4,7 +4,7 @@
 //! The registry declares `identity_args` (argv appended to the resolved
 //! binary, e.g. `["--version"]`) and `identity_pattern` (a regex the combined
 //! stdout+stderr must match). When both are set, every surface that resolves
-//! the platform's binary for use — probe, node dispatch, `agent_add`
+//! the platform's binary for use — probe, node dispatch, `agent_edit add`
 //! validation, doctor — checks the resolved path once per (path, mtime) and
 //! reports the platform as not installed on a mismatch or a timeout.
 //!
@@ -79,7 +79,7 @@ pub struct NotInstalled {
 
 impl NotInstalled {
     /// The operator-facing message. One wording for probe, dispatch,
-    /// `agent_add` and doctor so they can never drift apart.
+    /// `agent_edit add` and doctor so they can never drift apart.
     pub fn message(&self) -> String {
         self.to_string()
     }
@@ -273,7 +273,7 @@ pub fn ensure_binary_identity_blocking(
     verdict
 }
 
-/// `agent_add`/`agent_watch` validation with an injectable home directory.
+/// `agent_edit add`/`agent_edit watch` validation with an injectable home directory.
 ///
 /// `Ok(())` — and today's behaviour continues — when the canopy config
 /// cannot be read, the platform is not configured, the platform declares no

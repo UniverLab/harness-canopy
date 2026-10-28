@@ -431,7 +431,7 @@ impl Database {
 
     /// Update a standalone/backlog spec's name, description, and/or workdir
     /// tag. Unlike [`Self::update_graph_spec_details`] (position/parallelizable,
-    /// used by `graph_edit`), this is for `spec_update` and never
+    /// used by `graph_edit`), this is for `spec_edit update` and never
     /// touches graph assignment or ordering.
     pub fn update_spec_tag_details(
         &self,
@@ -496,7 +496,7 @@ impl Database {
     }
 
     /// Delete a spec outright. Callers must enforce the graph-binding guard
-    /// (see `spec_delete`'s handler) before calling this — this function
+    /// (see `spec_edit delete`'s handler) before calling this — this function
     /// performs no such check itself.
     pub fn delete_graph_spec(&self, spec_id: &str) -> Result<bool> {
         let conn = self

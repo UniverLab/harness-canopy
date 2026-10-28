@@ -71,9 +71,13 @@ pub(crate) fn call_daemon_tool(
     Ok(parse_tool_outcome(&result))
 }
 
-/// Fire `agent_run` for `agent_id` via the daemon MCP endpoint.
+/// Fire `agent_edit run` for `agent_id` via the daemon MCP endpoint.
 pub(crate) fn send_mcp_task_run(port: &str, agent_id: &str) -> Result<()> {
-    let outcome = call_daemon_tool(port, "agent_run", &serde_json::json!({ "id": agent_id }))?;
+    let outcome = call_daemon_tool(
+        port,
+        "agent_edit",
+        &serde_json::json!({ "action": "run", "id": agent_id }),
+    )?;
     if outcome.is_error {
         return Err(anyhow!(outcome.text));
     }

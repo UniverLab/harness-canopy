@@ -464,10 +464,10 @@ mod tests {
 
         let calls = fake.recorded_calls();
         assert_eq!(calls.len(), 1, "{calls:?}");
-        assert_eq!(calls[0]["name"], "config_set");
+        assert_eq!(calls[0]["name"], "config");
         assert_eq!(
             calls[0]["arguments"],
-            serde_json::json!({ "key": "theme", "value": "modern" })
+            serde_json::json!({ "action": "set", "key": "theme", "value": "modern" })
         );
     }
 }

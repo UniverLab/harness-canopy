@@ -9,35 +9,23 @@ use crate::daemon::handler_validate::{
 };
 use crate::daemon::helpers::{error_result, success_result};
 use crate::daemon::params::*;
-use crate::daemon::params_extract::Parameters;
 use crate::db::Database;
 use crate::domain::graphs::GraphSpecStatus;
 use crate::domain::queues::{Queue, QueueDetails, QueueMember};
 use rmcp::model::{CallToolResult, ContentBlock};
-use rmcp::tool;
-use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
 
-#[tool_router(router = tool_router_queues, vis = "pub(crate)")]
 impl TaskTriggerHandler {
-    #[tool(
-        name = "queue_create",
-        description = "Create a queue: an ordered list of existing specs, decoupled from any one graph."
-    )]
-    pub(crate) async fn queue_create(
+    pub(crate) async fn queue_create_impl(
         &self,
-        Parameters(params): Parameters<QueueCreateParams>,
+        params: QueueCreateParams,
     ) -> Result<CallToolResult, McpError> {
         self.do_queue_create(&params.name).await
     }
 
-    #[tool(
-        name = "queue_add_spec",
-        description = "Add an existing spec to a queue; a grouped add lands right after the group's last pending member."
-    )]
-    pub(crate) async fn queue_add_spec(
+    pub(crate) async fn queue_add_spec_impl(
         &self,
-        Parameters(params): Parameters<QueueAddSpecParams>,
+        params: QueueAddSpecParams,
     ) -> Result<CallToolResult, McpError> {
         let queue_id = match resolve_prefix_or_error(
             &self.db,
@@ -61,13 +49,9 @@ impl TaskTriggerHandler {
             .await
     }
 
-    #[tool(
-        name = "queue_list",
-        description = "List a queue's ordered members, or every queue (summary only) if queue_id is omitted."
-    )]
-    pub(crate) async fn queue_list(
+    pub(crate) async fn queue_list_impl(
         &self,
-        Parameters(params): Parameters<QueueListParams>,
+        params: QueueListParams,
     ) -> Result<CallToolResult, McpError> {
         let resolved_queue_id = match &params.queue_id {
             Some(qid) => {
@@ -90,13 +74,9 @@ impl TaskTriggerHandler {
         .await
     }
 
-    #[tool(
-        name = "queue_remove_spec",
-        description = "Remove a spec from a queue."
-    )]
-    pub(crate) async fn queue_remove_spec(
+    pub(crate) async fn queue_remove_spec_impl(
         &self,
-        Parameters(params): Parameters<QueueRemoveSpecParams>,
+        params: QueueRemoveSpecParams,
     ) -> Result<CallToolResult, McpError> {
         let queue_id = match resolve_prefix_or_error(
             &self.db,
@@ -119,13 +99,9 @@ impl TaskTriggerHandler {
         self.do_queue_remove_spec(&queue_id, &spec_id).await
     }
 
-    #[tool(
-        name = "queue_reorder",
-        description = "Reorder a queue. `spec_ids` must list every queue member exactly once, in the desired order — a total replacement, not a partial swap."
-    )]
-    pub(crate) async fn queue_reorder(
+    pub(crate) async fn queue_reorder_impl(
         &self,
-        Parameters(params): Parameters<QueueReorderParams>,
+        params: QueueReorderParams,
     ) -> Result<CallToolResult, McpError> {
         let queue_id = match resolve_prefix_or_error(
             &self.db,
@@ -151,13 +127,9 @@ impl TaskTriggerHandler {
         self.do_queue_reorder(&queue_id, &resolved_spec_ids).await
     }
 
-    #[tool(
-        name = "queue_set_group",
-        description = "Set or clear the context group of an existing queue member; each group's pending members stay contiguous."
-    )]
-    pub(crate) async fn queue_set_group(
+    pub(crate) async fn queue_set_group_impl(
         &self,
-        Parameters(params): Parameters<QueueSetGroupParams>,
+        params: QueueSetGroupParams,
     ) -> Result<CallToolResult, McpError> {
         let queue_id = match resolve_prefix_or_error(
             &self.db,
@@ -231,7 +203,7 @@ impl TaskTriggerHandler {
                 .any(|graph| graph.require_spec_type);
             if wants_types {
                 return Ok(error_result(&format!(
-                    "Spec '{}' has no type: a graph with require_spec_type may run this queue. Set a Conventional Commits type via spec_update first.",
+                    "Spec '{}' has no type: a graph with require_spec_type may run this queue. Set a Conventional Commits type via `spec_edit update` first.",
                     spec.name
                 )));
             }
@@ -508,7 +480,7 @@ pub(crate) fn validate_queue_reorder(
 }
 
 /// Live queues (R6): refuse to remove a queue member that is currently
-/// `running` — the tool-layer half of the same lock `queue_reorder` enforces
+/// `running` — the tool-layer half of the same lock `queue reorder` enforces
 /// via [`validate_queue_reorder_locking`]. A spec that isn't a queue member at
 /// all, or isn't found, is left for [`Database::remove_queue_member`]'s own
 /// "no such spec" error — this only ever blocks a positive `running` match.

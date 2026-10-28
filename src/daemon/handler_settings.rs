@@ -9,8 +9,6 @@ use std::path::Path;
 
 use anyhow::{bail, Result};
 use rmcp::model::CallToolResult;
-use rmcp::tool;
-use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
 use serde_json::json;
 
@@ -19,33 +17,23 @@ use crate::daemon::handler::TaskTriggerHandler;
 use crate::daemon::handler_formatting::build_json_result;
 use crate::daemon::helpers::{data_dir, error_result};
 use crate::daemon::params::*;
-use crate::daemon::params_extract::Parameters;
 use crate::db::Database;
 use crate::domain::canopy_config::CanopyConfig;
 use crate::domain::settings::{self, inspect, Kind};
 
-#[tool_router(router = tool_router_settings, vis = "pub(crate)")]
 impl TaskTriggerHandler {
-    #[tool(
-        name = "config_list",
-        description = "List every canopy setting with its group, kind, default, effective value, where that value came from (default, file, or env), when it applies, and its status: ok, invalid: <reason>, pending_restart, or unknown (a hand-written key nothing declares; never deleted). Optional `group` filters to one group."
-    )]
-    pub(crate) async fn config_list(
+    pub(crate) async fn config_list_impl(
         &self,
-        Parameters(params): Parameters<ConfigListParams>,
+        params: ConfigListParams,
     ) -> Result<CallToolResult, McpError> {
         let dir = data_dir()?;
         let rows = inspect::list(&dir, params.group.as_deref());
         to_json(&rows)
     }
 
-    #[tool(
-        name = "config_get",
-        description = "Read one canopy setting by its dotted key (e.g. `theme`, `clean.retention_days`), in the same shape config_list reports."
-    )]
-    pub(crate) async fn config_get(
+    pub(crate) async fn config_get_impl(
         &self,
-        Parameters(params): Parameters<ConfigGetParams>,
+        params: ConfigGetParams,
     ) -> Result<CallToolResult, McpError> {
         let dir = data_dir()?;
         if settings::find(&params.key).is_none() {
@@ -60,13 +48,9 @@ impl TaskTriggerHandler {
         }
     }
 
-    #[tool(
-        name = "config_set",
-        description = "Change one canopy setting. The value is validated against the setting's type and range first, and nothing is written if it is refused. Returns the new effective value and what the user must do for it to take effect: applied, applies on next run, restart the daemon, or restart the TUI. A list-of-tables setting (skills.sources) must be edited by hand."
-    )]
-    pub(crate) async fn config_set(
+    pub(crate) async fn config_set_impl(
         &self,
-        Parameters(params): Parameters<ConfigSetParams>,
+        params: ConfigSetParams,
     ) -> Result<CallToolResult, McpError> {
         let dir = data_dir()?;
         match apply_set(&self.db, &dir, &params.key, Some(&params.value)) {
@@ -75,13 +59,9 @@ impl TaskTriggerHandler {
         }
     }
 
-    #[tool(
-        name = "config_reset",
-        description = "Reset one canopy setting to its registry default, written through the same validating path as config_set."
-    )]
-    pub(crate) async fn config_reset(
+    pub(crate) async fn config_reset_impl(
         &self,
-        Parameters(params): Parameters<ConfigResetParams>,
+        params: ConfigResetParams,
     ) -> Result<CallToolResult, McpError> {
         let dir = data_dir()?;
         match apply_set(&self.db, &dir, &params.key, None) {

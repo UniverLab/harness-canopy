@@ -315,7 +315,7 @@ pub(crate) fn validate_specs_have_types_for_run(
         return Ok(());
     }
     Err(format!(
-        "Graph '{graph_id}' requires every spec to have a type (require_spec_type); still untyped: {}. Set the type with spec_update before relaunching.",
+        "Graph '{graph_id}' requires every spec to have a type (require_spec_type); still untyped: {}. Set the type with `spec_edit update` before relaunching.",
         untyped.join(", ")
     ))
 }

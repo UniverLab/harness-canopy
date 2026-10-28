@@ -120,7 +120,7 @@ pub(crate) fn convert_specs(
     })
 }
 
-/// SPECCODE: create response for `spec_create` — an untyped, unconventional
+/// SPECCODE: create response for `spec_edit create` — an untyped, unconventional
 /// create succeeds but answers with a `warning` naming the consequence (no
 /// code, no prebuilt commit message) instead of silently dropping the data.
 pub(crate) fn spec_create_result(spec_id: &str, naming: &SpecNaming) -> CallToolResult {
@@ -149,7 +149,7 @@ pub(crate) fn validate_at_least_one_bool(updates: &[bool], field_name: &str) -> 
     }
 }
 
-/// Summary JSON for `spec_list` — no run/blocker info, since a standalone
+/// Summary JSON for `spec list` — no run/blocker info, since a standalone
 /// (unassigned) spec has never run. Compare [`graph_spec_details_json`],
 /// which adds that runtime detail for specs already inside a graph.
 pub(crate) fn spec_summary_json(spec: &GraphSpec, include_descriptions: bool) -> serde_json::Value {

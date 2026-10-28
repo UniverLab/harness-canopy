@@ -81,7 +81,7 @@ pub enum ArchiveGraphOutcome {
 pub enum SpecAdminStatusOutcome {
     Success,
     NotFound,
-    /// Spec is bound to a graph (not standalone); spec_set_status only
+    /// Spec is bound to a graph (not standalone); spec_edit set_status only
     /// administers standalone specs.
     NotStandalone(String),
     /// Spec has an active run and cannot be administratively transitioned.

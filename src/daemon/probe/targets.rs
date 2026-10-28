@@ -1,4 +1,4 @@
-//! Target discovery for `agent_probe`/`graph_control`: which
+//! Target discovery for `harness probe`/`graph_control`: which
 //! platform+model pairs a graph or recent-run history references, and the
 //! aggregate counts the MCP tools report. Split out of `probe.rs` to keep
 //! every production file within the file-size gate.
@@ -16,7 +16,7 @@ use crate::domain::graphs::{GraphDetails, GraphNodeKind};
 /// except `Reachable` and `Unknown`. Deliberately excludes `Unknown`: a pair
 /// whose validity could not be determined is not a confirmed failure, and
 /// folding it in here would make `would_fail` claim more certainty than the
-/// probe actually has. Shared by `agent_probe` and `graph_control` so the
+/// probe actually has. Shared by `harness probe` and `graph_control` so the
 /// two tools can never disagree about what counts as "would fail".
 pub(crate) fn would_fail_count(reports: &[ProbeReport]) -> usize {
     reports

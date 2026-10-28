@@ -4,8 +4,8 @@
 //! `crate::db::crews`.
 //!
 //! One code path (`all_crew_bindings`) answers all three questions:
-//! `crew_bindings` (every binding of one crew, for `crew_get`/`crew_delete`)
-//! and `crew_binding_counts` (per-kind counts per crew, for `crew_list`).
+//! `crew_bindings` (every binding of one crew, for `crew get`/`crew delete`)
+//! and `crew_binding_counts` (per-kind counts per crew, for `crew list`).
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};

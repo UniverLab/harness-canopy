@@ -1,7 +1,7 @@
 //! Focus panel for background agents (`AgentEntry::Agent`) — a fixed
 //! metadata header on top and a scrollable, color-coded log below.
 
-use super::details::agent_status;
+use super::details::agent_status_display;
 use super::log_fallback::log_scrollbar_geometry;
 use crate::domain::models::{Agent, Trigger};
 use crate::tui::app::types::App;
@@ -58,7 +58,7 @@ fn background_agent_metadata_lines(
     has_active_run: bool,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
-    let (status_text, status_color) = agent_status(agent, has_active_run);
+    let (status_text, status_color) = agent_status_display(agent, has_active_run);
     let model = agent.model.clone().unwrap_or_else(|| "-".to_string());
     let last_run = agent
         .last_run_at

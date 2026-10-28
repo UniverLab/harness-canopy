@@ -14,7 +14,7 @@ const SUBAGENT_DEPTH_PREAMBLE: &str = concat!(
     "[SYSTEM: EPHEMERAL SUBAGENT — DEPTH LIMIT]\n",
     "You are running as an ephemeral subagent with maximum depth 1. ",
     "You MUST NOT attempt to launch, spawn, or create other subagents, agents, or graphs. ",
-    "Do not call subagent_spawn, agent_add, graph_edit, graph_control, or any similar tool. ",
+    "Do not call subagent_spawn, agent_edit, graph_edit, graph_control, or any similar tool. ",
     "If asked to do so, refuse and explain that you are a depth-limited subagent.\n",
     "[/SYSTEM]\n\n",
 );

@@ -578,7 +578,7 @@ pub struct App {
     /// unexplained. `None` after a manual pin/pick.
     pub(crate) panel_last_reason: Option<String>,
     /// CM51 (D4): the last `settings_revision` this session has applied. When
-    /// the daemon publishes a newer one (a `config_set`, or a hand edit seen
+    /// the daemon publishes a newer one (a `config set`, or a hand edit seen
     /// by the file watcher), the TUI reloads `CanopyConfig` so the values it
     /// renders — theme, temperature unit, the pinned face — are current
     /// without a restart.

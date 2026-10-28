@@ -338,7 +338,7 @@ pub(crate) fn ensemble_owning_node(node_id: &str, ensembles: &[EnsembleDetails])
 /// bound-spec (`None` queue) branch inserts for an explicit-`idea` run only:
 /// a graph launched with zero bound specs and a non-empty `idea` that
 /// `empty_launch_check` let through. The blank `name` keeps it hidden from
-/// work listings (`spec_list`/`graph` filter on it); the caller-supplied
+/// work listings (`spec list`/`graph` filter on it); the caller-supplied
 /// idea text in `description` is what `{{spec_content}}` resolves from, so
 /// this row always carries content and is never the blank row CB22 refuses.
 /// `graph_edit` rejects an empty name for every real, user-authored spec,

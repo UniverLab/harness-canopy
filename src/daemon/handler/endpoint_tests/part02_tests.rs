@@ -11,13 +11,17 @@ async fn task_schedule_enable_sets_future_enable_time() {
     db.upsert_agent(&agent).unwrap();
 
     let at = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
-    let result = handler
-        .task_schedule_enable(Parameters(AgentScheduleEnableParams {
+    let result = call_resource_action(
+        &handler,
+        "agent_edit",
+        "schedule",
+        params_id(AgentScheduleEnableParams {
             id: "sched-1".to_string(),
             at: at.clone(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(!is_err(&result));
     assert!(text(&result).contains("scheduled to enable"));
@@ -28,13 +32,17 @@ async fn task_schedule_enable_rejects_bad_timestamp() {
     let (_dir, db, handler) = endpoint_test_handler();
     db.upsert_agent(&sample_agent("sched-2", None)).unwrap();
 
-    let result = handler
-        .task_schedule_enable(Parameters(AgentScheduleEnableParams {
+    let result = call_resource_action(
+        &handler,
+        "agent_edit",
+        "schedule",
+        params_id(AgentScheduleEnableParams {
             id: "sched-2".to_string(),
             at: "not-a-timestamp".to_string(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(is_err(&result));
     assert!(text(&result).contains("Invalid ISO 8601"));
@@ -44,13 +52,17 @@ async fn task_schedule_enable_rejects_bad_timestamp() {
 async fn task_schedule_enable_reports_missing_agent() {
     let (_dir, _db, handler) = endpoint_test_handler();
     let at = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
-    let result = handler
-        .task_schedule_enable(Parameters(AgentScheduleEnableParams {
+    let result = call_resource_action(
+        &handler,
+        "agent_edit",
+        "schedule",
+        params_id(AgentScheduleEnableParams {
             id: "ghost".to_string(),
             at,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&result));
 }
 
@@ -70,12 +82,16 @@ async fn task_disable_stops_a_watch_agent() {
     ))
     .unwrap();
 
-    let result = handler
-        .task_disable(Parameters(IdParam {
+    let result = call_resource_action(
+        &handler,
+        "agent_edit",
+        "disable",
+        params_id(IdParam {
             id: "watch-disable".to_string(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(!is_err(&result));
     let stored = db.get_agent("watch-disable").unwrap().unwrap();
@@ -85,12 +101,16 @@ async fn task_disable_stops_a_watch_agent() {
 #[tokio::test]
 async fn task_disable_reports_missing_agent() {
     let (_dir, _db, handler) = endpoint_test_handler();
-    let result = handler
-        .task_disable(Parameters(IdParam {
+    let result = call_resource_action(
+        &handler,
+        "agent_edit",
+        "disable",
+        params_id(IdParam {
             id: "ghost".to_string(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&result));
 }
 
@@ -101,12 +121,16 @@ async fn agent_run_launches_existing_agent_in_background() {
     let (_dir, db, handler) = endpoint_test_handler();
     db.upsert_agent(&sample_agent("runnable", None)).unwrap();
 
-    let result = handler
-        .agent_run(Parameters(IdParam {
+    let result = call_resource_action(
+        &handler,
+        "agent_edit",
+        "run",
+        params_id(IdParam {
             id: "runnable".to_string(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(!is_err(&result));
     assert!(text(&result).contains("launched in background"));
@@ -115,12 +139,16 @@ async fn agent_run_launches_existing_agent_in_background() {
 #[tokio::test]
 async fn agent_run_reports_missing_agent() {
     let (_dir, _db, handler) = endpoint_test_handler();
-    let result = handler
-        .agent_run(Parameters(IdParam {
+    let result = call_resource_action(
+        &handler,
+        "agent_edit",
+        "run",
+        params_id(IdParam {
             id: "ghost".to_string(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&result));
     assert!(text(&result).contains("No agent found"));
 }
@@ -139,7 +167,9 @@ async fn task_status_reports_agent_counts() {
     .unwrap();
     db.upsert_agent(&sample_agent("manual-a", None)).unwrap();
 
-    let result = handler.task_status().await.unwrap();
+    let result = call_resource_action(&handler, "agent", "status", ())
+        .await
+        .unwrap();
     let out = text(&result);
     assert!(out.contains("canopy v"));
     assert!(out.contains("cron: 1"));
@@ -168,14 +198,18 @@ async fn task_models_rejects_unconfigured_platform() {
     let _home_guard = HomeVar::set(home.path());
 
     let (_dir, _db, handler) = endpoint_test_handler();
-    let result = handler
-        .task_models(Parameters(TaskModelsParams {
+    let result = call_resource_action(
+        &handler,
+        "harness",
+        "models",
+        params_id(TaskModelsParams {
             platform: Some("not-configured-platform".to_string()),
             refresh: None,
             full: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(is_err(&result));
     assert!(text(&result).contains("is not configured in canopy"));
@@ -192,14 +226,18 @@ async fn task_models_returns_empty_list_with_reason_for_interactive_only_platfor
     let _home_guard = HomeVar::set(home.path());
 
     let (_dir, _db, handler) = endpoint_test_handler();
-    let result = handler
-        .task_models(Parameters(TaskModelsParams {
+    let result = call_resource_action(
+        &handler,
+        "harness",
+        "models",
+        params_id(TaskModelsParams {
             platform: Some("freebuff".to_string()),
             refresh: Some(true),
             full: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(!is_err(&result), "{}", text(&result));
     let body: serde_json::Value = serde_json::from_str(&raw_text(&result)).unwrap();
@@ -241,14 +279,18 @@ async fn task_models_enumerates_native_platform_models() {
     let _home_guard = HomeVar::set(home.path());
 
     let (_dir, _db, handler) = endpoint_test_handler();
-    let result = handler
-        .task_models(Parameters(TaskModelsParams {
+    let result = call_resource_action(
+        &handler,
+        "harness",
+        "models",
+        params_id(TaskModelsParams {
             platform: Some("native-cli".to_string()),
             refresh: Some(true),
             full: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(!is_err(&result), "{}", text(&result));
     let out = text(&result);
@@ -295,14 +337,18 @@ async fn task_models_warns_for_platform_without_model_flag() {
     let _home_guard = HomeVar::set(home.path());
 
     let (_dir, _db, handler) = endpoint_test_handler();
-    let result = handler
-        .task_models(Parameters(TaskModelsParams {
+    let result = call_resource_action(
+        &handler,
+        "harness",
+        "models",
+        params_id(TaskModelsParams {
             platform: Some("mistral".to_string()),
             refresh: None,
             full: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(!is_err(&result), "{}", text(&result));
     let out = text(&result);
@@ -340,14 +386,18 @@ async fn task_models_warns_for_native_enumeration_without_model_flag() {
     let _home_guard = HomeVar::set(home.path());
 
     let (_dir, _db, handler) = endpoint_test_handler();
-    let result = handler
-        .task_models(Parameters(TaskModelsParams {
+    let result = call_resource_action(
+        &handler,
+        "harness",
+        "models",
+        params_id(TaskModelsParams {
             platform: Some("named-agent-cli".to_string()),
             refresh: Some(true),
             full: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(!is_err(&result), "{}", text(&result));
     let out = text(&result);
@@ -388,14 +438,18 @@ async fn native_result_labels_source_as_cli_and_drops_catalogue_warning() {
     let _home_guard = HomeVar::set(home.path());
 
     let (_dir, _db, handler) = endpoint_test_handler();
-    let result = handler
-        .task_models(Parameters(TaskModelsParams {
+    let result = call_resource_action(
+        &handler,
+        "harness",
+        "models",
+        params_id(TaskModelsParams {
             platform: Some("kiro-shaped".to_string()),
             refresh: Some(true),
             full: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(!is_err(&result), "{}", text(&result));
     let out = text(&result);
@@ -449,14 +503,18 @@ async fn catalogue_result_keeps_cb9_warning_and_labels_source() {
     let _home_guard = HomeVar::set(home.path());
 
     let (_dir, _db, handler) = endpoint_test_handler();
-    let result = handler
-        .task_models(Parameters(TaskModelsParams {
+    let result = call_resource_action(
+        &handler,
+        "harness",
+        "models",
+        params_id(TaskModelsParams {
             platform: Some("mistral".to_string()),
             refresh: None,
             full: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(!is_err(&result), "{}", text(&result));
     let out = text(&result);
@@ -504,14 +562,18 @@ async fn native_enumeration_failure_falls_back_to_catalogue_and_says_so() {
     let _home_guard = HomeVar::set(home.path());
 
     let (_dir, _db, handler) = endpoint_test_handler();
-    let result = handler
-        .task_models(Parameters(TaskModelsParams {
+    let result = call_resource_action(
+        &handler,
+        "harness",
+        "models",
+        params_id(TaskModelsParams {
             platform: Some("mistral".to_string()),
             refresh: None,
             full: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
 
     // Must NOT be an error — the fallback is a degraded but usable result.
     assert!(!is_err(&result), "{}", text(&result));
@@ -553,14 +615,18 @@ async fn native_cache_and_refresh_match_catalogue_semantics() {
     let (_dir, _db, handler) = endpoint_test_handler();
 
     // First call with refresh: true → should be Live.
-    let result1 = handler
-        .task_models(Parameters(TaskModelsParams {
+    let result1 = call_resource_action(
+        &handler,
+        "harness",
+        "models",
+        params_id(TaskModelsParams {
             platform: Some("cache-test-cli".to_string()),
             refresh: Some(true),
             full: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&result1), "{}", text(&result1));
     let out1 = text(&result1);
     assert!(
@@ -570,14 +636,18 @@ async fn native_cache_and_refresh_match_catalogue_semantics() {
 
     // Second call without refresh → should be Cache (served from the
     // fresh cache populated by the first call).
-    let result2 = handler
-        .task_models(Parameters(TaskModelsParams {
+    let result2 = call_resource_action(
+        &handler,
+        "harness",
+        "models",
+        params_id(TaskModelsParams {
             platform: Some("cache-test-cli".to_string()),
             refresh: None,
             full: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&result2), "{}", text(&result2));
     let out2 = text(&result2);
     assert!(
@@ -620,14 +690,18 @@ async fn catalogue_platform_without_provider_mapping_says_so_not_network_error()
     let _home_guard = HomeVar::set(home.path());
 
     let (_dir, _db, handler) = endpoint_test_handler();
-    let result = handler
-        .task_models(Parameters(TaskModelsParams {
+    let result = call_resource_action(
+        &handler,
+        "harness",
+        "models",
+        params_id(TaskModelsParams {
             platform: Some("unmapped-cli".to_string()),
             refresh: None,
             full: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(is_err(&result), "{}", text(&result));
     let out = text(&result);
@@ -654,14 +728,18 @@ async fn task_logs_reports_no_logs_for_unexecuted_agent() {
         .to_string();
     db.upsert_agent(&agent).unwrap();
 
-    let result = handler
-        .task_logs(Parameters(TaskLogsParams {
+    let result = call_resource_action(
+        &handler,
+        "agent",
+        "logs",
+        params_id(TaskLogsParams {
             id: "no-logs-yet".to_string(),
             lines: None,
             since: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(!is_err(&result));
     assert!(text(&result).contains("No logs found"));
@@ -676,14 +754,18 @@ async fn task_logs_returns_recent_lines() {
     agent.log_path = log_path.to_string_lossy().to_string();
     db.upsert_agent(&agent).unwrap();
 
-    let result = handler
-        .task_logs(Parameters(TaskLogsParams {
+    let result = call_resource_action(
+        &handler,
+        "agent",
+        "logs",
+        params_id(TaskLogsParams {
             id: "has-logs".to_string(),
             lines: Some(2),
             since: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
 
     let out = text(&result);
     assert!(out.contains("line two"));
@@ -706,32 +788,33 @@ async fn task_update_renames_and_updates_prompt() {
     ))
     .unwrap();
 
-    let result = handler
-        .task_update(
-            Parameters(TaskUpdateParams {
-                action: None,
-                target_session_name: None,
-                target_session_id: None,
-                id: "old-id".to_string(),
-                new_id: Some("new-id".to_string()),
-                prompt: Some("updated prompt".to_string()),
-                cli: None,
-                model: None,
-                effort: None,
-                schedule: None,
-                working_dir: None,
-                duration_minutes: None,
-                path: None,
-                events: None,
-                debounce_seconds: None,
-                recursive: None,
-                enabled: None,
-                notify_on_success: None,
-            }),
-            OptionalExtension(None),
-        )
-        .await
-        .unwrap();
+    let result = call_resource_action(
+        &handler,
+        "agent_edit",
+        "update",
+        params_id(TaskUpdateParams {
+            delivery_action: None,
+            target_session_name: None,
+            target_session_id: None,
+            id: "old-id".to_string(),
+            new_id: Some("new-id".to_string()),
+            prompt: Some("updated prompt".to_string()),
+            cli: None,
+            model: None,
+            effort: None,
+            schedule: None,
+            working_dir: None,
+            duration_minutes: None,
+            path: None,
+            events: None,
+            debounce_seconds: None,
+            recursive: None,
+            enabled: None,
+            notify_on_success: None,
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(!is_err(&result), "{}", text(&result));
     assert!(db.get_agent("old-id").unwrap().is_none());
@@ -745,32 +828,33 @@ async fn task_update_reports_missing_agent() {
     let _home_guard = HomeVar::set(home.path());
     let (_dir, _db, handler) = endpoint_test_handler();
 
-    let result = handler
-        .task_update(
-            Parameters(TaskUpdateParams {
-                action: None,
-                target_session_name: None,
-                target_session_id: None,
-                id: "ghost".to_string(),
-                new_id: None,
-                prompt: None,
-                cli: None,
-                model: None,
-                effort: None,
-                schedule: None,
-                working_dir: None,
-                duration_minutes: None,
-                path: None,
-                events: None,
-                debounce_seconds: None,
-                recursive: None,
-                enabled: None,
-                notify_on_success: None,
-            }),
-            OptionalExtension(None),
-        )
-        .await
-        .unwrap();
+    let result = call_resource_action(
+        &handler,
+        "agent_edit",
+        "update",
+        params_id(TaskUpdateParams {
+            delivery_action: None,
+            target_session_name: None,
+            target_session_id: None,
+            id: "ghost".to_string(),
+            new_id: None,
+            prompt: None,
+            cli: None,
+            model: None,
+            effort: None,
+            schedule: None,
+            working_dir: None,
+            duration_minutes: None,
+            path: None,
+            events: None,
+            debounce_seconds: None,
+            recursive: None,
+            enabled: None,
+            notify_on_success: None,
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(is_err(&result));
     assert!(text(&result).contains("No agent found"));
@@ -783,32 +867,33 @@ async fn task_update_rejects_invalid_new_id() {
     let (_dir, db, handler) = endpoint_test_handler();
     db.upsert_agent(&sample_agent("keep-id", None)).unwrap();
 
-    let result = handler
-        .task_update(
-            Parameters(TaskUpdateParams {
-                action: None,
-                target_session_name: None,
-                target_session_id: None,
-                id: "keep-id".to_string(),
-                new_id: Some("bad id!".to_string()),
-                prompt: None,
-                cli: None,
-                model: None,
-                effort: None,
-                schedule: None,
-                working_dir: None,
-                duration_minutes: None,
-                path: None,
-                events: None,
-                debounce_seconds: None,
-                recursive: None,
-                enabled: None,
-                notify_on_success: None,
-            }),
-            OptionalExtension(None),
-        )
-        .await
-        .unwrap();
+    let result = call_resource_action(
+        &handler,
+        "agent_edit",
+        "update",
+        params_id(TaskUpdateParams {
+            delivery_action: None,
+            target_session_name: None,
+            target_session_id: None,
+            id: "keep-id".to_string(),
+            new_id: Some("bad id!".to_string()),
+            prompt: None,
+            cli: None,
+            model: None,
+            effort: None,
+            schedule: None,
+            working_dir: None,
+            duration_minutes: None,
+            path: None,
+            events: None,
+            debounce_seconds: None,
+            recursive: None,
+            enabled: None,
+            notify_on_success: None,
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(is_err(&result));
     assert!(db.get_agent("keep-id").unwrap().is_some());

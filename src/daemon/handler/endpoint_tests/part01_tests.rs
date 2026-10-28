@@ -164,26 +164,27 @@ async fn task_add_registers_a_cron_agent() {
     let _home_guard = HomeVar::set(home.path());
     let (_dir, db, handler) = endpoint_test_handler();
 
-    let result = handler
-        .task_add(
-            Parameters(TaskAddParams {
-                action: None,
-                target_session_name: None,
-                target_session_id: None,
-                id: "agt-1".to_string(),
-                prompt: "run the tests".to_string(),
-                schedule: "*/5 * * * *".to_string(),
-                cli: Some("opencode".to_string()),
-                model: None,
-                effort: None,
-                duration_minutes: None,
-                working_dir: None,
-                timeout_minutes: None,
-            }),
-            OptionalExtension(None),
-        )
-        .await
-        .unwrap();
+    let result = call_resource_action(
+        &handler,
+        "agent_edit",
+        "add",
+        params_id(TaskAddParams {
+            delivery_action: None,
+            target_session_name: None,
+            target_session_id: None,
+            id: "agt-1".to_string(),
+            prompt: "run the tests".to_string(),
+            schedule: "*/5 * * * *".to_string(),
+            cli: Some("opencode".to_string()),
+            model: None,
+            effort: None,
+            duration_minutes: None,
+            working_dir: None,
+            timeout_minutes: None,
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(!is_err(&result), "{}", text(&result));
     assert!(text(&result).contains("registered with schedule"));
@@ -197,26 +198,27 @@ async fn agent_add_send_action_does_not_require_cli() {
     let _home_guard = HomeVar::set(home.path());
     let (_dir, db, handler) = endpoint_test_handler();
 
-    let result = handler
-        .task_add(
-            Parameters(TaskAddParams {
-                action: Some("send_to_session".to_string()),
-                target_session_name: Some("orch".to_string()),
-                target_session_id: None,
-                id: "nudge-1".to_string(),
-                prompt: "nudge the orchestrator".to_string(),
-                schedule: "0 * * * *".to_string(),
-                cli: None,
-                model: None,
-                effort: None,
-                duration_minutes: None,
-                working_dir: None,
-                timeout_minutes: None,
-            }),
-            OptionalExtension(None),
-        )
-        .await
-        .unwrap();
+    let result = call_resource_action(
+        &handler,
+        "agent_edit",
+        "add",
+        params_id(TaskAddParams {
+            delivery_action: Some("send_to_session".to_string()),
+            target_session_name: Some("orch".to_string()),
+            target_session_id: None,
+            id: "nudge-1".to_string(),
+            prompt: "nudge the orchestrator".to_string(),
+            schedule: "0 * * * *".to_string(),
+            cli: None,
+            model: None,
+            effort: None,
+            duration_minutes: None,
+            working_dir: None,
+            timeout_minutes: None,
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(!is_err(&result), "{}", text(&result));
     assert!(text(&result).contains("orch"), "{}", text(&result));
@@ -231,27 +233,28 @@ async fn agent_watch_send_action_registers_watcher() {
     let _home_guard = HomeVar::set(home.path());
     let (dir, db, handler) = endpoint_test_handler();
 
-    let result = handler
-        .task_watch(
-            Parameters(TaskWatchParams {
-                action: Some("send_to_session".to_string()),
-                target_session_name: None,
-                target_session_id: Some("sess-1".to_string()),
-                id: "watch-send-1".to_string(),
-                path: dir.path().to_string_lossy().to_string(),
-                events: vec!["modify".to_string()],
-                prompt: "a spec changed".to_string(),
-                cli: None,
-                model: None,
-                effort: None,
-                debounce_seconds: None,
-                recursive: None,
-                timeout_minutes: None,
-            }),
-            OptionalExtension(None),
-        )
-        .await
-        .unwrap();
+    let result = call_resource_action(
+        &handler,
+        "agent_edit",
+        "watch",
+        params_id(TaskWatchParams {
+            delivery_action: Some("send_to_session".to_string()),
+            target_session_name: None,
+            target_session_id: Some("sess-1".to_string()),
+            id: "watch-send-1".to_string(),
+            path: dir.path().to_string_lossy().to_string(),
+            events: vec!["modify".to_string()],
+            prompt: "a spec changed".to_string(),
+            cli: None,
+            model: None,
+            effort: None,
+            debounce_seconds: None,
+            recursive: None,
+            timeout_minutes: None,
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(!is_err(&result), "{}", text(&result));
     assert!(text(&result).contains("sess-1"), "{}", text(&result));
@@ -266,54 +269,56 @@ async fn agent_update_switching_to_headless_requires_cli() {
     let _home_guard = HomeVar::set(home.path());
     let (_dir, db, handler) = endpoint_test_handler();
 
-    let created = handler
-        .task_add(
-            Parameters(TaskAddParams {
-                action: Some("send_to_session".to_string()),
-                target_session_name: Some("orch".to_string()),
-                target_session_id: None,
-                id: "switch-1".to_string(),
-                prompt: "p".to_string(),
-                schedule: "0 * * * *".to_string(),
-                cli: None,
-                model: None,
-                effort: None,
-                duration_minutes: None,
-                working_dir: None,
-                timeout_minutes: None,
-            }),
-            OptionalExtension(None),
-        )
-        .await
-        .unwrap();
+    let created = call_resource_action(
+        &handler,
+        "agent_edit",
+        "add",
+        params_id(TaskAddParams {
+            delivery_action: Some("send_to_session".to_string()),
+            target_session_name: Some("orch".to_string()),
+            target_session_id: None,
+            id: "switch-1".to_string(),
+            prompt: "p".to_string(),
+            schedule: "0 * * * *".to_string(),
+            cli: None,
+            model: None,
+            effort: None,
+            duration_minutes: None,
+            working_dir: None,
+            timeout_minutes: None,
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&created), "{}", text(&created));
 
-    let result = handler
-        .task_update(
-            Parameters(TaskUpdateParams {
-                action: Some("headless".to_string()),
-                target_session_name: None,
-                target_session_id: None,
-                id: "switch-1".to_string(),
-                new_id: None,
-                prompt: None,
-                cli: None,
-                model: None,
-                effort: None,
-                schedule: None,
-                working_dir: None,
-                duration_minutes: None,
-                path: None,
-                events: None,
-                debounce_seconds: None,
-                recursive: None,
-                enabled: None,
-                notify_on_success: None,
-            }),
-            OptionalExtension(None),
-        )
-        .await
-        .unwrap();
+    let result = call_resource_action(
+        &handler,
+        "agent_edit",
+        "update",
+        params_id(TaskUpdateParams {
+            delivery_action: Some("headless".to_string()),
+            target_session_name: None,
+            target_session_id: None,
+            id: "switch-1".to_string(),
+            new_id: None,
+            prompt: None,
+            cli: None,
+            model: None,
+            effort: None,
+            schedule: None,
+            working_dir: None,
+            duration_minutes: None,
+            path: None,
+            events: None,
+            debounce_seconds: None,
+            recursive: None,
+            enabled: None,
+            notify_on_success: None,
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(is_err(&result), "{}", text(&result));
     assert!(text(&result).contains("cli"), "{}", text(&result));
@@ -365,54 +370,56 @@ async fn agent_update_retargets_send_agent_without_repeating_action() {
     let _home_guard = HomeVar::set(home.path());
     let (_dir, db, handler) = endpoint_test_handler();
 
-    let created = handler
-        .task_add(
-            Parameters(TaskAddParams {
-                action: Some("send_to_session".to_string()),
-                target_session_name: Some("orch".to_string()),
-                target_session_id: None,
-                id: "retarget-1".to_string(),
-                prompt: "p".to_string(),
-                schedule: "0 * * * *".to_string(),
-                cli: None,
-                model: None,
-                effort: None,
-                duration_minutes: None,
-                working_dir: None,
-                timeout_minutes: None,
-            }),
-            OptionalExtension(None),
-        )
-        .await
-        .unwrap();
+    let created = call_resource_action(
+        &handler,
+        "agent_edit",
+        "add",
+        params_id(TaskAddParams {
+            delivery_action: Some("send_to_session".to_string()),
+            target_session_name: Some("orch".to_string()),
+            target_session_id: None,
+            id: "retarget-1".to_string(),
+            prompt: "p".to_string(),
+            schedule: "0 * * * *".to_string(),
+            cli: None,
+            model: None,
+            effort: None,
+            duration_minutes: None,
+            working_dir: None,
+            timeout_minutes: None,
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&created), "{}", text(&created));
 
-    let updated = handler
-        .task_update(
-            Parameters(TaskUpdateParams {
-                action: None,
-                target_session_name: Some("other".to_string()),
-                target_session_id: None,
-                id: "retarget-1".to_string(),
-                new_id: None,
-                prompt: None,
-                cli: None,
-                model: None,
-                effort: None,
-                schedule: None,
-                working_dir: None,
-                duration_minutes: None,
-                path: None,
-                events: None,
-                debounce_seconds: None,
-                recursive: None,
-                enabled: None,
-                notify_on_success: None,
-            }),
-            OptionalExtension(None),
-        )
-        .await
-        .unwrap();
+    let updated = call_resource_action(
+        &handler,
+        "agent_edit",
+        "update",
+        params_id(TaskUpdateParams {
+            delivery_action: None,
+            target_session_name: Some("other".to_string()),
+            target_session_id: None,
+            id: "retarget-1".to_string(),
+            new_id: None,
+            prompt: None,
+            cli: None,
+            model: None,
+            effort: None,
+            schedule: None,
+            working_dir: None,
+            duration_minutes: None,
+            path: None,
+            events: None,
+            debounce_seconds: None,
+            recursive: None,
+            enabled: None,
+            notify_on_success: None,
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&updated), "{}", text(&updated));
 
     let stored = db.get_agent("retarget-1").unwrap().unwrap();
@@ -425,55 +432,57 @@ async fn agent_update_refuses_target_on_headless_agent() {
     let _home_guard = HomeVar::set(home.path());
     let (dir, db, handler) = endpoint_test_handler();
 
-    let created = handler
-        .task_watch(
-            Parameters(TaskWatchParams {
-                action: None,
-                target_session_name: None,
-                target_session_id: None,
-                id: "headless-watch".to_string(),
-                path: dir.path().to_string_lossy().to_string(),
-                events: vec!["modify".to_string()],
-                prompt: "p".to_string(),
-                cli: Some("opencode".to_string()),
-                model: None,
-                effort: None,
-                debounce_seconds: None,
-                recursive: None,
-                timeout_minutes: None,
-            }),
-            OptionalExtension(None),
-        )
-        .await
-        .unwrap();
+    let created = call_resource_action(
+        &handler,
+        "agent_edit",
+        "watch",
+        params_id(TaskWatchParams {
+            delivery_action: None,
+            target_session_name: None,
+            target_session_id: None,
+            id: "headless-watch".to_string(),
+            path: dir.path().to_string_lossy().to_string(),
+            events: vec!["modify".to_string()],
+            prompt: "p".to_string(),
+            cli: Some("opencode".to_string()),
+            model: None,
+            effort: None,
+            debounce_seconds: None,
+            recursive: None,
+            timeout_minutes: None,
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&created), "{}", text(&created));
 
-    let updated = handler
-        .task_update(
-            Parameters(TaskUpdateParams {
-                action: None,
-                target_session_name: Some("orch".to_string()),
-                target_session_id: None,
-                id: "headless-watch".to_string(),
-                new_id: None,
-                prompt: None,
-                cli: None,
-                model: None,
-                effort: None,
-                schedule: None,
-                working_dir: None,
-                duration_minutes: None,
-                path: None,
-                events: None,
-                debounce_seconds: None,
-                recursive: None,
-                enabled: None,
-                notify_on_success: None,
-            }),
-            OptionalExtension(None),
-        )
-        .await
-        .unwrap();
+    let updated = call_resource_action(
+        &handler,
+        "agent_edit",
+        "update",
+        params_id(TaskUpdateParams {
+            delivery_action: None,
+            target_session_name: Some("orch".to_string()),
+            target_session_id: None,
+            id: "headless-watch".to_string(),
+            new_id: None,
+            prompt: None,
+            cli: None,
+            model: None,
+            effort: None,
+            schedule: None,
+            working_dir: None,
+            duration_minutes: None,
+            path: None,
+            events: None,
+            debounce_seconds: None,
+            recursive: None,
+            enabled: None,
+            notify_on_success: None,
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&updated), "{}", text(&updated));
     assert!(!db
         .get_agent("headless-watch")
@@ -488,26 +497,27 @@ async fn task_add_rejects_invalid_cron_expression() {
     let _home_guard = HomeVar::set(home.path());
     let (_dir, db, handler) = endpoint_test_handler();
 
-    let result = handler
-        .task_add(
-            Parameters(TaskAddParams {
-                action: None,
-                target_session_name: None,
-                target_session_id: None,
-                id: "agt-bad-cron".to_string(),
-                prompt: "run the tests".to_string(),
-                schedule: "not a cron expr!".to_string(),
-                cli: Some("opencode".to_string()),
-                model: None,
-                effort: None,
-                duration_minutes: None,
-                working_dir: None,
-                timeout_minutes: None,
-            }),
-            OptionalExtension(None),
-        )
-        .await
-        .unwrap();
+    let result = call_resource_action(
+        &handler,
+        "agent_edit",
+        "add",
+        params_id(TaskAddParams {
+            delivery_action: None,
+            target_session_name: None,
+            target_session_id: None,
+            id: "agt-bad-cron".to_string(),
+            prompt: "run the tests".to_string(),
+            schedule: "not a cron expr!".to_string(),
+            cli: Some("opencode".to_string()),
+            model: None,
+            effort: None,
+            duration_minutes: None,
+            working_dir: None,
+            timeout_minutes: None,
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(is_err(&result));
     assert!(text(&result).contains("Invalid cron expression"));
@@ -520,26 +530,27 @@ async fn task_add_rejects_invalid_id() {
     let _home_guard = HomeVar::set(home.path());
     let (_dir, _db, handler) = endpoint_test_handler();
 
-    let result = handler
-        .task_add(
-            Parameters(TaskAddParams {
-                action: None,
-                target_session_name: None,
-                target_session_id: None,
-                id: "bad id with spaces!".to_string(),
-                prompt: "run the tests".to_string(),
-                schedule: "*/5 * * * *".to_string(),
-                cli: Some("opencode".to_string()),
-                model: None,
-                effort: None,
-                duration_minutes: None,
-                working_dir: None,
-                timeout_minutes: None,
-            }),
-            OptionalExtension(None),
-        )
-        .await
-        .unwrap();
+    let result = call_resource_action(
+        &handler,
+        "agent_edit",
+        "add",
+        params_id(TaskAddParams {
+            delivery_action: None,
+            target_session_name: None,
+            target_session_id: None,
+            id: "bad id with spaces!".to_string(),
+            prompt: "run the tests".to_string(),
+            schedule: "*/5 * * * *".to_string(),
+            cli: Some("opencode".to_string()),
+            model: None,
+            effort: None,
+            duration_minutes: None,
+            working_dir: None,
+            timeout_minutes: None,
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(is_err(&result));
     assert!(text(&result).contains("alphanumeric"));
@@ -572,26 +583,27 @@ async fn task_add_rejects_platform_whose_binary_is_the_wrong_program() {
     let _home_guard = HomeVar::set(home.path());
 
     let (_dir, db, handler) = endpoint_test_handler();
-    let result = handler
-        .task_add(
-            Parameters(TaskAddParams {
-                action: None,
-                target_session_name: None,
-                target_session_id: None,
-                id: "agt-wrong-bin".to_string(),
-                prompt: "run the tests".to_string(),
-                schedule: "*/5 * * * *".to_string(),
-                cli: Some("blackbox".to_string()),
-                model: None,
-                effort: None,
-                duration_minutes: None,
-                working_dir: None,
-                timeout_minutes: None,
-            }),
-            OptionalExtension(None),
-        )
-        .await
-        .unwrap();
+    let result = call_resource_action(
+        &handler,
+        "agent_edit",
+        "add",
+        params_id(TaskAddParams {
+            delivery_action: None,
+            target_session_name: None,
+            target_session_id: None,
+            id: "agt-wrong-bin".to_string(),
+            prompt: "run the tests".to_string(),
+            schedule: "*/5 * * * *".to_string(),
+            cli: Some("blackbox".to_string()),
+            model: None,
+            effort: None,
+            duration_minutes: None,
+            working_dir: None,
+            timeout_minutes: None,
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(is_err(&result));
     assert!(text(&result).contains("is not"));
@@ -612,26 +624,27 @@ async fn task_add_rejects_interactive_only_platform() {
 
     let (_dir, db, handler) = endpoint_test_handler();
 
-    let result = handler
-        .task_add(
-            Parameters(TaskAddParams {
-                action: None,
-                target_session_name: None,
-                target_session_id: None,
-                id: "agt-live-only".to_string(),
-                prompt: "run the tests".to_string(),
-                schedule: "*/5 * * * *".to_string(),
-                cli: Some("freebuff".to_string()),
-                model: None,
-                effort: None,
-                duration_minutes: None,
-                working_dir: None,
-                timeout_minutes: None,
-            }),
-            OptionalExtension(None),
-        )
-        .await
-        .unwrap();
+    let result = call_resource_action(
+        &handler,
+        "agent_edit",
+        "add",
+        params_id(TaskAddParams {
+            delivery_action: None,
+            target_session_name: None,
+            target_session_id: None,
+            id: "agt-live-only".to_string(),
+            prompt: "run the tests".to_string(),
+            schedule: "*/5 * * * *".to_string(),
+            cli: Some("freebuff".to_string()),
+            model: None,
+            effort: None,
+            duration_minutes: None,
+            working_dir: None,
+            timeout_minutes: None,
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(is_err(&result), "{}", text(&result));
     assert!(
@@ -654,27 +667,28 @@ async fn task_watch_registers_a_watcher() {
     let _home_guard = HomeVar::set(home.path());
     let (dir, db, handler) = endpoint_test_handler();
 
-    let result = handler
-        .task_watch(
-            Parameters(TaskWatchParams {
-                action: None,
-                target_session_name: None,
-                target_session_id: None,
-                id: "watch-1".to_string(),
-                path: dir.path().to_string_lossy().to_string(),
-                events: vec!["modify".to_string(), "create".to_string()],
-                prompt: "react to changes".to_string(),
-                cli: Some("opencode".to_string()),
-                model: None,
-                effort: None,
-                debounce_seconds: None,
-                recursive: Some(true),
-                timeout_minutes: None,
-            }),
-            OptionalExtension(None),
-        )
-        .await
-        .unwrap();
+    let result = call_resource_action(
+        &handler,
+        "agent_edit",
+        "watch",
+        params_id(TaskWatchParams {
+            delivery_action: None,
+            target_session_name: None,
+            target_session_id: None,
+            id: "watch-1".to_string(),
+            path: dir.path().to_string_lossy().to_string(),
+            events: vec!["modify".to_string(), "create".to_string()],
+            prompt: "react to changes".to_string(),
+            cli: Some("opencode".to_string()),
+            model: None,
+            effort: None,
+            debounce_seconds: None,
+            recursive: Some(true),
+            timeout_minutes: None,
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(!is_err(&result), "{}", text(&result));
     let stored = db.get_agent("watch-1").unwrap().unwrap();
@@ -687,27 +701,28 @@ async fn task_watch_rejects_relative_path() {
     let _home_guard = HomeVar::set(home.path());
     let (_dir, db, handler) = endpoint_test_handler();
 
-    let result = handler
-        .task_watch(
-            Parameters(TaskWatchParams {
-                action: None,
-                target_session_name: None,
-                target_session_id: None,
-                id: "watch-bad-path".to_string(),
-                path: "relative/path".to_string(),
-                events: vec!["modify".to_string()],
-                prompt: "react to changes".to_string(),
-                cli: Some("opencode".to_string()),
-                model: None,
-                effort: None,
-                debounce_seconds: None,
-                recursive: None,
-                timeout_minutes: None,
-            }),
-            OptionalExtension(None),
-        )
-        .await
-        .unwrap();
+    let result = call_resource_action(
+        &handler,
+        "agent_edit",
+        "watch",
+        params_id(TaskWatchParams {
+            delivery_action: None,
+            target_session_name: None,
+            target_session_id: None,
+            id: "watch-bad-path".to_string(),
+            path: "relative/path".to_string(),
+            events: vec!["modify".to_string()],
+            prompt: "react to changes".to_string(),
+            cli: Some("opencode".to_string()),
+            model: None,
+            effort: None,
+            debounce_seconds: None,
+            recursive: None,
+            timeout_minutes: None,
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(is_err(&result));
     assert!(text(&result).contains("must be absolute"));
@@ -720,27 +735,28 @@ async fn task_watch_rejects_unknown_event_name() {
     let _home_guard = HomeVar::set(home.path());
     let (dir, _db, handler) = endpoint_test_handler();
 
-    let result = handler
-        .task_watch(
-            Parameters(TaskWatchParams {
-                action: None,
-                target_session_name: None,
-                target_session_id: None,
-                id: "watch-bad-event".to_string(),
-                path: dir.path().to_string_lossy().to_string(),
-                events: vec!["explode".to_string()],
-                prompt: "react to changes".to_string(),
-                cli: Some("opencode".to_string()),
-                model: None,
-                effort: None,
-                debounce_seconds: None,
-                recursive: None,
-                timeout_minutes: None,
-            }),
-            OptionalExtension(None),
-        )
-        .await
-        .unwrap();
+    let result = call_resource_action(
+        &handler,
+        "agent_edit",
+        "watch",
+        params_id(TaskWatchParams {
+            delivery_action: None,
+            target_session_name: None,
+            target_session_id: None,
+            id: "watch-bad-event".to_string(),
+            path: dir.path().to_string_lossy().to_string(),
+            events: vec!["explode".to_string()],
+            prompt: "react to changes".to_string(),
+            cli: Some("opencode".to_string()),
+            model: None,
+            effort: None,
+            debounce_seconds: None,
+            recursive: None,
+            timeout_minutes: None,
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(is_err(&result));
 }
@@ -751,7 +767,9 @@ async fn task_list_reports_agents_and_corrupt_rows() {
     db.upsert_agent(&sample_agent("healthy-1", None)).unwrap();
     db.insert_corrupt_agent_for_test("corrupt-1", true).unwrap();
 
-    let result = handler.task_list().await.unwrap();
+    let result = call_resource_action(&handler, "agent", "list", ())
+        .await
+        .unwrap();
     let out = text(&result);
     assert!(out.contains("healthy-1"));
     assert!(out.contains("corrupt"));
@@ -761,7 +779,9 @@ async fn task_list_reports_agents_and_corrupt_rows() {
 #[tokio::test]
 async fn task_list_reports_empty_state() {
     let (_dir, _db, handler) = endpoint_test_handler();
-    let result = handler.task_list().await.unwrap();
+    let result = call_resource_action(&handler, "agent", "list", ())
+        .await
+        .unwrap();
     assert!(text(&result).contains("No agents registered"));
 }
 
@@ -777,12 +797,16 @@ async fn agent_get_returns_full_prompt_and_every_field() {
     agent.prompt = "x".repeat(2000);
     db.upsert_agent(&agent).unwrap();
 
-    let result = handler
-        .agent_get(Parameters(IdParam {
+    let result = call_resource_action(
+        &handler,
+        "agent",
+        "get",
+        params_id(IdParam {
             id: "long-prompt".to_string(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&result), "{}", text(&result));
     let v: serde_json::Value = serde_json::from_str(&raw_text(&result))
         .unwrap_or_else(|e| panic!("expected JSON body: {e}"));
@@ -824,12 +848,16 @@ async fn agent_get_returns_full_prompt_and_every_field() {
 #[tokio::test]
 async fn agent_get_unknown_id_returns_exact_error() {
     let (_dir, _db, handler) = endpoint_test_handler();
-    let result = handler
-        .agent_get(Parameters(IdParam {
+    let result = call_resource_action(
+        &handler,
+        "agent",
+        "get",
+        params_id(IdParam {
             id: "nope".to_string(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&result));
     assert_eq!(raw_text(&result), "agent 'nope' not found");
 }
@@ -841,8 +869,10 @@ async fn task_list_long_prompt_points_to_agent_get() {
     agent.prompt = "y".repeat(2000);
     db.upsert_agent(&agent).unwrap();
 
-    let result = handler.task_list().await.unwrap();
-    assert!(text(&result).contains("agent_get loop-watchdog"));
+    let result = call_resource_action(&handler, "agent", "list", ())
+        .await
+        .unwrap();
+    assert!(text(&result).contains("`agent get` loop-watchdog"));
 }
 
 #[tokio::test]
@@ -1319,12 +1349,16 @@ async fn task_remove_deletes_existing_agent() {
     let (_dir, db, handler) = endpoint_test_handler();
     db.upsert_agent(&sample_agent("to-remove", None)).unwrap();
 
-    let result = handler
-        .task_remove(Parameters(IdParam {
+    let result = call_resource_action(
+        &handler,
+        "agent_edit",
+        "remove",
+        params_id(IdParam {
             id: "to-remove".to_string(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(!is_err(&result));
     assert!(text(&result).contains("removed"));
@@ -1334,12 +1368,16 @@ async fn task_remove_deletes_existing_agent() {
 #[tokio::test]
 async fn task_remove_reports_missing_agent() {
     let (_dir, _db, handler) = endpoint_test_handler();
-    let result = handler
-        .task_remove(Parameters(IdParam {
+    let result = call_resource_action(
+        &handler,
+        "agent_edit",
+        "remove",
+        params_id(IdParam {
             id: "does-not-exist".to_string(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(is_err(&result));
     assert!(text(&result).contains("No agent found"));
@@ -1355,12 +1393,16 @@ async fn task_enable_clears_expiry_on_expired_agent() {
     agent.expires_at = Some(chrono::Utc::now() - chrono::Duration::minutes(5));
     db.upsert_agent(&agent).unwrap();
 
-    let result = handler
-        .task_enable(Parameters(IdParam {
+    let result = call_resource_action(
+        &handler,
+        "agent_edit",
+        "enable",
+        params_id(IdParam {
             id: "expired-1".to_string(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
 
     assert!(!is_err(&result));
     let stored = db.get_agent("expired-1").unwrap().unwrap();
@@ -1371,11 +1413,15 @@ async fn task_enable_clears_expiry_on_expired_agent() {
 #[tokio::test]
 async fn task_enable_reports_missing_agent() {
     let (_dir, _db, handler) = endpoint_test_handler();
-    let result = handler
-        .task_enable(Parameters(IdParam {
+    let result = call_resource_action(
+        &handler,
+        "agent_edit",
+        "enable",
+        params_id(IdParam {
             id: "ghost".to_string(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&result));
 }

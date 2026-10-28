@@ -149,7 +149,7 @@ impl App {
     /// Store a fresh snapshot and clamp every selection against it so a
     /// shrunken list can never leave the keys pointing past the end.
     fn apply_crews_snapshot(&mut self, mut snapshot: CrewsSnapshot) {
-        // `crew_list` carries only binding counts, so the Enter-expand read
+        // `crew list` carries only binding counts, so the Enter-expand read
         // (D16) is the only source of a crew's binding list. Carry the
         // already-loaded bindings over to the new snapshot by name, or the
         // periodic refresh would blank the expanded row's bindings seconds
@@ -319,7 +319,7 @@ impl App {
     }
 
     /// D15's note: non-empty when any graph a crew is bound to is running.
-    /// `crew_get`'s `bindings[].graph` carries the graph NAME (verified
+    /// `crew get`'s `bindings[].graph` carries the graph NAME (verified
     /// against `graph_name_for_scope`), so the match is on `lp.name`.
     pub(crate) fn crew_running_note(&self, bound: &[String]) -> &'static str {
         const NOTE: &str = " Bound running graphs pick it up at their next dispatch.";
@@ -389,8 +389,8 @@ mod tests {
     }
 
     /// The refresh tick must not blank an expanded crew's bindings: the
-    /// `crew_list` snapshot only counts them, so the value `crew_get` loaded
-    /// on Enter has to survive (`crew_list` carries no binding list).
+    /// `crew list` snapshot only counts them, so the value `crew get` loaded
+    /// on Enter has to survive (`crew list` carries no binding list).
     #[test]
     fn refresh_keeps_loaded_bindings_on_the_expanded_crew() {
         let mut app = test_app();

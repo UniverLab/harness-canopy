@@ -48,7 +48,7 @@ impl Availability {
 }
 
 /// Parse an `until` timestamp. RFC 3339, normalised to UTC. Shared by
-/// `effective_state`'s expiry rule and the `roster_set` validation, so the
+/// `effective_state`'s expiry rule and the `harness roster_set` action validation, so the
 /// write edge and the read edge agree about what a valid instant is.
 pub(crate) fn parse_until(raw: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(raw)
@@ -58,7 +58,7 @@ pub(crate) fn parse_until(raw: &str) -> Option<DateTime<Utc>> {
 
 /// An `unavailable` entry whose `until` is at or before `now`: its pair reads
 /// as available again. The one expiry rule — `effective_state` and the
-/// `roster_list`/`roster_check` read surfaces report it as expired rather
+/// `harness roster_list`/`harness roster_check` read surfaces report it as expired rather
 /// than silently swallowing the entry, and nothing is ever rewritten by a
 /// timer.
 pub fn entry_expired(entry: &RosterEntry, now: &DateTime<Utc>) -> bool {

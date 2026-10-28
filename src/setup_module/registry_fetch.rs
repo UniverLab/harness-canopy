@@ -30,7 +30,7 @@ pub fn local_registry_path() -> Option<&'static PathBuf> {
 
 /// Outcome of a [`refresh_registry_inner`] run, suitable for surfacing to an
 /// operator via the `canopy registry refresh` CLI command or the
-/// `registry_refresh` MCP tool.
+/// `harness refresh_registry` action.
 #[derive(Debug, Serialize)]
 pub(crate) struct RegistryRefreshReport {
     /// Registry-owned CLI fields that were rewritten on platforms the operator

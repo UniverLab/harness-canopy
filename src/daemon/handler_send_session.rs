@@ -1,4 +1,4 @@
-//! MCP `agent_add` / `agent_watch` delivery action (CM53).
+//! MCP `agent_edit` `add` / `watch` delivery action (CM53).
 //!
 //! An agent's action can be `headless` (the default) or `send_to_session`,
 //! which delivers the rendered prompt into a live interactive session instead
@@ -20,8 +20,8 @@ use crate::daemon::params::{TaskAddParams, TaskWatchParams};
 use crate::domain::models::{Agent, AgentAction, Cli, Trigger, WatchEvent};
 use crate::domain::validation::{validate_id, validate_prompt, validate_watch_path};
 
-/// Whether a `task_add` / `task_watch` call is a headless run or a session
-/// delivery, decided from the action and target fields.
+/// Whether an `agent_edit` `add` / `watch` call is a headless run or a session
+/// delivery, decided from the delivery-action and target fields.
 pub(crate) enum AddAction {
     Headless,
     Send,
@@ -137,7 +137,7 @@ pub(crate) fn target_label(action: &AgentAction) -> String {
 }
 
 impl TaskTriggerHandler {
-    /// `agent_add` with `action: "send_to_session"`.
+    /// `agent_edit` `add` with `delivery_action: "send_to_session"`.
     pub(crate) async fn send_agent_add(
         &self,
         params: &TaskAddParams,
@@ -146,7 +146,7 @@ impl TaskTriggerHandler {
         self.record_harness_id(parts);
         let caller = caller_session_id(parts, self);
         let action = match build_send_action(
-            params.action.as_deref(),
+            params.delivery_action.as_deref(),
             params.target_session_name.clone(),
             params.target_session_id.clone(),
             caller,
@@ -197,7 +197,7 @@ impl TaskTriggerHandler {
         )))
     }
 
-    /// `agent_watch` with `action: "send_to_session"`.
+    /// `agent_edit` `watch` with `delivery_action: "send_to_session"`.
     pub(crate) async fn send_agent_watch(
         &self,
         params: &TaskWatchParams,
@@ -206,7 +206,7 @@ impl TaskTriggerHandler {
         self.record_harness_id(parts);
         let caller = caller_session_id(parts, self);
         let action = match build_send_action(
-            params.action.as_deref(),
+            params.delivery_action.as_deref(),
             params.target_session_name.clone(),
             params.target_session_id.clone(),
             caller,

@@ -39,11 +39,15 @@ pub(crate) enum CrewAction {
 
 pub async fn handle_crew_action(action: CrewAction, port_override: Option<u16>) -> Result<()> {
     match action {
-        CrewAction::List => print_tool(port_override, "crew_list", &serde_json::json!({})),
+        CrewAction::List => print_tool(
+            port_override,
+            "crew",
+            &serde_json::json!({ "action": "list" }),
+        ),
         CrewAction::Show { name } => print_tool(
             port_override,
-            "crew_get",
-            &serde_json::json!({ "name": name }),
+            "crew",
+            &serde_json::json!({ "action": "get", "name": name }),
         ),
         CrewAction::Create {
             name,
@@ -54,12 +58,13 @@ pub async fn handle_crew_action(action: CrewAction, port_override: Option<u16>) 
             if let Some(description) = description {
                 args["description"] = serde_json::json!(description);
             }
-            print_tool(port_override, "crew_create", &args)
+            args["action"] = serde_json::json!("create");
+            print_tool(port_override, "crew", &args)
         }
         CrewAction::Delete { name } => print_tool(
             port_override,
-            "crew_delete",
-            &serde_json::json!({ "name": name }),
+            "crew",
+            &serde_json::json!({ "action": "delete", "name": name }),
         ),
     }
 }
@@ -118,7 +123,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_calls_crew_create_with_from_ensemble() {
+    async fn create_calls_crew_create_action_with_from_ensemble() {
         let fake = spawn_fake_daemon(serde_json::json!({
             "content": [{"type": "text", "text": "ok"}],
             "isError": false
@@ -132,13 +137,14 @@ mod tests {
         handle_crew_action(action, Some(port)).await.unwrap();
 
         let calls = fake.recorded_calls();
-        assert_eq!(calls[0]["name"], "crew_create");
+        assert_eq!(calls[0]["name"], "crew");
+        assert_eq!(calls[0]["arguments"]["action"], "create");
         assert_eq!(calls[0]["arguments"]["name"], "implementers");
         assert_eq!(calls[0]["arguments"]["from_ensemble"], "ens-1");
     }
 
     #[tokio::test]
-    async fn delete_calls_crew_delete() {
+    async fn delete_calls_crew_delete_action() {
         let fake = spawn_fake_daemon(serde_json::json!({
             "content": [{"type": "text", "text": "ok"}],
             "isError": false
@@ -150,7 +156,8 @@ mod tests {
         handle_crew_action(action, Some(port)).await.unwrap();
 
         let calls = fake.recorded_calls();
-        assert_eq!(calls[0]["name"], "crew_delete");
+        assert_eq!(calls[0]["name"], "crew");
+        assert_eq!(calls[0]["arguments"]["action"], "delete");
         assert_eq!(calls[0]["arguments"]["name"], "implementers");
     }
 }

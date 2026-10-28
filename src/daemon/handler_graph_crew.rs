@@ -1,4 +1,4 @@
-//! CM50: the `graph_crew` MCP tool — "which graphs use this harness or
+//! CM50: the `crew assignments` action — "which graphs use this harness or
 //! model?" answered from the same read path the CLI uses, with no prompt
 //! text in the answer.
 
@@ -6,22 +6,14 @@ use crate::daemon::handler::TaskTriggerHandler;
 use crate::daemon::handler_formatting::internal_error;
 use crate::daemon::helpers::{error_result, success_result};
 use crate::daemon::params::*;
-use crate::daemon::params_extract::Parameters;
 use crate::db::graph_crew::GraphCrewDbParams;
 use rmcp::model::CallToolResult;
-use rmcp::tool;
-use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
 
-#[tool_router(router = tool_router_graph_crew, vis = "pub(crate)")]
 impl TaskTriggerHandler {
-    #[tool(
-        name = "graph_crew",
-        description = "List every graph's harness/model assignments: agent nodes outside ensembles, ensemble members, and agent-type hooks — each with platform, model, timeout and, when set, crew (CM49) and availability (CM48). Answers 'which graphs use this harness or model?' without reading SQLite. Filter with graph_id (one graph), platform (exact) or model (case-insensitive substring); include_archived widens past the archive. With group_by: \"pair\", returns one summary row per distinct platform/model pair with graph/ensemble/node/hook counts and the graph names. No prompt text is ever returned."
-    )]
-    pub(crate) async fn graph_crew(
+    pub(crate) async fn crew_assignments_impl(
         &self,
-        Parameters(params): Parameters<GraphCrewParams>,
+        params: GraphCrewParams,
     ) -> Result<CallToolResult, McpError> {
         let db_params = GraphCrewDbParams {
             graph_id: params.graph_id.as_deref(),

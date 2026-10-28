@@ -29,7 +29,7 @@ pub enum GraphEventKind {
     NodeFinished,
     HookFired,
     ConfigChanged,
-    /// CM47's `spec_note_write` constructs this; the CHECK constraint and this
+    /// CM47's `spec_edit note_write` constructs this; the CHECK constraint and this
     /// vocabulary are fixed now so the two never drift.
     #[allow(dead_code)]
     Note,

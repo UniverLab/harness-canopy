@@ -177,7 +177,7 @@ enum Commands {
         #[command(subcommand)]
         action: QueueAction,
     },
-    /// Inspect or refresh the `agent_models` catalog cache.
+    /// Inspect or refresh the `harness models` catalog cache.
     Models {
         #[command(subcommand)]
         action: ModelsAction,

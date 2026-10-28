@@ -8,23 +8,15 @@ use crate::daemon::handler_formatting::{
 };
 use crate::daemon::helpers::error_result;
 use crate::daemon::params::*;
-use crate::daemon::params_extract::Parameters;
 use crate::db::Database;
 use rmcp::model::{CallToolResult, ContentBlock};
-use rmcp::tool;
-use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
 
-#[tool_router(router = tool_router_models_probes, vis = "pub(crate)")]
 impl TaskTriggerHandler {
     /// List available AI models.
-    #[tool(
-        name = "agent_models",
-        description = "List AI models available for use with agents. Pass an optional `platform` (e.g. \"opencode\") to filter to the models that platform can reach; pass `refresh: true` to force a fresh fetch instead of serving a cache that's within its TTL (`canopy models refresh` does the same from the CLI, for one platform or all). Every returned model id is the literal string that platform's CLI accepts for its model field — for a universal gateway that is the provider-prefixed form (opencode/big-pickle), for claude the bare form (claude-opus-4-8) — so an id can be copied verbatim into the model field of agent_add or agent_watch. Platform-scoped listings (with `platform` set) return every model the platform can reach, uncapped; the `full` flag only affects the unfiltered (no-platform) listing. Includes cache provenance (source: cache|live|stale, fetched_at, age, and whether a refresh is due) — the TTL itself is configurable in config.toml under `[models]`."
-    )]
-    pub(crate) async fn task_models(
+    pub(crate) async fn harness_models_impl(
         &self,
-        Parameters(params): Parameters<TaskModelsParams>,
+        params: TaskModelsParams,
     ) -> Result<CallToolResult, McpError> {
         let force_refresh = params.refresh.unwrap_or(false);
         let full = params.full.unwrap_or(false);
@@ -76,13 +68,9 @@ impl TaskTriggerHandler {
         Ok(result)
     }
 
-    #[tool(
-        name = "agent_probe",
-        description = "Actually invoke a configured platform headlessly with a trivial prompt and report whether a real, usable response comes back — the verdict is based on the response content, not the exit code, so a harness that prints its own error and exits 0 is reported broken rather than healthy, and a harness that silently answers with a different model than the one requested (its own \"falling back\" warning) is reported substituted rather than reachable. A failure whose text is the CLI's own argument-parser usage/error output (e.g. \"cannot be used with\", \"unrecognized flag\", \"unexpected argument\", \"unknown option\") is reported misconfigured, not broken: the platform answered, canopy called it wrong — the fix is the registry's invocation template, never a retry with a permuted command line. Omit `platform` to probe every platform configured in canopy (each with its own default model); pass `platform` alone to probe its default model, or `platform`+`model` together to validate the exact pair a graph node would use. If the platform's CLI has no way to select a model explicitly, the specific pair can't be validated end to end and is reported unknown, never reachable. On any failure where a command was actually run, reports the harness's own error text and the exact argv canopy invoked (both redacted of secrets) so you learn *why* (missing API key vs. wrong model name vs. a malformed invocation vs. it never answered) and can reproduce the exact call. Spends real tokens/quota per platform probed — call this explicitly, never automatically or on a schedule."
-    )]
-    pub(crate) async fn agent_probe(
+    pub(crate) async fn harness_probe_impl(
         &self,
-        Parameters(params): Parameters<AgentProbeParams>,
+        params: AgentProbeParams,
     ) -> Result<CallToolResult, McpError> {
         if params.model.is_some() && params.platform.is_none() {
             return Ok(error_result(
@@ -143,13 +131,9 @@ impl TaskTriggerHandler {
         )]))
     }
 
-    #[tool(
-        name = "agent_probe_recent",
-        description = "Sweep every distinct platform+model pair this installation actually used recently and probe each exactly once, naming every graph node, completion hook, background agent, or subagent spawn that used it. Failures come first; confirmed failures and unvalidated pairs remain separate, and substituted models are not reachable. Accepts per-probe timeout and a maximum pair count. Spends real tokens/quota once per distinct pair — a sweep is several probes, not one — and is strictly manual: it never runs automatically or changes configuration."
-    )]
-    pub(crate) async fn agent_probe_recent(
+    pub(crate) async fn harness_probe_recent_impl(
         &self,
-        Parameters(params): Parameters<AgentProbeRecentParams>,
+        params: AgentProbeRecentParams,
     ) -> Result<CallToolResult, McpError> {
         let since = chrono::Utc::now()
             - chrono::Duration::days(crate::db::graphs::RECENT_USAGE_WINDOW_DAYS);
@@ -234,7 +218,7 @@ pub(crate) fn default_probe_timeout(agents: &crate::domain::canopy_config::Agent
     agents.probe_timeout_seconds
 }
 
-/// Resolve `agent_probe`/`graph_control`'s `timeout_seconds` param to an
+/// Resolve `harness probe`/`graph_control`'s `timeout_seconds` param to an
 /// actual bound: the configured default when omitted, clamped to
 /// `[MIN_PROBE_TIMEOUT_SECS, MAX_PROBE_TIMEOUT_SECS]` otherwise — a probe is
 /// a liveness check, not a capability benchmark, so callers can't ask for an
@@ -266,7 +250,7 @@ pub(crate) fn display_for_slug(
         .unwrap_or_else(|| slug.to_string())
 }
 
-/// Validate a requested `agent_models` platform against the CLIs actually
+/// Validate a requested `harness models` platform against the CLIs actually
 /// configured in canopy (registry-driven, from `~/.canopy/config.toml`).
 /// Returns `Some(error_message)` if config exists and the platform isn't among
 /// the configured CLIs; `None` when the platform is configured, or when no
@@ -318,7 +302,7 @@ pub(crate) fn platform_enumeration_cmd(platform: &str) -> Option<(String, String
     Some((cli.binary.clone(), args.to_string()))
 }
 
-/// Build the `agent_models` result from a platform's native enumeration. The
+/// Build the `harness models` result from a platform's native enumeration. The
 /// CLI run happens off the async executor (it may spawn a process); a fresh
 /// cache returns with no CLI call at all.
 pub(crate) async fn native_models_result(
@@ -451,8 +435,8 @@ pub(crate) async fn catalogue_models_text(
     ))
 }
 
-/// Build the `agent_models` result from the models.dev provider catalogue.
-/// Used by `task_models` for platforms without native enumeration.
+/// Build the `harness models` result from the models.dev provider catalogue.
+/// Used by `harness_models_impl` for platforms without native enumeration.
 pub(crate) async fn catalogue_models_result(
     platform: Option<&str>,
     force_refresh: bool,
@@ -475,7 +459,7 @@ pub(crate) async fn catalogue_models_result(
 
 /// This daemon's `[models]` TTL configuration, read fresh from
 /// `~/.canopy/config.toml` on every call (like `rag_max_file_bytes`) so a
-/// config edit is picked up on the next `agent_models` call without
+/// config edit is picked up on the next `harness models` call without
 /// restarting the daemon. Falls back to the compiled defaults when no home
 /// directory or config file can be found.
 pub(crate) fn configured_models() -> crate::domain::canopy_config::ModelsConfig {
@@ -484,7 +468,7 @@ pub(crate) fn configured_models() -> crate::domain::canopy_config::ModelsConfig 
         .unwrap_or_default()
 }
 
-/// CB43: the "recently used" section that leads `agent_models` output — one
+/// CB43: the "recently used" section that leads `harness models` output — one
 /// line per platform+model pair this installation has run in the last 30
 /// days (most recent first, capped at fifteen): when it last ran, how many
 /// times, and how the most recent run ended. Computed only from this
@@ -535,7 +519,7 @@ pub(crate) fn format_recent_usage_section(rows: &[crate::db::graphs::RecentModel
     out
 }
 
-/// CB43: lead a successful `agent_models` result with the recently-used
+/// CB43: lead a successful `harness models` result with the recently-used
 /// section. Error results (unknown platform, unreachable catalogue) are left
 /// untouched — the section informs a model choice, and there is no choice
 /// on offer when the listing itself failed.
@@ -554,7 +538,7 @@ pub(crate) fn prepend_recent_usage(result: &mut CallToolResult, section: &str) {
     }
 }
 
-/// The shared provenance/footer block for `agent_models`, used by both the
+/// The shared provenance/footer block for `harness models`, used by both the
 /// models.dev and native-enumeration paths. States the cache's age and
 /// whether a refresh is due, not just its timestamp — and when the source was
 /// unreachable, folds how stale the served cache is into that same notice.
@@ -603,7 +587,7 @@ pub(crate) fn model_result_footer(
              (refresh interval {ttl_str}) · fetched_at: {}\n\
              WARNING: This lists the PROVIDER'S CATALOG, not what your account can use.\n\
              Actual availability depends on your API key tier, account type, and region.\n\
-             A model listed here may still fail at runtime — use `agent_probe` or `graph_control preflight`\n\
+             A model listed here may still fail at runtime — use `harness probe` or `graph_control preflight`\n\
              to validate a specific platform+model pair before relying on it.{truncation_notice}",
             source.as_str(),
             format_system_time(fetched_at),

@@ -43,7 +43,7 @@ pub struct GraphCreateParams {
     #[serde(default)]
     pub allow_dirty_start: bool,
     /// SPECCODE: opt-in enforcement. When true, adding a spec to this graph
-    /// (graph_edit attach_spec, queue_add_spec) and graph_control run refuse a spec without
+    /// (graph_edit attach_spec, queue add_spec) and graph_control run refuse a spec without
     /// a type, named. Default false — never enforced until asked.
     #[serde(default)]
     pub require_spec_type: bool,
@@ -161,7 +161,7 @@ pub struct GraphUpdateParams {
     /// dirty-worktree refusal to a warning. Omit to leave unchanged.
     pub allow_dirty_start: Option<bool>,
     /// SPECCODE: opt-in enforcement. When true, adding a spec to this graph
-    /// (graph_edit attach_spec, queue_add_spec) and graph_control run refuse a spec without
+    /// (graph_edit attach_spec, queue add_spec) and graph_control run refuse a spec without
     /// a type, named. Default false — never enforced until asked.
     pub require_spec_type: Option<bool>,
 }
@@ -295,6 +295,12 @@ pub struct SpecSetStatusParams {
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SpecDeleteParams {
     /// Existing spec ID.
+    pub spec_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SpecGetParams {
+    /// Existing spec ID (or unambiguous id prefix).
     pub spec_id: String,
 }
 

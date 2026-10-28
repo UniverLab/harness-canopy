@@ -72,7 +72,7 @@ impl Database {
 
     /// All registered background-agent ids — cross-referenced against
     /// `logs/<id>.log` filenames to detect orphaned log files (an agent
-    /// removed via `agent_remove` leaves its log file behind).
+    /// removed via `agent_edit remove` leaves its log file behind).
     pub fn list_agent_ids(&self) -> Result<HashSet<String>> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         let mut stmt = conn.prepare("SELECT id FROM agents")?;

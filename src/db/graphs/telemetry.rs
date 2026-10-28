@@ -121,7 +121,7 @@ impl Database {
     }
 
     /// Return every recent run event with the identity that produced it.
-    /// This is the installation-wide source data for `agent_probe_recent`;
+    /// This is the installation-wide source data for `harness probe_recent`;
     /// callers group it by platform and model while retaining attribution.
     pub fn list_recent_platform_model_usage_sources(
         &self,

@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 /// The Conventional Commits types a spec may carry. Stored in the DB as the
-/// lowercase label; serialized lowercase and accepted by `spec_list`'s
+/// lowercase label; serialized lowercase and accepted by `spec list`'s
 /// `type` filter in the same form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]

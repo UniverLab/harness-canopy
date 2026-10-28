@@ -50,7 +50,7 @@ impl App {
         self.poll_crews_face();
         self.poll_crews_write();
         self.refresh_crews_face();
-        // CM51 (D4): a `config_set` from anywhere, or a hand edit the
+        // CM51 (D4): a `config set` from anywhere, or a hand edit the
         // daemon's watcher saw, publishes a settings revision. When it moves,
         // re-read the settings this TUI renders — no restart needed.
         self.poll_settings_revision();
@@ -78,7 +78,7 @@ impl App {
     }
 
     /// CM51 (D4): re-read the settings this TUI renders when the daemon
-    /// publishes a newer `settings_revision` — from a `config_set`, or from a
+    /// publishes a newer `settings_revision` — from a `config set`, or from a
     /// hand edit its file watcher saw. The revision row carries the changed
     /// keys, but the cheap and always-correct move is to reload the config
     /// and re-derive theme, temperature unit and the pinned face.

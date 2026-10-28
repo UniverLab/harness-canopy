@@ -9,15 +9,19 @@ use super::*;
 async fn graph_export_import_round_trip_with_crew() {
     let (dir, db, handler) = endpoint_test_handler();
     let workdir = dir.path().to_string_lossy().to_string();
-    handler
-        .crew_create(Parameters(CrewCreateParams {
+    call_resource_action(
+        &handler,
+        "crew",
+        "create",
+        params_id(CrewCreateParams {
             name: "eager".to_string(),
             description: None,
             members: Some(vec![crew_json_member("a"), crew_json_member("b")]),
             from_ensemble: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let (graph_id, _ens) = build_crew_ensemble(&handler, &workdir, "Crew G").await;
 
     let exported = call_graph_action(
@@ -94,15 +98,19 @@ async fn graph_export_import_round_trip_with_crew() {
 async fn graph_update_ensemble_binds_then_unbinds_a_crew() {
     let (dir, db, handler) = endpoint_test_handler();
     let workdir = dir.path().to_string_lossy().to_string();
-    handler
-        .crew_create(Parameters(CrewCreateParams {
+    call_resource_action(
+        &handler,
+        "crew",
+        "create",
+        params_id(CrewCreateParams {
             name: "eager".to_string(),
             description: None,
             members: Some(vec![crew_json_member("a"), crew_json_member("b")]),
             from_ensemble: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let (_graph_id, ensemble_id) = build_literal_ensemble(&handler, &workdir, "Literal G").await;
 
     // Bind: the literal rows are replaced by the crew's members.
@@ -208,15 +216,19 @@ async fn graph_update_ensemble_binds_then_unbinds_a_crew() {
 async fn graph_add_ensemble_crew_and_members_are_exclusive() {
     let (dir, _db, handler) = endpoint_test_handler();
     let workdir = dir.path().to_string_lossy().to_string();
-    handler
-        .crew_create(Parameters(CrewCreateParams {
+    call_resource_action(
+        &handler,
+        "crew",
+        "create",
+        params_id(CrewCreateParams {
             name: "eager".to_string(),
             description: None,
             members: Some(vec![crew_json_member("a"), crew_json_member("b")]),
             from_ensemble: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let (graph_id, _ens) = build_literal_ensemble(&handler, &workdir, "Exclusive G").await;
     let entry = call_graph_action(
         &handler,
@@ -290,18 +302,24 @@ async fn graph_add_ensemble_crew_and_members_are_exclusive() {
 async fn crew_list_reports_crews_members_and_bindings_without_arguments() {
     let (dir, _db, handler) = endpoint_test_handler();
     let workdir = dir.path().to_string_lossy().to_string();
-    handler
-        .crew_create(Parameters(CrewCreateParams {
+    call_resource_action(
+        &handler,
+        "crew",
+        "create",
+        params_id(CrewCreateParams {
             name: "eager".to_string(),
             description: Some("the implementers".to_string()),
             members: Some(vec![crew_json_member("a"), crew_json_member("b")]),
             from_ensemble: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let (_graph_id, _ens) = build_crew_ensemble(&handler, &workdir, "Bound G").await;
 
-    let listed = handler.crew_list().await.unwrap();
+    let listed = call_resource_action(&handler, "crew", "list", ())
+        .await
+        .unwrap();
     assert!(!is_err(&listed), "{}", text(&listed));
     let body: serde_json::Value = serde_json::from_str(&raw_text(&listed)).unwrap();
     let crews = body.as_array().expect("a JSON array of crews");

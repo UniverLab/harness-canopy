@@ -219,32 +219,43 @@ async fn graph_update_spec_renames_and_rejects_no_op() {
 async fn spec_create_and_list_and_update() {
     let (_dir, db, handler) = endpoint_test_handler();
 
-    let created = handler
-        .spec_create(Parameters(SpecCreateParams {
+    let created = call_resource_action(
+        &handler,
+        "spec_edit",
+        "create",
+        params_id(SpecCreateParams {
             name: "Backlog item".to_string(),
             description: valid_spec_description(),
             workdir: Some("/tmp".to_string()),
             spec_type: None,
             spec_scope: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&created), "{}", text(&created));
 
-    let bad = handler
-        .spec_create(Parameters(SpecCreateParams {
+    let bad = call_resource_action(
+        &handler,
+        "spec_edit",
+        "create",
+        params_id(SpecCreateParams {
             name: "Backlog item 2".to_string(),
             description: "too short".to_string(),
             workdir: None,
             spec_type: None,
             spec_scope: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&bad));
 
-    let listed = handler
-        .spec_list(Parameters(SpecListParams {
+    let listed = call_resource_action(
+        &handler,
+        "spec",
+        "list",
+        params_id(SpecListParams {
             workdir: None,
             status: None,
             unassigned_only: Some(true),
@@ -252,13 +263,17 @@ async fn spec_create_and_list_and_update() {
             limit: None,
             offset: None,
             spec_type: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(text(&listed).contains("Backlog item"));
 
-    let bad_status = handler
-        .spec_list(Parameters(SpecListParams {
+    let bad_status = call_resource_action(
+        &handler,
+        "spec",
+        "list",
+        params_id(SpecListParams {
             workdir: None,
             status: Some("sideways".to_string()),
             unassigned_only: None,
@@ -266,9 +281,10 @@ async fn spec_create_and_list_and_update() {
             limit: None,
             offset: None,
             spec_type: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&bad_status));
 
     let all_specs = db.list_specs(None, None, false, None).unwrap();
@@ -279,17 +295,21 @@ async fn spec_create_and_list_and_update() {
         .id
         .clone();
 
-    let updated = handler
-        .spec_update(Parameters(SpecUpdateParams {
+    let updated = call_resource_action(
+        &handler,
+        "spec_edit",
+        "update",
+        params_id(SpecUpdateParams {
             spec_id: spec_id.clone(),
             name: Some("Renamed backlog item".to_string()),
             description: None,
             workdir: None,
             spec_type: None,
             spec_scope: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&updated), "{}", text(&updated));
     assert_eq!(
         db.get_graph_spec(&spec_id).unwrap().unwrap().name,
@@ -301,16 +321,20 @@ async fn spec_create_and_list_and_update() {
 async fn spec_create_with_conventional_title_stores_subject_type_scope_and_code() {
     let (dir, db, handler) = endpoint_test_handler();
 
-    let created = handler
-        .spec_create(Parameters(SpecCreateParams {
+    let created = call_resource_action(
+        &handler,
+        "spec_edit",
+        "create",
+        params_id(SpecCreateParams {
             name: "fix(tui): open F1 from inside a session".to_string(),
             description: valid_spec_description(),
             workdir: Some(dir.path().to_string_lossy().to_string()),
             spec_type: None,
             spec_scope: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&created), "{}", text(&created));
 
     // A conventional title is parsed and stored as subject + type + scope,
@@ -347,16 +371,20 @@ async fn spec_update_name_only_conventional_title_stores_subject_and_code() {
     let (dir, db, handler) = endpoint_test_handler();
     let _ = &dir;
 
-    let created = handler
-        .spec_create(Parameters(SpecCreateParams {
+    let created = call_resource_action(
+        &handler,
+        "spec_edit",
+        "create",
+        params_id(SpecCreateParams {
             name: "Vague bug report".to_string(),
             description: valid_spec_description(),
             workdir: None,
             spec_type: None,
             spec_scope: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&created), "{}", text(&created));
     let spec_id = db
         .list_specs(None, None, false, None)
@@ -366,17 +394,21 @@ async fn spec_update_name_only_conventional_title_stores_subject_and_code() {
         .unwrap()
         .id;
 
-    let updated = handler
-        .spec_update(Parameters(SpecUpdateParams {
+    let updated = call_resource_action(
+        &handler,
+        "spec_edit",
+        "update",
+        params_id(SpecUpdateParams {
             spec_id: spec_id.clone(),
             name: Some("fix(tui): open F1 from inside a session".to_string()),
             description: None,
             workdir: None,
             spec_type: None,
             spec_scope: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&updated), "{}", text(&updated));
 
     let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
@@ -402,16 +434,20 @@ async fn spec_update_name_only_conventional_title_stores_subject_and_code() {
 async fn spec_set_status_transitions_and_rejects_bound_spec() {
     let (dir, db, handler) = endpoint_test_handler();
 
-    let standalone = handler
-        .spec_create(Parameters(SpecCreateParams {
+    let standalone = call_resource_action(
+        &handler,
+        "spec_edit",
+        "create",
+        params_id(SpecCreateParams {
             name: "Standalone".to_string(),
             description: valid_spec_description(),
             workdir: None,
             spec_type: None,
             spec_scope: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&standalone));
     let spec_id = db
         .list_specs(None, None, false, None)
@@ -421,68 +457,88 @@ async fn spec_set_status_transitions_and_rejects_bound_spec() {
         .unwrap()
         .id;
 
-    let completed = handler
-        .spec_set_status(Parameters(SpecSetStatusParams {
+    let completed = call_resource_action(
+        &handler,
+        "spec_edit",
+        "set_status",
+        params_id(SpecSetStatusParams {
             spec_id: spec_id.clone(),
             status: "completed".to_string(),
             reason: "manually closed".to_string(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&completed), "{}", text(&completed));
     assert_eq!(
         db.get_graph_spec(&spec_id).unwrap().unwrap().status,
         GraphSpecStatus::Completed
     );
 
-    let empty_reason = handler
-        .spec_set_status(Parameters(SpecSetStatusParams {
+    let empty_reason = call_resource_action(
+        &handler,
+        "spec_edit",
+        "set_status",
+        params_id(SpecSetStatusParams {
             spec_id: spec_id.clone(),
             status: "pending".to_string(),
             reason: "  ".to_string(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&empty_reason));
 
     // A graph-bound spec must be rejected as "not standalone".
     let lp = insert_test_graph(&db, dir.path());
     let bound_spec = insert_test_spec(&db, &lp.id, 1);
-    let not_standalone = handler
-        .spec_set_status(Parameters(SpecSetStatusParams {
+    let not_standalone = call_resource_action(
+        &handler,
+        "spec_edit",
+        "set_status",
+        params_id(SpecSetStatusParams {
             spec_id: bound_spec.id.clone(),
             status: "completed".to_string(),
             reason: "trying anyway".to_string(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&not_standalone));
     assert!(text(&not_standalone).contains("bound to graph"));
 
-    let unknown_status = handler
-        .spec_set_status(Parameters(SpecSetStatusParams {
+    let unknown_status = call_resource_action(
+        &handler,
+        "spec_edit",
+        "set_status",
+        params_id(SpecSetStatusParams {
             spec_id: spec_id.clone(),
             status: "sideways".to_string(),
             reason: "x".to_string(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&unknown_status));
 }
 
 #[tokio::test]
 async fn spec_delete_removes_standalone_but_refuses_bound_spec() {
     let (dir, db, handler) = endpoint_test_handler();
-    handler
-        .spec_create(Parameters(SpecCreateParams {
+    call_resource_action(
+        &handler,
+        "spec_edit",
+        "create",
+        params_id(SpecCreateParams {
             name: "Deletable".to_string(),
             description: valid_spec_description(),
             workdir: None,
             spec_type: None,
             spec_scope: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     let spec_id = db
         .list_specs(None, None, false, None)
         .unwrap()
@@ -491,31 +547,43 @@ async fn spec_delete_removes_standalone_but_refuses_bound_spec() {
         .unwrap()
         .id;
 
-    let deleted = handler
-        .spec_delete(Parameters(SpecDeleteParams {
+    let deleted = call_resource_action(
+        &handler,
+        "spec_edit",
+        "delete",
+        params_id(SpecDeleteParams {
             spec_id: spec_id.clone(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&deleted), "{}", text(&deleted));
     assert!(db.get_graph_spec(&spec_id).unwrap().is_none());
 
-    let missing = handler
-        .spec_delete(Parameters(SpecDeleteParams {
+    let missing = call_resource_action(
+        &handler,
+        "spec_edit",
+        "delete",
+        params_id(SpecDeleteParams {
             spec_id: "ghost".to_string(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&missing));
 
     let lp = insert_test_graph(&db, dir.path());
     let bound_spec = insert_test_spec(&db, &lp.id, 1);
-    let refused = handler
-        .spec_delete(Parameters(SpecDeleteParams {
+    let refused = call_resource_action(
+        &handler,
+        "spec_edit",
+        "delete",
+        params_id(SpecDeleteParams {
             spec_id: bound_spec.id,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&refused));
 }
 
@@ -601,16 +669,20 @@ async fn graph_remove_spec_rejects_wrong_graph() {
 async fn graph_remove_spec_rejects_standalone_spec() {
     let (dir, db, handler) = endpoint_test_handler();
     let lp = insert_test_graph(&db, dir.path());
-    let created = handler
-        .spec_create(Parameters(SpecCreateParams {
+    let created = call_resource_action(
+        &handler,
+        "spec_edit",
+        "create",
+        params_id(SpecCreateParams {
             name: "Standalone".to_string(),
             description: valid_spec_description(),
             workdir: None,
             spec_type: None,
             spec_scope: None,
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&created), "{}", text(&created));
     let standalone_id = db
         .list_specs(None, None, false, None)
@@ -641,12 +713,16 @@ async fn spec_delete_error_message_names_graph_remove_spec() {
     let lp = insert_test_graph(&db, dir.path());
     let spec = insert_test_spec(&db, &lp.id, 1);
 
-    let refused = handler
-        .spec_delete(Parameters(SpecDeleteParams {
+    let refused = call_resource_action(
+        &handler,
+        "spec_edit",
+        "delete",
+        params_id(SpecDeleteParams {
             spec_id: spec.id.clone(),
-        }))
-        .await
-        .unwrap();
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&refused));
     assert!(text(&refused).contains("graph_edit"));
 }

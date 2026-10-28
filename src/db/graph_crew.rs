@@ -1,4 +1,4 @@
-//! CM50: `graph_crew` — the read-only view over every graph's crew
+//! CM50: `crew assignments` — the read-only view over every graph's crew
 //! assignments, so "which graphs use this harness or model?" never needs a
 //! hand-written SQLite query again.
 //!
@@ -64,7 +64,7 @@ impl GraphCrewDbParams<'_> {
 
 impl Database {
     /// Every agent node (outside an ensemble), ensemble member and
-    /// agent-type hook, grouped per graph — the `graph_crew` result shape.
+    /// agent-type hook, grouped per graph — the `crew assignments` result shape.
     ///
     /// Rows carry no prompt text. With `graph_id` the result is that graph
     /// alone (an unknown id is an error, not an empty answer, and an

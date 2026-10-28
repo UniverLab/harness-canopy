@@ -276,7 +276,7 @@ pub(crate) fn resolve_ensemble_member_list(
                 .collect(),
             None => {
                 return Err(EarlyReturn::tool_error(&format!(
-                    "crew '{name}' not found. Create it with crew_create first."
+                    "crew '{name}' not found. Create it with `crew create` first."
                 )))
             }
         },

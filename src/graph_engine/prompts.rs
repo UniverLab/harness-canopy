@@ -506,7 +506,7 @@ pub(crate) const COMPLETION_HOOK_BINDINGS: &[&str] = &["graph_name", "workdir", 
 pub(crate) const SPEC_NOTES_CHAR_BUDGET: usize = 5_000;
 
 /// CM47: fixed instructions closing every `[SPEC NOTES]` section.
-pub(crate) const SPEC_NOTES_FOOTER: &str = "Write your note with spec_note_write(run_id, body); it replaces your previous note; keep it at most 2 500 characters; write it as you go (what you did, what is left, decisions a successor must not redo), not only at the end.";
+pub(crate) const SPEC_NOTES_FOOTER: &str = "Write your note with `spec_edit note_write`(run_id, body); it replaces your previous note; keep it at most 2 500 characters; write it as you go (what you did, what is left, decisions a successor must not redo), not only at the end.";
 
 /// CM47: one note's already-fetched fields for [`compose_spec_notes_section`].
 /// A view (not the DB row) so the composer never touches the DB and the
@@ -522,7 +522,7 @@ pub(crate) struct SpecNoteView<'a> {
 
 fn spec_note_stub(note: &SpecNoteView<'_>) -> String {
     format!(
-        "{}: {} chars, updated {} — read with spec_notes_get\n",
+        "{}: {} chars, updated {} — read with `spec notes`\n",
         note.owner_name,
         note.body.chars().count(),
         note.updated_at
@@ -719,7 +719,7 @@ mod spec_notes_tests {
             section.contains("Other: 900 chars, updated"),
             "overflow becomes a stub naming owner, size and time"
         );
-        assert!(section.contains("read with spec_notes_get"));
+        assert!(section.contains("read with `spec notes`"));
     }
 
     fn topo_node(id: &str, name: &str, kind: GraphNodeKind) -> GraphNode {

@@ -518,7 +518,7 @@ mod tests {
     #[test]
     fn watcher_restart_needed_true() {
         let mut params = TaskUpdateParams {
-            action: None,
+            delivery_action: None,
             target_session_name: None,
             target_session_id: None,
             id: "test".to_string(),
@@ -629,7 +629,7 @@ mod tests {
         };
 
         let params = TaskUpdateParams {
-            action: None,
+            delivery_action: None,
             target_session_name: None,
             target_session_id: None,
             id: "test".to_string(),
@@ -677,7 +677,7 @@ mod tests {
         };
 
         let params = TaskUpdateParams {
-            action: None,
+            delivery_action: None,
             target_session_name: None,
             target_session_id: None,
             id: "test".to_string(),
@@ -725,7 +725,7 @@ mod tests {
         };
 
         let params = TaskUpdateParams {
-            action: None,
+            delivery_action: None,
             target_session_name: None,
             target_session_id: None,
             id: "test".to_string(),
@@ -771,7 +771,7 @@ mod tests {
     #[test]
     fn prepare_cron_task_valid() {
         let params = TaskAddParams {
-            action: None,
+            delivery_action: None,
             target_session_name: None,
             target_session_id: None,
             id: "test-agent".to_string(),
@@ -795,7 +795,7 @@ mod tests {
     #[test]
     fn prepare_cron_task_invalid_id() {
         let params = TaskAddParams {
-            action: None,
+            delivery_action: None,
             target_session_name: None,
             target_session_id: None,
             id: "".to_string(),
@@ -816,7 +816,7 @@ mod tests {
     #[test]
     fn prepare_cron_task_invalid_schedule() {
         let params = TaskAddParams {
-            action: None,
+            delivery_action: None,
             target_session_name: None,
             target_session_id: None,
             id: "test-agent".to_string(),
@@ -837,7 +837,7 @@ mod tests {
     #[test]
     fn prepare_watch_task_valid() {
         let params = TaskWatchParams {
-            action: None,
+            delivery_action: None,
             target_session_name: None,
             target_session_id: None,
             id: "test-watcher".to_string(),
@@ -864,7 +864,7 @@ mod tests {
     #[test]
     fn prepare_watch_task_defaults() {
         let params = TaskWatchParams {
-            action: None,
+            delivery_action: None,
             target_session_name: None,
             target_session_id: None,
             id: "test-watcher".to_string(),
@@ -887,7 +887,7 @@ mod tests {
     #[test]
     fn prepare_watch_task_invalid_path() {
         let params = TaskWatchParams {
-            action: None,
+            delivery_action: None,
             target_session_name: None,
             target_session_id: None,
             id: "test-watcher".to_string(),
@@ -936,7 +936,7 @@ mod tests {
         };
 
         let params = TaskUpdateParams {
-            action: None,
+            delivery_action: None,
             target_session_name: None,
             target_session_id: None,
             id: "cron-agent".to_string(),

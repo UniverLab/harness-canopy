@@ -12,14 +12,11 @@ use crate::daemon::handler_formatting::internal_error;
 use crate::daemon::handler_validate::{resolve_prefix_or_error, validate_spec_exists};
 use crate::daemon::helpers::{error_result, success_result};
 use crate::daemon::params::*;
-use crate::daemon::params_extract::Parameters;
 use crate::db::graphs::notes::{NewSpecNote, SPEC_NOTE_MAX_CHARS};
 use crate::db::Database;
 use crate::domain::activity::{self, GraphEvent, GraphEventKind};
 use crate::domain::graphs::GraphRunStatus;
 use rmcp::model::CallToolResult;
-use rmcp::tool;
-use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
 
 /// CM47: who owns the note a node writes. Shared with the prompt-injection
@@ -100,25 +97,16 @@ fn record_note_event(
     );
 }
 
-#[tool_router(router = tool_router_notes, vis = "pub(crate)")]
 impl TaskTriggerHandler {
-    #[tool(
-        name = "spec_note_write",
-        description = "Write or replace the caller's note for the current spec. When called with a run_id, the owner is resolved from the active run (the node it belongs to, or that node's ensemble if it is an ensemble member, so every member of one ensemble shares one note). It refuses a run_id that is no longer running. When called with a spec_id and no run_id, it writes the `operator` note. The body must be at most 2 500 characters."
-    )]
-    pub(crate) async fn spec_note_write(
+    pub(crate) async fn spec_edit_note_write_impl(
         &self,
-        Parameters(params): Parameters<SpecNoteWriteParams>,
+        params: SpecNoteWriteParams,
     ) -> Result<CallToolResult, McpError> {
         match (params.run_id.as_deref(), params.spec_id.as_deref()) {
-            (Some(_), Some(_)) => {
-                return Ok(error_result("Pass exactly one of run_id or spec_id."));
-            }
-            (None, None) => {
-                return Ok(error_result(
-                    "Pass exactly one of run_id (your note) or spec_id (the operator note).",
-                ));
-            }
+            (Some(_), Some(_)) => Ok(error_result("Pass exactly one of run_id or spec_id.")),
+            (None, None) => Ok(error_result(
+                "Pass exactly one of run_id (your note) or spec_id (the operator note).",
+            )),
             (Some(run_id), None) => {
                 spec_note_write_from_run(&self.db, run_id, &params.body).map_err(internal_error)
             }
@@ -128,13 +116,9 @@ impl TaskTriggerHandler {
         }
     }
 
-    #[tool(
-        name = "spec_notes_get",
-        description = "Read every note of a spec — the working-memory notes owner nodes wrote for each other — with owner, author model, updated_at and body."
-    )]
-    pub(crate) async fn spec_notes_get(
+    pub(crate) async fn spec_notes_impl(
         &self,
-        Parameters(params): Parameters<SpecNotesGetParams>,
+        params: SpecNotesGetParams,
     ) -> Result<CallToolResult, McpError> {
         let spec_id = match resolve_prefix_or_error(
             &self.db,

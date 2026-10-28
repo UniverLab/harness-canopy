@@ -23,7 +23,7 @@ impl Database {
     /// Materialises the crew's members through the one sync path.
     pub fn bind_ensemble_to_crew(&self, ensemble_id: &str, crew_name: &str) -> Result<Crew> {
         let (crew, crew_members) = self.crew_get(crew_name)?.ok_or_else(|| {
-            anyhow!("crew '{crew_name}' not found. Create it with crew_create first.")
+            anyhow!("crew '{crew_name}' not found. Create it with `crew create` first.")
         })?;
         let details = self
             .get_ensemble_details(ensemble_id)?

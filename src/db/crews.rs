@@ -311,7 +311,7 @@ impl Database {
     }
 
     /// Ensemble ids bound to a crew, each with its graph's status string.
-    /// Used by `crew_update`'s eager sync to skip running/pausing graphs.
+    /// Used by `crew update`'s eager sync to skip running/pausing graphs.
     pub fn crew_bound_ensembles(&self, name: &str) -> Result<Vec<(String, String)>> {
         let rows: Vec<(String, Option<String>, Option<String>)> = {
             let conn = self
@@ -393,7 +393,7 @@ impl Database {
             .optional()?)
     }
 
-    /// CM49 requirement 5, the one sync function the engine and `crew_update`
+    /// CM49 requirement 5, the one sync function the engine and `crew update`
     /// share. Rewrites a bound ensemble's member rows from its crew when the
     /// applied version is stale, then stores the applied version and clamps
     /// `min_pass`. NEVER runs while a member of the ensemble is in flight —

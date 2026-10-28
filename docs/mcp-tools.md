@@ -1,12 +1,12 @@
 ---
 title: MCP Tools
-description: All 93 MCP tools exposed by the canopy daemon, by category.
+description: All 57 MCP tools exposed by the canopy daemon, by category.
 order: 11
 ---
 
 # MCP Tools
 
-The daemon exposes **93 MCP tools** over Streamable HTTP (port 7755) and
+The daemon exposes **57 MCP tools** over Streamable HTTP (port 7755) and
 stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 
 Writes wait up to 5 seconds for a concurrent writer. If the database is still
@@ -14,32 +14,35 @@ busy after that, the call fails with `<tool>: database busy after 5 s — nothin
 was written, retry`. Nothing changed, so retry the same call.
 
 Graph-node sessions (agent and ensemble nodes launched by the graph engine) get
-a fixed node profile of 18 tools in `tools/list` (`CANOPY_MCP_PROFILE=node`), so
+a fixed node profile of 17 tools in `tools/list` (`CANOPY_MCP_PROFILE=node`), so
 every node stays under the 128-tool cap of OpenAI-compatible providers. Calls to
 any other tool still work. All other sessions keep the full list.
 
-## Agent management (18)
+## Agent management (5)
 
 | Tool | Description |
 |---|---|
-| `agent_add` | Create a cron-scheduled background agent |
-| `agent_watch` | Create a file-watcher-triggered agent |
-| `agent_list` | List registered agents |
-| `agent_get` | Get one agent's full stored definition as JSON, including the untruncated prompt |
-| `agent_remove` | Remove an agent |
-| `agent_enable` | Enable an agent |
-| `agent_schedule_enable` | Schedule a one-shot enable at a future time |
-| `agent_disable` | Disable an agent |
-| `agent_run` | Run an agent immediately |
-| `agent_status` | Daemon health and agent status |
-| `agent_models` | List available models per CLI |
-| `agent_logs` | Read execution logs |
-| `agent_update` | Update an agent's definition |
-| `agent_report` | Report execution status for scheduled tasks |
-| `agent_probe` | Test platform+model liveness before a `graph_control` `run` |
-| `agent_probe_recent` | Sweep recently-used platform+model pairs before a run |
+| `agent` | Read agents, logs, and daemon health. Actions: `list`, `get` (needs `id` — the full stored definition as JSON, including the untruncated prompt), `logs` (`id`, optional `lines`/`since`), `status` — pass `action` plus the params the refusal/table lists |
+| `agent_edit` | Create, change, and run agents. Actions: `add` (`id`, `prompt`, `schedule` — a 5-field cron expression), `watch` (`id`, `path`, `events`, `prompt`), `update`, `remove`, `enable`, `disable`, `schedule` (`id`, `at` — a one-shot enable at a future ISO 8601 time), `run` — the old one-operation agent tools, now one tool with an `action` parameter and the same per-action params, except `action` itself, renamed `delivery_action` (`headless` or `send_to_session`) |
+| `agent_report` | Report execution status for scheduled tasks — the only way to report a run |
 | `subagent_spawn` | Launch an ephemeral subagent, asynchronously or blocking; the subagent runs with the given `workdir` as its working directory (default: the caller's project), and a missing or non-directory `workdir` is refused before anything spawns, naming the path |
 | `subagent_collect` | Collect an ephemeral subagent result and mark it for cleanup |
+
+## Harness (1)
+
+| Tool | Description |
+|---|---|
+| `harness` | Inspect model catalogs, probe platform liveness, refresh the platform registry, and manage the availability roster. Actions: `models` (optional `platform`/`refresh`/`full` — every returned model id copies verbatim into a model field), `probe` (test platform+model liveness before a `graph_control` `run`; the verdict reads the response content, not the exit code), `probe_recent` (sweep recently-used platform+model pairs before a run), `refresh_registry` (fetch the platform registry and apply it to config.toml now, ignoring the 24-hour interval; takes no parameters and returns the report as JSON — `changed` and `kept` per platform, the `added`, `updated` and `deleted` platform names, and `up_to_date`), `roster_list`, `roster_set`, `roster_clear`, `roster_check` — pass `action` plus the params the refusal/table lists. Probes spend real tokens/quota: call them explicitly, never automatically or on a schedule |
+
+The roster declares which platform/model pairs may run. The engine consults
+it at dispatch — an unavailable member is skipped, an unavailable single node
+or agent hook blocks the spec — and never infers availability from failures,
+exit codes or quota messages. Only the `roster_*` actions (and the CLI, which calls them)
+write the table.
+
+The most specific entry wins: exact model, then the longest `*` prefix, then the
+platform-wide entry. An `unavailable` entry past its `until` reads as available
+(expired) — expiry is evaluated at read time, never by a timer.
 
 ## Multi-agent sync (4)
 
@@ -80,28 +83,30 @@ any other tool still work. All other sessions keep the full list.
 | `skill_list` | List skills available from the dynamic skill store and configured catalogs; an installed skill that its git source no longer lists is marked `orphaned`, and its description starts with `[removed upstream]` |
 | `skill_get` | Fetch a skill's full instructions by name, cloning or refreshing it on demand |
 
-## Graph engine (18)
+## Graph engine (8)
 
 | Tool | Description |
 |---|---|
-| `crew_list` | List every crew: name, description, version, ordered members, and how many ensembles/nodes/hooks bind it |
-| `crew_get` | Show one crew and every binding of it |
-| `crew_create` | Create a crew from an ordered member list, or seed it from an ensemble's current members |
-| `crew_update` | Update a crew's ordered members, description and/or name; bound ensembles pick it up at their next dispatch |
-| `crew_delete` | Delete a crew (refused while any ensemble, node or hook still binds it) |
-| `config_list` | List every setting with its group, kind, default, effective value, source (`default`/`file`/`env`), apply mode and status (`ok`, `invalid: <reason>`, `pending_restart`, `unknown`); a `config.toml` that will not parse appears as one `config.toml` row with `invalid: <reason>`; optional `group` filter |
-| `config_get` | Read one setting by its dotted key (e.g. `clean.retention_days`) |
-| `config_set` | Change one setting, validated against its type and range first (nothing is written on refusal); returns the new effective value and what the user must do — `applied`, `applies on next run`, `restart the daemon`, or `restart the TUI` |
-| `config_reset` | Reset one setting to its registry default, through the same validating path as `config_set` |
 | `graph` | Read graphs, specs, node runs, and events. Actions: `list`, `get`, `export`, `validate`, `audit`, `events`, `node_runs`, `node_run` — pass `action` plus the params the refusal/table lists (e.g. `get` needs `graph_id`; `node_run` needs `run_id`) |
 | `graph_edit` | Create, change, and archive graphs and their specs. Actions: `create`, `update`, `archive`, `restore`, `import`, `install`, `attach_spec`, `detach_spec`, `update_spec` — the old one-operation graph authoring tools, now one tool with an `action` parameter and the same per-action params |
 | `graph_node` | Author graph nodes. Actions: `add` (kind+config, blueprint, or node document + `config_overrides`), `update`, `delete`, `copy`. Never completes a node or reports a blocker — node sessions keep using `graph_complete_node` / `graph_report_blocker` |
 | `graph_edge` | Wire graph nodes. Actions: `add`, `update`, `delete` (params unchanged: `from_node`/`to_node`/`condition`/`route`, `edge_id`, …) |
 | `graph_ensemble` | Author multi-member ensembles. Actions: `add`, `update`, `delete`, `copy` (params unchanged: `members`, `min_pass`, `on_pass_to`, …) |
 | `graph_control` | Run and manage graph execution. Actions: `run`, `pause`, `continue` (required `mode`: retry_current_node / skip_next_spec / run_from_node), `reset`, `preflight`, `schedule_continue` (optional `mode`: retry_current_node / skip_next_spec), `schedule_autorun` |
-| `graph_crew` | List every graph's harness/model assignments — agent nodes outside ensembles, ensemble members and agent hooks with platform, model, timeout, crew and availability; `group_by: "pair"` summarises per platform/model pair. No prompt text is returned |
 | `graph_complete_node` | Complete an active graph node |
 | `graph_report_blocker` | Report a blocker for an active graph node |
+
+## Crews (1)
+
+| Tool | Description |
+|---|---|
+| `crew` | Manage crews and read every graph's harness/model assignments. Actions: `list` (every crew with version, ordered members and binding counts), `get` (one crew and every binding of it), `create` (from an ordered member list, or seeded from an ensemble's members — pass exactly one of `members` or `from_ensemble`), `update` (replace the member list, set the description, and/or rename; bound ensembles pick it up at their next dispatch), `delete` (refused while any ensemble, node or hook still binds it), `assignments` (every graph's harness/model assignments with platform, model, timeout, crew and availability; `group_by: "pair"` summarises per platform/model pair — no prompt text is returned) — pass `action` plus the params the refusal/table lists |
+
+## Configuration (1)
+
+| Tool | Description |
+|---|---|
+| `config` | Read and change canopy settings. Actions: `get` (one setting by its dotted key, e.g. `clean.retention_days`), `list` (every setting with group, kind, default, effective value, source, apply mode and status; optional `group` filter), `set` (validated against the setting's type and range first — nothing is written on refusal; returns the new effective value and what the user must do: `applied`, `applies on next run`, `restart the daemon`, or `restart the TUI`), `reset` (one setting back to its registry default) — pass `action` plus the params the refusal/table lists |
 
 Every authoring tool that stores prompt text — `graph_node` `add`,
 `graph_node` `update`, `graph_ensemble` `add`, `graph_ensemble` `update`,
@@ -120,7 +125,7 @@ See [Graphs](graphs.md).
 
 Kept callable for the whole 3.x line, but excluded from tool listings
 (`tools/list`) so nothing new adopts them — call the 3.x name instead. Not
-counted in the 93 tools above.
+counted in the 57 tools above.
 
 | Deprecated name | Renamed to (3.0.0) |
 |---|---|
@@ -157,25 +162,6 @@ for how name resolution and its failure modes work. `session_list` remains
 the way to see both the names and ids of every live session a hook can
 target.
 
-## Availability roster (4)
-
-The roster declares which platform/model pairs may run. The engine consults
-it at dispatch — an unavailable member is skipped, an unavailable single node
-or agent hook blocks the spec — and never infers availability from failures,
-exit codes or quota messages. Only these tools (and the CLI, which calls them)
-write the table.
-
-| Tool | Description |
-|---|---|
-| `roster_set` | Declare one `platform`/`model_pattern` pair `available` or `unavailable`. `model_pattern` is omitted for every model of the platform, or an exact model id, or a prefix ending in `*` (e.g. `opencode-go/*`). `until` (RFC 3339 UTC) is accepted only with `unavailable` and must be in the future |
-| `roster_clear` | Delete one entry (idempotent); omit `model_pattern` for the platform-wide entry |
-| `roster_list` | Every entry, filterable by `platform`, each with its effective state now |
-| `roster_check` | The effective availability of one `platform`/`model` pair, naming the entry that decided it |
-
-The most specific entry wins: exact model, then the longest `*` prefix, then the
-platform-wide entry. An `unavailable` entry past its `until` reads as available
-(expired) — expiry is evaluated at read time, never by a timer.
-
 ## Named mutexes (1)
 
 A node (agent, check, gate) or ensemble declares the shared resources it
@@ -189,22 +175,16 @@ an ensemble) and released when the run ends for any reason.
 |---|---|
 | `mutex` | Action `list`: every granted lease (resource, holder run/graph/node, `acquired_at`) and every queued waiter (run/graph/node, resources, `requested_at`) in FIFO order |
 
-## Spec backlog (9)
+## Spec backlog (3)
 
 Every tool that takes a `spec_id` also accepts the spec's code (e.g. `FIX-7`),
 resolved within the caller's or the graph's workdir.
 
 | Tool | Description |
 |---|---|
-| `spec_create` | Create a standalone spec (not bound to any graph). Supports `spec_type` (Conventional Commits type: `feat`, `fix`, etc.) and `spec_scope` (e.g. `tui`) to enable automatic code generation and deterministic commit messages. A conventional name such as `fix(tui): open F1` sets the type and scope and stores the subject alone. A spec created without a type still succeeds but returns a `warning`: it will have no code and no commit message |
-| `spec_list` | List specs, filterable by workdir, status, and `spec_type` |
-| `spec_update` | Update a spec's name, description, workdir tag, `spec_type`, or `spec_scope` |
-| `spec_delete` | Delete an unbound spec |
-| `spec_set_status` | Admin transition: complete, skip, or reopen a standalone spec |
-| `spec_section_get` | Extract one canonical section (`<objective>`, `<constraints>`, …) from a spec body |
+| `spec` | Read specs, sections, and notes. Actions: `list` (filterable by workdir, status, and `spec_type`, with limit/offset pagination), `get` (one spec with its full description), `section` (one canonical section from a spec body), `notes` (every note of a spec, newest first, with owner, author model, `updated_at` and body) — pass `action` plus the params the refusal/table lists |
+| `spec_edit` | Create, change, and transition specs. Actions: `create` (a standalone spec — supports `spec_type`/`spec_scope` for automatic code generation and deterministic commit messages; a conventional name such as `fix(tui): open F1` sets the type and scope and stores the subject alone, while an untyped create still succeeds but returns a `warning`), `update`, `delete` (refused while bound to a graph), `set_status` (admin transition: complete, skip, or reopen), `note_write` (`run_id` + `body`, or `spec_id` + `body` for the `operator` note; body ≤ 2 500 chars) — the old one-operation spec tools, now one tool with an `action` parameter and the same per-action params |
 | `spec_convert` | Convert legacy heading-format spec bodies to the tagged `<spec>` format (skips tagged and running specs) |
-| `spec_note_write` | Write or replace the caller's note for the current spec: `run_id` + `body` resolves the owner from the active run (node, or its ensemble when a member) and refuses a finished run; `spec_id` + `body` with no `run_id` writes the `operator` note. Body ≤ 2 500 chars |
-| `spec_notes_get` | Read every note of a spec (`spec_id`), newest first, with owner, author model, `updated_at` and body |
 
 Spec bodies use the tagged `<spec>` format with all seven canonical section
 tags — `<objective>`, `<functional_requirements>`,
@@ -213,16 +193,11 @@ tags — `<objective>`, `<functional_requirements>`,
 are rejected naming the offending tag; legacy heading-format bodies remain
 readable until `spec_convert` migrates them.
 
-## Spec queues (6)
+## Spec queues (1)
 
 | Tool | Description |
 |---|---|
-| `queue_create` | Create an ordered queue of specs |
-| `queue_add_spec` | Append a spec to a queue — a grouped add lands after the group's last pending member |
-| `queue_list` | List a queue's members, or all queues |
-| `queue_remove_spec` | Remove a spec from a queue |
-| `queue_reorder` | Full replacement of a queue's order |
-| `queue_set_group` | Set or clear a member's context group |
+| `queue` | Author ordered spec queues. Actions: `create`, `list` (a queue's members, or all queues), `add_spec` (a grouped add lands after the group's last pending member), `remove_spec`, `reorder` (full replacement of the order), `set_group` — pass `action` plus the params the refusal/table lists |
 
 ## Node blueprints (3)
 
@@ -255,12 +230,6 @@ readable until `spec_convert` migrates them.
 |---|---|
 | `rag_search` | Semantic search over indexed documents (rate-limited) |
 | `rag_compact` | Compact the vector store now: merge fragments and prune old versions |
-
-## Platform registry (1)
-
-| Tool | Description |
-|---|---|
-| `registry_refresh` | Fetch the platform registry and apply it to config.toml now, ignoring the 24-hour interval. Takes no parameters; returns the report as JSON — `changed` and `kept` per platform, the `added`, `updated` and `deleted` platform names, and `up_to_date` |
 
 ## Protocol (1)
 

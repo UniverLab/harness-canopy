@@ -403,7 +403,7 @@ pub struct GraphSpec {
     /// (`commit_rights: true`) — a graph that never does never populates it.
     #[serde(default)]
     pub spec_committed_head: Option<String>,
-    /// Optional workdir tag for backlog filtering only (`spec_list`). It does
+    /// Optional workdir tag for backlog filtering only (`spec list`). It does
     /// not drive execution — the run that eventually assigns this spec to a
     /// graph decides the actual workdir.
     #[serde(default)]
@@ -429,7 +429,7 @@ pub struct GraphSpec {
     pub spec_scope: Option<String>,
     /// SPECCODE: engine-generated quick reference (`FIX-7`), immutable once
     /// assigned — assigned on create when the type is known, or by
-    /// `spec_update` assigning a type to a legacy spec. Never set by callers
+    /// `spec_edit update` assigning a type to a legacy spec. Never set by callers
     /// and never part of the commit message.
     #[serde(default)]
     pub spec_code: Option<String>,

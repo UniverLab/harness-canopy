@@ -31,7 +31,7 @@ pub(crate) fn validate_absolute_dir(path: &str) -> Result<(), String> {
 /// Unlike [`validate_absolute_dir`], a spec's `workdir` tag doesn't require
 /// the directory to exist yet — a backlog spec can be authored for a workdir
 /// before that project is cloned or a graph targeting it is created. It's
-/// only ever used for filtering (`spec_list`), never to drive execution.
+/// only ever used for filtering (`spec list`), never to drive execution.
 pub(crate) fn validate_spec_workdir(path: &str) -> Result<(), String> {
     if !std::path::Path::new(path).is_absolute() {
         return Err("Spec workdir must be an absolute path.".into());
@@ -482,7 +482,7 @@ pub(crate) fn delete_graph_node_checked(db: &Database, node_id: &str) -> Result<
 
 /// Unlike [`GraphSpecStatus::from_str`] (infallible, defaults to `Pending`
 /// for callers that already trust the value came from the DB), a
-/// `spec_list` status filter comes from the caller — an unrecognized value
+/// `spec list` status filter comes from the caller — an unrecognized value
 /// should be rejected, not silently reinterpreted as "pending".
 pub(crate) fn validate_spec_status(status: &str) -> Result<GraphSpecStatus, String> {
     match status.trim().to_lowercase().as_str() {

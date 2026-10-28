@@ -42,7 +42,7 @@ impl Serialize for Status {
     }
 }
 
-/// One setting as reported by `config_list`.
+/// One setting as reported by `config list`.
 #[derive(Debug, Clone, Serialize)]
 pub struct Row {
     pub key: String,
@@ -132,7 +132,7 @@ pub fn list_with_env(
 
     if group.is_none() {
         // A file that will not parse has no per-key statuses to show, so it
-        // gets one row of its own — `config_list` and `canopy doctor` would
+        // gets one row of its own — `config list` and `canopy doctor` would
         // otherwise report the previous values as if nothing were wrong.
         if let Some(problem) = problems.iter().find(|problem| problem.key == "*") {
             rows.insert(

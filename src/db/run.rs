@@ -27,7 +27,7 @@ impl RunRepository for Database {
 
         // Check-then-insert under the *same* lock acquisition: two
         // concurrent callers (e.g. a scheduled tick and a manual
-        // `agent_run`, or two evaluations of the same cron tick) serialize
+        // `agent_edit run`, or two evaluations of the same cron tick) serialize
         // on `self.conn`'s mutex, so whichever loses the race sees the
         // winner's row already inserted here instead of both seeing "no
         // active run" and both starting an execution.

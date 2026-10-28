@@ -1,6 +1,6 @@
 //! Headless liveness probing for configured platforms.
 //!
-//! `agent_models`/`doctor` answer "does the catalog list this platform" and
+//! `harness models`/`doctor` answer "does the catalog list this platform" and
 //! "is its binary present and its config well-formed" — neither one ever
 //! actually asks the harness to speak. A platform can be installed, listed,
 //! and configured while every real invocation answers with its own error

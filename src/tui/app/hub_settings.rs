@@ -3,7 +3,7 @@
 //!
 //! Structure (groups, kinds, apply modes) comes from the compile-time
 //! registry; live state (`effective`, `source`, `status`) comes from a
-//! `config_list` daemon call cached here. Every write goes through the daemon
+//! `config list` daemon call cached here. Every write goes through the daemon
 //! client on a background thread, so the UI never blocks and never writes
 //! `config.toml` itself.
 
@@ -16,7 +16,7 @@ use crate::application::ports::StateRepository;
 use crate::domain::settings::{find, Apply, Group, Kind};
 use crate::tui::app::dialog::GraphActionMessage;
 
-/// Minimum gap between two `config_list` fetches while the tab is visible.
+/// Minimum gap between two `config list` fetches while the tab is visible.
 pub(crate) const SETTINGS_REFRESH_EVERY: Duration = Duration::from_secs(5);
 
 /// Which Settings column holds the focus: the category list or its
@@ -28,12 +28,12 @@ pub(crate) enum SettingsFocus {
     Properties,
 }
 
-/// One setting as the Settings tab shows it, from a `config_list` row.
+/// One setting as the Settings tab shows it, from a `config list` row.
 pub(crate) struct SettingRow {
     pub key: String,
     pub group: String,
     pub description: String,
-    /// TOML-rendered, from `config_list`.
+    /// TOML-rendered, from `config list`.
     pub effective: String,
     pub default: String,
     /// "default" | "file" | "env"
@@ -94,14 +94,17 @@ pub(crate) struct HubDirPicker {
 /// The plan for setting `key` to `value_text`: the tool name and its args.
 pub(crate) fn plan_set(key: &str, value_text: &str) -> (&'static str, serde_json::Value) {
     (
-        "config_set",
-        serde_json::json!({ "key": key, "value": value_text }),
+        "config",
+        serde_json::json!({ "action": "set", "key": key, "value": value_text }),
     )
 }
 
 /// The plan for resetting `key` to its default.
 pub(crate) fn plan_reset(key: &str) -> (&'static str, serde_json::Value) {
-    ("config_reset", serde_json::json!({ "key": key }))
+    (
+        "config",
+        serde_json::json!({ "action": "reset", "key": key }),
+    )
 }
 
 /// Render a list of paths as a TOML array, escaping `\` and `"`.
@@ -133,13 +136,13 @@ pub(crate) fn settings_badge_for(apply: Apply) -> &'static str {
     apply.badge()
 }
 
-/// Parse the `config_list` text payload (a JSON array of rows).
+/// Parse the `config list` text payload (a JSON array of rows).
 pub(crate) fn parse_settings_rows(text: &str) -> Result<Vec<SettingRow>, String> {
     let value: serde_json::Value =
         serde_json::from_str(text).map_err(|error| format!("response is not JSON: {error}"))?;
     let items = value
         .as_array()
-        .ok_or_else(|| "config_list: expected a JSON array".to_string())?;
+        .ok_or_else(|| "config list: expected a JSON array".to_string())?;
     Ok(items.iter().map(parse_setting_row).collect())
 }
 
@@ -162,7 +165,7 @@ fn parse_setting_row(item: &serde_json::Value) -> SettingRow {
 }
 
 /// Parse a TOML array of strings (the form `toml_array` writes and
-/// `config_list` reports) back into a list.
+/// `config list` reports) back into a list.
 pub(crate) fn parse_toml_array(text: &str) -> Vec<String> {
     let trimmed = text.trim();
     let inner = trimmed
@@ -246,12 +249,12 @@ pub(crate) fn list_move(list: &mut [String], idx: &mut usize, forward: bool) {
 }
 
 impl App {
-    /// Request a fresh `config_list` as soon as possible.
+    /// Request a fresh `config list` as soon as possible.
     pub(crate) fn settings_request_refresh(&mut self) {
         self.hub.settings.request_refresh();
     }
 
-    /// Spawn a `config_list` fetch unless the hub's Settings tab is not
+    /// Spawn a `config list` fetch unless the hub's Settings tab is not
     /// visible, a fetch is already in flight, or the throttle still holds.
     pub(crate) fn refresh_settings_rows(&mut self) {
         if !self.hub_open || self.hub.tab != super::hub::HubTab::Settings {
@@ -280,7 +283,7 @@ impl App {
         self.hub.settings.stale = false;
     }
 
-    /// Apply a finished `config_list` fetch, if any.
+    /// Apply a finished `config list` fetch, if any.
     pub(crate) fn poll_settings_rows(&mut self) {
         let Some(rx) = self.hub.settings.rows_rx.take() else {
             return;
@@ -478,7 +481,7 @@ impl App {
         }
     }
 
-    /// Space on a bool row: flip it through `config_set`.
+    /// Space on a bool row: flip it through `config set`.
     pub(crate) fn toggle_bool(&mut self) {
         let Some(plan) = self.selected_setting().and_then(bool_toggle_plan) else {
             return;
@@ -525,7 +528,7 @@ impl App {
         });
     }
 
-    /// Enter in the editor: write the pending value through `config_set`.
+    /// Enter in the editor: write the pending value through `config set`.
     pub(crate) fn commit_editor_value(&mut self) {
         let Some(editor) = self.hub.settings.editor.take() else {
             return;
@@ -616,9 +619,12 @@ fn read_dir_names(path: &std::path::Path) -> Vec<String> {
 
 /// Fetch and parse every setting row through the daemon.
 fn fetch_settings_rows(port: &str) -> Result<Vec<SettingRow>, String> {
-    let outcome =
-        crate::tui::mcp_client::call_daemon_tool(port, "config_list", &serde_json::json!({}))
-            .map_err(|error| format!("{error:#}"))?;
+    let outcome = crate::tui::mcp_client::call_daemon_tool(
+        port,
+        "config",
+        &serde_json::json!({ "action": "list" }),
+    )
+    .map_err(|error| format!("{error:#}"))?;
     if outcome.is_error {
         return Err(outcome.text);
     }
@@ -657,11 +663,11 @@ mod tests {
         }
     }
 
-    /// Each editor kind plans the right `config_set` call and value: a bool
+    /// Each editor kind plans the right `config set` call and value: a bool
     /// sends `true`, an enum its option, an int `5`, a float `0.5`, a
     /// duration `30`, a string its text, and a PathList the TOML array.
     #[test]
-    fn editors_plan_the_right_config_set_value() {
+    fn editors_plan_the_right_config_set_action_value() {
         let cases = [
             ("tui.brians_brain", "true"),
             ("theme", "modern"),
@@ -673,7 +679,8 @@ mod tests {
         ];
         for (key, value) in cases {
             let (tool, args) = plan_set(key, value);
-            assert_eq!(tool, "config_set");
+            assert_eq!(tool, "config");
+            assert_eq!(args["action"], "set");
             assert_eq!(args["key"], key);
             assert_eq!(args["value"], value);
         }
@@ -683,7 +690,8 @@ mod tests {
     fn bool_toggles_and_enum_cycles() {
         let bool_row = row("tui.atmosphere", "TUI & appearance", "true");
         let (tool, args) = bool_toggle_plan(&bool_row).expect("bool plan");
-        assert_eq!(tool, "config_set");
+        assert_eq!(tool, "config");
+        assert_eq!(args["action"], "set");
         assert_eq!(args["value"], "false");
 
         let enum_row = row("theme", "General", "\"classic\"");
@@ -712,9 +720,10 @@ mod tests {
     }
 
     #[test]
-    fn reset_plans_config_reset() {
+    fn reset_plans_config_reset_action() {
         let (tool, args) = plan_reset("theme");
-        assert_eq!(tool, "config_reset");
+        assert_eq!(tool, "config");
+        assert_eq!(args["action"], "reset");
         assert_eq!(args["key"], "theme");
         assert!(args.get("value").is_none());
     }
@@ -793,7 +802,7 @@ mod tests {
     }
 
     #[test]
-    fn enter_on_an_int_row_calls_config_set_with_the_typed_value() {
+    fn enter_on_an_int_row_calls_config_set_action_with_the_typed_value() {
         let (mut app, fake) = app_on_daemon(ok_result());
         app.hub.settings.rows = vec![row("spec_attempt_limit", "General", "5")];
 
@@ -806,15 +815,16 @@ mod tests {
 
         let calls = fake.recorded_calls();
         assert_eq!(calls.len(), 1, "{calls:?}");
-        assert_eq!(calls[0]["name"], "config_set");
+        assert_eq!(calls[0]["name"], "config");
+        assert_eq!(calls[0]["arguments"]["action"], "set");
         assert_eq!(
             calls[0]["arguments"],
-            serde_json::json!({ "key": "spec_attempt_limit", "value": "7" })
+            serde_json::json!({ "action": "set", "key": "spec_attempt_limit", "value": "7" })
         );
     }
 
     #[test]
-    fn space_on_a_bool_row_calls_config_set_with_the_flip() {
+    fn space_on_a_bool_row_calls_config_set_action_with_the_flip() {
         let (mut app, fake) = app_on_daemon(ok_result());
         app.hub.settings.rows = vec![row("tui.atmosphere", "General", "true")];
 
@@ -822,12 +832,13 @@ mod tests {
         finish_write(&mut app);
 
         let calls = fake.recorded_calls();
-        assert_eq!(calls[0]["name"], "config_set");
+        assert_eq!(calls[0]["name"], "config");
+        assert_eq!(calls[0]["arguments"]["action"], "set");
         assert_eq!(calls[0]["arguments"]["value"], "false");
     }
 
     #[test]
-    fn arrows_on_an_enum_row_call_config_set_with_the_next_option() {
+    fn arrows_on_an_enum_row_call_config_set_action_with_the_next_option() {
         let (mut app, fake) = app_on_daemon(ok_result());
         app.hub.settings.rows = vec![row("theme", "General", "\"classic\"")];
 
@@ -835,12 +846,13 @@ mod tests {
         finish_write(&mut app);
 
         let calls = fake.recorded_calls();
-        assert_eq!(calls[0]["name"], "config_set");
+        assert_eq!(calls[0]["name"], "config");
+        assert_eq!(calls[0]["arguments"]["action"], "set");
         assert_eq!(calls[0]["arguments"]["value"], "modern");
     }
 
     #[test]
-    fn path_list_commit_calls_config_set_with_the_toml_array() {
+    fn path_list_commit_calls_config_set_action_with_the_toml_array() {
         let (mut app, fake) = app_on_daemon(ok_result());
         app.hub.settings.rows = vec![row("rag_personal_dirs", "General", "[\"/a\",\"/b\"]")];
 
@@ -850,15 +862,16 @@ mod tests {
         finish_write(&mut app);
 
         let calls = fake.recorded_calls();
-        assert_eq!(calls[0]["name"], "config_set");
+        assert_eq!(calls[0]["name"], "config");
+        assert_eq!(calls[0]["arguments"]["action"], "set");
         assert_eq!(
             calls[0]["arguments"],
-            serde_json::json!({ "key": "rag_personal_dirs", "value": "[\"/b\"]" })
+            serde_json::json!({ "action": "set", "key": "rag_personal_dirs", "value": "[\"/b\"]" })
         );
     }
 
     #[test]
-    fn r_calls_config_reset_for_the_selected_row() {
+    fn r_calls_config_reset_action_for_the_selected_row() {
         let (mut app, fake) = app_on_daemon(ok_result());
         app.hub.settings.rows = vec![row("theme", "General", "\"modern\"")];
 
@@ -866,8 +879,11 @@ mod tests {
         finish_write(&mut app);
 
         let calls = fake.recorded_calls();
-        assert_eq!(calls[0]["name"], "config_reset");
-        assert_eq!(calls[0]["arguments"], serde_json::json!({ "key": "theme" }));
+        assert_eq!(calls[0]["name"], "config");
+        assert_eq!(
+            calls[0]["arguments"],
+            serde_json::json!({ "action": "reset", "key": "theme" })
+        );
     }
 
     /// A range refusal from the daemon leaves the old value on screen and

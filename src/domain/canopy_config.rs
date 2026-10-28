@@ -85,7 +85,7 @@ pub struct CanopyConfig {
     #[serde(default)]
     pub skills: SkillsConfig,
 
-    /// `[models]` settings for the `agent_models` catalog cache.
+    /// `[models]` settings for the `harness models` catalog cache.
     #[serde(default)]
     pub models: ModelsConfig,
 
@@ -557,7 +557,7 @@ fn default_reclaim_min_deleted_rows() -> usize {
     settings::default_int("clean.reclaim_min_deleted_rows") as usize
 }
 
-/// Settings for the `agent_models` catalog cache. Read from the `[models]`
+/// Settings for the `harness models` catalog cache. Read from the `[models]`
 /// table in `config.toml`.
 ///
 /// The two caches get independent TTLs rather than sharing one: the
@@ -567,7 +567,7 @@ fn default_reclaim_min_deleted_rows() -> usize {
 /// authenticates with a new provider through that CLI, so it defaults much
 /// shorter — a stale native cache is far more likely to hide a model the
 /// user just unlocked than the models.dev catalog is to miss a same-day
-/// release. Either can still be forced fresh early via `agent_models
+/// release. Either can still be forced fresh early via `harness models
 /// refresh: true` or `canopy models refresh`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelsConfig {
