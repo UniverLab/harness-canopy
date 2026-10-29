@@ -84,11 +84,14 @@ pub(super) fn normalize_temperature(value: Option<f32>) -> Option<f32> {
 
 pub(super) fn is_cpu_temperature_label(label: &str) -> bool {
     let label = label.to_ascii_lowercase();
-    label.contains("cpu")
+    let looks_cpu = label.contains("cpu")
         || label.contains("package")
         || label.contains("tctl")
         || label.contains("tdie")
-        || label.contains("coretemp")
+        || label.contains("coretemp");
+    // A GPU sensor such as "GPU Package" also contains a CPU keyword; it
+    // belongs to the GPU unless the label explicitly says CPU.
+    looks_cpu && (!is_gpu_temperature_label(&label) || label.contains("cpu"))
 }
 
 pub(super) fn is_gpu_temperature_label(label: &str) -> bool {
@@ -182,6 +185,14 @@ mod tests {
         assert!(!is_cpu_temperature_label("GPU Core"));
         assert!(!is_cpu_temperature_label("SYSTIN"));
         assert!(!is_cpu_temperature_label("Fan #1"));
+    }
+
+    #[test]
+    fn is_cpu_temperature_label_rejects_gpu_sensors_with_cpu_keywords() {
+        // "package" is a CPU keyword, but these sensors belong to the GPU.
+        assert!(!is_cpu_temperature_label("GPU Package"));
+        assert!(!is_cpu_temperature_label("gpu package id 0"));
+        assert!(is_gpu_temperature_label("GPU Package"));
     }
 
     #[test]

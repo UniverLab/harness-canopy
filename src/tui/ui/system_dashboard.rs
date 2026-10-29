@@ -111,9 +111,27 @@ fn create_system_dashboard_lines(
     max_lines: usize,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
+    create_system_dashboard_lines_with_hint(
+        system_info,
+        system_info.cpu_temp_hint(),
+        temperature_unit,
+        max_lines,
+        theme,
+    )
+}
+
+/// Inner builder taking an explicit hint so tests can pin the hint row
+/// without depending on the host platform.
+fn create_system_dashboard_lines_with_hint(
+    system_info: &SystemInfo,
+    cpu_temp_hint: Option<&str>,
+    temperature_unit: TemperatureUnit,
+    max_lines: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
     let mut lines = vec![cpu_line(system_info, temperature_unit, theme)];
 
-    if let Some(hint) = cpu_temp_hint_line(system_info.cpu_temp_hint(), theme) {
+    if let Some(hint) = cpu_temp_hint_line(cpu_temp_hint, theme) {
         lines.push(hint);
     }
 
@@ -666,21 +684,53 @@ mod tests {
     #[test]
     fn cpu_temp_hint_line_hides_without_hint() {
         assert!(cpu_temp_hint_line(None, &Theme::classic()).is_none());
-        // No hint on this host → no hint row in the rendered dashboard.
+    }
+
+    #[test]
+    fn dashboard_shows_hint_row_when_hint_present() {
         let info = SystemInfo::default();
-        if info.cpu_temp_hint().is_none() {
-            let lines = create_system_dashboard_lines(
-                &info,
-                TemperatureUnit::Celsius,
-                usize::MAX,
-                &Theme::classic(),
-            );
-            assert!(
-                !lines
-                    .iter()
-                    .any(|l| l.to_string().contains("LibreHardwareMonitor")),
-                "hint row must be absent without a hint"
-            );
-        }
+        let lines = create_system_dashboard_lines_with_hint(
+            &info,
+            Some("run LibreHardwareMonitor (WMI on) to expose CPU temperature"),
+            TemperatureUnit::Celsius,
+            usize::MAX,
+            &Theme::classic(),
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.to_string().contains("LibreHardwareMonitor")),
+            "hint row must render when a hint is present"
+        );
+        let without = create_system_dashboard_lines_with_hint(
+            &info,
+            None,
+            TemperatureUnit::Celsius,
+            usize::MAX,
+            &Theme::classic(),
+        );
+        assert_eq!(
+            lines.len(),
+            without.len() + 1,
+            "hint row must add exactly one line"
+        );
+    }
+
+    #[test]
+    fn dashboard_hides_hint_row_without_hint() {
+        let info = SystemInfo::default();
+        let lines = create_system_dashboard_lines_with_hint(
+            &info,
+            None,
+            TemperatureUnit::Celsius,
+            usize::MAX,
+            &Theme::classic(),
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.to_string().contains("LibreHardwareMonitor")),
+            "hint row must be absent without a hint"
+        );
     }
 }

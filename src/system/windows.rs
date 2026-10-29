@@ -79,7 +79,7 @@ fn select_windows_temps(snapshot: &WindowsHostSnapshot) -> WindowsTemps {
             find_sensor_temp(snapshot.ohm_temps.as_ref(), is_cpu_temperature_label)
                 .map(|temp| (temp, "openhardwaremonitor"))
         })
-        .or_else(|| snapshot.cpu_temperature_c.map(|temp| (temp, "msacpi")));
+        .or_else(|| normalize_temperature(snapshot.cpu_temperature_c).map(|temp| (temp, "msacpi")));
     let (cpu_temp, cpu_source) = cpu
         .map(|(temp, source)| (Some(temp), Some(source.to_string())))
         .unwrap_or((None, None));
@@ -273,6 +273,14 @@ mod tests {
     }
 
     #[test]
+    fn invalid_msacpi_yields_no_cpu_temp() {
+        let snapshot = snapshot_from(r#"{"CpuTemperatureC": 0.0}"#);
+        let temps = select_windows_temps(&snapshot);
+        assert!(temps.cpu.is_none());
+        assert!(temps.cpu_source.is_none());
+    }
+
+    #[test]
     fn all_absent_yields_no_temps() {
         let snapshot = snapshot_from(r#"{}"#);
         let temps = select_windows_temps(&snapshot);
@@ -286,6 +294,18 @@ mod tests {
         let snapshot = snapshot_from(
             r#"{"CpuTemperatureC": 50.0,
                 "LhmTemps": [{"Name": "GPU Core", "Value": 70.0}]}"#,
+        );
+        let temps = select_windows_temps(&snapshot);
+        assert_eq!(temps.cpu, Some(50.0));
+        assert_eq!(temps.cpu_source.as_deref(), Some("msacpi"));
+        assert_eq!(temps.gpu, Some(70.0));
+    }
+
+    #[test]
+    fn gpu_package_sensor_does_not_become_cpu_temp() {
+        let snapshot = snapshot_from(
+            r#"{"CpuTemperatureC": 50.0,
+                "LhmTemps": [{"Name": "GPU Package", "Value": 70.0}]}"#,
         );
         let temps = select_windows_temps(&snapshot);
         assert_eq!(temps.cpu, Some(50.0));

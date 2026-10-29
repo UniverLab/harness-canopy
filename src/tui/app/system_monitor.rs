@@ -352,3 +352,47 @@ pub(crate) fn log_contains_spawn(log_up: &str) -> bool {
         .iter()
         .any(|kw| log_up.contains(kw))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::system::SystemInfo;
+
+    #[test]
+    fn blend_system_info_snaps_cpu_temp_source() {
+        let mut current = SystemInfo {
+            cpu_temp_source: Some("msacpi".to_string()),
+            ..SystemInfo::default()
+        };
+        let target = SystemInfo {
+            cpu_temp_source: Some("librehardwaremonitor".to_string()),
+            ..SystemInfo::default()
+        };
+        // Source slugs snap like integers: no lerp, even at t=0.
+        blend_system_info(&mut current, &target, 0.0);
+        assert_eq!(
+            current.cpu_temp_source.as_deref(),
+            Some("librehardwaremonitor")
+        );
+    }
+
+    #[test]
+    fn blend_system_info_clears_source_when_target_has_none() {
+        let mut current = SystemInfo {
+            cpu_temp_source: Some("msacpi".to_string()),
+            ..SystemInfo::default()
+        };
+        let target = SystemInfo::default();
+        blend_system_info(&mut current, &target, 1.0);
+        assert!(current.cpu_temp_source.is_none());
+    }
+
+    #[test]
+    fn system_settling_detects_source_change() {
+        let current = SystemInfo::default();
+        let mut target = SystemInfo::default();
+        assert!(!system_settling(&current, &target));
+        target.cpu_temp_source = Some("librehardwaremonitor".to_string());
+        assert!(system_settling(&current, &target));
+    }
+}

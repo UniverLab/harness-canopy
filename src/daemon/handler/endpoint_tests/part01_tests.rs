@@ -152,6 +152,21 @@ fn daemon_start_instant_is_shared_by_every_handler() {
     );
 }
 
+/// FR4: `agent status` carries the CPU temperature section (reading plus
+/// `cpu_temp_source` slug, or `n/a`) — pins the wiring, not just the
+/// section builder.
+#[tokio::test]
+async fn agent_status_includes_cpu_temperature_section() {
+    let home = tempdir().unwrap();
+    let _home_guard = HomeVar::set(home.path());
+    let (_dir, _db, handler) = endpoint_test_handler();
+
+    let result = handler.agent_status_impl().await.unwrap();
+    let body = text(&result);
+    assert!(!is_err(&result), "{body}");
+    assert!(body.contains("CPU temperature:"), "got: {body}");
+}
+
 // ── task_add / agent_add ─────────────────────────────────────
 
 #[tokio::test]
