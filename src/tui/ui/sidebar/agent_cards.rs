@@ -151,7 +151,7 @@ pub(super) fn draw_sidebar_card(
     } else if hovered {
         BG_HOVER
     } else {
-        Color::Reset
+        theme.sidebar_bg
     };
     let name = agent.id(app);
 
@@ -471,7 +471,7 @@ pub(super) fn group_row_style(is_selected: bool, is_active: bool, theme: &Theme)
         bg: if is_selected {
             theme.selected_bg
         } else {
-            Color::Reset
+            theme.sidebar_bg
         },
         fg: if is_selected {
             theme.header_color

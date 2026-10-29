@@ -156,7 +156,7 @@ pub(super) fn draw_project_graph_card(
     let bg = if selected {
         theme.selected_bg
     } else {
-        Color::Reset
+        theme.sidebar_bg
     };
     let title_style = project_title_style(selected, panel_focused, theme);
     let meta_style = project_meta_style(selected, theme);

@@ -882,61 +882,72 @@ fn draw_sidebar_tab_bar_registers_three_equal_click_cells_spanning_the_full_widt
 }
 
 #[test]
-fn draw_sidebar_tab_bar_marks_the_active_tab_with_accent_bold_and_no_fill() {
+fn draw_sidebar_tab_bar_paints_the_sidebar_surface_in_every_theme() {
     use crate::db::Database;
     use crate::tui::app::App;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use std::sync::Arc;
 
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
-    let db = Arc::new(Database::new(&path).unwrap());
-    let data_dir = tempfile::tempdir().unwrap();
-    let mut app = App::new(
-        Arc::clone(&db),
-        data_dir.path(),
-        &crate::domain::canopy_config::CanopyConfig::default(),
-    )
-    .unwrap();
-    app.sidebar_layer = SidebarLayer::Live;
-
-    let theme = Theme::classic();
-    let backend = TestBackend::new(33, 40);
-    let mut terminal = Terminal::new(backend).unwrap();
-    terminal
-        .draw(|frame| {
-            let area = frame.area();
-            draw_sidebar(frame, area, &mut app, &theme);
-        })
+    for theme in [Theme::classic(), Theme::modern()] {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let db = Arc::new(Database::new(&path).unwrap());
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
         .unwrap();
+        app.sidebar_layer = SidebarLayer::Live;
 
-    let (_, row, start, end) = app.sidebar_tab_click_map[0];
-    let buffer = terminal.backend().buffer().clone();
-    let mut saw_accent_glyph = false;
-    for x in start..end {
-        let cell = &buffer[(x, row)];
-        assert_eq!(
-            cell.bg,
-            Color::Reset,
-            "active tab cell must not fill its background"
-        );
-        if cell.symbol() != " " {
-            assert_eq!(cell.fg, theme.header_color);
-            assert!(cell.modifier.contains(Modifier::BOLD));
-            saw_accent_glyph = true;
+        let backend = TestBackend::new(33, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                draw_sidebar(frame, area, &mut app, &theme);
+            })
+            .unwrap();
+
+        let row = app.sidebar_tab_click_map[0].1;
+        let buffer = terminal.backend().buffer().clone();
+        // The strip is part of the sidebar surface, not a window onto the
+        // host terminal: every cell of the row must carry the theme's
+        // sidebar background, never the terminal's own.
+        for x in 0..33 {
+            let cell = &buffer[(x, row)];
+            assert_eq!(
+                cell.bg, theme.sidebar_bg,
+                "tab strip cell {x} must sit on the sidebar surface"
+            );
+            assert_ne!(
+                cell.bg,
+                Color::Reset,
+                "tab strip cell {x} leaks the terminal background"
+            );
         }
-    }
-    assert!(saw_accent_glyph, "expected the active label to be drawn");
 
-    let (_, row, start, end) = app.sidebar_tab_click_map[1];
-    for x in start..end {
-        let cell = &buffer[(x, row)];
-        assert_eq!(cell.bg, Color::Reset);
-        if cell.symbol() != " " {
-            assert_eq!(cell.fg, theme.dim_text);
-            assert!(!cell.modifier.contains(Modifier::BOLD));
+        for (index, &(_, _, start, end)) in app.sidebar_tab_click_map.iter().enumerate() {
+            let active = index == 0;
+            let mut saw_glyph = false;
+            for x in start..end {
+                let cell = &buffer[(x, row)];
+                if cell.symbol() == " " {
+                    continue;
+                }
+                saw_glyph = true;
+                if active {
+                    assert_eq!(cell.fg, theme.header_color);
+                    assert!(cell.modifier.contains(Modifier::BOLD));
+                } else {
+                    assert_eq!(cell.fg, theme.dim_text);
+                    assert!(!cell.modifier.contains(Modifier::BOLD));
+                }
+            }
+            assert!(saw_glyph, "expected tab {index} to draw its label");
         }
     }
 }
@@ -1213,7 +1224,7 @@ fn group_row_style_selected_and_active() {
 fn group_row_style_not_selected_not_active() {
     let theme = Theme::classic();
     let style = group_row_style(false, false, &theme);
-    assert_eq!(style.bg, Color::Reset);
+    assert_eq!(style.bg, theme.sidebar_bg);
     assert_eq!(style.fg, theme.text_primary);
     assert!(style.modifier.is_empty());
     assert_eq!(style.prefix_color, theme.dim_text);
@@ -1233,7 +1244,7 @@ fn group_row_style_selected_not_active() {
 fn group_row_style_active_not_selected() {
     let theme = Theme::classic();
     let style = group_row_style(false, true, &theme);
-    assert_eq!(style.bg, Color::Reset);
+    assert_eq!(style.bg, theme.sidebar_bg);
     assert_eq!(style.fg, theme.success);
     assert!(style.modifier.contains(Modifier::BOLD));
 }

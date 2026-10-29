@@ -265,21 +265,25 @@ mod tests {
     }
 
     #[test]
-    fn modern_sidebar_text_contrast() {
-        let theme = Theme::modern();
-        for (foreground, threshold) in [
-            (theme.text_primary, 4.5),
-            (theme.dim_text, 4.5),
-            (theme.muted_text, 4.5),
-            (theme.header_color, 3.0),
-        ] {
-            assert!(
-                contrast_ratio(foreground, theme.sidebar_bg) >= threshold,
-                "{foreground:?} fails {threshold}:1 contrast against sidebar"
-            );
+    fn sidebar_text_contrast() {
+        // The sidebar paints `sidebar_bg` behind its body, cards and the
+        // Live / Automation / Knowledge tab strip, so every sidebar text
+        // token must clear its bar on that surface in every theme.
+        for theme in [Theme::classic(), Theme::modern()] {
+            for (foreground, threshold) in [
+                (theme.text_primary, 4.5),
+                (theme.dim_text, 4.5),
+                (theme.muted_text, 4.5),
+                (theme.header_color, 3.0),
+            ] {
+                assert!(
+                    contrast_ratio(foreground, theme.sidebar_bg) >= threshold,
+                    "{foreground:?} fails {threshold}:1 contrast against sidebar"
+                );
+            }
+            assert!(contrast_ratio(theme.text_primary, theme.panel_bg) >= 4.5);
+            assert!(contrast_ratio(theme.text_primary, theme.field_bg) >= 4.5);
         }
-        assert!(contrast_ratio(theme.text_primary, theme.panel_bg) >= 4.5);
-        assert!(contrast_ratio(theme.text_primary, theme.field_bg) >= 4.5);
     }
 
     #[test]
@@ -299,7 +303,7 @@ mod tests {
     fn text_stays_readable_on_the_new_tinted_grounds() {
         // The builder draws body text, dimmed hints/previews and muted
         // secondary text directly on the new grounds, so all three must
-        // clear 4.5:1 (same bar as `modern_sidebar_text_contrast`).
+        // clear 4.5:1 (same bar as `sidebar_text_contrast`).
         for theme in [Theme::classic(), Theme::modern()] {
             for background in [theme.info_bg, theme.stage_bg] {
                 for (name, foreground) in [
