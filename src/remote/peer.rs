@@ -38,6 +38,12 @@ pub const CHANNEL_LABEL: &str = "canopy-session-v1";
 /// How long to wait for ICE gathering before answering with what we have.
 const GATHERING_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long the host waits for candidates before answering an offer. Host
+/// and server-reflexive candidates land well inside it; TURN allocations can
+/// take the full [`GATHERING_TIMEOUT`] (or never finish), so whatever arrives
+/// later is trickled as `ice` frames instead of holding the answer back.
+const ANSWER_GATHER_GRACE: Duration = Duration::from_millis(500);
+
 /// How long to wait for the relay's TURN credential response.
 const RELAY_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -388,7 +394,7 @@ impl Peer {
             .set_local_description(answer)
             .await
             .context("set the local answer")?;
-        answer_with_gathered_sdp(wiring).await
+        answer_with_gathered_sdp(wiring, ANSWER_GATHER_GRACE).await
     }
 
     /// Device side: opens the `label` data channel and returns the offer SDP.
@@ -424,7 +430,7 @@ impl Peer {
             .set_local_description(offer)
             .await
             .context("set the local offer")?;
-        answer_with_gathered_sdp(wiring).await
+        answer_with_gathered_sdp(wiring, GATHERING_TIMEOUT).await
     }
 
     /// Device side: applies the host's answer SDP, completing the handshake.
@@ -563,12 +569,13 @@ impl Wiring {
     }
 }
 
-/// Waits for ICE gathering (bounded) and returns the local SDP plus the peer.
-async fn answer_with_gathered_sdp(mut wiring: Wiring) -> Result<(String, Peer)> {
+/// Waits for ICE gathering (at most `wait`) and returns the local SDP plus
+/// the peer.
+async fn answer_with_gathered_sdp(mut wiring: Wiring, wait: Duration) -> Result<(String, Peer)> {
     // Bounded on purpose: a peer that never finishes gathering (a TURN server
     // that stays silent, say) must not hang the pairing, and the candidates
     // gathered so far still travel in the SDP.
-    let _ = tokio::time::timeout(GATHERING_TIMEOUT, wiring.gathered.recv()).await;
+    let _ = tokio::time::timeout(wait, wiring.gathered.recv()).await;
     let sdp = local_sdp(&wiring.pc).await?;
     Ok((sdp, wiring.into_peer()))
 }

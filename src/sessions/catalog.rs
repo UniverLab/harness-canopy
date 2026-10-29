@@ -111,7 +111,12 @@ fn load_cli_entries(model_catalog: Option<&ModelCatalog>) -> Vec<CatalogCli> {
         .into_iter()
         .zip(configs)
         .map(|(cli, config)| {
+            // A CLI with no provider mapping would get the whole registry
+            // (thousands of ids per CLI, megabytes per catalog), which no
+            // picker can use and no data channel can carry; its model stays
+            // free text instead.
             let models: Vec<String> = model_catalog
+                .filter(|_| !models_db::providers_for_cli(cli.as_str()).is_empty())
                 .map(|catalog| {
                     models_db::suggestions_for(catalog, cli.as_str(), "")
                         .into_iter()

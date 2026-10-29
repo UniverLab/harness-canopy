@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::sessions::protocol::hello_frame;
+use crate::sessions::protocol::{error_frame, hello_frame};
 use crate::sessions::ws::SessionsState;
 
 use super::bridge::RemoteBridge;
@@ -162,6 +162,37 @@ pub struct PeerSession {
     pub from: String,
 }
 
+/// Largest frame the data channel carries. Chrome advertises
+/// `a=max-message-size:262144` and closes the channel on a bigger message,
+/// so one oversized answer used to end the whole peer.
+const MAX_CHANNEL_FRAME: usize = 256 * 1024;
+
+/// The frame to send for `frame`: itself when it fits, otherwise an `error`
+/// answering the same `req` so the device stops waiting for it.
+fn fitting_frame(frame: String) -> String {
+    if frame.len() <= MAX_CHANNEL_FRAME {
+        return frame;
+    }
+    let parsed: Option<serde_json::Value> = serde_json::from_str(&frame).ok();
+    let field = |key: &str| {
+        parsed
+            .as_ref()
+            .and_then(|value| value.get(key))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    };
+    let kind = field("t").unwrap_or_else(|| "?".to_string());
+    tracing::warn!(
+        "remote: dropping a {} byte `{kind}` frame over the {MAX_CHANNEL_FRAME} byte channel limit",
+        frame.len()
+    );
+    error_frame(
+        field("req").as_deref(),
+        "frame_too_large",
+        &format!("the host's `{kind}` answer is too large for the data channel"),
+    )
+}
+
 /// Serve one established peer: relay its ICE, bridge its data channel, and
 /// stop as soon as the channel closes or the device is revoked.
 pub fn spawn(mut session: PeerSession) {
@@ -178,41 +209,27 @@ async fn serve(session: &mut PeerSession) {
     // hub event produced before the channel exists is dropped (the device
     // resynchronises with `list`), never reordered around the greeting.
     let mut greeted = false;
-    loop {
+    let ended = loop {
         tokio::select! {
-            _ = session.token.cancelled() => break,
+            _ = session.token.cancelled() => break "revoked or closed by the device",
             message = session.control.recv() => match message {
                 Some(Control::Ice(candidate)) => {
                     let _ = session.peer.add_remote_candidate(&candidate).await;
                 }
-                None => break,
+                None => break "replaced by a newer connection",
             },
             frame = out_rx.recv() => {
                 if let Some(frame) = frame {
-                    if greeted && session.peer.send_text(&frame).await.is_err() {
-                        break;
+                    if greeted && session.peer.send_text(&fitting_frame(frame)).await.is_err() {
+                        break "the data channel refused a write";
                     }
                 }
             }
-            event = session.peer.next() => match event {
-                Some(PeerEvent::Open) => {
-                    if !greeted {
-                        greeted = true;
-                        let _ = out_tx.send(hello_frame(session.state.hub.host_label()));
-                    }
+            event = session.peer.next() => {
+                if let Err(ended) = on_peer_event(session, event, &mut greeted, &mut bridge, &out_tx).await {
+                    break ended;
                 }
-                Some(PeerEvent::LocalCandidate(candidate)) => {
-                    let _ = session
-                        .signal
-                        .send((session.from.clone(), signaling::ice_body(&candidate)));
-                }
-                Some(PeerEvent::Channel(bytes)) => {
-                    if let Ok(text) = String::from_utf8(bytes) {
-                        bridge.handle_text(&text, &out_tx).await;
-                    }
-                }
-                Some(PeerEvent::Closed) | None => break,
-            },
+            }
             hub_event = events.recv() => match hub_event {
                 Ok(event) => {
                     // Held until the greeting is queued: nothing may overtake
@@ -226,17 +243,48 @@ async fn serve(session: &mut PeerSession) {
                         bridge.note_hidden(&event);
                     }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break "the hub stopped",
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
             },
         }
-    }
+    };
+    tracing::info!("remote: device {} disconnected: {ended}", session.device_id);
     bridge.abort();
     session.peer.close().await;
     session.peers.remove(&session.device_id, &session.token);
     session
         .connections
         .release(&session.device_id, &session.token);
+}
+
+/// Handle one transport event; `Err` carries why the peer ends.
+async fn on_peer_event(
+    session: &PeerSession,
+    event: Option<PeerEvent>,
+    greeted: &mut bool,
+    bridge: &mut RemoteBridge,
+    out_tx: &mpsc::UnboundedSender<String>,
+) -> Result<(), &'static str> {
+    match event {
+        Some(PeerEvent::Open) => {
+            if !*greeted {
+                *greeted = true;
+                let _ = out_tx.send(hello_frame(session.state.hub.host_label()));
+            }
+        }
+        Some(PeerEvent::LocalCandidate(candidate)) => {
+            let _ = session
+                .signal
+                .send((session.from.clone(), signaling::ice_body(&candidate)));
+        }
+        Some(PeerEvent::Channel(bytes)) => {
+            if let Ok(text) = String::from_utf8(bytes) {
+                bridge.handle_text(&text, out_tx).await;
+            }
+        }
+        Some(PeerEvent::Closed) | None => return Err("the channel or the connection closed"),
+    }
+    Ok(())
 }
 
 #[cfg(test)]

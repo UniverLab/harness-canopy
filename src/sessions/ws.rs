@@ -59,7 +59,7 @@ impl SessionsState {
     /// the daemon must never serve without auth.
     pub fn ensure(data_dir: &Path, db: Arc<Database>) -> anyhow::Result<Arc<Self>> {
         let token = ensure_token(data_dir)?;
-        let hub = SessionHub::new(db.clone(), host_label());
+        let hub = SessionHub::new(db.clone(), host_label(data_dir));
         let shelf = ShelfStore::new(db, data_dir.join("shelf"))?;
         hub.wire_shelf(shelf.clone());
         shelf.maintenance();
@@ -107,7 +107,15 @@ impl SessionsState {
 }
 
 /// Machine hostname for `hello.host_label`.
-fn host_label() -> String {
+/// The label `hello` greets with: `[remote] host_label` when set (the same
+/// label the relay lists the host under), otherwise the hostname.
+fn host_label(data_dir: &Path) -> String {
+    let configured = crate::domain::canopy_config::CanopyConfig::load(data_dir)
+        .remote
+        .host_label;
+    if !configured.trim().is_empty() {
+        return configured.trim().to_string();
+    }
     #[cfg(unix)]
     if let Some(name) = unix_hostname() {
         return name;

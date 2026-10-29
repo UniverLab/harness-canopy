@@ -74,9 +74,14 @@ fn a_large_snapshot_keeps_its_geometry_in_the_first_frame_then_marks_the_last() 
 }
 
 #[test]
-fn a_snapshot_that_fits_is_a_single_snapshot_frame() {
+fn a_snapshot_that_fits_is_one_snapshot_frame_closed_by_an_empty_last_part() {
     let frames = split_snapshot_frames("s1", 80, 24, 3, b"tiny");
-    assert_eq!(frames.len(), 1);
+    assert_eq!(frames.len(), 2);
     assert_eq!(json(&frames[0])["t"], "snapshot");
     assert_eq!(data(&json(&frames[0])), b"tiny");
+    // The closing part is what tells the device the snapshot is whole.
+    let last = json(&frames[1]);
+    assert_eq!(last["t"], "snapshot_more");
+    assert_eq!(last["last"], true);
+    assert_eq!(data(&last), b"");
 }

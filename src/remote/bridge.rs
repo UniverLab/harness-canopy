@@ -595,12 +595,18 @@ pub fn split_out_frames(id: &str, seq: u64, data: &[u8]) -> Vec<String> {
 
 /// Split one snapshot into a leading `snapshot` frame (cols/rows/seq and the
 /// first chunk) followed by `snapshot_more` frames, the final one carrying
-/// `last: true`.
+/// `last: true`. A snapshot that fits the first frame still ends with an
+/// empty `snapshot_more{last:true}`: the device only knows the snapshot is
+/// whole when it sees `last`, so a lone `snapshot` would never be drawn.
 pub fn split_snapshot_frames(id: &str, cols: u16, rows: u16, seq: u64, data: &[u8]) -> Vec<String> {
     let mut chunks = data.chunks(CHUNK_BYTES);
     let first = chunks.next().unwrap_or(&[]);
     let mut frames = vec![snapshot_frame(id, cols, rows, seq, first)];
     let rest: Vec<&[u8]> = chunks.collect();
+    if rest.is_empty() {
+        frames.push(snapshot_more_frame(id, &[], true));
+        return frames;
+    }
     let total = rest.len();
     for (index, chunk) in rest.into_iter().enumerate() {
         frames.push(snapshot_more_frame(id, chunk, index + 1 == total));

@@ -350,8 +350,9 @@ with `spawn: harness '<cli>' has no yolo mode`, and a `terminal` spawn with
 `spawn: field 'yolo' is not allowed for kind 'terminal'`. Each `catalog` CLI
 row carries `yolo: true|false`, so the browser only offers the switch where
 the host can honor it. Output and snapshot frames are chunked to stay under
-16 KiB; a snapshot's first part carries `cols`/`rows` and the
-rest travels as `snapshot_more`. The shelf rides the same channel:
+16 KiB; a snapshot's first part carries `cols`/`rows`, the
+rest travels as `snapshot_more`, and the final `snapshot_more` carries
+`last: true` (an empty one when the snapshot fit the first part). The shelf rides the same channel:
 `shelf_list` and `shelf_get` answer `shelf` and `file` frames, and
 `shelf_added` / `shelf_removed` push arrivals and removals. Files from
 terminal sessions stay hidden from lists and pushes and answer
