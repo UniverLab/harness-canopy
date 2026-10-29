@@ -1799,7 +1799,7 @@ mod tests {
             .vt
             .lock()
             .expect("lock vt")
-            .process(b"\x1b[31mX\x1b[0m");
+            .process(b"\x1b[31;41mX\x1b[0m");
 
         app.open_simple_prompt_dialog(None);
         assert!(
@@ -1825,6 +1825,11 @@ mod tests {
             cell.fg,
             Color::Indexed(1),
             "red fg must survive behind the dialog"
+        );
+        assert_eq!(
+            cell.bg,
+            Color::Indexed(1),
+            "red bg must survive behind the dialog"
         );
         let mut text = String::new();
         for y in 0..area.height {
@@ -1990,5 +1995,16 @@ mod tests {
         new_agent.prev_focus = Some(Focus::Home);
         app.new_agent_dialog = Some(new_agent);
         assert!(panel_background_focus(&app) == Focus::Home);
+
+        // Nested dialogs (Ctrl+N is global and opens the new-agent dialog
+        // over the prompt builder): the chain of prev_focus values must be
+        // walked down to the panel-bearing focus, never to the log
+        // fallback.
+        app.new_agent_dialog.as_mut().unwrap().prev_focus = Some(Focus::PromptTemplateDialog);
+        app.focus = Focus::NewAgentDialog;
+        let mut prompt = crate::tui::app::dialog::SimplePromptDialog::new();
+        prompt.prev_focus = Some(Focus::Agent);
+        app.simple_prompt_dialog = Some(prompt);
+        assert!(panel_background_focus(&app) == Focus::Agent);
     }
 }

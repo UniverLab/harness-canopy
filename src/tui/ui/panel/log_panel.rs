@@ -1,54 +1,69 @@
 use super::*;
 
-/// The focus whose panel the log pane keeps drawing while an overlay dialog
-/// is open: the focus from before the dialog opened, never the dialog
-/// itself. `None` (dialog built without an opener, only in tests) falls
-/// back to `Preview`, never to the plain-text log.
-pub(super) fn panel_background_focus(app: &App) -> Focus {
-    match app.focus {
+/// The panel-bearing focus an overlay dialog stored at open time, or `None`
+/// when `focus` is not an overlay. A dialog that is open without stored
+/// state (`prev_focus: None`, only in tests) resolves to `Preview`, never
+/// to the plain-text log. `GraphEditorDialog` sits over the graph view, so
+/// it resolves to `Preview` without a stored field.
+fn overlay_prev_focus(app: &App, focus: Focus) -> Option<Focus> {
+    let stored = match focus {
         Focus::PromptTemplateDialog => app
             .simple_prompt_dialog
             .as_ref()
-            .and_then(|dialog| dialog.prev_focus)
-            .unwrap_or(Focus::Preview),
+            .and_then(|dialog| dialog.prev_focus),
         Focus::KnowledgeDialog => app
             .knowledge_dialog
             .as_ref()
-            .and_then(|dialog| dialog.prev_focus)
-            .unwrap_or(Focus::Preview),
+            .and_then(|dialog| dialog.prev_focus),
         Focus::KnowledgeViewer => app
             .knowledge_viewer
             .as_ref()
-            .and_then(|dialog| dialog.prev_focus)
-            .unwrap_or(Focus::Preview),
+            .and_then(|dialog| dialog.prev_focus),
         Focus::GraphFormDialog => app
             .graph_form_dialog
             .as_ref()
-            .and_then(|dialog| dialog.prev_focus)
-            .unwrap_or(Focus::Preview),
+            .and_then(|dialog| dialog.prev_focus),
         Focus::ContextTransfer => app
             .context_transfer_modal
             .as_ref()
-            .and_then(|modal| modal.prev_focus)
-            .unwrap_or(Focus::Preview),
+            .and_then(|modal| modal.prev_focus),
         Focus::RagTransfer => app
             .rag_transfer_modal
             .as_ref()
-            .and_then(|modal| modal.prev_focus)
-            .unwrap_or(Focus::Preview),
+            .and_then(|modal| modal.prev_focus),
         Focus::LaunchpadDialog => app
             .launchpad_dialog
             .as_ref()
-            .and_then(|dialog| dialog.prev_focus)
-            .unwrap_or(Focus::Preview),
+            .and_then(|dialog| dialog.prev_focus),
         Focus::NewAgentDialog => app
             .new_agent_dialog
             .as_ref()
-            .and_then(|dialog| dialog.prev_focus)
-            .unwrap_or(Focus::Preview),
-        Focus::GraphEditorDialog => Focus::Preview,
-        other => other,
+            .and_then(|dialog| dialog.prev_focus),
+        Focus::GraphEditorDialog => return Some(Focus::Preview),
+        _ => return None,
+    };
+    Some(stored.unwrap_or(Focus::Preview))
+}
+
+/// Chain-length guard for [`panel_background_focus`]: `prev_focus` is
+/// captured from `self.focus` at open time, so a cycle needs inconsistent
+/// state; the bound walks out of it deterministically anyway.
+const MAX_DIALOG_FOCUS_HOPS: usize = 8;
+
+/// The focus whose panel the log pane keeps drawing while an overlay dialog
+/// is open: the focus from before the dialog opened, never the dialog
+/// itself. Dialogs can stack (Ctrl+N is global and opens the new-agent
+/// dialog over the prompt builder), so the chain of stored `prev_focus`s is
+/// followed until a panel-bearing focus is reached.
+pub(super) fn panel_background_focus(app: &App) -> Focus {
+    let mut focus = app.focus;
+    for _ in 0..MAX_DIALOG_FOCUS_HOPS {
+        let Some(prev) = overlay_prev_focus(app, focus) else {
+            return focus;
+        };
+        focus = prev;
     }
+    Focus::Preview
 }
 
 pub(super) fn draw_log_panel_focus(
