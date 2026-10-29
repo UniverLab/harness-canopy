@@ -141,7 +141,11 @@ impl App {
     }
 
     pub(super) fn open_launchpad_dialog(&mut self, dialog: NewAgentDialog) -> Result<()> {
-        let launchpad = LaunchpadDialog::for_workdir(&self.db, &dialog.working_dir)?;
+        // The launchpad opens nested over the new-agent dialog, so the panel
+        // behind it must keep the focus from before that dialog opened.
+        let prev_focus = dialog.prev_focus.or(Some(self.focus));
+        let mut launchpad = LaunchpadDialog::for_workdir(&self.db, &dialog.working_dir)?;
+        launchpad.prev_focus = prev_focus;
         self.pending_launch_dialog = Some(dialog);
         self.launchpad_dialog = Some(launchpad);
         self.focus = crate::tui::app::types::Focus::LaunchpadDialog;

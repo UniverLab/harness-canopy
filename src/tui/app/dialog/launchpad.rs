@@ -2,6 +2,7 @@ use anyhow::Result;
 
 use crate::db::Database;
 use crate::domain::sync::summarize_sync_context;
+use crate::tui::app::types::Focus;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LaunchpadChoice {
@@ -34,6 +35,8 @@ pub struct LaunchpadDialog {
     pub submit_blocked: bool,
     /// Active missions from peer agents in this workdir (mission handoff context).
     pub active_missions: Vec<ActiveMissionSummary>,
+    /// Focus before the dialog opened; the panel behind keeps drawing it.
+    pub prev_focus: Option<Focus>,
 }
 
 impl LaunchpadDialog {
@@ -132,6 +135,7 @@ impl LaunchpadDialog {
             cursor: 0,
             submit_blocked: false,
             active_missions,
+            prev_focus: None,
         })
     }
 
@@ -279,6 +283,7 @@ mod tests {
             cursor: 3,
             submit_blocked: false,
             active_missions: Vec::new(),
+            prev_focus: None,
         };
 
         assert!(!dialog.can_confirm_selection());
@@ -315,6 +320,7 @@ mod tests {
             cursor: 0,
             submit_blocked: false,
             active_missions: Vec::new(),
+            prev_focus: None,
         };
 
         dialog.move_selection_up();
@@ -344,6 +350,7 @@ mod tests {
             cursor: 0,
             submit_blocked: false,
             active_missions: Vec::new(),
+            prev_focus: None,
         };
 
         assert!(dialog.can_confirm_selection());
@@ -365,6 +372,7 @@ mod tests {
             cursor: 0,
             submit_blocked: false,
             active_missions: Vec::new(),
+            prev_focus: None,
         };
 
         assert!(dialog.is_new_mission_selected());

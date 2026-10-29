@@ -7,6 +7,7 @@
 use std::collections::VecDeque;
 
 use super::agent::{InteractiveAgent, PromptEntry};
+use crate::tui::app::types::Focus;
 
 // ── Config ───────────────────────────────────────────────────────
 
@@ -287,6 +288,8 @@ pub struct ContextTransferModal {
     pub picker_selected: usize,
     /// Precomputed payload shown as preview in Step 1.
     pub payload_preview: String,
+    /// Focus before the modal opened; the panel behind keeps drawing it.
+    pub prev_focus: Option<Focus>,
 }
 
 impl ContextTransferModal {
@@ -304,6 +307,7 @@ impl ContextTransferModal {
             n_units: initial_units.max(1),
             picker_selected: 0,
             payload_preview: String::new(),
+            prev_focus: None,
         }
     }
 

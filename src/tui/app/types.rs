@@ -189,6 +189,8 @@ pub(crate) struct RagTransferModal {
     pub picker_selected: usize,
     pub query: String,
     pub context_payload: String,
+    /// Focus before the modal opened; the panel behind keeps drawing it.
+    pub prev_focus: Option<Focus>,
 }
 
 // ── App struct ──────────────────────────────────────────────────

@@ -1,12 +1,63 @@
 use super::*;
 
+/// The focus whose panel the log pane keeps drawing while an overlay dialog
+/// is open: the focus from before the dialog opened, never the dialog
+/// itself. `None` (dialog built without an opener, only in tests) falls
+/// back to `Preview`, never to the plain-text log.
+pub(super) fn panel_background_focus(app: &App) -> Focus {
+    match app.focus {
+        Focus::PromptTemplateDialog => app
+            .simple_prompt_dialog
+            .as_ref()
+            .and_then(|dialog| dialog.prev_focus)
+            .unwrap_or(Focus::Preview),
+        Focus::KnowledgeDialog => app
+            .knowledge_dialog
+            .as_ref()
+            .and_then(|dialog| dialog.prev_focus)
+            .unwrap_or(Focus::Preview),
+        Focus::KnowledgeViewer => app
+            .knowledge_viewer
+            .as_ref()
+            .and_then(|dialog| dialog.prev_focus)
+            .unwrap_or(Focus::Preview),
+        Focus::GraphFormDialog => app
+            .graph_form_dialog
+            .as_ref()
+            .and_then(|dialog| dialog.prev_focus)
+            .unwrap_or(Focus::Preview),
+        Focus::ContextTransfer => app
+            .context_transfer_modal
+            .as_ref()
+            .and_then(|modal| modal.prev_focus)
+            .unwrap_or(Focus::Preview),
+        Focus::RagTransfer => app
+            .rag_transfer_modal
+            .as_ref()
+            .and_then(|modal| modal.prev_focus)
+            .unwrap_or(Focus::Preview),
+        Focus::LaunchpadDialog => app
+            .launchpad_dialog
+            .as_ref()
+            .and_then(|dialog| dialog.prev_focus)
+            .unwrap_or(Focus::Preview),
+        Focus::NewAgentDialog => app
+            .new_agent_dialog
+            .as_ref()
+            .and_then(|dialog| dialog.prev_focus)
+            .unwrap_or(Focus::Preview),
+        Focus::GraphEditorDialog => Focus::Preview,
+        other => other,
+    }
+}
+
 pub(super) fn draw_log_panel_focus(
     frame: &mut Frame,
     area: Rect,
     app: &mut App,
     theme: &Theme,
 ) -> bool {
-    match app.focus {
+    match panel_background_focus(app) {
         Focus::Home => {
             draw_home_panel(frame, area, app, theme);
             true
@@ -17,19 +68,11 @@ pub(super) fn draw_log_panel_focus(
             true
         }
         Focus::Agent => draw_agent_panel(frame, area, app, theme),
-        Focus::NewAgentDialog => draw_new_agent_dialog_background(frame, area, app, theme),
-        Focus::LaunchpadDialog
-        | Focus::KnowledgeDialog
-        | Focus::KnowledgeViewer
-        | Focus::ContextTransfer
-        | Focus::RagTransfer
-        | Focus::PromptTemplateDialog
-        | Focus::GraphEditorDialog
-        | Focus::GraphFormDialog => false,
         Focus::ProjectRelationDialog => {
             draw_project_preview_card(frame, area, app, theme);
             true
         }
+        _ => false,
     }
 }
 
@@ -288,24 +331,6 @@ pub(super) fn draw_terminal_warp_mode(
     app.last_panel_inner = (pty_area.width, pty_area.height);
     app.last_panel_x = pty_area.x;
     app.last_panel_y = pty_area.y;
-}
-
-pub(super) fn draw_new_agent_dialog_background(
-    frame: &mut Frame,
-    area: Rect,
-    app: &mut App,
-    theme: &Theme,
-) -> bool {
-    let previous_focus = app
-        .new_agent_dialog
-        .as_ref()
-        .and_then(|dialog| dialog.prev_focus);
-    if matches!(previous_focus, Some(Focus::Home) | None) {
-        draw_home_panel(frame, area, app, theme);
-        return true;
-    }
-
-    false
 }
 
 pub(super) fn set_focused_interactive_cursor(
