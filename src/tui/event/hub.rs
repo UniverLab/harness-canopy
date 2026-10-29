@@ -635,7 +635,7 @@ mod tests {
     }
 
     /// The open pairing overlay owns every key but Esc: tab switches,
-    /// digits, movement, `d` and Enter all bounce off it.
+    /// digits, movement, `r` and Enter all bounce off it.
     #[test]
     fn the_pair_overlay_swallows_every_key_but_esc() {
         let mut app = test_app();
@@ -658,7 +658,7 @@ mod tests {
         assert_eq!(app.hub.tab, HubTab::Remote, "digits must not jump tabs");
         handle_hub_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
         assert_eq!(app.hub.remote.row_idx, 0, "the cursor cannot move");
-        handle_hub_key(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
+        handle_hub_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE);
         assert_eq!(app.hub.remote.revoke_confirm, None, "no arming under it");
         handle_hub_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert!(
@@ -676,7 +676,7 @@ mod tests {
         assert_eq!(app.hub.tab, HubTab::Settings, "keys work again after");
     }
 
-    /// `d` on a device row arms the revoke, `n`/Esc cancel it, `y` revokes
+    /// `r` on a device row arms the revoke, `n`/Esc cancel it, `y` revokes
     /// through the daemon — and nothing else acts mid-confirm.
     #[test]
     fn remote_revoke_runs_behind_a_y_n_confirmation() {
@@ -688,11 +688,11 @@ mod tests {
         app.hub.remote.view.devices = vec![remote_device("bfcba2b742a807bb")];
         app.hub.remote.row_idx = 4; // Device(0).
 
-        handle_hub_key(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
+        handle_hub_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE);
         assert_eq!(
             app.hub.remote.revoke_confirm.as_deref(),
             Some("bfcba2b742a807bb"),
-            "d arms the confirmation"
+            "r arms the confirmation"
         );
         handle_hub_key(&mut app, KeyCode::Char('2'), KeyModifiers::NONE);
         assert_eq!(app.hub.tab, HubTab::Remote, "digits do not switch tabs");
@@ -701,11 +701,11 @@ mod tests {
         assert_eq!(app.hub.remote.revoke_confirm, None, "Esc cancels");
         assert!(app.hub_open, "Esc must not close the hub mid-confirm");
 
-        handle_hub_key(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
+        handle_hub_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE);
         handle_hub_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE);
         assert_eq!(app.hub.remote.revoke_confirm, None, "n cancels");
 
-        handle_hub_key(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
+        handle_hub_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE);
         handle_hub_key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
         assert_eq!(app.hub.remote.revoke_confirm, None, "y confirms and clears");
         for _ in 0..1000 {

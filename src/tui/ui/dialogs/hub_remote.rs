@@ -553,7 +553,10 @@ mod tests {
             text.contains("Revoke laptop?  y = confirm  n = cancel"),
             "{text}"
         );
-        assert!(text.contains("d revoke"), "footer names the key: {text}");
+        assert!(
+            text.contains("d disconnect") && text.contains("r revoke"),
+            "footer names both keys: {text}"
+        );
     }
 
     #[test]

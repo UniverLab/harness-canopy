@@ -13,3 +13,10 @@ pub struct RemoteRevokeParams {
     /// Device id to revoke (first 16 hex chars of SHA-256 over its key).
     pub device_id: String,
 }
+
+/// `remote` `disconnect` action parameters.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RemoteDisconnectParams {
+    /// Device id to disconnect (first 16 hex chars of SHA-256 over its key).
+    pub device_id: String,
+}

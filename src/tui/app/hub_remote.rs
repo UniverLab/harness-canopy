@@ -2,7 +2,7 @@
 //!
 //! Mirrors the Settings tab's shape: the status view comes from a
 //! `remote` `status` daemon call cached here, writes (`set_enabled`,
-//! `pair`, `revoke`) run on background threads, and the GitHub
+//! `pair`, `revoke`, `disconnect`) run on background threads, and the GitHub
 //! device flow runs on its own thread with a current-thread runtime. The
 //! status also refreshes while the hub is closed — on a slower throttle —
 //! so the sidebar's live-device indicator stays current.
@@ -68,11 +68,12 @@ pub(crate) enum LoginFlow {
 }
 
 /// One finished remote write: the new switch state, a fresh pairing code,
-/// or the revoked device id — or the daemon's refusal.
+/// the revoked or disconnected device id — or the daemon's refusal.
 pub(crate) enum RemoteWriteResult {
     SetEnabled(Result<bool, String>),
     Pair(Result<PairView, String>),
     Revoke(Result<String, String>),
+    Disconnect(Result<String, String>),
 }
 
 /// The Remote tab's state.
@@ -83,7 +84,7 @@ pub(crate) struct RemoteState {
     /// The last pairing code fetched; stays valid after the overlay hides.
     pub pair: Option<PairView>,
     pub pair_open: bool,
-    /// The device id an armed `d` revoke would delete.
+    /// The device id an armed `r` revoke would delete.
     pub revoke_confirm: Option<String>,
     pub login: LoginFlow,
     pub rows_rx: Option<mpsc::Receiver<Result<RemoteView, String>>>,
@@ -147,6 +148,18 @@ fn revoke_device(port: &str, device_id: &str) -> Result<String, String> {
         port,
         "remote",
         &serde_json::json!({ "action": "revoke", "device_id": device_id }),
+    ) {
+        Ok(outcome) if !outcome.is_error => Ok(device_id.to_string()),
+        Ok(outcome) => Err(outcome.text),
+        Err(error) => Err(format!("{error:#}")),
+    }
+}
+
+fn disconnect_device(port: &str, device_id: &str) -> Result<String, String> {
+    match crate::tui::mcp_client::call_daemon_tool(
+        port,
+        "remote",
+        &serde_json::json!({ "action": "disconnect", "device_id": device_id }),
     ) {
         Ok(outcome) if !outcome.is_error => Ok(device_id.to_string()),
         Ok(outcome) => Err(outcome.text),
@@ -300,6 +313,11 @@ impl App {
                 self.remote_request_refresh();
             }
             RemoteWriteResult::Revoke(Err(text)) => self.set_remote_message(true, text),
+            RemoteWriteResult::Disconnect(Ok(id)) => {
+                self.set_remote_message(false, format!("Disconnected {id}"));
+                self.remote_request_refresh();
+            }
+            RemoteWriteResult::Disconnect(Err(text)) => self.set_remote_message(true, text),
         }
     }
 
@@ -332,7 +350,8 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => self.move_remote_selection(false),
             KeyCode::Down | KeyCode::Char('j') => self.move_remote_selection(true),
             KeyCode::Enter => self.activate_remote_row(),
-            KeyCode::Char('d') => self.arm_remote_revoke(),
+            KeyCode::Char('d') => self.disconnect_remote_device(),
+            KeyCode::Char('r') => self.arm_remote_revoke(),
             _ => {}
         }
     }
@@ -402,7 +421,20 @@ impl App {
         self.hub.remote.pair_open = false;
     }
 
-    /// `d` on a device row: arm the y/n revoke confirmation.
+    /// `d` on a device row: disconnect its live peer at once (no confirm;
+    /// the pairing stays). Ignored on any other row.
+    pub(crate) fn disconnect_remote_device(&mut self) {
+        if let Some(RemoteRow::Device(index)) = self.selected_remote_row() {
+            if let Some(device) = self.hub.remote.view.devices.get(index) {
+                let device_id = device.id.clone();
+                self.spawn_remote_write(move |port| {
+                    RemoteWriteResult::Disconnect(disconnect_device(&port, &device_id))
+                });
+            }
+        }
+    }
+
+    /// `r` on a device row: arm the y/n revoke confirmation.
     pub(crate) fn arm_remote_revoke(&mut self) {
         if let Some(RemoteRow::Device(index)) = self.selected_remote_row() {
             if let Some(device) = self.hub.remote.view.devices.get(index) {
@@ -605,11 +637,11 @@ mod tests {
         app.hub.remote.view.devices = vec![device("bfcba2b742a807bb")];
 
         app.hub.remote.row_idx = 0; // GitHub.
-        app.hub_remote_key(KeyCode::Char('d'));
+        app.hub_remote_key(KeyCode::Char('r'));
         assert_eq!(app.hub.remote.revoke_confirm, None);
 
         app.hub.remote.row_idx = 4; // Device(0).
-        app.hub_remote_key(KeyCode::Char('d'));
+        app.hub_remote_key(KeyCode::Char('r'));
         assert_eq!(
             app.hub.remote.revoke_confirm.as_deref(),
             Some("bfcba2b742a807bb")
@@ -617,6 +649,51 @@ mod tests {
 
         app.cancel_remote_revoke();
         assert_eq!(app.hub.remote.revoke_confirm, None);
+    }
+
+    #[test]
+    fn disconnect_spawns_the_write_on_device_rows_and_ignores_other_rows() {
+        let mut app = test_app();
+        app.hub.remote.view.devices = vec![device("bfcba2b742a807bb")];
+
+        app.hub.remote.row_idx = 0; // GitHub.
+        app.hub_remote_key(KeyCode::Char('d'));
+        assert!(
+            app.hub.remote.write_rx.is_none(),
+            "d off a device row writes nothing"
+        );
+
+        app.hub.remote.row_idx = 4; // Device(0).
+        app.hub_remote_key(KeyCode::Char('d'));
+        assert!(
+            app.hub.remote.write_rx.is_some(),
+            "d on a device row disconnects at once, with no confirm"
+        );
+        assert_eq!(app.hub.remote.revoke_confirm, None);
+    }
+
+    #[test]
+    fn disconnect_results_report_inline_and_refresh_on_success() {
+        let mut app = test_app();
+
+        app.apply_remote_write(RemoteWriteResult::Disconnect(Ok(
+            "bfcba2b742a807bb".to_string()
+        )));
+        let message = app.hub.remote.message.as_ref().expect("a message");
+        assert!(!message.is_error);
+        assert!(message.text.contains("Disconnected"), "{}", message.text);
+        assert!(app.hub.remote.stale, "success refreshes the status");
+
+        app.apply_remote_write(RemoteWriteResult::Disconnect(Err(
+            "no paired device with id bfcba2b742a807bb".to_string(),
+        )));
+        let message = app.hub.remote.message.as_ref().expect("a message");
+        assert!(message.is_error, "the exact error reports inline");
+        assert!(
+            message.text.contains("no paired device"),
+            "{}",
+            message.text
+        );
     }
 
     #[test]

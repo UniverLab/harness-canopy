@@ -43,6 +43,11 @@ pub(crate) static REMOTE: ToolSpec = ToolSpec {
             required: &["device_id"],
             optional: &[],
         },
+        ActionSpec {
+            name: "disconnect",
+            required: &["device_id"],
+            optional: &[],
+        },
     ],
 };
 
@@ -54,6 +59,7 @@ resource_action_object!(
     [
         ("set_enabled", RemoteSetEnabledParams),
         ("revoke", RemoteRevokeParams),
+        ("disconnect", RemoteDisconnectParams),
     ]
 );
 
@@ -66,7 +72,8 @@ impl TaskTriggerHandler {
         `status` (required: none; optional: none) — sign-in state, whether remote is enabled, the relay URL, the relay phase (connected, connecting, token rejected: sign in again, off), the live device ids and every paired device with its live flag. \
         `pair` (required: none; optional: none) — create a one-time pairing code with its link, expiry and QR, replacing any live one; the same code `canopy remote pair` prints. \
         `set_enabled` (required: enabled; optional: none) — turn the relay connection on or off (`[remote] enabled`); the daemon picks the change up without a restart. \
-        `revoke` (required: device_id; optional: none) — revoke a paired device: delete the row and close its live connection at once."
+        `revoke` (required: device_id; optional: none) — revoke a paired device: delete the row and close its live connection at once. \
+        `disconnect` (required: device_id; optional: none) — disconnect a paired device: close its live peer at once, keeping the pairing so it may reconnect."
     )]
     pub(crate) async fn remote(
         &self,
@@ -85,6 +92,10 @@ impl TaskTriggerHandler {
             "revoke" => {
                 let params: RemoteRevokeParams = action_params(&params)?;
                 self.remote_revoke_impl(params.device_id.trim())
+            }
+            "disconnect" => {
+                let params: RemoteDisconnectParams = action_params(&params)?;
+                self.remote_disconnect_impl(params.device_id.trim())
             }
             _ => unreachable!("validated action"),
         }
@@ -108,6 +119,16 @@ impl TaskTriggerHandler {
                 "no paired device with id {device_id}"
             ))),
             Err(error) => Ok(error_result(&format!("remote revoke: {error:#}"))),
+        }
+    }
+
+    fn remote_disconnect_impl(&self, device_id: &str) -> Result<CallToolResult, McpError> {
+        match panel::disconnect(&self.db, device_id) {
+            Ok(true) => to_json(&json!({ "disconnected": device_id })),
+            Ok(false) => Ok(error_result(&format!(
+                "no paired device with id {device_id}"
+            ))),
+            Err(error) => Ok(error_result(&format!("remote disconnect: {error:#}"))),
         }
     }
 }

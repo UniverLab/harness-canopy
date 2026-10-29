@@ -48,6 +48,11 @@ pub enum RemoteAction {
         /// Device id (first 16 hex chars of SHA-256 over the browser key).
         device_id: String,
     },
+    /// Disconnect a paired browser by device id, keeping the pairing.
+    Disconnect {
+        /// Device id (first 16 hex chars of SHA-256 over the browser key).
+        device_id: String,
+    },
 }
 
 /// Handle one `canopy remote` subcommand.
@@ -61,6 +66,7 @@ pub async fn handle_remote_action(action: RemoteAction) -> Result<()> {
         RemoteAction::Pair => handle_pair(),
         RemoteAction::Devices { json } => handle_devices(json),
         RemoteAction::Revoke { device_id } => handle_revoke(&device_id),
+        RemoteAction::Disconnect { device_id } => handle_disconnect(&device_id),
     }
 }
 
@@ -176,14 +182,24 @@ fn handle_devices(json_output: bool) -> Result<()> {
 fn handle_revoke(device_id: &str) -> Result<()> {
     let data_dir = crate::ensure_data_dir()?;
     let db = open_db(&data_dir)?;
-    let devices = RemoteDevices::new(db.clone());
-    if !devices.revoke(device_id)? {
+    // The daemon reads the queued id on its next tick and closes the
+    // device's live connection at once.
+    if !super::panel::revoke(&db, device_id)? {
         bail!("no paired device with id {device_id}");
     }
-    // The daemon reads this queue on its next tick and closes the device's
-    // live connection at once.
-    relay::queue_revocation(&db, device_id);
     println!("revoked {device_id}");
+    Ok(())
+}
+
+fn handle_disconnect(device_id: &str) -> Result<()> {
+    let data_dir = crate::ensure_data_dir()?;
+    let db = open_db(&data_dir)?;
+    // The daemon reads the queued id on its next tick and closes the
+    // device's live peer at once; the pairing stays, so it may reconnect.
+    if !super::panel::disconnect(&db, device_id)? {
+        bail!("no paired device with id {device_id}");
+    }
+    println!("disconnected {device_id}");
     Ok(())
 }
 
@@ -255,6 +271,12 @@ mod tests {
         match cli.action {
             RemoteAction::Revoke { device_id } => assert_eq!(device_id, "bfcba2b742a807bb"),
             _ => panic!("expected revoke"),
+        }
+        let cli = TestCli::try_parse_from(["test", "disconnect", "bfcba2b742a807bb"])
+            .expect("disconnect");
+        match cli.action {
+            RemoteAction::Disconnect { device_id } => assert_eq!(device_id, "bfcba2b742a807bb"),
+            _ => panic!("expected disconnect"),
         }
     }
 }

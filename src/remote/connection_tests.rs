@@ -176,10 +176,17 @@ struct Loopback {
     _tasks: Vec<JoinHandle<()>>,
 }
 
-/// Wire a device peer to a hub-backed [`PeerSession`] over a real loopback
-/// WebRTC connection: the fake relay's `/turn` supplies the ICE servers, the
-/// device opens the session channel, the host answers and bridges it.
-async fn connected_loopback() -> Loopback {
+/// The hub side of the loopback: one agent session a device may use, one
+/// terminal it may not, plus the guards that keep both alive for every peer.
+struct LoopbackHub {
+    state: Arc<SessionsState>,
+    cat: Arc<HubSession>,
+    terminal: Arc<HubSession>,
+    kills: Vec<KillGuard>,
+}
+
+/// Build the hub every loopback peer of one test bridges to.
+fn loopback_hub() -> LoopbackHub {
     // The hub: one agent session a device may use, one terminal it may not.
     let dir = tempfile::tempdir().expect("tempdir");
     let db =
@@ -190,9 +197,39 @@ async fn connected_loopback() -> Loopback {
     let (terminal, kill_terminal) = spawn_session(&hub, SessionKind::Terminal, workdir.path());
     let state = SessionsState::for_test(hub, "token".to_string());
 
-    // The device identity: the d4eb8558 vector key derives the vector id.
-    let vector_key = HostKey::from_scalar_bytes(&[0x22; 32]).expect("device key");
-    assert_eq!(device_id(vector_key.spki_der()), DEVICE_ID);
+    LoopbackHub {
+        state,
+        cat,
+        terminal,
+        kills: vec![kill_cat, kill_terminal],
+    }
+}
+
+/// Connect one device peer to a hub shared with other peers: the fake
+/// relay's `/turn` supplies the ICE servers, the device opens the session
+/// channel, the host answers and bridges it. The device id derives from the
+/// `device_byte` scalar; `from` is the relay connection the trickle and the
+/// peer's control traffic are addressed to. `max_frame` presets the peer's
+/// frame cap (production computes it from the offer SDP via
+/// `peer_frame_cap`; the harness presets it to simulate a desktop or a
+/// mobile peer). Returns the device end, its inbound frames, the pump tasks,
+/// and the derived device id.
+async fn connect_loopback_device(
+    state: &Arc<SessionsState>,
+    peers: &DevicePeers,
+    connections: &ConnectionRegistry,
+    device_byte: u8,
+    from: &str,
+    max_frame: usize,
+) -> (
+    Arc<peer::device_side::DeviceSide>,
+    mpsc::UnboundedReceiver<DeviceEvent>,
+    Vec<JoinHandle<()>>,
+    String,
+) {
+    // The device identity derives its id from its scalar.
+    let device_key = HostKey::from_scalar_bytes(&[device_byte; 32]).expect("device key");
+    let id = device_id(device_key.spki_der());
 
     // The relay hands out no ICE servers; the host still fetches them per
     // connection, with its bearer token.
@@ -224,23 +261,23 @@ async fn connected_loopback() -> Loopback {
         .expect("the device accepts the answer");
 
     // Host bookkeeping, exactly like the relay's offer path.
-    let peers = DevicePeers::default();
-    let connections = ConnectionRegistry::default();
-    let token = connections.register(DEVICE_ID);
+    let token = connections.register(&id);
     let (control_tx, control_rx) = mpsc::unbounded_channel();
-    assert!(peers.register(DEVICE_ID, FROM, token.clone(), control_tx));
+    assert!(peers.register(&id, from, token.clone(), control_tx));
     let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
 
     // The device demultiplexes its peer: trickle to the host, frames here.
     let (events_tx, events_rx) = mpsc::unbounded_channel();
+    let from_owned = from.to_string();
     let demux = {
         let device = Arc::clone(&device);
         let peers = peers.clone();
+        let from = from_owned.clone();
         tokio::spawn(async move {
             while let Some(event) = device.next().await {
                 match event {
                     peer::device_side::DeviceEvent::Candidate(candidate) => {
-                        let _ = peers.route(FROM, Control::Ice(candidate));
+                        let _ = peers.route(&from, Control::Ice(candidate));
                     }
                     peer::device_side::DeviceEvent::Frame(bytes) => {
                         let _ = events_tx.send(DeviceEvent::Frame(Frame::parse(bytes)));
@@ -268,27 +305,77 @@ async fn connected_loopback() -> Loopback {
 
     spawn(PeerSession {
         peer: host_peer,
-        device_id: DEVICE_ID.to_string(),
-        state: Arc::clone(&state),
+        device_id: id.clone(),
+        state: Arc::clone(state),
         peers: peers.clone(),
         connections: connections.clone(),
         token,
         control: control_rx,
         signal: signal_tx,
-        from: FROM.to_string(),
+        from: from_owned,
+        max_frame,
     });
+
+    (device, events_rx, vec![demux, trickle], id)
+}
+
+/// Wire a device peer to a hub-backed [`PeerSession`] over a real loopback
+/// WebRTC connection: the fake relay's `/turn` supplies the ICE servers, the
+/// device opens the session channel, the host answers and bridges it.
+async fn connected_loopback() -> Loopback {
+    let hub = loopback_hub();
+    let peers = DevicePeers::default();
+    let connections = ConnectionRegistry::default();
+    let (device, events, tasks, id) = connect_loopback_device(
+        &hub.state,
+        &peers,
+        &connections,
+        0x22,
+        FROM,
+        MAX_CHANNEL_FRAME,
+    )
+    .await;
+    // The d4eb8558 vector key derives the vector id.
+    assert_eq!(id, DEVICE_ID);
 
     Loopback {
         device,
-        events: events_rx,
+        events,
         pending: None,
         peers,
         connections,
-        state,
-        cat,
-        terminal,
-        _kills: vec![kill_cat, kill_terminal],
-        _tasks: vec![demux, trickle],
+        state: hub.state,
+        cat: hub.cat,
+        terminal: hub.terminal,
+        _kills: hub.kills,
+        _tasks: tasks,
+    }
+}
+
+/// Connect another device peer to the hub `first` is bridged to, sharing its
+/// sessions, peers and connections. The caller must keep `first` alive: it
+/// owns the session guards.
+async fn second_loopback(first: &Loopback, device_byte: u8, from: &str) -> Loopback {
+    let (device, events, tasks, _id) = connect_loopback_device(
+        &first.state,
+        &first.peers,
+        &first.connections,
+        device_byte,
+        from,
+        MAX_CHANNEL_FRAME,
+    )
+    .await;
+    Loopback {
+        device,
+        events,
+        pending: None,
+        peers: first.peers.clone(),
+        connections: first.connections.clone(),
+        state: Arc::clone(&first.state),
+        cat: Arc::clone(&first.cat),
+        terminal: Arc::clone(&first.terminal),
+        _kills: Vec::new(),
+        _tasks: tasks,
     }
 }
 
@@ -542,9 +629,9 @@ async fn assert_hundred_kib_intact(loopback: &mut Loopback) {
 /// peer, and the freed slot shows up in the live-peer registry.
 ///
 /// [`RelayRuntime::revoke`]: crate::remote::relay::RelayRuntime
-async fn close_by_revoking(loopback: &mut Loopback) {
-    loopback.connections.close(DEVICE_ID);
-    loopback.peers.close(DEVICE_ID);
+async fn close_by_revoking(loopback: &mut Loopback, device_id: &str) {
+    loopback.connections.close(device_id);
+    loopback.peers.close(device_id);
     let closed = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             match loopback.events.recv().await {
@@ -560,7 +647,7 @@ async fn close_by_revoking(loopback: &mut Loopback) {
         "a revoked device's peer must close within a second"
     );
     let deadline = Instant::now() + Duration::from_secs(5);
-    while !loopback.peers.is_empty() {
+    while loopback.peers.live_ids().iter().any(|id| id == device_id) {
         assert!(
             Instant::now() < deadline,
             "the peer slot must be released when the channel closes"
@@ -682,7 +769,264 @@ async fn a_paired_device_gets_the_session_hub_over_a_webrtc_data_channel() {
     assert_hundred_kib_intact(&mut loopback).await;
 
     // A revoke closes the peer and frees its slot.
-    close_by_revoking(&mut loopback).await;
+    close_by_revoking(&mut loopback, DEVICE_ID).await;
+}
+
+/// The greeting every peer sees: hello, proto 1, the shelf feature.
+async fn assert_hello(peer: &mut Loopback, what: &str) {
+    let hello = peer.recv(what).await;
+    assert_eq!(hello.json["t"], "hello", "got {}", hello.raw);
+    assert_eq!(hello.json["proto"], 1);
+    assert_eq!(
+        hello.json["features"],
+        json!(["shelf"]),
+        "the data channel advertises the shelf: {}",
+        hello.raw
+    );
+}
+
+/// The catalog answer for `req`.
+async fn assert_catalog(peer: &mut Loopback, req: &str, what: &str) {
+    peer.send(json!({"t": "catalog", "req": req})).await;
+    let frame = peer.recv(what).await;
+    assert_eq!(
+        frame.json["t"], "catalog",
+        "{what}: expected a catalog, got {}",
+        frame.raw
+    );
+    assert_eq!(frame.json["req"], req);
+}
+
+/// The session ids one `list` answer carries, sorted for comparison.
+async fn list_ids(peer: &mut Loopback, req: &str, what: &str) -> Vec<String> {
+    peer.send(json!({"t": "list", "req": req})).await;
+    let frame = peer.recv(what).await;
+    assert_eq!(
+        frame.json["t"], "sessions",
+        "{what}: expected a sessions answer, got {}",
+        frame.raw
+    );
+    assert_eq!(frame.json["req"], req);
+    let mut ids: Vec<String> = frame.json["items"]
+        .as_array()
+        .expect("items array")
+        .iter()
+        .map(|item| item["id"].as_str().expect("item id").to_string())
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// Two device peers against one daemon: both are greeted, both get the
+/// catalog and the identical session list, and a session spawned after both
+/// connected is announced to both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_peers_share_hello_catalog_list_and_updates() {
+    let mut first = connected_loopback().await;
+    let second_id = device_id(
+        HostKey::from_scalar_bytes(&[0x33; 32])
+            .expect("second device key")
+            .spki_der(),
+    );
+    assert_ne!(second_id, DEVICE_ID);
+    let mut second = second_loopback(&first, 0x33, "d:second").await;
+    assert_eq!(first.peers.len(), 2, "both peers register");
+
+    assert_hello(&mut first, "the first hello").await;
+    assert_hello(&mut second, "the second hello").await;
+
+    assert_catalog(&mut first, "c1", "the first catalog").await;
+    assert_catalog(&mut second, "c2", "the second catalog").await;
+
+    let first_ids = list_ids(&mut first, "l1", "the first list").await;
+    let second_ids = list_ids(&mut second, "l2", "the second list").await;
+    assert_eq!(
+        first_ids, second_ids,
+        "both peers see the identical session list"
+    );
+    assert!(
+        first_ids.contains(&first.cat.id),
+        "the agent session is listed: {first_ids:?}"
+    );
+    assert!(
+        !first_ids.contains(&first.terminal.id),
+        "terminal sessions stay hidden: {first_ids:?}"
+    );
+
+    // A session spawned after both connected is announced to both.
+    let workdir = tempfile::tempdir().expect("workdir");
+    let (spawned, _kill) = spawn_session(&first.state.hub, SessionKind::Agent, workdir.path());
+    for (peer, what) in [(&mut first, "first"), (&mut second, "second")] {
+        let added = peer.recv("the session_added").await;
+        assert_eq!(
+            added.json["t"], "session_added",
+            "{what}: expected a session_added, got {}",
+            added.raw
+        );
+        assert_eq!(added.json["item"]["id"], spawned.id);
+    }
+
+    close_by_revoking(&mut first, DEVICE_ID).await;
+    close_by_revoking(&mut second, second_id.as_str()).await;
+}
+
+/// A revoked device hears `error{code:"revoked"}` before its channel
+/// closes — the same calls [`RelayRuntime::revoke`] makes, with the mark.
+///
+/// [`RelayRuntime::revoke`]: crate::remote::relay::RelayRuntime
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_revoked_device_hears_revoked_before_close() {
+    let mut loopback = connected_loopback().await;
+    assert_hello(&mut loopback, "the hello").await;
+
+    loopback.peers.close_revoked(DEVICE_ID);
+    loopback.connections.close(DEVICE_ID);
+
+    let frame = loopback.recv("the revoked error").await;
+    assert_eq!(frame.json["t"], "error", "got {}", frame.raw);
+    assert_eq!(frame.json["code"], "revoked");
+    match tokio::time::timeout(Duration::from_secs(5), loopback.events.recv()).await {
+        Ok(Some(DeviceEvent::Closed)) | Ok(None) => {}
+        Ok(Some(DeviceEvent::Frame(frame))) => {
+            panic!("nothing follows the revoked error: {}", frame.raw)
+        }
+        Err(_) => panic!("timed out waiting for the close after the error"),
+    }
+}
+
+/// `fitting_frame` passes a frame through under the peer's cap and answers
+/// an oversized one with `frame_too_large` for the same `req` — a push
+/// without a `req` errors without one too.
+#[test]
+fn fitting_frame_errors_only_past_the_peers_cap() {
+    let big = format!(
+        "{{\"t\":\"sessions\",\"req\":\"l1\",\"items\":[\"{}\"]}}",
+        "x".repeat(2000)
+    );
+    assert!(big.len() > 1024, "the fixture must exceed the small cap");
+    assert_eq!(
+        super::fitting_frame(big.clone(), MAX_CHANNEL_FRAME),
+        big,
+        "under the desktop cap it passes through"
+    );
+    let error: Value = serde_json::from_str(&super::fitting_frame(big, 1024)).expect("error frame");
+    assert_eq!(error["t"], "error");
+    assert_eq!(error["code"], "frame_too_large");
+    assert_eq!(error["req"], "l1");
+
+    let push = format!(
+        "{{\"t\":\"session_added\",\"item\":{{\"id\":\"{}\"}}}}",
+        "y".repeat(2000)
+    );
+    let error: Value =
+        serde_json::from_str(&super::fitting_frame(push, 1024)).expect("error frame");
+    assert_eq!(error["code"], "frame_too_large");
+    assert!(
+        error.get("req").is_none(),
+        "a push errors without a req: {error}"
+    );
+}
+
+/// `peer_frame_cap` reads the remote's `a=max-message-size` advertisement:
+/// the minimum when several are present, the 64 KiB RFC default when none
+/// is usable, and never above the desktop ceiling.
+#[test]
+fn peer_frame_cap_follows_the_remote_advertisement() {
+    let sdp_with = |attrs: &[&str]| {
+        format!(
+            "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n{}",
+            attrs.join("\r\n")
+        )
+    };
+    assert_eq!(
+        super::peer_frame_cap(&sdp_with(&["a=max-message-size:262144"])),
+        MAX_CHANNEL_FRAME
+    );
+    assert_eq!(
+        super::peer_frame_cap(&sdp_with(&["a=max-message-size:65536"])),
+        64 * 1024
+    );
+    assert_eq!(
+        super::peer_frame_cap(&sdp_with(&[
+            "a=max-message-size:262144",
+            "a=max-message-size:16384"
+        ])),
+        16 * 1024,
+        "several advertisements: the smallest wins"
+    );
+    // Zero advertises no limit; garbage and absence fall back to 64 KiB.
+    assert_eq!(
+        super::peer_frame_cap(&sdp_with(&["a=max-message-size:0"])),
+        64 * 1024
+    );
+    assert_eq!(
+        super::peer_frame_cap(&sdp_with(&["a=max-message-size:banana"])),
+        64 * 1024
+    );
+    assert_eq!(super::peer_frame_cap(&sdp_with(&[])), 64 * 1024);
+    // A huge advertisement never raises the desktop ceiling.
+    assert_eq!(
+        super::peer_frame_cap(&sdp_with(&["a=max-message-size:1073741823"])),
+        MAX_CHANNEL_FRAME
+    );
+}
+
+/// A peer with a small negotiated cap gets `frame_too_large` for a list
+/// that fits the desktop cap, and its channel stays alive: the answer is
+/// refused, never sent halfway to kill the peer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_small_cap_peer_gets_frame_too_large_for_a_desktop_sized_list() {
+    let hub = loopback_hub();
+    let LoopbackHub {
+        state,
+        cat,
+        terminal,
+        mut kills,
+    } = hub;
+    let peers = DevicePeers::default();
+    let connections = ConnectionRegistry::default();
+    // Enough sessions that the list answer dwarfs the mobile cap; one is
+    // doomed, so its later exit proves the channel is still alive.
+    let workdir = tempfile::tempdir().expect("workdir");
+    for _ in 0..10 {
+        let (_session, kill) = spawn_session(&state.hub, SessionKind::Agent, workdir.path());
+        kills.push(kill);
+    }
+    let (doomed, doomed_kill) = spawn_session(&state.hub, SessionKind::Agent, workdir.path());
+
+    let (device, events, tasks, id) =
+        connect_loopback_device(&state, &peers, &connections, 0x22, FROM, 1024).await;
+    assert_eq!(id, DEVICE_ID);
+    let mut peer = Loopback {
+        device,
+        events,
+        pending: None,
+        peers,
+        connections,
+        state,
+        cat,
+        terminal,
+        _kills: kills,
+        _tasks: tasks,
+    };
+
+    assert_hello(&mut peer, "the hello").await;
+    peer.send(json!({"t": "list", "req": "l1"})).await;
+    let error = expect_error(&mut peer, "the oversized list").await;
+    assert_eq!(error["code"], "frame_too_large");
+    assert_eq!(error["req"], "l1");
+
+    // The refusal killed nothing: the doomed session's exit still arrives.
+    drop(doomed_kill);
+    let exited = peer.recv("the exit after the refusal").await;
+    assert_eq!(
+        exited.json["t"], "exited",
+        "expected the exit, got {}",
+        exited.raw
+    );
+    assert_eq!(exited.json["id"], doomed.id);
+
+    close_by_revoking(&mut peer, DEVICE_ID).await;
 }
 
 /// A 3 MiB host-shelf PNG fetched over the data channel reassembles to the
@@ -773,7 +1117,7 @@ async fn a_remote_client_fetches_a_3mib_shelf_png_intact_while_output_interleave
         want,
         "the PNG reassembles byte-for-byte"
     );
-    close_by_revoking(&mut loopback).await;
+    close_by_revoking(&mut loopback, DEVICE_ID).await;
 }
 
 /// Terminal-session files stay hidden from remote clients — absent from
@@ -824,7 +1168,7 @@ async fn terminal_session_files_are_hidden_and_refused_over_the_data_channel() {
     assert_eq!(added.json["t"], "shelf_added");
     assert_eq!(added.json["item"]["file_id"], shown);
 
-    close_by_revoking(&mut loopback).await;
+    close_by_revoking(&mut loopback, DEVICE_ID).await;
 }
 
 /// A device may hold two shelf downloads at once; the third answers `busy`.
@@ -863,7 +1207,7 @@ async fn the_third_concurrent_shelf_get_answers_busy() {
             frame.raw.len()
         );
     }
-    close_by_revoking(&mut loopback).await;
+    close_by_revoking(&mut loopback, DEVICE_ID).await;
 }
 
 /// Revoking the device mid-download stops its transfer: the peer closes and
@@ -886,7 +1230,7 @@ async fn a_revoked_devices_shelf_transfer_stops() {
     let first = loopback.recv("the first file frame").await;
     assert_eq!(first.json["t"], "file");
 
-    close_by_revoking(&mut loopback).await;
+    close_by_revoking(&mut loopback, DEVICE_ID).await;
 
     match tokio::time::timeout(Duration::from_secs(1), loopback.events.recv()).await {
         Ok(Some(DeviceEvent::Frame(frame))) => {

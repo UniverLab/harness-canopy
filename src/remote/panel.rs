@@ -134,6 +134,17 @@ pub fn revoke(db: &Database, device_id: &str) -> Result<bool> {
     Ok(removed)
 }
 
+/// Disconnect a device: queue the id so the daemon closes its live peer at
+/// once, keeping the pairing so the device may reconnect. Returns whether
+/// the device is paired (an unknown id queues nothing).
+pub fn disconnect(db: &Database, device_id: &str) -> Result<bool> {
+    if !super::devices::RemoteDevices::new(db.clone()).is_paired(device_id)? {
+        return Ok(false);
+    }
+    super::relay::queue_disconnect(db, device_id);
+    Ok(true)
+}
+
 #[cfg(test)]
 #[path = "panel_tests.rs"]
 mod tests;

@@ -249,6 +249,7 @@ WebSocket — the CLI never writes the shelf itself. `file_id` is the
 | `canopy remote pair` | Create a one-time code, print it with its `<relay_url>/pair#<code>` link and expiry, and draw the link as a terminal QR code |
 | `canopy remote devices [--json]` | List paired browsers (`id`, `label`, `paired_at`, `last_seen`) |
 | `canopy remote revoke <device_id>` | Delete a paired browser and close its live connection at once |
+| `canopy remote disconnect <device_id>` | Close a paired browser's live connection at once, keeping the pairing so it may reconnect |
 
 The same actions live in the TUI: `F1`, then `5` opens the hub's **Remote**
 tab — GitHub sign-in with the device flow, the relay switch and phase,
@@ -286,7 +287,10 @@ remote is on. A failed exchange tells the browser only `no_code`,
 or as a JSON array; `no paired devices` when there are none. `canopy
 remote revoke <device_id>` deletes the device and closes its live
 connection within a second, printing `revoked <device_id>`, and refuses
-an unknown id with `no paired device with id <device_id>`. Re-pairing the
+an unknown id with `no paired device with id <device_id>`. `canopy
+remote disconnect <device_id>` closes the live connection the same way
+but keeps the pairing, printing `disconnected <device_id>` and refusing
+an unknown id the same way. Re-pairing the
 same browser updates its label and `paired_at` instead of adding a row.
 
 The host key lives in `~/.canopy/remote/host_key` (PKCS#8 DER, mode 0600)
@@ -362,7 +366,10 @@ answers `error{code:"busy"}` — and their parts interleave with terminal
 output so a large image never stalls it. A host serves at most four device
 connections at once — a fifth is told `busy` — each success refreshes the
 device's `last_seen`, and `canopy remote revoke` closes a live connection
-within a second.
+within a second. A revoked device hears `error{code:"revoked"}` before its
+channel closes, so its app can say the device was removed; answers larger
+than the peer's negotiated frame cap are refused with
+`error{code:"frame_too_large"}` instead of being sent halfway.
 
 Graphs ride the same channel, read-only. `graphs{req}` answers
 `graphs{req,graphs}` with the non-archived running, paused and failed

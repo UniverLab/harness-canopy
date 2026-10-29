@@ -9,14 +9,16 @@
 //! `ice` and `bye` bodies carry no device id: the relay envelope's `from` is
 //! the address, so every handle remembers the connection id it answers to.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::sessions::protocol::{error_frame, hello_frame};
+use crate::sessions::protocol::{error_frame, hello_frame, ERR_REVOKED};
 use crate::sessions::ws::SessionsState;
+use crate::sessions::HubEvent;
 
 use super::bridge::RemoteBridge;
 use super::peer::{Peer, PeerEvent};
@@ -41,6 +43,11 @@ struct PeerHandle {
 #[derive(Clone, Default)]
 pub struct DevicePeers {
     inner: Arc<Mutex<HashMap<String, PeerHandle>>>,
+    /// Devices whose peer must hear `error{code:"revoked"}` before its
+    /// channel closes. Marked by [`Self::close_revoked`], taken by the serve
+    /// loop, forgotten by [`Self::remove`] — always under the `inner` lock
+    /// first, so a mark never leaks into a later generation.
+    revoked: Arc<Mutex<HashSet<String>>>,
 }
 
 impl DevicePeers {
@@ -117,7 +124,7 @@ impl DevicePeers {
         }
     }
 
-    /// Close one device's peer now (a revoke).
+    /// Close one device's peer now (a disconnect or a `bye`).
     pub fn close(&self, device_id: &str) {
         if let Ok(mut map) = self.inner.lock() {
             if let Some(handle) = map.remove(device_id) {
@@ -126,15 +133,46 @@ impl DevicePeers {
         }
     }
 
+    /// Mark one device revoked and cancel its peer now, keeping the entry
+    /// until the serve loop's cleanup removes it: the loop takes the mark
+    /// and sends `error{code:"revoked"}` before the channel closes. No mark
+    /// when the device has no live peer — there is no open channel to hear
+    /// it, and nothing must leak into its next connection.
+    ///
+    /// Callers cancel through here first: the mark lands under the same
+    /// locks, so a peer woken by the cancel always finds it. Cancelling the
+    /// shared registry token beforehand would let the serve loop take (and
+    /// miss) before the mark lands.
+    pub fn close_revoked(&self, device_id: &str) {
+        if let (Ok(map), Ok(mut revoked)) = (self.inner.lock(), self.revoked.lock()) {
+            if let Some(handle) = map.get(device_id) {
+                revoked.insert(device_id.to_string());
+                handle.token.cancel();
+            }
+        }
+    }
+
+    /// Take one device's revoked mark, if set. The serve loop calls this as
+    /// it ends, so only the revoked generation hears the error.
+    pub fn take_revoked(&self, device_id: &str) -> bool {
+        self.revoked
+            .lock()
+            .map(|mut revoked| revoked.remove(device_id))
+            .unwrap_or(false)
+    }
+
     /// Forget a peer that ended on its own — unless the device already
-    /// reconnected and a newer handle took the slot.
+    /// reconnected and a newer handle took the slot. A revoked mark set
+    /// after this peer passed its own check is forgotten with it, so the
+    /// next generation of the same device starts unmarked.
     pub fn remove(&self, device_id: &str, token: &Arc<CancellationToken>) {
-        if let Ok(mut map) = self.inner.lock() {
+        if let (Ok(mut map), Ok(mut revoked)) = (self.inner.lock(), self.revoked.lock()) {
             if map
                 .get(device_id)
                 .is_some_and(|handle| Arc::ptr_eq(&handle.token, token))
             {
                 map.remove(device_id);
+                revoked.remove(device_id);
             }
         }
     }
@@ -160,17 +198,65 @@ pub struct PeerSession {
     pub signal: SignalTx,
     /// Relay peer id to address the candidates to.
     pub from: String,
+    /// Largest outbound frame for this peer, from its offer SDP (see
+    /// [`peer_frame_cap`]): [`MAX_CHANNEL_FRAME`] for a desktop, less for a
+    /// peer that advertised less.
+    pub max_frame: usize,
 }
 
-/// Largest frame the data channel carries. Chrome advertises
-/// `a=max-message-size:262144` and closes the channel on a bigger message,
-/// so one oversized answer used to end the whole peer.
-const MAX_CHANNEL_FRAME: usize = 256 * 1024;
+/// Receive cap when the offer carries no usable `a=max-message-size`
+/// (RFC 8841 §6: absent means 64 KiB).
+const DEFAULT_REMOTE_MAX_FRAME: usize = 64 * 1024;
 
-/// The frame to send for `frame`: itself when it fits, otherwise an `error`
-/// answering the same `req` so the device stops waiting for it.
-fn fitting_frame(frame: String) -> String {
-    if frame.len() <= MAX_CHANNEL_FRAME {
+/// How long a revoked peer's farewell frame gets to leave before the
+/// connection closes.
+const REVOKED_FAREWELL_WAIT: Duration = Duration::from_millis(250);
+
+/// The largest frame a peer accepts, from its offer SDP: the minimum of
+/// every `a=max-message-size` it advertises (a zero advertises no limit and
+/// is skipped), or the 64 KiB RFC default when it advertises nothing usable.
+/// Never above [`MAX_CHANNEL_FRAME`]: the const stays the ceiling.
+///
+/// Why the SDP and not the SCTP association's negotiated max: the
+/// association reconciles the remote advertisement with this stack's own
+/// 64 KiB ceiling, so its minimum would cap a desktop peer that accepts the
+/// full const. Our sends are bounded by what the remote receives — its own
+/// advertisement — and Chrome advertises the full 256 KiB.
+pub(crate) fn peer_frame_cap(offer_sdp: &str) -> usize {
+    let mut cap = DEFAULT_REMOTE_MAX_FRAME;
+    let mut seen = false;
+    for line in offer_sdp.lines() {
+        let Some(value) = line.trim().strip_prefix("a=max-message-size:") else {
+            continue;
+        };
+        let Ok(advertised) = value.trim().parse::<usize>() else {
+            continue;
+        };
+        if advertised == 0 {
+            continue;
+        }
+        cap = if seen {
+            cap.min(advertised)
+        } else {
+            advertised
+        };
+        seen = true;
+    }
+    MAX_CHANNEL_FRAME.min(cap)
+}
+
+/// Largest frame the data channel carries for a peer that negotiated at
+/// least this much. Chrome advertises `a=max-message-size:262144` and
+/// closes the channel on a bigger message, so one oversized answer used to
+/// end the whole peer; a peer that negotiated less gets its own smaller cap
+/// instead (see [`PeerSession::max_frame`).
+pub(crate) const MAX_CHANNEL_FRAME: usize = 256 * 1024;
+
+/// The frame to send for `frame`: itself when it fits `max_frame`,
+/// otherwise an `error` answering the same `req` so the device stops
+/// waiting for it.
+fn fitting_frame(frame: String, max_frame: usize) -> String {
+    if frame.len() <= max_frame {
         return frame;
     }
     let parsed: Option<serde_json::Value> = serde_json::from_str(&frame).ok();
@@ -183,7 +269,7 @@ fn fitting_frame(frame: String) -> String {
     };
     let kind = field("t").unwrap_or_else(|| "?".to_string());
     tracing::warn!(
-        "remote: dropping a {} byte `{kind}` frame over the {MAX_CHANNEL_FRAME} byte channel limit",
+        "remote: dropping a {} byte `{kind}` frame over the {max_frame} byte channel limit",
         frame.len()
     );
     error_frame(
@@ -220,7 +306,13 @@ async fn serve(session: &mut PeerSession) {
             },
             frame = out_rx.recv() => {
                 if let Some(frame) = frame {
-                    if greeted && session.peer.send_text(&fitting_frame(frame)).await.is_err() {
+                    if greeted
+                        && session
+                            .peer
+                            .send_text(&fitting_frame(frame, session.max_frame))
+                            .await
+                            .is_err()
+                    {
                         break "the data channel refused a write";
                     }
                 }
@@ -231,30 +323,51 @@ async fn serve(session: &mut PeerSession) {
                 }
             }
             hub_event = events.recv() => match hub_event {
-                Ok(event) => {
-                    // Held until the greeting is queued: nothing may overtake
-                    // `hello`, and nothing is attached yet to miss a removal.
-                    // Pre-greeting shelf events still feed the hidden set, so
-                    // a terminal file that lands during the handshake hides
-                    // its later removal.
-                    if greeted {
-                        bridge.handle_event(event, &out_tx);
-                    } else {
-                        bridge.note_hidden(&event);
-                    }
-                }
+                Ok(event) => forward_hub_event(&mut bridge, &out_tx, greeted, event),
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break "the hub stopped",
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
             },
         }
     };
     tracing::info!("remote: device {} disconnected: {ended}", session.device_id);
+    send_revoked_farewell(session).await;
     bridge.abort();
     session.peer.close().await;
     session.peers.remove(&session.device_id, &session.token);
     session
         .connections
         .release(&session.device_id, &session.token);
+}
+
+/// Forward one hub event to the bridge. Held until the greeting is
+/// queued: nothing may overtake `hello`, and nothing is attached yet to
+/// miss a removal. Pre-greeting shelf events still feed the hidden set, so
+/// a terminal file that lands during the handshake hides its later removal.
+fn forward_hub_event(
+    bridge: &mut RemoteBridge,
+    out_tx: &mpsc::UnboundedSender<String>,
+    greeted: bool,
+    event: HubEvent,
+) {
+    if greeted {
+        bridge.handle_event(event, out_tx);
+    } else {
+        bridge.note_hidden(&event);
+    }
+}
+
+/// A revoke lands as a cancelled token; the device hears why before the
+/// channel closes, so its app can say the device was removed.
+async fn send_revoked_farewell(session: &PeerSession) {
+    if session.peers.take_revoked(&session.device_id) {
+        let _ = session
+            .peer
+            .send_text(&error_frame(None, ERR_REVOKED, "this device was revoked"))
+            .await;
+        // The farewell gets a moment to leave: shutting the connection down
+        // in the same instant drops it from the SCTP queue on some stacks.
+        tokio::time::sleep(REVOKED_FAREWELL_WAIT).await;
+    }
 }
 
 /// Handle one transport event; `Err` carries why the peer ends.

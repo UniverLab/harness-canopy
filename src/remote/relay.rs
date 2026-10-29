@@ -40,6 +40,8 @@ use crate::sessions::ws::SessionsState;
 pub const REMOTE_ERROR_KEY: &str = "remote_error";
 /// `daemon_state` key holding device ids revoked by another process.
 pub const REMOTE_REVOKE_KEY: &str = "remote_revoke";
+/// `daemon_state` key holding device ids disconnected by another process.
+pub const REMOTE_DISCONNECT_KEY: &str = "remote_disconnect";
 /// Longest reconnect delay.
 pub const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
@@ -309,6 +311,7 @@ impl RelayRuntime {
                 control: control_rx,
                 signal,
                 from,
+                max_frame: connection::peer_frame_cap(&offer.sdp),
             });
         });
     }
@@ -328,8 +331,10 @@ impl RelayRuntime {
     #[allow(dead_code)]
     pub fn revoke(&self, device_id: &str) -> Result<bool> {
         let removed = self.devices.revoke(device_id)?;
+        // Marked before the registry forgets it: the mark must land before
+        // any cancel wakes the serve loop.
+        self.peers.close_revoked(device_id);
         self.connections.close(device_id);
-        self.peers.close(device_id);
         Ok(removed)
     }
 
@@ -339,29 +344,39 @@ impl RelayRuntime {
         &self.connections
     }
 
-    /// Close every connection whose device was revoked by another process
-    /// (the CLI writes ids to `remote_revoke`).
+    /// Close every connection whose device was revoked or disconnected by
+    /// another process (the CLI queues ids to `remote_revoke` /
+    /// `remote_disconnect`). A revoked peer hears `error{code:"revoked"}`
+    /// before its close; a disconnected one just closes and may reconnect.
     pub fn drain_remote_revocations(&self) {
-        let Ok(Some(value)) = self.db.get_state(REMOTE_REVOKE_KEY) else {
+        self.drain_queue(REMOTE_REVOKE_KEY, |runtime, id| {
+            runtime.peers.close_revoked(id);
+            runtime.connections.close(id);
+        });
+        self.drain_queue(REMOTE_DISCONNECT_KEY, |runtime, id| {
+            runtime.connections.close(id);
+            runtime.peers.close(id);
+        });
+    }
+
+    /// Close every id queued under `key`, leaving ids that landed while
+    /// closing for the next tick.
+    fn drain_queue(&self, key: &str, close: impl Fn(&Self, &str)) {
+        let Ok(Some(value)) = self.db.get_state(key) else {
             return;
         };
         let drained: Vec<&str> = value.split(',').filter(|id| !id.is_empty()).collect();
         for id in &drained {
-            self.connections.close(id);
+            close(self, id);
         }
-        // A revoke that lands while we close must survive: keep whatever we
+        // An id that lands while we close must survive: keep whatever we
         // did not just drain instead of blanking the key.
-        let current = self
-            .db
-            .get_state(REMOTE_REVOKE_KEY)
-            .ok()
-            .flatten()
-            .unwrap_or_default();
+        let current = self.db.get_state(key).ok().flatten().unwrap_or_default();
         let remaining: Vec<&str> = current
             .split(',')
             .filter(|id| !id.is_empty() && !drained.contains(id))
             .collect();
-        let _ = self.db.set_state(REMOTE_REVOKE_KEY, &remaining.join(","));
+        let _ = self.db.set_state(key, &remaining.join(","));
     }
 }
 
@@ -467,7 +482,17 @@ pub fn record_token_rejected(db: &Database) {
 
 /// Append a revoked device id for the daemon to pick up.
 pub fn queue_revocation(db: &Database, device_id: &str) {
-    let existing = db.get_state(REMOTE_REVOKE_KEY).ok().flatten();
+    queue_device_id(db, REMOTE_REVOKE_KEY, device_id);
+}
+
+/// Append a disconnected device id for the daemon to pick up.
+pub fn queue_disconnect(db: &Database, device_id: &str) {
+    queue_device_id(db, REMOTE_DISCONNECT_KEY, device_id);
+}
+
+/// Append a device id to one daemon queue, once.
+fn queue_device_id(db: &Database, key: &str, device_id: &str) {
+    let existing = db.get_state(key).ok().flatten();
     let mut ids: Vec<&str> = existing
         .as_deref()
         .unwrap_or_default()
@@ -477,7 +502,7 @@ pub fn queue_revocation(db: &Database, device_id: &str) {
     if !ids.contains(&device_id) {
         ids.push(device_id);
     }
-    let _ = db.set_state(REMOTE_REVOKE_KEY, &ids.join(","));
+    let _ = db.set_state(key, &ids.join(","));
 }
 
 /// Spawn the relay supervisor for the life of the daemon. It re-reads

@@ -10,7 +10,7 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
 use serde_json::{json, Value};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 
 use super::*;
 use crate::db::Database;
@@ -321,6 +321,97 @@ async fn revoke_deletes_the_row_and_closes_a_live_connection() {
     assert!(
         queue.as_deref().unwrap_or_default().is_empty(),
         "drained ids must leave the queue, got {queue:?}"
+    );
+}
+
+/// A disconnect closes only that device's live connection and peer: the
+/// pairing stays, the queue drains, and the other peer is untouched and
+/// unmarked.
+#[tokio::test]
+async fn disconnect_closes_only_that_peer() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = test_db();
+    let host = HostKey::load_or_create(dir.path()).expect("host key");
+    let runtime = RelayRuntime::new(
+        host,
+        db.clone(),
+        "octocat".to_string(),
+        crate::remote::pairing::PairingState::new(dir.path()),
+        ConnectionRegistry::default(),
+    );
+    let devices = crate::remote::devices::RemoteDevices::new(db.clone());
+    let id_a = device_id(
+        HostKey::from_scalar_bytes(&[0x22; 32])
+            .expect("device a")
+            .spki_der(),
+    );
+    let id_b = device_id(
+        HostKey::from_scalar_bytes(&[0x33; 32])
+            .expect("device b")
+            .spki_der(),
+    );
+    for (scalar, label) in [(0x22u8, "laptop"), (0x33u8, "phone")] {
+        devices
+            .pair(
+                HostKey::from_scalar_bytes(&[scalar; 32])
+                    .expect("device key")
+                    .spki_der()
+                    .to_vec(),
+                label,
+                "octocat",
+                "2026-01-01T00:00:00Z",
+            )
+            .expect("pair a device");
+    }
+    // Live connections with live peers, like the offer path registers them.
+    let token_a = runtime.connections().register(&id_a);
+    let (control_a, _rx_a) = mpsc::unbounded_channel();
+    assert!(runtime
+        .peers
+        .register(&id_a, "d:a", token_a.clone(), control_a));
+    let token_b = runtime.connections().register(&id_b);
+    let (control_b, _rx_b) = mpsc::unbounded_channel();
+    assert!(runtime
+        .peers
+        .register(&id_b, "d:b", token_b.clone(), control_b));
+
+    queue_disconnect(&db, &id_a);
+    runtime.drain_remote_revocations();
+
+    assert!(token_a.is_cancelled(), "the disconnected peer closes");
+    assert!(
+        !token_b.is_cancelled(),
+        "the other peer's token is untouched"
+    );
+    assert!(
+        !runtime.peers.live_ids().contains(&id_a),
+        "the disconnected peer is gone"
+    );
+    assert!(
+        runtime.peers.live_ids().contains(&id_b),
+        "the other peer is untouched"
+    );
+    assert!(
+        !runtime.peers.take_revoked(&id_a),
+        "a disconnect marks nothing revoked"
+    );
+    assert!(
+        devices.is_paired(&id_a).expect("is_paired"),
+        "the pairing stays"
+    );
+    let queue = crate::application::ports::StateRepository::get_state(&db, REMOTE_DISCONNECT_KEY)
+        .expect("queue state");
+    assert!(
+        queue.as_deref().unwrap_or_default().is_empty(),
+        "drained ids must leave the queue, got {queue:?}"
+    );
+
+    // Unknown ids drain silently.
+    queue_disconnect(&db, "missingdevice0000");
+    runtime.drain_remote_revocations();
+    assert!(
+        runtime.peers.live_ids().contains(&id_b),
+        "an unknown id closes nothing"
     );
 }
 

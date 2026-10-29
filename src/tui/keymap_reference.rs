@@ -601,8 +601,14 @@ pub static KEY_REFS: &[KeyRef] = &[
     KeyRef {
         key: "d",
         context: "Hub remote",
-        action: "revoke the selected device (y/n confirm)",
+        action: "disconnect the selected device",
         code: "Char('d')",
+    },
+    KeyRef {
+        key: "r",
+        context: "Hub remote",
+        action: "revoke the selected device (y/n confirm)",
+        code: "Char('r')",
     },
     KeyRef {
         key: "j",

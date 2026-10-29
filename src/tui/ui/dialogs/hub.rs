@@ -104,7 +104,7 @@ fn footer_hint(app: &App) -> &'static str {
         HubTab::Keys => "↑↓ scroll · Shift+←→ tab · Esc close",
         HubTab::Missions => "↑↓ mission · Shift+←→ tab · Esc close",
         HubTab::Shelf => "Enter open   d delete   c copy path",
-        HubTab::Remote => "↑↓ move · Enter select · d revoke · Esc close",
+        HubTab::Remote => "↑↓ move · Enter select · d disconnect · r revoke · Esc close",
     }
 }
 

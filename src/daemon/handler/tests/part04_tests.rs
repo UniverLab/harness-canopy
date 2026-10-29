@@ -984,3 +984,93 @@ async fn unparseable_stringified_integer_is_refused_as_invalid_params() {
     .expect_err("a non-JSON string for an integer parameter must be refused");
     assert_eq!(err.code, ErrorCode::INVALID_PARAMS, "{err}");
 }
+
+// ── `remote` revoke/disconnect actions ──────────────────────────
+
+/// Call the `remote` tool with one action object.
+async fn call_remote(
+    handler: &TaskTriggerHandler,
+    action: &str,
+    device_id: &str,
+) -> rmcp::model::CallToolResult {
+    use crate::daemon::actions::ActionObject;
+    use crate::daemon::handler_remote::RemoteObject;
+    use crate::daemon::params_extract::Parameters;
+
+    let object = serde_json::json!({"action": action, "device_id": device_id})
+        .as_object()
+        .expect("object params")
+        .clone();
+    handler
+        .remote(Parameters(RemoteObject(ActionObject(object))))
+        .await
+        .expect("the tool call succeeds")
+}
+
+fn pair_remote_device(db: &Database, label: &str) -> String {
+    crate::remote::devices::RemoteDevices::new(db.clone())
+        .pair(
+            format!("test spki for {label}").into_bytes(),
+            label,
+            "octocat",
+            "2026-01-01T00:00:00Z",
+        )
+        .expect("pair the device")
+        .id
+}
+
+#[tokio::test]
+async fn remote_revoke_deletes_the_row_and_answers_revoked() {
+    let (_dir, db, handler) = queue_test_handler();
+    let id = pair_remote_device(&db, "laptop");
+
+    let result = call_remote(&handler, "revoke", &id).await;
+    assert!(!result.is_error.unwrap_or(false), "{:?}", result.content);
+    let body: serde_json::Value =
+        serde_json::from_str(&queue_raw_text(&result)).expect("json body");
+    assert_eq!(body, serde_json::json!({ "revoked": id }));
+    assert!(
+        crate::remote::devices::RemoteDevices::new(db.as_ref().clone())
+            .list()
+            .expect("list")
+            .is_empty(),
+        "the row is gone"
+    );
+
+    let result = call_remote(&handler, "revoke", "missingdevice0000").await;
+    assert!(result.is_error.unwrap_or(false), "unknown id errors");
+    assert!(
+        queue_raw_text(&result).contains("no paired device"),
+        "the error names the problem: {}",
+        queue_raw_text(&result)
+    );
+}
+
+#[tokio::test]
+async fn remote_disconnect_keeps_the_row_and_answers_disconnected() {
+    use crate::application::ports::StateRepository as _;
+
+    let (_dir, db, handler) = queue_test_handler();
+    let id = pair_remote_device(&db, "phone");
+
+    let result = call_remote(&handler, "disconnect", &id).await;
+    assert!(!result.is_error.unwrap_or(false), "{:?}", result.content);
+    let body: serde_json::Value =
+        serde_json::from_str(&queue_raw_text(&result)).expect("json body");
+    assert_eq!(body, serde_json::json!({ "disconnected": id }));
+
+    let devices = crate::remote::devices::RemoteDevices::new(db.as_ref().clone());
+    assert_eq!(devices.list().expect("list").len(), 1, "the row stays");
+    let queue = db
+        .get_state(crate::remote::relay::REMOTE_DISCONNECT_KEY)
+        .expect("queue state");
+    assert_eq!(queue.as_deref(), Some(id.as_str()));
+
+    let result = call_remote(&handler, "disconnect", "missingdevice0000").await;
+    assert!(result.is_error.unwrap_or(false), "unknown id errors");
+    assert!(
+        queue_raw_text(&result).contains("no paired device"),
+        "the error names the problem: {}",
+        queue_raw_text(&result)
+    );
+}

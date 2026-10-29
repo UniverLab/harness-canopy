@@ -166,3 +166,37 @@ fn revoke_deletes_the_row_and_queues_the_id() {
         "the daemon picks the id up on its next tick"
     );
 }
+
+#[test]
+fn disconnect_queues_the_id_and_keeps_the_row() {
+    use crate::remote::relay::REMOTE_DISCONNECT_KEY;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = test_db(&dir);
+    let devices = RemoteDevices::new(db.clone());
+    let spki = b"device spki bytes".to_vec();
+    let id = device_id(&spki);
+    devices
+        .pair(spki, "laptop", "octocat", "2026-01-01T00:00:00Z")
+        .expect("pair");
+
+    assert!(
+        !disconnect(&db, "missingdevice0000").expect("unknown"),
+        "unknown id disconnects nothing"
+    );
+    assert_eq!(
+        db.get_state(REMOTE_DISCONNECT_KEY).expect("state"),
+        None,
+        "an unknown id queues nothing"
+    );
+
+    assert!(disconnect(&db, &id).expect("disconnect"));
+    assert_eq!(devices.list().expect("list").len(), 1, "the pairing stays");
+    assert_eq!(
+        db.get_state(REMOTE_DISCONNECT_KEY)
+            .expect("state")
+            .unwrap_or_default(),
+        id,
+        "the daemon picks the id up on its next tick"
+    );
+}
