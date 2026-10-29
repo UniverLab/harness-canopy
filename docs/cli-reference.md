@@ -253,7 +253,7 @@ WebSocket — the CLI never writes the shelf itself. `file_id` is the
 
 The same actions live in the TUI: `F1`, then `5` opens the hub's **Remote**
 tab — GitHub sign-in with the device flow, the relay switch and phase,
-pairing with a QR overlay, and revoking devices ([TUI](tui.md)).
+pairing with a QR overlay, and disconnecting and revoking devices ([TUI](tui.md)).
 
 ### Pairing a browser
 
@@ -365,8 +365,8 @@ frames stay under 16 KiB, at most two downloads run at once — a third
 answers `error{code:"busy"}` — and their parts interleave with terminal
 output so a large image never stalls it. A host serves at most four device
 connections at once — a fifth is told `busy` — each success refreshes the
-device's `last_seen`, and `canopy remote revoke` closes a live connection
-within a second. A revoked device hears `error{code:"revoked"}` before its
+device's `last_seen`, and `canopy remote revoke` (or `disconnect`, keeping
+the pairing) closes a live connection within a second. A revoked device hears `error{code:"revoked"}` before its
 channel closes, so its app can say the device was removed; answers larger
 than the peer's negotiated frame cap are refused with
 `error{code:"frame_too_large"}` instead of being sent halfway.
