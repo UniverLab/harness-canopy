@@ -98,6 +98,11 @@ is a percentage of the machine's physical memory, so the unit stays portable.
 (the systemd default for a unit written before this), naming the reinstall
 that fixes it.
 
+The generated unit also carries `CPUQuota=` from the
+`daemon.cpu_quota_percent` setting (half the host's logical CPUs by
+default; `0` disables it), so graph work can never saturate every core of
+the host — see [CPU quota cap](graphs-isolation.md#cpu-quota-cap).
+
 `canopy daemon start` and `canopy daemon restart` compare the unit's
 `ExecStart` with the `canopy` binary running the command. When it names a
 different or already-removed binary — a unit left behind by an older

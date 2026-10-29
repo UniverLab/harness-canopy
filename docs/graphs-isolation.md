@@ -96,7 +96,7 @@ systemd user unit from the `daemon.cpu_quota_percent` setting, which
 bounds every agent and gate the daemon spawns.
 
 The value is percent of one core (`600` = 6 cores) and defaults to half
-the host's logical CPUs; `0` disables the cap. Changing it with `config`
+the host's logical CPUs (at least one core); `0` disables the cap. Changing it with `config`
 `set` applies to the running daemon at once via `systemctl --user
 set-property` (runtime and persistent) — restarting the daemon is never
 required. `agent` `status` shows the configured value, the value the

@@ -555,6 +555,7 @@ it came from. **Apply** says when a change takes effect: `applied` (at once),
 | `remote.relay_url` | `https://remote.univerlab.org` | — | next run | Relay URL for owner-only remote control |
 | `remote.github_client_id` | `Ov23liVCfE58kUb3ssDy` | — | next run | Public Client ID of UniverLab's "Canopy Remote" OAuth App (identity only; empty disables `remote login`) |
 | `remote.host_label` | empty | — | next run | Label shown for this host; empty means the hostname |
+| `daemon.cpu_quota_percent` | half the host's logical CPUs | 0–25600 | applied | CPU cap for every agent and gate the daemon spawns, in percent of one core (600 = 6 cores); `0` disables the cap ([CPU quota cap](graphs-isolation.md#cpu-quota-cap)) |
 
 `scheduler.retry_*` and `spec_attempt_limit` are not in `graphs.*`, which is
 why they are listed here.
