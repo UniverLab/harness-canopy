@@ -87,3 +87,29 @@ Inspect the live state with `canopy mutex list [--json]`. Mutexes are
 scoped to one daemon (one machine); there are no counting semaphores or
 priorities.
 
+## CPU quota cap
+
+Mutexes serialize gate nodes, but agents still run cargo builds, tests,
+npm and Playwright outside any gate — so the daemon also caps its own
+cgroup. `canopy setup` writes `CPUQuota=` into the `canopy.service`
+systemd user unit from the `daemon.cpu_quota_percent` setting, which
+bounds every agent and gate the daemon spawns.
+
+The value is percent of one core (`600` = 6 cores) and defaults to half
+the host's logical CPUs; `0` disables the cap. Changing it with `config`
+`set` applies to the running daemon at once via `systemctl --user
+set-property` (runtime and persistent) — restarting the daemon is never
+required. `agent` `status` shows the configured value, the value the
+cgroup enforces, and whether it enforces one.
+
+Every spawned node also exports `CARGO_BUILD_JOBS`,
+`NEXTEST_TEST_THREADS` and `RUST_TEST_THREADS` set to the cap in cores
+(minimum 2), so tools size their worker counts to the budget instead of
+thrashing under the quota.
+
+Where the cap cannot apply — no systemd user instance, no delegated cpu
+controller, or macOS/Windows — setup says so once and keeps the previous
+behavior. A `50-CPUQuota.conf` drop-in you already own is respected and
+reported, never overwritten: while it exists the unit carries no
+`CPUQuota=` line of its own.
+

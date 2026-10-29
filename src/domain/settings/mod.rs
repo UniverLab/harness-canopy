@@ -88,12 +88,16 @@ pub enum Apply {
     RestartTui,
 }
 
-/// A registry default: a literal in TOML syntax, or the home directory
-/// resolved at runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A registry default: a literal in TOML syntax, the home directory
+/// resolved at runtime, or a host-dependent integer computed at runtime
+/// (a literal cannot hold a default that varies per machine). Compared by
+/// shape with `matches!`, never by value: function pointers have no
+/// meaningful equality.
+#[derive(Debug, Clone, Copy)]
 pub enum DefaultValue {
     Literal(&'static str),
     Home,
+    Computed(fn() -> i64),
 }
 
 /// The group a setting is presented under.
@@ -166,6 +170,7 @@ impl SettingDef {
             DefaultValue::Literal(text) => text
                 .parse::<toml_edit::Value>()
                 .expect("registry default is valid TOML"),
+            DefaultValue::Computed(compute) => toml_edit::Value::from(compute()),
         }
     }
 

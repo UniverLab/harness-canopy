@@ -2,6 +2,7 @@
 //! Moved verbatim; tool names, schemas, and behaviour unchanged.
 
 use crate::application::ports::{AgentRepository, RunRepository};
+use crate::daemon::cpu_quota;
 use crate::daemon::handler::{TaskTriggerHandler, SESSION_LIST_DEFAULT_LIMIT};
 use crate::daemon::handler_formatting::{
     agent_detail_json, append_send_session_section, append_temporal_agents_section,
@@ -19,6 +20,9 @@ use crate::daemon::handler_send_session::{
 use crate::daemon::helpers::{data_dir, error_result, notify_run_result, success_result};
 use crate::daemon::params::*;
 use crate::daemon::params_extract::Parameters;
+use crate::daemon::process::RealRunner;
+use crate::domain::canopy_config::CanopyConfig;
+use crate::domain::daemon_config::DaemonConfig;
 use crate::domain::models::Agent;
 use crate::domain::models::Trigger;
 use crate::domain::models::{AgentAction, Cli};
@@ -493,6 +497,13 @@ impl TaskTriggerHandler {
         for reason in &health.reasons {
             status.push_str(&format!("\n  - {reason}"));
         }
+
+        // FR5: the CPU quota cap — configured value vs what the cgroup
+        // enforces. The probe is a read-only `systemctl show`.
+        let configured = data_dir()
+            .map(|dir| CanopyConfig::load(&dir).daemon.cpu_quota_percent)
+            .unwrap_or_else(|_| DaemonConfig::default().cpu_quota_percent);
+        status.push_str(&cpu_quota::status_section(configured, &RealRunner));
 
         Ok(CallToolResult::success(vec![ContentBlock::text(status)]))
     }

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 use super::cli_config::CliConfig;
+use super::daemon_config::DaemonConfig;
 pub use super::remote_config::RemoteConfig;
 use super::settings;
 
@@ -178,6 +179,10 @@ pub struct CanopyConfig {
     /// `[remote]` settings for owner-only remote control via the relay.
     #[serde(default)]
     pub remote: RemoteConfig,
+
+    /// `[daemon]` settings for the daemon's own resource footprint.
+    #[serde(default)]
+    pub daemon: DaemonConfig,
 }
 
 /// Retry policy of the cron scheduler, read from the `[scheduler]` table in
@@ -760,6 +765,7 @@ impl Default for CanopyConfig {
             notifications: NotificationsConfig::default(),
             tui: TuiConfig::default(),
             remote: RemoteConfig::default(),
+            daemon: DaemonConfig::default(),
         }
     }
 }

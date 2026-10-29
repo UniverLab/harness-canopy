@@ -492,6 +492,15 @@ pub static REGISTRY: &[SettingDef] = &[
         apply: Apply::NextRun,
         wizard: false,
     },
+    SettingDef {
+        key: "daemon.cpu_quota_percent",
+        kind: Kind::Int { min: 0, max: 25600 },
+        default: DefaultValue::Computed(crate::domain::daemon_config::default_quota_percent),
+        group: Group::DaemonStorage,
+        description: "CPU cap for every agent and gate the daemon spawns, in percent of one core (600 = 6 cores). Half the host's CPUs by default; 0 disables the cap. Applies live, no daemon restart.",
+        apply: Apply::Hot,
+        wizard: false,
+    },
 ];
 
 #[cfg(test)]
@@ -501,7 +510,7 @@ mod tests {
 
     #[test]
     fn registry_has_one_entry_per_setting_and_they_are_unique() {
-        assert_eq!(REGISTRY.len(), 50);
+        assert_eq!(REGISTRY.len(), 51);
         for def in REGISTRY {
             assert_eq!(find(def.key).map(|d| d.key), Some(def.key));
         }

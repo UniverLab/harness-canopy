@@ -1,6 +1,7 @@
 use super::output_tee::{spawn_and_wait_tee, OutputTee};
 use super::verdict_shutdown::{guard_wait, VerdictWatch};
 use super::*;
+use crate::daemon::cpu_quota;
 use crate::shared::sync_identity::GraphIdentity;
 
 /// A failure to build or spawn the child process, classified by whether it
@@ -181,6 +182,8 @@ pub(crate) async fn spawn_and_wait_cli_process(
         command.env_remove(crate::shared::sync_identity::CANOPY_MCP_PROFILE_ENV);
     }
     apply_graph_identity_env(&mut command, graph_identity);
+    // FR4: size the child's worker counts to the daemon's CPU budget.
+    cpu_quota::export_quota_env(&mut command, cpu_quota::loaded_quota_percent());
     // Set the child process cwd to the node's workdir, whether or not the
     // platform supports a working-dir flag. The flag behaviour for platforms
     // that have one is unchanged.
@@ -959,6 +962,73 @@ mod tests {
             profile_env_seen_by_child(false).await,
             "",
             "hook spawn must keep the full tool list (no CANOPY_MCP_PROFILE)"
+        );
+    }
+
+    /// FR4: every agent-node spawn sizes the child's worker counts to the
+    /// daemon's CPU budget. The expectation is derived from the same
+    /// loader the spawn uses, so this holds on any machine — and fails
+    /// with the export removed, since nothing else sets all three.
+    #[tokio::test]
+    async fn spawn_exports_quota_worker_counts_to_the_child() {
+        let workdir = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let record = scratch.path().join("quota_record.txt");
+        let record_str = record.to_string_lossy().to_string();
+
+        let fake_bin = scratch.path().join("fake-quota-cli");
+        std::fs::write(
+            &fake_bin,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n%s\\n%s\\n' \"$CARGO_BUILD_JOBS\" \"$NEXTEST_TEST_THREADS\" \"$RUST_TEST_THREADS\" > '{record_str}'\n"
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let cli_config = CliConfig {
+            name: "fake-quota".to_string(),
+            binary: fake_bin.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        let strategy = CliStrategy::from_cli_config(&cli_config);
+        let workdir_str = workdir.path().to_string_lossy().to_string();
+
+        let outcome = spawn_and_wait_cli_process(
+            &strategy,
+            "prompt",
+            None,
+            None,
+            &workdir_str,
+            5,
+            None,
+            None,
+            false,
+            Some("run-quota"),
+            |_| {},
+            None,
+            None,
+            true,
+            None,
+        )
+        .await;
+        assert!(
+            matches!(
+                outcome,
+                Ok(CliProcessOutcome::Finished { exit_code: 0, .. })
+            ),
+            "spawn must succeed"
+        );
+
+        let expected = cpu_quota::cores_from_quota(cpu_quota::loaded_quota_percent()).to_string();
+        let recorded = std::fs::read_to_string(&record).unwrap();
+        assert_eq!(
+            recorded.lines().collect::<Vec<_>>(),
+            vec![expected.as_str(), expected.as_str(), expected.as_str()],
+            "child must see the quota worker counts: {recorded}"
         );
     }
 

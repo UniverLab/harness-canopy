@@ -13,10 +13,12 @@ use rmcp::ErrorData as McpError;
 use serde_json::json;
 
 use crate::daemon::config_watch;
+use crate::daemon::cpu_quota;
 use crate::daemon::handler::TaskTriggerHandler;
 use crate::daemon::handler_formatting::build_json_result;
 use crate::daemon::helpers::{data_dir, error_result};
 use crate::daemon::params::*;
+use crate::daemon::process::RealRunner;
 use crate::db::Database;
 use crate::domain::canopy_config::CanopyConfig;
 use crate::domain::settings::{self, inspect, Kind};
@@ -112,12 +114,27 @@ fn apply_set(
     config_watch::publish_revision(db, &[key.to_string()]);
 
     let effective = CanopyConfig::load(canopy_dir);
-    Ok(json!({
+    let mut result = json!({
         "key": key,
         "value": value.to_string(),
         "effective": inspect::config_value(&effective, key).to_string(),
         "action": settings::action_for(def.apply),
-    }))
+    });
+
+    // FR2: the quota applies to the running daemon without a restart. The
+    // value is already written and published above, so a failed live apply
+    // keeps it written and only fails the response, naming the cause.
+    if key == cpu_quota::CONFIG_KEY {
+        let quota = u32::try_from(value.as_integer().unwrap_or(0)).unwrap_or(0);
+        cpu_quota::apply_with(&RealRunner, quota)
+            .map_err(|cause| anyhow::anyhow!("quota saved but live apply failed: {cause}"))?;
+        result["applied_live"] = json!(true);
+        result["note"] = json!(
+            "CPU quota applied live via systemctl set-property (runtime and persistent); no daemon restart needed"
+        );
+    }
+
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -202,5 +219,80 @@ mod tests {
         );
         apply_set(&db, dir.path(), "pinned_panel_face", None).unwrap();
         assert_eq!(CanopyConfig::load(dir.path()).pinned_panel_face, None);
+    }
+
+    /// Restores `PATH` when dropped, so the fake `systemctl` below never
+    /// leaks into another test.
+    struct RestorePath {
+        old: Option<std::ffi::OsString>,
+    }
+
+    impl Drop for RestorePath {
+        fn drop(&mut self) {
+            match &self.old {
+                Some(value) => std::env::set_var("PATH", value),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+    }
+
+    /// FR2 end to end through the real runner: `config set` on the quota
+    /// key applies live via `systemctl set-property` and reports it, and a
+    /// failed apply keeps the written value while naming the cause. The
+    /// only test that executes a `systemctl`, and it is a fake on a
+    /// prepended `PATH` — the real unit and the running daemon are never
+    /// touched.
+    #[cfg(unix)]
+    #[test]
+    fn config_set_cpu_quota_applies_live_and_keeps_the_value_on_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let bin = TempDir::new().unwrap();
+        let bin_path = bin.path().to_string_lossy().to_string();
+        std::fs::write(
+            bin.path().join("systemctl"),
+            format!(
+                "#!/bin/sh\necho \"$@\" >> '{bin_path}/calls.log'\nif [ -e '{bin_path}/fail' ]; then exit 1; fi\nexit 0\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            bin.path().join("systemctl"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+
+        let old_path = std::env::var_os("PATH");
+        let joined = match &old_path {
+            Some(path) => format!("{bin_path}:{}", path.to_string_lossy()),
+            None => bin_path,
+        };
+        std::env::set_var("PATH", joined);
+        let _restore = RestorePath { old: old_path };
+
+        let dir = TempDir::new().unwrap();
+        let db = test_db(&dir);
+
+        let result = apply_set(&db, dir.path(), "daemon.cpu_quota_percent", Some("600")).unwrap();
+        assert_eq!(result["applied_live"], true);
+        assert!(result["note"].as_str().unwrap().contains("set-property"));
+        assert_eq!(result["effective"], "600");
+        let calls = std::fs::read_to_string(bin.path().join("calls.log")).unwrap();
+        assert!(
+            calls.contains("--user set-property canopy.service CPUQuota=600%"),
+            "fake systemctl saw: {calls}"
+        );
+
+        std::fs::write(bin.path().join("fail"), "yes").unwrap();
+        let error = apply_set(&db, dir.path(), "daemon.cpu_quota_percent", Some("400"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("live apply failed"), "{error}");
+        assert!(error.contains("set-property"), "{error}");
+        assert_eq!(
+            CanopyConfig::load(dir.path()).daemon.cpu_quota_percent,
+            400,
+            "the value stays written when the live apply fails"
+        );
     }
 }

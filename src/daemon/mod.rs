@@ -11,6 +11,7 @@ pub(crate) mod clean_cli;
 pub(crate) mod cli;
 pub(crate) mod cli_daemon;
 pub(crate) mod config_watch;
+pub(crate) mod cpu_quota;
 pub(crate) mod crew_cli;
 pub(crate) mod daemon_start;
 pub(crate) mod doctor;
