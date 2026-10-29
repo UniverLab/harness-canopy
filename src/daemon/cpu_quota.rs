@@ -47,7 +47,9 @@ pub(crate) fn parse_quota_usec(output: &str) -> Option<u32> {
         return None;
     }
     // `CPUQuota=600%` reports as 6_000_000: percent is usec / 10_000.
-    Some((usec / 10_000) as u32)
+    // Clamped, never `as`-truncated: a garbage value must not wrap into a
+    // small percent the status line then reports as fact.
+    Some(u32::try_from(usec / 10_000).unwrap_or(u32::MAX))
 }
 
 /// Where `systemctl --user set-property` persists a quota: a drop-in the
@@ -256,6 +258,11 @@ mod tests {
         );
         assert_eq!(parse_quota_usec("LoadState=loaded\n"), None);
         assert_eq!(parse_quota_usec("CPUQuotaPerSecUSec=not-a-number\n"), None);
+        // Absurd but finite: clamps instead of wrapping into a small lie.
+        assert_eq!(
+            parse_quota_usec(&format!("CPUQuotaPerSecUSec={}\n", u64::MAX - 1)),
+            Some(u32::MAX)
+        );
     }
 
     #[test]

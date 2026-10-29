@@ -294,5 +294,22 @@ mod tests {
             400,
             "the value stays written when the live apply fails"
         );
+
+        // `config reset` travels the same live-apply branch: the host
+        // default is written and applied without a restart.
+        std::fs::remove_file(bin.path().join("fail")).unwrap();
+        let default = crate::domain::daemon_config::default_quota_percent();
+        let result = apply_set(&db, dir.path(), "daemon.cpu_quota_percent", None).unwrap();
+        assert_eq!(result["applied_live"], true);
+        assert_eq!(result["effective"], default.to_string());
+        assert_eq!(
+            CanopyConfig::load(dir.path()).daemon.cpu_quota_percent,
+            u32::try_from(default).unwrap()
+        );
+        let calls = std::fs::read_to_string(bin.path().join("calls.log")).unwrap();
+        assert!(
+            calls.contains(&format!("CPUQuota={default}%")),
+            "fake systemctl saw: {calls}"
+        );
     }
 }
