@@ -363,8 +363,15 @@ on.
   graph. A failed graph action is reported on the error tint. Every dialog
   still spells out what it does in words, so the tint is never the only
   signal; the quit and archive confirmations keep the neutral dialog ground.
+- **Sidebar** — the sidebar is painted on its own theme surface, not on the
+  terminal's default background: the Live / Automation / Knowledge tab strip,
+  the agent and group rows, and the project graph cards all sit on the
+  theme's sidebar background. On a terminal whose own background differs
+  (a light or purple one, say), no part of the sidebar shows that foreign
+  colour. The active tab keeps its accent colour and inactive tabs stay
+  dimmed, both at readable contrast against that surface.
 
-The sidebar, header, footer and session panes are unchanged.
+The header, footer and session panes are unchanged.
 
 ## Appearance and behaviour settings
 
