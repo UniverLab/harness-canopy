@@ -113,6 +113,7 @@ impl TaskTriggerHandler {
         params: ScheduledSendListParams,
         parts: Option<&Parts>,
     ) -> Result<CallToolResult, McpError> {
+        self.record_harness_id(parts);
         let session_id = match params
             .session_id
             .as_deref()

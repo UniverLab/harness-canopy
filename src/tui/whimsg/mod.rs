@@ -14,7 +14,8 @@ use kaomojis::{
 };
 use phrases::{
     BUSY, EVENT_AGENT_DONE, EVENT_AGENT_FAILED, EVENT_AGENT_SPAWNED, EVENT_GRAPH_COMPLETED,
-    EVENT_GRAPH_STOPPED, EVENT_HOOK_MESSAGE, EVENT_SPEC_COMPLETED, IDLE, JOKES, SCROLL,
+    EVENT_GRAPH_STOPPED, EVENT_HOOK_MESSAGE, EVENT_SESSION_RENAMED, EVENT_SPEC_COMPLETED, IDLE,
+    JOKES, SCROLL,
 };
 use rng::{pick_no_repeat, DedupRing, Rng};
 
@@ -89,6 +90,7 @@ fn event_templates(kind: EventKind) -> &'static [&'static str] {
         EventKind::AgentSpawned => EVENT_AGENT_SPAWNED,
         EventKind::AgentDone => EVENT_AGENT_DONE,
         EventKind::AgentFailed => EVENT_AGENT_FAILED,
+        EventKind::SessionRenamed => EVENT_SESSION_RENAMED,
         EventKind::SpecCompleted => EVENT_SPEC_COMPLETED,
         EventKind::GraphCompleted => EVENT_GRAPH_COMPLETED,
         EventKind::GraphBlocked | EventKind::GraphFailed => EVENT_GRAPH_STOPPED,
@@ -672,6 +674,32 @@ mod tests {
         }
     }
 
+    /// FR5: a renamed session announces its old and new names, with no
+    /// placeholder left behind.
+    #[test]
+    fn renamed_session_event_names_the_old_and_the_new_name() {
+        let mut w = Whimsg::with_seed(17);
+        w.notify_event(WhimEvent::with_detail(
+            EventKind::SessionRenamed,
+            "paulownia",
+            "platanus",
+        ));
+        for _ in 0..50 {
+            w.generate();
+            assert!(
+                w.active_text.contains("paulownia"),
+                "text: {}",
+                w.active_text
+            );
+            assert!(
+                w.active_text.contains("platanus"),
+                "text: {}",
+                w.active_text
+            );
+            assert!(!text_has_placeholder(&w.active_text));
+        }
+    }
+
     /// A blocked/failed graph with no recorded node never repeats the graph's
     /// own name as the node it hit.
     #[test]
@@ -726,6 +754,7 @@ mod tests {
             EventKind::AgentSpawned,
             EventKind::AgentDone,
             EventKind::AgentFailed,
+            EventKind::SessionRenamed,
             EventKind::SpecCompleted,
             EventKind::GraphCompleted,
             EventKind::GraphBlocked,

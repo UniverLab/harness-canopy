@@ -35,12 +35,15 @@ step instead of launching straight away:
   skipping the mission step; a harness with nothing to resume shows
   `No sessions to resume for <harness> in <dir>` and `New session` stays
   usable.
-  - Resuming the same harness conversation (a harness conversation id canopy
-    has already recorded) reuses that session: it keeps its id and its name,
-    so hooks and scheduled sends addressed to it still reach it afterwards,
-    and `session_list` shows one row — never the old one plus a newly-named
-    one. A conversation canopy has never seen starts a fresh session with a
-    new id and a new generated name, as before.
+  - Picking a finished canopy session relaunches that same session: it keeps
+    its id and its name — even when canopy never recorded the harness's own
+    conversation id — so hooks and scheduled sends addressed to it still
+    reach it afterwards, and `session_list` shows one row, never the old one
+    plus a newly-named one. Only when another live session already holds the
+    name does the resumed session take a fresh name (keeping its id); the
+    header then names both. A conversation picked out of the harness's own
+    list that canopy has never seen starts a fresh session with a new id and
+    a new generated name, as before.
   - `↑↓` selects, `Enter` confirms, and `Esc` returns to the form with every
   value kept. **Background** and **Terminal** launch from the form as
   before — the Mode step is Interactive-only.

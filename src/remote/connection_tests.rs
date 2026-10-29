@@ -147,6 +147,7 @@ fn spawn_session(
         fallback_args: None,
         model_flag: None,
         id: None,
+        harness_conversation_id: None,
         seed_id: None,
         accent: None,
         yolo: false,

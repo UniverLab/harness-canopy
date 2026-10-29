@@ -136,6 +136,35 @@ impl Database {
         Ok(found)
     }
 
+    /// Fetch one interactive session row by its canopy id (`None` when no such
+    /// row). Any status matches: a resume relaunches a finished session, and
+    /// the caller — not this lookup — decides what the row's state means.
+    pub fn get_interactive_session(&self, id: &str) -> Result<Option<InteractiveSession>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {SESSION_COLUMNS} FROM interactive_sessions WHERE id = ?1",
+        ))?;
+        let found = match stmt.query_row(params![id], session_from_row) {
+            Ok(session) => Some(session),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(e.into()),
+        };
+        Ok(found)
+    }
+
+    /// Rename one interactive session row. Only a resume that had to take a
+    /// fresh name (its source name was held by another live session) renames:
+    /// every other path keeps the name so hooks and scheduled sends addressed
+    /// to it keep resolving.
+    pub fn rename_interactive_session(&self, id: &str, new_name: &str) -> Result<()> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        conn.execute(
+            "UPDATE interactive_sessions SET name = ?1 WHERE id = ?2",
+            params![new_name, id],
+        )?;
+        Ok(())
+    }
+
     /// Reactivate an existing session row in place, for a harness conversation
     /// that came back: the row keeps its id, name and `session_type`, and only
     /// the liveness fields move (pid, workdir, args, boot id, and `started_at`,
@@ -180,11 +209,12 @@ impl Database {
     }
 
     /// Register a freshly launched interactive session, reusing the earlier row
-    /// when the harness conversation identifier matches one canopy has seen:
-    /// that row is reactivated and its id and name are returned, so the caller
-    /// adopts them instead of a second row appearing for the same
-    /// conversation. With no identifier, or one canopy has never seen, a new
-    /// row is inserted under the supplied identity — today's behaviour.
+    /// when the registration carries an id canopy already knows (a resume
+    /// relaunched under its source session's id) or when the harness
+    /// conversation identifier matches one canopy has seen: that row is
+    /// reactivated and its id and name are returned, so the caller adopts
+    /// them instead of a second row appearing for the same conversation. With
+    /// neither, a new row is inserted under the supplied identity.
     pub fn register_interactive_session(
         &self,
         registration: &SessionRegistration<'_>,
@@ -193,6 +223,31 @@ impl Database {
         // any row is written (mapping locks the connection, so it must run
         // before this function locks it below).
         let working_dir = self.map_workdir_out_of_sandbox(registration.working_dir)?;
+        // A resume relaunches the source session's own id: reactivate that
+        // row in place — status, pid, boot id and args move, the id never
+        // does. The name only moves when the spawn had to take a fresh one
+        // (the source name was held by another live session); a carried
+        // harness identifier is recorded but never overwrites the recorded
+        // one. No second row is ever added for the relaunched session.
+        if let Some(existing) = self.get_interactive_session(registration.id)? {
+            self.reactivate_interactive_session(
+                &existing.id,
+                registration.pid,
+                &working_dir,
+                registration.args,
+                registration.boot_id,
+            )?;
+            if existing.name != registration.name {
+                self.rename_interactive_session(&existing.id, registration.name)?;
+            }
+            if let Some(harness_id) = registration.harness_conversation_id {
+                self.set_session_harness_conversation_id(&existing.id, harness_id)?;
+            }
+            return Ok(RegistrationOutcome::Reactivated {
+                id: existing.id,
+                name: registration.name.to_string(),
+            });
+        }
         if let Some(harness_id) = registration.harness_conversation_id {
             if let Some(existing) = self.find_session_by_harness_id(harness_id)? {
                 self.reactivate_interactive_session(
@@ -1196,5 +1251,116 @@ mod tests {
         );
         let outcome = register(&db, "sess-new", "populus", "/tmp", Some("conv-abc"));
         assert_eq!(outcome, RegistrationOutcome::Inserted);
+    }
+
+    // ── resume by explicit session id ─────────────────────────────────
+
+    #[test]
+    fn resume_of_known_id_reactivates_the_same_row() {
+        let db = test_db();
+        finished_known_session(&db, "conv-abc");
+
+        let outcome = register(&db, "sess-orch", "marasmius", "/tmp/proj", Some("conv-abc"));
+
+        assert_eq!(
+            outcome,
+            RegistrationOutcome::Reactivated {
+                id: "sess-orch".to_string(),
+                name: "marasmius".to_string(),
+            }
+        );
+        // No second row: the source row is reactivated in place (FR2).
+        assert_eq!(db.count_interactive_sessions().unwrap(), 1);
+        let row = db.get_interactive_session("sess-orch").unwrap().unwrap();
+        assert_eq!(row.id, "sess-orch");
+        assert_eq!(row.name, "marasmius");
+        assert_eq!(row.status, "active");
+        assert_eq!(row.pid, Some(4242));
+        assert_eq!(row.boot_id.as_deref(), Some("boot-new"));
+        assert_eq!(row.args.as_deref(), Some("--continue"));
+        assert_eq!(
+            row.harness_conversation_id.as_deref(),
+            Some("conv-abc"),
+            "the recorded harness id survives the resume"
+        );
+        assert!(db.get_interactive_session("no-such-id").unwrap().is_none());
+    }
+
+    #[test]
+    fn resume_of_known_id_with_a_fresh_name_renames_and_keeps_the_id() {
+        let db = test_db();
+        finished_known_session(&db, "conv-abc");
+
+        // FR5: the source name was held by another live session, so the
+        // spawn kept the id under a fresh name.
+        let outcome = register(&db, "sess-orch", "pholiota", "/tmp/proj", Some("conv-abc"));
+
+        assert_eq!(
+            outcome,
+            RegistrationOutcome::Reactivated {
+                id: "sess-orch".to_string(),
+                name: "pholiota".to_string(),
+            }
+        );
+        assert_eq!(db.count_interactive_sessions().unwrap(), 1);
+        let row = db.get_interactive_session("sess-orch").unwrap().unwrap();
+        assert_eq!(row.id, "sess-orch");
+        assert_eq!(row.name, "pholiota");
+        assert_eq!(row.status, "active");
+    }
+
+    #[test]
+    fn resume_of_known_id_records_a_carried_harness_id_without_overwriting() {
+        let db = test_db();
+        db.insert_interactive_session(
+            "sess-bare",
+            "populus",
+            "claude",
+            "/tmp/proj",
+            Some("--continue"),
+            Some(111),
+            "interactive",
+            Some("boot-old"),
+        )
+        .unwrap();
+        db.finish_interactive_session("sess-bare", 0).unwrap();
+
+        // First resume carries the conversation id: it is recorded.
+        let outcome = register(&db, "sess-bare", "populus", "/tmp/proj", Some("conv-first"));
+        assert_eq!(
+            outcome,
+            RegistrationOutcome::Reactivated {
+                id: "sess-bare".to_string(),
+                name: "populus".to_string(),
+            }
+        );
+        assert_eq!(
+            db.find_session_by_harness_id("conv-first")
+                .unwrap()
+                .unwrap()
+                .id,
+            "sess-bare"
+        );
+
+        // A later resume carrying a different id must not overwrite it.
+        register(
+            &db,
+            "sess-bare",
+            "populus",
+            "/tmp/proj",
+            Some("conv-second"),
+        );
+        assert_eq!(
+            db.get_interactive_session("sess-bare")
+                .unwrap()
+                .unwrap()
+                .harness_conversation_id
+                .as_deref(),
+            Some("conv-first")
+        );
+        assert!(db
+            .find_session_by_harness_id("conv-second")
+            .unwrap()
+            .is_none());
     }
 }

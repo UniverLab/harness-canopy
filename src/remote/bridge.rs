@@ -85,6 +85,7 @@ fn spawn_request(
         fallback_args: ext.fallback_args,
         model_flag: ext.model_flag,
         id: ext.id,
+        harness_conversation_id: ext.harness_conversation_id,
         seed_id: ext.seed_id,
         accent: ext.accent,
         yolo: ext.yolo,

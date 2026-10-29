@@ -134,6 +134,7 @@ fn spawn_frame_carries_every_field() {
         id: Some("sess-1".to_string()),
         seed_id: Some("seed-1".to_string()),
         accent: Some("1,2,3".to_string()),
+        harness_conversation_id: Some("ses_abc123".to_string()),
         yolo: true,
     };
     let frame = spawn_frame_full(&SpawnFrameArgs {
@@ -170,6 +171,7 @@ fn spawn_frame_carries_every_field() {
             assert_eq!(ext.id.as_deref(), Some("sess-1"));
             assert_eq!(ext.seed_id.as_deref(), Some("seed-1"));
             assert_eq!(ext.accent.as_deref(), Some("1,2,3"));
+            assert_eq!(ext.harness_conversation_id.as_deref(), Some("ses_abc123"));
             assert!(ext.yolo, "yolo:true must survive the frame");
         }
         other => panic!("spawn frame parsed as {other:?}"),
@@ -193,6 +195,7 @@ fn spawn_frame_carries_every_field() {
             assert_eq!(ext.id, None);
             assert_eq!(ext.seed_id, None);
             assert_eq!(ext.accent, None);
+            assert_eq!(ext.harness_conversation_id, None);
             assert!(!ext.yolo, "an explicit yolo:false reads as false");
         }
         other => panic!("spawn frame parsed as {other:?}"),

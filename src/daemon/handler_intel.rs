@@ -31,6 +31,7 @@ impl TaskTriggerHandler {
         OptionalExtension(parts): OptionalExtension<Parts>,
     ) -> Result<CallToolResult, McpError> {
         self.reject_if_nursery(parts.as_ref())?;
+        self.record_harness_id(parts.as_ref());
         let scope = params.scope.trim().to_lowercase();
         let (session_limit, _knowledge_limit, sync_limit, dependency_limit) = match scope.as_str() {
             "light" => (2, 5, 8, 0),
@@ -171,6 +172,7 @@ impl TaskTriggerHandler {
         OptionalExtension(parts): OptionalExtension<Parts>,
     ) -> Result<CallToolResult, McpError> {
         self.reject_if_nursery(parts.as_ref())?;
+        self.record_harness_id(parts.as_ref());
         // Track an explicit id that resolved to nothing: the caller almost
         // certainly mistyped or truncated the id of a node they meant to
         // update, so a bare `created: true` (which also fires for the normal
@@ -320,6 +322,7 @@ impl TaskTriggerHandler {
         OptionalExtension(parts): OptionalExtension<Parts>,
     ) -> Result<CallToolResult, McpError> {
         self.reject_if_nursery(parts.as_ref())?;
+        self.record_harness_id(parts.as_ref());
         let limit = params.limit.unwrap_or(10).min(50);
         let depth = params
             .depth
@@ -486,6 +489,7 @@ impl TaskTriggerHandler {
         parts: Option<&Parts>,
     ) -> Result<CallToolResult, McpError> {
         self.reject_if_nursery(parts)?;
+        self.record_harness_id(parts);
         if let Err(e) = validate_non_empty(&params.node_id, "node_id") {
             return Ok(error_result(&e));
         }
@@ -547,6 +551,7 @@ impl TaskTriggerHandler {
         parts: Option<&Parts>,
     ) -> Result<CallToolResult, McpError> {
         self.reject_if_nursery(parts)?;
+        self.record_harness_id(parts);
 
         let effective_project_hash =
             self.effective_project_hash_for_delete(parts, params.project_hash.as_deref());

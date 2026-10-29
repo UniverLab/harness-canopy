@@ -1309,6 +1309,7 @@ mod focus_shortcuts_keyboard_claim_tests {
             None,
             None,
             None,
+            None,
         )
         .expect("spawn cat as a stand-in interactive child")
     }

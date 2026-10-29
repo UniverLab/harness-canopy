@@ -47,13 +47,11 @@ impl App {
     }
 
     /// Carry `source_session_id`'s persisted flag over to `new_session_id`.
-    /// A resume whose harness conversation canopy does not recognize spawns
-    /// a fresh agent id (a new uuid per `InteractiveAgent::spawn`), and the
-    /// resumed conversation — which already contains the block — would
-    /// receive it again without this inheritance; a resume that keeps the
-    /// session id returns early below, its flag already on the same row.
-    /// Only copies when the source has the flag and the target does not; an
-    /// existing target flag always wins.
+    /// Test-only now: every resume relaunches the source session's own id,
+    /// so the flag stays on the reactivated row and production never calls
+    /// this. Only copies when the source has the flag and the target does
+    /// not; an existing target flag always wins.
+    #[cfg(test)]
     pub(crate) fn inherit_protocol_flag(&self, source_session_id: &str, new_session_id: &str) {
         if source_session_id == new_session_id || self.protocol_persisted(new_session_id) {
             return;

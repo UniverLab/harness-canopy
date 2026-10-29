@@ -746,6 +746,7 @@ mod forward_mouse_scroll_tests {
             None,
             None,
             None,
+            None,
         )
         .expect("spawn cat as a stand-in interactive child")
     }
@@ -908,6 +909,7 @@ mod kitty_keyboard_negotiation_tests {
             Some("kitty-keyboard-test-agent"),
             None,
             &[],
+            None,
             None,
             None,
             None,

@@ -158,6 +158,11 @@ pub struct SpawnExt {
     pub id: Option<String>,
     pub seed_id: Option<String>,
     pub accent: Option<String>,
+    /// The harness's own conversation identifier for this launch, when the
+    /// launcher knows it (a resume of a recorded conversation). The hub
+    /// records it on the session row so the next resume of the same
+    /// conversation resolves back to this session.
+    pub harness_conversation_id: Option<String>,
     /// Skip the harness's approval prompts: the hub appends the registry's
     /// `yolo_flag` to the interactive args. Only for `kind:"agent"`, and only
     /// for a harness that defines one.
@@ -298,6 +303,7 @@ fn parse_spawn_frame(value: &Value, frame: &str) -> Result<ClientFrame, FrameErr
     let id = opt_str_field(value, frame, "id")?;
     let seed_id = opt_str_field(value, frame, "seed_id")?;
     let accent = opt_str_field(value, frame, "accent")?;
+    let harness_conversation_id = opt_str_field(value, frame, "harness_conversation_id")?;
     let yolo = opt_bool_field(value, frame, "yolo")?;
     Ok(ClientFrame::Spawn {
         req,
@@ -314,6 +320,7 @@ fn parse_spawn_frame(value: &Value, frame: &str) -> Result<ClientFrame, FrameErr
             id,
             seed_id,
             accent,
+            harness_conversation_id,
             yolo,
         }),
     })
@@ -551,10 +558,11 @@ pub fn resize_frame(id: &str, cols: u16, rows: u16) -> String {
     serde_json::json!({"t": "resize", "id": id, "cols": cols, "rows": rows}).to_string()
 }
 
-/// `spawn{req,kind,cli,model?,workdir,name?,prompt?,interactive_args?,fallback_args?,model_flag?,id?,seed_id?,accent?,yolo?}`:
+/// `spawn{req,kind,cli,model?,workdir,name?,prompt?,interactive_args?,fallback_args?,model_flag?,id?,seed_id?,accent?,harness_conversation_id?,yolo?}`:
 /// spawn a hub session. The agent launch fields mirror what the TUI passes to
 /// `InteractiveAgent::spawn` today: explicit args (resume/yolo included),
-/// the resume identity, the seed and the accent (`"r,g,b"`). `yolo` (default
+/// the resume identity, the seed, the accent (`"r,g,b"`) and the harness's
+/// own conversation identifier. `yolo` (default
 /// `false`) asks the hub to append the harness's registry `yolo_flag` to the
 /// interactive args; it is refused for `kind:"terminal"` and for a harness
 /// with no such flag. `workdir` may start with `~/` (or be `~` alone) to mean
@@ -602,6 +610,7 @@ pub fn spawn_frame_full(args: &SpawnFrameArgs<'_>) -> String {
         "model": args.model, "workdir": args.workdir, "name": args.name, "prompt": args.prompt,
         "interactive_args": ext.interactive_args, "fallback_args": ext.fallback_args,
         "model_flag": ext.model_flag, "id": ext.id, "seed_id": ext.seed_id, "accent": ext.accent,
+        "harness_conversation_id": ext.harness_conversation_id,
         "yolo": ext.yolo,
     })
     .to_string()

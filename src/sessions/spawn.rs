@@ -55,7 +55,9 @@ pub fn preserve_rows_on_shrink<C: vt100::Callbacks>(
 /// harness conversation passes both, so it keeps its canopy session id and
 /// name (hooks and scheduled sends addressed to them keep resolving);
 /// otherwise the id is a fresh uuid and the name a random one that avoids
-/// `existing_ids`.
+/// `existing_ids`. A wanted name that another live session already holds is
+/// refused the same way: the spawn keeps the id and takes a fresh name, so a
+/// resume never steals a live session's name.
 pub fn spawn_identity(
     id: Option<&str>,
     name: Option<&str>,
@@ -64,9 +66,10 @@ pub fn spawn_identity(
     let id = id
         .map(str::to_owned)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let name = name
-        .map(str::to_owned)
-        .unwrap_or_else(|| crate::tui::agent::naming::pick_random_name(existing_ids));
+    let name = match name {
+        Some(wanted) if !existing_ids.contains(&wanted) => wanted.to_owned(),
+        _ => crate::tui::agent::naming::pick_random_name(existing_ids),
+    };
     (id, name)
 }
 
@@ -307,4 +310,28 @@ pub fn write_submitted_prompt(
         writer.flush()?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// FR5: a wanted name held by another live session is refused — the
+    /// spawn keeps the id and takes a fresh name instead of stealing it.
+    #[test]
+    fn held_wanted_name_yields_a_fresh_name_with_the_id_kept() {
+        let (id, name) =
+            spawn_identity(Some("sess-1"), Some("marasmius"), &["marasmius", "populus"]);
+        assert_eq!(id, "sess-1");
+        assert_ne!(name, "marasmius");
+        assert_ne!(name, "populus");
+        assert!(!name.is_empty());
+    }
+
+    #[test]
+    fn free_wanted_name_is_kept() {
+        let (id, name) = spawn_identity(Some("sess-1"), Some("marasmius"), &["populus"]);
+        assert_eq!(id, "sess-1");
+        assert_eq!(name, "marasmius");
+    }
 }

@@ -167,6 +167,10 @@ pub struct SpawnRequest {
     pub model_flag: Option<String>,
     /// Resume identity: reuse this id instead of minting a fresh uuid.
     pub id: Option<String>,
+    /// The harness's own conversation identifier for this spawn, when the
+    /// launcher knows it. Recorded on the session row so the next resume of
+    /// the same conversation resolves back to this session.
+    pub harness_conversation_id: Option<String>,
     pub seed_id: Option<String>,
     /// Canopy accent as `"r,g,b"`.
     pub accent: Option<String>,
@@ -602,7 +606,7 @@ impl SessionHub {
                     pid: session.pid,
                     session_type: "interactive",
                     boot_id: boot_id.as_deref(),
-                    harness_conversation_id: None,
+                    harness_conversation_id: req.harness_conversation_id.as_deref(),
                 };
                 if let Err(e) = self.inner.db.register_interactive_session(&registration) {
                     tracing::warn!("Failed to register hub session: {e}");

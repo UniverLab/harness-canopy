@@ -893,6 +893,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("spawn cat as a stand-in interactive child");
         *agent.kitty_keyboard_flags.lock().expect("lock") = Some(7);
@@ -937,6 +938,7 @@ mod tests {
             Some("claimed-end-agent"),
             None,
             &[],
+            None,
             None,
             None,
             None,
@@ -1191,6 +1193,7 @@ mod tests {
             Some("drag-copy-hint-agent"),
             None,
             &[],
+            None,
             None,
             None,
             None,

@@ -17,6 +17,7 @@ impl TaskTriggerHandler {
         parts: Option<&Parts>,
     ) -> Result<CallToolResult, McpError> {
         self.reject_if_nursery(parts)?;
+        self.record_harness_id(parts);
         let agent_id = self.resolve_sync_agent_id(parts)?;
         let (_, identity) = load_bound_seed_identity(&self.db, parts, &agent_id)
             .map_err(|e| McpError::invalid_params(e, None))?;
@@ -32,6 +33,7 @@ impl TaskTriggerHandler {
         parts: Option<&Parts>,
     ) -> Result<CallToolResult, McpError> {
         self.reject_if_nursery(parts)?;
+        self.record_harness_id(parts);
         let agent_id = self.resolve_sync_agent_id(parts)?;
         let (seed_id, mut identity) = load_bound_seed_identity(&self.db, parts, &agent_id)
             .map_err(|e| McpError::invalid_params(e, None))?;
@@ -67,6 +69,7 @@ impl TaskTriggerHandler {
         parts: Option<&Parts>,
     ) -> Result<CallToolResult, McpError> {
         self.reject_if_nursery(parts)?;
+        self.record_harness_id(parts);
         let seed_id = crate::domain::nursery::slugify(&params.name);
         let identity = crate::domain::seeds::SeedIdentity {
             name: params.name,

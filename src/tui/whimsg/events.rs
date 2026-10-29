@@ -15,6 +15,10 @@ pub enum EventKind {
     AgentSpawned,
     AgentDone,
     AgentFailed,
+    /// A resume that kept its source id under a fresh name (the source name
+    /// was held by another live session): subject is the old name, detail
+    /// the new one.
+    SessionRenamed,
     SpecCompleted,
     GraphCompleted,
     GraphBlocked,

@@ -172,6 +172,7 @@ fn agent_spawn_preserves_dialog_launch_fields() {
         fallback_args: Some("chat".to_string()),
         model_flag: Some("-m".to_string()),
         id: Some("sess-resume-1".to_string()),
+        harness_conversation_id: None,
         seed_id: Some("seed-1".to_string()),
         accent: Some("1,2,3".to_string()),
         yolo: false,
@@ -191,4 +192,60 @@ fn agent_spawn_preserves_dialog_launch_fields() {
         args.contains("-m") && args.contains("opus"),
         "model flag lost from the DB row: {args:?}"
     );
+}
+
+/// FR4: a hub spawn built from the Resume step carries the source session's
+/// id and name, so the relaunch keeps both and reactivates the source row
+/// in place — no second row, and the harness id stays on it.
+#[test]
+fn hub_spawn_from_the_resume_step_keeps_the_source_id_and_name() {
+    use crate::sessions::{SessionKind, SpawnRequest};
+    let (db, _db_dir) = test_db();
+    db.insert_interactive_session(
+        "sess-resume-2",
+        "marasmius",
+        "claude",
+        "/tmp/proj",
+        None,
+        None,
+        "interactive",
+        None,
+    )
+    .expect("seed source row");
+    db.set_session_harness_conversation_id("sess-resume-2", "conv-abc")
+        .expect("record harness id");
+    db.finish_interactive_session("sess-resume-2", 0)
+        .expect("finish source row");
+    let workdir = tempfile::tempdir().expect("workdir");
+    let hub = test_hub(&db);
+    let req = SpawnRequest {
+        kind: SessionKind::Agent,
+        cli: "cat".to_string(),
+        model: None,
+        workdir: workdir.path().to_string_lossy().to_string(),
+        name: Some("marasmius".to_string()),
+        prompt: None,
+        interactive_args: Some("--continue".to_string()),
+        fallback_args: None,
+        model_flag: None,
+        id: Some("sess-resume-2".to_string()),
+        harness_conversation_id: Some("conv-abc".to_string()),
+        seed_id: None,
+        accent: None,
+        yolo: false,
+    };
+    let (session, _guard) = KillGuard::spawn(&hub, &req);
+    assert_eq!(session.id, "sess-resume-2");
+    assert_eq!(session.name, "marasmius");
+    assert_eq!(
+        db.count_interactive_sessions().expect("count rows"),
+        1,
+        "the resume must reactivate the source row, not add one"
+    );
+    let row = db
+        .get_interactive_session("sess-resume-2")
+        .expect("db read")
+        .expect("source row");
+    assert_eq!(row.status, "active");
+    assert_eq!(row.harness_conversation_id.as_deref(), Some("conv-abc"));
 }

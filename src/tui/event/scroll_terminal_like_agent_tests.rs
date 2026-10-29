@@ -17,6 +17,7 @@ fn spawn_cat_agent() -> InteractiveAgent {
         None,
         None,
         None,
+        None,
     )
     .expect("spawn cat as a stand-in interactive child")
 }

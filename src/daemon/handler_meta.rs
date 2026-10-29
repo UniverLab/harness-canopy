@@ -32,6 +32,7 @@ impl TaskTriggerHandler {
         Parameters(params): Parameters<GetToolsParams>,
         OptionalExtension(parts): OptionalExtension<Parts>,
     ) -> Result<CallToolResult, McpError> {
+        self.record_harness_id(parts.as_ref());
         let scope = params.scope.trim().to_lowercase();
         if !matches!(
             scope.as_str(),
@@ -237,6 +238,7 @@ impl TaskTriggerHandler {
         parts: Option<&Parts>,
     ) -> Result<CallToolResult, McpError> {
         self.reject_if_nursery(parts)?;
+        self.record_harness_id(parts);
         if let Some(result) = self.check_rag_rate_limit(&params).await {
             return Ok(result);
         }
@@ -316,6 +318,7 @@ impl TaskTriggerHandler {
         if self.resolve_sync_agent_id(parts).is_ok() {
             self.reject_if_nursery(parts)?;
         }
+        self.record_harness_id(parts);
 
         let platform = params.cli.as_deref().unwrap_or("opencode");
         let workdir = params

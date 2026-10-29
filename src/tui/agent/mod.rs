@@ -189,8 +189,9 @@ impl InteractiveAgent {
     ///
     /// `cols` and `rows` should match the panel area where the agent will render.
     /// `interactive_args` (resume/yolo included), `fallback_args`, `model_flag`,
-    /// `id` (resume identity), `seed_id` and the accent travel in the spawn
-    /// frame so the hub builds the same child the TUI built before.
+    /// `id` (resume identity), `seed_id`, the harness conversation id and the
+    /// accent travel in the spawn frame so the hub builds the same child the
+    /// TUI built before and records the conversation on the session row.
     /// `name` is an optional user-provided session name (random if None).
     /// `existing_ids` is used to avoid name collisions.
     /// `model` selects the model (e.g. `gpt-4`).
@@ -209,6 +210,7 @@ impl InteractiveAgent {
         model: Option<&str>,
         model_flag: Option<&str>,
         seed_id: Option<&str>,
+        harness_conversation_id: Option<&str>,
     ) -> Result<Self> {
         let accent = match accent_color {
             Color::Rgb(r, g, b) => Some(format_accent_rgb((r, g, b))),
@@ -229,6 +231,7 @@ impl InteractiveAgent {
             id,
             seed_id,
             accent: accent.as_deref(),
+            harness_conversation_id,
         })?;
         Self::attach_item(&item, cli, accent_color, seed_id, cols, rows)
     }
@@ -695,6 +698,7 @@ struct HubSpawnArgs<'a> {
     id: Option<&'a str>,
     seed_id: Option<&'a str>,
     accent: Option<&'a str>,
+    harness_conversation_id: Option<&'a str>,
 }
 
 /// Spawn a hub session and return its metadata row: `spawn` answers the id,
@@ -707,6 +711,7 @@ fn spawn_on_hub(args: &HubSpawnArgs<'_>) -> Result<SessionItem> {
         id: args.id.map(str::to_owned),
         seed_id: args.seed_id.map(str::to_owned),
         accent: args.accent.map(str::to_owned),
+        harness_conversation_id: args.harness_conversation_id.map(str::to_owned),
         yolo: false,
     };
     let req = new_req();

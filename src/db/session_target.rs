@@ -130,4 +130,30 @@ mod tests {
             }
         );
     }
+
+    /// FR7: a hook addressed to the old name resolves to the resumed session
+    /// once the resume reactivates its row — the finished row is not a
+    /// target, the reactivated one is, under the same id and name.
+    #[test]
+    fn hook_targeting_the_old_name_resolves_after_the_resume() {
+        let db = test_db();
+        add_session(&db, "s1", "marasmius", "interactive");
+        db.finish_interactive_session("s1", 0).unwrap();
+        assert_eq!(
+            db.resolve_target_session_name("marasmius").unwrap(),
+            SessionTarget::Missing,
+            "the finished session is not a hook target yet"
+        );
+
+        db.reactivate_interactive_session("s1", Some(99), "/tmp", None, Some("boot-new"))
+            .unwrap();
+
+        assert_eq!(
+            db.resolve_target_session_name("marasmius").unwrap(),
+            SessionTarget::Found {
+                id: "s1".to_string(),
+                name: Some("marasmius".to_string()),
+            }
+        );
+    }
 }
