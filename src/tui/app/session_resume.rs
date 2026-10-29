@@ -54,8 +54,9 @@ pub(crate) struct ResumableSession {
     pub working_dir: String,
     pub args: Option<String>,
     /// The harness's own conversation identifier for this session, when it was
-    /// recorded. Relaunching it reports this value, so the resume is matched
-    /// back to the same canopy row instead of minting a new id and name.
+    /// recorded. Relaunching it reports this value so the reactivated row
+    /// keeps (or records) it; the resume finds the source row by its canopy
+    /// id, never by this value.
     pub harness_conversation_id: Option<String>,
 }
 

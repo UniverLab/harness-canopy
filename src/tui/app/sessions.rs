@@ -117,7 +117,8 @@ impl App {
     /// is what keeps hooks and scheduled sends addressed to the session's name
     /// or id delivered to the resumed process, and why there is nothing to
     /// reassign or inherit: the sends and the persisted protocol flag already
-    /// point at this same id.
+    /// point at this same id. Only a source name held by another live session
+    /// changes the name (FR5), keeping the id, and the header then names both.
     fn finalize_resumed_session(
         &mut self,
         session: &crate::db::session::InteractiveSession,
@@ -136,6 +137,17 @@ impl App {
                 "Failed to reactivate resumed session '{}': {e}",
                 session.name
             );
+        }
+        // The hub mints a fresh name when another live session holds the
+        // source name (FR5): the revive keeps the id, and the header names
+        // both so the rename is never silent.
+        if agent.name != session.name {
+            use crate::tui::whimsg::events::{EventKind, WhimEvent};
+            self.whimsg.notify_event(WhimEvent::with_detail(
+                EventKind::SessionRenamed,
+                session.name.clone(),
+                agent.name.clone(),
+            ));
         }
         self.interactive_agents.push(agent);
     }

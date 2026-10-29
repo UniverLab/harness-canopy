@@ -428,8 +428,10 @@ impl App {
         }
         // A resume relaunches the source session's own id, so the persisted
         // "protocol sent" flag stays on the reactivated row — nothing is
-        // inherited anymore.
-        let is_resume = dialog.selected_resume_session.is_some();
+        // inherited anymore. Either picker can adopt an existing session's
+        // identity (the Resume step by its row, the CLI list through its
+        // harness id), and either adoption is a resume for the rename notice.
+        let is_resume = dialog.selected_resume_session.is_some() || known_session.is_some();
         self.announce_spawned_agent(agent, is_resume, requested_name.as_deref());
         Ok(())
     }
@@ -446,10 +448,7 @@ impl App {
     ) {
         use crate::tui::whimsg::events::{EventKind, WhimEvent};
         let spawned_name = agent.name.clone();
-        let renamed_from = match (is_resume, requested_name) {
-            (true, Some(requested)) if requested != spawned_name => Some(requested),
-            _ => None,
-        };
+        let renamed_from = resume_rename_notice(is_resume, requested_name, &spawned_name);
         self.interactive_agents.push(agent);
         self.whimsg.notify_event(WhimEvent::new(
             EventKind::AgentSpawned,
@@ -506,8 +505,9 @@ impl App {
         (None, None)
     }
 
-    /// Register the launched session in the registry, reusing an earlier row
-    /// when the harness conversation id matches one canopy has seen (see
+    /// Register the launched session in the registry, reactivating the source
+    /// row in place when the launch adopted an existing session's id, or when
+    /// the harness conversation id matches one canopy has seen (see
     /// `Database::register_interactive_session`).
     fn persist_launched_session(
         &self,
@@ -684,6 +684,21 @@ impl App {
     }
 }
 
+/// The old name a resume must announce (FR5): the launch asked the hub for
+/// `requested_name`, but the spawn came back under `spawned_name` because
+/// another live session held the source name. `None` for a fresh launch and
+/// whenever the hub kept the requested name.
+fn resume_rename_notice<'a>(
+    is_resume: bool,
+    requested_name: Option<&'a str>,
+    spawned_name: &str,
+) -> Option<&'a str> {
+    match (is_resume, requested_name) {
+        (true, Some(requested)) if requested != spawned_name => Some(requested),
+        _ => None,
+    }
+}
+
 /// Launch args for an interactive agent: the dialog's base args, with the yolo
 /// flag appended when yolo mode is on.
 fn yolo_launch_args(dialog: &NewAgentDialog) -> Option<String> {
@@ -845,5 +860,25 @@ mod tests {
         let (harness_id, known) = app.resolve_launch_identity(&dialog);
         assert!(harness_id.is_none());
         assert!(known.is_none());
+    }
+
+    /// FR5: the rename notice fires exactly when a resume asked for one name
+    /// and the hub landed it under another — never for a fresh launch, never
+    /// when the requested name was kept.
+    #[test]
+    fn rename_notice_fires_only_for_a_renamed_resume() {
+        assert_eq!(
+            resume_rename_notice(true, Some("paulownia"), "platanus"),
+            Some("paulownia")
+        );
+        assert_eq!(
+            resume_rename_notice(true, Some("marasmius"), "marasmius"),
+            None
+        );
+        assert_eq!(resume_rename_notice(true, None, "platanus"), None);
+        assert_eq!(
+            resume_rename_notice(false, Some("paulownia"), "platanus"),
+            None
+        );
     }
 }

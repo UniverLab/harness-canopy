@@ -212,6 +212,10 @@ fn finalize_resumed_session(
     pid: Option<i64>,
     current_boot_id: Option<&str>,
 ) {
+    // The hub's spawn already reactivated this same row through
+    // `register_interactive_session` (id-first) and recorded the carried
+    // harness identifier on it; this second write only moves the liveness
+    // fields to the args the resume actually launched with.
     if let Err(e) = hub.db().reactivate_interactive_session(
         &session.id,
         pid,
@@ -223,17 +227,6 @@ fn finalize_resumed_session(
             "Failed to reactivate resumed session '{}': {e}",
             session.name
         );
-    }
-    // The hub's spawn recorded its row with `INSERT OR REPLACE` and no
-    // harness identifier, which nulls the conversation id the previous daemon
-    // recorded. Restore it so a later registration carrying the same harness
-    // conversation still resolves to this row (FIX-21).
-    if let Some(harness_id) = session.harness_conversation_id.as_deref() {
-        if !harness_id.is_empty() {
-            let _ = hub
-                .db()
-                .set_session_harness_conversation_id(&session.id, harness_id);
-        }
     }
 }
 

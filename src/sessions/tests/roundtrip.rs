@@ -196,7 +196,8 @@ fn agent_spawn_preserves_dialog_launch_fields() {
 
 /// FR4: a hub spawn built from the Resume step carries the source session's
 /// id and name, so the relaunch keeps both and reactivates the source row
-/// in place — no second row, and the harness id stays on it.
+/// in place — no second row. The source recorded no harness id, so the
+/// carried one must be recorded on the reactivated row (FR6).
 #[test]
 fn hub_spawn_from_the_resume_step_keeps_the_source_id_and_name() {
     use crate::sessions::{SessionKind, SpawnRequest};
@@ -212,8 +213,6 @@ fn hub_spawn_from_the_resume_step_keeps_the_source_id_and_name() {
         None,
     )
     .expect("seed source row");
-    db.set_session_harness_conversation_id("sess-resume-2", "conv-abc")
-        .expect("record harness id");
     db.finish_interactive_session("sess-resume-2", 0)
         .expect("finish source row");
     let workdir = tempfile::tempdir().expect("workdir");
@@ -247,5 +246,9 @@ fn hub_spawn_from_the_resume_step_keeps_the_source_id_and_name() {
         .expect("db read")
         .expect("source row");
     assert_eq!(row.status, "active");
-    assert_eq!(row.harness_conversation_id.as_deref(), Some("conv-abc"));
+    assert_eq!(
+        row.harness_conversation_id.as_deref(),
+        Some("conv-abc"),
+        "the hub must record the carried harness id on the reactivated row"
+    );
 }

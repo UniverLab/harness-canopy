@@ -76,13 +76,16 @@ completion, review the specs this run closed, the resulting code, and
 
 An interactive hook targets a session either by its exact id
 (`target_session_id`) or by its name (`target_session_name`) — exactly one
-of the two must be set. A resume canopy recognizes — a harness conversation
-it already has on record — keeps the session's id and its name, so a hook
-addressed to either keeps reaching it afterwards. A resume it does not
-recognize comes back as a new session with a fresh id and a fresh generated
-name, and a hook configured with the old id then points at a session that no
-longer exists: firing fails loudly naming the id rather than redirecting the
-message anywhere else.
+of the two must be set. Picking a finished session in the New Session Resume
+step relaunches that same session — it keeps its id and its name even when
+canopy never recorded the harness's own conversation id — so a hook
+addressed to either keeps reaching it afterwards. Only when another live
+session already holds the name does the resumed session take a fresh name
+(keeping its id). A conversation picked out of the harness's own list that
+canopy has never seen comes back as a new session with a fresh id and a
+fresh generated name, and a hook configured with the old id then points at a
+session that no longer exists: firing fails loudly naming the id rather than
+redirecting the message anywhere else.
 `target_session_name` exists for exactly this case: a name-targeted hook is
 resolved against the live session set fresh on every fire — never cached —
 the same set `session_list` reads. Exactly one live session with that name resolves and

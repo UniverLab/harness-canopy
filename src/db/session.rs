@@ -1260,7 +1260,10 @@ mod tests {
         let db = test_db();
         finished_known_session(&db, "conv-abc");
 
-        let outcome = register(&db, "sess-orch", "marasmius", "/tmp/proj", Some("conv-abc"));
+        // The relaunch carries no harness identifier at all: the id alone is
+        // the identity (FR1), yet the source row reactivates in place (FR2)
+        // instead of a second row appearing.
+        let outcome = register(&db, "sess-orch", "marasmius", "/tmp/proj", None);
 
         assert_eq!(
             outcome,
