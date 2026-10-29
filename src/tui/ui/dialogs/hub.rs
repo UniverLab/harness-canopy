@@ -13,6 +13,7 @@ use super::{
 use crate::tui::app::hub::{HubTab, HUB_TABS};
 use crate::tui::app::hub_settings::SettingsFocus;
 use crate::tui::app::types::App;
+use crate::tui::ui::effective_animation_tick;
 use crate::tui::ui::theme::Theme;
 
 /// Draw the hub as a centered dialog (requirement 1): 80% of the frame's
@@ -30,7 +31,7 @@ pub fn draw_hub(frame: &mut Frame, app: &mut App, theme: &Theme) {
         .style(Style::default().bg(theme.dialog_bg));
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    draw_dialog_left_wave(frame, area, app.animation_tick.into());
+    draw_dialog_left_wave(frame, area, effective_animation_tick(app).into());
 
     if area.width >= 80 {
         let rows = Layout::vertical([

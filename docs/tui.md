@@ -391,9 +391,9 @@ value's apply mode.
 | `tui.panel_dwell_seconds` | 10 | Seconds a panel event holds the right panel (0 disables the dwell). |
 | `tui.brians_brain` | true | false keeps the home banner static. |
 | `tui.atmosphere` | true | false disables fireflies and dandelions. |
-
-Both animation toggles off is the master switch: the header spinner, sweep
-and pulse indicators freeze, and an idle TUI performs no redraws at all
-(near-zero CPU when nothing changes).
 | `tui.scroll_step` | 3 | Terminal scroll step, in lines. |
 | `tui.page_step` | 15 | Terminal page step, in lines. |
+
+Both animation toggles off is the master switch: the header spinner, sweep,
+dialog waves and pulse indicators freeze, and an idle TUI performs no
+redraws at all (near-zero CPU when nothing changes).

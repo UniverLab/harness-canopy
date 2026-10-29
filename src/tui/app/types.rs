@@ -529,6 +529,15 @@ pub struct App {
     /// A pushed change (hub membership, reconnect) armed an immediate slow
     /// refresh on the next tick, bypassing the one-second cadence.
     pub(crate) slow_force: bool,
+    /// Digests of draw-time database reads, refreshed by [`App::refresh_slow`]
+    /// so [`SlowFingerprint`](crate::tui::app::SlowFingerprint) sees them:
+    /// the activity panel's log entries for the drawn workdirs,
+    /// the project overview's recent-session summaries, the hub legend's
+    /// session/run counts, and the simple prompt's pending scheduled sends.
+    pub(crate) activity_digest: u64,
+    pub(crate) overview_sessions_digest: u64,
+    pub(crate) hub_counts_digest: (i64, i64, i64, i64),
+    pub(crate) pending_sends_digest: u64,
     /// Preferred unit for sysinfo temperature labels.
     pub(crate) temperature_unit: crate::domain::canopy_config::TemperatureUnit,
     /// Resolved TUI color theme (T6), read from config once at startup.

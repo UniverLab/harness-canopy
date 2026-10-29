@@ -296,11 +296,12 @@ impl SimplePromptDialog {
     }
 
     /// Drive the `@`-picker's debounced search. Call once per UI tick so a
-    /// pending search runs after typing pauses.
-    pub fn tick_at_picker(&mut self) {
-        if let Some(picker) = self.at_picker.as_mut() {
-            picker.tick_search();
-        }
+    /// pending search runs after typing pauses. True when a search ran (the
+    /// entry list is new and must redraw).
+    pub fn tick_at_picker(&mut self) -> bool {
+        self.at_picker
+            .as_mut()
+            .is_some_and(|picker| picker.tick_search())
     }
 
     /// Returns true if the section is locked (read-only).

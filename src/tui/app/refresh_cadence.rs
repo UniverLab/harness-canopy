@@ -4,186 +4,36 @@
 //! state plus non-blocking channel polls. [`App::refresh_slow`] runs at most
 //! once per second (or when [`App::slow_force`] is armed by a pushed change)
 //! and owns every database read, daemon round-trip and port probe the old
-//! per-tick `refresh` performed. [`SlowFingerprint`] captures the slow
-//! outputs so the loop redraws for the slow path only when something in it
-//! actually changed.
+//! per-tick `refresh` performed. [`SlowFingerprint`](super::SlowFingerprint)
+//! captures the slow outputs so the loop redraws for the slow path only when
+//! something in it actually changed.
 
 use std::time::{Duration, Instant};
 
 use super::super::agent::AgentStatus;
-use super::dialog::GraphActionMessage;
 use super::system_monitor::system_settling;
 use super::*;
 use crate::domain::graphs::GraphRunStatus;
-
-// ── Slow fingerprint ────────────────────────────────────────────────
-
-/// Visible slow-refresh outputs, captured before and after
-/// [`App::refresh_slow`]: the tick redraws for the slow path only when the
-/// fingerprint moved, so settled data never draws on its own (FR5).
-#[derive(PartialEq, Eq)]
-pub(crate) struct SlowFingerprint {
-    agents_len: usize,
-    graphs: Vec<(String, GraphStatus)>,
-    daemon_running: bool,
-    daemon_version: String,
-    update_available: Option<String>,
-    hub_notice: Option<String>,
-    active_runs_len: usize,
-    backlog_len: usize,
-    projects_len: usize,
-    project_knowledge_len: usize,
-    project_graph_edges_len: usize,
-    project_graph_trees_len: usize,
-    archived_graph_count: usize,
-    graph_specs: Vec<(String, GraphSpecStatus)>,
-    graph_runs: Vec<(String, GraphRunStatus, i64)>,
-    graph_live: Option<(GraphStatus, usize, usize, Option<String>)>,
-    log_hash: u64,
-    rag_queue_len: usize,
-    rag_paused: bool,
-    rag_model_loaded: bool,
-    rag_info: (i64, i64, i64, i64),
-    rag_files_len: usize,
-    missions_unlocked: usize,
-    playground_results_len: usize,
-    playground_pending: bool,
-    playground_executed_query: String,
-    crews_snapshot: bool,
-    crews_rows: u64,
-    crews_message: Option<(bool, String)>,
-    settings_rows: u64,
-    settings_message: Option<(bool, String)>,
-    remote_signed_in: bool,
-    remote_login: Option<String>,
-    remote_enabled: bool,
-    remote_relay: String,
-    remote_live_devices: Vec<String>,
-    remote_devices_len: usize,
-    remote_pair: bool,
-    remote_message: Option<(bool, String)>,
-}
-
-/// `(is_error, text)` of a transient daemon-operation message, if one shows.
-fn message_summary(message: &Option<GraphActionMessage>) -> Option<(bool, String)> {
-    message
-        .as_ref()
-        .map(|message| (message.is_error, message.text.clone()))
-}
-
-/// Hash of the Crews face's pair rows: availability flips keep the row count
-/// but must still dirty the tick.
-fn crews_rows_digest(app: &App) -> u64 {
-    let mut summary = String::new();
-    for row in &app.crews.pair_rows {
-        use std::fmt::Write as _;
-        let _ = writeln!(
-            summary,
-            "{}|{}|{}|{}|{}|{}",
-            row.platform, row.model, row.available, row.expired, row.graph_count, row.crew_count,
-        );
-    }
-    calculate_log_hash(&summary)
-}
-
-/// Hash of the Settings tab's rows: a refetch that changes values but not
-/// the row count must still dirty the tick.
-fn settings_rows_digest(app: &App) -> u64 {
-    let mut summary = String::new();
-    for row in &app.hub.settings.rows {
-        use std::fmt::Write as _;
-        let _ = writeln!(
-            summary,
-            "{}|{}|{}|{}",
-            row.key, row.effective, row.source, row.status,
-        );
-    }
-    calculate_log_hash(&summary)
-}
-
-impl SlowFingerprint {
-    pub(crate) fn capture(app: &App) -> Self {
-        let mut graph_specs = Vec::new();
-        if let Some(details) = &app.graph_details {
-            for spec in &details.specs {
-                graph_specs.push((spec.spec.id.clone(), spec.spec.status));
-            }
-        }
-        Self {
-            agents_len: app.agents.len(),
-            graphs: app
-                .graphs
-                .iter()
-                .map(|graph| (graph.id.clone(), graph.status))
-                .collect(),
-            daemon_running: app.daemon_running,
-            daemon_version: app.daemon_version.clone(),
-            update_available: app.update_available.clone(),
-            hub_notice: app.hub_notice.clone(),
-            active_runs_len: app.active_runs.len(),
-            backlog_len: app.backlog_specs.len(),
-            projects_len: app.projects.len(),
-            project_knowledge_len: app.project_knowledge.len(),
-            project_graph_edges_len: app.project_graph_edges.len(),
-            project_graph_trees_len: app.project_graph_trees.len(),
-            archived_graph_count: app.archived_graph_count,
-            graph_specs,
-            graph_runs: app
-                .graph_runs
-                .iter()
-                .map(|run| (run.node_id.clone(), run.status, run.iteration))
-                .collect(),
-            graph_live: app.graph_live_state.as_ref().map(|live| {
-                (
-                    live.graph_status,
-                    live.done_count,
-                    live.total_count,
-                    live.current_spec_id.clone(),
-                )
-            }),
-            log_hash: calculate_log_hash(&app.log_content),
-            rag_queue_len: app.global_rag_queue.len(),
-            rag_paused: app.rag_paused,
-            rag_model_loaded: app.rag_model_loaded,
-            rag_info: (
-                app.rag_info.total_chunks,
-                app.rag_info.indexed_files,
-                app.rag_info.queued_items,
-                app.rag_info.processing_items,
-            ),
-            rag_files_len: app.rag_file_status.len(),
-            missions_unlocked: app.mission_manager.unlocked_count(),
-            playground_results_len: app.playground_results.len(),
-            playground_pending: app.playground_search_pending,
-            playground_executed_query: app.playground_last_executed_query.clone(),
-            crews_snapshot: app.crews.snapshot.is_some(),
-            crews_rows: crews_rows_digest(app),
-            crews_message: message_summary(&app.crews.message),
-            settings_rows: settings_rows_digest(app),
-            settings_message: message_summary(&app.hub.settings.message),
-            remote_signed_in: app.hub.remote.view.signed_in,
-            remote_login: app.hub.remote.view.login.clone(),
-            remote_enabled: app.hub.remote.view.enabled,
-            remote_relay: app.hub.remote.view.relay.clone(),
-            remote_live_devices: app.hub.remote.view.live_devices.clone(),
-            remote_devices_len: app.hub.remote.view.devices.len(),
-            remote_pair: app.hub.remote.pair.is_some(),
-            remote_message: message_summary(&app.hub.remote.message),
-        }
-    }
-}
-
 // ── Fast-path change snapshots ──────────────────────────────────────
 
-/// Session identities, statuses and connection flags across both PTY-backed
-/// lists: compared around the fast polls so an exit or disconnect (which
-/// `output_seq` does not observe — the `exited` frame carries no `seq`)
-/// dirties the tick.
-fn session_snapshot(app: &App) -> Vec<(String, AgentStatus, bool)> {
+/// Session identities, statuses, connection flags and activity pulses across
+/// both PTY-backed lists: compared around the fast polls so an exit or
+/// disconnect (which `output_seq` does not observe — the `exited` frame
+/// carries no `seq`) dirties the tick, and so the sidebar pulse going solid
+/// 12 s after the last bytes dirties it too (time-based, otherwise invisible
+/// with animations off).
+fn session_snapshot(app: &App) -> Vec<(String, AgentStatus, bool, bool)> {
     app.interactive_agents
         .iter()
         .chain(app.terminal_agents.iter())
-        .map(|agent| (agent.id.clone(), agent.status, agent.is_connected()))
+        .map(|agent| {
+            (
+                agent.id.clone(),
+                agent.status,
+                agent.is_connected(),
+                agent.has_recent_activity(),
+            )
+        })
         .collect()
 }
 
@@ -230,7 +80,9 @@ impl App {
         let sessions_changed = sessions_before != session_snapshot(self);
         self.tick_banner_animation();
         self.ensure_sidebar_brain();
+        let sidebar_before = self.sidebar_visible;
         self.auto_hide_sidebar();
+        let sidebar_changed = sidebar_before != self.sidebar_visible;
         self.system_monitor_active
             .store(self.sidebar_visible, Ordering::Relaxed);
         let copied_cleared = self.dismiss_copied();
@@ -243,21 +95,12 @@ impl App {
         let tail_changed = tail_before != tail_snapshot(self);
         let graph_message_cleared = self.dismiss_graph_action_message();
         let shelf_cleared = self.dismiss_shelf_toast();
-        let panel_before = (
-            self.panel_face,
-            self.panel_dwell_face,
-            self.panel_last_reason.clone(),
-        );
-        self.tick_panel_face();
-        let panel_changed = panel_before
-            != (
-                self.panel_face,
-                self.panel_dwell_face,
-                self.panel_last_reason.clone(),
-            );
-        if let Some(dialog) = self.simple_prompt_dialog.as_mut() {
-            dialog.tick_at_picker();
-        }
+        let settings_message_cleared = self.dismiss_settings_message();
+        let remote_message_cleared = self.dismiss_remote_message();
+        let at_picker_changed = self
+            .simple_prompt_dialog
+            .as_mut()
+            .is_some_and(|dialog| dialog.tick_at_picker());
         let ctrl_c_cleared = self.clear_expired_ctrl_c();
 
         // Non-blocking check for updated system info from background thread
@@ -284,12 +127,15 @@ impl App {
 
         hub_dirty
             || sessions_changed
+            || sidebar_changed
             || copied_cleared
             || graph_action_changed
             || tail_changed
             || graph_message_cleared
             || shelf_cleared
-            || panel_changed
+            || settings_message_cleared
+            || remote_message_cleared
+            || at_picker_changed
             || ctrl_c_cleared
     }
 
@@ -324,22 +170,31 @@ impl App {
         self.poll_settings_revision();
         // CT31: apply any finished Settings-tab fetch/write, then start a new
         // one if the hub's Settings tab is visible and the throttle allows.
+        // (The TTL dismissal lives on the fast path so it clears promptly.)
         self.poll_settings_rows();
         self.poll_settings_write();
         self.refresh_settings_rows();
-        self.dismiss_settings_message();
         // The Remote tab's cached status, its writes and its device flow;
         // the status also refreshes off-tab so the sidebar indicator stays
-        // current.
+        // current. (Its TTL dismissal is fast-path too.)
         self.poll_remote_status();
         self.poll_remote_write();
         self.poll_remote_login();
         self.refresh_remote_status();
-        self.dismiss_remote_message();
         // Same CT14 defensives as the fast path: slow data can shrink too.
         self.normalize_automation_kind();
         self.normalize_agent_section_focus();
         self.clamp_sidebar_selection();
+        // CT1 multi-face panel (FR2): the face tick runs two MAX queries per
+        // call, so it lives here on the one-second cadence — after the data
+        // refreshes it reads — and the fingerprint below carries the face, so
+        // a switch still draws.
+        self.tick_panel_face();
+        // Draw-time database reads have no refresh output to fingerprint, so
+        // the slow tick re-runs them and stores content digests: a new
+        // activity entry, session summary, hub count or pending send moves
+        // the fingerprint and draws without another interaction.
+        self.refresh_draw_digests();
         Ok(())
     }
 
@@ -357,5 +212,114 @@ impl App {
             cleared = true;
         }
         cleared
+    }
+
+    /// Re-run the draws' own database reads and store content digests for
+    /// [`SlowFingerprint`]: the activity panel's log entries for the drawn
+    /// workdirs, the project overview's recent-session summaries, the hub
+    /// legend's session/run counts, and the selected session's pending
+    /// scheduled sends. One second of staleness at most; without this a new
+    /// entry would sit invisible until some other change drew.
+    fn refresh_draw_digests(&mut self) {
+        self.activity_digest = self.activity_draw_digest();
+        self.overview_sessions_digest = self.overview_sessions_draw_digest();
+        self.hub_counts_digest = (
+            self.db.count_interactive_sessions().unwrap_or(0),
+            self.db.count_terminal_sessions().unwrap_or(0),
+            self.db.count_background_agents().unwrap_or(0),
+            self.db.count_runs().unwrap_or(0),
+        );
+        self.pending_sends_digest = self.pending_sends_draw_digest();
+    }
+
+    /// Hash of the activity rows the panel draws: the selected workdir's log
+    /// entries (raw rows — name resolution is deterministic from them) plus
+    /// its active agent ids, and the same for the selected project when it
+    /// differs (the overview draws that workdir's activity too).
+    fn activity_draw_digest(&self) -> u64 {
+        let mut workdirs = Vec::new();
+        if let Some(workdir) = self.selected_activity_workdir() {
+            workdirs.push(workdir.to_string());
+        }
+        if let Some(project) = self.selected_project() {
+            if !workdirs.iter().any(|w| w == &project.path) {
+                workdirs.push(project.path.clone());
+            }
+        }
+        if workdirs.is_empty() {
+            return 0;
+        }
+        let limit = self.message_window_limit_for_scroll();
+        let mut summary = String::new();
+        for workdir in &workdirs {
+            let entries = self
+                .db
+                .list_activity_log_entries(workdir, limit)
+                .unwrap_or_default();
+            let mut agent_ids = self
+                .db
+                .list_active_sync_agent_ids(workdir)
+                .unwrap_or_default();
+            agent_ids.sort();
+            use std::fmt::Write as _;
+            let _ = writeln!(summary, "{workdir}|{entries:?}|{agent_ids:?}");
+        }
+        calculate_log_hash(&summary)
+    }
+
+    /// Hash of the overview's recent-session summaries for the selected
+    /// project: the same search the draw runs, filtered the same way, hashed
+    /// as raw rows (the title/summary truncation is deterministic from them).
+    fn overview_sessions_draw_digest(&self) -> u64 {
+        let Some(project) = self.selected_project() else {
+            return 0;
+        };
+        let nodes = self
+            .db
+            .search_operational_sessions(&project.path, 12)
+            .unwrap_or_default();
+        let mut summary = String::new();
+        use std::fmt::Write as _;
+        for node in nodes
+            .iter()
+            .filter(|node| {
+                node.project_hash.as_deref() == Some(project.hash.as_str())
+                    || node.metadata.as_deref().is_some_and(|metadata| {
+                        serde_json::from_str::<serde_json::Value>(metadata)
+                            .ok()
+                            .and_then(|value| {
+                                value
+                                    .get("workdir")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::to_string)
+                            })
+                            == Some(project.path.clone())
+                    })
+            })
+            .take(3)
+        {
+            let _ = writeln!(summary, "{}|{}|{}", node.title, node.body, node.id);
+        }
+        calculate_log_hash(&summary)
+    }
+
+    /// Hash of the selected interactive session's pending scheduled sends —
+    /// what the simple prompt's schedule panel draws.
+    fn pending_sends_draw_digest(&self) -> u64 {
+        let selected = self.selected_agent().and_then(|entry| match entry {
+            types::AgentEntry::Interactive(idx) => self
+                .interactive_agents
+                .get(*idx)
+                .map(|agent| agent.id.clone()),
+            _ => None,
+        });
+        let Some(id) = selected else {
+            return 0;
+        };
+        let pending = self
+            .db
+            .list_pending_scheduled_sends_for_session(&id)
+            .unwrap_or_default();
+        calculate_log_hash(&format!("{pending:?}"))
     }
 }

@@ -493,8 +493,12 @@ impl App {
         self.hub.remote.message_at = Some(Instant::now());
     }
 
-    /// Drop the status line once its TTL has passed.
-    pub(crate) fn dismiss_remote_message(&mut self) {
+    /// Drop the status line once its TTL has passed. True when it cleared
+    /// this tick (a visible change).
+    pub(crate) fn dismiss_remote_message(&mut self) -> bool {
+        if self.hub.remote.message.is_none() {
+            return false;
+        }
         let elapsed = self
             .hub
             .remote
@@ -503,7 +507,9 @@ impl App {
             .unwrap_or(Duration::MAX);
         if elapsed >= crate::tui::app::dialog::GRAPH_ACTION_MESSAGE_TTL {
             self.hub.remote.message = None;
+            return true;
         }
+        false
     }
 }
 
@@ -805,5 +811,32 @@ mod tests {
         let message = app.hub.remote.message.as_ref().expect("a message");
         assert!(!message.is_error);
         assert!(message.text.contains("octocat"), "{}", message.text);
+    }
+
+    /// The TTL dismissal reports whether it cleared: no message or a fresh
+    /// one returns false, an expired one clears and returns true so the tick
+    /// redraws without it.
+    #[test]
+    fn dismiss_remote_message_reports_whether_it_cleared() {
+        let mut app = test_app();
+        assert!(!app.dismiss_remote_message(), "no message must not clear");
+
+        app.set_remote_message(false, "paired");
+        assert!(
+            !app.dismiss_remote_message(),
+            "a fresh message must survive"
+        );
+
+        app.hub.remote.message_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(30));
+        assert!(
+            app.dismiss_remote_message(),
+            "an expired message must clear"
+        );
+        assert!(app.hub.remote.message.is_none());
+        assert!(
+            !app.dismiss_remote_message(),
+            "a cleared message must not clear again"
+        );
     }
 }

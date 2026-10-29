@@ -358,8 +358,12 @@ impl App {
         self.hub.settings.message_at = Some(Instant::now());
     }
 
-    /// Drop the status line once its TTL has passed.
-    pub(crate) fn dismiss_settings_message(&mut self) {
+    /// Drop the status line once its TTL has passed. True when it cleared
+    /// this tick (a visible change).
+    pub(crate) fn dismiss_settings_message(&mut self) -> bool {
+        if self.hub.settings.message.is_none() {
+            return false;
+        }
         let elapsed = self
             .hub
             .settings
@@ -368,7 +372,9 @@ impl App {
             .unwrap_or(Duration::MAX);
         if elapsed >= crate::tui::app::dialog::GRAPH_ACTION_MESSAGE_TTL {
             self.hub.settings.message = None;
+            return true;
         }
+        false
     }
 
     /// The hub's group labels, in presentation order.
@@ -942,6 +948,33 @@ mod tests {
         assert_eq!(
             parse_toml_array(&toml_array(&["/a".to_string(), "/b".to_string()])),
             vec!["/a", "/b"]
+        );
+    }
+
+    /// The TTL dismissal reports whether it cleared: no message or a fresh
+    /// one returns false, an expired one clears and returns true so the tick
+    /// redraws without it.
+    #[test]
+    fn dismiss_settings_message_reports_whether_it_cleared() {
+        let mut app = test_app();
+        assert!(!app.dismiss_settings_message(), "no message must not clear");
+
+        app.set_settings_message(false, "saved");
+        assert!(
+            !app.dismiss_settings_message(),
+            "a fresh message must survive"
+        );
+
+        app.hub.settings.message_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(30));
+        assert!(
+            app.dismiss_settings_message(),
+            "an expired message must clear"
+        );
+        assert!(app.hub.settings.message.is_none());
+        assert!(
+            !app.dismiss_settings_message(),
+            "a cleared message must not clear again"
         );
     }
 }

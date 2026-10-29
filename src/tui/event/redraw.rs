@@ -63,10 +63,12 @@ struct WhimSnapshot {
 }
 
 /// Caches [`tick`] carries across loop iterations: per-session PTY output
-/// sequences, the last whimsg frame, and the last header animation frame.
+/// sequences and activity pulses, the last whimsg frame, and the last header
+/// animation frame.
 #[derive(Default)]
 pub(crate) struct TickState {
     pty_seqs: HashMap<String, u64>,
+    activity: HashMap<String, bool>,
     last_whim: Option<WhimSnapshot>,
     last_header: Option<crate::tui::ui::HeaderFrameId>,
 }
@@ -81,6 +83,7 @@ pub(crate) fn tick(app: &mut App, state: &mut TickState, input: bool) -> Result<
     let mut dirty = input;
     dirty |= app.refresh_fast();
     dirty |= pty_seq_changed(app, &mut state.pty_seqs);
+    dirty |= activity_changed(app, &mut state.activity);
     let mut slow_ran = false;
     if app.slow_refresh_due() {
         let before = SlowFingerprint::capture(app);
@@ -130,17 +133,53 @@ pub(crate) fn pty_seq_changed(app: &App, cache: &mut HashMap<String, u64>) -> bo
     changed
 }
 
+/// True when a session's activity pulse flipped since the last tick: the
+/// sidebar holds the working-green pulse while output is recent and goes
+/// solid 12 s after the last bytes. Time-based, so it must be diffed across
+/// ticks like the PTY sequences — the fast poll cannot see it change.
+fn activity_changed(app: &App, cache: &mut HashMap<String, bool>) -> bool {
+    let mut changed = false;
+    let mut live = HashSet::new();
+    for agent in app
+        .interactive_agents
+        .iter()
+        .chain(app.terminal_agents.iter())
+    {
+        live.insert(agent.id.as_str());
+        let active = agent.has_recent_activity();
+        let same = cache.get(&agent.id).is_some_and(|cached| *cached == active);
+        if !same {
+            cache.insert(agent.id.clone(), active);
+            changed = true;
+        }
+    }
+    let gone: Vec<String> = cache
+        .keys()
+        .filter(|id| !live.contains(id.as_str()))
+        .cloned()
+        .collect();
+    for id in gone {
+        cache.remove(&id);
+    }
+    changed
+}
+
 // ── Animation ───────────────────────────────────────────────────────
 
-/// True while a Brian's Brain automaton is on screen and allowed to step:
-/// the home banner's brain on `Focus::Home`, or the sidebar brain while the
-/// sidebar is visible (its draw rect proves it was drawn).
+/// True while a Brian's Brain animation is on screen and allowed to step:
+/// the home banner's wave on `Focus::Home` (it moves every tick while either
+/// animation toggle is on, even before the automaton exists on a tiny panel),
+/// or the sidebar brain while the sidebar is visible and the automaton
+/// exists (the draw records its rect and then returns early on `None`, so
+/// the rect alone does not prove anything was drawn).
 fn brain_visible(app: &App) -> bool {
+    if app.focus == Focus::Home && animations_enabled(app) {
+        return true;
+    }
     if !app.tui_settings.brians_brain {
         return false;
     }
-    (app.focus == Focus::Home && app.home_brain.is_some())
-        || (app.sidebar_visible && app.sidebar_brain_rect.is_some())
+    app.sidebar_visible && app.sidebar_brain.is_some() && app.sidebar_brain_rect.is_some()
 }
 
 /// Sample the whimsg line and report whether its frame differs from the last
@@ -181,15 +220,18 @@ pub(crate) fn animation_on_screen(app: &mut App, state: &mut TickState) -> bool 
     if !animations_enabled(app) {
         return false;
     }
-    // `whimsg_frame_changed` advances the whimsg phases as a side effect, so
-    // it runs unconditionally (while enabled) to keep its cache fresh even
-    // when an earlier disjunct already dirtied the tick.
+    // `whimsg_frame_changed` advances the whimsg phases as a side effect and
+    // `header_animating` refreshes its frame cache, so both run
+    // unconditionally (while enabled) to keep their caches fresh even when an
+    // earlier disjunct already dirtied the tick — otherwise the skipped cache
+    // would prime a tick late and dirty on its own.
     let whim = whimsg_frame_changed(app, state);
+    let header = header_animating(app, state);
     atmosphere_active(app)
         || brain_visible(app)
         || whim
         || system_settling(&app.system_info, &app.system_info_target)
-        || header_animating(app, state)
+        || header
 }
 
 #[cfg(test)]
@@ -289,11 +331,177 @@ mod redraw_tests {
         assert_eq!(app.daemon_version, before, "throttled tick reads nothing");
         assert!(!dirty, "throttled tick with no change must not draw");
 
+        // A pushed change arms an immediate slow refresh through `slow_force`.
         app.slow_force = true;
+        assert!(app.slow_refresh_due());
+        app.slow_force = false;
+        // Let the one-second cadence lapse instead of pre-arming `slow_force`:
+        // in production it never survives a tick, so a test that pre-arms it
+        // would dirty through the hub poll rather than the slow path.
+        app.last_slow_refresh = std::time::Instant::now() - std::time::Duration::from_secs(2);
         let (dirty, slow_ran) = tick(&mut app, &mut state, false).unwrap();
-        assert!(slow_ran, "forced slow refresh must run");
+        assert!(slow_ran, "due slow refresh must run");
         assert_eq!(app.daemon_version, "9.9.9-test");
         assert!(dirty, "a slow data change must draw");
+
+        // A slow run with settled data draws nothing (FR5).
+        app.last_slow_refresh = std::time::Instant::now() - std::time::Duration::from_secs(2);
+        let (dirty, slow_ran) = tick(&mut app, &mut state, false).unwrap();
+        assert!(slow_ran, "due slow refresh must run again");
+        assert!(!dirty, "a slow run with no change must not draw");
+    }
+
+    /// Input always dirties the tick: keys, mouse, resize and paste must
+    /// render within one frame.
+    #[test]
+    fn input_dirties() {
+        let (mut app, _dir) = test_app();
+        disable_animations(&mut app);
+        let mut state = TickState::default();
+        let (dirty, _) = tick(&mut app, &mut state, true).unwrap();
+        assert!(dirty, "input must draw");
+    }
+
+    /// A session status flip (exit, disconnect) dirties the tick even though
+    /// no PTY bytes arrived: the `exited` frame carries no `seq`. The exit
+    /// lands as an atomic (as the stream reader records it) and the fast
+    /// poll folds it into the status during the tick.
+    #[test]
+    fn session_status_change_draws() {
+        let (mut app, _dir) = test_app();
+        disable_animations(&mut app);
+        let agent = InteractiveAgent::spawn(
+            Cli::new("cat"),
+            env!("CARGO_MANIFEST_DIR"),
+            80,
+            24,
+            None,
+            None,
+            Color::Reset,
+            Some("redraw-test-exit"),
+            None,
+            &[],
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("spawn cat as a stand-in interactive child");
+        app.interactive_agents.push(agent);
+        let mut state = TickState::default();
+        let (dirty, _) = tick(&mut app, &mut state, false).unwrap();
+        assert!(dirty, "attaching a session must draw");
+        let (dirty, _) = tick(&mut app, &mut state, false).unwrap();
+        assert!(!dirty, "quiet session must not draw");
+
+        app.interactive_agents[0].note_exited(1);
+        let (dirty, _) = tick(&mut app, &mut state, false).unwrap();
+        assert!(dirty, "a session status change must draw");
+        app.interactive_agents[0].kill();
+    }
+
+    /// The sidebar's activity pulse holds while output is recent and goes
+    /// solid 12 s after the last bytes; that expiry is a visible change and
+    /// must draw even with animations off.
+    #[test]
+    fn activity_expiry_draws() {
+        let (mut app, _dir) = test_app();
+        disable_animations(&mut app);
+        let agent = InteractiveAgent::spawn(
+            Cli::new("cat"),
+            env!("CARGO_MANIFEST_DIR"),
+            80,
+            24,
+            None,
+            None,
+            Color::Reset,
+            Some("redraw-test-activity"),
+            None,
+            &[],
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("spawn cat as a stand-in interactive child");
+        app.interactive_agents.push(agent);
+        let mut state = TickState::default();
+        let (dirty, _) = tick(&mut app, &mut state, false).unwrap();
+        assert!(dirty, "attaching a session must draw");
+
+        let seq = app.interactive_agents[0].output_seq();
+        assert!(app.interactive_agents[0].apply_out_frame(seq + 1, b"hi"));
+        assert!(app.interactive_agents[0].has_recent_activity());
+        let (dirty, _) = tick(&mut app, &mut state, false).unwrap();
+        assert!(dirty, "pty output must draw");
+
+        // 20 s of quiet: the pulse expiry must draw on its own.
+        *app.interactive_agents[0].last_output_at.lock().unwrap() =
+            chrono::Utc::now() - chrono::Duration::seconds(20);
+        assert!(!app.interactive_agents[0].has_recent_activity());
+        let (dirty, _) = tick(&mut app, &mut state, false).unwrap();
+        assert!(dirty, "activity expiry must draw");
+        app.interactive_agents[0].kill();
+    }
+
+    /// On Home with animations on, the banner wave moves every tick — even
+    /// before the brain automaton exists (tiny panel) — so the tick draws.
+    #[test]
+    fn home_wave_draws_without_brain() {
+        use crate::tui::app::types::Focus;
+
+        let (mut app, _dir) = test_app();
+        app.tui_settings.atmosphere = false;
+        assert!(app.tui_settings.brians_brain);
+        app.focus = Focus::Home;
+        app.home_brain = None;
+        assert!(
+            brain_visible(&app),
+            "Home with animations on always animates (banner wave)"
+        );
+        // Behavioral pin: prime the whim/header caches, then the wave alone
+        // must keep the tick dirty.
+        let mut state = TickState::default();
+        let _ = tick(&mut app, &mut state, false).unwrap();
+        let (dirty, _) = tick(&mut app, &mut state, false).unwrap();
+        assert!(dirty, "the Home wave must draw while animations are on");
+    }
+
+    /// A sidebar brain rect with no automaton draws nothing (the draw
+    /// returns early), so it must not dirty the tick on its own. The rect is
+    /// below the automaton's minimum size, so the fast path's `ensure` leaves
+    /// the brain unbuilt — a full-size rect would grow one on the first tick
+    /// and correctly dirty from then on.
+    #[test]
+    fn sidebar_brain_none_no_draw() {
+        use crate::tui::app::types::Focus;
+
+        let (mut app, _dir) = test_app();
+        app.tui_settings.atmosphere = false;
+        assert!(app.tui_settings.brians_brain);
+        app.focus = Focus::Agent;
+        app.sidebar_visible = true;
+        app.sidebar_brain_rect = Some(Rect::new(0, 0, 5, 2));
+        app.sidebar_brain = None;
+        // Freeze the background system sampler: `App::new` leaves a blend in
+        // progress, and a sample arriving mid-test would legitimately dirty
+        // via settling — neither is what this test pins.
+        app.system_monitor_active
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        while app.system_info_rx.try_recv().is_ok() {}
+        app.system_info_target = app.system_info.clone();
+        assert!(
+            !brain_visible(&app),
+            "no automaton on screen means no brain animation"
+        );
+        let mut state = TickState::default();
+        let _ = tick(&mut app, &mut state, false).unwrap();
+        assert!(
+            app.sidebar_brain.is_none(),
+            "a sub-minimum rect must not grow a brain"
+        );
+        let (dirty, _) = tick(&mut app, &mut state, false).unwrap();
+        assert!(!dirty, "an undrawn brain must not draw");
     }
 
     /// FR5: both toggles off freezes the header (spinner[0], sweep t=0,

@@ -10,6 +10,7 @@ use crate::tui::app::dialog::{PromptTab, SimplePromptDialog};
 use crate::tui::app::types::{AgentEntry, App};
 use crate::tui::ui::dialogs::at_picker::draw_at_picker_dropdown;
 use crate::tui::ui::dialogs::section_picker::draw_section_picker_modal;
+use crate::tui::ui::effective_animation_tick;
 use crate::tui::ui::theme::Theme;
 
 mod content;
@@ -221,7 +222,7 @@ pub fn draw_simple_prompt_dialog(
 
     let area = centered_rect_fixed(geo.dialog_width, geo.height, frame.area());
     frame.render_widget(Clear, area);
-    draw_dialog_left_wave(frame, area, app.animation_tick.into());
+    draw_dialog_left_wave(frame, area, effective_animation_tick(app).into());
 
     let block = Block::default()
         .title(" Prompt Builder ")

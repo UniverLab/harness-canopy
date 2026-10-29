@@ -9,6 +9,7 @@ use crate::tui::app::{
     dialog::new_agent::{BackgroundTrigger, DialogStep, NewAgentDialog, NewTaskType, SeedOption},
     types::App,
 };
+use crate::tui::ui::effective_animation_tick;
 use crate::tui::ui::theme::Theme;
 
 mod fields;
@@ -139,7 +140,7 @@ pub fn draw_new_agent_dialog(frame: &mut Frame, app: &App, theme: &Theme) {
 
     let area = centered_rect(65, height, frame.area());
     frame.render_widget(Clear, area);
-    draw_dialog_left_wave(frame, area, app.animation_tick.into());
+    draw_dialog_left_wave(frame, area, effective_animation_tick(app).into());
 
     let block = Block::default()
         .title(dialog_title(dialog))

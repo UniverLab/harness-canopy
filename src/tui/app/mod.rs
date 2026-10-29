@@ -25,6 +25,7 @@ mod refresh_graph_whimsg;
 pub(crate) mod session_hub;
 mod sessions;
 mod sidebar_nav;
+mod slow_fingerprint;
 mod sync;
 pub(crate) mod system_monitor;
 
@@ -71,8 +72,8 @@ pub mod terminal_search;
 pub mod types;
 pub mod utils;
 
-pub(crate) use refresh_cadence::SlowFingerprint;
 pub(crate) use session_resume::build_resumed_session_args;
+pub(crate) use slow_fingerprint::SlowFingerprint;
 pub use terminal_search::TerminalSearch;
 pub(crate) use types::ContextTransferSource;
 pub(crate) use types::CtrlCState;

@@ -184,7 +184,7 @@ impl App {
         })
     }
 
-    fn message_window_limit_for_scroll(&self) -> usize {
+    pub(crate) fn message_window_limit_for_scroll(&self) -> usize {
         let steps = (self.sync_scroll_offset / MESSAGE_WINDOW_LINES_PER_STEP) as usize;
         (RECENT_MESSAGE_LIMIT + steps.saturating_mul(MESSAGE_WINDOW_ITEMS_PER_STEP))
             .min(MAX_RECENT_MESSAGE_LIMIT)
