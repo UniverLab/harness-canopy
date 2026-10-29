@@ -169,7 +169,7 @@ session later instead of polling), and `intelligence_upsert` /
 - **Scheduled Delivery** — `Shift+Enter` (Kitty keyboard protocol) sends prompts at a chosen time instead of immediately.
 - **Session Shelf** — an agent copies up to 10 files per call (PNG, JPEG, WebP, GIF or SVG, sniffed from content, 20 MiB each) onto its session's shelf with the `session_send_file` MCP tool; the F1 hub's `Shelf` tab lists every shelf newest first, toasts each arrival as `📎 <name> — <from>`, and opens, copies the path of, or deletes the selected file, with `canopy shelf list`/`open` reaching the same files from the CLI.
 - **Split Groups** — Side-by-side horizontal/vertical views for monitoring multiple agents simultaneously.
-- **System Dashboard** — CPU, memory, disk, GPU (NVIDIA/Linux/macOS), temperatures with amber/red alert thresholds. WSL queries Windows host metrics via PowerShell.
+- **System Dashboard** — CPU, memory, disk, GPU (NVIDIA/Linux/macOS), temperatures with amber/red alert thresholds. WSL queries Windows host metrics via PowerShell. Where ACPI thermal zones report nothing, run LibreHardwareMonitor (WMI on) to expose CPU temperature.
 - **Live Graph View** — Real-time graph rendering with auto-follow on the running node, manual node inspection, and per-node run info (status, elapsed, output tail).
 - **Agent Status Colors** — Green for working (recent output), blue for idle, red for failed, gray for exited.
 - **Projects Sidebar** — Sections for active graphs, backlog specs, and graph history, filterable by project workdir.

@@ -105,6 +105,9 @@ step instead of launching straight away:
   temperatures with amber/red alert thresholds. Under WSL, metrics come
   from the Windows host via PowerShell. Where ACPI thermal zones report
   nothing, run LibreHardwareMonitor (WMI on) to expose CPU temperature.
+  With no reading the CPU row shows `n/a` (on Windows/WSL with that
+  hint beneath it); `agent` `status` reports the reading and its
+  `cpu_temp_source`.
 - **Live graph view** — real-time graph rendering of the running graph's
   current spec, auto-following the active node. When the engine moves to a
   new node, the view centres that node's whole box (a tall collapsed
