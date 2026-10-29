@@ -724,6 +724,43 @@ mod tests {
         );
     }
 
+    /// `d` on a device row disconnects through the daemon at once — no
+    /// confirm — and off a device row it sends nothing.
+    #[test]
+    fn remote_disconnect_sends_the_disconnect_action_at_once() {
+        let fake = crate::tui::mcp_client::test_support::spawn_fake_daemon(ok_result());
+        let mut app = test_app();
+        app.db.set_state("port", &fake.port).unwrap();
+        app.open_hub();
+        app.set_hub_tab(HubTab::Remote);
+        app.hub.remote.view.devices = vec![remote_device("bfcba2b742a807bb")];
+
+        app.hub.remote.row_idx = 0; // GitHub.
+        handle_hub_key(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert!(
+            fake.recorded_calls().is_empty(),
+            "d off a device row sends nothing"
+        );
+
+        app.hub.remote.row_idx = 4; // Device(0).
+        handle_hub_key(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert_eq!(app.hub.remote.revoke_confirm, None, "no confirm is armed");
+        for _ in 0..1000 {
+            if app.hub.remote.write_rx.is_none() {
+                break;
+            }
+            app.poll_remote_write();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let calls = fake.recorded_calls();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0]["name"], "remote");
+        assert_eq!(
+            calls[0]["arguments"],
+            serde_json::json!({ "action": "disconnect", "device_id": "bfcba2b742a807bb" })
+        );
+    }
+
     /// The Remote tab moves with ↑↓/jk and stays put on other keys.
     #[test]
     fn remote_tab_moves_the_cursor_with_arrows_and_jk() {

@@ -697,6 +697,43 @@ mod tests {
     }
 
     #[test]
+    fn revoke_results_report_inline_and_keep_the_row_until_a_refresh() {
+        let mut app = test_app();
+        app.hub.remote.view.devices = vec![device("bfcba2b742a807bb")];
+
+        app.apply_remote_write(RemoteWriteResult::Revoke(
+            Ok("bfcba2b742a807bb".to_string()),
+        ));
+        let message = app.hub.remote.message.as_ref().expect("a message");
+        assert!(!message.is_error);
+        assert!(message.text.contains("Revoked"), "{}", message.text);
+        assert!(app.hub.remote.stale, "success refreshes the status");
+        assert_eq!(
+            app.hub.remote.view.devices.len(),
+            1,
+            "the row leaves only when the refresh confirms it"
+        );
+
+        // A failed revoke reports the exact error inline and refreshes
+        // nothing: the row stays exactly as the daemon last reported it,
+        // never looking revoked.
+        app.hub.remote.stale = false;
+        app.apply_remote_write(RemoteWriteResult::Revoke(Err(
+            "no paired device with id bfcba2b742a807bb".to_string(),
+        )));
+        let message = app.hub.remote.message.as_ref().expect("a message");
+        assert!(message.is_error, "the exact error reports inline");
+        assert!(
+            message.text.contains("no paired device"),
+            "{}",
+            message.text
+        );
+        assert!(!app.hub.remote.stale, "failure refreshes nothing");
+        assert_eq!(app.hub.remote.view.devices.len(), 1);
+        assert_eq!(app.hub.remote.view.devices[0].id, "bfcba2b742a807bb");
+    }
+
+    #[test]
     fn pair_overlay_opens_only_with_a_code_and_esc_hides_it() {
         let mut app = test_app();
         app.open_pair_overlay();
