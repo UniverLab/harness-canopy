@@ -7,7 +7,7 @@
 //! so both surfaces share the refusals (never force, never auto-resolve a
 //! conflict) and the `sandbox_runs` row update (`merged` / `discarded`).
 
-use crate::daemon::actions::{action_params, ActionObject, ActionSpec, ToolSpec};
+use crate::daemon::actions::{action_params, resource_action_object, ActionSpec, ToolSpec};
 use crate::daemon::handler::TaskTriggerHandler;
 use crate::daemon::helpers::{error_result, success_result};
 use crate::daemon::params::*;
@@ -20,7 +20,7 @@ use rmcp::tool;
 use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
 
-static SANDBOX: ToolSpec = ToolSpec {
+pub(crate) static SANDBOX: ToolSpec = ToolSpec {
     name: "sandbox",
     actions: &[
         ActionSpec {
@@ -46,6 +46,19 @@ static SANDBOX: ToolSpec = ToolSpec {
     ],
 };
 
+// ── Typed input schema (FR1) ─────────────────────────────────────────
+
+resource_action_object!(
+    SandboxObject,
+    SANDBOX,
+    [
+        ("list", SandboxListParams),
+        ("get", SandboxIdParams),
+        ("land", SandboxIdParams),
+        ("discard", SandboxDiscardParams),
+    ]
+);
+
 #[tool_router(router = tool_router_sandbox, vis = "pub(crate)")]
 impl TaskTriggerHandler {
     #[tool(
@@ -59,9 +72,10 @@ impl TaskTriggerHandler {
     )]
     pub(crate) async fn sandbox(
         &self,
-        Parameters(params): Parameters<ActionObject>,
+        Parameters(params): Parameters<SandboxObject>,
     ) -> Result<CallToolResult, McpError> {
-        let params = params.into_value();
+        let mut params = params.into_value();
+        SandboxObject::coerce(&mut params);
         let action = SANDBOX.validate(&params)?;
         match action {
             "list" => self.sandbox_list_impl(action_params(&params)?),

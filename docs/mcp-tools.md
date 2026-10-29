@@ -13,6 +13,18 @@ Writes wait up to 5 seconds for a concurrent writer. If the database is still
 busy after that, the call fails with `<tool>: database busy after 5 s — nothing
 was written, retry`. Nothing changed, so retry the same call.
 
+Resource tools (every tool that dispatches on `action` — `spec`, `graph`,
+`agent`, …) publish **typed parameters** in their MCP input schema: `action`
+is a string enum of the tool's actions, and every parameter any action
+accepts is declared with its JSON type and description, so MCP clients build
+correctly typed arguments from `tools/list` alone. The root schema's only
+`required` is `action` — which parameters a call needs depends on its action
+and is listed in the tool description (and in every refusal message). As a
+tolerance for clients that stringify arguments, a string that parses to a
+declared object, array, integer, number or boolean (e.g. `"5"` for a
+`limit`) is coerced back to that type before validation; anything else is
+refused with the usual per-field error.
+
 Graph-node sessions (agent and ensemble nodes launched by the graph engine) get
 a fixed node profile of 12 tools in `tools/list` (`CANOPY_MCP_PROFILE=node`), so
 every node stays under the 128-tool cap of OpenAI-compatible providers. Calls to

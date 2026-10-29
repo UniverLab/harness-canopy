@@ -10,8 +10,9 @@
 //! listing or cancelling one) and keeps its own `#[tool]` in
 //! `handler_scheduled_sends`.
 
-use crate::daemon::actions::{action_params, ActionObject, ActionSpec, ToolSpec};
+use crate::daemon::actions::{action_params, resource_action_object, ActionSpec, ToolSpec};
 use crate::daemon::handler::{OptionalExtension, TaskTriggerHandler};
+use crate::daemon::params::*;
 use crate::daemon::params_extract::Parameters;
 use axum::http::request::Parts;
 use rmcp::model::CallToolResult;
@@ -21,7 +22,7 @@ use rmcp::ErrorData as McpError;
 
 // ── Action tables ────────────────────────────────────────────────────
 
-static NODE: ToolSpec = ToolSpec {
+pub(crate) static NODE: ToolSpec = ToolSpec {
     name: "node",
     actions: &[
         ActionSpec {
@@ -47,7 +48,7 @@ static NODE: ToolSpec = ToolSpec {
     ],
 };
 
-static INTELLIGENCE_ADMIN: ToolSpec = ToolSpec {
+pub(crate) static INTELLIGENCE_ADMIN: ToolSpec = ToolSpec {
     name: "intelligence_admin",
     actions: &[
         ActionSpec {
@@ -78,7 +79,7 @@ static INTELLIGENCE_ADMIN: ToolSpec = ToolSpec {
     ],
 };
 
-static PROJECT: ToolSpec = ToolSpec {
+pub(crate) static PROJECT: ToolSpec = ToolSpec {
     name: "project",
     actions: &[
         ActionSpec {
@@ -104,7 +105,7 @@ static PROJECT: ToolSpec = ToolSpec {
     ],
 };
 
-static SCHEDULED_SEND: ToolSpec = ToolSpec {
+pub(crate) static SCHEDULED_SEND: ToolSpec = ToolSpec {
     name: "scheduled_send",
     actions: &[
         ActionSpec {
@@ -120,7 +121,7 @@ static SCHEDULED_SEND: ToolSpec = ToolSpec {
     ],
 };
 
-static SKILL: ToolSpec = ToolSpec {
+pub(crate) static SKILL: ToolSpec = ToolSpec {
     name: "skill",
     actions: &[
         ActionSpec {
@@ -136,7 +137,7 @@ static SKILL: ToolSpec = ToolSpec {
     ],
 };
 
-static SUBAGENT: ToolSpec = ToolSpec {
+pub(crate) static SUBAGENT: ToolSpec = ToolSpec {
     name: "subagent",
     actions: &[
         ActionSpec {
@@ -161,7 +162,7 @@ static SUBAGENT: ToolSpec = ToolSpec {
     ],
 };
 
-static RAG: ToolSpec = ToolSpec {
+pub(crate) static RAG: ToolSpec = ToolSpec {
     name: "rag",
     actions: &[
         ActionSpec {
@@ -177,7 +178,7 @@ static RAG: ToolSpec = ToolSpec {
     ],
 };
 
-static IDENTITY: ToolSpec = ToolSpec {
+pub(crate) static IDENTITY: ToolSpec = ToolSpec {
     name: "identity",
     actions: &[
         ActionSpec {
@@ -208,6 +209,73 @@ static IDENTITY: ToolSpec = ToolSpec {
     ],
 };
 
+// ── Typed input schemas, one newtype per tool (FR1) ─────────────────
+
+resource_action_object!(
+    NodeObject,
+    NODE,
+    [
+        ("get", NodeGetParams),
+        ("install", NodeInstallParams),
+        ("remove", NodeRemoveParams),
+    ]
+);
+
+resource_action_object!(
+    IntelligenceAdminObject,
+    INTELLIGENCE_ADMIN,
+    [
+        ("delete_node", IntelligenceDeleteNodeParams),
+        ("delete_relation", IntelligenceDeleteRelationParams),
+        ("walk", IntelligenceGraphWalkParams),
+        ("list_projects", IntelligenceListProjectsParams),
+        ("link_projects", IntelligenceLinkProjectsParams),
+    ]
+);
+
+resource_action_object!(
+    ProjectObject,
+    PROJECT,
+    [
+        ("register", ProjectRegisterParams),
+        ("remap", ProjectRemapParams),
+        ("search", ProjectSearchParams),
+        ("update", ProjectUpdateParams),
+    ]
+);
+
+resource_action_object!(
+    ScheduledSendObject,
+    SCHEDULED_SEND,
+    [
+        ("list", ScheduledSendListParams),
+        ("cancel", ScheduledSendCancelParams),
+    ]
+);
+
+resource_action_object!(SkillObject, SKILL, [("get", SkillGetParams)]);
+
+resource_action_object!(
+    SubagentObject,
+    SUBAGENT,
+    [
+        ("spawn", SubagentSpawnParams),
+        ("collect", SubagentCollectParams),
+    ]
+);
+
+resource_action_object!(RagObject, RAG, [("search", RagSearchParams)]);
+
+resource_action_object!(
+    IdentityObject,
+    IDENTITY,
+    [
+        ("evolve", EvolveIdentityParams),
+        ("create_seed", CreateSeedParams),
+        ("remove_seed", RemoveSeedParams),
+    ]
+);
+
 // ── The eight resource tools ─────────────────────────────────────────
 
 #[tool_router(router = tool_router_resource_tools_final, vis = "pub(crate)")]
@@ -223,9 +291,10 @@ impl TaskTriggerHandler {
     )]
     pub(crate) async fn node(
         &self,
-        Parameters(params): Parameters<ActionObject>,
+        Parameters(params): Parameters<NodeObject>,
     ) -> Result<CallToolResult, McpError> {
-        let params = params.into_value();
+        let mut params = params.into_value();
+        NodeObject::coerce(&mut params);
         let action = NODE.validate(&params)?;
         match action {
             "list" => self.node_list_impl().await,
@@ -248,10 +317,11 @@ impl TaskTriggerHandler {
     )]
     pub(crate) async fn intelligence_admin(
         &self,
-        Parameters(params): Parameters<ActionObject>,
+        Parameters(params): Parameters<IntelligenceAdminObject>,
         OptionalExtension(parts): OptionalExtension<Parts>,
     ) -> Result<CallToolResult, McpError> {
-        let params = params.into_value();
+        let mut params = params.into_value();
+        IntelligenceAdminObject::coerce(&mut params);
         let action = INTELLIGENCE_ADMIN.validate(&params)?;
         match action {
             "delete_node" => {
@@ -292,9 +362,10 @@ impl TaskTriggerHandler {
     )]
     pub(crate) async fn project(
         &self,
-        Parameters(params): Parameters<ActionObject>,
+        Parameters(params): Parameters<ProjectObject>,
     ) -> Result<CallToolResult, McpError> {
-        let params = params.into_value();
+        let mut params = params.into_value();
+        ProjectObject::coerce(&mut params);
         let action = PROJECT.validate(&params)?;
         match action {
             "register" => self.project_register_impl(action_params(&params)?).await,
@@ -314,10 +385,11 @@ impl TaskTriggerHandler {
     )]
     pub(crate) async fn scheduled_send(
         &self,
-        Parameters(params): Parameters<ActionObject>,
+        Parameters(params): Parameters<ScheduledSendObject>,
         OptionalExtension(parts): OptionalExtension<Parts>,
     ) -> Result<CallToolResult, McpError> {
-        let params = params.into_value();
+        let mut params = params.into_value();
+        ScheduledSendObject::coerce(&mut params);
         let action = SCHEDULED_SEND.validate(&params)?;
         match action {
             "list" => {
@@ -341,9 +413,10 @@ impl TaskTriggerHandler {
     )]
     pub(crate) async fn skill(
         &self,
-        Parameters(params): Parameters<ActionObject>,
+        Parameters(params): Parameters<SkillObject>,
     ) -> Result<CallToolResult, McpError> {
-        let params = params.into_value();
+        let mut params = params.into_value();
+        SkillObject::coerce(&mut params);
         let action = SKILL.validate(&params)?;
         match action {
             "list" => self.skill_list_impl().await,
@@ -361,10 +434,11 @@ impl TaskTriggerHandler {
     )]
     pub(crate) async fn subagent(
         &self,
-        Parameters(params): Parameters<ActionObject>,
+        Parameters(params): Parameters<SubagentObject>,
         OptionalExtension(parts): OptionalExtension<Parts>,
     ) -> Result<CallToolResult, McpError> {
-        let params = params.into_value();
+        let mut params = params.into_value();
+        SubagentObject::coerce(&mut params);
         let action = SUBAGENT.validate(&params)?;
         match action {
             "spawn" => {
@@ -385,10 +459,11 @@ impl TaskTriggerHandler {
     )]
     pub(crate) async fn rag(
         &self,
-        Parameters(params): Parameters<ActionObject>,
+        Parameters(params): Parameters<RagObject>,
         OptionalExtension(parts): OptionalExtension<Parts>,
     ) -> Result<CallToolResult, McpError> {
-        let params = params.into_value();
+        let mut params = params.into_value();
+        RagObject::coerce(&mut params);
         let action = RAG.validate(&params)?;
         match action {
             "search" => {
@@ -412,10 +487,11 @@ impl TaskTriggerHandler {
     )]
     pub(crate) async fn identity(
         &self,
-        Parameters(params): Parameters<ActionObject>,
+        Parameters(params): Parameters<IdentityObject>,
         OptionalExtension(parts): OptionalExtension<Parts>,
     ) -> Result<CallToolResult, McpError> {
-        let params = params.into_value();
+        let mut params = params.into_value();
+        IdentityObject::coerce(&mut params);
         let action = IDENTITY.validate(&params)?;
         match action {
             "get" => self.identity_get_impl(parts.as_ref()).await,

@@ -6,8 +6,9 @@
 //! calls the renamed `<tool>_<action>` `_impl` method. No behaviour lives
 //! here; the logic is the old tools' own.
 
-use crate::daemon::actions::{action_params, ActionObject, ActionSpec, ToolSpec};
+use crate::daemon::actions::{action_params, resource_action_object, ActionSpec, ToolSpec};
 use crate::daemon::handler::TaskTriggerHandler;
+use crate::daemon::params::*;
 use crate::daemon::params_extract::Parameters;
 use rmcp::model::CallToolResult;
 use rmcp::tool;
@@ -16,7 +17,7 @@ use rmcp::ErrorData as McpError;
 
 // ── Action tables ────────────────────────────────────────────────────
 
-static GRAPH: ToolSpec = ToolSpec {
+pub(crate) static GRAPH: ToolSpec = ToolSpec {
     name: "graph",
     actions: &[
         ActionSpec {
@@ -69,7 +70,7 @@ static GRAPH: ToolSpec = ToolSpec {
     ],
 };
 
-static GRAPH_EDIT: ToolSpec = ToolSpec {
+pub(crate) static GRAPH_EDIT: ToolSpec = ToolSpec {
     name: "graph_edit",
     actions: &[
         ActionSpec {
@@ -143,7 +144,7 @@ static GRAPH_EDIT: ToolSpec = ToolSpec {
     ],
 };
 
-static GRAPH_NODE: ToolSpec = ToolSpec {
+pub(crate) static GRAPH_NODE: ToolSpec = ToolSpec {
     name: "graph_node",
     actions: &[
         ActionSpec {
@@ -185,7 +186,7 @@ static GRAPH_NODE: ToolSpec = ToolSpec {
     ],
 };
 
-static GRAPH_EDGE: ToolSpec = ToolSpec {
+pub(crate) static GRAPH_EDGE: ToolSpec = ToolSpec {
     name: "graph_edge",
     actions: &[
         ActionSpec {
@@ -206,7 +207,7 @@ static GRAPH_EDGE: ToolSpec = ToolSpec {
     ],
 };
 
-static GRAPH_ENSEMBLE: ToolSpec = ToolSpec {
+pub(crate) static GRAPH_ENSEMBLE: ToolSpec = ToolSpec {
     name: "graph_ensemble",
     actions: &[
         ActionSpec {
@@ -285,7 +286,7 @@ static GRAPH_ENSEMBLE: ToolSpec = ToolSpec {
     ],
 };
 
-static GRAPH_CONTROL: ToolSpec = ToolSpec {
+pub(crate) static GRAPH_CONTROL: ToolSpec = ToolSpec {
     name: "graph_control",
     actions: &[
         ActionSpec {
@@ -326,6 +327,84 @@ static GRAPH_CONTROL: ToolSpec = ToolSpec {
     ],
 };
 
+// ── Typed input schemas, one newtype per tool (FR1) ─────────────────
+
+resource_action_object!(
+    GraphObject,
+    GRAPH,
+    [
+        ("list", GraphListParams),
+        ("get", GraphGetParams),
+        ("export", GraphExportParams),
+        ("validate", GraphValidateParams),
+        ("events", GraphEventsParams),
+        ("node_runs", GraphNodeRunsListParams),
+        ("node_run", GraphNodeRunGetParams),
+    ]
+);
+
+resource_action_object!(
+    GraphEditObject,
+    GRAPH_EDIT,
+    [
+        ("create", GraphCreateParams),
+        ("update", GraphUpdateParams),
+        ("archive", GraphArchiveParams),
+        ("restore", GraphRestoreParams),
+        ("import", GraphImportParams),
+        ("install", GraphInstallParams),
+        ("attach_spec", GraphAddSpecParams),
+        ("detach_spec", GraphRemoveSpecParams),
+        ("update_spec", GraphUpdateSpecParams),
+    ]
+);
+
+resource_action_object!(
+    GraphNodeObject,
+    GRAPH_NODE,
+    [
+        ("add", GraphAddNodeParams),
+        ("update", GraphUpdateNodeParams),
+        ("delete", GraphDeleteNodeParams),
+        ("copy", GraphCopyNodeParams),
+    ]
+);
+
+resource_action_object!(
+    GraphEdgeObject,
+    GRAPH_EDGE,
+    [
+        ("add", GraphAddEdgeParams),
+        ("update", GraphUpdateEdgeParams),
+        ("delete", GraphDeleteEdgeParams),
+    ]
+);
+
+resource_action_object!(
+    GraphEnsembleObject,
+    GRAPH_ENSEMBLE,
+    [
+        ("add", GraphAddEnsembleParams),
+        ("update", GraphUpdateEnsembleParams),
+        ("delete", GraphDeleteEnsembleParams),
+        ("copy", GraphCopyEnsembleParams),
+    ]
+);
+
+resource_action_object!(
+    GraphControlObject,
+    GRAPH_CONTROL,
+    [
+        ("run", GraphRunParams),
+        ("pause", GraphPauseParams),
+        ("continue", GraphContinueParams),
+        ("reset", GraphResetParams),
+        ("preflight", GraphPreflightParams),
+        ("schedule_continue", GraphScheduleContinueParams),
+        ("schedule_autorun", GraphScheduleAutorunParams),
+    ]
+);
+
 // ── The six resource tools ───────────────────────────────────────────
 
 /// Test seam: the `graph` tool's action table (so callers can assert the
@@ -359,9 +438,10 @@ impl TaskTriggerHandler {
     )]
     pub(crate) async fn graph(
         &self,
-        Parameters(params): Parameters<ActionObject>,
+        Parameters(params): Parameters<GraphObject>,
     ) -> Result<CallToolResult, McpError> {
-        let params = params.into_value();
+        let mut params = params.into_value();
+        GraphObject::coerce(&mut params);
         let action = GRAPH.validate(&params)?;
         match action {
             "list" => self.graph_list_impl(action_params(&params)?).await,
@@ -396,9 +476,10 @@ impl TaskTriggerHandler {
     )]
     pub(crate) async fn graph_edit(
         &self,
-        Parameters(params): Parameters<ActionObject>,
+        Parameters(params): Parameters<GraphEditObject>,
     ) -> Result<CallToolResult, McpError> {
-        let params = params.into_value();
+        let mut params = params.into_value();
+        GraphEditObject::coerce(&mut params);
         let action = GRAPH_EDIT.validate(&params)?;
         match action {
             "create" => self.graph_create_impl(action_params(&params)?).await,
@@ -426,9 +507,10 @@ impl TaskTriggerHandler {
     )]
     pub(crate) async fn graph_node(
         &self,
-        Parameters(params): Parameters<ActionObject>,
+        Parameters(params): Parameters<GraphNodeObject>,
     ) -> Result<CallToolResult, McpError> {
-        let params = params.into_value();
+        let mut params = params.into_value();
+        GraphNodeObject::coerce(&mut params);
         let action = GRAPH_NODE.validate(&params)?;
         match action {
             "add" => self.graph_add_node_impl(action_params(&params)?).await,
@@ -449,9 +531,10 @@ impl TaskTriggerHandler {
     )]
     pub(crate) async fn graph_edge(
         &self,
-        Parameters(params): Parameters<ActionObject>,
+        Parameters(params): Parameters<GraphEdgeObject>,
     ) -> Result<CallToolResult, McpError> {
-        let params = params.into_value();
+        let mut params = params.into_value();
+        GraphEdgeObject::coerce(&mut params);
         let action = GRAPH_EDGE.validate(&params)?;
         match action {
             "add" => self.graph_add_edge_impl(action_params(&params)?).await,
@@ -472,9 +555,10 @@ impl TaskTriggerHandler {
     )]
     pub(crate) async fn graph_ensemble(
         &self,
-        Parameters(params): Parameters<ActionObject>,
+        Parameters(params): Parameters<GraphEnsembleObject>,
     ) -> Result<CallToolResult, McpError> {
-        let params = params.into_value();
+        let mut params = params.into_value();
+        GraphEnsembleObject::coerce(&mut params);
         let action = GRAPH_ENSEMBLE.validate(&params)?;
         match action {
             "add" => self.graph_add_ensemble_impl(action_params(&params)?).await,
@@ -505,9 +589,10 @@ impl TaskTriggerHandler {
     )]
     pub(crate) async fn graph_control(
         &self,
-        Parameters(params): Parameters<ActionObject>,
+        Parameters(params): Parameters<GraphControlObject>,
     ) -> Result<CallToolResult, McpError> {
-        let params = params.into_value();
+        let mut params = params.into_value();
+        GraphControlObject::coerce(&mut params);
         let action = GRAPH_CONTROL.validate(&params)?;
         match action {
             "run" => self.graph_run_impl(action_params(&params)?).await,

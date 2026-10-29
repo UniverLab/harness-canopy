@@ -6,7 +6,7 @@
 //! revokes. Relay phase, live peers and code creation live in this process,
 //! so the TUI must ask here instead of reading files itself.
 
-use crate::daemon::actions::{action_params, ActionObject, ActionSpec, ToolSpec};
+use crate::daemon::actions::{action_params, resource_action_object, ActionSpec, ToolSpec};
 use rmcp::model::CallToolResult;
 use rmcp::tool;
 use rmcp::tool_router;
@@ -20,7 +20,7 @@ use crate::daemon::params::*;
 use crate::daemon::params_extract::Parameters;
 use crate::remote::{live, panel};
 
-static REMOTE: ToolSpec = ToolSpec {
+pub(crate) static REMOTE: ToolSpec = ToolSpec {
     name: "remote",
     actions: &[
         ActionSpec {
@@ -46,6 +46,17 @@ static REMOTE: ToolSpec = ToolSpec {
     ],
 };
 
+// ── Typed input schema (FR1) ─────────────────────────────────────────
+
+resource_action_object!(
+    RemoteObject,
+    REMOTE,
+    [
+        ("set_enabled", RemoteSetEnabledParams),
+        ("revoke", RemoteRevokeParams),
+    ]
+);
+
 #[tool_router(router = tool_router_remote, vis = "pub(crate)")]
 impl TaskTriggerHandler {
     #[tool(
@@ -59,9 +70,10 @@ impl TaskTriggerHandler {
     )]
     pub(crate) async fn remote(
         &self,
-        Parameters(params): Parameters<ActionObject>,
+        Parameters(params): Parameters<RemoteObject>,
     ) -> Result<CallToolResult, McpError> {
-        let params = params.into_value();
+        let mut params = params.into_value();
+        RemoteObject::coerce(&mut params);
         let action = REMOTE.validate(&params)?;
         match action {
             "status" => self.remote_status_impl(),

@@ -128,6 +128,26 @@ pub(crate) use crate::daemon::handler_validate::{
 
 pub struct OptionalExtension<T>(pub Option<T>);
 
+// Test seams below construct per-tool parameter newtypes; production code
+// reaches them only through the `#[tool]` methods' own extractor.
+#[cfg(test)]
+use crate::daemon::handler_graph_tools::{
+    GraphControlObject, GraphEdgeObject, GraphEditObject, GraphEnsembleObject, GraphNodeObject,
+    GraphObject,
+};
+#[cfg(test)]
+use crate::daemon::handler_resource_tools::{
+    AgentEditObject, AgentObject, ConfigObject, CrewObject, HarnessObject, QueueObject,
+    SpecEditObject, SpecObject,
+};
+#[cfg(test)]
+use crate::daemon::handler_resource_tools_final::{
+    IdentityObject, IntelligenceAdminObject, NodeObject, ProjectObject, RagObject,
+    ScheduledSendObject, SkillObject, SubagentObject,
+};
+#[cfg(test)]
+use crate::daemon::handler_sandbox::SandboxObject;
+
 impl<C, T> rmcp::handler::server::common::FromContextPart<C> for OptionalExtension<T>
 where
     C: AsRequestContext,
@@ -412,7 +432,8 @@ mod removed_names_tests;
 /// Test-only dispatch seam: route a ported endpoint-test call through one of
 /// the six graph resource tools exactly as an MCP client would — the typed
 /// params struct is serialized, `action` is injected, and the call goes
-/// through the tool's own `Parameters<Value>` validation before reaching the
+/// through the tool's own per-tool parameter newtype validation before
+/// reaching the
 /// same `_impl` logic the old one-operation tools held.
 #[cfg(test)]
 pub(crate) async fn call_graph_action<P: serde::Serialize>(
@@ -434,15 +455,50 @@ pub(crate) async fn call_graph_action<P: serde::Serialize>(
     }
     value["action"] = serde_json::Value::String(action.to_string());
     let object = value.as_object().cloned().expect("object params");
-    let parameters =
-        crate::daemon::params_extract::Parameters(crate::daemon::actions::ActionObject(object));
+    let object = crate::daemon::actions::ActionObject(object);
     match tool {
-        "graph" => handler.graph(parameters).await,
-        "graph_edit" => handler.graph_edit(parameters).await,
-        "graph_node" => handler.graph_node(parameters).await,
-        "graph_edge" => handler.graph_edge(parameters).await,
-        "graph_ensemble" => handler.graph_ensemble(parameters).await,
-        "graph_control" => handler.graph_control(parameters).await,
+        "graph" => {
+            handler
+                .graph(crate::daemon::params_extract::Parameters(GraphObject(
+                    object,
+                )))
+                .await
+        }
+        "graph_edit" => {
+            handler
+                .graph_edit(crate::daemon::params_extract::Parameters(GraphEditObject(
+                    object,
+                )))
+                .await
+        }
+        "graph_node" => {
+            handler
+                .graph_node(crate::daemon::params_extract::Parameters(GraphNodeObject(
+                    object,
+                )))
+                .await
+        }
+        "graph_edge" => {
+            handler
+                .graph_edge(crate::daemon::params_extract::Parameters(GraphEdgeObject(
+                    object,
+                )))
+                .await
+        }
+        "graph_ensemble" => {
+            handler
+                .graph_ensemble(crate::daemon::params_extract::Parameters(
+                    GraphEnsembleObject(object),
+                ))
+                .await
+        }
+        "graph_control" => {
+            handler
+                .graph_control(crate::daemon::params_extract::Parameters(
+                    GraphControlObject(object),
+                ))
+                .await
+        }
         other => panic!("unknown graph resource tool '{other}'"),
     }
 }
@@ -470,15 +526,50 @@ pub(crate) async fn call_graph_action_value(
         .as_object()
         .cloned()
         .expect("object params must serialize");
-    let parameters =
-        crate::daemon::params_extract::Parameters(crate::daemon::actions::ActionObject(object));
+    let object = crate::daemon::actions::ActionObject(object);
     match tool {
-        "graph" => handler.graph(parameters).await,
-        "graph_edit" => handler.graph_edit(parameters).await,
-        "graph_node" => handler.graph_node(parameters).await,
-        "graph_edge" => handler.graph_edge(parameters).await,
-        "graph_ensemble" => handler.graph_ensemble(parameters).await,
-        "graph_control" => handler.graph_control(parameters).await,
+        "graph" => {
+            handler
+                .graph(crate::daemon::params_extract::Parameters(GraphObject(
+                    object,
+                )))
+                .await
+        }
+        "graph_edit" => {
+            handler
+                .graph_edit(crate::daemon::params_extract::Parameters(GraphEditObject(
+                    object,
+                )))
+                .await
+        }
+        "graph_node" => {
+            handler
+                .graph_node(crate::daemon::params_extract::Parameters(GraphNodeObject(
+                    object,
+                )))
+                .await
+        }
+        "graph_edge" => {
+            handler
+                .graph_edge(crate::daemon::params_extract::Parameters(GraphEdgeObject(
+                    object,
+                )))
+                .await
+        }
+        "graph_ensemble" => {
+            handler
+                .graph_ensemble(crate::daemon::params_extract::Parameters(
+                    GraphEnsembleObject(object),
+                ))
+                .await
+        }
+        "graph_control" => {
+            handler
+                .graph_control(crate::daemon::params_extract::Parameters(
+                    GraphControlObject(object),
+                ))
+                .await
+        }
         other => panic!("unknown graph resource tool '{other}'"),
     }
 }
@@ -488,7 +579,7 @@ pub(crate) async fn call_graph_action_value(
 /// `config`, `crew`, `node`, `intelligence_admin`, `project`,
 /// `scheduled_send`, `sandbox`, `skill`, `subagent`, `rag`, `identity`): the
 /// typed params struct is serialized with nulls stripped, `action` is injected,
-/// and the call goes through the tool's own `Parameters<ActionObject>`
+/// and the call goes through the tool's own per-tool parameter newtype
 /// validation before reaching the same `_impl` logic the old one-operation
 /// tools held. Tools that take a caller session run without one, like the
 /// ported tests' old `OptionalExtension(None)`.
@@ -525,38 +616,133 @@ pub(crate) async fn call_resource_action_value(
         .as_object()
         .cloned()
         .expect("object params must serialize");
-    let parameters =
-        crate::daemon::params_extract::Parameters(crate::daemon::actions::ActionObject(object));
+    let object = crate::daemon::actions::ActionObject(object);
     match tool {
-        "spec" => handler.spec(parameters).await,
-        "spec_edit" => handler.spec_edit(parameters).await,
-        "queue" => handler.queue(parameters).await,
-        "agent" => handler.agent(parameters).await,
+        "spec" => {
+            handler
+                .spec(crate::daemon::params_extract::Parameters(SpecObject(
+                    object,
+                )))
+                .await
+        }
+        "spec_edit" => {
+            handler
+                .spec_edit(crate::daemon::params_extract::Parameters(SpecEditObject(
+                    object,
+                )))
+                .await
+        }
+        "queue" => {
+            handler
+                .queue(crate::daemon::params_extract::Parameters(QueueObject(
+                    object,
+                )))
+                .await
+        }
+        "agent" => {
+            handler
+                .agent(crate::daemon::params_extract::Parameters(AgentObject(
+                    object,
+                )))
+                .await
+        }
         "agent_edit" => {
             handler
-                .agent_edit(parameters, OptionalExtension(None))
+                .agent_edit(
+                    crate::daemon::params_extract::Parameters(AgentEditObject(object)),
+                    OptionalExtension(None),
+                )
                 .await
         }
-        "harness" => handler.harness(parameters).await,
-        "config" => handler.config(parameters).await,
-        "crew" => handler.crew(parameters).await,
-        "node" => handler.node(parameters).await,
+        "harness" => {
+            handler
+                .harness(crate::daemon::params_extract::Parameters(HarnessObject(
+                    object,
+                )))
+                .await
+        }
+        "config" => {
+            handler
+                .config(crate::daemon::params_extract::Parameters(ConfigObject(
+                    object,
+                )))
+                .await
+        }
+        "crew" => {
+            handler
+                .crew(crate::daemon::params_extract::Parameters(CrewObject(
+                    object,
+                )))
+                .await
+        }
+        "node" => {
+            handler
+                .node(crate::daemon::params_extract::Parameters(NodeObject(
+                    object,
+                )))
+                .await
+        }
         "intelligence_admin" => {
             handler
-                .intelligence_admin(parameters, OptionalExtension(None))
+                .intelligence_admin(
+                    crate::daemon::params_extract::Parameters(IntelligenceAdminObject(object)),
+                    OptionalExtension(None),
+                )
                 .await
         }
-        "project" => handler.project(parameters).await,
+        "project" => {
+            handler
+                .project(crate::daemon::params_extract::Parameters(ProjectObject(
+                    object,
+                )))
+                .await
+        }
         "scheduled_send" => {
             handler
-                .scheduled_send(parameters, OptionalExtension(None))
+                .scheduled_send(
+                    crate::daemon::params_extract::Parameters(ScheduledSendObject(object)),
+                    OptionalExtension(None),
+                )
                 .await
         }
-        "sandbox" => handler.sandbox(parameters).await,
-        "skill" => handler.skill(parameters).await,
-        "subagent" => handler.subagent(parameters, OptionalExtension(None)).await,
-        "rag" => handler.rag(parameters, OptionalExtension(None)).await,
-        "identity" => handler.identity(parameters, OptionalExtension(None)).await,
+        "sandbox" => {
+            handler
+                .sandbox(crate::daemon::params_extract::Parameters(SandboxObject(
+                    object,
+                )))
+                .await
+        }
+        "skill" => {
+            handler
+                .skill(crate::daemon::params_extract::Parameters(SkillObject(
+                    object,
+                )))
+                .await
+        }
+        "subagent" => {
+            handler
+                .subagent(
+                    crate::daemon::params_extract::Parameters(SubagentObject(object)),
+                    OptionalExtension(None),
+                )
+                .await
+        }
+        "rag" => {
+            handler
+                .rag(
+                    crate::daemon::params_extract::Parameters(RagObject(object)),
+                    OptionalExtension(None),
+                )
+                .await
+        }
+        "identity" => {
+            handler
+                .identity(
+                    crate::daemon::params_extract::Parameters(IdentityObject(object)),
+                    OptionalExtension(None),
+                )
+                .await
+        }
         other => panic!("unknown resource tool '{other}'"),
     }
 }

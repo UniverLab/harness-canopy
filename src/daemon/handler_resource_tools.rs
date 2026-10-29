@@ -10,8 +10,9 @@
 //! `session_list` was never in a moved family, so it keeps its own `#[tool]`
 //! in its family module.
 
-use crate::daemon::actions::{action_params, ActionObject, ActionSpec, ToolSpec};
+use crate::daemon::actions::{action_params, resource_action_object, ActionSpec, ToolSpec};
 use crate::daemon::handler::{OptionalExtension, TaskTriggerHandler};
+use crate::daemon::params::*;
 use crate::daemon::params_extract::Parameters;
 use axum::http::request::Parts;
 use rmcp::model::CallToolResult;
@@ -21,7 +22,7 @@ use rmcp::ErrorData as McpError;
 
 // ── Action tables ────────────────────────────────────────────────────
 
-static SPEC: ToolSpec = ToolSpec {
+pub(crate) static SPEC: ToolSpec = ToolSpec {
     name: "spec",
     actions: &[
         ActionSpec {
@@ -55,7 +56,7 @@ static SPEC: ToolSpec = ToolSpec {
     ],
 };
 
-static SPEC_EDIT: ToolSpec = ToolSpec {
+pub(crate) static SPEC_EDIT: ToolSpec = ToolSpec {
     name: "spec_edit",
     actions: &[
         ActionSpec {
@@ -86,7 +87,7 @@ static SPEC_EDIT: ToolSpec = ToolSpec {
     ],
 };
 
-static QUEUE: ToolSpec = ToolSpec {
+pub(crate) static QUEUE: ToolSpec = ToolSpec {
     name: "queue",
     actions: &[
         ActionSpec {
@@ -122,7 +123,7 @@ static QUEUE: ToolSpec = ToolSpec {
     ],
 };
 
-static AGENT: ToolSpec = ToolSpec {
+pub(crate) static AGENT: ToolSpec = ToolSpec {
     name: "agent",
     actions: &[
         ActionSpec {
@@ -148,7 +149,7 @@ static AGENT: ToolSpec = ToolSpec {
     ],
 };
 
-static AGENT_EDIT: ToolSpec = ToolSpec {
+pub(crate) static AGENT_EDIT: ToolSpec = ToolSpec {
     name: "agent_edit",
     actions: &[
         ActionSpec {
@@ -232,7 +233,7 @@ static AGENT_EDIT: ToolSpec = ToolSpec {
     ],
 };
 
-static HARNESS: ToolSpec = ToolSpec {
+pub(crate) static HARNESS: ToolSpec = ToolSpec {
     name: "harness",
     actions: &[
         ActionSpec {
@@ -278,7 +279,7 @@ static HARNESS: ToolSpec = ToolSpec {
     ],
 };
 
-static CONFIG: ToolSpec = ToolSpec {
+pub(crate) static CONFIG: ToolSpec = ToolSpec {
     name: "config",
     actions: &[
         ActionSpec {
@@ -304,7 +305,7 @@ static CONFIG: ToolSpec = ToolSpec {
     ],
 };
 
-static CREW: ToolSpec = ToolSpec {
+pub(crate) static CREW: ToolSpec = ToolSpec {
     name: "crew",
     actions: &[
         ActionSpec {
@@ -346,6 +347,102 @@ static CREW: ToolSpec = ToolSpec {
     ],
 };
 
+// ── Typed input schemas, one newtype per tool (FR1) ─────────────────
+
+resource_action_object!(
+    SpecObject,
+    SPEC,
+    [
+        ("list", SpecListParams),
+        ("get", SpecGetParams),
+        ("section", SpecSectionGetParams),
+        ("notes", SpecNotesGetParams),
+    ]
+);
+
+resource_action_object!(
+    SpecEditObject,
+    SPEC_EDIT,
+    [
+        ("create", SpecCreateParams),
+        ("update", SpecUpdateParams),
+        ("delete", SpecDeleteParams),
+        ("set_status", SpecSetStatusParams),
+        ("note_write", SpecNoteWriteParams),
+    ]
+);
+
+resource_action_object!(
+    QueueObject,
+    QUEUE,
+    [
+        ("create", QueueCreateParams),
+        ("list", QueueListParams),
+        ("add_spec", QueueAddSpecParams),
+        ("remove_spec", QueueRemoveSpecParams),
+        ("reorder", QueueReorderParams),
+        ("set_group", QueueSetGroupParams),
+    ]
+);
+
+resource_action_object!(
+    AgentObject,
+    AGENT,
+    [("get", IdParam), ("logs", TaskLogsParams),]
+);
+
+resource_action_object!(
+    AgentEditObject,
+    AGENT_EDIT,
+    [
+        ("add", TaskAddParams),
+        ("watch", TaskWatchParams),
+        ("update", TaskUpdateParams),
+        ("remove", IdParam),
+        ("enable", IdParam),
+        ("disable", IdParam),
+        ("schedule", AgentScheduleEnableParams),
+        ("run", IdParam),
+    ]
+);
+
+resource_action_object!(
+    HarnessObject,
+    HARNESS,
+    [
+        ("models", TaskModelsParams),
+        ("probe", AgentProbeParams),
+        ("probe_recent", AgentProbeRecentParams),
+        ("roster_list", RosterListParams),
+        ("roster_set", RosterSetParams),
+        ("roster_clear", RosterClearParams),
+        ("roster_check", RosterCheckParams),
+    ]
+);
+
+resource_action_object!(
+    ConfigObject,
+    CONFIG,
+    [
+        ("get", ConfigGetParams),
+        ("list", ConfigListParams),
+        ("set", ConfigSetParams),
+        ("reset", ConfigResetParams),
+    ]
+);
+
+resource_action_object!(
+    CrewObject,
+    CREW,
+    [
+        ("get", CrewGetParams),
+        ("create", CrewCreateParams),
+        ("update", CrewUpdateParams),
+        ("delete", CrewDeleteParams),
+        ("assignments", GraphCrewParams),
+    ]
+);
+
 // ── The eight resource tools ─────────────────────────────────────────
 
 #[tool_router(router = tool_router_resource_tools, vis = "pub(crate)")]
@@ -361,9 +458,10 @@ impl TaskTriggerHandler {
     )]
     pub(crate) async fn spec(
         &self,
-        Parameters(params): Parameters<ActionObject>,
+        Parameters(params): Parameters<SpecObject>,
     ) -> Result<CallToolResult, McpError> {
-        let params = params.into_value();
+        let mut params = params.into_value();
+        SpecObject::coerce(&mut params);
         let action = SPEC.validate(&params)?;
         match action {
             "list" => self.spec_list_impl(action_params(&params)?).await,
@@ -386,9 +484,10 @@ impl TaskTriggerHandler {
     )]
     pub(crate) async fn spec_edit(
         &self,
-        Parameters(params): Parameters<ActionObject>,
+        Parameters(params): Parameters<SpecEditObject>,
     ) -> Result<CallToolResult, McpError> {
-        let params = params.into_value();
+        let mut params = params.into_value();
+        SpecEditObject::coerce(&mut params);
         let action = SPEC_EDIT.validate(&params)?;
         match action {
             "create" => self.spec_edit_create_impl(action_params(&params)?).await,
@@ -419,9 +518,10 @@ impl TaskTriggerHandler {
     )]
     pub(crate) async fn queue(
         &self,
-        Parameters(params): Parameters<ActionObject>,
+        Parameters(params): Parameters<QueueObject>,
     ) -> Result<CallToolResult, McpError> {
-        let params = params.into_value();
+        let mut params = params.into_value();
+        QueueObject::coerce(&mut params);
         let action = QUEUE.validate(&params)?;
         match action {
             "create" => self.queue_create_impl(action_params(&params)?).await,
@@ -445,9 +545,10 @@ impl TaskTriggerHandler {
     )]
     pub(crate) async fn agent(
         &self,
-        Parameters(params): Parameters<ActionObject>,
+        Parameters(params): Parameters<AgentObject>,
     ) -> Result<CallToolResult, McpError> {
-        let params = params.into_value();
+        let mut params = params.into_value();
+        AgentObject::coerce(&mut params);
         let action = AGENT.validate(&params)?;
         match action {
             "list" => self.agent_list_impl().await,
@@ -474,10 +575,11 @@ impl TaskTriggerHandler {
     )]
     pub(crate) async fn agent_edit(
         &self,
-        Parameters(params): Parameters<ActionObject>,
+        Parameters(params): Parameters<AgentEditObject>,
         OptionalExtension(parts): OptionalExtension<Parts>,
     ) -> Result<CallToolResult, McpError> {
-        let params = params.into_value();
+        let mut params = params.into_value();
+        AgentEditObject::coerce(&mut params);
         let action = AGENT_EDIT.validate(&params)?;
         match action {
             "add" => {
@@ -516,9 +618,10 @@ impl TaskTriggerHandler {
     )]
     pub(crate) async fn harness(
         &self,
-        Parameters(params): Parameters<ActionObject>,
+        Parameters(params): Parameters<HarnessObject>,
     ) -> Result<CallToolResult, McpError> {
-        let params = params.into_value();
+        let mut params = params.into_value();
+        HarnessObject::coerce(&mut params);
         let action = HARNESS.validate(&params)?;
         match action {
             "models" => self.harness_models_impl(action_params(&params)?).await,
@@ -553,9 +656,10 @@ impl TaskTriggerHandler {
     )]
     pub(crate) async fn config(
         &self,
-        Parameters(params): Parameters<ActionObject>,
+        Parameters(params): Parameters<ConfigObject>,
     ) -> Result<CallToolResult, McpError> {
-        let params = params.into_value();
+        let mut params = params.into_value();
+        ConfigObject::coerce(&mut params);
         let action = CONFIG.validate(&params)?;
         match action {
             "get" => self.config_get_impl(action_params(&params)?).await,
@@ -579,9 +683,10 @@ impl TaskTriggerHandler {
     )]
     pub(crate) async fn crew(
         &self,
-        Parameters(params): Parameters<ActionObject>,
+        Parameters(params): Parameters<CrewObject>,
     ) -> Result<CallToolResult, McpError> {
-        let params = params.into_value();
+        let mut params = params.into_value();
+        CrewObject::coerce(&mut params);
         let action = CREW.validate(&params)?;
         match action {
             "list" => self.crew_list_impl().await,

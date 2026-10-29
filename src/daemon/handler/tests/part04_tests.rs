@@ -707,3 +707,280 @@ fn build_graph_trigger_cron_valid_expression() {
         other => panic!("expected Trigger::Cron, got {other:?}"),
     }
 }
+
+// ── FR1/FR5: typed resource-tool input schemas ──────────────────────
+
+use crate::daemon::actions::ToolSpec;
+use crate::daemon::handler::{
+    call_graph_action, call_graph_action_value, call_resource_action, call_resource_action_value,
+};
+use rmcp::model::ErrorCode;
+
+/// Every resource tool dispatched through a `ToolSpec`, with its action
+/// table (all 24 — the schema-coverage test walks this list, so a
+/// resource tool missing from it, or an action parameter missing from the
+/// published schema, fails there).
+const RESOURCE_TOOL_SPECS: &[(&str, &ToolSpec)] = &[
+    ("agent", &crate::daemon::handler_resource_tools::AGENT),
+    (
+        "agent_edit",
+        &crate::daemon::handler_resource_tools::AGENT_EDIT,
+    ),
+    ("config", &crate::daemon::handler_resource_tools::CONFIG),
+    ("crew", &crate::daemon::handler_resource_tools::CREW),
+    ("graph", &crate::daemon::handler_graph_tools::GRAPH),
+    (
+        "graph_control",
+        &crate::daemon::handler_graph_tools::GRAPH_CONTROL,
+    ),
+    (
+        "graph_edge",
+        &crate::daemon::handler_graph_tools::GRAPH_EDGE,
+    ),
+    (
+        "graph_edit",
+        &crate::daemon::handler_graph_tools::GRAPH_EDIT,
+    ),
+    (
+        "graph_ensemble",
+        &crate::daemon::handler_graph_tools::GRAPH_ENSEMBLE,
+    ),
+    (
+        "graph_node",
+        &crate::daemon::handler_graph_tools::GRAPH_NODE,
+    ),
+    ("harness", &crate::daemon::handler_resource_tools::HARNESS),
+    (
+        "identity",
+        &crate::daemon::handler_resource_tools_final::IDENTITY,
+    ),
+    (
+        "intelligence_admin",
+        &crate::daemon::handler_resource_tools_final::INTELLIGENCE_ADMIN,
+    ),
+    ("node", &crate::daemon::handler_resource_tools_final::NODE),
+    (
+        "project",
+        &crate::daemon::handler_resource_tools_final::PROJECT,
+    ),
+    ("queue", &crate::daemon::handler_resource_tools::QUEUE),
+    ("rag", &crate::daemon::handler_resource_tools_final::RAG),
+    ("remote", &crate::daemon::handler_remote::REMOTE),
+    ("sandbox", &crate::daemon::handler_sandbox::SANDBOX),
+    (
+        "scheduled_send",
+        &crate::daemon::handler_resource_tools_final::SCHEDULED_SEND,
+    ),
+    ("skill", &crate::daemon::handler_resource_tools_final::SKILL),
+    ("spec", &crate::daemon::handler_resource_tools::SPEC),
+    (
+        "spec_edit",
+        &crate::daemon::handler_resource_tools::SPEC_EDIT,
+    ),
+    (
+        "subagent",
+        &crate::daemon::handler_resource_tools_final::SUBAGENT,
+    ),
+];
+
+/// Every JSON type name a (possibly union) schema declares, collected
+/// shallowly; empty when the schema declares no type at all.
+fn declared_type_names(shape: &serde_json::Value) -> Vec<String> {
+    use serde_json::Value;
+    let mut names = Vec::new();
+    match shape.get("type") {
+        Some(Value::String(single)) => names.push(single.clone()),
+        Some(Value::Array(candidates)) => names.extend(
+            candidates
+                .iter()
+                .filter_map(|candidate| candidate.as_str().map(str::to_string)),
+        ),
+        _ => {}
+    }
+    if names.is_empty() {
+        for combinator in ["anyOf", "oneOf"] {
+            if let Some(variants) = shape.get(combinator).and_then(Value::as_array) {
+                for variant in variants {
+                    names.extend(declared_type_names(variant));
+                }
+            }
+        }
+    }
+    if names.is_empty() {
+        if shape.get("properties").is_some() {
+            names.push("object".to_string());
+        } else if shape.get("items").is_some() {
+            names.push("array".to_string());
+        }
+    }
+    names
+}
+
+#[test]
+fn schema_covers_every_action_param_of_every_resource_tool() {
+    let tools = TaskTriggerHandler::tool_router().list_all();
+    assert_eq!(
+        RESOURCE_TOOL_SPECS.len(),
+        24,
+        "all 24 resource tools listed"
+    );
+    for (name, spec) in RESOURCE_TOOL_SPECS {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name.as_ref() == *name)
+            .unwrap_or_else(|| panic!("resource tool `{name}` missing from tools/list"));
+        let schema = tool.input_schema.as_ref();
+        assert_eq!(
+            schema.get("type").and_then(serde_json::Value::as_str),
+            Some("object"),
+            "`{name}` root schema must be an object"
+        );
+        assert_eq!(
+            schema.get("required"),
+            Some(&serde_json::json!(["action"])),
+            "`{name}` root required must be exactly [\"action\"]"
+        );
+        let properties = schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .unwrap_or_else(|| panic!("`{name}` schema must declare properties"));
+
+        // `action` is a string enum listing every action of the tool,
+        // in table order.
+        let action = &properties["action"];
+        assert_eq!(
+            action.get("type").and_then(serde_json::Value::as_str),
+            Some("string"),
+            "`{name}` action must be a string"
+        );
+        let enum_names: Vec<&str> = action
+            .get("enum")
+            .and_then(serde_json::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let table_names: Vec<&str> = spec.actions.iter().map(|action| action.name).collect();
+        assert_eq!(
+            enum_names, table_names,
+            "`{name}` action enum must list every action of its table"
+        );
+
+        // Every parameter any action declares appears in `properties`
+        // with a non-empty declared type — a future action shipping an
+        // undeclared parameter fails here.
+        for action_spec in spec.actions {
+            for param in action_spec.required.iter().chain(action_spec.optional) {
+                let shape = properties.get(*param).unwrap_or_else(|| {
+                    panic!(
+                        "`{name}` action `{}` does not declare parameter `{param}` in properties",
+                        action_spec.name
+                    )
+                });
+                assert!(
+                    !declared_type_names(shape).is_empty(),
+                    "`{name}` parameter `{param}` must declare a non-empty type: {shape}"
+                );
+            }
+        }
+    }
+}
+
+// ── FR5: typed calls through the resource-tool dispatch ────────────
+
+#[tokio::test]
+async fn typed_spec_list_with_integer_limit_succeeds() {
+    let (_dir, _db, handler) = queue_test_handler();
+    let result = call_resource_action(&handler, "spec", "list", serde_json::json!({ "limit": 5 }))
+        .await
+        .expect("a typed integer limit must deserialize");
+    assert!(!result.is_error.unwrap_or(false), "{:?}", result.content);
+}
+
+#[tokio::test]
+async fn typed_graph_node_update_with_object_config_succeeds() {
+    let (_dir, db, handler) = queue_test_handler();
+    insert_test_graph(&db, "graph-1");
+    insert_standalone_spec(&db, "spec-1");
+    insert_test_node(&db, "node-1", "spec-1");
+    let result = call_graph_action(
+        &handler,
+        "graph_node",
+        "update",
+        serde_json::json!({ "node_id": "node-1", "config": { "command": "echo hi" } }),
+    )
+    .await
+    .expect("a typed object config must deserialize");
+    assert!(!result.is_error.unwrap_or(false), "{:?}", result.content);
+}
+
+#[tokio::test]
+async fn typed_graph_edit_update_with_object_hooks_succeeds() {
+    let (_dir, db, handler) = queue_test_handler();
+    insert_test_graph(&db, "graph-1");
+    let result = call_graph_action(
+        &handler,
+        "graph_edit",
+        "update",
+        serde_json::json!({
+            "graph_id": "graph-1",
+            "hooks": { "on_completed": [{ "command": "echo done" }] },
+        }),
+    )
+    .await
+    .expect("a typed object hooks map must deserialize");
+    assert!(!result.is_error.unwrap_or(false), "{:?}", result.content);
+}
+
+// ── FR3: stringified clients are coerced, not refused ───────────────
+
+#[tokio::test]
+async fn stringified_integer_limit_is_coerced_to_integer() {
+    let (_dir, _db, handler) = queue_test_handler();
+    let result = call_resource_action_value(
+        &handler,
+        "spec",
+        "list",
+        serde_json::json!({ "limit": "5" }),
+    )
+    .await
+    .expect("the string \"5\" must be coerced to the integer 5");
+    assert!(!result.is_error.unwrap_or(false), "{:?}", result.content);
+}
+
+#[tokio::test]
+async fn stringified_object_config_is_coerced_to_object() {
+    let (_dir, db, handler) = queue_test_handler();
+    insert_test_graph(&db, "graph-1");
+    insert_standalone_spec(&db, "spec-1");
+    insert_test_node(&db, "node-1", "spec-1");
+    let result = call_graph_action_value(
+        &handler,
+        "graph_node",
+        "update",
+        serde_json::json!({
+            "node_id": "node-1",
+            "config": "{\"command\":\"echo hi\"}",
+        }),
+    )
+    .await
+    .expect("the stringified config must be coerced to an object");
+    assert!(!result.is_error.unwrap_or(false), "{:?}", result.content);
+}
+
+#[tokio::test]
+async fn unparseable_stringified_integer_is_refused_as_invalid_params() {
+    let (_dir, _db, handler) = queue_test_handler();
+    let err = call_resource_action_value(
+        &handler,
+        "spec",
+        "list",
+        serde_json::json!({ "limit": "abc" }),
+    )
+    .await
+    .expect_err("a non-JSON string for an integer parameter must be refused");
+    assert_eq!(err.code, ErrorCode::INVALID_PARAMS, "{err}");
+}
