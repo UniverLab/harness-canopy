@@ -64,6 +64,13 @@ step instead of launching straight away:
 - **Scrolling up** — the scrollback keeps everything the session wrote,
   including output an inline TUI scrolled off the top of the screen, so
   scrolling up shows the transcript instead of stale rows.
+- **Overlays keep the panel live behind them** — opening the prompt
+  builder, the knowledge list or viewer, context transfer, RAG transfer, the
+  launchpad or the new-agent form never replaces the panel behind it: a
+  focused session keeps its live PTY with its own colours (no accent tint,
+  no plain-text log), home and the graph view keep what they were showing,
+  and the focus rail with the `Focus`/`Preview` pill keep naming the focus
+  underneath — including when one overlay opens on top of another.
 - **Surviving TUI restarts** — sessions live in the daemon, not the TUI:
   quitting (`F10`, closing the window) leaves every running session running,
   and reopening the TUI reattaches to them live, with screen and scrollback
