@@ -46,9 +46,11 @@ Background agents are managed from the TUI or by other agents through the
 A background agent can deliver its prompt into a *live interactive session*
 instead of running a CLI headlessly. Set `delivery_action` to `send_to_session` (`action` is the tool's dispatch key, so the delivery parameter is named `delivery_action`) and give
 a target session — by **name** is recommended, because the name is resolved
-against the live sessions on every fire, and a resume canopy recognizes keeps
-both the session's id and its name. A resume it does not recognize comes back
-with a fresh id and a fresh generated name (see
+against the live sessions on every fire, and a resumed session keeps
+both its id and its name — only a name held by another live session mints
+a fresh name, keeping the id. A conversation picked out of the harness's own
+list that canopy has never seen starts a fresh session with a new id and a
+new generated name (see
 [Graphs](graphs-hooks-and-queues.md#event-keyed-hooks)). Every time the agent's cron or watch
 trigger fires, canopy enqueues the prompt as a scheduled send to that session,
 and the daemon delivers it on its next scheduler tick. Delivery does not need
