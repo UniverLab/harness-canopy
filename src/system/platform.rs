@@ -83,6 +83,7 @@ pub(super) fn normalize_temperature(value: Option<f32>) -> Option<f32> {
 }
 
 pub(super) fn is_cpu_temperature_label(label: &str) -> bool {
+    let label = label.to_ascii_lowercase();
     label.contains("cpu")
         || label.contains("package")
         || label.contains("tctl")
@@ -91,6 +92,7 @@ pub(super) fn is_cpu_temperature_label(label: &str) -> bool {
 }
 
 pub(super) fn is_gpu_temperature_label(label: &str) -> bool {
+    let label = label.to_ascii_lowercase();
     label.contains("gpu") || label.contains("graphics") || label.contains("junction")
 }
 
@@ -160,6 +162,29 @@ mod tests {
     }
 
     #[test]
+    fn is_cpu_temperature_label_matches_librehardwaremonitor_names() {
+        assert!(is_cpu_temperature_label("tctl/tdie"));
+        assert!(is_cpu_temperature_label("core (tctl/tdie)"));
+        assert!(is_cpu_temperature_label("cpu package"));
+    }
+
+    #[test]
+    fn is_cpu_temperature_label_is_case_insensitive() {
+        assert!(is_cpu_temperature_label("CPU Package"));
+        assert!(is_cpu_temperature_label("Core (TCTL/TDIE)"));
+        assert!(is_cpu_temperature_label("Tctl/Tdie"));
+        assert!(is_cpu_temperature_label("CPU_TEMP"));
+        assert!(is_cpu_temperature_label("Package id 0"));
+    }
+
+    #[test]
+    fn is_cpu_temperature_label_rejects_mixed_case_non_cpu() {
+        assert!(!is_cpu_temperature_label("GPU Core"));
+        assert!(!is_cpu_temperature_label("SYSTIN"));
+        assert!(!is_cpu_temperature_label("Fan #1"));
+    }
+
+    #[test]
     fn is_gpu_temperature_label_matches_gpu_keywords() {
         assert!(is_gpu_temperature_label("gpu_temp"));
         assert!(is_gpu_temperature_label("graphics temperature"));
@@ -171,6 +196,19 @@ mod tests {
         assert!(!is_gpu_temperature_label("cpu_temp"));
         assert!(!is_gpu_temperature_label("fan_speed"));
         assert!(!is_gpu_temperature_label("voltage"));
+    }
+
+    #[test]
+    fn is_gpu_temperature_label_is_case_insensitive() {
+        assert!(is_gpu_temperature_label("GPU Core"));
+        assert!(is_gpu_temperature_label("GPU Junction"));
+        assert!(is_gpu_temperature_label("Graphics"));
+    }
+
+    #[test]
+    fn is_gpu_temperature_label_rejects_mixed_case_non_gpu() {
+        assert!(!is_gpu_temperature_label("CPU Package"));
+        assert!(!is_gpu_temperature_label("SYSTIN"));
     }
 
     #[test]

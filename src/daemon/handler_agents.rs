@@ -504,6 +504,8 @@ impl TaskTriggerHandler {
             .map(|dir| CanopyConfig::load(&dir).daemon.cpu_quota_percent)
             .unwrap_or_else(|_| DaemonConfig::default().cpu_quota_percent);
         status.push_str(&cpu_quota::status_section(configured, &RealRunner));
+        let system_info = crate::system::SystemInfo::new();
+        status.push_str(&system_info.cpu_temp_status_section());
 
         Ok(CallToolResult::success(vec![ContentBlock::text(status)]))
     }

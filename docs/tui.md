@@ -103,7 +103,8 @@ step instead of launching straight away:
   multiple agents simultaneously.
 - **System dashboard** — CPU, memory, disk, GPU (NVIDIA/Linux/macOS) and
   temperatures with amber/red alert thresholds. Under WSL, metrics come
-  from the Windows host via PowerShell.
+  from the Windows host via PowerShell. Where ACPI thermal zones report
+  nothing, run LibreHardwareMonitor (WMI on) to expose CPU temperature.
 - **Live graph view** — real-time graph rendering of the running graph's
   current spec, auto-following the active node. When the engine moves to a
   new node, the view centres that node's whole box (a tall collapsed

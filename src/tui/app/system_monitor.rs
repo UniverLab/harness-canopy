@@ -128,6 +128,7 @@ pub(crate) fn blend_system_info(
     current.cpu_cores = target.cpu_cores;
     current.cpu_temperature =
         blend_optional_f32(current.cpu_temperature, target.cpu_temperature, t);
+    current.cpu_temp_source.clone_from(&target.cpu_temp_source);
     current.cpu_frequency_mhz = target.cpu_frequency_mhz;
     current.memory_used = lerp_u64(current.memory_used, target.memory_used, t);
     current.memory_total = target.memory_total;
@@ -153,6 +154,7 @@ pub(crate) fn system_settling(
     (current.cpu_usage - target.cpu_usage).abs() > 0.05
         || current.cpu_cores != target.cpu_cores
         || opt_f32_settling(current.cpu_temperature, target.cpu_temperature)
+        || current.cpu_temp_source != target.cpu_temp_source
         || current.cpu_frequency_mhz != target.cpu_frequency_mhz
         || current.memory_used != target.memory_used
         || current.memory_total != target.memory_total

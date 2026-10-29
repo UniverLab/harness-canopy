@@ -27,6 +27,7 @@ pub struct SystemInfo {
     pub cpu_usage: f32,
     pub cpu_cores: usize,
     pub cpu_temperature: Option<f32>,
+    pub cpu_temp_source: Option<String>,
     pub cpu_frequency_mhz: Option<u64>,
     pub memory_used: u64,
     pub memory_total: u64,
@@ -69,6 +70,7 @@ pub struct GpuInfo {
 struct HostMetrics {
     cpu_usage: Option<f32>,
     cpu_temperature: Option<f32>,
+    cpu_temp_source: Option<String>,
     memory_used: Option<u64>,
     memory_total: Option<u64>,
     gpu_info: Option<GpuInfo>,
@@ -106,6 +108,7 @@ impl SystemInfo {
         self.swap_total = system.total_swap();
         self.load_average = get_load_average();
         self.cpu_temperature = None;
+        self.cpu_temp_source = None;
         self.gpu_info = None;
     }
 
@@ -128,6 +131,7 @@ impl SystemInfo {
         }
 
         self.cpu_temperature = cpu_temperature;
+        self.cpu_temp_source = cpu_temperature.map(|_| "components".to_string());
         if let Some(temperature) = gpu_temperature {
             self.gpu_info = Some(GpuInfo {
                 temperature: Some(temperature),
@@ -144,6 +148,9 @@ impl SystemInfo {
         }
         if let Some(v) = host.cpu_temperature {
             self.cpu_temperature = Some(v);
+        }
+        if let Some(v) = host.cpu_temp_source {
+            self.cpu_temp_source = Some(v);
         }
         if let Some(v) = host.memory_used {
             self.memory_used = v;
@@ -199,6 +206,37 @@ impl SystemInfo {
 
     pub fn cpu_temperature_celsius(&self) -> Option<f32> {
         self.cpu_temperature
+    }
+
+    /// Dashboard hint naming the CPU-temperature fix, if this snapshot needs
+    /// one: only Windows/WSL hosts without a reading get it — elsewhere a
+    /// missing sensor has no such fix to name.
+    pub fn cpu_temp_hint(&self) -> Option<&'static str> {
+        Self::cpu_temp_hint_for(detect_host_platform(), self.cpu_temperature)
+    }
+
+    fn cpu_temp_hint_for(platform: HostPlatform, temperature: Option<f32>) -> Option<&'static str> {
+        if temperature.is_some() {
+            return None;
+        }
+        match platform {
+            HostPlatform::Wsl | HostPlatform::Windows => {
+                Some("run LibreHardwareMonitor (WMI on) to expose CPU temperature")
+            }
+            HostPlatform::Linux | HostPlatform::MacOs => None,
+        }
+    }
+
+    /// The `agent status` CPU temperature section: the reading plus its
+    /// source slug, or `n/a` when no source yields a value.
+    pub fn cpu_temp_status_section(&self) -> String {
+        match (self.cpu_temperature, self.cpu_temp_source.as_deref()) {
+            (Some(temp), Some(source)) => {
+                format!("\nCPU temperature: {temp:.1}°C (cpu_temp_source: {source})")
+            }
+            (Some(temp), None) => format!("\nCPU temperature: {temp:.1}°C"),
+            (None, _) => "\nCPU temperature: n/a".to_string(),
+        }
     }
 
     #[allow(dead_code)]
@@ -326,6 +364,7 @@ mod tests {
         assert_eq!(info.cpu_usage, 0.0);
         assert_eq!(info.cpu_cores, 0);
         assert!(info.cpu_temperature.is_none());
+        assert!(info.cpu_temp_source.is_none());
         assert_eq!(info.memory_used, 0);
         assert_eq!(info.memory_total, 0);
         assert!(info.gpu_info.is_none());
@@ -516,5 +555,58 @@ mod tests {
             assert!(!process_is_alive(0));
             assert!(!process_is_alive(-1));
         }
+    }
+
+    #[test]
+    fn cpu_temp_hint_names_librehardwaremonitor_on_wsl_and_windows() {
+        let expected = "run LibreHardwareMonitor (WMI on) to expose CPU temperature";
+        assert_eq!(
+            SystemInfo::cpu_temp_hint_for(HostPlatform::Wsl, None),
+            Some(expected)
+        );
+        assert_eq!(
+            SystemInfo::cpu_temp_hint_for(HostPlatform::Windows, None),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn cpu_temp_hint_is_none_with_reading_or_elsewhere() {
+        assert!(SystemInfo::cpu_temp_hint_for(HostPlatform::Wsl, Some(55.0)).is_none());
+        assert!(SystemInfo::cpu_temp_hint_for(HostPlatform::Windows, Some(55.0)).is_none());
+        assert!(SystemInfo::cpu_temp_hint_for(HostPlatform::Linux, None).is_none());
+        assert!(SystemInfo::cpu_temp_hint_for(HostPlatform::MacOs, None).is_none());
+    }
+
+    #[test]
+    fn cpu_temp_status_section_shows_temp_and_source() {
+        let info = SystemInfo {
+            cpu_temperature: Some(62.5),
+            cpu_temp_source: Some("librehardwaremonitor".to_string()),
+            ..SystemInfo::default()
+        };
+        let section = info.cpu_temp_status_section();
+        assert!(section.contains("62.5"), "got: {section}");
+        assert!(
+            section.contains("cpu_temp_source: librehardwaremonitor"),
+            "got: {section}"
+        );
+    }
+
+    #[test]
+    fn cpu_temp_status_section_shows_temp_without_source() {
+        let info = SystemInfo {
+            cpu_temperature: Some(55.0),
+            ..SystemInfo::default()
+        };
+        let section = info.cpu_temp_status_section();
+        assert!(section.contains("55.0"), "got: {section}");
+        assert!(!section.contains("cpu_temp_source"), "got: {section}");
+    }
+
+    #[test]
+    fn cpu_temp_status_section_shows_na_without_reading() {
+        let info = SystemInfo::default();
+        assert_eq!(info.cpu_temp_status_section(), "\nCPU temperature: n/a");
     }
 }

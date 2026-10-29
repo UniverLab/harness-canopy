@@ -113,6 +113,10 @@ fn create_system_dashboard_lines(
 ) -> Vec<Line<'static>> {
     let mut lines = vec![cpu_line(system_info, temperature_unit, theme)];
 
+    if let Some(hint) = cpu_temp_hint_line(system_info.cpu_temp_hint(), theme) {
+        lines.push(hint);
+    }
+
     if let Some(gpu) = gpu_line(system_info, temperature_unit, theme) {
         lines.push(gpu);
     }
@@ -152,6 +156,8 @@ fn cpu_line(
             format!(" {temp_str}"),
             Style::default().fg(temp_alert_color(temp_c, theme)),
         ));
+    } else {
+        cpu_spans.push(Span::styled(" n/a", Style::default().fg(theme.dim_text)));
     }
     if let Some(freq) = format_cpu_frequency(system_info.cpu_frequency_mhz) {
         cpu_spans.push(Span::styled(
@@ -166,6 +172,17 @@ fn cpu_line(
         ));
     }
     Line::from(cpu_spans)
+}
+
+/// Hint row naming the CPU-temperature fix, shown only when the snapshot
+/// carries a hint (no reading on a Windows/WSL host).
+fn cpu_temp_hint_line(hint: Option<&str>, theme: &Theme) -> Option<Line<'static>> {
+    hint.map(|text| {
+        Line::from(vec![Span::styled(
+            text.to_string(),
+            Style::default().fg(theme.dim_text),
+        )])
+    })
 }
 
 /// `gpu:` row, or `None` when there is no GPU data worth showing. The power
@@ -512,9 +529,12 @@ mod tests {
             rendered.len(),
             "height count must equal the rows actually rendered"
         );
+        // The hint row exists only where a fix can be named (Windows/WSL
+        // without a reading), so the base count is platform-dependent.
+        let expected = if info.cpu_temp_hint().is_some() { 4 } else { 3 };
         assert_eq!(
-            count, 3,
-            "no gpu/pwr/swap → only cpu/mem/load rows, got {count}"
+            count, expected,
+            "no gpu/pwr/swap → only cpu/mem/load rows plus a platform hint, got {count}"
         );
         assert!(
             !rendered.iter().any(|l| l.to_string().starts_with("pwr:")),
@@ -602,5 +622,65 @@ mod tests {
             !gpu_line.trim_end().ends_with("·"),
             "trailing separator when no watts, got: {gpu_line}"
         );
+    }
+
+    #[test]
+    fn cpu_line_shows_na_without_reading() {
+        let info = SystemInfo::default();
+        let line = cpu_line(&info, TemperatureUnit::Celsius, &Theme::classic()).to_string();
+        assert!(line.contains("n/a"), "got: {line}");
+    }
+
+    #[test]
+    fn cpu_line_hides_na_with_reading() {
+        let info = SystemInfo {
+            cpu_temperature: Some(45.0),
+            ..SystemInfo::default()
+        };
+        let line = cpu_line(&info, TemperatureUnit::Celsius, &Theme::classic()).to_string();
+        assert!(line.contains("45°C"), "got: {line}");
+        assert!(!line.contains("n/a"), "got: {line}");
+    }
+
+    #[test]
+    fn cpu_line_respects_fahrenheit_unit() {
+        let info = SystemInfo {
+            cpu_temperature: Some(40.0),
+            ..SystemInfo::default()
+        };
+        let line = cpu_line(&info, TemperatureUnit::Fahrenheit, &Theme::classic()).to_string();
+        assert!(line.contains("104°F"), "got: {line}");
+    }
+
+    #[test]
+    fn cpu_temp_hint_line_shows_given_hint() {
+        let line = cpu_temp_hint_line(
+            Some("run LibreHardwareMonitor (WMI on) to expose CPU temperature"),
+            &Theme::classic(),
+        )
+        .expect("hint row should render");
+        let text = line.to_string();
+        assert!(text.contains("LibreHardwareMonitor"), "got: {text}");
+    }
+
+    #[test]
+    fn cpu_temp_hint_line_hides_without_hint() {
+        assert!(cpu_temp_hint_line(None, &Theme::classic()).is_none());
+        // No hint on this host → no hint row in the rendered dashboard.
+        let info = SystemInfo::default();
+        if info.cpu_temp_hint().is_none() {
+            let lines = create_system_dashboard_lines(
+                &info,
+                TemperatureUnit::Celsius,
+                usize::MAX,
+                &Theme::classic(),
+            );
+            assert!(
+                !lines
+                    .iter()
+                    .any(|l| l.to_string().contains("LibreHardwareMonitor")),
+                "hint row must be absent without a hint"
+            );
+        }
     }
 }
