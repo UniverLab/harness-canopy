@@ -272,6 +272,41 @@ fn graph_live_mode_label(app: &App) -> Option<&'static str> {
     }
 }
 
+const PILL_MARGIN: u16 = 1;
+
+/// Right-aligned area for the Focus pill on the panel's first row, or `None`
+/// when the pill would overlap the `reserved` leading columns (session name)
+/// or does not fit at all. The pill is dropped, never the name.
+fn focus_pill_area(inner: Rect, reserved: u16, pill_width: u16) -> Option<Rect> {
+    if inner.width == 0 || pill_width == 0 {
+        return None;
+    }
+    let right_edge = inner.right().saturating_sub(PILL_MARGIN);
+    let x = right_edge.checked_sub(pill_width)?;
+    let left_limit = inner
+        .x
+        .saturating_add(1)
+        .saturating_add(reserved)
+        .saturating_add(PILL_MARGIN);
+    (x >= left_limit).then(|| Rect::new(x, inner.y, pill_width, 1))
+}
+
+/// Width of the first-row text the pill must not cover: the graph name (plus
+/// its status icon) in graph live mode, else the selected session id (plus
+/// its leading space in the title).
+fn first_row_reserved_width(app: &App) -> u16 {
+    let name_len = if graph_live_mode_label(app).is_some() {
+        app.graph_live_state
+            .as_ref()
+            .map_or(0, |state| state.graph_name.chars().count())
+    } else {
+        app.selected_id().chars().count()
+    };
+    u16::try_from(name_len)
+        .unwrap_or(u16::MAX)
+        .saturating_add(2)
+}
+
 fn render_focus_indicator(
     frame: &mut Frame,
     area: Rect,
@@ -296,21 +331,25 @@ fn render_focus_indicator(
         rail,
     );
 
-    if let Some(label) = label.filter(|_| inner.height > 0 && inner.width > 4) {
-        let text = label.trim();
-        let width = text.chars().count() as u16;
-        if width + 2 <= inner.width {
-            let pill_area = Rect::new(inner.x + 1, inner.y, width + 2, 1);
-            let pill = Span::styled(
-                format!(" {text} "),
-                Style::default()
-                    .fg(theme.accent_fg)
-                    .bg(theme.header_color)
-                    .add_modifier(Modifier::BOLD),
-            );
-            frame.render_widget(Paragraph::new(Line::from(pill)), pill_area);
-        }
+    let Some(label) = label else { return };
+    let text = label.trim();
+    if text.is_empty() || inner.height == 0 {
+        return;
     }
+    let pill_width = u16::try_from(text.chars().count())
+        .unwrap_or(u16::MAX)
+        .saturating_add(2);
+    let Some(pill_area) = focus_pill_area(inner, first_row_reserved_width(app), pill_width) else {
+        return;
+    };
+    let pill = Span::styled(
+        format!(" {text} "),
+        Style::default()
+            .fg(theme.accent_fg)
+            .bg(theme.header_color)
+            .add_modifier(Modifier::BOLD),
+    );
+    frame.render_widget(Paragraph::new(Line::from(pill)), pill_area);
 }
 
 fn show_home_fallback(app: &App) -> bool {
@@ -1089,6 +1128,95 @@ mod tests {
         .unwrap();
         app.focus = Focus::Agent;
         assert_eq!(panel_mode_label(&app), Some(" Focus "));
+    }
+
+    #[test]
+    fn focus_pill_area_right_aligns() {
+        assert_eq!(
+            focus_pill_area(Rect::new(0, 0, 40, 1), 10, 7),
+            Some(Rect::new(32, 0, 7, 1))
+        );
+    }
+
+    #[test]
+    fn focus_pill_area_drops_when_narrow() {
+        assert_eq!(focus_pill_area(Rect::new(0, 0, 16, 1), 10, 7), None);
+        assert_eq!(focus_pill_area(Rect::new(0, 0, 0, 0), 10, 7), None);
+    }
+
+    fn focus_pill_test_app() -> App {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let db = Arc::new(crate::db::Database::new(&path).unwrap());
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
+        app.focus = Focus::Agent;
+        app.projects
+            .push(crate::domain::project::Project::new("/tmp/proj"));
+        let agent = crate::tui::agent::InteractiveAgent::spawn_terminal(
+            "cat",
+            "/tmp",
+            80,
+            24,
+            Some("sess-abc"),
+            &[],
+            Color::White,
+        )
+        .unwrap();
+        app.interactive_agents.push(agent);
+        app.agents
+            .push(crate::tui::app::types::AgentEntry::Interactive(0));
+        app.selected = 0;
+        app.log_content = String::new();
+        std::mem::forget(data_dir);
+        app
+    }
+
+    fn focus_pill_first_row(width: u16) -> String {
+        let app = focus_pill_test_app();
+        let theme = Theme::modern();
+        let area = Rect::new(0, 0, width, 8);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_log_text(frame, area, area, &app);
+                render_focus_indicator(frame, area, area, &app, &theme, panel_mode_label(&app));
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..width).map(|x| buffer[(x, 0)].symbol()).collect()
+    }
+
+    #[test]
+    fn focus_pill_keeps_session_name_modern() {
+        let row0 = focus_pill_first_row(40);
+        // Skip the rail cell (a 3-byte `█`, so byte slicing would panic).
+        let after_rail: String = row0.chars().skip(1).collect();
+        assert!(
+            after_rail.starts_with("sess-abc"),
+            "session name must be intact, row was {row0:?}"
+        );
+        assert!(row0.contains(" Focus "), "pill must show, row was {row0:?}");
+        assert!(
+            row0.find("sess-abc").unwrap() + 8 < row0.find("Focus").unwrap(),
+            "pill must sit right of the name, row was {row0:?}"
+        );
+    }
+
+    #[test]
+    fn focus_pill_dropped_when_narrow_modern() {
+        let row0 = focus_pill_first_row(14);
+        assert!(
+            row0.contains("sess-abc") && !row0.contains("Foc"),
+            "name stays, pill is dropped, row was {row0:?}"
+        );
     }
 
     #[test]
