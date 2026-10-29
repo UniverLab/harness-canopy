@@ -20,6 +20,7 @@ mod project_filter;
 mod project_graph;
 mod project_nav;
 mod refresh;
+mod refresh_cadence;
 mod refresh_graph_whimsg;
 pub(crate) mod session_hub;
 mod sessions;
@@ -70,6 +71,7 @@ pub mod terminal_search;
 pub mod types;
 pub mod utils;
 
+pub(crate) use refresh_cadence::SlowFingerprint;
 pub(crate) use session_resume::build_resumed_session_args;
 pub use terminal_search::TerminalSearch;
 pub(crate) use types::ContextTransferSource;

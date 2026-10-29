@@ -4,6 +4,7 @@ pub(crate) mod brand;
 pub(crate) mod dialogs;
 mod footer;
 mod header;
+pub(crate) use header::{header_frame_id, HeaderFrameId};
 mod panel;
 mod sidebar;
 mod system_dashboard;
@@ -356,6 +357,39 @@ fn draw_ctrl_c_notice(frame: &mut Frame, body: Rect, app: &App, theme: &Theme) {
 /// the user hid it for the session or `tui.atmosphere = false`.
 pub(crate) fn atmosphere_active(app: &App) -> bool {
     !app.atmosphere_hidden && app.tui_settings.atmosphere
+}
+
+/// Master animation switch: either animation toggle on means animated
+/// frames are on screen. Both off freezes every animation source (FR5) —
+/// see [`header_millis`], [`effective_animation_tick`], and the
+/// brain/atmosphere gates.
+pub(crate) fn animations_enabled(app: &App) -> bool {
+    app.tui_settings.atmosphere || app.tui_settings.brians_brain
+}
+
+/// Wall-clock millis the header animates with — 0 when both animation
+/// toggles are off, freezing the spinner on its first frame, the sweep at
+/// t=0, and the stopped-daemon block solid (no blink).
+pub(crate) fn header_millis(app: &App) -> u128 {
+    if animations_enabled(app) {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    } else {
+        0
+    }
+}
+
+/// Animation tick the pulse indicators render with — frozen at 0 when both
+/// animation toggles are off, so they hold a static color instead of
+/// breathing or blinking.
+pub(crate) fn effective_animation_tick(app: &App) -> u32 {
+    if animations_enabled(app) {
+        app.animation_tick
+    } else {
+        0
+    }
 }
 
 /// Top-level overlays rendered last so they appear above all content.

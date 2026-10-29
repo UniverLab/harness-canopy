@@ -210,10 +210,13 @@ impl App {
         }
     }
 
-    pub(super) fn dismiss_copied(&mut self) {
+    /// True when the badge cleared this tick (a visible change).
+    pub(super) fn dismiss_copied(&mut self) -> bool {
         if self.show_copied && self.copied_at.elapsed() > Duration::from_secs(2) {
             self.show_copied = false;
+            return true;
         }
+        false
     }
 
     fn move_interactive_selection(&mut self, forward: bool) {

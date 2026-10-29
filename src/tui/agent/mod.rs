@@ -582,6 +582,11 @@ impl InteractiveAgent {
         self.pid
     }
 
+    /// Last applied hub output sequence, for the TUI's dirty tracking.
+    pub(crate) fn output_seq(&self) -> u64 {
+        self.last_seq.load(Ordering::Relaxed)
+    }
+
     /// Send raw bytes to the agent's stdin as an `input` frame.
     pub fn write_to_pty(&self, data: &[u8]) -> Result<()> {
         #[cfg(test)]

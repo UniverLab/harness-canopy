@@ -1,5 +1,6 @@
 use super::*;
 use crate::tui::agent::InteractiveAgent;
+use crate::tui::ui::effective_animation_tick;
 
 pub(super) fn agent_section_border_style(
     app: &App,
@@ -245,7 +246,7 @@ pub(super) fn agent_card_meta<'a>(
                         &agent.status,
                         agent.has_recent_activity(),
                         false,
-                        app.animation_tick,
+                        effective_animation_tick(app),
                     ),
                 ),
                 agent_type: "pty",
@@ -269,7 +270,7 @@ pub(super) fn agent_card_meta<'a>(
                         &agent.status,
                         false,
                         agent.foreground_app_active(),
-                        app.animation_tick,
+                        effective_animation_tick(app),
                     ),
                 ),
                 agent_type: "term",
@@ -405,7 +406,7 @@ pub(super) fn effective_status_color(
         return base;
     }
 
-    pulse(super::STATUS_WAIT_ON, app.animation_tick)
+    pulse(super::STATUS_WAIT_ON, effective_animation_tick(app))
 }
 
 pub(super) fn agent_is_waiting(agent: &AgentEntry, app: &App, selected: bool) -> bool {

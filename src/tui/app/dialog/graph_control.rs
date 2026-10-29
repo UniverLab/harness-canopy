@@ -218,17 +218,18 @@ impl App {
 
     /// Apply a finished background graph-action dispatch, if any. Called from
     /// the tick graph; never blocks (mirrors `App::poll_playground_search`).
-    pub(crate) fn poll_graph_action(&mut self) {
+    /// True when an outcome landed this tick (a visible change).
+    pub(crate) fn poll_graph_action(&mut self) -> bool {
         let Some(rx) = &self.graph_action_rx else {
-            return;
+            return false;
         };
         let outcome = match rx.try_recv() {
             Ok(outcome) => outcome,
-            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.graph_action_pending = false;
                 self.graph_action_rx = None;
-                return;
+                return false;
             }
         };
         self.graph_action_pending = false;
@@ -242,16 +243,19 @@ impl App {
         if !is_error {
             let _ = self.refresh_graphs();
         }
+        true
     }
 
     /// Clear an old graph-action result banner once its TTL has elapsed
-    /// (mirrors `App::dismiss_copied`).
-    pub(crate) fn dismiss_graph_action_message(&mut self) {
+    /// (mirrors `App::dismiss_copied`). True when it cleared this tick.
+    pub(crate) fn dismiss_graph_action_message(&mut self) -> bool {
         if self.graph_action_message.is_some()
             && self.graph_action_message_at.elapsed() > GRAPH_ACTION_MESSAGE_TTL
         {
             self.graph_action_message = None;
+            return true;
         }
+        false
     }
 
     /// Run the selected graph (`r`) — valid for a `draft`, `completed`, or

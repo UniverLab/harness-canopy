@@ -524,6 +524,11 @@ pub struct App {
     pub(crate) prev_active_run_ids: std::collections::HashSet<String>,
     /// Tick counter for animation (increments every refresh)
     pub(crate) animation_tick: u32,
+    /// When the throttled slow refresh last ran (FR2: at most once per second).
+    pub(crate) last_slow_refresh: std::time::Instant,
+    /// A pushed change (hub membership, reconnect) armed an immediate slow
+    /// refresh on the next tick, bypassing the one-second cadence.
+    pub(crate) slow_force: bool,
     /// Preferred unit for sysinfo temperature labels.
     pub(crate) temperature_unit: crate::domain::canopy_config::TemperatureUnit,
     /// Resolved TUI color theme (T6), read from config once at startup.

@@ -182,7 +182,8 @@ impl App {
 
     /// Drop the shelf toast once its TTL passed (the draw side checks the
     /// age too, so a paused refresh loop never freezes a toast on screen).
-    pub(crate) fn dismiss_shelf_toast(&mut self) {
+    /// True when the toast cleared this tick (a visible change).
+    pub(crate) fn dismiss_shelf_toast(&mut self) -> bool {
         let expired = self
             .hub
             .shelf
@@ -192,6 +193,7 @@ impl App {
         if expired {
             self.hub.shelf.toast = None;
         }
+        expired
     }
 
     /// Replace the list with a freshly merged one, sorted and re-clamped.

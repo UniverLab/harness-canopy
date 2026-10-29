@@ -3,88 +3,13 @@
 use super::*;
 
 impl App {
+    /// Full refresh: the fast tick plus an unconditional slow refresh. Used
+    /// for the initial load (`App::new`); the event loop calls
+    /// [`App::refresh_fast`] every tick and [`App::refresh_slow`] on its
+    /// one-second cadence instead (FR2).
     pub fn refresh(&mut self) -> Result<()> {
-        self.poll_session_hub();
-        self.animation_tick = self.animation_tick.wrapping_add(1);
-        // The project type-ahead only ever applies to the Knowledge layer's
-        // list, so it is dropped here — the one place every way of leaving
-        // that layer (arrows, F2, click, Home) passes through.
-        self.sync_project_filter_to_layer();
-        if self.update_available.is_none() {
-            self.update_available = crate::autoupdate::update_available_tag();
-        }
-        self.refresh_daemon_status();
-        self.refresh_agents()?;
-        self.refresh_projects()?;
-        self.refresh_graphs()?;
-        // CT14: correct stale sidebar indices on the existing refresh tick
-        // (pure state, no extra redraw) so navigation works after data
-        // shrinks between ticks.
-        self.normalize_automation_kind();
-        self.normalize_agent_section_focus();
-        self.clamp_sidebar_selection();
-        self.refresh_project_graph().ok();
-        self.refresh_rag_state()?;
-        self.refresh_active_runs()?;
-        self.poll_interactive_agents();
-        self.poll_terminal_agents();
-        self.tick_banner_animation();
-        self.ensure_sidebar_brain();
-        self.refresh_log();
-        self.auto_hide_sidebar();
-        self.system_monitor_active
-            .store(self.sidebar_visible, Ordering::Relaxed);
-        self.dismiss_copied();
-        self.update_whimsg_context();
-        self.tick_atmosphere();
-        self.tick_missions()?;
-        self.resize_interactive_agents();
-        self.poll_playground_search();
-        self.refresh_playground_search()?;
-        self.poll_graph_action();
-        self.poll_node_tail_dialog();
-        self.dismiss_graph_action_message();
-        // The Shelf tab's `📎 …` toast holds for 5 s, then goes.
-        self.dismiss_shelf_toast();
-        // CT30: apply any finished Crews-face fetch/write, then start a new
-        // one if the face is visible and its throttle allows (D5). Runs
-        // before the panel-face tick so the recomputation sees current data.
-        self.poll_crews_face();
-        self.poll_crews_write();
-        self.refresh_crews_face();
-        // CM51 (D4): a `config set` from anywhere, or a hand edit the
-        // daemon's watcher saw, publishes a settings revision. When it moves,
-        // re-read the settings this TUI renders — no restart needed.
-        self.poll_settings_revision();
-        // CT31: apply any finished Settings-tab fetch/write, then start a new
-        // one if the hub's Settings tab is visible and the throttle allows.
-        self.poll_settings_rows();
-        self.poll_settings_write();
-        self.refresh_settings_rows();
-        self.dismiss_settings_message();
-        // The Remote tab's cached status, its writes and its device flow;
-        // the status also refreshes off-tab so the sidebar indicator stays
-        // current.
-        self.poll_remote_status();
-        self.poll_remote_write();
-        self.poll_remote_login();
-        self.refresh_remote_status();
-        self.dismiss_remote_message();
-        // CT1 multi-face panel: recompute the visible face from the
-        // switching rule after every data refresh above has run.
-        self.tick_panel_face();
-        if let Some(dialog) = self.simple_prompt_dialog.as_mut() {
-            dialog.tick_at_picker();
-        }
-
-        // Non-blocking check for updated system info from background thread
-        while let Ok(info) = self.system_info_rx.try_recv() {
-            self.system_info_target = info;
-            self.last_system_update = std::time::Instant::now();
-        }
-        self.interpolate_system_info();
-
-        Ok(())
+        let _ = self.refresh_fast();
+        self.refresh_slow()
     }
 
     /// CM51 (D4): re-read the settings this TUI renders when the daemon

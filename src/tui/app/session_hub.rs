@@ -128,6 +128,8 @@ impl App {
             if let Some(previous) = self.session_hub.client.take() {
                 previous.close();
             }
+            // The notice names the restart; the sidebar rebuilds next tick.
+            self.slow_force = true;
             return false;
         }
         set_active(
@@ -139,17 +141,24 @@ impl App {
         self.session_hub.backoff = INITIAL_BACKOFF;
         self.session_hub.next_retry_at = None;
         self.hub_notice = None;
+        // Adopting clears the hub notice, so the sidebar rebuilds next tick.
+        self.slow_force = true;
         true
     }
 
     /// Poll the hub connection: dispatch frames, reconnect with backoff.
-    /// Runs first on every refresh tick.
-    pub(crate) fn poll_session_hub(&mut self) {
+    /// Runs first on every refresh tick. True when the poll produced a
+    /// visible change that needs a redraw.
+    pub(crate) fn poll_session_hub(&mut self) -> bool {
         if self.session_hub.client.is_none() {
             self.retry_hub_connect();
-            return;
+            // A reconnect that changed membership (or the hub notice) armed
+            // a slow refresh; report it so this tick redraws with fresh data.
+            // (`slow_force` never survives a tick — the slow refresh clears
+            // it — so it can only have been set by this retry.)
+            return self.slow_force;
         }
-        self.dispatch_hub_frames();
+        self.dispatch_hub_frames()
     }
 
     /// Close the hub WebSocket without touching the sessions.
@@ -157,8 +166,11 @@ impl App {
         self.session_hub.close();
     }
 
-    /// Drain one tick's worth of hub frames.
-    fn dispatch_hub_frames(&mut self) {
+    /// Drain one tick's worth of hub frames. True unless only `Unknown`
+    /// frames arrived (or none did): anything else — membership, exits,
+    /// shelf changes, errors — is a visible change.
+    fn dispatch_hub_frames(&mut self) -> bool {
+        let mut dirty = false;
         loop {
             let event = self
                 .session_hub
@@ -166,13 +178,18 @@ impl App {
                 .as_ref()
                 .and_then(|client| client.try_recv());
             let Some(event) = event else {
-                return;
+                return dirty;
             };
             match event {
-                HubRecv::Frame(frame) => self.handle_hub_frame(frame),
+                HubRecv::Frame(frame) => {
+                    if !matches!(frame, HostFrame::Unknown) {
+                        dirty = true;
+                    }
+                    self.handle_hub_frame(frame);
+                }
                 HubRecv::Closed => {
                     self.note_hub_dropped();
-                    return;
+                    return true;
                 }
             }
         }
@@ -297,6 +314,7 @@ impl App {
         self.drop_gone_hub_sessions(&items);
         self.attach_new_hub_sessions(&items);
         let _ = self.refresh_agents();
+        self.slow_force = true;
     }
 
     /// Remove sidebar sessions the hub no longer has.
@@ -360,6 +378,7 @@ impl App {
                 } else {
                     self.interactive_agents.push(agent);
                 }
+                self.slow_force = true;
             }
             Err(e) => tracing::warn!("Cannot attach to hub session '{}': {e}", item.name),
         }
@@ -384,6 +403,7 @@ impl App {
         for name in &names {
             self.dissolve_groups_for_session(name);
         }
+        self.slow_force = true;
     }
 
     /// Record an `exited` frame from the control connection. A natural exit

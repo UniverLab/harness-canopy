@@ -137,6 +137,8 @@ macro_rules! app_new_fields {
             notification_service: Arc::new(DefaultNotificationService),
             prev_active_run_ids: std::collections::HashSet::new(),
             animation_tick: 0,
+            last_slow_refresh: std::time::Instant::now(),
+            slow_force: false,
             temperature_unit: $canopy_config.temperature_unit,
             theme: crate::tui::ui::theme::Theme::resolve(&$canopy_config.theme),
             suggestion_picker: None,

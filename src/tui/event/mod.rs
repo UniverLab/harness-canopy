@@ -29,21 +29,37 @@ use rag_transfer::handle_rag_transfer_key;
 
 type Terminal = ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>;
 
-/// Main event loop: draw → poll events → refresh data.
+/// Main event loop: poll events → refresh → draw only when dirty.
+///
+/// A tick redraws only when something visible changed (FR1): input, PTY
+/// output, a slow-refresh data change, or an animation frame on screen —
+/// see [`redraw::tick`]. The tick cadence is unchanged, so timers and PTY
+/// latency behave exactly as before.
 pub fn run_event_graph(terminal: &mut Terminal, app: &mut App) -> Result<()> {
+    let mut tick_state = redraw::TickState::default();
+    let mut first = true;
     while app.running {
-        terminal.draw(|frame| ui::draw(frame, app))?;
-
-        if event::poll(tick_duration(app))? {
+        let input = if event::poll(tick_duration(app))? {
             drain_pending_events(app)?;
-        }
+            true
+        } else {
+            false
+        };
 
         #[cfg(unix)]
         if crate::tui::agent::pty::SIGHUP_RECEIVED.load(std::sync::atomic::Ordering::Relaxed) {
             app.running = false;
         }
 
-        app.refresh()?;
+        let (dirty, slow_ran) = redraw::tick(app, &mut tick_state, input || first)?;
+        first = false;
+        redraw::perf_tick(redraw::PerfKind {
+            drawn: dirty,
+            slow: slow_ran,
+        });
+        if dirty {
+            terminal.draw(|frame| ui::draw(frame, app))?;
+        }
     }
 
     app.cleanup();
@@ -136,6 +152,7 @@ mod paste;
 mod project_filter;
 mod prompt_template;
 mod rag_transfer;
+mod redraw;
 mod scroll;
 mod search_picker;
 mod terminal_warp;

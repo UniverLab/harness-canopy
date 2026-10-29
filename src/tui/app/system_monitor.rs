@@ -142,6 +142,67 @@ pub(crate) fn blend_system_info(
     current.power_source = target.power_source;
 }
 
+/// True while the displayed system snapshot is still blending toward its
+/// target — i.e. the dashboard would visibly move on the next draw.
+/// Integers snap in [`blend_system_info`], so only the lerped floats need an
+/// epsilon (invisible below it); everything else compares exactly.
+pub(crate) fn system_settling(
+    current: &crate::system::SystemInfo,
+    target: &crate::system::SystemInfo,
+) -> bool {
+    (current.cpu_usage - target.cpu_usage).abs() > 0.05
+        || current.cpu_cores != target.cpu_cores
+        || opt_f32_settling(current.cpu_temperature, target.cpu_temperature)
+        || current.cpu_frequency_mhz != target.cpu_frequency_mhz
+        || current.memory_used != target.memory_used
+        || current.memory_total != target.memory_total
+        || current.system_uptime != target.system_uptime
+        || current.process_count != target.process_count
+        || current.swap_used != target.swap_used
+        || current.swap_total != target.swap_total
+        || opt_f64_settling(current.load_average, target.load_average)
+        || gpu_settling(current.gpu_info.as_ref(), target.gpu_info.as_ref())
+        || opt_f32_settling(current.power_watts, target.power_watts)
+        || current.power_limit_watts != target.power_limit_watts
+        || current.power_source != target.power_source
+}
+
+fn opt_f32_settling(current: Option<f32>, target: Option<f32>) -> bool {
+    match (current, target) {
+        (Some(a), Some(b)) => (a - b).abs() > 0.05,
+        (None, None) => false,
+        _ => true,
+    }
+}
+
+fn opt_f64_settling(current: Option<f64>, target: Option<f64>) -> bool {
+    match (current, target) {
+        (Some(a), Some(b)) => (a - b).abs() > 0.01,
+        (None, None) => false,
+        _ => true,
+    }
+}
+
+fn gpu_settling(
+    current: Option<&crate::system::GpuInfo>,
+    target: Option<&crate::system::GpuInfo>,
+) -> bool {
+    match (current, target) {
+        (Some(a), Some(b)) => {
+            a.name != b.name
+                || a.vendor != b.vendor
+                || opt_f32_settling(a.usage, b.usage)
+                || opt_f32_settling(a.temperature, b.temperature)
+                || a.vram_used != b.vram_used
+                || a.vram_total != b.vram_total
+                || opt_f32_settling(a.power_watts, b.power_watts)
+                || a.power_limit_watts != b.power_limit_watts
+        }
+        (None, None) => false,
+        _ => true,
+    }
+}
+
 // ── Playground vector search (worker-thread body) ─────────────
 
 /// Worker-thread body of the playground search (B23): loads/uses an
