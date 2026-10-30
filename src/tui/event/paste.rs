@@ -138,6 +138,19 @@ fn attach_dropped_images(app: &mut App, paths: &[std::path::PathBuf]) {
             .and_then(|ext| ext.to_str())
             .unwrap_or("png")
             .to_ascii_lowercase();
+        // Refuse an over-cap file before reading it: `ShelfStore::insert`
+        // checks the length first for the same reason, and a dropped file of
+        // any size must never be pulled into memory whole just to reject it.
+        if let Ok(len) = std::fs::metadata(path).map(|meta| meta.len()) {
+            if len > crate::sessions::shelf::MAX_FILE_BYTES {
+                dialog.attach_error = Some(format!(
+                    "{} is {len} bytes; the shelf accepts at most {}",
+                    path.display(),
+                    crate::sessions::shelf::MAX_FILE_BYTES
+                ));
+                break;
+            }
+        }
         let bytes = match std::fs::read(path) {
             Ok(bytes) => bytes,
             Err(e) => {
@@ -440,6 +453,41 @@ mod tests {
         let dialog = app.simple_prompt_dialog.as_ref().unwrap();
         assert_eq!(dialog.get_section_content("instruction_1"), "hello");
         assert_eq!(dialog.attachments.len(), 1);
+    }
+
+    /// An over-cap dropped image is refused with an inline error: nothing
+    /// attaches and nothing is inserted as text either (the paste was an
+    /// image drop, not text).
+    #[test]
+    fn prompt_builder_oversize_drop_is_rejected_with_an_inline_error() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        app.focus = Focus::PromptTemplateDialog;
+        app.simple_prompt_dialog = Some(crate::tui::app::dialog::SimplePromptDialog::new());
+
+        // Sparse: the length trips the cap without writing 20 MiB.
+        let big = data_dir.path().join("big.png");
+        let file = std::fs::File::create(&big).expect("create fixture");
+        file.set_len(crate::sessions::shelf::MAX_FILE_BYTES + 1)
+            .expect("stretch fixture");
+        drop(file);
+
+        handle_paste(&mut app, &big.to_string_lossy());
+
+        let dialog = app.simple_prompt_dialog.as_ref().unwrap();
+        assert!(dialog.attachments.is_empty());
+        assert_eq!(dialog.get_section_content("instruction_1"), "");
+        let error = dialog.attach_error.as_deref().expect("inline error");
+        assert!(
+            error.contains(&crate::sessions::shelf::MAX_FILE_BYTES.to_string()),
+            "names the cap: {error}"
+        );
     }
 
     /// A paste of non-image paths stays text: only all-image pastes attach.

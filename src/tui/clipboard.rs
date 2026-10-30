@@ -101,7 +101,8 @@ fn candidate_to_path_impl(candidate: &str, wsl: bool) -> Option<PathBuf> {
         return None;
     }
     if let Some(path) = strip_file_uri(candidate) {
-        return Some(PathBuf::from(path));
+        let path = PathBuf::from(path);
+        return path.is_absolute().then_some(path);
     }
     if let Some(path) = map_windows_path(candidate, wsl) {
         return Some(path);
@@ -183,6 +184,8 @@ fn hex_value(byte: u8) -> Option<u8> {
 }
 
 /// Map `C:\…` / `C:/…` onto `/mnt/c/…` under WSL; `None` elsewhere.
+/// Drive-relative `C:foo` (no separator after the colon) is not absolute
+/// and never maps.
 fn map_windows_path(candidate: &str, wsl: bool) -> Option<PathBuf> {
     if !wsl {
         return None;
@@ -190,6 +193,9 @@ fn map_windows_path(candidate: &str, wsl: bool) -> Option<PathBuf> {
     let bytes = candidate.as_bytes();
     let drive = *bytes.first()?;
     if !drive.is_ascii_alphabetic() || bytes.get(1) != Some(&b':') {
+        return None;
+    }
+    if !matches!(bytes.get(2), Some(b'\\') | Some(b'/')) {
         return None;
     }
     let unix = candidate[2..]
@@ -316,5 +322,22 @@ mod tests {
             Some(PathBuf::from("/mnt/d/shots/a.JPG"))
         );
         assert_eq!(candidate_to_path_impl("C:\\Users\\u\\pic.png", false), None);
+    }
+
+    #[test]
+    fn drive_relative_windows_path_never_maps() {
+        assert_eq!(candidate_to_path_impl("C:pic.png", true), None);
+        assert_eq!(candidate_to_path_impl("C:", true), None);
+        assert!(parse_image_path_paste("C:pic.png").is_empty());
+    }
+
+    #[test]
+    fn relative_file_uri_stays_text() {
+        // A `file://` URI without an absolute path is malformed: rejected at
+        // the candidate level, so it can never attach even when a relative
+        // file of that name exists under the working directory.
+        assert_eq!(candidate_to_path("file://relative/shot.png"), None);
+        assert_eq!(candidate_to_path("file://localhostrelative/shot.png"), None);
+        assert!(parse_image_path_paste("file://relative/shot.png").is_empty());
     }
 }

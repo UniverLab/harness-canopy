@@ -87,6 +87,36 @@ fn golden_attachments_append_last_as_escaped_image_paths() {
 }
 
 #[test]
+fn attachments_stay_last_behind_resolved_resources() {
+    // Resolved resources replace the raw section and close the body — the
+    // attachments block must still render after them, not before.
+    let draft = PromptDraft {
+        sections: vec![DraftSection {
+            title: "instruction_1".to_string(),
+            content: "do it".to_string(),
+        }],
+        attachments: vec!["/home/u/shots/a.png".to_string()],
+        ..PromptDraft::default()
+    };
+    let ctx = PromptContext {
+        resources: vec!["path: /golden/file\nkind: file".to_string()],
+        ..PromptContext::default()
+    };
+    let text = build_prompt_text(&draft, &ctx).expect("builds");
+    let resources_at = text
+        .find("# [RESOURCES]")
+        .expect("resolved resources render");
+    let attachments_at = text
+        .find("# [ATTACHMENTS]: Images")
+        .expect("attachments render");
+    assert!(
+        attachments_at > resources_at,
+        "attachments must close the body: {text}"
+    );
+    assert!(text.contains("<image path=\"/home/u/shots/a.png\"/>"));
+}
+
+#[test]
 fn unknown_preset_names_the_choice() {
     let draft = PromptDraft {
         preset: Some("no-such-preset".to_string()),

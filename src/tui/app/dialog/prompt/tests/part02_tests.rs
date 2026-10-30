@@ -217,6 +217,30 @@ fn attachments_survive_a_persisted_state_round_trip() {
     assert!(legacy.attachments.is_empty());
 }
 
+#[test]
+fn built_prompt_carries_the_chips_as_the_trailing_attachments_block() {
+    // The send path (immediate and scheduled alike) resolves through
+    // `build_prompt_with_resolved_resources`: the chips must surface as the
+    // trailing `# [ATTACHMENTS]` block, and an empty chip row must not.
+    let temp = tempdir().unwrap();
+    let db = Database::new(&temp.path().join("canopy.db")).unwrap();
+    let workdir = temp.path().to_path_buf();
+
+    let dialog = dialog_with_chips();
+    let out = dialog
+        .build_prompt_with_resolved_resources(&db, &workdir)
+        .unwrap();
+    assert!(out.contains("# [ATTACHMENTS]: Images"), "{out}");
+    assert!(out.contains("<image path=\"/shelf/aaa\"/>"), "{out}");
+    assert!(out.contains("<image path=\"/shelf/bbb\"/>"), "{out}");
+
+    let plain = SimplePromptDialog::new();
+    let out = plain
+        .build_prompt_with_resolved_resources(&db, &workdir)
+        .unwrap();
+    assert!(!out.contains("[ATTACHMENTS]"), "{out}");
+}
+
 // ── send display ─────────────────────────────────────────────
 
 #[test]
