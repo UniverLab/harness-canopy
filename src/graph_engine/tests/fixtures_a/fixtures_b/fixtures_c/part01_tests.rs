@@ -682,8 +682,9 @@ async fn dirty_start_check_refusal_names_blocking_predecessor_when_next_resumes_
     .unwrap();
     insert_run_row(&db, &graph_id, "spec-a", "node-a", 1, t1.timestamp()).unwrap();
 
-    // Spec B: Failed in G2 (fixture graph), completed_at T2, end_dirty 2,
-    // run row in G2 — it is the next spec and resumes its own dirt.
+    // Spec B: Failed in the fixture graph, completed_at T2, end_dirty 2,
+    // run row in the fixture graph — it is the next spec and resumes its
+    // own dirt.
     let mut spec_b =
         dirty_predecessor_spec_named("spec-b", "Beta", &workdir, GraphSpecStatus::Failed);
     spec_b.graph_id = Some(graph_id.clone());

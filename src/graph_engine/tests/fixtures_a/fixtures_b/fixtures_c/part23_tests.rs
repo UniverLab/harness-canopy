@@ -1,13 +1,17 @@
 //! Part 23 of graph-engine `tests`: recovering a spec that was interrupted
 //! mid-run (a WSL shutdown, a killed daemon). The dirt on the workdir is the
-//! resuming spec's own work, and a *skipped* spec's stale record from another
-//! graph must never make that ambiguous (FR1).
+//! resuming spec's own work, and a *skipped* spec's stale record — from
+//! another graph, a standalone row, or this graph itself — must never make
+//! that ambiguous (FR1).
 use super::*;
 
 /// FR1: a spec left `Skipped` never ran, so whatever its row recorded about
-/// the workdir is not "previous work" that blocks. Here the skipped record
-/// even names the file that is still dirty — the exact shape that refused the
+/// the workdir is not "previous work" that blocks. Here the skipped records
+/// even name the file that is still dirty — the exact shape that refused the
 /// real recovery ("spec 'update zstd…' (graph 'standalone', skipped …)").
+/// Two rows pin the two filters: a standalone one (excluded by graph scope)
+/// and one bound to this graph (excluded by status alone — without the
+/// status filter this test refuses).
 #[tokio::test]
 async fn dirty_start_check_ignores_a_skipped_specs_stale_dirty_record() {
     let (_dir, db, engine, graph_id, _spec_id) = graph_fixture().unwrap();
@@ -23,6 +27,17 @@ async fn dirty_start_check_ignores_a_skipped_specs_stale_dirty_record() {
     ))
     .unwrap();
     db.set_graph_spec_end_state("spec-skip", Some(1), &["x.txt".to_string()])
+        .unwrap();
+    let mut skip_same = dirty_predecessor_spec_named(
+        "spec-skip-same",
+        "SkippedSameGraph",
+        &workdir,
+        GraphSpecStatus::Skipped,
+    );
+    skip_same.graph_id = Some(graph_id.clone());
+    skip_same.position = 2;
+    db.insert_graph_spec(&skip_same).unwrap();
+    db.set_graph_spec_end_state("spec-skip-same", Some(1), &["x.txt".to_string()])
         .unwrap();
     // The spec being resumed: its own latest run recorded x.txt and y.txt.
     db.insert_graph_spec(&dirty_predecessor_spec_named(
@@ -62,6 +77,11 @@ async fn dirty_start_check_ignores_a_skipped_specs_stale_dirty_record() {
     assert!(
         !notice.message.contains("SkippedElsewhere"),
         "the skipped spec must not be named as a blocker: {}",
+        notice.message
+    );
+    assert!(
+        !notice.message.contains("SkippedSameGraph"),
+        "the same-graph skipped spec must not be named as a blocker: {}",
         notice.message
     );
     assert!(
