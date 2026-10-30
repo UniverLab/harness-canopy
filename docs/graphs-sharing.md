@@ -345,9 +345,10 @@ The fetched document goes through the same validation as
 [`validate`](#validate-before-you-share): any problem aborts the
 install and lists every problem. Its bundled presets (version 6) are
 written to `~/.canopy/prompts/` — a file already there with identical
-content is a no-op, while one with different content aborts the whole
-install before anything is written, naming the file and the source
-that owns it, unless `--overwrite-presets` (or `--replace`) is passed.
+content is a no-op, while one with different content owned by another
+source aborts the whole install before anything is written, naming the
+file and the source that owns it, unless `--overwrite-presets` (or
+`--replace`) is passed.
 Every preset written is stamped with the ref it came from, so a later
 install from another source ships the same name without silently
 taking it: reinstalling from the same source updates in place, while a

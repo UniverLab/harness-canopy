@@ -72,7 +72,8 @@ Only after the confirmation is the document written to
 from (`slug`, `owner/repo/slug`, or `draft:<id>`). Its bundled `preset`
 is installed as `~/.canopy/prompts/<preset.name>.md` with the same
 no-silent-overwrite rule as a graph's presets: a file owned by another
-source aborts the install unless `--overwrite-presets` is given. A
+source aborts the install unless `--overwrite-presets` (or `--replace`)
+is given. A
 graph document fetched from a node endpoint is refused, and a 410 says
 `<name> was removed from the catalogue after a community report:
 <reason> (<issue>)`.
@@ -83,7 +84,9 @@ silently replaced. `--as <local-name>` installs under another local
 name instead (the bundled preset is renamed with it: a `<doc>-…`
 preset keeps its suffix under the new name, any other preset becomes
 `<as>-<preset>`, with the config's `prompt_preset` rewritten to
-match), or `--replace` overwrites. Reinstalling from the same source
+match), or `--replace` overwrites. `--as` takes a plain slug
+(lowercase letters, digits, `-`); anything else is refused before
+anything is fetched. Reinstalling from the same source
 updates in place, and an installed copy still overrides a builtin of
 the same name.
 
@@ -103,7 +106,8 @@ canopy node list --json
 
 The list shows installed copies and the builtins embedded in the binary,
 each marked `installed` or `builtin`, with the catalogue entry that
-installed it next to the name. The builtins are `implementer`,
+installed it next to the name (`catalogue_source` in `--json`; a
+hand-written copy shows `local`). The builtins are `implementer`,
 `cargo-gates`, `reviewer-committer`, `commit-check`, `resilience`, and
 `ensemble-proposers`; they resolve offline, with no install step. An
 installed copy of a builtin's name wins over the builtin.
