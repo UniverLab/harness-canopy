@@ -72,20 +72,28 @@ async fn install(
     overwrite_presets: Option<bool>,
     accept: Option<bool>,
 ) -> rmcp::model::CallToolResult {
-    call_graph_action(
+    install_params(
         handler,
-        "graph_edit",
-        "install",
-        params_id(GraphInstallParams {
+        GraphInstallParams {
             reference: reference.to_string(),
             workdir: workdir.to_string(),
             name,
+            as_prefix: None,
+            replace: None,
             overwrite_presets,
             accept,
-        }),
+        },
     )
     .await
-    .unwrap()
+}
+
+async fn install_params(
+    handler: &TaskTriggerHandler,
+    params: GraphInstallParams,
+) -> rmcp::model::CallToolResult {
+    call_graph_action(handler, "graph_edit", "install", params_id(params))
+        .await
+        .unwrap()
 }
 
 /// An install that already carries the user's acceptance — what every
@@ -565,4 +573,121 @@ async fn install_draft_accept_without_a_parked_body_reports_it_gone() {
         "{}",
         text(&installed)
     );
+}
+
+fn graph_doc_with_preset(name: &str, content: &str) -> serde_json::Value {
+    let mut doc = install_doc();
+    doc["nodes"][0]["config"]["prompt_preset"] = serde_json::json!("custom");
+    doc["prompt_presets"] = serde_json::json!([
+        {"name": "custom", "content": content},
+    ]);
+    doc["name"] = serde_json::json!(name);
+    doc
+}
+
+/// A graph install whose bundled preset is owned by another source refuses
+/// before writing anything: no graph is created and no preset is touched.
+#[tokio::test]
+async fn install_preset_owned_by_another_source_refuses_and_writes_nothing() {
+    let (dir, db, handler) = endpoint_test_handler();
+    let workdir = dir.path().to_string_lossy().to_string();
+    let stub = StubCatalogue::start(
+        [
+            (
+                "/i/graph/my-graph".to_string(),
+                StubRoute::ok(&graph_doc_with_preset("shared", "official text").to_string()),
+            ),
+            (
+                "/i/alice/lab/graph/my-graph".to_string(),
+                StubRoute::ok(&graph_doc_with_preset("shared", "alice text").to_string()),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    let (_home, _guard, prompts) = install_home(&stub.base_url());
+
+    let installed = install_accepted(&handler, "my-graph", &workdir, None, None).await;
+    assert!(!is_err(&installed), "{}", text(&installed));
+    assert_eq!(db.list_graphs(None, true).unwrap().len(), 1);
+
+    let refused = install_accepted(&handler, "alice/lab/my-graph", &workdir, None, None).await;
+    assert!(is_err(&refused), "{}", text(&refused));
+    let message = text(&refused);
+    assert!(message.contains("'custom'"), "{message}");
+    assert!(message.contains("different content"), "{message}");
+    assert!(message.contains("'my-graph'"), "{message}");
+    assert!(message.contains("'alice/lab/my-graph'"), "{message}");
+
+    assert_eq!(
+        db.list_graphs(None, true).unwrap().len(),
+        1,
+        "a collision refuses before any graph is created"
+    );
+    assert_eq!(
+        std::fs::read_to_string(prompts.join("custom.md")).unwrap(),
+        "official text"
+    );
+}
+
+/// `as` renames the colliding bundled preset under the prefix — with the
+/// node config rewritten to match — and the install succeeds.
+#[tokio::test]
+async fn install_as_renames_a_colliding_bundled_preset() {
+    let (dir, db, handler) = endpoint_test_handler();
+    let workdir = dir.path().to_string_lossy().to_string();
+    let stub = StubCatalogue::start(
+        [
+            (
+                "/i/graph/my-graph".to_string(),
+                StubRoute::ok(&graph_doc_with_preset("shared", "official text").to_string()),
+            ),
+            (
+                "/i/alice/lab/graph/my-graph".to_string(),
+                StubRoute::ok(&graph_doc_with_preset("shared", "alice text").to_string()),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    let (_home, _guard, prompts) = install_home(&stub.base_url());
+
+    let installed = install_accepted(&handler, "my-graph", &workdir, None, None).await;
+    assert!(!is_err(&installed), "{}", text(&installed));
+
+    let installed = install_params(
+        &handler,
+        GraphInstallParams {
+            reference: "alice/lab/my-graph".to_string(),
+            workdir: workdir.clone(),
+            name: None,
+            as_prefix: Some("alice".to_string()),
+            replace: None,
+            overwrite_presets: None,
+            accept: Some(true),
+        },
+    )
+    .await;
+    assert!(!is_err(&installed), "{}", text(&installed));
+    let report: serde_json::Value = serde_json::from_str(&raw_text(&installed)).unwrap();
+    assert_eq!(
+        report["presets_written"],
+        serde_json::json!(["alice-custom"])
+    );
+    assert_eq!(
+        std::fs::read_to_string(prompts.join("alice-custom.md")).unwrap(),
+        "alice text"
+    );
+    assert_eq!(
+        std::fs::read_to_string(prompts.join("custom.md")).unwrap(),
+        "official text"
+    );
+
+    let graph_id = report["graph_id"].as_str().unwrap();
+    let nodes = db.list_graph_nodes_for_graph(graph_id).unwrap();
+    let start = nodes
+        .iter()
+        .find(|node| node.name == "start")
+        .expect("start node imported");
+    assert_eq!(start.config["prompt_preset"], "alice-custom");
 }

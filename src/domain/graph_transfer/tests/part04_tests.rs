@@ -458,3 +458,183 @@ fn install_standalone_refuses_unsafe_builtin_or_conflicting() {
         "my own edited text"
     );
 }
+
+/// A catalogue install stamps every preset it writes with its source, and a
+/// later install from the same source updates the file in place — no
+/// overwrite flag needed for a reinstall.
+#[test]
+fn install_for_install_stamps_the_source_and_updates_it_in_place() {
+    let dir = tempdir().unwrap();
+    let first = vec![GraphExportPromptPreset {
+        name: "custom".to_string(),
+        content: "v1".to_string(),
+    }];
+    install_for_install(&first, dir.path(), "my-graph", false).unwrap();
+    assert_eq!(
+        read_owners(dir.path()).get("custom").map(String::as_str),
+        Some("my-graph")
+    );
+    let sidecar = std::fs::read_to_string(dir.path().join(".sources.json")).unwrap();
+    assert!(sidecar.contains("my-graph"), "{sidecar}");
+
+    let second = vec![GraphExportPromptPreset {
+        name: "custom".to_string(),
+        content: "v2".to_string(),
+    }];
+    install_for_install(&second, dir.path(), "my-graph", false)
+        .expect("the same source updates in place");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("custom.md")).unwrap(),
+        "v2"
+    );
+    assert_eq!(
+        read_owners(dir.path()).get("custom").map(String::as_str),
+        Some("my-graph")
+    );
+}
+
+/// A preset owned by another source is never overwritten silently: the
+/// refusal names the preset, both sources, and the way out — and writes
+/// nothing, not even the presets that would have installed.
+#[test]
+fn install_for_install_refuses_a_preset_owned_by_another_source() {
+    let dir = tempdir().unwrap();
+    let official = vec![GraphExportPromptPreset {
+        name: "custom".to_string(),
+        content: "official text".to_string(),
+    }];
+    install_for_install(&official, dir.path(), "my-graph", false).unwrap();
+
+    let community = vec![
+        GraphExportPromptPreset {
+            name: "aaa".to_string(),
+            content: "aaa content".to_string(),
+        },
+        GraphExportPromptPreset {
+            name: "custom".to_string(),
+            content: "community text".to_string(),
+        },
+    ];
+    let error = install_for_install(&community, dir.path(), "alice/lab/my-graph", false)
+        .expect_err("another source must refuse");
+    assert!(error.contains("'custom'"), "{error}");
+    assert!(error.contains("different content"), "{error}");
+    assert!(error.contains("'my-graph'"), "{error}");
+    assert!(error.contains("'alice/lab/my-graph'"), "{error}");
+    assert!(error.contains("--as"), "{error}");
+    assert!(error.contains("--overwrite-presets"), "{error}");
+    assert!(
+        !dir.path().join("aaa.md").exists(),
+        "a refusal writes nothing, not even the clean presets"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("custom.md")).unwrap(),
+        "official text"
+    );
+    assert_eq!(
+        read_owners(dir.path()).get("custom").map(String::as_str),
+        Some("my-graph")
+    );
+
+    install_for_install(&community, dir.path(), "alice/lab/my-graph", true)
+        .expect("overwrite replaces regardless of owner");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("custom.md")).unwrap(),
+        "community text"
+    );
+    assert_eq!(
+        read_owners(dir.path()).get("custom").map(String::as_str),
+        Some("alice/lab/my-graph")
+    );
+}
+
+/// A differing file with no recorded owner — hand-written, or installed
+/// before sources were recorded — is refused as a local file.
+#[test]
+fn install_for_install_refuses_a_local_file_as_local() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("custom.md"), "my own edited text").unwrap();
+    let bundled = vec![GraphExportPromptPreset {
+        name: "custom".to_string(),
+        content: "bundled text".to_string(),
+    }];
+    let error = install_for_install(&bundled, dir.path(), "my-graph", false)
+        .expect_err("a local file must refuse");
+    assert!(error.contains("local"), "{error}");
+    assert!(error.contains("'my-graph'"), "{error}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("custom.md")).unwrap(),
+        "my own edited text"
+    );
+}
+
+/// Identical content is a no-op that adopts nothing: a matching local file
+/// gains no owner, and an owned file keeps its owner.
+#[test]
+fn install_for_install_leaves_identical_files_and_their_owners_alone() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("mine.md"), "same text").unwrap();
+    let matching = vec![GraphExportPromptPreset {
+        name: "mine".to_string(),
+        content: "same text".to_string(),
+    }];
+    install_for_install(&matching, dir.path(), "my-graph", false).unwrap();
+    assert!(
+        !read_owners(dir.path()).contains_key("mine"),
+        "a matching local file is never adopted"
+    );
+
+    let owned = vec![GraphExportPromptPreset {
+        name: "theirs".to_string(),
+        content: "their text".to_string(),
+    }];
+    install_for_install(&owned, dir.path(), "acme/widgets/my-graph", false).unwrap();
+    install_for_install(&owned, dir.path(), "acme/widgets/my-graph", false).unwrap();
+    assert_eq!(
+        read_owners(dir.path()).get("theirs").map(String::as_str),
+        Some("acme/widgets/my-graph")
+    );
+}
+
+/// A missing sidecar — or one that does not parse — is an empty map: every
+/// file is simply local.
+#[test]
+fn read_owners_treats_missing_and_corrupt_sidecars_as_empty() {
+    let dir = tempdir().unwrap();
+    assert!(read_owners(dir.path()).is_empty());
+    std::fs::write(dir.path().join(".sources.json"), "not json{").unwrap();
+    assert!(read_owners(dir.path()).is_empty());
+    std::fs::write(dir.path().join(".sources.json"), "[1, 2]").unwrap();
+    assert!(read_owners(dir.path()).is_empty());
+}
+
+/// Stamping records the listed presets and keeps every other owner.
+#[test]
+fn stamp_owners_keeps_owners_it_was_not_asked_to_change() {
+    let dir = tempdir().unwrap();
+    std::fs::create_dir_all(dir.path()).unwrap();
+    stamp_owners(
+        dir.path(),
+        &[GraphExportPromptPreset {
+            name: "custom".to_string(),
+            content: "custom text".to_string(),
+        }],
+        "my-graph",
+    )
+    .unwrap();
+    stamp_owners(
+        dir.path(),
+        &[GraphExportPromptPreset {
+            name: "other".to_string(),
+            content: "other text".to_string(),
+        }],
+        "alice/lab/other",
+    )
+    .unwrap();
+    let owners = read_owners(dir.path());
+    assert_eq!(owners.get("custom").map(String::as_str), Some("my-graph"));
+    assert_eq!(
+        owners.get("other").map(String::as_str),
+        Some("alice/lab/other")
+    );
+}

@@ -673,6 +673,14 @@ pub struct GraphInstallParams {
     pub workdir: String,
     /// Graph name to use instead of the document's own `name`.
     pub name: Option<String>,
+    /// Prefix for renaming bundled presets that would otherwise collide
+    /// with a preset owned by another source (`alice` installs `review` as
+    /// `alice-review`).
+    #[serde(rename = "as")]
+    pub as_prefix: Option<String>,
+    /// Overwrite bundled presets owned by another source (like
+    /// `overwrite_presets`) instead of refusing the install. Default false.
+    pub replace: Option<bool>,
     /// Overwrite a local preset file whose content differs from the bundled
     /// one instead of refusing the install. Default false.
     pub overwrite_presets: Option<bool>,

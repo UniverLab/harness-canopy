@@ -23,6 +23,15 @@ pub(crate) struct InstallArgs {
     /// Graph name to use instead of the document's own name.
     #[arg(long)]
     name: Option<String>,
+    /// Prefix for renaming bundled presets that would otherwise collide
+    /// with a preset owned by another source (`--as alice` installs
+    /// `review` as `alice-review`).
+    #[arg(long = "as")]
+    as_prefix: Option<String>,
+    /// Overwrite bundled presets owned by another source (like
+    /// `--overwrite-presets`) instead of refusing the install.
+    #[arg(long)]
+    replace: bool,
     /// Overwrite a local preset file whose content differs instead of
     /// refusing the install.
     #[arg(long = "overwrite-presets")]
@@ -68,6 +77,8 @@ pub(crate) fn run_install(
         reference,
         workdir,
         name,
+        as_prefix,
+        replace,
         overwrite_presets,
         yes,
         show_prompts,
@@ -80,7 +91,14 @@ pub(crate) fn run_install(
             .to_string_lossy()
             .to_string(),
     };
-    let mut payload = install_args(&reference, &workdir, name.as_deref(), overwrite_presets);
+    let mut payload = install_args(
+        &reference,
+        &workdir,
+        name.as_deref(),
+        as_prefix.as_deref(),
+        replace,
+        overwrite_presets,
+    );
     payload["action"] = serde_json::json!("install");
     let text = crate::daemon::cli_daemon::call_tool(port_override, "graph_edit", &payload)?;
 
@@ -168,11 +186,19 @@ fn install_args(
     reference: &str,
     workdir: &str,
     name: Option<&str>,
+    as_prefix: Option<&str>,
+    replace: bool,
     overwrite_presets: bool,
 ) -> serde_json::Value {
     let mut args = serde_json::json!({ "ref": reference, "workdir": workdir });
     if let Some(name) = name {
         args["name"] = serde_json::json!(name);
+    }
+    if let Some(as_prefix) = as_prefix {
+        args["as"] = serde_json::json!(as_prefix);
+    }
+    if replace {
+        args["replace"] = serde_json::json!(true);
     }
     if overwrite_presets {
         args["overwrite_presets"] = serde_json::json!(true);
@@ -274,6 +300,8 @@ mod tests {
             reference: "my-graph".to_string(),
             workdir: Some("/tmp/work".to_string()),
             name: None,
+            as_prefix: None,
+            replace: false,
             overwrite_presets: false,
             yes,
             show_prompts: false,
@@ -424,7 +452,7 @@ mod tests {
     }
 
     #[test]
-    fn install_sends_ref_workdir_name_and_overwrite_to_the_daemon() {
+    fn install_sends_ref_workdir_name_as_replace_and_overwrite_to_the_daemon() {
         let fake = spawn_fake_daemon(serde_json::json!({
             "content": [{"type": "text", "text": "{}"}],
             "isError": false
@@ -436,6 +464,8 @@ mod tests {
                 reference: "acme/widgets/my-graph@v1.2".to_string(),
                 workdir: Some("/tmp/work".to_string()),
                 name: Some("renamed".to_string()),
+                as_prefix: Some("alice".to_string()),
+                replace: true,
                 overwrite_presets: true,
                 yes: true,
                 show_prompts: false,
@@ -451,6 +481,8 @@ mod tests {
         assert_eq!(calls[0]["arguments"]["ref"], "acme/widgets/my-graph@v1.2");
         assert_eq!(calls[0]["arguments"]["workdir"], "/tmp/work");
         assert_eq!(calls[0]["arguments"]["name"], "renamed");
+        assert_eq!(calls[0]["arguments"]["as"], "alice");
+        assert_eq!(calls[0]["arguments"]["replace"], true);
         assert_eq!(calls[0]["arguments"]["overwrite_presets"], true);
     }
 
@@ -465,6 +497,8 @@ mod tests {
         let calls = fake.recorded_calls();
         assert_eq!(calls[0]["arguments"]["ref"], "my-graph");
         assert!(calls[0]["arguments"].get("name").is_none());
+        assert!(calls[0]["arguments"].get("as").is_none());
+        assert!(calls[0]["arguments"].get("replace").is_none());
         assert!(calls[0]["arguments"].get("overwrite_presets").is_none());
     }
 
@@ -483,6 +517,8 @@ mod tests {
                 reference: "my-graph".to_string(),
                 workdir: None,
                 name: None,
+                as_prefix: None,
+                replace: false,
                 overwrite_presets: false,
                 yes: false,
                 show_prompts: false,

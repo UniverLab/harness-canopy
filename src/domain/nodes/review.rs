@@ -605,6 +605,7 @@ mod tests {
                 name: "auditor-preset".to_string(),
                 content: "shipped content".to_string(),
             }),
+            catalogue_source: None,
         };
         let review = review_node(&document, "acme/widgets@v1.2");
         let labels: Vec<&str> = review
@@ -639,6 +640,7 @@ mod tests {
                 name: "checker-preset".to_string(),
                 content: "check well".to_string(),
             }),
+            catalogue_source: None,
         };
         let review = review_node(&document, "official");
         assert_eq!(review.commands.len(), 1);
@@ -667,6 +669,7 @@ mod tests {
                 ],
             }),
             preset: None,
+            catalogue_source: None,
         };
         let review = review_node(&document, "official");
         let labels: Vec<&str> = review

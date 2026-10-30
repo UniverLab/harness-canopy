@@ -82,12 +82,25 @@ async fn install_node(
     overwrite_presets: Option<bool>,
     accept: Option<bool>,
 ) -> rmcp::model::CallToolResult {
+    install_node_with_as(handler, reference, None, None, overwrite_presets, accept).await
+}
+
+async fn install_node_with_as(
+    handler: &TaskTriggerHandler,
+    reference: &str,
+    as_name: Option<String>,
+    replace: Option<bool>,
+    overwrite_presets: Option<bool>,
+    accept: Option<bool>,
+) -> rmcp::model::CallToolResult {
     call_resource_action(
         handler,
         "node",
         "install",
         params_id(NodeInstallParams {
             reference: reference.to_string(),
+            as_name,
+            replace,
             overwrite_presets,
             accept,
         }),
@@ -666,4 +679,225 @@ async fn node_install_draft_accept_without_a_parked_body_reports_it_gone() {
         text(&installed)
     );
     assert!(!nodes_dir.join("auditor.json").exists());
+}
+
+fn community_auditor_doc() -> serde_json::Value {
+    serde_json::json!({
+        "format_version": 1,
+        "name": "auditor",
+        "kind": "agent",
+        "description": "Alice's audit node.",
+        "config": {"prompt_template": "alice audits", "timeout_minutes": 10},
+        "preset": {"name": "auditor-preset", "content": "alice audits well"},
+    })
+}
+
+fn stub_serving_official_and_community(official: &str, community: &str) -> StubCatalogue {
+    StubCatalogue::start(
+        [
+            ("/i/node/auditor".to_string(), StubRoute::ok(official)),
+            (
+                "/i/alice/lab/node/auditor".to_string(),
+                StubRoute::ok(community),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    )
+}
+
+fn node_list_entry(body: &serde_json::Value, name: &str) -> serde_json::Value {
+    body["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == name)
+        .unwrap_or_else(|| panic!("{name} is listed: {body}"))
+        .clone()
+}
+
+/// Installing the official `auditor` and then Alice's `auditor` refuses the
+/// second install, naming both sources and the way out — the first copy
+/// (and its preset) is untouched, and the list shows which source owns the
+/// name.
+#[tokio::test]
+async fn node_install_from_another_source_refuses_and_keeps_the_first() {
+    let (_dir, _db, handler) = endpoint_test_handler();
+    let stub = stub_serving_official_and_community(
+        &auditor_doc().to_string(),
+        &community_auditor_doc().to_string(),
+    );
+    let (_home, _guard, nodes_dir, prompts_dir) = node_home(&stub.base_url());
+
+    let installed = install_node_accepted(&handler, "auditor", None).await;
+    assert!(!is_err(&installed), "{}", text(&installed));
+
+    let refused = install_node_accepted(&handler, "alice/lab/auditor", None).await;
+    assert!(is_err(&refused), "{}", text(&refused));
+    let message = text(&refused);
+    assert!(message.contains("'auditor'"), "{message}");
+    assert!(message.contains("'alice/lab/auditor'"), "{message}");
+    assert!(message.contains("--as"), "{message}");
+    assert!(message.contains("--replace"), "{message}");
+
+    let stored =
+        nodes::parse_document(&std::fs::read_to_string(nodes_dir.join("auditor.json")).unwrap())
+            .unwrap();
+    assert_eq!(stored.config["prompt_template"], "audit this");
+    assert_eq!(stored.catalogue_source.as_deref(), Some("auditor"));
+    assert_eq!(
+        std::fs::read_to_string(prompts_dir.join("auditor-preset.md")).unwrap(),
+        "audit well"
+    );
+
+    let listed = call_resource_action(&handler, "node", "list", ())
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_str(&raw_text(&listed)).unwrap();
+    let entry = node_list_entry(&body, "auditor");
+    assert_eq!(entry["source"], "installed");
+    assert_eq!(entry["catalogue_source"], "auditor");
+}
+
+/// `as` installs both copies side by side — the community copy under
+/// another local name with its preset renamed with it — and `graph_node
+/// add` resolves each name to its own document.
+#[tokio::test]
+async fn node_install_as_installs_both_and_each_resolves_in_a_graph() {
+    let (dir, db, handler) = endpoint_test_handler();
+    let stub = stub_serving_official_and_community(
+        &auditor_doc().to_string(),
+        &community_auditor_doc().to_string(),
+    );
+    let (_home, _guard, nodes_dir, prompts_dir) = node_home(&stub.base_url());
+
+    let installed = install_node_accepted(&handler, "auditor", None).await;
+    assert!(!is_err(&installed), "{}", text(&installed));
+    let installed = install_node_with_as(
+        &handler,
+        "alice/lab/auditor",
+        Some("alice-auditor".to_string()),
+        None,
+        None,
+        Some(true),
+    )
+    .await;
+    assert!(!is_err(&installed), "{}", text(&installed));
+    let report: serde_json::Value = serde_json::from_str(&raw_text(&installed)).unwrap();
+    assert_eq!(report["name"], "alice-auditor");
+
+    let stored = nodes::parse_document(
+        &std::fs::read_to_string(nodes_dir.join("alice-auditor.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(stored.config["prompt_template"], "alice audits");
+    assert_eq!(
+        stored.catalogue_source.as_deref(),
+        Some("alice/lab/auditor")
+    );
+    assert_eq!(
+        std::fs::read_to_string(prompts_dir.join("alice-auditor-preset.md")).unwrap(),
+        "alice audits well"
+    );
+    assert_eq!(
+        std::fs::read_to_string(prompts_dir.join("auditor-preset.md")).unwrap(),
+        "audit well",
+        "the official preset is untouched"
+    );
+
+    let listed = call_resource_action(&handler, "node", "list", ())
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_str(&raw_text(&listed)).unwrap();
+    assert_eq!(
+        node_list_entry(&body, "auditor")["catalogue_source"],
+        "auditor"
+    );
+    assert_eq!(
+        node_list_entry(&body, "alice-auditor")["catalogue_source"],
+        "alice/lab/auditor"
+    );
+
+    let workdir = dir.path().to_string_lossy().to_string();
+    let created = call_graph_action(
+        &handler,
+        "graph_edit",
+        "create",
+        params_id(GraphCreateParams {
+            name: "Two Auditors".to_string(),
+            description: None,
+            workdir,
+            trigger: None,
+            infra_node_id: None,
+            allow_dirty_start: false,
+            require_spec_type: false,
+        }),
+    )
+    .await
+    .unwrap();
+    let graph_id = extract_id(&created, "graph_id");
+    for (node_name, document) in [("audit", "auditor"), ("alice-audit", "alice-auditor")] {
+        let added = call_graph_action(
+            &handler,
+            "graph_node",
+            "add",
+            params_id(GraphAddNodeParams {
+                spec_id: None,
+                graph_id: Some(graph_id.clone()),
+                name: node_name.to_string(),
+                kind: None,
+                config: None,
+                node: Some(document.to_string()),
+                config_overrides: Some(overrides(&[("platform", "claude")])),
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(!is_err(&added), "{document}: {}", text(&added));
+    }
+    let stored = db.list_graph_nodes_for_graph(&graph_id).unwrap();
+    let official = stored
+        .iter()
+        .find(|node| node.name == "audit")
+        .expect("official node stored");
+    assert_eq!(official.config["prompt_template"], "audit this");
+    let community = stored
+        .iter()
+        .find(|node| node.name == "alice-audit")
+        .expect("community node stored");
+    assert_eq!(community.config["prompt_template"], "alice audits");
+}
+
+/// Reinstalling from the same source updates the document and its preset in
+/// place, with no overwrite flag.
+#[tokio::test]
+async fn node_reinstall_from_the_same_source_updates() {
+    let (_dir, _db, handler) = endpoint_test_handler();
+    let stub_v1 = stub_serving("/i/node/auditor", &auditor_doc().to_string());
+    let (home, _guard, nodes_dir, prompts_dir) = node_home(&stub_v1.base_url());
+
+    let installed = install_node_accepted(&handler, "auditor", None).await;
+    assert!(!is_err(&installed), "{}", text(&installed));
+
+    let mut v2 = auditor_doc();
+    v2["config"]["prompt_template"] = serde_json::json!("audit harder");
+    v2["preset"] = serde_json::json!({"name": "auditor-preset", "content": "audit very well"});
+    let stub_v2 = stub_serving("/i/node/auditor", &v2.to_string());
+    std::fs::write(
+        home.path().join(".canopy").join("config.toml"),
+        format!("[graphs]\ncatalogue_url = \"{}\"\n", stub_v2.base_url()),
+    )
+    .unwrap();
+
+    let reinstalled = install_node_accepted(&handler, "auditor", None).await;
+    assert!(!is_err(&reinstalled), "{}", text(&reinstalled));
+    let stored =
+        nodes::parse_document(&std::fs::read_to_string(nodes_dir.join("auditor.json")).unwrap())
+            .unwrap();
+    assert_eq!(stored.config["prompt_template"], "audit harder");
+    assert_eq!(stored.catalogue_source.as_deref(), Some("auditor"));
+    assert_eq!(
+        std::fs::read_to_string(prompts_dir.join("auditor-preset.md")).unwrap(),
+        "audit very well"
+    );
 }

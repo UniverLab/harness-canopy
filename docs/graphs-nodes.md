@@ -38,11 +38,12 @@ node is the installer's decision, not the author's. `canopy graph validate
 canopy node install <slug>
 canopy node install <owner>/<repo>/<slug>@<ref>
 canopy node install draft:<id>
-canopy node install <ref> --overwrite-presets --yes --show-prompts --json
+canopy node install <ref> --as <name> --replace --overwrite-presets --yes --show-prompts --json
 ```
 
-The ref grammar is the graph ref grammar (`<slug>` or
-`<owner>/<repo>/<slug>`, optional `@<ref>`), plus `draft:<id>` for a
+The ref grammar is the graph ref grammar: a bare `<slug>` is the
+official UniverLab entry, `<owner>/<repo>/<slug>` a community one
+(each with an optional `@<ref>`), plus `draft:<id>` for a
 node draft shared from the editor — the same one-use, 30-minute,
 unreviewed draft as a graph, with the same `draft not found` message
 (see [Install a graph](graphs-sharing.md#install-a-graph)); a draft holding a graph
@@ -67,14 +68,26 @@ the summary without the question, and `--json` prints the review as
 JSON on stdout with the question on stderr.
 
 Only after the confirmation is the document written to
-`~/.canopy/nodes/<name>.json`. Its bundled `preset` is installed as
-`~/.canopy/prompts/<preset.name>.md` with the same no-silent-overwrite rule
-as a graph's presets: a local file with different content aborts the
-install unless `--overwrite-presets` is given. A graph document fetched
-from a node endpoint is refused, and a 410 says `<name> was removed
-from the catalogue after a community report: <reason> (<issue>)`.
+`~/.canopy/nodes/<name>.json`, stamped with the catalogue entry it came
+from (`slug`, `owner/repo/slug`, or `draft:<id>`). Its bundled `preset`
+is installed as `~/.canopy/prompts/<preset.name>.md` with the same
+no-silent-overwrite rule as a graph's presets: a file owned by another
+source aborts the install unless `--overwrite-presets` is given. A
+graph document fetched from a node endpoint is refused, and a 410 says
+`<name> was removed from the catalogue after a community report:
+<reason> (<issue>)`.
 
-Over MCP, `node` `install` { `ref`, `overwrite_presets`?, `accept`? } follows
+A name already installed from a different source is refused, naming
+both sources — the installed copy (and every graph using it) is never
+silently replaced. `--as <local-name>` installs under another local
+name instead (the bundled preset is renamed with it: a `<doc>-…`
+preset keeps its suffix under the new name, any other preset becomes
+`<as>-<preset>`, with the config's `prompt_preset` rewritten to
+match), or `--replace` overwrites. Reinstalling from the same source
+updates in place, and an installed copy still overrides a builtin of
+the same name.
+
+Over MCP, `node` `install` { `ref`, `as`?, `replace`?, `overwrite_presets`?, `accept`? } follows
 the same gate: **without** `accept: true` it installs nothing and
 returns `{ needs_review: true, review: { source, commands, prompts,
 attention } }`; with `accept: true` it installs and echoes the same
@@ -89,7 +102,8 @@ canopy node list --json
 ```
 
 The list shows installed copies and the builtins embedded in the binary,
-each marked `installed` or `builtin`. The builtins are `implementer`,
+each marked `installed` or `builtin`, with the catalogue entry that
+installed it next to the name. The builtins are `implementer`,
 `cargo-gates`, `reviewer-committer`, `commit-check`, `resilience`, and
 `ensemble-proposers`; they resolve offline, with no install step. An
 installed copy of a builtin's name wins over the builtin.

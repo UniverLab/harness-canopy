@@ -270,7 +270,7 @@ graph catalogue at `graphs.univerlab.org` — fetching through the
 catalogue is what counts the install:
 
 ```
-canopy graph install <ref> [--workdir <dir>] [--name <name>] [--overwrite-presets] [--yes] [--show-prompts] [--json]
+canopy graph install <ref> [--workdir <dir>] [--name <name>] [--as <prefix>] [--replace] [--overwrite-presets] [--yes] [--show-prompts] [--json]
 canopy graph install draft:<id>
 ```
 
@@ -346,8 +346,14 @@ The fetched document goes through the same validation as
 install and lists every problem. Its bundled presets (version 6) are
 written to `~/.canopy/prompts/` — a file already there with identical
 content is a no-op, while one with different content aborts the whole
-install before anything is written, naming the file, unless
-`--overwrite-presets` is passed. The import itself is the
+install before anything is written, naming the file and the source
+that owns it, unless `--overwrite-presets` (or `--replace`) is passed.
+Every preset written is stamped with the ref it came from, so a later
+install from another source ships the same name without silently
+taking it: reinstalling from the same source updates in place, while a
+different source is refused. `--as <prefix>` renames the colliding
+presets instead (`review` becomes `alice-review`, with the node
+configs rewritten to match). The import itself is the
 [`import`](#export-and-import) path: always a new graph (a numeric
 suffix when the name is taken), `--name` overriding the document's
 name, `--workdir` defaulting to the current directory (which must be
@@ -357,7 +363,7 @@ The report carries the graph id and name, its source, the workdir, the
 presets written, the review, and the agent nodes still needing a
 platform/model with the next command to assign them (`--json` prints
 the machine-readable report). The same operation exists as the MCP tool
-`graph_edit` `install` (`ref`, `workdir`, `name?`, `overwrite_presets?`, `accept?`):
+`graph_edit` `install` (`ref`, `workdir`, `name?`, `as?`, `replace?`, `overwrite_presets?`, `accept?`):
 called **without** `accept: true` it installs nothing and returns
 `{ needs_review: true, review: { source, commands, prompts,
 attention } }` — the same review printed above; called with

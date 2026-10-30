@@ -197,41 +197,152 @@ pub fn install(
     Ok(())
 }
 
-/// Install the bundled presets like [`install`], but overwrite a local file
-/// whose content differs instead of refusing — the `--overwrite-presets`
-/// path of `canopy graph install`. Entry rules still apply (safe name, not
-/// a builtin, not repeated, non-empty content); a file with identical
-/// content is still skipped as a no-op.
-pub fn install_overwriting(
+/// Validate the bundled presets of a catalogue install, before anything is
+/// written: the same entry rules as [`validate`], plus the ownership rule.
+/// A name that exists locally with identical content is a no-op; one that
+/// exists with DIFFERENT content is updated in place when the recorded
+/// owner is the same source — a reinstall — and refused otherwise, naming
+/// the recorded owner (or that the file is local) and the incoming source,
+/// unless `overwrite` (`--overwrite-presets`/`--replace`) is set. A preset
+/// name owned by another source is never overwritten silently.
+pub fn validate_for_install(
     presets: &[GraphExportPromptPreset],
     prompts_dir: &std::path::Path,
+    source_ref: &str,
+    overwrite: bool,
+) -> Result<(), String> {
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for preset in presets {
+        validate_entry(preset, &mut seen)?;
+        let name = preset.name.as_str();
+        let path = prompts_dir.join(format!("{name}.md"));
+        match std::fs::read_to_string(&path) {
+            Ok(existing) if existing == preset.content => {}
+            Ok(_) => {
+                if overwrite || owner_of(prompts_dir, name).as_deref() == Some(source_ref) {
+                    continue;
+                }
+                return Err(owned_preset_refusal(&path, name, prompts_dir, source_ref));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "Prompt preset '{name}' exists at {} but could not be read ({error}); refusing to overwrite it.",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Install the bundled presets of a catalogue install, after the whole
+/// install validated (all-or-nothing): like [`install`], but a differing
+/// local file owned by the same source is updated in place, and every
+/// preset actually written is stamped with its source in `.sources.json`.
+/// Entry rules still apply; `overwrite`
+/// (`--overwrite-presets`/`--replace`) replaces a differing file regardless
+/// of owner. A file with identical content is skipped as a no-op and keeps
+/// its recorded owner — a matching local file is never adopted.
+pub fn install_for_install(
+    presets: &[GraphExportPromptPreset],
+    prompts_dir: &std::path::Path,
+    source_ref: &str,
+    overwrite: bool,
 ) -> Result<(), String> {
     if presets.is_empty() {
         return Ok(());
     }
-    let mut seen: BTreeSet<&str> = BTreeSet::new();
-    for preset in presets {
-        validate_entry(preset, &mut seen)?;
-    }
+    validate_for_install(presets, prompts_dir, source_ref, overwrite)?;
     std::fs::create_dir_all(prompts_dir).map_err(|error| {
         format!(
             "Could not create prompts dir {}: {error}.",
             prompts_dir.display()
         )
     })?;
+    let mut written: Vec<GraphExportPromptPreset> = Vec::new();
     for preset in presets {
         let path = prompts_dir.join(format!("{}.md", preset.name));
         match std::fs::read_to_string(&path) {
             Ok(existing) if existing == preset.content => {}
-            _ => std::fs::write(&path, &preset.content).map_err(|error| {
-                format!(
-                    "Could not write bundled prompt preset '{}' to {}: {error}.",
-                    preset.name,
-                    path.display()
-                )
-            })?,
+            _ => {
+                std::fs::write(&path, &preset.content).map_err(|error| {
+                    format!(
+                        "Could not write bundled prompt preset '{}' to {}: {error}.",
+                        preset.name,
+                        path.display()
+                    )
+                })?;
+                written.push(preset.clone());
+            }
         }
     }
+    stamp_owners(prompts_dir, &written, source_ref)
+}
+
+/// The refusal for a bundled preset whose local file differs and belongs to
+/// another source (or to no recorded source — a local file): it names the
+/// preset, its path, both sides, and the way out. It keeps the `different
+/// content` phrase the import-path refusal uses.
+fn owned_preset_refusal(
+    path: &std::path::Path,
+    name: &str,
+    prompts_dir: &std::path::Path,
+    source_ref: &str,
+) -> String {
+    let existing = match owner_of(prompts_dir, name) {
+        Some(owner) => format!("installed from '{owner}'"),
+        None => "a local file, not installed from the catalogue".to_string(),
+    };
+    format!(
+        "Prompt preset '{name}' already exists at {} with different content ({existing}); \
+         '{source_ref}' also ships it. Install with --as to rename it, or pass --overwrite-presets to replace it.",
+        path.display()
+    )
+}
+
+/// The recorded owner of one preset: the source identity stamped when it
+/// was last written by a catalogue install, or `None` for a local file.
+fn owner_of(prompts_dir: &std::path::Path, name: &str) -> Option<String> {
+    read_owners(prompts_dir).get(name).cloned()
+}
+
+/// The sidecar recording which catalogue source owns each installed preset:
+/// `<prompts_dir>/.sources.json`, a `{name: source}` object. Presets are
+/// read by direct `<name>.md` joins, never by globbing the dir, so the
+/// sidecar disturbs no reader.
+const SIDECAR_FILENAME: &str = ".sources.json";
+
+/// Every recorded preset owner. A missing sidecar — or one that does not
+/// parse as a `{name: source}` object — is an empty map: local files and
+/// installs from before sources were recorded simply have no owner.
+pub fn read_owners(prompts_dir: &std::path::Path) -> BTreeMap<String, String> {
+    let Ok(raw) = std::fs::read_to_string(prompts_dir.join(SIDECAR_FILENAME)) else {
+        return BTreeMap::new();
+    };
+    serde_json::from_str::<BTreeMap<String, String>>(&raw).unwrap_or_default()
+}
+
+/// Record `source_ref` as the owner of every preset in `presets`, keeping
+/// the owners of presets not listed. An empty list still succeeds (it
+/// rewrites the sidecar unchanged, creating it when missing).
+pub fn stamp_owners(
+    prompts_dir: &std::path::Path,
+    presets: &[GraphExportPromptPreset],
+    source_ref: &str,
+) -> Result<(), String> {
+    let mut owners = read_owners(prompts_dir);
+    for preset in presets {
+        owners.insert(preset.name.clone(), source_ref.to_string());
+    }
+    let body = serde_json::to_string_pretty(&owners)
+        .map_err(|error| format!("Could not serialize preset owners: {error}."))?;
+    std::fs::write(prompts_dir.join(SIDECAR_FILENAME), format!("{body}\n")).map_err(|error| {
+        format!(
+            "Could not write {}: {error}.",
+            prompts_dir.join(SIDECAR_FILENAME).display()
+        )
+    })?;
     Ok(())
 }
 

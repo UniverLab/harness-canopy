@@ -2,7 +2,7 @@
 //! classic implementer as one installable file.
 //!
 //! A node document is `{format_version, name, kind, description?, config,
-//! preset?}`; `canopy graph validate` is its schema check (see
+//! preset?, catalogue_source?}`; `canopy graph validate` is its schema check (see
 //! `daemon::graph`), and `graph_node`/`graph_ensemble` can
 //! instantiate one by name instead of asking the caller for a full `config`.
 //! Installed copies live in `~/.canopy/nodes/<name>.json`; the six builtin
@@ -48,6 +48,13 @@ pub struct NodeDocument {
     pub config: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset: Option<NodePreset>,
+    /// Which catalogue entry installed this copy: `slug` for an official
+    /// node, `owner/repo/slug` for a community one (both without any
+    /// `@<ref>` version suffix), or `draft:<id>` for an editor draft.
+    /// `None` is a local document — hand-written, or installed before
+    /// sources were recorded — and is never silently taken by an install.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalogue_source: Option<String>,
 }
 
 /// Where a resolvable node document came from.

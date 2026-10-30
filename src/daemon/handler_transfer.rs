@@ -133,11 +133,29 @@ impl TaskTriggerHandler {
         })
         .await
         .map_err(|error| internal_error(error.to_string()))?;
-        let fetched = match fetched {
+        let mut fetched = match fetched {
             Ok(fetched) => fetched,
             Err(message) => return Ok(error_result(&message)),
         };
 
+        // `replace` is the graph install's alias for `overwrite_presets`:
+        // both overwrite a bundled preset owned by another source.
+        let overwrite =
+            params.overwrite_presets.unwrap_or(false) || params.replace.unwrap_or(false);
+        // `--as` renames colliding presets before the review on both calls,
+        // so the review shows the names that will be written.
+        if let Some(prefix) = &params.as_prefix {
+            let canopy_dir = crate::domain::prompts::canopy_dir();
+            if let Err(message) = crate::daemon::graph_install::rename_colliding_presets(
+                &mut fetched.document,
+                prefix,
+                &fetched.source_ref,
+                overwrite,
+                &crate::domain::prompts::prompts_dir(&canopy_dir),
+            ) {
+                return Ok(error_result(&message));
+            }
+        }
         let review = crate::domain::nodes::review::review_graph(&fetched.document, &fetched.source);
         if !accepted {
             if let Some(id) = crate::daemon::graph_install::draft_id(&params.reference) {
@@ -154,12 +172,13 @@ impl TaskTriggerHandler {
         }
 
         // Only after the caller accepted does anything touch disk.
-        let overwrite = params.overwrite_presets.unwrap_or(false);
         let document = fetched.document.clone();
+        let source_ref = fetched.source_ref.clone();
         let presets_written = tokio::task::spawn_blocking(move || {
             let canopy_dir = crate::domain::prompts::canopy_dir();
             crate::daemon::graph_install::write_presets(
                 &document,
+                &source_ref,
                 overwrite,
                 &crate::domain::prompts::prompts_dir(&canopy_dir),
             )

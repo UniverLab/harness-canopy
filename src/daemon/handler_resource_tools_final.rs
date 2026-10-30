@@ -38,7 +38,7 @@ pub(crate) static NODE: ToolSpec = ToolSpec {
         ActionSpec {
             name: "install",
             required: &["ref"],
-            optional: &["overwrite_presets", "accept"],
+            optional: &["as", "replace", "overwrite_presets", "accept"],
         },
         ActionSpec {
             name: "remove",
@@ -286,7 +286,7 @@ impl TaskTriggerHandler {
         Actions (required params; optional params): \
         `list` (required: none; optional: none) — list every node document available to graph_node add and graph_ensemble add, installed and builtin. \
         `get` (required: name; optional: none) — return one node document with its kind, source, and full config. \
-        `install` (required: ref; optional: overwrite_presets, accept) — install a node document from the catalogue by ref (`<slug>`, `<owner>/<repo>/<slug>`, each with an optional `@<ref>`, or `draft:<id>` for a one-use editor draft); without accept: true it writes nothing and returns {needs_review: true, review} for the agent to show its user first, with accept: true it installs and echoes the review. \
+        `install` (required: ref; optional: as, replace, overwrite_presets, accept) — install a node document from the catalogue by ref (`<slug>`, `<owner>/<repo>/<slug>`, each with an optional `@<ref>`, or `draft:<id>` for a one-use editor draft); without accept: true it writes nothing and returns {needs_review: true, review} for the agent to show its user first, with accept: true it installs and echoes the review. A name already installed from another source is refused: pass `as` to install under another local name, or `replace: true` to overwrite. \
         `remove` (required: name; optional: none) — remove an installed node document; a builtin with no installed copy is refused."
     )]
     pub(crate) async fn node(

@@ -91,7 +91,12 @@ refresh also restarts that 24-hour window.
 | `canopy graph validate <path>` | Check a shared graph or node JSON document without importing it: every structural check `import` runs plus the sharing rules. Prints each problem with its JSON path; exits 0 when the document is valid, 1 when it is not |
 | `canopy graph validate <path> --json` | Print the machine-readable report instead: `ok` with the kind, name and counts, or `problems` |
 | `canopy graph install <ref>` | Install a graph from the catalogue in one command: `<slug>` or `<owner>/<repo>/<slug>`, each with an optional `@<ref>` suffix, or `draft:<id>` for an unreviewed editor draft ([graphs.univerlab.org/editor](https://graphs.univerlab.org/editor), 30 minutes, installs once). Prints a review of every shell command and agent prompt the document runs (with attention marks), asks `Install <name> from <source>? [y/N]`, then — after confirmation — validates the fetched document, installs its bundled presets, and imports it as a new graph |
-| `canopy graph install <ref> [--workdir <dir>] [--name <name>] [--overwrite-presets] [--yes] [--show-prompts] [--json]` | Install into another workdir (default: the current directory), under another name, overwriting differing local preset files instead of refusing, skipping the confirmation question (`--yes`, after printing the review), printing every prompt in full (`--show-prompts`), or printing the review and report as machine-readable JSON |
+| `canopy graph install <ref> [--workdir <dir>] [--name <name>] [--as <prefix>] [--replace] [--overwrite-presets] [--yes] [--show-prompts] [--json]` | Install into another workdir (default: the current directory), under another name, renaming colliding bundled presets under a prefix (`--as alice` installs `review` as `alice-review`), overwriting differing local preset files instead of refusing (`--replace`, like `--overwrite-presets`), skipping the confirmation question (`--yes`, after printing the review), printing every prompt in full (`--show-prompts`), or printing the review and report as machine-readable JSON |
+
+A bare slug installs the official UniverLab entry; `owner/repo/slug`
+installs a community one. A bundled preset already owned by another
+source is refused before anything is written — rename it with
+`--as <prefix>` or overwrite it with `--replace`.
 
 `canopy graph validate` runs entirely locally — no daemon, no database,
 no workdir — so it works before anything is installed. The rules it
@@ -104,10 +109,17 @@ prefix. Ambiguous references list the candidates.
 
 | Command | Description |
 |---|---|
-| `canopy node list [--json]` | List installed node documents and the builtins embedded in the binary, marking each `installed` or `builtin` |
+| `canopy node list [--json]` | List installed node documents and the builtins embedded in the binary, marking each `installed` or `builtin` and showing which catalogue entry installed it |
 | `canopy node install <ref>` | Install a node document from the catalogue: `<slug>` or `<owner>/<repo>/<slug>`, each with an optional `@<ref>` suffix, or `draft:<id>` for an unreviewed editor draft. Prints the same review as `graph install` and asks for confirmation first; after confirmation it validates the document, installs its bundled preset, and writes it to `~/.canopy/nodes` |
-| `canopy node install <ref> [--overwrite-presets] [--yes] [--show-prompts] [--json]` | Overwrite differing local preset files instead of refusing, skip the confirmation question (`--yes`, after printing the review), print every prompt in full (`--show-prompts`), or print the review and report as machine-readable JSON |
+| `canopy node install <ref> [--as <name>] [--replace] [--overwrite-presets] [--yes] [--show-prompts] [--json]` | Install under another local name (`--as`, renaming the bundled preset with it), overwrite an installed copy from another source (`--replace`), overwrite differing local preset files instead of refusing, skip the confirmation question (`--yes`, after printing the review), print every prompt in full (`--show-prompts`), or print the review and report as machine-readable JSON |
 | `canopy node remove <name> [--json]` | Remove an installed node document. A builtin with no installed copy cannot be removed; an installed override can |
+
+A bare slug is the official UniverLab entry and `owner/repo/slug` a
+community one. Installing a name already installed from a different
+source is refused, naming both sources — `--as <local-name>` installs
+it under another local name, `--replace` overwrites. Reinstalling from
+the same source updates in place, and an installed copy still overrides
+a builtin of the same name.
 
 `canopy node` runs entirely locally — no daemon needed. See
 [Graphs](graphs-nodes.md#nodes).

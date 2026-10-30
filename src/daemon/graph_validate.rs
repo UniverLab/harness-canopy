@@ -319,7 +319,9 @@ fn validate_member_overrides(
 // ── Node documents ────────────────────────────────────────────────────
 
 /// A single shareable node: `format_version`, `name`, `kind`, `config`, an
-/// optional `description`, and an optional bundled `preset`.
+/// optional `description`, an optional bundled `preset`, and the optional
+/// `catalogue_source` an install stamps (accepted so an installed copy
+/// validates; ignored, since the install re-stamps it from the ref).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NodeDocument {
@@ -329,6 +331,7 @@ struct NodeDocument {
     config: Value,
     description: Option<String>,
     preset: Option<NodePreset>,
+    catalogue_source: Option<String>,
 }
 
 /// What a validated node document describes: a single engine node of a
@@ -362,8 +365,9 @@ fn validate_node_document(value: &Value) -> Value {
         }
     };
     // `description` is documentation-only: accepted by the shape, ignored by
-    // the rules.
+    // the rules — as is `catalogue_source`, which the install re-stamps.
     let _ = document.description.as_deref();
+    let _ = document.catalogue_source.as_deref();
 
     let mut problems = Vec::new();
     if document.format_version != NODE_DOCUMENT_FORMAT_VERSION {

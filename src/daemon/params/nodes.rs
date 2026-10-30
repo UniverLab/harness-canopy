@@ -114,6 +114,15 @@ pub struct NodeInstallParams {
     /// an editor draft.
     #[serde(rename = "ref")]
     pub reference: String,
+    /// Install under another local name instead of the document's own (the
+    /// bundled preset is renamed with it) — the way out when the name is
+    /// already installed from another source.
+    #[serde(rename = "as")]
+    pub as_name: Option<String>,
+    /// Overwrite an installed copy from another source (and a differing
+    /// preset regardless of owner) instead of refusing the install. Default
+    /// false.
+    pub replace: Option<bool>,
     /// Overwrite a local preset file whose content differs from the bundled
     /// one instead of refusing the install. Default false.
     pub overwrite_presets: Option<bool>,

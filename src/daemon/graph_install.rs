@@ -15,6 +15,8 @@ pub(crate) mod stub;
 
 use std::path::Path;
 
+use serde_json::Value;
+
 use crate::domain::graph_transfer::{parse_export_document_str, GraphExportDocument};
 
 /// A parsed catalogue ref: `<slug>` (official) or `<owner>/<repo>/<slug>`
@@ -69,6 +71,20 @@ impl GraphRef {
         match self {
             GraphRef::Draft { id } => Some(id),
             GraphRef::Standard { .. } => None,
+        }
+    }
+
+    /// The stored source identity for an install from this ref: the slug for
+    /// an official ref, `owner/repo/slug` for a community one — both without
+    /// any `@<ref>` version suffix, so reinstalling another version updates
+    /// in place — or `draft:<id>` for an editor draft.
+    pub(crate) fn source_identity(&self) -> String {
+        match self {
+            GraphRef::Standard { scope, slug, .. } => match scope {
+                None => slug.clone(),
+                Some((owner, repo)) => format!("{owner}/{repo}/{slug}"),
+            },
+            GraphRef::Draft { id } => format!("draft:{id}"),
         }
     }
 
@@ -221,6 +237,9 @@ pub(crate) struct FetchedGraph {
     pub source_url: String,
     /// The source label for the install review.
     pub source: String,
+    /// The stored source identity ([`GraphRef::source_identity`]): what the
+    /// install stamps on the bundled presets it writes.
+    pub source_ref: String,
     /// The raw validated body — a draft review parks it for the accept call,
     /// since the draft is consumed by the first fetch.
     pub body: String,
@@ -257,6 +276,7 @@ fn assemble_graph(
     source_url: String,
 ) -> Result<FetchedGraph, String> {
     let source = parsed.source_label();
+    let source_ref = parsed.source_identity();
     let report = crate::daemon::graph_validate::validate_document_str(body);
     reject_invalid_report(reference, &report)?;
     let document = parse_export_document_str(body)?;
@@ -264,27 +284,95 @@ fn assemble_graph(
         document,
         source_url,
         source,
+        source_ref,
         body: body.to_string(),
     })
 }
 
 /// Install the document's bundled presets into `prompts_dir` — refusing
-/// (before anything is written) when a local preset file differs, unless
-/// `overwrite_presets` is set — and return the preset names written (new or
-/// overwritten; files already present with identical content are not listed).
+/// (before anything is written) when a local preset file differs and belongs
+/// to another source, unless `overwrite_presets` is set — and return the
+/// preset names written (new or overwritten; files already present with
+/// identical content are not listed). Every preset written is stamped with
+/// `source_ref`, and a differing file owned by the same source is updated
+/// in place.
 pub(crate) fn write_presets(
     document: &GraphExportDocument,
+    source_ref: &str,
     overwrite_presets: bool,
     prompts_dir: &Path,
 ) -> Result<Vec<String>, String> {
     let presets_written = presets_to_write(document, prompts_dir);
-    if overwrite_presets {
-        crate::domain::graph_transfer::install_overwriting(&document.prompt_presets, prompts_dir)?;
-    } else {
-        crate::domain::graph_transfer::validate(&document.prompt_presets, prompts_dir)?;
-        crate::domain::graph_transfer::install(&document.prompt_presets, prompts_dir)?;
-    }
+    crate::domain::graph_transfer::install_for_install(
+        &document.prompt_presets,
+        prompts_dir,
+        source_ref,
+        overwrite_presets,
+    )?;
     Ok(presets_written)
+}
+
+/// Rename every bundled preset the install would refuse under the ownership
+/// rule to `{prefix}-{preset}`, rewriting the agent node configs that
+/// reference it — the `--as PREFIX` path of `canopy graph install`. The
+/// caller runs this before building the review, so the review shows the
+/// names that will be written. Entry-invalid presets are left alone (they
+/// fail at write time instead); a renamed target that still collides
+/// refuses. With `overwrite` nothing would refuse, so nothing is renamed.
+pub(crate) fn rename_colliding_presets(
+    document: &mut GraphExportDocument,
+    prefix: &str,
+    source_ref: &str,
+    overwrite: bool,
+    prompts_dir: &Path,
+) -> Result<(), String> {
+    let prefix = prefix.trim();
+    if !is_slug(prefix) {
+        return Err(format!(
+            "Invalid --as prefix '{prefix}': use 1-48 lowercase letters, digits, or '-'."
+        ));
+    }
+    let mut renames: Vec<(String, String)> = Vec::new();
+    for preset in &document.prompt_presets {
+        let single = std::slice::from_ref(preset);
+        if crate::domain::graph_transfer::validate_for_install(
+            single,
+            prompts_dir,
+            source_ref,
+            overwrite,
+        )
+        .is_ok()
+        {
+            continue;
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        if crate::domain::graph_transfer::validate_entry(preset, &mut seen).is_err() {
+            continue;
+        }
+        renames.push((preset.name.clone(), format!("{prefix}-{}", preset.name)));
+    }
+    if renames.is_empty() {
+        return Ok(());
+    }
+    for preset in &mut document.prompt_presets {
+        if let Some((_, new)) = renames.iter().find(|(old, _)| *old == preset.name) {
+            preset.name = new.clone();
+        }
+    }
+    for node in &mut document.nodes {
+        let Some(referenced) = node.config.get("prompt_preset").and_then(Value::as_str) else {
+            continue;
+        };
+        if let Some((_, new)) = renames.iter().find(|(old, _)| *old == referenced) {
+            node.config["prompt_preset"] = serde_json::json!(new);
+        }
+    }
+    crate::domain::graph_transfer::validate_for_install(
+        &document.prompt_presets,
+        prompts_dir,
+        source_ref,
+        overwrite,
+    )
 }
 
 /// Refuse a catalogue body that fails validation — listing every problem —
@@ -587,7 +675,13 @@ mod tests {
             format!("{}/i/graph/my-graph", stub.base_url())
         );
         let prompts = tempfile::tempdir().unwrap();
-        let written = write_presets(&fetched.document, false, prompts.path()).unwrap();
+        let written = write_presets(
+            &fetched.document,
+            &fetched.source_ref,
+            false,
+            prompts.path(),
+        )
+        .unwrap();
         assert!(written.is_empty());
     }
 
@@ -647,8 +741,13 @@ mod tests {
         let prompts = tempfile::tempdir().unwrap();
         std::fs::write(prompts.path().join("custom.md"), "old content").unwrap();
         std::fs::write(prompts.path().join("same.md"), "same content").unwrap();
-        let error = write_presets(&fetched.document, false, prompts.path())
-            .expect_err("conflict must fail");
+        let error = write_presets(
+            &fetched.document,
+            &fetched.source_ref,
+            false,
+            prompts.path(),
+        )
+        .expect_err("conflict must fail");
         assert!(error.contains("custom"), "{error}");
         assert!(error.contains("different content"), "{error}");
         assert!(
@@ -668,7 +767,8 @@ mod tests {
         let prompts = tempfile::tempdir().unwrap();
         std::fs::write(prompts.path().join("custom.md"), "old content").unwrap();
         std::fs::write(prompts.path().join("same.md"), "same content").unwrap();
-        let written = write_presets(&fetched.document, true, prompts.path()).unwrap();
+        let written =
+            write_presets(&fetched.document, &fetched.source_ref, true, prompts.path()).unwrap();
         assert_eq!(
             std::fs::read_to_string(prompts.path().join("custom.md")).unwrap(),
             "new content"
@@ -678,5 +778,124 @@ mod tests {
             "aaa content"
         );
         assert_eq!(written, vec!["aaa", "custom"]);
+    }
+
+    #[test]
+    fn source_identity_drops_the_version_but_keeps_the_scope() {
+        assert_eq!(parse_ref("my-graph").unwrap().source_identity(), "my-graph");
+        assert_eq!(
+            parse_ref("my-graph@abc123").unwrap().source_identity(),
+            "my-graph"
+        );
+        assert_eq!(
+            parse_ref("acme/widgets/my-graph@v1.2")
+                .unwrap()
+                .source_identity(),
+            "acme/widgets/my-graph"
+        );
+        let draft = format!("draft:{DRAFT_ID}");
+        assert_eq!(parse_ref(&draft).unwrap().source_identity(), draft);
+    }
+
+    #[test]
+    fn write_presets_updates_a_preset_owned_by_the_same_source() {
+        let stub = stub_serving(&graph_doc().to_string());
+        let fetched = fetch_graph(&stub.base_url(), "my-graph").unwrap();
+        let prompts = tempfile::tempdir().unwrap();
+        let first =
+            crate::domain::graph_transfer::parse_export_document_str(&preset_doc().to_string())
+                .unwrap();
+        write_presets(&first, &fetched.source_ref, false, prompts.path()).unwrap();
+
+        let mut second = preset_doc();
+        second["prompt_presets"][1]["content"] = json!("newer content");
+        let second =
+            crate::domain::graph_transfer::parse_export_document_str(&second.to_string()).unwrap();
+        let written = write_presets(&second, &fetched.source_ref, false, prompts.path())
+            .expect("same-source reinstall updates without flags");
+        assert_eq!(written, vec!["custom"]);
+        assert_eq!(
+            std::fs::read_to_string(prompts.path().join("custom.md")).unwrap(),
+            "newer content"
+        );
+    }
+
+    #[test]
+    fn rename_colliding_presets_renames_only_what_would_refuse() {
+        let stub = stub_serving(&preset_doc().to_string());
+        let fetched = fetch_graph(&stub.base_url(), "my-graph").unwrap();
+        let prompts = tempfile::tempdir().unwrap();
+        std::fs::write(prompts.path().join("custom.md"), "old content").unwrap();
+        std::fs::write(prompts.path().join("same.md"), "same content").unwrap();
+
+        let mut document = fetched.document.clone();
+        rename_colliding_presets(
+            &mut document,
+            "alice",
+            &fetched.source_ref,
+            false,
+            prompts.path(),
+        )
+        .unwrap();
+        let names: Vec<&str> = document
+            .prompt_presets
+            .iter()
+            .map(|preset| preset.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["aaa", "alice-custom", "same"]);
+        assert_eq!(
+            document.nodes[0].config["prompt_preset"], "alice-custom",
+            "the node config follows the rename"
+        );
+
+        let written = write_presets(&document, &fetched.source_ref, false, prompts.path()).unwrap();
+        assert_eq!(written, vec!["aaa", "alice-custom"]);
+        assert_eq!(
+            std::fs::read_to_string(prompts.path().join("custom.md")).unwrap(),
+            "old content",
+            "the colliding file is left alone"
+        );
+        assert_eq!(
+            std::fs::read_to_string(prompts.path().join("alice-custom.md")).unwrap(),
+            "new content"
+        );
+    }
+
+    #[test]
+    fn rename_colliding_presets_refuses_a_taken_target() {
+        let stub = stub_serving(&preset_doc().to_string());
+        let fetched = fetch_graph(&stub.base_url(), "my-graph").unwrap();
+        let prompts = tempfile::tempdir().unwrap();
+        std::fs::write(prompts.path().join("custom.md"), "old content").unwrap();
+        std::fs::write(prompts.path().join("alice-custom.md"), "someone else").unwrap();
+
+        let mut document = fetched.document.clone();
+        let error = rename_colliding_presets(
+            &mut document,
+            "alice",
+            &fetched.source_ref,
+            false,
+            prompts.path(),
+        )
+        .expect_err("a taken rename target must refuse");
+        assert!(error.contains("alice-custom"), "{error}");
+        assert!(error.contains("different content"), "{error}");
+    }
+
+    #[test]
+    fn rename_colliding_presets_refuses_a_bad_prefix() {
+        let stub = stub_serving(&preset_doc().to_string());
+        let fetched = fetch_graph(&stub.base_url(), "my-graph").unwrap();
+        let prompts = tempfile::tempdir().unwrap();
+        let mut document = fetched.document.clone();
+        let error = rename_colliding_presets(
+            &mut document,
+            "Not A Prefix",
+            &fetched.source_ref,
+            false,
+            prompts.path(),
+        )
+        .expect_err("a non-slug prefix must fail");
+        assert!(error.contains("Invalid --as prefix"), "{error}");
     }
 }

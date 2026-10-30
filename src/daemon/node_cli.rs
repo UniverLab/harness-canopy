@@ -27,6 +27,15 @@ pub(crate) enum NodeAction {
         /// Catalogue ref: `<slug>` or `<owner>/<repo>/<slug>`, each with an
         /// optional `@<ref>` suffix — or `draft:<id>` for an editor draft.
         reference: String,
+        /// Install under another local name instead of the document's own
+        /// (the bundled preset is renamed with it) — the way out when the
+        /// name is already installed from another source.
+        #[arg(long = "as")]
+        as_name: Option<String>,
+        /// Overwrite an installed copy from another source instead of
+        /// refusing the install.
+        #[arg(long)]
+        replace: bool,
         /// Overwrite a local preset file whose content differs instead of
         /// refusing the install.
         #[arg(long = "overwrite-presets")]
@@ -59,6 +68,8 @@ pub(crate) fn handle_node_action(action: NodeAction) -> Result<()> {
         NodeAction::List { json } => list(json),
         NodeAction::Install {
             reference,
+            as_name,
+            replace,
             overwrite_presets,
             yes,
             show_prompts,
@@ -68,10 +79,14 @@ pub(crate) fn handle_node_action(action: NodeAction) -> Result<()> {
                 && std::io::IsTerminal::is_terminal(&std::io::stdout());
             run_install(
                 &reference,
-                overwrite_presets,
-                yes,
-                show_prompts,
-                json,
+                InstallFlags {
+                    as_name,
+                    replace,
+                    overwrite_presets,
+                    yes,
+                    show_prompts,
+                    json,
+                },
                 tty,
                 &mut std::io::stdin().lock(),
             )
@@ -95,12 +110,23 @@ fn list(json: bool) -> Result<()> {
         return Ok(());
     }
     for entry in &entries {
-        println!(
+        let mut line = format!(
             "{}  {:<8} {}",
             entry.document.name,
             entry.document.kind,
             entry.source.as_str()
         );
+        if entry.source == nodes::Source::Installed {
+            line.push(' ');
+            line.push_str(
+                entry
+                    .document
+                    .catalogue_source
+                    .as_deref()
+                    .unwrap_or("local"),
+            );
+        }
+        println!("{line}");
     }
     Ok(())
 }
@@ -113,6 +139,7 @@ fn list_rows(entries: &[NodeEntry]) -> Vec<serde_json::Value> {
                 "name": entry.document.name,
                 "kind": entry.document.kind,
                 "source": entry.source.as_str(),
+                "catalogue_source": entry.document.catalogue_source,
             })
         })
         .collect()
@@ -120,26 +147,49 @@ fn list_rows(entries: &[NodeEntry]) -> Vec<serde_json::Value> {
 
 /// The `canopy node install` flow, with `tty` and the answer reader injected
 /// so tests can drive it: fetch and validate the document (nothing written),
-/// print the summary (`--json` prints the review as JSON, the question goes
-/// to stderr), ask `Install <name> from <source>? [y/N]` unless `--yes`, and
-/// only then write the preset and the node — finally print the report with
-/// the review it was asked about.
+/// rename it under `--as` for the review, print the summary (`--json`
+/// prints the review as JSON, the question goes to stderr), ask
+/// `Install <name> from <source>? [y/N]` unless `--yes`, and only then
+/// write the preset and the node — finally print the report with the review
+/// it was asked about.
+/// The `canopy node install` flags, bundled so [`run_install`] stays a
+/// readable call.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct InstallFlags {
+    pub as_name: Option<String>,
+    pub replace: bool,
+    pub overwrite_presets: bool,
+    pub yes: bool,
+    pub show_prompts: bool,
+    pub json: bool,
+}
+
 pub(crate) fn run_install(
     reference: &str,
-    overwrite_presets: bool,
-    yes: bool,
-    show_prompts: bool,
-    json: bool,
+    flags: InstallFlags,
     tty: bool,
     read: &mut impl std::io::BufRead,
 ) -> Result<()> {
+    let InstallFlags {
+        as_name,
+        replace,
+        overwrite_presets,
+        yes,
+        show_prompts,
+        json,
+    } = flags;
     let canopy_dir = crate::domain::prompts::canopy_dir();
     let fetched = crate::daemon::node_install::fetch_node_document(
         &crate::daemon::graph_install::catalogue_url(),
         reference,
     )
     .map_err(|e| anyhow!(e))?;
-    let review = crate::domain::nodes::review::review_node(&fetched.document, &fetched.source);
+    let document = match &as_name {
+        Some(name) => crate::daemon::node_install::apply_as(&fetched.document, name)
+            .map_err(|e| anyhow!(e))?,
+        None => fetched.document.clone(),
+    };
+    let review = crate::domain::nodes::review::review_node(&document, &fetched.source);
     print_summary(&review, show_prompts, json);
 
     let is_draft = crate::daemon::graph_install::draft_id(reference).is_some();
@@ -162,16 +212,22 @@ pub(crate) fn run_install(
         }
     })?;
 
+    let options = crate::daemon::node_install::NodeInstallOptions {
+        source_ref: fetched.source_ref.clone(),
+        local_name: as_name,
+        replace,
+        overwrite_presets,
+    };
     let presets_written = crate::daemon::node_install::write_node_install(
         &fetched.document,
-        overwrite_presets,
+        &options,
         &nodes::nodes_dir(&canopy_dir),
         &crate::domain::prompts::prompts_dir(&canopy_dir),
     )
     .map_err(|e| anyhow!(e))?;
     let report = serde_json::json!({
-        "name": fetched.document.name,
-        "kind": fetched.document.kind,
+        "name": document.name,
+        "kind": document.kind,
         "ref": reference,
         "source_url": fetched.source_url,
         "source": fetched.source,
@@ -293,11 +349,14 @@ mod tests {
     }
 
     #[test]
-    fn install_parses_ref_overwrite_yes_show_prompts_and_json() {
+    fn install_parses_ref_as_replace_overwrite_yes_show_prompts_and_json() {
         let cli = TestCli::try_parse_from([
             "test",
             "install",
             "acme/widgets/auditor@v1",
+            "--as",
+            "alice-auditor",
+            "--replace",
             "--overwrite-presets",
             "--yes",
             "--show-prompts",
@@ -307,12 +366,16 @@ mod tests {
         match cli.action {
             NodeAction::Install {
                 reference,
+                as_name,
+                replace,
                 overwrite_presets,
                 yes,
                 show_prompts,
                 json,
             } => {
                 assert_eq!(reference, "acme/widgets/auditor@v1");
+                assert_eq!(as_name.as_deref(), Some("alice-auditor"));
+                assert!(replace);
                 assert!(overwrite_presets);
                 assert!(yes);
                 assert!(show_prompts);
@@ -323,8 +386,14 @@ mod tests {
         let cli = TestCli::try_parse_from(["test", "install", "auditor"]).expect("install parses");
         match cli.action {
             NodeAction::Install {
-                yes, show_prompts, ..
+                as_name,
+                replace,
+                yes,
+                show_prompts,
+                ..
             } => {
+                assert!(as_name.is_none(), "--as defaults to none");
+                assert!(!replace, "--replace defaults to false");
                 assert!(!yes, "--yes defaults to false");
                 assert!(!show_prompts, "--show-prompts defaults to false");
             }
@@ -483,10 +552,7 @@ mod tests {
 
         let error = run_install(
             "auditor",
-            false,
-            false,
-            false,
-            false,
+            InstallFlags::default(),
             false,
             &mut "".as_bytes(),
         )
@@ -525,10 +591,10 @@ mod tests {
 
         run_install(
             "auditor",
-            false,
-            true,
-            false,
-            false,
+            InstallFlags {
+                yes: true,
+                ..Default::default()
+            },
             false,
             &mut "".as_bytes(),
         )
@@ -567,10 +633,7 @@ mod tests {
 
         let error = run_install(
             &draft_reference(),
-            false,
-            false,
-            false,
-            false,
+            InstallFlags::default(),
             false,
             &mut "".as_bytes(),
         )
@@ -609,10 +672,10 @@ mod tests {
 
         run_install(
             &draft_reference(),
-            false,
-            true,
-            false,
-            false,
+            InstallFlags {
+                yes: true,
+                ..Default::default()
+            },
             false,
             &mut "".as_bytes(),
         )
@@ -640,10 +703,7 @@ mod tests {
 
         run_install(
             "auditor",
-            false,
-            false,
-            false,
-            false,
+            InstallFlags::default(),
             true,
             &mut b"y\n".as_slice(),
         )
@@ -652,10 +712,7 @@ mod tests {
 
         let declined = run_install(
             "auditor",
-            false,
-            false,
-            false,
-            false,
+            InstallFlags::default(),
             true,
             &mut b"\n".as_slice(),
         )

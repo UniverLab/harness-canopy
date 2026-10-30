@@ -117,7 +117,7 @@ pub(crate) static GRAPH_EDIT: ToolSpec = ToolSpec {
         ActionSpec {
             name: "install",
             required: &["ref", "workdir"],
-            optional: &["name", "overwrite_presets", "accept"],
+            optional: &["name", "as", "replace", "overwrite_presets", "accept"],
         },
         ActionSpec {
             name: "attach_spec",
@@ -468,7 +468,7 @@ impl TaskTriggerHandler {
         `archive` (required: graph_id; optional: none) — archive a graph out of the main list (restorable). \
         `restore` (required: graph_id; optional: none) — restore an archived graph to the main list. \
         `import` (required: document, workdir; optional: name) — import an exported graph document. \
-        `install` (required: ref, workdir; optional: name, overwrite_presets, accept) — install a graph from the catalogue. \
+        `install` (required: ref, workdir; optional: name, as, replace, overwrite_presets, accept) — install a graph from the catalogue. A bundled preset owned by another source is refused: pass `as` (a prefix to rename it under) or `replace: true` to overwrite. \
         `attach_spec` (required: graph_id, name, position, parallelizable; optional: description, spec_type, spec_scope) — bind a spec to the graph. \
         `detach_spec` (required: graph_id, spec_id; optional: none) — unbind a spec from the graph. \
         `update_spec` (required: spec_id; optional: name, description, position, parallelizable, spec_type, spec_scope) — update a bound spec. \

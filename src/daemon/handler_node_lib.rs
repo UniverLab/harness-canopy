@@ -46,6 +46,7 @@ impl TaskTriggerHandler {
                 "kind": entry.document.kind,
                 "description": entry.document.description,
                 "source": entry.source.as_str(),
+                "catalogue_source": entry.document.catalogue_source,
                 "config": entry.document.config,
             }))),
             None => match nodes::unknown_node_message(&dir, name) {
@@ -87,7 +88,17 @@ impl TaskTriggerHandler {
             Err(message) => return Ok(error_result(&message)),
         };
 
-        let review = crate::domain::nodes::review::review_node(&fetched.document, &fetched.source);
+        // `--as` renames before the review on both calls, so the review
+        // shows the names that will be written; the accept call renames
+        // from the same fetched body again at write time.
+        let document = match &params.as_name {
+            Some(name) => match crate::daemon::node_install::apply_as(&fetched.document, name) {
+                Ok(document) => document,
+                Err(message) => return Ok(error_result(&message)),
+            },
+            None => fetched.document.clone(),
+        };
+        let review = crate::domain::nodes::review::review_node(&document, &fetched.source);
         if !accepted {
             if let Some(id) = crate::daemon::graph_install::draft_id(&params.reference) {
                 crate::daemon::draft_pending::store(
@@ -103,13 +114,18 @@ impl TaskTriggerHandler {
         }
 
         // Only after the caller accepted does anything touch disk.
-        let overwrite = params.overwrite_presets.unwrap_or(false);
-        let document = fetched.document.clone();
+        let options = crate::daemon::node_install::NodeInstallOptions {
+            source_ref: fetched.source_ref.clone(),
+            local_name: params.as_name.clone(),
+            replace: params.replace.unwrap_or(false),
+            overwrite_presets: params.overwrite_presets.unwrap_or(false),
+        };
+        let original = fetched.document.clone();
         let written = tokio::task::spawn_blocking(move || {
             let canopy_dir = crate::domain::prompts::canopy_dir();
             crate::daemon::node_install::write_node_install(
-                &document,
-                overwrite,
+                &original,
+                &options,
                 &crate::domain::nodes::nodes_dir(&canopy_dir),
                 &crate::domain::prompts::prompts_dir(&canopy_dir),
             )
@@ -118,8 +134,8 @@ impl TaskTriggerHandler {
         .map_err(|error| internal_error(error.to_string()))?;
         match written {
             Ok(presets_written) => Ok(build_json_result(&serde_json::json!({
-                "name": fetched.document.name,
-                "kind": fetched.document.kind,
+                "name": document.name,
+                "kind": document.kind,
                 "ref": params.reference,
                 "source_url": fetched.source_url,
                 "source": fetched.source,
@@ -149,7 +165,9 @@ impl TaskTriggerHandler {
     }
 }
 
-/// The `node` `list` rows: name, kind, and where the document came from.
+/// The `node` `list` rows: name, kind, where the document came from, and
+/// which catalogue entry installed it (`null` for builtins and local
+/// documents).
 fn node_rows(entries: &[nodes::NodeEntry]) -> Vec<serde_json::Value> {
     entries
         .iter()
@@ -158,6 +176,7 @@ fn node_rows(entries: &[nodes::NodeEntry]) -> Vec<serde_json::Value> {
                 "name": entry.document.name,
                 "kind": entry.document.kind,
                 "source": entry.source.as_str(),
+                "catalogue_source": entry.document.catalogue_source,
             })
         })
         .collect()

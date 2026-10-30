@@ -107,7 +107,9 @@ const EXPECTED_TOOL_NAMES: &[&str] = &[
 /// Any byte drift in a description or schema fails `tool_inventory_is_byte_identical`.
 /// The schema hashes were re-pinned for rmcp 2.x, whose `validate_and_strip` drops the
 /// root `title`/`description` of each input schema (rmcp 1.6 kept them). Properties,
-/// required fields and tool descriptions are unchanged by that.
+/// required fields and tool descriptions are unchanged by that. The `node` and
+/// `graph_edit` rows were re-pinned again when their `install` actions gained
+/// the optional `as`/`replace` params.
 const EXPECTED_TOOL_ROWS: &[&str] = &[
     "agent|d8f9c6d2e27d78721e0e68301793b430eb079a49d68e003c0a36062ade4326c2|d713589e444e00e203c10fb39b668774212540a62cec84a04d9f2b34b7c386b1",
     "agent_edit|9f9d97739be8934e8023b86d6ed35d9acf9209d18d42a8cafd8ffc99154965cf|eb0e7e1757828c2db9669176f36f437dc1cfc1797eacee875d69ff61ae80b271",
@@ -119,7 +121,7 @@ const EXPECTED_TOOL_ROWS: &[&str] = &[
     "graph_complete_node|cd65852e0bb702902c8fc61858fb514f0f75d749de39d9014f2ae037d39a5a24|174f4383731a376d4ffd07080c26cbc61bd66839093939ea3f6defaebd64cd5e",
     "graph_control|6ea48b9f5a7efdcb8091015b809f91686f69870f05e7f83b077744334a521603|30031d3a2a46a23b6d748a31eac9e22a82c16a6743c7dc5a5a574fab68f7eee5",
     "graph_edge|dc837b1ca327d911a1f60b27d4546747dcb70411b35c7a51d4954256e73987de|78b3584a55307259ba886f8371e49efad61a12b996a821c014343fd545196f47",
-    "graph_edit|d5c0c9ad02ee3f28ccea179274e9a3410f8458a9ddb43f87123119ce9e92f71f|6c205d5b8823c086eb4c5e1438bb9e269e5fa259d12c6f9a9e81a0e3713f7519",
+    "graph_edit|7bdde9172acea2efe7c1d82ae46a829552eb3c844d14a15679c0e48eb40092b7|cdab5b6c2bb35df571546efe4edd6e66aa118d8cbff63a8c7f716a510f31090c",
     "graph_ensemble|de9b6ae3f76602a7e5b1f8dfc1dbd36a127265dba6149340b3fe1710ee052ec7|3baf8f276e40a612e23cac47960df84a6949236c21f36f07521560d9894d7974",
     "graph_node|7fce2b505b0d7e9dc1256d68c5ded89516a89bbbbcd5ea128cc35d360793141c|2216ae95d00d2978c711101c9113ed1051d4691fa6a6bfea8bff67260a71dd1d",
     "graph_report_blocker|0af53e5791486ff4aacdfd49ff7e2a12171ff71ba4825fe03147683c8bea8d95|55366b14da2aae0cf6af2fb6f92900d8db343c7051e7d01dc025f8196b8bf599",
@@ -131,7 +133,7 @@ const EXPECTED_TOOL_ROWS: &[&str] = &[
     "intelligence_upsert|164de5427fff75a57508a5da581435374ebd7176ced490cf2e21577294d1aa01|7f55a980873729de4e6ae987d684496da34ac296de5d6d75603bf72dc039db1d",
     "loop_complete_node|a3a48975f0dafdc50569ac00a150cb091479281e7339f112708580a1764f95e8|174f4383731a376d4ffd07080c26cbc61bd66839093939ea3f6defaebd64cd5e",
     "loop_report_blocker|9fb9038c5d224015aa25b157730b99339dd91372deb3c1460abb1e5e4fad2081|55366b14da2aae0cf6af2fb6f92900d8db343c7051e7d01dc025f8196b8bf599",
-    "node|b3eb6b349c7f9a09be75c5537612e2fd087fc80d9dbb406a6f2bb9f8d213e097|e8595cc21ab1ac6d293a54b011a1a968fc3c5a3cc7eec4892af2433e75c58e7d",
+    "node|422983fb9ec553e602cae4b674884fdad6afa738f63b8b9c08be324393d5d082|15e2628fcd07f60f77b122dda40096ac66cf401ef1bf147e9e22b561dece0ef1",
     "project|c65b957f5281b52bc552e5d1b03c7647d3e9f4761341e52f06c61238c8f6a4bb|64ee4edf4859789a3cc27a22c02ccc82783ae53c4a88caa54e9908a50b951a5f",
     "queue|c9468c5708f09f8830ada49db64c145bc9dce653035ebc56499df454fc82143f|6a146499c66558d48a9a08d37430f98ffeea824541462e49a89e7e90752434c7",
     "rag|9e6c40757677f90c354176984896506760fe8b81b8102b4f277c9228e4add4a8|32008a6f85eb5c4dda7ff1071bec866bc8122f09dc9fbaf4890f0f25f81ab603",
