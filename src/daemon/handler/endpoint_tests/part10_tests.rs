@@ -1332,3 +1332,80 @@ async fn graph_update_ensemble_rejects_quorum_grace_on_round_robin() {
         text(&result)
     );
 }
+
+/// `run_from_node` accepts an unambiguous id prefix for a queue member, like
+/// every other spec tool — not just the full uuid (the 3f087a76 incident).
+#[tokio::test]
+async fn run_from_node_prefix_starts_member_spec() {
+    let (dir, db, _handler) = endpoint_test_handler();
+    let lp = insert_test_graph(&db, dir.path());
+    let member = insert_standalone_spec(&db, "Member One");
+    let other = insert_standalone_spec(&db, "Member Two");
+    let queue_id = uuid::Uuid::new_v4().to_string();
+    db.insert_queue(&Queue {
+        id: queue_id.clone(),
+        name: "Q".to_string(),
+        created_at: chrono::Utc::now(),
+    })
+    .unwrap();
+    db.append_queue_member(&queue_id, &member.id, None).unwrap();
+    db.append_queue_member(&queue_id, &other.id, None).unwrap();
+    db.set_graph_active_run_queue(&lp.id, Some(&queue_id))
+        .unwrap();
+
+    let prefix = member.id[..8].to_string();
+    let resolved =
+        crate::daemon::handler_run_exec::resolve_directed_spec(&db, &lp.id, Some(&prefix))
+            .unwrap_or_else(|e| panic!("prefix '{prefix}' must resolve the member: {e}"));
+    assert_eq!(resolved.id, member.id);
+}
+
+/// `run_from_node` accepts a spec code for a queue member, resolved within
+/// the graph's workdir (docs/mcp-tools.md promises codes everywhere).
+#[tokio::test]
+async fn run_from_node_code_starts_member_spec() {
+    let (dir, db, _handler) = endpoint_test_handler();
+    let lp = insert_test_graph(&db, dir.path());
+    let workdir = dir.path().to_string_lossy().to_string();
+    let member = GraphSpec {
+        id: uuid::Uuid::new_v4().to_string(),
+        graph_id: None,
+        name: "Member One".to_string(),
+        description: Some(valid_spec_description()),
+        position: 1,
+        parallelizable: false,
+        status: GraphSpecStatus::Pending,
+        started_at: None,
+        completed_at: None,
+        spec_start_head: None,
+        spec_start_dirty: None,
+        spec_end_dirty: None,
+        spec_end_dirty_paths: None,
+        spec_committed_head: None,
+        workdir: Some(workdir),
+        completed_via: None,
+        completed_via_reason: None,
+        completed_via_at: None,
+        spec_type: None,
+        spec_scope: None,
+        spec_code: Some("FIX-4".to_string()),
+    };
+    db.insert_graph_spec(&member).unwrap();
+    let other = insert_standalone_spec(&db, "Member Two");
+    let queue_id = uuid::Uuid::new_v4().to_string();
+    db.insert_queue(&Queue {
+        id: queue_id.clone(),
+        name: "Q".to_string(),
+        created_at: chrono::Utc::now(),
+    })
+    .unwrap();
+    db.append_queue_member(&queue_id, &member.id, None).unwrap();
+    db.append_queue_member(&queue_id, &other.id, None).unwrap();
+    db.set_graph_active_run_queue(&lp.id, Some(&queue_id))
+        .unwrap();
+
+    let resolved =
+        crate::daemon::handler_run_exec::resolve_directed_spec(&db, &lp.id, Some("FIX-4"))
+            .unwrap_or_else(|e| panic!("code 'FIX-4' must resolve the member: {e}"));
+    assert_eq!(resolved.id, member.id);
+}

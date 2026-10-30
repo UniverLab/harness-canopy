@@ -121,7 +121,8 @@ impl Database {
              SET status = ?1,
                  started_at = COALESCE(?2, started_at),
                  completed_at = COALESCE(?3, completed_at),
-                 paused_by_reconciliation = 0
+                 paused_by_reconciliation = 0,
+                 blocker = CASE WHEN ?1 = 'paused' THEN blocker ELSE NULL END
              WHERE id = ?4",
             params![
                 status.as_str(),
@@ -182,7 +183,8 @@ impl Database {
         let rows = conn.execute(
             "UPDATE graphs
              SET status = ?1,
-                 started_at = COALESCE(?2, started_at)
+                 started_at = COALESCE(?2, started_at),
+                 blocker = NULL
              WHERE id = ?3 AND status != ?1",
             params![
                 GraphStatus::Running.as_str(),
@@ -248,6 +250,38 @@ impl Database {
         Ok(rows > 0)
     }
 
+    /// The blocker text a guard pause stored for `graph_id` (`None` when the
+    /// graph is not paused behind a blocker). Read straight from the row —
+    /// there is deliberately no `Graph` field for it (cf.
+    /// [`Self::graph_active_run_idea`]), so only the readers that need it
+    /// pay for the read.
+    pub fn graph_blocker(&self, graph_id: &str) -> Result<Option<String>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let mut stmt = conn.prepare("SELECT blocker FROM graphs WHERE id = ?1")?;
+        let mut rows = stmt.query(params![graph_id])?;
+        match rows.next()? {
+            Some(row) => Ok(row.get::<_, Option<String>>(0)?),
+            None => Ok(None),
+        }
+    }
+
+    /// Persist (or, with `None`, clear) the blocker text for `graph_id`.
+    /// Returns whether the graph row existed.
+    pub fn set_graph_blocker(&self, graph_id: &str, blocker: Option<&str>) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let rows = conn.execute(
+            "UPDATE graphs SET blocker = ?1 WHERE id = ?2",
+            params![blocker, graph_id],
+        )?;
+        Ok(rows > 0)
+    }
+
     /// Reset a graph back to `Draft` (the status `graph_control` accepts) and clear
     /// `completed_at`, so a `failed` or `completed` graph can be relaunched via
     /// `graph_control` + `graph_control` instead of being stuck forever.
@@ -257,7 +291,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let rows = conn.execute(
-            "UPDATE graphs SET status = ?1, completed_at = NULL WHERE id = ?2",
+            "UPDATE graphs SET status = ?1, completed_at = NULL, blocker = NULL WHERE id = ?2",
             params![GraphStatus::Draft.as_str(), graph_id],
         )?;
         Ok(rows > 0)

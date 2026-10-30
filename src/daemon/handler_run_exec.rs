@@ -445,32 +445,42 @@ pub(crate) fn resolve_directed_spec(
     spec_id: Option<&str>,
 ) -> Result<GraphSpec, String> {
     let bound = db.list_graph_specs(graph_id).map_err(|e| e.to_string())?;
-    if let Some(spec_id) = spec_id.map(str::trim).filter(|s| !s.is_empty()) {
-        if let Some(spec) = bound.iter().find(|s| s.id == spec_id) {
+    if let Some(spec_ref) = spec_id.map(str::trim).filter(|s| !s.is_empty()) {
+        let lp = db.get_graph(graph_id).map_err(|e| e.to_string())?;
+        let workdir = lp.as_ref().map(|graph| graph.workdir.as_str());
+        // Accept a full id, an unambiguous id prefix, or a spec code —
+        // resolved within the graph's workdir like every other spec tool —
+        // then check membership against the graph's bound specs and, for a
+        // queue-driven graph, the queue being run.
+        let resolved = db
+            .resolve_spec_id_by_prefix(spec_ref, workdir)
+            .map_err(|e| e.to_string())?;
+        let Some(resolved) = resolved else {
+            return Err(format!(
+                "Spec '{spec_ref}' does not belong to graph '{graph_id}'."
+            ));
+        };
+        if let Some(spec) = bound.iter().find(|s| s.id == resolved) {
             return Ok(spec.clone());
         }
-        let Some(queue_id) = db
-            .get_graph(graph_id)
-            .map_err(|e| e.to_string())?
-            .and_then(|lp| lp.active_run_queue_id)
-        else {
+        let Some(queue_id) = lp.and_then(|graph| graph.active_run_queue_id) else {
             return Err(format!(
-                "Spec '{spec_id}' does not belong to graph '{graph_id}'."
+                "Spec '{spec_ref}' does not belong to graph '{graph_id}'."
             ));
         };
         for member_id in db
             .list_queue_member_spec_ids(&queue_id)
             .map_err(|e| e.to_string())?
         {
-            if member_id != spec_id {
+            if member_id != resolved {
                 continue;
             }
-            if let Some(spec) = db.get_graph_spec(spec_id).map_err(|e| e.to_string())? {
+            if let Some(spec) = db.get_graph_spec(&resolved).map_err(|e| e.to_string())? {
                 return Ok(spec);
             }
         }
         return Err(format!(
-            "Spec '{spec_id}' does not belong to graph '{graph_id}'."
+            "Spec '{spec_ref}' does not belong to graph '{graph_id}'."
         ));
     }
     if let Some(spec) = bound.iter().find(|s| s.status.is_resumable()).or_else(|| {

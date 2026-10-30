@@ -79,6 +79,14 @@ pub(crate) fn build_graph_summary_json(
     .map(|spec| build_spec_run_info(db, &spec))
     .transpose()?;
 
+    // A guard pause stores its blocker on the graph row — that wins over the
+    // spec-derived blocker (a node run's `graph_report_blocker` output), so a
+    // paused-behind-a-guard graph reports WHY it paused instead of `blocked: false`.
+    let blocker = db
+        .graph_blocker(&lp.id)
+        .map_err(internal_error)?
+        .or_else(|| current_spec.as_ref().and_then(|v| v.blocker.clone()));
+
     let mut out = serde_json::json!({
         "id": lp.id,
         "name": lp.name,
@@ -86,8 +94,8 @@ pub(crate) fn build_graph_summary_json(
         "trigger": graph_trigger_json(lp),
         "current_spec": current_spec.as_ref().map(|v| &v.name),
         "current_node": current_spec.as_ref().and_then(|v| v.current_node.as_ref()),
-        "blocked": current_spec.as_ref().is_some_and(|v| v.blocker.is_some()),
-        "blocker": current_spec.as_ref().and_then(|v| v.blocker.clone()),
+        "blocked": blocker.is_some(),
+        "blocker": blocker,
         "spec_attempts": current_spec.as_ref().map(|v| v.cross_run_attempts),
         "created_at": lp.created_at.to_rfc3339(),
         "workdir": lp.workdir,
@@ -310,6 +318,27 @@ fn running_graph_consistency_warning(db: &Database, graph: &Graph) -> Option<&'s
         .then_some("graph is running but has no node run in progress and no scheduled resume")
 }
 
+/// CB52 FR4: join nodes that belong to no ensemble — the state left behind
+/// when an ensemble row was deleted (pre-fix: silently, via `ON DELETE
+/// CASCADE` from a referenced node) while its member/join nodes survived.
+/// Never an error here: the graph must stay inspectable so the operator can
+/// repair it. Never auto-repaired (C1).
+fn orphan_join_warnings_json(
+    db: &Database,
+    lp: &GraphDetails,
+) -> anyhow::Result<Vec<serde_json::Value>> {
+    let mut warnings = Vec::new();
+    for node in db.list_orphan_join_nodes_for_graph(&lp.lp.id)? {
+        warnings.push(orphan_join_warning_json(&node));
+    }
+    for spec in &lp.specs {
+        for node in db.list_orphan_join_nodes_for_spec(&spec.spec.id)? {
+            warnings.push(orphan_join_warning_json(&node));
+        }
+    }
+    Ok(warnings)
+}
+
 pub(crate) fn graph_details_json(
     db: &Database,
     lp: &GraphDetails,
@@ -356,27 +385,17 @@ pub(crate) fn graph_details_json(
         .map(|details| ensemble_details_json(details, &lp.graph_edges))
         .collect::<Vec<_>>();
 
-    // CB52 FR4: join nodes that belong to no ensemble — the state left
-    // behind when an ensemble row was deleted (pre-fix: silently, via `ON
-    // DELETE CASCADE` from a referenced node) while its member/join nodes
-    // survived. Never an error here: the graph must stay inspectable so the
-    // operator can repair it. Never auto-repaired (C1).
-    let mut orphan_join_warnings = Vec::new();
-    for node in db.list_orphan_join_nodes_for_graph(&lp.lp.id)? {
-        orphan_join_warnings.push(orphan_join_warning_json(&node));
-    }
-    for spec in &lp.specs {
-        for node in db.list_orphan_join_nodes_for_spec(&spec.spec.id)? {
-            orphan_join_warnings.push(orphan_join_warning_json(&node));
-        }
-    }
+    let orphan_join_warnings = orphan_join_warnings_json(db, lp)?;
 
+    let row_blocker = db.graph_blocker(&lp.lp.id)?;
     let mut out = serde_json::json!({
         "id": lp.lp.id,
         "name": lp.lp.name,
         "description": lp.lp.description,
         "workdir": lp.lp.workdir,
         "status": lp.lp.status.as_str(),
+        "blocked": row_blocker.is_some(),
+        "blocker": row_blocker,
         "trigger": graph_trigger_json(&lp.lp),
         "created_at": lp.lp.created_at.to_rfc3339(),
         "started_at": lp.lp.started_at.map(|value| value.to_rfc3339()),

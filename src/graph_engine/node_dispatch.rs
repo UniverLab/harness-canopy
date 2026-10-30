@@ -380,6 +380,10 @@ impl GraphEngine {
         let ending_node = self.ending_node_name(graph_id, None);
         self.db
             .update_graph_status(graph_id, GraphStatus::Paused, None, None)?;
+        // Persist the blocker on the graph row so `graph`, `graph list` and
+        // the TUI show WHY the graph paused. Stored unprefixed — the
+        // `GraphBlocked` event below adds the "Blocked: " prefix itself.
+        self.db.set_graph_blocker(graph_id, Some(blocker))?;
         if let Ok(Some(lp)) = self.db.get_graph(graph_id) {
             activity::record(
                 &self.db,

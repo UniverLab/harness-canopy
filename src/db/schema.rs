@@ -139,6 +139,25 @@ impl Database {
         Ok(())
     }
 
+    /// Add graph `blocker`: the text a dirty-tree guard (or attempt-budget)
+    /// pause stores so `graph`, `graph list` and the TUI can show WHY the
+    /// graph paused. `NULL` on pre-existing rows and whenever the graph is
+    /// not paused-behind-a-blocker (cleared on resume and on terminal moves).
+    pub(in crate::db) fn migrate_graph_blocker(conn: &Connection) -> Result<()> {
+        let has_blocker: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('graphs') WHERE name = 'blocker'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if !has_blocker {
+            conn.execute("ALTER TABLE graphs ADD COLUMN blocker TEXT", [])
+                .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+        }
+        Ok(())
+    }
+
     /// Add graph-spec `spec_committed_head`/`spec_end_dirty*` columns.
     pub(in crate::db) fn migrate_spec_commit_evidence_columns(conn: &Connection) -> Result<()> {
         // `spec_committed_head` (C15): the workdir's git HEAD immediately

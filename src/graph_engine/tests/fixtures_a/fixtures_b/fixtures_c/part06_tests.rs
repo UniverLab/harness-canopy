@@ -1354,3 +1354,131 @@ async fn graph_engine_queue_run_settles_failed_when_member_failed() {
     // No dangling running node runs remain.
     assert!(db.list_running_graph_runs(&graph_id).unwrap().is_empty());
 }
+
+/// A queue-advance guard pause stores the blocker on the graph row — so
+/// `graph_get`/`graph_list` report it instead of `blocked: false` — fires
+/// `on_blocked` exactly once, and names the previous spec by name only with
+/// no doubled period. Resuming clears the stored blocker.
+#[tokio::test]
+async fn guard_pause_stores_blocker_and_fires_on_blocked_once() {
+    let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+    init_git_repo(dir.path());
+    let workdir = dir.path().to_string_lossy().to_string();
+
+    // A failed predecessor that ended dirty on this workdir, and the dirt
+    // still in the tree.
+    db.insert_graph_spec(&dirty_predecessor_spec_named(
+        "pred-1",
+        "PredOne",
+        &workdir,
+        GraphSpecStatus::Failed,
+    ))
+    .unwrap();
+    db.set_graph_spec_end_state("pred-1", Some(1), &["leftover.txt".to_string()])
+        .unwrap();
+    std::fs::write(dir.path().join("leftover.txt"), "x").unwrap();
+
+    let next = standalone_spec("next-1", 1);
+    db.insert_graph_spec(&next).unwrap();
+    insert_queue_with_members(&db, "queue-1", &[&next.id]);
+
+    let blocked_file = dir.path().join("blocked.txt");
+    let mut hooks = std::collections::BTreeMap::new();
+    hooks.insert(
+        crate::domain::graphs::GraphHookEvent::OnBlocked,
+        vec![crate::domain::graphs::GraphCompletionHook {
+            platform: None,
+            model: None,
+            effort: None,
+            prompt: None,
+            command: Some(format!("printf blocked > {}", blocked_file.display())),
+            target_session_id: None,
+            target_session_name: None,
+            timeout_minutes: Some(1),
+            target_graph_id: None,
+            queue_id: None,
+            workdir_override: None,
+            idea: None,
+            crew: None,
+        }],
+    );
+    db.update_graph_hooks(&graph_id, &hooks).unwrap();
+
+    engine
+        .run_graph_dispatch(
+            graph_id.clone(),
+            Some("queue-1".to_string()),
+            None,
+            DispatchMode::fresh(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let lp = db.get_graph(&graph_id).unwrap().unwrap();
+    assert_eq!(
+        lp.status,
+        GraphStatus::Paused,
+        "the guard must pause, never fail"
+    );
+    let blocker = db
+        .graph_blocker(&graph_id)
+        .unwrap()
+        .expect("a guard pause must store a blocker on the graph row");
+    assert!(blocker.contains("leftover.txt"), "{blocker}");
+    assert!(blocker.contains("spec 'PredOne'"), "{blocker}");
+    assert!(
+        !blocker.contains("(graph '"),
+        "queue-driven text names the spec only: {blocker}"
+    );
+    assert!(!blocker.contains(".."), "no doubled period: {blocker}");
+
+    // The stored text is the graph_blocked event's text (modulo its prefix).
+    let events = db
+        .list_graph_events(
+            &graph_id,
+            None,
+            None,
+            Some(&["graph_blocked".to_string()]),
+            50,
+        )
+        .unwrap();
+    assert_eq!(
+        events.len(),
+        1,
+        "exactly one graph_blocked event, got {events:?}"
+    );
+    assert_eq!(events[0].message, format!("Blocked: {blocker}"));
+
+    // The get/list surfaces show the same blocker.
+    let summary = crate::daemon::handler_read::build_graph_summary_json(&db, &lp).unwrap();
+    assert_eq!(summary["blocked"], serde_json::json!(true));
+    assert_eq!(summary["blocker"], serde_json::json!(blocker));
+    let details = db.get_graph_details(&graph_id).unwrap().unwrap();
+    let details_json = crate::daemon::handler_read::graph_details_json(&db, &details).unwrap();
+    assert_eq!(details_json["blocked"], serde_json::json!(true));
+    assert_eq!(details_json["blocker"], serde_json::json!(blocker));
+
+    // on_blocked fired exactly once.
+    let hook_runs = db.list_graph_completion_hook_runs(&graph_id).unwrap();
+    assert_eq!(
+        hook_runs.len(),
+        1,
+        "on_blocked must fire once, got {hook_runs:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&blocked_file).unwrap_or_default(),
+        "blocked"
+    );
+
+    // Resuming clears the blocker.
+    assert!(db
+        .claim_graph_for_run(&graph_id, chrono::Utc::now())
+        .unwrap());
+    assert_eq!(
+        db.graph_blocker(&graph_id).unwrap(),
+        None,
+        "resume clears the blocker"
+    );
+}

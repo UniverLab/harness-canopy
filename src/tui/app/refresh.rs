@@ -311,13 +311,14 @@ impl App {
                     None => "never".to_string(),
                 }
             };
-            let blocked = lp.status == GraphStatus::Paused
+            let mut blocked = lp.status == GraphStatus::Paused
                 && self
                     .db
                     .list_graph_runs_for_graph(&lp.id)
                     .ok()
                     .and_then(|runs| runs.last().and_then(|run| run.output.clone()))
                     .is_some_and(|output| output.get("blocker").is_some());
+            blocked |= self.db.graph_blocker(&lp.id).ok().flatten().is_some();
             let autorun_label = lp
                 .autorun_at
                 .map(|at| format!("resumes {}", utils::relative_time_until_compact(&at)));

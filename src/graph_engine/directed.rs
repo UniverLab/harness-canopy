@@ -199,10 +199,25 @@ pub(crate) fn skipped_node_names(
             }
         }
     }
+    // Forward reachability FROM the start: anything the run reaches after the
+    // start is downstream, never skipped. Cycles and bypass edges would
+    // otherwise leak downstream nodes in — reachable from the entry AND able
+    // to reach a start node via a back edge. DAGs are unaffected (nothing is
+    // both strictly upstream and downstream there).
+    let mut downstream: HashSet<String> = HashSet::new();
+    let mut forward: VecDeque<String> = start_node_ids.iter().cloned().collect();
+    while let Some(id) = forward.pop_front() {
+        for edge in edges.iter().filter(|e| e.from_node == id) {
+            if downstream.insert(edge.to_node.clone()) {
+                forward.push_back(edge.to_node.clone());
+            }
+        }
+    }
     nodes
         .iter()
         .filter(|n| {
             !start.contains(n.id.as_str())
+                && !downstream.contains(&n.id)
                 && can_reach_start.contains(&n.id)
                 && from_entry.contains(&n.id)
         })
@@ -624,6 +639,40 @@ mod tests {
             resolve_spec_start(&nodes, &edges, &s, &runs, &[], false, Some(&directed)).unwrap_err();
         assert!(err.to_string().contains("prerequisite node 'A'"), "{err}");
         assert!(err.to_string().contains("fail"), "{err}");
+    }
+
+    /// A directed run at an ensemble lists only the nodes upstream of it as
+    /// skipped — never nodes downstream, even when a bypass edge plus a back
+    /// edge make a downstream node look both reachable-from-entry and
+    /// able-to-reach-the-start (the 3f087a76 incident listed Tail and the
+    /// Implementer as skipped).
+    #[test]
+    fn skipped_excludes_nodes_downstream_of_start() {
+        let nodes = vec![
+            node("s", "Start", 0, Value::Null),
+            node("l", "Lock", 1, Value::Null),
+            node("m1", "M1", 2, Value::Null),
+            node("m2", "M2", 3, Value::Null),
+            node("j", "Join", 4, Value::Null),
+            node("t", "Tail", 5, Value::Null),
+        ];
+        let edges = vec![
+            edge("s", "l", GraphEdgeCondition::Pass),
+            edge("l", "m1", GraphEdgeCondition::Pass),
+            edge("l", "m2", GraphEdgeCondition::Pass),
+            edge("m1", "j", GraphEdgeCondition::Pass),
+            edge("m2", "j", GraphEdgeCondition::Pass),
+            edge("j", "t", GraphEdgeCondition::Pass),
+            edge("l", "t", GraphEdgeCondition::Pass),
+            edge("t", "m1", GraphEdgeCondition::Pass),
+        ];
+        let skipped = skipped_node_names(
+            &nodes,
+            &edges,
+            &["m1".to_string(), "m2".to_string(), "j".to_string()],
+            "s",
+        );
+        assert_eq!(skipped, vec!["Start".to_string(), "Lock".to_string()]);
     }
 
     #[test]

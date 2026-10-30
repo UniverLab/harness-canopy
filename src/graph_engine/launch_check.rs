@@ -212,8 +212,14 @@ impl GraphEngine {
     /// DB call; "standalone" covers `None` backlog rows the predecessor query
     /// can return. End time falls back to `started_at` for interrupted rows
     /// that may lack `completed_at` after boot reconciliation.
-    fn dirty_predecessor_detail(predecessor: &GraphSpec) -> String {
+    /// For a queue-driven run (`queue_driven`) the graph tag would wrongly
+    /// read "(graph 'standalone', …)" — queue members are standalone rows —
+    /// so only the spec name is rendered.
+    fn dirty_predecessor_detail(predecessor: &GraphSpec, queue_driven: bool) -> String {
         let display = Self::dirty_display_name(predecessor);
+        if queue_driven {
+            return format!("spec '{display}'");
+        }
         let graph = predecessor.graph_id.as_deref().unwrap_or("standalone");
         let status = predecessor.status.as_str();
         let time = predecessor
@@ -352,7 +358,12 @@ impl GraphEngine {
         let refuse = predecessor.is_some() && !allow_dirty_start;
         let message = if refuse {
             let pred = predecessor.expect("refuse implies a predecessor");
-            let detail = Self::dirty_predecessor_detail(pred);
+            let queue_driven = self
+                .db
+                .get_graph(graph_id)?
+                .and_then(|lp| lp.active_run_queue_id)
+                .is_some();
+            let detail = Self::dirty_predecessor_detail(pred, queue_driven);
             if resuming {
                 let next_name = match (&attributed, next_spec_id) {
                     (Some(spec), Some(_)) => Self::dirty_display_name(spec),
@@ -414,7 +425,7 @@ pub(crate) fn dirty_advance_blocker(next_spec: &str, message: &str, paths: &[Str
         listed.push_str(&format!(", ... (+{} more)", paths.len() - LISTED));
     }
     format!(
-        "{message}. Dirty paths: {listed}. Ways out: `graph_control continue` with mode \
+        "{message} Dirty paths: {listed}. Ways out: `graph_control continue` with mode \
          `run_from_node` on spec '{next_spec}'; clean the tree by hand, then `graph_control continue` \
          with mode `skip_next_spec`; or set `allow_dirty_start` on the graph."
     )
