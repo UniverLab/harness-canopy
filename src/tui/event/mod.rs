@@ -12,7 +12,7 @@ use anyhow::Result;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use std::time::Duration;
 
-use crate::tui::app::types::{AgentEntry, App, Focus, ProjectTab, SidebarLayer};
+use crate::tui::app::types::{AgentEntry, App, Focus, SidebarLayer};
 use crate::tui::app::TerminalSearch;
 use crate::tui::ui;
 
@@ -245,8 +245,8 @@ fn handle_global_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> b
     {
         let forward = code == KeyCode::Right;
         app.step_sidebar_tab(forward);
-        if app.focus == Focus::Agent && app.sidebar_layer == SidebarLayer::Knowledge {
-            app.enter_project_focus(ProjectTab::Overview);
+        if matches!(app.focus, Focus::Agent) {
+            app.focus = Focus::Preview;
         }
         return true;
     }
@@ -472,3 +472,7 @@ mod brain_seed_tests;
 // ── Firefly Catcher: the click itself is hit-tested ────────────────────
 #[cfg(test)]
 mod firefly_click_tests;
+
+// ── Shift+←/→ steps the sidebar strip without entering the tab's panel ──
+#[cfg(test)]
+mod shift_sidebar_step_tests;

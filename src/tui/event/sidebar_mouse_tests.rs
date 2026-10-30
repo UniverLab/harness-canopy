@@ -294,7 +294,9 @@ fn unshifted_arrows_do_not_switch_sidebar_tabs() {
 fn shift_arrows_step_sidebar_tab_inside_a_focused_agent_without_a_split() {
     // Functional requirement 1: the sidebar tab strip must be reachable
     // from focus, not only from Home/Preview, as long as nothing else
-    // (a split) already owns Shift+←/→ there.
+    // (a split) already owns Shift+←/→ there. Shift+arrows are frame
+    // navigation: they select the tab and land at sidebar level, like a
+    // click — entering the tab's panel is Enter's job.
     let mut app = app_with_agents(3);
     app.focus = Focus::Agent;
     app.selected = 0;
@@ -307,8 +309,8 @@ fn shift_arrows_step_sidebar_tab_inside_a_focused_agent_without_a_split() {
 
     assert_eq!(app.sidebar_layer, crate::tui::app::SidebarLayer::Automation);
     assert!(
-        matches!(app.focus, Focus::Agent),
-        "stepping tabs from focus must not disturb what is focused"
+        matches!(app.focus, Focus::Preview),
+        "stepping tabs from focus must land at sidebar level, like a click"
     );
 }
 
