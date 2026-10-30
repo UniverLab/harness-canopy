@@ -566,6 +566,9 @@ impl Database {
     /// CM29: the specs that ended without completing, for `workdir` — either
     /// graph-bound specs whose graph's `workdir` matches, or standalone specs
     /// whose own `workdir` tag matches — most recently touched first.
+    /// Scoped to `graph_id`: only specs bound to that graph or members of
+    /// its active queue run count, so a stale record from another graph (or
+    /// a standalone backlog row) never blocks a spec resuming its own work.
     /// Excludes `exclude_spec_id` (the spec about to be dispatched next) so
     /// a spec that is itself `Interrupted` and about to be legitimately
     /// resumed is never mistaken for "the previous spec" that left the mess
@@ -580,6 +583,7 @@ impl Database {
         &self,
         workdir: &str,
         exclude_spec_id: Option<&str>,
+        graph_id: &str,
     ) -> Result<Vec<GraphSpec>> {
         let conn = self
             .conn
@@ -592,10 +596,14 @@ impl Database {
              WHERE (g.workdir = ?1 OR gs.workdir = ?1)
                AND gs.status IN ('failed', 'interrupted')
                AND (?2 IS NULL OR gs.id != ?2)
+               AND (gs.graph_id = ?3 OR gs.id IN (SELECT spec_id FROM queue_members WHERE queue_id = (SELECT active_run_queue_id FROM graphs WHERE id = ?3)))
              ORDER BY gs.updated_at DESC
              LIMIT 20",
         )?;
-        let rows = stmt.query_map(params![workdir, exclude_spec_id], map_graph_spec_row)?;
+        let rows = stmt.query_map(
+            params![workdir, exclude_spec_id, graph_id],
+            map_graph_spec_row,
+        )?;
         let mut specs = Vec::new();
         for spec in rows {
             specs.push(spec?);

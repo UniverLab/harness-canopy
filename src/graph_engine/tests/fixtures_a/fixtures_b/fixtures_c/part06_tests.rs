@@ -1380,7 +1380,9 @@ async fn guard_pause_stores_blocker_and_fires_on_blocked_once() {
 
     let next = standalone_spec("next-1", 1);
     db.insert_graph_spec(&next).unwrap();
-    insert_queue_with_members(&db, "queue-1", &[&next.id]);
+    // The failed predecessor is a member of this queue run, so the guard
+    // still weighs its dirt; a stale record from outside the run is ignored.
+    insert_queue_with_members(&db, "queue-1", &["pred-1", &next.id]);
 
     let blocked_file = dir.path().join("blocked.txt");
     let mut hooks = std::collections::BTreeMap::new();

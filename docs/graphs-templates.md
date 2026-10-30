@@ -112,9 +112,12 @@ summary/blocker text and (for a plain `Failed` ending) onto the `on_failed`
 hook's `{{node}}` value.
 
 `graph_control` `run` and the autorun scheduler refuse to launch the next spec when the
-workdir is currently dirty and a *different* spec on that same workdir ended
-`Failed` or `Interrupted` with recorded dirty paths that overlap the ones
-dirty now. `Completed` specs never block, and neither do `Skipped` ones: a
+workdir is currently dirty and a *different* spec of the same graph — or a
+member of its active queue run — ended `Failed` or `Interrupted` with
+recorded dirty paths that overlap the ones dirty now. Records from other
+graphs and from standalone backlog specs are ignored, so a stale row
+elsewhere on the workdir never blocks a spec resuming its own work.
+`Completed` specs never block, and neither do `Skipped` ones: a
 skipped spec never ran, so its stale record must not make a later spec's own
 dirt look ambiguous. The comparison uses the (first 20) paths each spec
 recorded at its end, so a record naming files that are no longer dirty never
@@ -123,8 +126,9 @@ paths are exactly the ones its own latest run recorded. The warning names the
 spec whose last recorded run in **this graph** left the workdir dirty
 (`graph_runs` joined to `spec_end_dirty > 0`); when no run of this graph
 recorded dirt the warning says `dirty before this graph ran` and names no
-spec. A resuming spec is still refused while another spec's overlapping dirt is
-on the same workdir: the refusal names the blocking predecessor — its name (id when
+spec. A resuming spec is still refused while another spec of the same graph
+(or active queue run) left overlapping dirt on the workdir: the refusal
+names the blocking predecessor — its name (id when
 the name is empty), the graph it ran in, its end status and end time — and,
 when the next spec is resuming its own dirt, says so in the same line. Finish,
 reset or remove that blocking spec (or set `allow_dirty_start`) to proceed.

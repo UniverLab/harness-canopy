@@ -1502,14 +1502,13 @@ async fn graph_run_refuses_when_previous_spec_left_workdir_dirty() {
     let git_dir = tempdir().unwrap();
     init_git_repo(git_dir.path());
 
-    // Spec A ended Failed on this workdir in another graph — it is the
+    // Spec A ended Failed on this workdir in this graph — it is the
     // blocking predecessor. No run of `lp` recorded the dirt, so there is
     // no attribution, but the refusal still names the predecessor (CB69).
-    let failed_lp = insert_test_graph(&db, git_dir.path());
-    let spec_a = insert_named_spec(&db, &failed_lp.id, "Spec A", 1, GraphSpecStatus::Failed);
-
+    // Spec B stays first so it is the spec the launch would dispatch next.
     let lp = insert_test_graph(&db, git_dir.path());
     insert_named_spec(&db, &lp.id, "Spec B", 1, GraphSpecStatus::Pending);
+    let spec_a = insert_named_spec(&db, &lp.id, "Spec A", 2, GraphSpecStatus::Failed);
 
     // What makes it the blocker: its end record names the files still dirty.
     db.set_graph_spec_end_state(
@@ -1571,11 +1570,9 @@ async fn graph_run_allow_dirty_start_launches_with_warning() {
     let git_dir = tempdir().unwrap();
     init_git_repo(git_dir.path());
 
-    let failed_lp = insert_test_graph(&db, git_dir.path());
-    let spec_a = insert_named_spec(&db, &failed_lp.id, "Spec A", 1, GraphSpecStatus::Failed);
-
     let lp = insert_test_graph(&db, git_dir.path());
     insert_named_spec(&db, &lp.id, "Spec B", 1, GraphSpecStatus::Pending);
+    let spec_a = insert_named_spec(&db, &lp.id, "Spec A", 2, GraphSpecStatus::Failed);
     db.update_graph_allow_dirty_start(&lp.id, true).unwrap();
     db.set_graph_spec_end_state(
         &spec_a.id,

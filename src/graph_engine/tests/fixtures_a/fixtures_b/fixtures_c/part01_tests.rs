@@ -658,39 +658,18 @@ async fn dirty_start_check_refusal_names_blocking_predecessor_when_next_resumes_
     init_git_repo(dir.path());
     let workdir = dir.path().to_string_lossy().to_string();
 
-    // G1: a graph on the same git workdir, carrying spec A.
-    db.insert_graph(&Graph {
-        id: "g1".to_string(),
-        name: "Graph1".to_string(),
-        description: None,
-        workdir: workdir.clone(),
-        status: GraphStatus::Draft,
-        trigger: None,
-        created_at: chrono::Utc::now(),
-        started_at: None,
-        completed_at: None,
-        autorun_at: None,
-        auto_continue_at: None,
-        auto_continue_action: None,
-        active_run_queue_id: None,
-        hooks: std::collections::BTreeMap::new(),
-        archived: false,
-        paused_by_reconciliation: false,
-        infra_node_id: None,
-        allow_dirty_start: false,
-        require_spec_type: false,
-    })
-    .unwrap();
-
     let now = chrono::Utc::now().timestamp();
     let t1 = chrono::DateTime::from_timestamp(now - 3600, 0).unwrap();
     let t2 = chrono::DateTime::from_timestamp(now - 300, 0).unwrap();
 
-    // Spec A: Failed in G1, completed_at T1, end_dirty 3, run row in G1.
+    // Spec A: Failed in the fixture graph, completed_at T1, end_dirty 3,
+    // run row in the fixture graph. It keeps its workdir tag: the guard
+    // scopes candidates to this graph, and the tag is what matches this
+    // tempdir (the fixture graph itself lives on another dir).
     let mut spec_a =
         dirty_predecessor_spec_named("spec-a", "Alpha", &workdir, GraphSpecStatus::Failed);
-    spec_a.graph_id = Some("g1".to_string());
-    spec_a.workdir = None;
+    spec_a.graph_id = Some(graph_id.clone());
+    spec_a.position = 3;
     db.insert_graph_spec(&spec_a).unwrap();
     db.update_graph_spec_status("spec-a", GraphSpecStatus::Failed, Some(t1), Some(t1))
         .unwrap();
@@ -701,7 +680,7 @@ async fn dirty_start_check_refusal_names_blocking_predecessor_when_next_resumes_
         &["x.txt".to_string(), "b".to_string(), "c".to_string()],
     )
     .unwrap();
-    insert_run_row(&db, "g1", "spec-a", "node-a", 1, t1.timestamp()).unwrap();
+    insert_run_row(&db, &graph_id, "spec-a", "node-a", 1, t1.timestamp()).unwrap();
 
     // Spec B: Failed in G2 (fixture graph), completed_at T2, end_dirty 2,
     // run row in G2 — it is the next spec and resumes its own dirt.
@@ -734,7 +713,7 @@ async fn dirty_start_check_refusal_names_blocking_predecessor_when_next_resumes_
         notice.message
     );
     assert!(
-        notice.message.contains("g1"),
+        notice.message.contains(&graph_id),
         "message must name the predecessor's graph, got: {}",
         notice.message
     );
@@ -833,15 +812,13 @@ async fn dirty_start_check_refuses_when_predecessor_failed_dirty() {
     let dir = tempdir().unwrap();
     init_git_repo(dir.path());
     let workdir = dir.path().to_string_lossy().to_string();
-    // The dirty-leaving spec is not this graph's — no run of `graph_id`
+    // The dirty-leaving spec is this graph's, but no run of `graph_id`
     // recorded the dirt — so there is no attribution; the refusal still
     // names the blocking predecessor from `find_dirty_predecessor_specs`.
-    db.insert_graph_spec(&dirty_predecessor_spec(
-        "pred-a",
-        &workdir,
-        GraphSpecStatus::Failed,
-    ))
-    .unwrap();
+    let mut pred = dirty_predecessor_spec("pred-a", &workdir, GraphSpecStatus::Failed);
+    pred.graph_id = Some(graph_id.clone());
+    pred.position = 2;
+    db.insert_graph_spec(&pred).unwrap();
     // FR1: the record must name the files still dirty, or it does not block.
     db.set_graph_spec_end_state(
         "pred-a",
@@ -864,7 +841,7 @@ async fn dirty_start_check_refuses_when_predecessor_failed_dirty() {
         notice.message
     );
     assert!(
-        notice.message.contains("standalone"),
+        notice.message.contains(&graph_id),
         "the predecessor's graph id must be named: {}",
         notice.message
     );
@@ -884,13 +861,15 @@ async fn dirty_start_check_names_the_blocking_predecessor_not_the_attribution() 
     let dir = tempdir().unwrap();
     init_git_repo(dir.path());
     let workdir = dir.path().to_string_lossy().to_string();
-    db.insert_graph_spec(&dirty_predecessor_spec_named(
+    let mut old = dirty_predecessor_spec_named(
         "spec-a-old",
         "OldPredecessor",
         &workdir,
         GraphSpecStatus::Failed,
-    ))
-    .unwrap();
+    );
+    old.graph_id = Some(graph_id.clone());
+    old.position = 2;
+    db.insert_graph_spec(&old).unwrap();
     db.insert_graph_spec(&dirty_predecessor_spec_named(
         "spec-b-new",
         "RecentDirtier",
@@ -932,7 +911,7 @@ async fn dirty_start_check_names_the_blocking_predecessor_not_the_attribution() 
         notice.message
     );
     assert!(
-        notice.message.contains("standalone"),
+        notice.message.contains(&graph_id),
         "the predecessor's graph id must be named: {}",
         notice.message
     );
@@ -949,13 +928,15 @@ async fn dirty_start_check_refusal_says_not_launched() {
     let dir = tempdir().unwrap();
     init_git_repo(dir.path());
     let workdir = dir.path().to_string_lossy().to_string();
-    db.insert_graph_spec(&dirty_predecessor_spec_named(
+    let mut old = dirty_predecessor_spec_named(
         "spec-a-old",
         "OldPredecessor",
         &workdir,
         GraphSpecStatus::Failed,
-    ))
-    .unwrap();
+    );
+    old.graph_id = Some(graph_id.clone());
+    old.position = 2;
+    db.insert_graph_spec(&old).unwrap();
     db.insert_graph_spec(&dirty_predecessor_spec_named(
         "spec-b-new",
         "RecentDirtier",
@@ -1009,13 +990,15 @@ async fn dirty_start_check_allow_dirty_start_states_reason_without_flag_hint() {
     let dir = tempdir().unwrap();
     init_git_repo(dir.path());
     let workdir = dir.path().to_string_lossy().to_string();
-    db.insert_graph_spec(&dirty_predecessor_spec_named(
+    let mut old = dirty_predecessor_spec_named(
         "spec-a-old",
         "OldPredecessor",
         &workdir,
         GraphSpecStatus::Failed,
-    ))
-    .unwrap();
+    );
+    old.graph_id = Some(graph_id.clone());
+    old.position = 2;
+    db.insert_graph_spec(&old).unwrap();
     db.insert_graph_spec(&dirty_predecessor_spec_named(
         "spec-b-new",
         "RecentDirtier",
@@ -1067,12 +1050,10 @@ async fn dirty_start_check_warns_instead_of_refusing_with_allow_dirty_start() {
     let dir = tempdir().unwrap();
     init_git_repo(dir.path());
     let workdir = dir.path().to_string_lossy().to_string();
-    db.insert_graph_spec(&dirty_predecessor_spec(
-        "pred-a",
-        &workdir,
-        GraphSpecStatus::Failed,
-    ))
-    .unwrap();
+    let mut pred = dirty_predecessor_spec("pred-a", &workdir, GraphSpecStatus::Failed);
+    pred.graph_id = Some(graph_id.clone());
+    pred.position = 2;
+    db.insert_graph_spec(&pred).unwrap();
     db.set_graph_spec_end_state(
         "pred-a",
         Some(2),
@@ -1216,12 +1197,10 @@ async fn dirty_start_check_attribution_empty_when_no_run_recorded_the_dirt() {
     let dir = tempdir().unwrap();
     init_git_repo(dir.path());
     let workdir = dir.path().to_string_lossy().to_string();
-    db.insert_graph_spec(&dirty_predecessor_spec(
-        "pred-a",
-        &workdir,
-        GraphSpecStatus::Failed,
-    ))
-    .unwrap();
+    let mut pred = dirty_predecessor_spec("pred-a", &workdir, GraphSpecStatus::Failed);
+    pred.graph_id = Some(graph_id.clone());
+    pred.position = 2;
+    db.insert_graph_spec(&pred).unwrap();
     db.set_graph_spec_end_state("pred-a", Some(1), &["x.txt".to_string()])
         .unwrap();
     std::fs::write(dir.path().join("x.txt"), "x").unwrap();
@@ -1238,7 +1217,7 @@ async fn dirty_start_check_attribution_empty_when_no_run_recorded_the_dirt() {
         notice.message
     );
     assert!(
-        notice.message.contains("standalone"),
+        notice.message.contains(&graph_id),
         "the predecessor's graph id must be named: {}",
         notice.message
     );

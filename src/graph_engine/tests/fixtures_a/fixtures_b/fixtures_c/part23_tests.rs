@@ -136,13 +136,17 @@ async fn dirty_start_check_refuses_another_specs_overlapping_dirty_paths() {
     init_git_repo(dir.path());
     let workdir = dir.path().to_string_lossy().to_string();
 
-    db.insert_graph_spec(&dirty_predecessor_spec_named(
+    // Bound to this graph: only the same graph's (or active queue's) specs
+    // can block; a record from elsewhere on the workdir is ignored.
+    let mut blocker = dirty_predecessor_spec_named(
         "spec-int",
         "InterruptedElsewhere",
         &workdir,
         GraphSpecStatus::Interrupted,
-    ))
-    .unwrap();
+    );
+    blocker.graph_id = Some(graph_id.clone());
+    blocker.position = 2;
+    db.insert_graph_spec(&blocker).unwrap();
     db.set_graph_spec_end_state("spec-int", Some(1), &["x.txt".to_string()])
         .unwrap();
     db.insert_graph_spec(&dirty_predecessor_spec_named(
@@ -210,5 +214,263 @@ async fn dirty_start_check_ignores_a_record_whose_paths_are_gone() {
     assert!(
         notice.is_none(),
         "a non-overlapping record must not block (nor produce a notice)"
+    );
+}
+
+/// FR1: a stale *failed* record from a standalone backlog spec — overlapping
+/// the very file still dirty — never blocks a spec resuming its own work.
+/// The guard only weighs this graph's (and its active queue's) specs.
+#[tokio::test]
+async fn dirty_start_check_ignores_failed_standalone_specs_overlapping_record() {
+    let (_dir, db, engine, graph_id, _spec_id) = graph_fixture().unwrap();
+    let dir = tempdir().unwrap();
+    init_git_repo(dir.path());
+    let workdir = dir.path().to_string_lossy().to_string();
+
+    db.insert_graph_spec(&dirty_predecessor_spec_named(
+        "spec-stale",
+        "StaleElsewhere",
+        &workdir,
+        GraphSpecStatus::Failed,
+    ))
+    .unwrap();
+    db.set_graph_spec_end_state("spec-stale", Some(1), &["x.txt".to_string()])
+        .unwrap();
+    db.insert_graph_spec(&dirty_predecessor_spec_named(
+        "spec-b",
+        "Beta",
+        &workdir,
+        GraphSpecStatus::Interrupted,
+    ))
+    .unwrap();
+    db.set_graph_spec_end_state("spec-b", Some(1), &["y.txt".to_string()])
+        .unwrap();
+    insert_run_row(
+        &db,
+        &graph_id,
+        "spec-b",
+        "node-b",
+        1,
+        chrono::Utc::now().timestamp() - 60,
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("x.txt"), "x").unwrap();
+
+    let notice = engine
+        .dirty_start_check(&graph_id, &workdir, Some("spec-b"), false)
+        .await
+        .unwrap()
+        .expect("resuming its own dirt must produce a notice");
+    assert!(
+        !notice.refuse,
+        "a standalone spec's stale record must never block: {}",
+        notice.message
+    );
+    assert!(
+        !notice.message.contains("StaleElsewhere"),
+        "the stale spec must not be named as a blocker: {}",
+        notice.message
+    );
+    assert!(
+        notice.message.contains("Beta"),
+        "the resuming spec must be named: {}",
+        notice.message
+    );
+}
+
+/// FR1: a failed spec of *another* graph on the same workdir — overlapping
+/// the dirt still in the tree — never blocks a spec resuming its own work.
+#[tokio::test]
+async fn dirty_start_check_ignores_other_graphs_overlapping_dirty_record() {
+    let (_dir, db, engine, graph_id, _spec_id) = graph_fixture().unwrap();
+    let dir = tempdir().unwrap();
+    init_git_repo(dir.path());
+    let workdir = dir.path().to_string_lossy().to_string();
+
+    // G1: another graph on the same git workdir, carrying spec A.
+    db.insert_graph(&Graph {
+        id: "g1".to_string(),
+        name: "Graph1".to_string(),
+        description: None,
+        workdir: workdir.clone(),
+        status: GraphStatus::Draft,
+        trigger: None,
+        created_at: chrono::Utc::now(),
+        started_at: None,
+        completed_at: None,
+        autorun_at: None,
+        auto_continue_at: None,
+        auto_continue_action: None,
+        active_run_queue_id: None,
+        hooks: std::collections::BTreeMap::new(),
+        archived: false,
+        paused_by_reconciliation: false,
+        infra_node_id: None,
+        allow_dirty_start: false,
+        require_spec_type: false,
+    })
+    .unwrap();
+    let mut spec_a =
+        dirty_predecessor_spec_named("spec-a", "Alpha", &workdir, GraphSpecStatus::Failed);
+    spec_a.graph_id = Some("g1".to_string());
+    spec_a.workdir = None;
+    db.insert_graph_spec(&spec_a).unwrap();
+    db.set_graph_spec_end_state("spec-a", Some(1), &["x.txt".to_string()])
+        .unwrap();
+    db.insert_graph_spec(&dirty_predecessor_spec_named(
+        "spec-b",
+        "Beta",
+        &workdir,
+        GraphSpecStatus::Interrupted,
+    ))
+    .unwrap();
+    db.set_graph_spec_end_state("spec-b", Some(1), &["y.txt".to_string()])
+        .unwrap();
+    insert_run_row(
+        &db,
+        &graph_id,
+        "spec-b",
+        "node-b",
+        1,
+        chrono::Utc::now().timestamp() - 60,
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("x.txt"), "x").unwrap();
+
+    let notice = engine
+        .dirty_start_check(&graph_id, &workdir, Some("spec-b"), false)
+        .await
+        .unwrap()
+        .expect("resuming its own dirt must produce a notice");
+    assert!(
+        !notice.refuse,
+        "another graph's stale record must never block: {}",
+        notice.message
+    );
+    assert!(
+        !notice.message.contains("Alpha"),
+        "the other graph's spec must not be named as a blocker: {}",
+        notice.message
+    );
+    assert!(
+        notice.message.contains("Beta"),
+        "the resuming spec must be named: {}",
+        notice.message
+    );
+}
+
+/// FR1: a failed member of the graph's *active* queue run still blocks a
+/// fresh next spec when its recorded dirt overlaps the tree — queue members
+/// are standalone rows, but they are this run's specs.
+#[tokio::test]
+async fn dirty_start_check_refuses_active_queue_members_overlapping_dirty_paths() {
+    let (_dir, db, engine, graph_id, _spec_id) = graph_fixture().unwrap();
+    let dir = tempdir().unwrap();
+    init_git_repo(dir.path());
+    let workdir = dir.path().to_string_lossy().to_string();
+
+    db.insert_graph_spec(&dirty_predecessor_spec_named(
+        "spec-member",
+        "QueueMember",
+        &workdir,
+        GraphSpecStatus::Failed,
+    ))
+    .unwrap();
+    db.set_graph_spec_end_state("spec-member", Some(1), &["x.txt".to_string()])
+        .unwrap();
+    let next = standalone_spec("queue-next", 2);
+    db.insert_graph_spec(&next).unwrap();
+    insert_queue_with_members(&db, "queue-1", &["spec-member", &next.id]);
+    db.set_graph_active_run_queue(&graph_id, Some("queue-1"))
+        .unwrap();
+    std::fs::write(dir.path().join("x.txt"), "x").unwrap();
+
+    let notice = engine
+        .dirty_start_check(&graph_id, &workdir, Some(&next.id), false)
+        .await
+        .unwrap()
+        .expect("expected a dirty-start notice");
+    assert!(
+        notice.refuse,
+        "an active queue member's overlapping dirt blocks: {}",
+        notice.message
+    );
+    assert!(
+        notice.message.contains("QueueMember"),
+        "the blocking member must be named: {}",
+        notice.message
+    );
+    assert!(notice.message.contains("not launched"));
+}
+
+/// FR1 end to end: a stale standalone failure on the workdir does not pause
+/// a queue run — the single member completes and no blocker is stored.
+#[tokio::test]
+async fn queue_run_completes_past_a_stale_standalone_dirty_record() {
+    let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+    // The fixture's database lives in the worktree: ignore it before the
+    // repo commits, or every write to it reads as a dirty tree.
+    std::fs::write(
+        dir.path().join(".gitignore"),
+        format!("{TEST_DB_FILENAME}*\n"),
+    )
+    .unwrap();
+    init_git_repo(dir.path());
+    let workdir = dir.path().to_string_lossy().to_string();
+    db.insert_graph_spec(&dirty_predecessor_spec_named(
+        "spec-stale",
+        "StaleElsewhere",
+        &workdir,
+        GraphSpecStatus::Failed,
+    ))
+    .unwrap();
+    db.set_graph_spec_end_state("spec-stale", Some(1), &["x.txt".to_string()])
+        .unwrap();
+    let next = standalone_spec("queue-next", 1);
+    db.insert_graph_spec(&next).unwrap();
+    insert_queue_with_members(&db, "queue-1", &[&next.id]);
+    db.insert_graph_node(&GraphNode {
+        id: "graph-check".to_string(),
+        spec_id: None,
+        graph_id: Some(graph_id.clone()),
+        name: "check".to_string(),
+        kind: GraphNodeKind::Check,
+        config: serde_json::json!({
+            "command": "printf APPROVED",
+            "success_condition": "exit_code_0"
+        }),
+        position: 1,
+        created_at: chrono::Utc::now(),
+    })
+    .unwrap();
+    std::fs::write(dir.path().join("x.txt"), "x").unwrap();
+
+    engine
+        .run_graph_dispatch(
+            graph_id.clone(),
+            Some("queue-1".to_string()),
+            None,
+            DispatchMode::fresh(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let spec = db.get_graph_spec(&next.id).unwrap().unwrap();
+    assert_eq!(
+        spec.status,
+        GraphSpecStatus::Completed,
+        "the member must complete past the stale record"
+    );
+    let lp = db.get_graph(&graph_id).unwrap().unwrap();
+    assert!(
+        !matches!(lp.status, GraphStatus::Paused),
+        "the guard must not pause on a stale outside record: {:?}",
+        lp.status
+    );
+    assert!(
+        db.graph_blocker(&graph_id).unwrap().is_none(),
+        "no blocker may be stored for the stale record"
     );
 }

@@ -314,7 +314,7 @@ impl GraphEngine {
         // paths, so it is decided after the capture below.
         let candidates = self
             .db
-            .find_dirty_predecessor_specs(workdir, next_spec_id)?;
+            .find_dirty_predecessor_specs(workdir, next_spec_id, graph_id)?;
         let attributed = self.db.find_last_dirty_run_spec(graph_id)?;
         let resuming = match (&attributed, next_spec_id) {
             (Some(spec), Some(next)) => spec.id == *next,
