@@ -323,7 +323,8 @@ impl Database {
     ///
     /// A session counts only when it is really alive, per
     /// [`crate::system::session_process_is_live`] (stored boot id matches
-    /// the current boot AND the stored PID is still alive). Rows left
+    /// the current boot AND the stored PID is still alive; when either boot
+    /// id is unknown the PID alone decides, fail-closed). Rows left
     /// `active`/`resumed` by crashed or killed processes — the common case
     /// after a crash — are stale and must neither block maintenance nor
     /// count here; the stale-session reconciliation closes them.

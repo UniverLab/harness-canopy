@@ -311,11 +311,23 @@ pub fn process_is_alive(_pid: i64) -> bool {
 }
 
 /// Whether a persisted interactive-session row refers to a process that is
-/// really alive right now: the single source of truth for session liveness.
-/// `true` only when provable — the stored boot id matches the current boot
-/// (ruling out PID recycling after a reboot) AND the stored PID is still
-/// alive. A different boot id, a `None` boot id, or a missing/dead PID all
-/// read as `false`. Side-effect-free: no PTY touched, no session woken.
+/// really alive right now: the single source of truth for session liveness,
+/// shared by `busy_reasons`, the stale-session reconciliation, and the
+/// `attached` flag in `session_list`.
+///
+/// When both boot ids are known, `true` only when provable — the stored boot
+/// id matches the current boot (ruling out PID recycling after a reboot)
+/// AND the stored PID is still alive. A known-different boot id means the
+/// original process is gone even if its PID number is alive again, so that
+/// reads as `false`.
+///
+/// When either boot id is unknown (`None` current boot on macOS/sandboxed
+/// hosts where `/proc` is absent, or a `None` stored boot on a legacy row),
+/// the boot comparison cannot run, so the PID alone decides: a dead or
+/// missing PID is provably gone (`false`), while a live PID is kept
+/// (`true`). That direction is deliberate — reconciliation must never close
+/// what may be alive, and the busy check must defer when uncertain.
+/// Side-effect-free: no PTY touched, no session woken.
 pub fn session_process_is_live(
     pid: Option<i64>,
     stored_boot_id: Option<&str>,
@@ -325,7 +337,8 @@ pub fn session_process_is_live(
         (Some(stored), Some(current)) if stored == current => {
             pid.map(process_is_alive).unwrap_or(false)
         }
-        _ => false,
+        (Some(_), Some(_)) => false,
+        _ => pid.map(process_is_alive).unwrap_or(false),
     }
 }
 
@@ -627,5 +640,57 @@ mod tests {
     fn cpu_temp_status_section_shows_na_without_reading() {
         let info = SystemInfo::default();
         assert_eq!(info.cpu_temp_status_section(), "\nCPU temperature: n/a");
+    }
+
+    /// Truth table for the single liveness rule: same boot + live PID is
+    /// live; a known-different boot is stale even with a live PID (PID
+    /// recycling); a dead or missing PID is stale on any boot. Fails if the
+    /// boot comparison is ever dropped (the rebooted row reads live) or the
+    /// PID check is dropped (the dead row reads live).
+    #[test]
+    fn session_process_is_live_truth_table() {
+        let live_pid = Some(std::process::id() as i64);
+        // Above any real pid_max, so deterministically dead.
+        let dead_pid = Some(987_654_321);
+        let boot = "boot-id";
+        let other_boot = "other-boot-id";
+
+        assert!(session_process_is_live(live_pid, Some(boot), Some(boot)));
+        assert!(!session_process_is_live(dead_pid, Some(boot), Some(boot)));
+        assert!(!session_process_is_live(None, Some(boot), Some(boot)));
+        assert!(!session_process_is_live(
+            live_pid,
+            Some(other_boot),
+            Some(boot)
+        ));
+        assert!(!session_process_is_live(
+            dead_pid,
+            Some(other_boot),
+            Some(boot)
+        ));
+    }
+
+    /// When either boot id is unknown (no `/proc` on macOS/sandboxed hosts,
+    /// or a legacy row with no stored boot), the PID alone decides —
+    /// fail-closed: a live PID is kept, a dead or missing PID is stale.
+    /// Fails under the old blanket-`false` rule, which closed every live
+    /// row on hosts without a boot id.
+    #[test]
+    fn session_process_is_live_falls_back_to_pid_when_boot_unknown() {
+        let live_pid = Some(std::process::id() as i64);
+        let dead_pid = Some(987_654_321);
+        let boot = "boot-id";
+
+        // Unknown current boot (macOS/sandbox): live kept, dead closed.
+        assert!(session_process_is_live(live_pid, Some(boot), None));
+        assert!(session_process_is_live(live_pid, None, None));
+        assert!(!session_process_is_live(dead_pid, Some(boot), None));
+        assert!(!session_process_is_live(dead_pid, None, None));
+        assert!(!session_process_is_live(None, Some(boot), None));
+        assert!(!session_process_is_live(None, None, None));
+        // Legacy row (no stored boot) on a known boot: same fallback.
+        assert!(session_process_is_live(live_pid, None, Some(boot)));
+        assert!(!session_process_is_live(dead_pid, None, Some(boot)));
+        assert!(!session_process_is_live(None, None, Some(boot)));
     }
 }

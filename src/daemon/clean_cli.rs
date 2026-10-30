@@ -1259,6 +1259,66 @@ mod tests {
         assert!(ops.calls.borrow().is_empty());
     }
 
+    /// A stale `active` row (process long gone) must not block the reclaim
+    /// window the way a live TUI session does: the window proceeds, and the
+    /// row itself is left untouched for the daemon's reconciliation (the
+    /// window never closes rows — closing here would kill auto-resume across
+    /// the stop/restart). Fails if the busy check ever counts raw
+    /// `active`/`resumed` rows again (Refused instead of Completed).
+    #[test]
+    fn reclaim_window_proceeds_when_only_a_stale_session_row_exists() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path();
+        let db_path = data_dir.join("test.db");
+        let db = Database::new(&db_path).unwrap();
+        // Stale row: a pid that can never be alive, on the current boot.
+        let current_boot_id = crate::system::boot_id().expect("test host has a boot id");
+        db.insert_interactive_session(
+            "s-stale",
+            "s-stale",
+            "opencode",
+            "/tmp",
+            None,
+            Some(987_654_321),
+            "interactive",
+            Some(&current_boot_id),
+        )
+        .unwrap();
+
+        let ops = FakeDaemonOps::new();
+        let restored = Mutex::new(false);
+        let outcome = run_reclaim_window(
+            &db,
+            data_dir,
+            &db_path,
+            ReclaimOptions {
+                retention_days: 7,
+                graph_event_retention_days: 90,
+                now_ts: chrono::Utc::now().timestamp(),
+                hard: false,
+                yes: true,
+            },
+            Some(FAKE_DAEMON_PID),
+            &ops,
+            &restored,
+        )
+        .unwrap();
+
+        match outcome {
+            ReclaimWindowOutcome::Completed(report) => {
+                assert!(report.daemon_was_running);
+                assert!(report.daemon_restored);
+            }
+            _ => panic!("expected Completed, the stale row must not refuse the window"),
+        }
+        assert_eq!(*ops.calls.borrow(), vec!["stop", "restart"]);
+        assert_eq!(
+            db.get_interactive_session_status("s-stale").unwrap(),
+            Some("active".to_string()),
+            "the window checks liveness but never closes rows"
+        );
+    }
+
     #[test]
     fn reclaim_window_happy_path_stops_cleans_vacuums_and_restarts() {
         let dir = tempdir().unwrap();

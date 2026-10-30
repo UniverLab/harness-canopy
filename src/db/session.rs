@@ -530,7 +530,8 @@ impl Database {
     /// [`Self::finish_interactive_session`] writes for a failed exit
     /// (`status = 'error'`, `exited_at` set, `exit_code = 1`) — no new
     /// status. Liveness is [`crate::system::session_process_is_live`]
-    /// (same boot id + PID alive), the same rule `busy_reasons` counts by,
+    /// (same boot id + PID alive, with a PID-only fail-closed fallback when
+    /// either boot id is unknown), the same rule `busy_reasons` counts by,
     /// so a reconciled row stops blocking maintenance and stops listing as
     /// live anywhere. Covers every `session_type`, including bridge
     /// sidecars. Kills nothing: only rows whose process is already gone are
