@@ -368,7 +368,9 @@ on.
 - **Prompt Builder** — the window sits on the info tint, its section fields
   on the near-black stage ground, and the focused section on the selection
   colour. Borders and the title keep the theme's own colours, and the text
-  on the new grounds stays at 4.5:1 contrast or better.
+  on the new grounds stays at 4.5:1 contrast or better. The Normal / Raw
+  tab strip paints the selected tab as the accent pill (dark ink on the
+  theme's accent colour, bold) with the other tab dimmed.
 - **Graph view** — the canvas sits on the same info tint. Nodes and edges
   keep their status colours, which stay at 3:1 or better against it.
 - **Alert dialogs** — confirmations of destructive actions are tinted for
@@ -386,6 +388,9 @@ on.
 - **Hub** — the `F1` hub's tab strip paints the active tab as the accent pill
   (dark ink on the theme's accent colour) and the remaining tabs dimmed, so
   the selected tab never reads as dark text on the dark selection raise.
+  The selected row of a hub list is the same accent pill: the Settings path
+  lists and directory picker, a Shelf file, a Remote row or paired device,
+  and the pairing code in the Remote overlay.
 
 The header, footer and session panes are unchanged.
 
