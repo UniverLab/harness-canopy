@@ -235,7 +235,10 @@ a rewired ensemble, or a hand fix — a **directed run** starts a spec at
 a node you choose instead of at Start: `graph_control` `continue` with
 `mode: run_from_node` and optional `spec_id` (CLI: `canopy graph continue --from
 <node> [--spec <spec>]`), or `graph_control` `run` with `start_node_id` for
-the first spec the run executes. `--spec` is optional: on a queue-driven graph it defaults to the
+the first spec the run executes. The spec reference accepts a full id, an
+unambiguous id prefix, or the spec's code (e.g. `FIX-7`), resolved within the
+graph's workdir; on a queue-driven graph it must name a member of the queue
+being run. `--spec` is optional: on a queue-driven graph it defaults to the
 graph's current spec — an in-flight member (`running` or `interrupted`)
 first, else a `failed` one, else the next `pending` one — so a bare directed
 run restarts the failed spec rather than the next fresh one. It reuses the
