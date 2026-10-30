@@ -763,10 +763,12 @@ mod tests {
         .expect("a passed quorum satisfies the ensemble prerequisite");
     }
 
-    /// FR1: a passed ensemble satisfies every node downstream of it, whatever
-    /// its members' individual results — member 1's failure under the passed
-    /// quorum is not an unmet prerequisite. Breaks if members are judged by
-    /// their own runs instead of the ensemble's verdict.
+    /// FR1: the reported incident shape — a round-robin rotation where member 1
+    /// failed (pass 1, quorum failed with it) and member 2 then passed (pass 2,
+    /// quorum passed). The ensemble's latest verdict is a pass, so a directed
+    /// start downstream is accepted: member 1 is judged by that latest verdict,
+    /// not by its own failure nor by the failed intermediate quorum. Breaks if
+    /// members are judged by their own runs, or by a same-iteration join.
     #[test]
     fn directed_start_past_passed_two_member_ensemble_accepts_failed_member() {
         let s = spec("spec-1");
@@ -788,16 +790,27 @@ mod tests {
         details.ensemble.kind = EnsembleKind::RoundRobin;
         details.ensemble.min_pass = 1;
         let ensembles = vec![details];
-        let runs = vec![
-            run("m1", GraphRunStatus::Fail, Some(serde_json::json!(1)), None),
-            run("m2", GraphRunStatus::Pass, Some(serde_json::json!(2)), None),
-            run(
-                "j",
-                GraphRunStatus::Pass,
-                Some(serde_json::json!(true)),
-                None,
-            ),
-        ];
+        let mut m1 = run("m1", GraphRunStatus::Fail, Some(serde_json::json!(1)), None);
+        m1.iteration = 1;
+        let mut j1 = run(
+            "j",
+            GraphRunStatus::Fail,
+            Some(serde_json::json!(false)),
+            None,
+        );
+        j1.iteration = 1;
+        j1.id = "run-j-1".to_string();
+        let mut m2 = run("m2", GraphRunStatus::Pass, Some(serde_json::json!(2)), None);
+        m2.iteration = 2;
+        let mut j2 = run(
+            "j",
+            GraphRunStatus::Pass,
+            Some(serde_json::json!(true)),
+            None,
+        );
+        j2.iteration = 2;
+        j2.id = "run-j-2".to_string();
+        let runs = vec![m1, j1, m2, j2];
         let directed = DirectedStart {
             spec_id: s.id.clone(),
             node_arg: "B".to_string(),
@@ -877,6 +890,49 @@ mod tests {
         );
         settled.iteration = 1;
         let mut newer_attempt = run("m1", GraphRunStatus::Fail, Some(serde_json::json!(1)), None);
+        newer_attempt.iteration = 2;
+        let runs = vec![settled, newer_attempt];
+        let directed = DirectedStart {
+            spec_id: s.id.clone(),
+            node_arg: "B".to_string(),
+        };
+        let err = resolve_spec_start(
+            &nodes,
+            &edges,
+            &s,
+            &runs,
+            &ensembles,
+            false,
+            Some(&directed),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("prerequisite ensemble 'rr'"),
+            "the unsettled attempt refuses against the ensemble: {err}"
+        );
+        assert!(
+            err.to_string().contains("no recorded verdict"),
+            "with no covering join the attempt has no verdict: {err}"
+        );
+    }
+
+    /// FR2: the unsettled pass refuses too. The member passed after the last
+    /// join — a shutdown between the member and its join — so the ensemble has
+    /// no verdict for this attempt: accepting would seed the stale join output
+    /// the previous pass left behind. Breaks if an unsettled member falls back
+    /// to its own run instead of refusing against the ensemble.
+    #[test]
+    fn directed_start_refuses_a_passed_member_of_an_unsettled_ensemble_pass() {
+        let s = spec("spec-1");
+        let (nodes, edges, ensembles) = round_robin_between_a_and_b();
+        let mut settled = run(
+            "j",
+            GraphRunStatus::Pass,
+            Some(serde_json::json!(true)),
+            None,
+        );
+        settled.iteration = 1;
+        let mut newer_attempt = run("m1", GraphRunStatus::Pass, Some(serde_json::json!(1)), None);
         newer_attempt.iteration = 2;
         let runs = vec![settled, newer_attempt];
         let directed = DirectedStart {
