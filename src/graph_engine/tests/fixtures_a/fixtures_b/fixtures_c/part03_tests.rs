@@ -283,6 +283,111 @@ async fn activity_publishes_expected_sequence_for_passing_two_node_spec() {
     }
 }
 
+/// SPECCODE: the main started/completed path carries the spec's code
+/// before its name. Fails if `run_spec` or `spec_step` go back to the
+/// bare name.
+#[tokio::test]
+async fn activity_spec_started_completed_carry_code_before_name() {
+    let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+    db.set_graph_spec_type(
+        &spec_id,
+        crate::domain::graphs::SpecType::Fix,
+        None,
+        Some("FIX-7"),
+    )
+    .unwrap();
+    db.insert_graph_node(&GraphNode {
+            id: "node-check".to_string(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            name: "check".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({"command": "printf APPROVED", "success_condition": "exit_code_0"}),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    db.insert_graph_node(&GraphNode {
+            id: "node-gate".to_string(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            name: "gate".to_string(),
+            kind: GraphNodeKind::Gate,
+            config: serde_json::json!({"evaluate": "output_contains", "value": "APPROVED", "pass_route": "next_spec"}),
+            position: 2,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    db.insert_graph_edge(&GraphEdge {
+        id: "edge-pass".to_string(),
+        spec_id: Some(spec_id.clone()),
+        graph_id: None,
+        from_node: "node-check".to_string(),
+        to_node: "node-gate".to_string(),
+        condition: crate::domain::graphs::GraphEdgeCondition::Pass,
+    })
+    .unwrap();
+
+    engine
+        .run_graph(graph_id.clone(), None, None, None, None, None)
+        .await
+        .unwrap();
+
+    let workdir = dir.path().to_string_lossy().to_string();
+    let entries = db.list_activity_log_entries(&workdir, 50).unwrap();
+    let messages: Vec<&str> = entries.iter().map(|e| e.message.as_str()).collect();
+    assert_eq!(
+        messages,
+        vec![
+            "Started (1 spec(s) pending).",
+            "Spec [FIX-7] 'Spec' started.",
+            "Spec [FIX-7] 'Spec' completed.",
+            "Completed (1/1 specs).",
+        ],
+        "got: {messages:?}"
+    );
+}
+
+/// SPECCODE: the spec-failed path carries the code looked up from the
+/// store. Fails if `node_dispatch` goes back to the bare name.
+#[tokio::test]
+async fn activity_spec_failed_carries_code_before_name() {
+    let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+    db.set_graph_spec_type(
+        &spec_id,
+        crate::domain::graphs::SpecType::Fix,
+        None,
+        Some("FIX-7"),
+    )
+    .unwrap();
+    db.insert_graph_node(&GraphNode {
+        id: "node-check".to_string(),
+        spec_id: Some(spec_id.clone()),
+        graph_id: None,
+        name: "check".to_string(),
+        kind: GraphNodeKind::Check,
+        config: serde_json::json!({"command": "exit 3", "success_condition": "exit_code_0"}),
+        position: 1,
+        created_at: chrono::Utc::now(),
+    })
+    .unwrap();
+
+    engine
+        .run_graph(graph_id.clone(), None, None, None, None, None)
+        .await
+        .unwrap();
+
+    let workdir = dir.path().to_string_lossy().to_string();
+    let entries = db.list_activity_log_entries(&workdir, 50).unwrap();
+    let messages: Vec<&str> = entries.iter().map(|e| e.message.as_str()).collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.starts_with("Spec [FIX-7] 'Spec' failed:")),
+        "expected a coded spec-failed entry, got: {messages:?}"
+    );
+}
+
 #[tokio::test]
 async fn activity_publishes_check_failure_with_exit_code() {
     let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();

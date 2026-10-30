@@ -401,6 +401,10 @@ mod tests {
             text.contains("no run of this node in My Spec yet"),
             "got: {text}"
         );
+        assert!(
+            !text.contains('['),
+            "no placeholder for a codeless spec: {text}"
+        );
     }
 
     /// SPECCODE: the waiting line shows the spec's code before its name.

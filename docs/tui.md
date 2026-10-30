@@ -338,6 +338,11 @@ row: `/` filters, `n` creates, `e` edits and `F4` deletes.
 The graph editor allows inline editing of node config JSON with
 validation. See [Graphs](graphs.md) for the engine itself.
 
+Wherever a spec is named — the live graph view, the sync panel's graph
+face, Activity lines and the node-tail waiting line — a spec with a type
+shows its code first (`[FIX-7] name`), like the Backlog badge above.
+Legacy specs without a type show the name alone.
+
 ## Notifications
 
 Native desktop notifications for task completions, failures, watcher
