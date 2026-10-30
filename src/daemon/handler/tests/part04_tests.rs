@@ -1074,3 +1074,166 @@ async fn remote_disconnect_keeps_the_row_and_answers_disconnected() {
         queue_raw_text(&result)
     );
 }
+
+// ── run workdir: continue + get/list ───────────────────────────────
+
+fn insert_paused_graph(db: &Database, id: &str, workdir: &str) {
+    db.insert_graph(&Graph {
+        archived: false,
+        paused_by_reconciliation: false,
+        allow_dirty_start: false,
+        require_spec_type: false,
+        infra_node_id: None,
+        id: id.to_string(),
+        name: id.to_string(),
+        description: None,
+        workdir: workdir.to_string(),
+        status: GraphStatus::Paused,
+        trigger: None,
+        created_at: chrono::Utc::now(),
+        started_at: None,
+        completed_at: None,
+        autorun_at: None,
+        auto_continue_at: None,
+        auto_continue_action: None,
+        active_run_queue_id: None,
+        hooks: std::collections::BTreeMap::new(),
+    })
+    .unwrap();
+    // The paused-mid-spec state: a spec left `running`, no active run.
+    let mut spec = standalone_spec(&format!("{id}-spec"));
+    spec.graph_id = Some(id.to_string());
+    spec.status = GraphSpecStatus::Running;
+    db.insert_graph_spec(&spec).unwrap();
+}
+
+/// `graph_control continue` with an explicit workdir replaces the run's
+/// workdir; without one the run keeps the workdir it was launched with
+/// (never the stored one); an invalid workdir is a tool error with no
+/// resume. Asserts the synchronous DB state only — never the background
+/// dispatch either accepted call spawns.
+#[tokio::test]
+async fn continue_workdir_replaces_and_is_kept_without_override() {
+    use crate::daemon::params::GraphContinueParams;
+
+    let (dir, db, handler) = queue_test_handler();
+    let stored = dir.path().to_string_lossy().to_string();
+    insert_paused_graph(&db, "graph-1", &stored);
+    let replacement = tempdir().unwrap();
+    let replacement_path = replacement.path().to_string_lossy().to_string();
+
+    let continued = handler
+        .graph_continue_impl(GraphContinueParams {
+            graph_id: "graph-1".to_string(),
+            mode: "retry_current_node".to_string(),
+            node_id: None,
+            spec_id: None,
+            workdir: Some(replacement_path.clone()),
+        })
+        .await
+        .unwrap();
+    assert!(
+        !continued.is_error.unwrap_or(false),
+        "{:?}",
+        continued.content
+    );
+    assert_eq!(
+        db.graph_active_run_workdir("graph-1").unwrap().as_deref(),
+        Some(replacement_path.as_str()),
+        "an explicit workdir replaces the run's workdir"
+    );
+
+    // Without an override the run keeps the workdir it was launched with —
+    // not the graph's stored workdir. The call's own result is background
+    // dependent (the accepted call above already spawned a dispatch); the
+    // persisted run workdir is not — every writer agrees on it.
+    db.update_graph_status("graph-1", GraphStatus::Paused, None, None)
+        .unwrap();
+    let _ = handler
+        .graph_continue_impl(GraphContinueParams {
+            graph_id: "graph-1".to_string(),
+            mode: "retry_current_node".to_string(),
+            node_id: None,
+            spec_id: None,
+            workdir: None,
+        })
+        .await;
+    assert_eq!(
+        db.graph_active_run_workdir("graph-1").unwrap().as_deref(),
+        Some(replacement_path.as_str()),
+        "without an override the run workdir is kept, never reset to the stored one"
+    );
+
+    // An invalid workdir is a tool error: nothing is persisted and the
+    // graph is not resumed.
+    insert_paused_graph(&db, "graph-2", &stored);
+    let invalid = handler
+        .graph_continue_impl(GraphContinueParams {
+            graph_id: "graph-2".to_string(),
+            mode: "retry_current_node".to_string(),
+            node_id: None,
+            spec_id: None,
+            workdir: Some("relative/path".to_string()),
+        })
+        .await
+        .unwrap();
+    assert!(
+        invalid.is_error.unwrap_or(false),
+        "an invalid workdir must be a tool error: {:?}",
+        invalid.content
+    );
+    assert!(
+        queue_raw_text(&invalid).contains("absolute path"),
+        "the error names the problem: {}",
+        queue_raw_text(&invalid)
+    );
+    assert_eq!(
+        db.graph_active_run_workdir("graph-2").unwrap(),
+        None,
+        "an invalid workdir persists nothing"
+    );
+    assert_eq!(
+        db.get_graph("graph-2").unwrap().unwrap().status,
+        GraphStatus::Paused,
+        "an invalid workdir resumes nothing"
+    );
+}
+
+/// `graph get` and `graph list` show the active run's workdir next to the
+/// stored one — but only when they differ.
+#[test]
+fn get_list_show_run_workdir_only_when_it_differs() {
+    let (dir, db) = queue_test_db();
+    insert_test_graph(&db, "graph-1");
+    // `insert_test_graph` stores `/tmp` as the graph's workdir.
+    let run_workdir_of = |db: &Database| {
+        let lp = db.get_graph("graph-1").unwrap().unwrap();
+        let summary = build_graph_summary_json(db, &lp).unwrap();
+        let details = db.get_graph_details("graph-1").unwrap().unwrap();
+        let details_json = graph_details_json(db, &details).unwrap();
+        (
+            summary.get("run_workdir").cloned(),
+            details_json.get("run_workdir").cloned(),
+        )
+    };
+
+    // No persisted run workdir: absent on both surfaces.
+    assert_eq!(run_workdir_of(&db), (None, None));
+
+    // Persisted but equal to the stored workdir: still absent.
+    db.set_graph_active_run_workdir("graph-1", Some("/tmp"))
+        .unwrap();
+    assert_eq!(run_workdir_of(&db), (None, None));
+
+    // Persisted and different: present on both surfaces.
+    let other = dir.path().to_string_lossy().to_string();
+    db.set_graph_active_run_workdir("graph-1", Some(&other))
+        .unwrap();
+    assert_eq!(
+        run_workdir_of(&db),
+        (
+            Some(serde_json::json!(other)),
+            Some(serde_json::json!(other))
+        )
+    );
+}

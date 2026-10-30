@@ -132,7 +132,13 @@ impl GraphEngine {
         self.db
             .set_graph_active_run_queue(&graph_id, queue_id.as_deref())?;
         self.persist_run_idea(&graph_id, idea.as_deref())?;
-        let workdir = Self::resolve_dispatch_workdir(&lp, workdir_override, &sandbox);
+        let workdir = self.resolve_and_persist_run_workdir(
+            &graph_id,
+            &lp,
+            workdir_override,
+            is_resume,
+            &sandbox,
+        )?;
         self.announce_dispatch_start(&lp, &graph_id, queue_id.as_deref(), &workdir, is_resume)?;
         let mut completed_specs: Vec<(String, String)> = Vec::new();
         let ctx = DispatchCtx {
@@ -199,18 +205,6 @@ impl GraphEngine {
         self.finish_dispatch(&ctx, queue_id.as_deref(), sandbox, &completed_specs)
             .await?;
         Ok(())
-    }
-
-    pub(crate) fn resolve_dispatch_workdir(
-        lp: &Graph,
-        workdir_override: Option<String>,
-        sandbox: &Option<Sandbox>,
-    ) -> String {
-        sandbox
-            .as_ref()
-            .map(|s| s.worktree_path.to_string_lossy().to_string())
-            .or(workdir_override)
-            .unwrap_or_else(|| lp.workdir.clone())
     }
 
     pub(crate) fn announce_dispatch_start(

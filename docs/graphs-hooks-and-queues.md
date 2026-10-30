@@ -63,7 +63,9 @@ each spec this run completed, one per line); `on_spec_completed` provides
 Every known marker with no value for the event renders exactly `(none)` in
 command, agent, interactive, and graph-idea hooks. Unknown marker names are
 rejected by `graph_edit` `update` with the marker name and supported list; no hook
-firing leaves a marker literal.
+firing leaves a marker literal. `{{workdir}}` (and `CANOPY_HOOK_WORKDIR`)
+is the workdir the firing run was launched with — the run's override when
+one applies, else the graph's stored workdir.
 
 The existing configuration keeps working, unchanged and unattended:
 whatever a graph has in its `on_completed` column becomes a hook on the

@@ -194,6 +194,11 @@ pub struct GraphContinueParams {
     /// Defaults to the graph's current spec.
     #[serde(default)]
     pub spec_id: Option<String>,
+    /// Optional absolute workdir for the continued run. Wins over the run's
+    /// workdir; without it the run keeps the workdir it was launched with
+    /// (never the graph's stored workdir).
+    #[serde(default)]
+    pub workdir: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]

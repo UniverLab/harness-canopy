@@ -761,4 +761,27 @@ impl Database {
         }
         Ok(())
     }
+
+    /// Add graph `active_run_workdir`: the workdir a run was launched with
+    /// (the override, or the stored workdir when none was given), persisted
+    /// the moment that run starts so every continuation of the run
+    /// (`graph_control` in every mode, scheduled resumes, quota auto-resume)
+    /// re-dispatches in it instead of silently expiring back to the stored
+    /// workdir. `NULL` on pre-existing rows (legacy runs fall back to the
+    /// stored workdir) and on graphs that never ran. Lives here rather than
+    /// in `schema.rs` so that file stays under the 800-line gate.
+    pub(in crate::db) fn migrate_graph_active_run_workdir(conn: &Connection) -> Result<()> {
+        let has_active_run_workdir: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('graphs') WHERE name = 'active_run_workdir'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if !has_active_run_workdir {
+            conn.execute("ALTER TABLE graphs ADD COLUMN active_run_workdir TEXT", [])
+                .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+        }
+        Ok(())
+    }
 }

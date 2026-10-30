@@ -31,18 +31,19 @@ impl GraphEngine {
     ) {
         // Clone the owned values the async ctx borrows from out of the
         // short-lived `get_graph` guard so the ctx can borrow them.
-        let owned: Option<(Graph, String, Option<String>)> =
+        let owned: Option<(Graph, String, Option<String>, String)> =
             self.db.get_graph(graph_id).ok().flatten().map(|lp| {
                 let blocker_owned = blocker.to_string();
                 let node_owned = node_name
                     .map(str::to_string)
                     .or_else(|| self.ending_node_name(graph_id, None));
-                (lp, blocker_owned, node_owned)
+                let run_workdir = self.db.graph_run_workdir_or(&lp.id, &lp.workdir);
+                (lp, blocker_owned, node_owned, run_workdir)
             });
-        if let Some((lp, blocker_owned, node_owned)) = owned.as_ref() {
+        if let Some((lp, blocker_owned, node_owned, run_workdir)) = owned.as_ref() {
             let ctx = HookContext {
                 graph_name: &lp.name,
-                workdir: &lp.workdir,
+                workdir: run_workdir,
                 completed_specs: &[],
                 spec_name: None,
                 spec_id: None,
@@ -84,9 +85,10 @@ impl GraphEngine {
         let commit_message = spec
             .spec_type
             .map(|spec_type| commit_message(spec_type, spec.spec_scope.as_deref(), &spec.name));
+        let run_workdir = self.db.graph_run_workdir_or(&lp.id, &lp.workdir);
         let ctx = HookContext {
             graph_name: &lp.name,
-            workdir: &lp.workdir,
+            workdir: &run_workdir,
             completed_specs: &[],
             spec_name: Some(&spec.name),
             spec_id: Some(&spec.id),

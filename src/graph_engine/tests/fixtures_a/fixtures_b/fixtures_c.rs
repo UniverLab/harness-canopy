@@ -811,3 +811,4 @@ mod part20_tests;
 mod part21_tests;
 mod part22_tests;
 mod part23_tests;
+mod part24_tests;

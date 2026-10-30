@@ -102,6 +102,7 @@ pub(crate) fn build_graph_summary_json(
         "workdir": lp.workdir,
         "archived": lp.archived,
     });
+    set_run_workdir_json(db, &mut out, &lp.id, &lp.workdir).map_err(internal_error)?;
     // CB30: when the graph draws from a queue, say so and name it, so the
     // reader knows where the sequence comes from.
     if let Some(queue_id) = lp.active_run_queue_id.as_deref() {
@@ -116,6 +117,24 @@ pub(crate) fn build_graph_summary_json(
         }
     }
     Ok(out)
+}
+
+/// Set `out["run_workdir"]` to the active run's workdir — but only when it
+/// differs from the stored one, so a run without an override reads exactly
+/// as before. Shared by `graph get` ([`graph_details_json`]) and `graph
+/// list` ([`build_graph_summary_json`]).
+fn set_run_workdir_json(
+    db: &Database,
+    out: &mut serde_json::Value,
+    graph_id: &str,
+    stored: &str,
+) -> anyhow::Result<()> {
+    if let Some(run_workdir) = db.graph_active_run_workdir(graph_id)? {
+        if run_workdir != stored {
+            out["run_workdir"] = serde_json::json!(run_workdir);
+        }
+    }
+    Ok(())
 }
 
 /// Serialize a graph's trigger for MCP responses: always a `type` label, plus
@@ -446,6 +465,7 @@ pub(crate) fn graph_details_json(
             .collect::<Vec<_>>(),
         "orphan_join_warnings": orphan_join_warnings,
     });
+    set_run_workdir_json(db, &mut out, &lp.lp.id, &lp.lp.workdir)?;
     // CB30: when the graph draws from a queue, say so and name it; when it
     // runs a loose idea, say that instead of leaving an empty `specs` to be
     // misread as "nothing running".

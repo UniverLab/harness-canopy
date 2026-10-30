@@ -190,6 +190,14 @@ auto-resumes (useful for quota-limited graphs that fail and need to
 wait before retrying). Call it again with `at` omitted to cancel a
 pending schedule.
 
+A run remembers the workdir it was launched with — the `workdir` override
+when `run` was given one, else the graph's stored workdir — and every
+continuation of that run (`continue` in any mode, scheduled resumes, quota
+auto-resume) re-dispatches in it, as do the run's hooks (`{{workdir}}`,
+`CANOPY_HOOK_WORKDIR`). `continue` without `workdir` keeps it; an explicit
+`workdir` replaces it. A new `run` without an override uses the stored
+workdir again; `graph` `get`/`list` show the run's as `run_workdir` when it differs.
+
 If the daemon stops while a node is running — a graceful shutdown or a
 crash — the killed run is finalized as interrupted and routes no edge
 (in particular, never its fail edge). On the next start the graph is

@@ -260,6 +260,45 @@ impl GraphEngine {
         let _ = self.db.clear_graph_hook_launched(&graph_id);
         result
     }
+
+    /// Resolve the workdir this dispatch runs in and persist it with the run.
+    /// A resume without an explicit override keeps the workdir the run was
+    /// launched with — without that fallback the override would silently
+    /// expire and the resumed nodes would run against the stored workdir
+    /// instead. A fresh run never reads the persisted value; it overwrites
+    /// it right after resolving. Lives here rather than in `dispatch.rs` so
+    /// that file stays under the 800-line gate.
+    pub(crate) fn resolve_and_persist_run_workdir(
+        &self,
+        graph_id: &str,
+        lp: &Graph,
+        workdir_override: Option<String>,
+        is_resume: bool,
+        sandbox: &Option<Sandbox>,
+    ) -> Result<String> {
+        let workdir_override = if is_resume && workdir_override.is_none() {
+            self.db.graph_active_run_workdir(graph_id)?
+        } else {
+            workdir_override
+        };
+        let workdir = Self::resolve_dispatch_workdir(lp, workdir_override, sandbox);
+        self.db
+            .set_graph_active_run_workdir(graph_id, Some(&workdir))?;
+        Ok(workdir)
+    }
+
+    pub(crate) fn resolve_dispatch_workdir(
+        lp: &Graph,
+        workdir_override: Option<String>,
+        sandbox: &Option<Sandbox>,
+    ) -> String {
+        sandbox
+            .as_ref()
+            .map(|s| s.worktree_path.to_string_lossy().to_string())
+            .or(workdir_override)
+            .unwrap_or_else(|| lp.workdir.clone())
+    }
+
     pub fn resume_background(self: Arc<Self>, graph_id: String, directed: Option<DirectedStart>) {
         let queue_id = self
             .db

@@ -1039,6 +1039,7 @@ async fn graph_continue_requires_a_paused_graph() {
             mode: "retry_current_node".to_string(),
             node_id: None,
             spec_id: None,
+            workdir: None,
         }),
     )
     .await
@@ -1055,6 +1056,7 @@ async fn graph_continue_requires_a_paused_graph() {
             mode: "retry_current_node".to_string(),
             node_id: None,
             spec_id: None,
+            workdir: None,
         }),
     )
     .await
@@ -1072,6 +1074,7 @@ async fn graph_continue_requires_a_paused_graph() {
             mode: "sideways".to_string(),
             node_id: None,
             spec_id: None,
+            workdir: None,
         }),
     )
     .await
@@ -1102,6 +1105,7 @@ async fn graph_continue_run_from_node_refuses_a_graph_with_an_active_run() {
             mode: "run_from_node".to_string(),
             node_id: Some("Node".to_string()),
             spec_id: None,
+            workdir: None,
         }),
     )
     .await
@@ -1125,6 +1129,7 @@ async fn graph_continue_run_from_node_refuses_a_graph_with_an_active_run() {
             mode: "run_from_node".to_string(),
             node_id: Some("Node".to_string()),
             spec_id: None,
+            workdir: None,
         }),
     )
     .await
@@ -1199,6 +1204,7 @@ async fn graph_continue_run_from_node_accepts_spec_paused_on_and_reports_directe
             mode: "run_from_node".to_string(),
             node_id: Some("B".to_string()),
             spec_id: Some(skipped.id.clone()),
+            workdir: None,
         }),
     )
     .await
@@ -1220,6 +1226,7 @@ async fn graph_continue_run_from_node_accepts_spec_paused_on_and_reports_directe
             mode: "run_from_node".to_string(),
             node_id: Some("Zed".to_string()),
             spec_id: None,
+            workdir: None,
         }),
     )
     .await
@@ -1244,6 +1251,7 @@ async fn graph_continue_run_from_node_accepts_spec_paused_on_and_reports_directe
             mode: "run_from_node".to_string(),
             node_id: Some("B".to_string()),
             spec_id: None,
+            workdir: None,
         }),
     )
     .await
@@ -1530,6 +1538,7 @@ async fn graph_continue_run_from_node_refuses_never_run_idea_graph() {
             mode: "run_from_node".to_string(),
             node_id: Some("Check".to_string()),
             spec_id: None,
+            workdir: None,
         }),
     )
     .await

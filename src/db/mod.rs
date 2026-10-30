@@ -262,6 +262,7 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
                 spec_queue TEXT,
                 active_run_queue_id TEXT,
                 active_run_idea TEXT,
+                active_run_workdir TEXT,
                 blocker TEXT,
                 require_spec_type INTEGER NOT NULL DEFAULT 0,
                 on_completed TEXT,
@@ -669,6 +670,7 @@ impl Database {
         Self::migrate_ensemble_member_columns(&conn)?;
         Self::migrate_graph_roster_columns(&conn)?;
         Self::migrate_graph_active_run_idea(&conn)?;
+        Self::migrate_graph_active_run_workdir(&conn)?;
         Self::migrate_graph_blocker(&conn)?;
         Self::migrate_spec_commit_evidence_columns(&conn)?;
         Self::migrate_spec_cross_run_attempts_column(&conn)?;

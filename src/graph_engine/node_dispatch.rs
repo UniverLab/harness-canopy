@@ -322,9 +322,10 @@ impl GraphEngine {
                 None => note,
             })
             .or_else(|| ending_node.clone());
+        let run_workdir = self.db.graph_run_workdir_or(&lp.id, &lp.workdir);
         let ctx = HookContext {
             graph_name: &lp.name,
-            workdir: &lp.workdir,
+            workdir: &run_workdir,
             completed_specs,
             spec_name: None,
             spec_id: None,

@@ -250,6 +250,54 @@ impl Database {
         Ok(rows > 0)
     }
 
+    /// The workdir a run against `graph_id` was launched with: the override
+    /// it ran with, or the stored workdir when none was given (`None` for a
+    /// graph that never ran since the column shipped). Read straight from
+    /// the row — there is deliberately no `Graph` field for it (cf.
+    /// [`Self::graph_active_run_idea`]), so only the resume/hook/display
+    /// paths that need it pay for the read.
+    pub fn graph_active_run_workdir(&self, graph_id: &str) -> Result<Option<String>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let mut stmt = conn.prepare("SELECT active_run_workdir FROM graphs WHERE id = ?1")?;
+        let mut rows = stmt.query(params![graph_id])?;
+        match rows.next()? {
+            Some(row) => Ok(row.get::<_, Option<String>>(0)?),
+            None => Ok(None),
+        }
+    }
+
+    /// Persist the workdir a run against `graph_id` executes with (called
+    /// once when the run starts — a resumed run re-persists the same value,
+    /// a fresh run overwrites it). Returns whether the graph row existed.
+    pub fn set_graph_active_run_workdir(
+        &self,
+        graph_id: &str,
+        workdir: Option<&str>,
+    ) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let rows = conn.execute(
+            "UPDATE graphs SET active_run_workdir = ?1 WHERE id = ?2",
+            params![workdir, graph_id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// The workdir `graph_id`'s run executes with: the persisted run workdir,
+    /// falling back to `stored` (the graph's own workdir) for legacy rows
+    /// that never persisted one.
+    pub fn graph_run_workdir_or(&self, graph_id: &str, stored: &str) -> String {
+        self.graph_active_run_workdir(graph_id)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| stored.to_string())
+    }
+
     /// The blocker text a guard pause stored for `graph_id` (`None` when the
     /// graph is not paused behind a blocker). Read straight from the row —
     /// there is deliberately no `Graph` field for it (cf.

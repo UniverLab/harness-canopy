@@ -579,9 +579,9 @@ impl TaskTriggerHandler {
         name = "graph_control",
         description = "Run, pause, continue, reset, preflight, and schedule graphs. Pass `action` plus the parameters listed for it. \
         Actions (required params; optional params): \
-        `run` (required: graph_id; optional: queue_id, workdir, idea, sandbox, start_node_id) — launch a graph run. \
+        `run` (required: graph_id; optional: queue_id, workdir, idea, sandbox, start_node_id) — launch a graph run. The run's workdir is the `workdir` override when given, else the graph's stored workdir; it is persisted with the run and every continuation of that run keeps using it. \
         `pause` (required: graph_id; optional: interrupt) — pause a running graph. \
-        `continue` (required: graph_id, mode; optional: node_id, spec_id) — continue a paused/failed graph (mode: retry_current_node, skip_next_spec, or run_from_node). \
+        `continue` (required: graph_id, mode; optional: node_id, spec_id, workdir) — continue a paused/failed graph (mode: retry_current_node, skip_next_spec, or run_from_node). Without `workdir` the continued run keeps the workdir it was launched with; an explicit `workdir` replaces it. \
         `reset` (required: graph_id; optional: specs, clear_notes) — reset a completed/failed graph back to pending. \
         `preflight` (required: graph_id; optional: timeout_seconds, reviewer) — probe a graph's platforms and audit its design. \
         `schedule_continue` (required: graph_id; optional: at, mode) — schedule a one-shot deferred continue for a paused graph (mode: retry_current_node or skip_next_spec, default retry_current_node), or cancel a pending one. \

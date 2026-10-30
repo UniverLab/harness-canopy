@@ -11,7 +11,7 @@ use crate::daemon::handler_run_exec::{
     directed_run_report, find_in_flight_run, handle_retry_current_node, handle_skip_next_spec,
     in_flight_run_error, node_name_for_error, resolve_directed_spec,
 };
-use crate::daemon::handler_validate::resolve_prefix_or_error;
+use crate::daemon::handler_validate::{resolve_prefix_or_error, validate_absolute_dir};
 use crate::daemon::helpers::{error_result, success_result, with_deprecated_note};
 use crate::daemon::params::*;
 use crate::daemon::params_extract::Parameters;
@@ -278,6 +278,23 @@ impl TaskTriggerHandler {
             Ok(None) => return Ok(error_result(&format!("Graph '{}' not found.", graph_id))),
             Err(e) => return Err(internal_error(e.to_string())),
         };
+        // An explicit workdir replaces the run's workdir for the continued
+        // run; without it the run keeps the workdir it was launched with
+        // (never the stored one — the resume path reads the persisted run
+        // workdir). Invalid means a tool error with no resume.
+        if let Some(workdir) = params
+            .workdir
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            if let Err(e) = validate_absolute_dir(workdir) {
+                return Ok(error_result(&e));
+            }
+            self.db
+                .set_graph_active_run_workdir(&graph_id, Some(workdir))
+                .map_err(internal_error)?;
+        }
         if params.mode.trim() == "run_from_node" {
             return self
                 .graph_continue_run_from_node(graph_id, lp, params.node_id, params.spec_id)
