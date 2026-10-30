@@ -169,7 +169,9 @@ by reconstructing what ran from the run history.
 **Dirty-tree guard between specs.** The launch guard that refuses a dirty
 worktree at `graph_control` `run` also runs every time a queue run moves from one spec
 to the next: after a completed, failed, skipped, interrupted or limit-blocked
-spec alike. A refusal pauses the graph (it does not fail it). The blocker
+spec alike. A refusal pauses the graph (it does not fail it) and stores the
+blocker on the graph, so `graph` `get` and `graph` `list` report it and the
+TUI flags the graph blocked, until a resume clears it. The blocker
 lists the first 20 dirty paths and the ways out: `graph_control` `continue`
 with `mode: run_from_node` on the next spec, cleaning the tree by hand and then
 `graph_control` `continue` with `mode: skip_next_spec`, or `allow_dirty_start` on the graph. A directed start on that

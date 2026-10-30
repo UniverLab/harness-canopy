@@ -1276,3 +1276,43 @@ fn resolve_node_kind_and_config_rejects_unknown_kind() {
         resolve_node_kind_and_config(Some("bogus"), Some(serde_json::Map::new())).unwrap_err();
     assert!(error.contains("must be one of"), "{error}");
 }
+
+/// `graph get` agrees with `graph list` on a run-reported blocker (a node
+/// run's `graph_report_blocker` output), and the row-stored guard text wins
+/// on both surfaces when the two exist together.
+#[test]
+fn graph_get_falls_back_to_run_reported_blocker_behind_row_text() {
+    let (_dir, db) = queue_test_db();
+    db.insert_graph(&cb30_test_graph("graph-1", GraphStatus::Paused))
+        .unwrap();
+    let mut spec = standalone_spec("spec-a");
+    spec.graph_id = Some("graph-1".to_string());
+    spec.name = "Spec A".to_string();
+    spec.status = GraphSpecStatus::Running;
+    db.insert_graph_spec(&spec).unwrap();
+    insert_test_node(&db, "node-1", "spec-a");
+    let mut run = graph_run_row("run-1", "graph-1", "spec-a", GraphRunStatus::Fail);
+    run.output = Some(serde_json::json!({"blocker": "waiting on human input"}));
+    db.insert_graph_run(&run).unwrap();
+
+    // Run-reported only: both surfaces show it.
+    let details = db.get_graph_details("graph-1").unwrap().unwrap();
+    let get = graph_details_json(&db, &details).unwrap();
+    assert_eq!(get["blocked"], serde_json::json!(true));
+    assert_eq!(get["blocker"], serde_json::json!("waiting on human input"));
+    let lp = db.get_graph("graph-1").unwrap().unwrap();
+    let list = build_graph_summary_json(&db, &lp).unwrap();
+    assert_eq!(list["blocked"], serde_json::json!(true));
+    assert_eq!(list["blocker"], serde_json::json!("waiting on human input"));
+
+    // Row-stored guard text wins on both.
+    db.set_graph_blocker("graph-1", Some("guard: dirty tree"))
+        .unwrap();
+    let details = db.get_graph_details("graph-1").unwrap().unwrap();
+    let get = graph_details_json(&db, &details).unwrap();
+    assert_eq!(get["blocked"], serde_json::json!(true));
+    assert_eq!(get["blocker"], serde_json::json!("guard: dirty tree"));
+    let lp = db.get_graph("graph-1").unwrap().unwrap();
+    let list = build_graph_summary_json(&db, &lp).unwrap();
+    assert_eq!(list["blocker"], serde_json::json!("guard: dirty tree"));
+}

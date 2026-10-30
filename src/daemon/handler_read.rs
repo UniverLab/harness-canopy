@@ -82,6 +82,7 @@ pub(crate) fn build_graph_summary_json(
     // A guard pause stores its blocker on the graph row — that wins over the
     // spec-derived blocker (a node run's `graph_report_blocker` output), so a
     // paused-behind-a-guard graph reports WHY it paused instead of `blocked: false`.
+    // `graph_details_json` mirrors this row-first decision.
     let blocker = db
         .graph_blocker(&lp.id)
         .map_err(internal_error)?
@@ -339,6 +340,21 @@ fn orphan_join_warnings_json(
     Ok(warnings)
 }
 
+/// The current spec's run-reported blocker (`graph_report_blocker`), if any —
+/// the fallback behind the graph row's guard-pause text on both read
+/// surfaces (`build_graph_summary_json` inlines the same decision over the
+/// `SpecRunInfo` it already computed).
+fn current_spec_blocker(db: &Database, ctx: &ActiveGraphSpec) -> anyhow::Result<Option<String>> {
+    match ctx {
+        ActiveGraphSpec::Bound(spec) | ActiveGraphSpec::QueueMember { spec, .. } => {
+            Ok(build_spec_run_info(db, spec)
+                .map_err(|error| anyhow::anyhow!("spec run info failed: {error}"))?
+                .blocker)
+        }
+        ActiveGraphSpec::Idea { .. } | ActiveGraphSpec::None => Ok(None),
+    }
+}
+
 pub(crate) fn graph_details_json(
     db: &Database,
     lp: &GraphDetails,
@@ -387,15 +403,20 @@ pub(crate) fn graph_details_json(
 
     let orphan_join_warnings = orphan_join_warnings_json(db, lp)?;
 
-    let row_blocker = db.graph_blocker(&lp.lp.id)?;
+    // Row first, current-spec run output second — the same decision
+    // `build_graph_summary_json` makes, so `graph get` and `graph list`
+    // agree on both pause flavors.
+    let blocker = db
+        .graph_blocker(&lp.lp.id)?
+        .or(current_spec_blocker(db, &ctx)?);
     let mut out = serde_json::json!({
         "id": lp.lp.id,
         "name": lp.lp.name,
         "description": lp.lp.description,
         "workdir": lp.lp.workdir,
         "status": lp.lp.status.as_str(),
-        "blocked": row_blocker.is_some(),
-        "blocker": row_blocker,
+        "blocked": blocker.is_some(),
+        "blocker": blocker,
         "trigger": graph_trigger_json(&lp.lp),
         "created_at": lp.lp.created_at.to_rfc3339(),
         "started_at": lp.lp.started_at.map(|value| value.to_rfc3339()),
