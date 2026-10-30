@@ -34,6 +34,35 @@ pub struct InteractiveSession {
 const SESSION_COLUMNS: &str = "id, name, cli, working_dir, args, started_at, status, \
      session_type, pid, boot_id, harness_conversation_id";
 
+/// Ids of `active`/`resumed` rows whose process is already gone, per
+/// [`crate::system::session_process_is_live`]. Split out so the reconcile
+/// update borrows no live statement while it writes.
+fn stale_interactive_session_ids(
+    conn: &rusqlite::Connection,
+    current_boot_id: Option<&str>,
+) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, pid, boot_id FROM interactive_sessions
+         WHERE status IN ('active', 'resumed')",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows
+        .into_iter()
+        .filter(|(_, pid, boot_id)| {
+            !crate::system::session_process_is_live(*pid, boot_id.as_deref(), current_boot_id)
+        })
+        .map(|(id, _, _)| id)
+        .collect())
+}
+
 fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<InteractiveSession> {
     Ok(InteractiveSession {
         id: row.get(0)?,
@@ -494,6 +523,36 @@ impl Database {
             [],
         )?;
         Ok(rows)
+    }
+
+    /// Reconcile stale interactive session rows: an `active`/`resumed` row
+    /// whose process is already gone is closed with the same values
+    /// [`Self::finish_interactive_session`] writes for a failed exit
+    /// (`status = 'error'`, `exited_at` set, `exit_code = 1`) — no new
+    /// status. Liveness is [`crate::system::session_process_is_live`]
+    /// (same boot id + PID alive), the same rule `busy_reasons` counts by,
+    /// so a reconciled row stops blocking maintenance and stops listing as
+    /// live anywhere. Covers every `session_type`, including bridge
+    /// sidecars. Kills nothing: only rows whose process is already gone are
+    /// touched. Returns the number of rows closed.
+    pub fn reconcile_stale_interactive_sessions(&self) -> Result<usize> {
+        let current_boot_id = crate::system::boot_id();
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let stale_ids = stale_interactive_session_ids(&conn, current_boot_id.as_deref())?;
+        if stale_ids.is_empty() {
+            return Ok(0);
+        }
+        let now = Utc::now().to_rfc3339();
+        let mut closed = 0;
+        for id in &stale_ids {
+            closed += conn.execute(
+                "UPDATE interactive_sessions
+                 SET status = 'error', exited_at = ?1, exit_code = 1
+                 WHERE id = ?2 AND status IN ('active', 'resumed')",
+                params![now, id],
+            )?;
+        }
+        Ok(closed)
     }
 
     /// Mark a single session 'resumed', once its replacement process has

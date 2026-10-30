@@ -1443,16 +1443,12 @@ pub(crate) fn format_session_info(session: &InteractiveSession) -> String {
 /// next attaches), it just is not attached at this moment. Side-effect-free:
 /// no PTY touched, no session woken.
 pub(crate) fn session_is_attached(session: &InteractiveSession) -> bool {
-    match (
+    let current_boot_id = crate::system::boot_id();
+    crate::system::session_process_is_live(
+        session.pid,
         session.boot_id.as_deref(),
-        crate::system::boot_id().as_deref(),
-    ) {
-        (Some(stored), Some(current)) if stored == current => session
-            .pid
-            .map(crate::system::process_is_alive)
-            .unwrap_or(false),
-        _ => false,
-    }
+        current_boot_id.as_deref(),
+    )
 }
 
 pub(crate) fn transport_details(port: u16) -> (&'static str, String) {

@@ -1363,3 +1363,79 @@ fn list_specs_filters_by_workdir_and_unassigned_only() {
         .unwrap();
     assert_eq!(pending.len(), 3);
 }
+
+// ── Stale interactive sessions: busy counts live rows only ──
+
+/// Three rows — one live, one dead pid, one live pid on a different boot.
+/// `busy_reasons` reports exactly the live one, and the reconciliation
+/// closes exactly the two stale ones with the failed-exit values
+/// (`error` + `exited_at` + exit code 1), leaving the live row active.
+/// Fails if the session count is ever a raw `COUNT(*)` again (3 reported,
+/// 0 reconciled) or if the boot id is ignored (the rebooted row counted
+/// as live and left open).
+#[test]
+fn busy_counts_only_live_and_reconcile_closes_dead() {
+    let db = test_db();
+    let current_boot = crate::system::boot_id().expect("test host has a boot id");
+    let live_pid = std::process::id() as i64;
+    // Above any real pid_max (Linux caps at 2^22), so `kill` reports ESRCH:
+    // deterministically dead without spawning anything.
+    let dead_pid = 987_654_321;
+
+    for (id, pid, boot_id) in [
+        ("sess-live", live_pid, current_boot.as_str()),
+        ("sess-dead", dead_pid, current_boot.as_str()),
+        (
+            "sess-rebooted",
+            live_pid,
+            "00000000-0000-0000-0000-000000000000",
+        ),
+    ] {
+        db.insert_interactive_session(
+            id,
+            id,
+            "opencode",
+            "/tmp",
+            None,
+            Some(pid),
+            "interactive",
+            Some(boot_id),
+        )
+        .unwrap();
+    }
+
+    let reasons = db.busy_reasons().unwrap();
+    assert_eq!(reasons.len(), 1, "{reasons:?}");
+    assert!(
+        reasons[0].contains('1') && reasons[0].contains("interactive session"),
+        "{reasons:?}"
+    );
+
+    assert_eq!(db.reconcile_stale_interactive_sessions().unwrap(), 2);
+
+    assert_eq!(
+        db.get_interactive_session_status("sess-live").unwrap(),
+        Some("active".to_string())
+    );
+    for id in ["sess-dead", "sess-rebooted"] {
+        assert_eq!(
+            db.get_interactive_session_status(id).unwrap(),
+            Some("error".to_string()),
+            "{id} must be closed"
+        );
+    }
+
+    // Closed rows carry the same failed-exit values `finish_interactive_session(id, 1)` writes.
+    let conn = db.conn.lock().unwrap();
+    for id in ["sess-dead", "sess-rebooted"] {
+        let (exited_at, exit_code): (Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT exited_at, exit_code FROM interactive_sessions WHERE id = ?1",
+                rusqlite::params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(exited_at.is_some(), "{id} must have exited_at set");
+        assert_eq!(exit_code, Some(1), "{id} must have exit_code 1");
+    }
+}

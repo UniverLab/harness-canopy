@@ -174,7 +174,9 @@ watchers, daemon process, registry connectivity and auto-update health.
 The database has a daily routine: a full integrity check and foreign-key
 check, then one verified backup written with `VACUUM INTO`, replacing the
 previous backup. It runs only while the daemon is idle (no graph running, no TUI
-attached). A busy daemon defers it, and after 72 hours of deferral it runs
+attached). Sessions whose process is already gone are reconciled shut first —
+at daemon startup and before each check — so stale rows never block it. A
+busy daemon defers it, and after 72 hours of deferral it runs
 anyway. `canopy doctor` reports the routine's last outcome, the backup and
 its age, and how many times it has been deferred, and warns when it has never
 completed. To run the check and backup now:

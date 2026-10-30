@@ -1217,15 +1217,17 @@ mod tests {
         let data_dir = dir.path();
         let db_path = data_dir.join("test.db");
         let db = Database::new(&db_path).unwrap();
+        // Genuinely attached: this test process's own pid on the current boot.
+        let current_boot_id = crate::system::boot_id().expect("test host has a boot id");
         db.insert_interactive_session(
             "s-live",
             "s-live",
             "opencode",
             "/tmp",
             None,
-            None,
+            Some(std::process::id() as i64),
             "interactive",
-            None,
+            Some(&current_boot_id),
         )
         .unwrap();
 

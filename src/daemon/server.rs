@@ -113,6 +113,7 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
         Arc::clone(&sessions_state),
     );
     crate::sessions::resume::reconcile_at_startup(&sessions_state.hub, &data_dir);
+    reconcile_stale_sessions_on_startup(&db);
 
     let background = start_background_tasks(
         &db,
@@ -175,6 +176,21 @@ fn write_startup_state(db: &Database, port: u16) -> Result<()> {
     db.set_state("version", env!("CARGO_PKG_VERSION"))?;
     db.set_state("last_start", &chrono::Utc::now().to_rfc3339())?;
     Ok(())
+}
+
+/// Close interactive-session rows whose process is already gone. Called
+/// AFTER the resume above, on purpose: rows the resume relaunched carry a
+/// fresh live pid again, so whatever is still stale here belongs to a
+/// process that is really gone. Reconciling first would close the rows the
+/// resume needs and kill auto-resume.
+fn reconcile_stale_sessions_on_startup(db: &Database) {
+    match db.reconcile_stale_interactive_sessions() {
+        Ok(closed) if closed > 0 => {
+            tracing::info!("Closed {closed} stale interactive session(s) on startup");
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!("Failed to reconcile stale interactive sessions: {e}"),
+    }
 }
 
 /// Startup reconciliation 1/2: graphs a previous daemon left `Running`.

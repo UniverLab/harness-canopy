@@ -145,6 +145,8 @@ impl HealthRoutine {
             return;
         }
 
+        Self::reconcile_stale_sessions(&self.db);
+
         let busy = match self.db.busy_reasons() {
             Ok(b) => b,
             Err(e) => {
@@ -172,6 +174,23 @@ impl HealthRoutine {
 
         // Idle path: unchanged, just delegates to the shared runner.
         self.run_and_record(false).await;
+    }
+
+    /// A stale row (a process that died without finishing its session)
+    /// must not block this routine: close those rows through the db layer
+    /// first, so the busy check only sees live sessions.
+    fn reconcile_stale_sessions(db: &Database) {
+        match db.reconcile_stale_interactive_sessions() {
+            Ok(closed) if closed > 0 => {
+                tracing::info!(
+                    "db health routine: reconciled {closed} stale interactive session(s)"
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!("db health routine: could not reconcile stale sessions: {e}");
+            }
+        }
     }
 
     /// Records the skip (so a routine that never finds an idle moment stays
@@ -734,6 +753,52 @@ mod tests {
         assert_eq!(status.deferred_count, 1);
         assert!(status.first_deferred_at.is_some());
         assert!(!backup_path(dir.path()).exists());
+    }
+
+    #[tokio::test]
+    async fn maybe_run_runs_with_only_stale_rows() {
+        let dir = tempdir().unwrap();
+        let db_path = database_path(dir.path());
+        let db = Arc::new(Database::new(&db_path).unwrap());
+        // Two rows whose processes are long gone (no pid, no boot id — the
+        // legacy shape a crash leaves behind). Neither may block the
+        // routine, and both must be closed by its reconcile step.
+        for id in ["stale-1", "stale-2"] {
+            db.insert_interactive_session(
+                id,
+                id,
+                "opencode",
+                "/tmp",
+                None,
+                None,
+                "interactive",
+                None,
+            )
+            .unwrap();
+        }
+
+        let routine = HealthRoutine::new(Arc::clone(&db), dir.path().to_path_buf());
+        routine.maybe_run().await;
+
+        let status = load_status(&db);
+        assert_eq!(status.outcome, Some(DbHealthOutcome::Passed));
+        assert!(
+            status.last_run_at.is_some(),
+            "the routine must have run despite the stale rows"
+        );
+        assert!(backup_path(dir.path()).exists());
+        assert!(
+            status.last_skip_at.is_none(),
+            "no busy skip must have been recorded"
+        );
+        assert_eq!(status.deferred_count, 0);
+        for id in ["stale-1", "stale-2"] {
+            assert_eq!(
+                db.get_interactive_session_status(id).unwrap().as_deref(),
+                Some("error"),
+                "{id} must have been reconciled shut"
+            );
+        }
     }
 
     #[test]

@@ -141,6 +141,13 @@ mod system {
     pub fn boot_id() -> Option<String> {
         None
     }
+    pub fn session_process_is_live(
+        _pid: Option<i64>,
+        _stored_boot_id: Option<&str>,
+        _current_boot_id: Option<&str>,
+    ) -> bool {
+        false
+    }
 }
 
 // Stubs for the skill sources `domain::prompt_catalog` reads: the example

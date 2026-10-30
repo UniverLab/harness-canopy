@@ -310,6 +310,25 @@ pub fn process_is_alive(_pid: i64) -> bool {
     false
 }
 
+/// Whether a persisted interactive-session row refers to a process that is
+/// really alive right now: the single source of truth for session liveness.
+/// `true` only when provable — the stored boot id matches the current boot
+/// (ruling out PID recycling after a reboot) AND the stored PID is still
+/// alive. A different boot id, a `None` boot id, or a missing/dead PID all
+/// read as `false`. Side-effect-free: no PTY touched, no session woken.
+pub fn session_process_is_live(
+    pid: Option<i64>,
+    stored_boot_id: Option<&str>,
+    current_boot_id: Option<&str>,
+) -> bool {
+    match (stored_boot_id, current_boot_id) {
+        (Some(stored), Some(current)) if stored == current => {
+            pid.map(process_is_alive).unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
