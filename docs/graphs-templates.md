@@ -115,8 +115,9 @@ hook's `{{node}}` value.
 workdir is currently dirty and a *different* spec of the same graph — or a
 member of its active queue run — ended `Failed` or `Interrupted` with
 recorded dirty paths that overlap the ones dirty now. Records from other
-graphs and from standalone backlog specs are ignored, so a stale row
-elsewhere on the workdir never blocks a spec resuming its own work.
+graphs, and from standalone backlog specs outside the active queue run,
+are ignored, so a stale row elsewhere on the workdir never blocks a spec
+resuming its own work.
 `Completed` specs never block, and neither do `Skipped` ones: a
 skipped spec never ran, so its stale record must not make a later spec's own
 dirt look ambiguous. The comparison uses the (first 20) paths each spec
