@@ -62,9 +62,11 @@ fn draw_tab_bar(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     for tab in HUB_TABS {
         let active = tab == app.hub.tab;
         let style = if active {
+            // The pill pair (`accent_fg` on `header_color`, panel/mod.rs and
+            // knowledge_tab.rs): ink on the accent, never on a dark raise.
             Style::default()
                 .fg(theme.accent_fg)
-                .bg(theme.selected_bg)
+                .bg(theme.header_color)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(theme.dim_text)
@@ -383,5 +385,45 @@ mod tests {
             theme.dim_text,
             "the unfocused categories header is dimmed"
         );
+    }
+
+    /// The active hub tab uses the pill pair (`accent_fg` on
+    /// `header_color`, bold) and the inactive tabs are dim — so the
+    /// highlighted tab stays readable on the dark dialog background.
+    #[test]
+    fn draw_hub_active_tab_uses_accent_pair() {
+        let mut app = test_app();
+        app.hub_open = true;
+        app.hub.tab = HubTab::Keys;
+        let theme = Theme::classic();
+        let buffer = render_buffer(&mut app, 100, 30);
+
+        // The tab bar is draw_hub's rows[0]: the first inner row, right
+        // under the title's border row.
+        let title_y = (0..buffer.area.height)
+            .find(|y| row_text(&buffer, *y).contains("Canopy Hub"))
+            .expect("hub title renders");
+        let tab_y = title_y + 1;
+
+        let mut inactive_seen = false;
+        for tab in HUB_TABS {
+            let active = tab == app.hub.tab;
+            let needle = format!(" {} ", tab.label());
+            let x = find_in_row(&buffer, tab_y, &needle)
+                .unwrap_or_else(|| panic!("tab label {needle:?} not in row {tab_y}"));
+            let cell = &buffer[(x, tab_y)];
+            if active {
+                assert_eq!(cell.fg, theme.accent_fg, "active tab {tab:?} fg");
+                assert_eq!(cell.bg, theme.header_color, "active tab {tab:?} bg");
+                assert!(
+                    cell.modifier.contains(Modifier::BOLD),
+                    "active tab {tab:?} must be bold"
+                );
+            } else {
+                assert_eq!(cell.fg, theme.dim_text, "inactive tab {tab:?} must be dim");
+                inactive_seen = true;
+            }
+        }
+        assert!(inactive_seen, "at least one inactive tab was checked");
     }
 }

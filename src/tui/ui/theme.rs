@@ -352,6 +352,22 @@ mod tests {
         );
     }
 
+    /// The hub/prompt tab bar's active tab is the pill pair (`accent_fg` on
+    /// `header_color`) in every theme. It must never regress onto a dark
+    /// raise (`selected_bg` is only ~1.2:1 against `accent_fg` in modern)
+    /// and `accent_fg` must stay the dark ink it is meant to be.
+    #[test]
+    fn active_tab_contrast() {
+        for theme in [Theme::classic(), Theme::modern()] {
+            assert!(
+                contrast_ratio(theme.accent_fg, theme.header_color) >= 4.5,
+                "active-tab pill {:?} on {:?} must clear 4.5:1",
+                theme.accent_fg,
+                theme.header_color
+            );
+        }
+    }
+
     /// Every colour role `Theme` declares must have a distinct value between
     /// `classic` and `modern` — otherwise a role was added and never given
     /// its own modern treatment, silently falling back to the classic look

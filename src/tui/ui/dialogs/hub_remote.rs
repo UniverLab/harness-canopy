@@ -112,8 +112,12 @@ fn remote_row_line(
         marker_style(theme, selected),
     )];
     let label_style = if selected {
+        // The pill pair (`accent_fg` on `header_color`): ink on the
+        // accent; the row's `selected_bg` raise covers the rest of the
+        // line, so the label never sits dark on dark.
         Style::default()
             .fg(theme.accent_fg)
+            .bg(theme.header_color)
             .add_modifier(Modifier::BOLD)
     } else if dimmed {
         Style::default().fg(theme.dim_text)
@@ -204,8 +208,12 @@ fn device_line(
         marker_style(theme, selected),
     )];
     let name_style = if selected {
+        // The pill pair (`accent_fg` on `header_color`): ink on the
+        // accent; the row's `selected_bg` raise covers the rest of the
+        // line, so the name never sits dark on dark.
         Style::default()
             .fg(theme.accent_fg)
+            .bg(theme.header_color)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(theme.text_primary)
@@ -312,8 +320,11 @@ pub(super) fn draw_pair_overlay(frame: &mut Frame, app: &App, theme: &Theme) {
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             truncate(&code_line, inner_width),
+            // The pill pair (`accent_fg` on `header_color`): the code is
+            // ink on the accent, never dark on the overlay's `dialog_bg`.
             Style::default()
                 .fg(theme.accent_fg)
+                .bg(theme.header_color)
                 .add_modifier(Modifier::BOLD),
         ))),
         rows[0],

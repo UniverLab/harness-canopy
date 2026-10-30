@@ -73,16 +73,11 @@ fn pending_scheduled_for_selection(app: &App) -> Vec<ScheduledSend> {
 
 /// Render the clickable Normal / Raw tab bar.
 ///
-/// The active tab is drawn in accent (reversed for a clear "selected"
-/// block); the inactive one is dim. Hit-boxes come from the same pure
-/// geometry the mouse handler uses, so clicks land exactly on the labels.
-fn draw_prompt_tab_bar(
-    frame: &mut Frame,
-    inner: Rect,
-    dialog: &SimplePromptDialog,
-    accent: Color,
-    theme: &Theme,
-) {
+/// The active tab uses the pill pair (`accent_fg` on `header_color`, the
+/// emphatic style the rest of the TUI uses for a selected tab); the
+/// inactive one is dim. Hit-boxes come from the same pure geometry the
+/// mouse handler uses, so clicks land exactly on the labels.
+fn draw_prompt_tab_bar(frame: &mut Frame, inner: Rect, dialog: &SimplePromptDialog, theme: &Theme) {
     let tab_boxes = SimplePromptDialog::tab_hitboxes(inner.x, inner.y);
     let tab_spans: Vec<Span> = tab_boxes
         .iter()
@@ -95,8 +90,9 @@ fn draw_prompt_tab_bar(
                 Span::styled(
                     label,
                     Style::default()
-                        .fg(accent)
-                        .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+                        .fg(theme.accent_fg)
+                        .bg(theme.header_color)
+                        .add_modifier(Modifier::BOLD),
                 )
             } else {
                 Span::styled(label, Style::default().fg(theme.dim_text))
@@ -234,7 +230,7 @@ pub fn draw_simple_prompt_dialog(
     frame.render_widget(block, area);
 
     // ── Tab bar (row 0) ───────────────────────────────────────────────────
-    draw_prompt_tab_bar(frame, inner, dialog, accent, theme);
+    draw_prompt_tab_bar(frame, inner, dialog, theme);
 
     // Draw hint line (row 1).
     let instructions = prompt_hint_line(

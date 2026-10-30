@@ -64,8 +64,12 @@ fn shelf_row(item: &ShelfItem, selected: bool, width: usize, theme: &Theme) -> L
         Style::default().fg(theme.dim_text)
     };
     let name_style = if selected {
+        // The pill pair (`accent_fg` on `header_color`): ink on the
+        // accent; the row's `selected_bg` raise covers the rest of the
+        // line, so the name never sits dark on dark.
         Style::default()
             .fg(theme.accent_fg)
+            .bg(theme.header_color)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(theme.text_primary)
