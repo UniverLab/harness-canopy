@@ -185,10 +185,23 @@ pub(crate) fn draw_node_tail_pane(
     if dialog.run_id.is_none() {
         // No run of this node in the current spec yet.
         let spec = dialog.no_run_spec_name.as_deref().unwrap_or("this spec");
-        lines.push(Line::from(Span::styled(
-            format!("no run of this node in {spec} yet"),
+        let mut parts = vec![Span::styled(
+            "no run of this node in ".to_string(),
             Style::default().fg(theme.dim_text),
-        )));
+        )];
+        // SPECCODE: code badge before the name, like graph_live/render.rs;
+        // a codeless spec shows its name alone.
+        if let Some(ref code) = dialog.no_run_spec_code {
+            parts.push(Span::styled(
+                format!("[{code}] "),
+                Style::default().fg(theme.status_ok),
+            ));
+        }
+        parts.push(Span::styled(
+            format!("{spec} yet"),
+            Style::default().fg(theme.dim_text),
+        ));
+        lines.push(Line::from(parts));
     } else if let Some(status_text) = pane_status_line(dialog) {
         let status_style = match dialog.status {
             Some(GraphRunStatus::Running) | Some(GraphRunStatus::Waiting) => Style::default()
@@ -238,6 +251,7 @@ mod tests {
             member_cursor: 0,
             member_count: 0,
             no_run_spec_name: None,
+            no_run_spec_code: None,
             last_resolved: None,
         }
     }
@@ -359,29 +373,47 @@ mod tests {
         );
     }
 
-    #[test]
-    fn no_run_shows_waiting_line() {
-        let mut dialog = NodeTailDialog::new();
-        dialog.node_name = "Tail".to_string();
-        dialog.no_run_spec_name = Some("My Spec".to_string());
+    fn render_pane_text(dialog: &NodeTailDialog) -> String {
         let area = Rect::new(0, 0, 80, 20);
         let backend = ratatui::backend::TestBackend::new(80, 20);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
-                draw_node_tail_pane(frame, area, &dialog, &Theme::classic(), Utc::now());
+                draw_node_tail_pane(frame, area, dialog, &Theme::classic(), Utc::now());
             })
             .unwrap();
-        let text = terminal
+        terminal
             .backend()
             .buffer()
             .content
             .iter()
             .map(|c| c.symbol())
-            .collect::<String>();
+            .collect::<String>()
+    }
+
+    #[test]
+    fn no_run_shows_waiting_line() {
+        let mut dialog = NodeTailDialog::new();
+        dialog.node_name = "Tail".to_string();
+        dialog.no_run_spec_name = Some("My Spec".to_string());
+        let text = render_pane_text(&dialog);
         assert!(
             text.contains("no run of this node in My Spec yet"),
             "got: {text}"
+        );
+    }
+
+    /// SPECCODE: the waiting line shows the spec's code before its name.
+    #[test]
+    fn no_run_waiting_line_shows_code_before_name() {
+        let mut dialog = NodeTailDialog::new();
+        dialog.node_name = "Tail".to_string();
+        dialog.no_run_spec_name = Some("My Spec".to_string());
+        dialog.no_run_spec_code = Some("FIX-7".to_string());
+        let text = render_pane_text(&dialog);
+        assert!(
+            text.contains("no run of this node in [FIX-7] My Spec yet"),
+            "code must come before the name, got: {text}"
         );
     }
 }

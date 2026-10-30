@@ -263,6 +263,11 @@ impl GraphEngine {
             })
         });
         if let Some(spec_name) = spec_name {
+            let label = spec_id
+                .as_deref()
+                .and_then(|id| self.db.get_graph_spec(id).ok().flatten())
+                .map(|spec| activity::spec_label(&spec))
+                .unwrap_or_else(|| format!("'{spec_name}'"));
             activity::record(
                 &self.db,
                 activity::GraphEvent {
@@ -273,7 +278,7 @@ impl GraphEngine {
                     node_id: None,
                     run_id: None,
                     kind: activity::GraphEventKind::SpecFailed,
-                    message: format!("Spec '{spec_name}' failed: {summary}"),
+                    message: format!("Spec {label} failed: {summary}"),
                     payload: None,
                 },
             );

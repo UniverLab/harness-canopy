@@ -165,6 +165,7 @@ fn app_with_open_tail() -> App {
         member_cursor: 0,
         member_count: 0,
         no_run_spec_name: None,
+        no_run_spec_code: None,
         last_resolved: None,
     });
     app

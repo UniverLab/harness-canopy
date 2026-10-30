@@ -9,6 +9,7 @@
 use serde_json::Value;
 
 use crate::db::Database;
+use crate::domain::graphs::GraphSpec;
 use crate::domain::sync::MessageKind;
 
 /// The kind of a durable graph event. The string values are the vocabulary
@@ -123,6 +124,16 @@ impl From<GraphEvent<'_>> for GraphEventRecord {
     }
 }
 
+/// Display label for a spec in engine-authored messages: `[CODE] 'name'`
+/// when the spec has a code, `'name'` alone when it does not — no
+/// placeholder. One helper so every call site formats the same way.
+pub fn spec_label(spec: &GraphSpec) -> String {
+    match spec.spec_code.as_deref() {
+        Some(code) => format!("[{code}] '{}'", spec.name),
+        None => format!("'{}'", spec.name),
+    }
+}
+
 /// Record one engine-authored event.
 ///
 /// Writes the durable `graph_events` row and the shared activity-stream line.
@@ -164,10 +175,55 @@ pub fn record(db: &Database, event: GraphEvent<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::graphs::GraphSpecStatus;
 
     fn test_db() -> Database {
         let dir = tempfile::tempdir().unwrap();
         Database::new(&dir.path().join("test.db")).unwrap()
+    }
+
+    fn test_spec(name: &str, code: Option<&str>) -> GraphSpec {
+        GraphSpec {
+            id: "s1".to_string(),
+            graph_id: None,
+            name: name.to_string(),
+            description: None,
+            position: 0,
+            parallelizable: false,
+            status: GraphSpecStatus::Pending,
+            started_at: None,
+            completed_at: None,
+            spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
+            spec_committed_head: None,
+            workdir: None,
+            completed_via: None,
+            completed_via_reason: None,
+            completed_via_at: None,
+            spec_code: code.map(str::to_string),
+            spec_scope: None,
+            spec_type: None,
+        }
+    }
+
+    #[test]
+    fn spec_label_shows_code_before_name() {
+        assert_eq!(
+            spec_label(&test_spec("Add retry", Some("FIX-7"))),
+            "[FIX-7] 'Add retry'"
+        );
+    }
+
+    #[test]
+    fn spec_label_without_code_is_bare_name() {
+        let label = spec_label(&test_spec("Add retry", None));
+        assert_eq!(label, "'Add retry'");
+        assert!(
+            !label.contains('['),
+            "no placeholder for a codeless spec: {label}"
+        );
     }
 
     #[test]

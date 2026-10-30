@@ -674,6 +674,24 @@ mod tests {
         }
     }
 
+    /// SPECCODE: a spec-completed event whose label carries a code renders
+    /// the code (`{spec}` is the label's first word).
+    #[test]
+    fn spec_completed_event_with_code_renders_the_code() {
+        let mut w = Whimsg::with_seed(11);
+        w.notify_event(WhimEvent::with_detail(
+            EventKind::SpecCompleted,
+            "grove",
+            "[FIX-7] Alpha",
+        ));
+        for _ in 0..50 {
+            w.generate();
+            assert!(w.active_text.contains("[FIX-7]"), "text: {}", w.active_text);
+            assert!(!w.active_text.contains("Alpha"));
+            assert!(!text_has_placeholder(&w.active_text));
+        }
+    }
+
     /// FR5: a renamed session announces its old and new names, with no
     /// placeholder left behind.
     #[test]

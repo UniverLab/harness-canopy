@@ -1121,10 +1121,10 @@ fn budget_key_distinguishes_node_and_ensemble() {
 }
 
 #[test]
-fn set_last_run_error_blocker_is_noop_without_runs() {
+fn set_join_run_blocker_is_noop_without_runs() {
     let (_dir, db, engine, _graph_id, spec_id) = graph_fixture().unwrap();
     engine
-        .set_last_run_error_blocker(&spec_id, "nothing to annotate")
+        .set_join_run_blocker(&spec_id, "join1", "nothing to annotate")
         .unwrap();
     assert!(
         db.list_graph_runs_for_spec(&spec_id).unwrap().is_empty(),

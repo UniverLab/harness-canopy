@@ -42,6 +42,8 @@ pub(crate) struct NodeTailDialog {
     pub member_count: usize,
     /// Set when resolution produced no run; the body shows this spec name.
     pub no_run_spec_name: Option<String>,
+    /// The waiting line's spec code (`[CODE]`), `None` for a codeless spec.
+    pub no_run_spec_code: Option<String>,
     /// The `(run_id, member_cursor)` last poll resolved to — lets the poll
     /// distinguish a genuine node transition (reset scroll) from a member
     /// cursor step (keep scroll).
@@ -65,6 +67,7 @@ impl NodeTailDialog {
             member_cursor: 0,
             member_count: 0,
             no_run_spec_name: None,
+            no_run_spec_code: None,
             last_resolved: None,
         }
     }
@@ -146,10 +149,12 @@ impl App {
                 dialog.stderr_lines.clear();
                 dialog.member_pos = None;
                 dialog.no_run_spec_name = None;
+                dialog.no_run_spec_code = None;
             }
             PollData::NoRun {
                 node_name,
                 spec_name,
+                spec_code,
             } => {
                 dialog.node_name = node_name;
                 dialog.run_id = None;
@@ -168,6 +173,7 @@ impl App {
                 dialog.scroll = 0;
                 dialog.last_resolved = None;
                 dialog.no_run_spec_name = Some(spec_name);
+                dialog.no_run_spec_code = spec_code;
             }
             PollData::Show(s) => {
                 apply_resolved_run(dialog, &s);
@@ -202,6 +208,13 @@ impl App {
                 .map(|q| q.spec_name.clone())
                 .unwrap_or_else(|| spec_id.to_string())
         };
+        let spec_code_of = || -> Option<String> {
+            state
+                .spec_queue
+                .iter()
+                .find(|q| Some(q.spec_id.as_str()) == Some(spec_id))
+                .and_then(|q| q.spec_code.clone())
+        };
 
         let ensemble = state.ensembles.iter().find(|e| {
             e.join_node_id == highlighted || e.members.iter().any(|m| m.node_id == highlighted)
@@ -232,6 +245,7 @@ impl App {
                     return PollData::NoRun {
                         node_name: node_name_of(highlighted),
                         spec_name: spec_name_of(),
+                        spec_code: spec_code_of(),
                     };
                 }
                 let cursor = self
@@ -260,6 +274,7 @@ impl App {
                     None => PollData::NoRun {
                         node_name: node_name_of(highlighted),
                         spec_name: spec_name_of(),
+                        spec_code: spec_code_of(),
                     },
                 }
             }
@@ -327,6 +342,7 @@ enum PollData {
     NoRun {
         node_name: String,
         spec_name: String,
+        spec_code: Option<String>,
     },
     Show(ShowData),
 }
@@ -909,6 +925,29 @@ mod tests {
             dialog.no_run_spec_name.as_deref(),
             Some("Pane spec"),
             "an empty ensemble member must name the spec too"
+        );
+    }
+
+    /// SPECCODE: a highlighted node with no run in the current spec carries
+    /// the spec's code (from the live queue) into the waiting line's dialog.
+    #[test]
+    fn waiting_line_carries_the_current_spec_code() {
+        let db = test_db();
+        seed_pane_graph(&db, "spec-pane", &["n1"]);
+        let mut app = test_app(Arc::clone(&db));
+        let mut state = pane_state("spec-pane", "n1");
+        state.spec_queue[0].spec_code = Some("FIX-7".to_string());
+        app.graph_live_state = Some(state);
+        app.graph_live_follow = true;
+
+        app.open_node_tail_pane();
+        let dialog = app.node_tail_dialog.as_ref().unwrap();
+        assert_eq!(dialog.run_id, None);
+        assert_eq!(dialog.no_run_spec_name.as_deref(), Some("Pane spec"));
+        assert_eq!(
+            dialog.no_run_spec_code.as_deref(),
+            Some("FIX-7"),
+            "the waiting line must carry the queue entry's code"
         );
     }
 }

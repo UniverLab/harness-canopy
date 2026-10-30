@@ -151,9 +151,11 @@ impl Database {
             .conn
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        // `started_at` has second granularity: `rowid` breaks ties in
+        // insertion order so "last" is deterministically the latest row.
         let mut stmt = conn.prepare(
             "SELECT id, graph_id, spec_id, node_id, status, input, output, started_at, completed_at, iteration, pid, boot_id, session_id, executed_platform, executed_model
-             FROM graph_runs WHERE spec_id = ?1 ORDER BY started_at ASC, iteration ASC",
+             FROM graph_runs WHERE spec_id = ?1 ORDER BY started_at ASC, iteration ASC, rowid ASC",
         )?;
         let rows = stmt.query_map(params![spec_id], map_graph_run_row)?;
 
@@ -174,7 +176,7 @@ impl Database {
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
             "SELECT id, graph_id, spec_id, node_id, status, input, output, started_at, completed_at, iteration, pid, boot_id, session_id, executed_platform, executed_model
-             FROM graph_runs WHERE graph_id = ?1 ORDER BY started_at ASC, iteration ASC",
+             FROM graph_runs WHERE graph_id = ?1 ORDER BY started_at ASC, iteration ASC, rowid ASC",
         )?;
         let rows = stmt.query_map(params![graph_id], map_graph_run_row)?;
 
@@ -223,7 +225,7 @@ impl Database {
             sql.push_str(" AND node_id = ?");
             query_params.push(node_id);
         }
-        sql.push_str(" ORDER BY started_at DESC, iteration DESC LIMIT ? OFFSET ?");
+        sql.push_str(" ORDER BY started_at DESC, iteration DESC, rowid DESC LIMIT ? OFFSET ?");
         query_params.push(&limit);
         query_params.push(&offset);
 
@@ -284,7 +286,7 @@ impl Database {
             "SELECT id, graph_id, spec_id, node_id, status, input, output, started_at, completed_at, iteration, pid, boot_id, session_id, executed_platform, executed_model
              FROM graph_runs
              WHERE node_id = ?1 AND status IN ('running', 'waiting')
-             ORDER BY started_at DESC
+             ORDER BY started_at DESC, rowid DESC
              LIMIT 1",
         )?;
 

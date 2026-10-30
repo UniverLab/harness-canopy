@@ -25,7 +25,7 @@ impl App {
                 };
                 let done_specs = if matches!(lp.status, GraphStatus::Running | GraphStatus::Pausing)
                 {
-                    graph_live_state::completed_spec_names(&self.db, lp)
+                    graph_live_state::completed_spec_labels(&self.db, lp)
                 } else {
                     Vec::new()
                 };

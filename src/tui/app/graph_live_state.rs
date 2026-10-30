@@ -374,17 +374,21 @@ fn build_spec_queue(db: &Database, lp: &crate::domain::graphs::Graph) -> Vec<Spe
         .collect()
 }
 
-/// Completed spec names for the header's graph events — queue members
+/// Completed spec labels for the header's graph events — `[CODE] name`
+/// when the spec has a code, the bare name when it does not. Queue members
 /// included, since it reads the same source `build_spec_queue` does. Callers
 /// bound this to running graphs so the per-tick query stays small.
-pub(crate) fn completed_spec_names(
+pub(crate) fn completed_spec_labels(
     db: &Database,
     lp: &crate::domain::graphs::Graph,
 ) -> Vec<String> {
     build_spec_queue(db, lp)
         .into_iter()
         .filter(|e| e.status == GraphSpecStatus::Completed)
-        .map(|e| e.spec_name)
+        .map(|e| match e.spec_code {
+            Some(code) => format!("[{code}] {}", e.spec_name),
+            None => e.spec_name,
+        })
         .collect()
 }
 
@@ -850,6 +854,29 @@ mod tests {
         assert_eq!(state.total_count, 0);
         assert!(state.current_spec_id.is_none());
         assert!(state.current_node_id.is_none());
+    }
+
+    /// SPECCODE: the header's completed-spec labels carry the code before
+    /// the name; a codeless spec yields its bare name with no placeholder.
+    #[test]
+    fn completed_spec_labels_prefix_code_before_name() {
+        let db = test_db();
+        let lp = make_graph("lp1", GraphStatus::Running);
+        db.insert_graph(&lp).unwrap();
+
+        let mut coded = make_spec("s1", "lp1", GraphSpecStatus::Completed, 1);
+        coded.name = "Alpha".to_string();
+        coded.spec_code = Some("FIX-7".to_string());
+        db.insert_graph_spec(&coded).unwrap();
+        let mut codeless = make_spec("s2", "lp1", GraphSpecStatus::Completed, 2);
+        codeless.name = "Beta".to_string();
+        db.insert_graph_spec(&codeless).unwrap();
+
+        let labels = completed_spec_labels(&db, &lp);
+        assert_eq!(
+            labels,
+            vec!["[FIX-7] Alpha".to_string(), "Beta".to_string()]
+        );
     }
 
     #[test]

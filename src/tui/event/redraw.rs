@@ -471,7 +471,10 @@ mod redraw_tests {
     /// returns early), so it must not dirty the tick on its own. The rect is
     /// below the automaton's minimum size, so the fast path's `ensure` leaves
     /// the brain unbuilt — a full-size rect would grow one on the first tick
-    /// and correctly dirty from then on.
+    /// and correctly dirty from then on. The brain's only dirty contribution
+    /// is `brain_visible`, pinned false; a single `!dirty` assertion would
+    /// also pin the wall-clock header (sweep/blink), which legitimately
+    /// dirties ticks straddling a frame boundary under load.
     #[test]
     fn sidebar_brain_none_no_draw() {
         use crate::tui::app::types::Focus;
@@ -501,8 +504,30 @@ mod redraw_tests {
             app.sidebar_brain.is_none(),
             "a sub-minimum rect must not grow a brain"
         );
-        let (dirty, _) = tick(&mut app, &mut state, false).unwrap();
-        assert!(!dirty, "an undrawn brain must not draw");
+        assert!(
+            !brain_visible(&app),
+            "an undrawn brain is never on screen, so it must not draw"
+        );
+        // The rect alone must never force a draw: a primed tick is clean
+        // unless a wall-clock source (header frame) straddled a boundary,
+        // so retry tightly until one lands inside a frame.
+        let mut clean = false;
+        for _ in 0..50 {
+            let (dirty, _) = tick(&mut app, &mut state, false).unwrap();
+            assert!(
+                app.sidebar_brain.is_none(),
+                "a sub-minimum rect must not grow a brain"
+            );
+            assert!(
+                !brain_visible(&app),
+                "an undrawn brain is never on screen, so it must not draw"
+            );
+            if !dirty {
+                clean = true;
+                break;
+            }
+        }
+        assert!(clean, "an undrawn brain must not force every tick to draw");
     }
 
     /// FR5: both toggles off freezes the header (spinner[0], sweep t=0,

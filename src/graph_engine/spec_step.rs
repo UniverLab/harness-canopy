@@ -67,11 +67,11 @@ impl GraphEngine {
                 kind: activity::GraphEventKind::SpecCompleted,
                 message: match &state.spec_committed_head {
                     Some(head) => format!(
-                        "Spec '{}' completed (committed {}).",
-                        ctx.spec.name,
+                        "Spec {} completed (committed {}).",
+                        activity::spec_label(ctx.spec),
                         &head[..head.len().min(7)]
                     ),
-                    None => format!("Spec '{}' completed.", ctx.spec.name),
+                    None => format!("Spec {} completed.", activity::spec_label(ctx.spec)),
                 },
                 payload: None,
             },
@@ -209,7 +209,10 @@ impl GraphEngine {
             member_texts.len(),
             member_texts.join("; "),
         );
-        self.set_last_run_error_blocker(&ctx.spec.id, &blocker)?;
+        // The blocker belongs to the join run: member rows share its
+        // second-granularity `started_at` and `iteration`, so "last row"
+        // does not reliably name the join.
+        self.set_join_run_blocker(&ctx.spec.id, &step.from_node_id, &blocker)?;
         // FR1: a no-verdict block is transient — an operator can fix it by
         // retrying or rewiring the ensemble — so it lands `Interrupted` (its
         // cursor is the ensemble join and `is_resumable`), not `Failed`. The
@@ -257,8 +260,20 @@ impl GraphEngine {
             .unwrap_or_else(|| from_node_id.to_string())
     }
 
-    pub(crate) fn set_last_run_error_blocker(&self, spec_id: &str, blocker: &str) -> Result<()> {
-        if let Some(run) = self.db.list_graph_runs_for_spec(spec_id)?.last() {
+    /// Stamp the no-verdict blocker onto the ensemble's join run, found by
+    /// its node id rather than by recency.
+    pub(crate) fn set_join_run_blocker(
+        &self,
+        spec_id: &str,
+        join_node_id: &str,
+        blocker: &str,
+    ) -> Result<()> {
+        let join = self
+            .db
+            .list_graph_runs_for_spec(spec_id)?
+            .into_iter()
+            .rfind(|run| run.node_id == join_node_id);
+        if let Some(run) = join {
             self.set_run_blocker(
                 &run.id,
                 GraphRunStatus::Error,
@@ -395,11 +410,11 @@ impl GraphEngine {
                 kind: activity::GraphEventKind::SpecCompleted,
                 message: match &state.spec_committed_head {
                     Some(head) => format!(
-                        "Spec '{}' completed (committed {}).",
-                        ctx.spec.name,
+                        "Spec {} completed (committed {}).",
+                        activity::spec_label(ctx.spec),
                         &head[..head.len().min(7)]
                     ),
-                    None => format!("Spec '{}' completed.", ctx.spec.name),
+                    None => format!("Spec {} completed.", activity::spec_label(ctx.spec)),
                 },
                 payload: None,
             },

@@ -422,6 +422,7 @@ impl GraphEngine {
                     continue;
                 };
                 if idx < d_pos {
+                    let label = activity::spec_label(&spec);
                     activity::record(
                         &self.db,
                         activity::GraphEvent {
@@ -432,10 +433,7 @@ impl GraphEngine {
                             node_id: None,
                             run_id: None,
                             kind: activity::GraphEventKind::SpecSkipped,
-                            message: format!(
-                                "Spec '{}' skipped (directed run starts later).",
-                                spec.name
-                            ),
+                            message: format!("Spec {label} skipped (directed run starts later)."),
                             payload: None,
                         },
                     );
@@ -701,6 +699,7 @@ impl GraphEngine {
         spec: &GraphSpec,
         settled: &mut Vec<String>,
     ) -> Result<()> {
+        let label = activity::spec_label(spec);
         activity::record(
             &self.db,
             activity::GraphEvent {
@@ -711,7 +710,7 @@ impl GraphEngine {
                 node_id: None,
                 run_id: None,
                 kind: activity::GraphEventKind::SpecSkipped,
-                message: format!("Spec '{}' skipped (directed run starts later).", spec.name),
+                message: format!("Spec {label} skipped (directed run starts later)."),
                 payload: None,
             },
         );
@@ -733,6 +732,7 @@ impl GraphEngine {
     /// Announce a spec that was already terminal when this dispatch's live read
     /// saw it — once per dispatch, never for a spec this dispatch ran itself.
     fn announce_settled_bound_spec(&self, ctx: &DispatchCtx<'_>, spec: &GraphSpec) {
+        let label = activity::spec_label(spec);
         activity::record(
             &self.db,
             activity::GraphEvent {
@@ -743,7 +743,7 @@ impl GraphEngine {
                 node_id: None,
                 run_id: None,
                 kind: activity::GraphEventKind::SpecSkipped,
-                message: format!("Spec '{}' already completed; skipping.", spec.name),
+                message: format!("Spec {label} already completed; skipping."),
                 payload: None,
             },
         );
