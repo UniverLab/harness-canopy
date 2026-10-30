@@ -46,7 +46,7 @@ table — the engine writes one row per event as the run happens:
 | Group | Kinds |
 |---|---|
 | Graph | `graph_started`, `graph_paused`, `graph_resumed`, `graph_completed`, `graph_failed`, `graph_blocked` |
-| Spec | `spec_started`, `spec_completed`, `spec_failed`, `spec_skipped` |
+| Spec | `spec_started` (payload: `spec_start_head`, `spec_start_dirty`), `spec_completed`, `spec_failed`, `spec_skipped` |
 | Node | `node_started`, `node_finished` (payload: `verdict`, `platform`, `model`, `duration_s`) |
 | Mutex | `mutex_waiting` (payload: `resources`, `waiting_for`), `mutex_acquired` (payload: `resources`) |
 | Hooks | `hook_fired` (payload: `event`, `mode`, `ok`, `error`) |

@@ -92,20 +92,6 @@ impl GraphEngine {
         queue_id: Option<&str>,
         directed: Option<&DirectedStart>,
     ) -> Result<SpecExecutionOutcome> {
-        activity::record(
-            &self.db,
-            activity::GraphEvent {
-                graph_id: &lp.id,
-                graph_name: &lp.name,
-                workdir,
-                spec_id: Some(&spec.id),
-                node_id: None,
-                run_id: None,
-                kind: activity::GraphEventKind::SpecStarted,
-                message: format!("Spec {} started.", activity::spec_label(spec)),
-                payload: None,
-            },
-        );
         let spec_details = self
             .db
             .get_graph_spec_details(&spec.id)?
@@ -141,9 +127,17 @@ impl GraphEngine {
             is_resume,
             directed,
         )?;
-        let (spec_start_head, spec_committed_head) = self
-            .resolve_spec_baseline(spec, &spec_details, workdir, is_resume, directed.is_some())
+        let is_directed = directed.is_some();
+        let (spec_start_head, spec_start_dirty, spec_committed_head) = self
+            .resolve_spec_baseline(&lp.id, spec, &spec_details, workdir, is_resume, is_directed)
             .await?;
+        self.record_spec_started(
+            lp,
+            spec,
+            workdir,
+            spec_start_head.as_deref(),
+            spec_start_dirty,
+        );
 
         self.db.update_graph_spec_status(
             &spec.id,

@@ -417,12 +417,23 @@ impl GraphEngine {
             &prompts_dir,
         )
         .map_err(|e| e.to_string())?;
+        // FR4: when the column was cleared (a pause reconciles it away), the
+        // plan reports the head this run's first `spec_started` recorded —
+        // the same baseline the dispatch will reuse. A failed lookup reports
+        // none, exactly as before.
+        let start_head = spec.spec_start_head.clone().or_else(|| {
+            self.db
+                .spec_started_head(graph_id, spec_id)
+                .ok()
+                .flatten()
+                .and_then(|(head, _)| head)
+        });
         Ok(DirectedPlan {
             spec_name: spec.name,
             start_label: target.label,
             skipped_nodes: target.skipped_nodes,
             reused_outputs: reused_output_records(&nodes, &edges, &target.start_node_ids, &runs),
-            start_head: spec.spec_start_head,
+            start_head,
         })
     }
 }
@@ -752,8 +763,60 @@ mod tests {
         .expect("a passed quorum satisfies the ensemble prerequisite");
     }
 
-    /// FR2/FR3: when the ensemble's own quorum result failed, the prerequisite
-    /// is unmet and the refusal names the ensemble's join node — not a member.
+    /// FR1: a passed ensemble satisfies every node downstream of it, whatever
+    /// its members' individual results — member 1's failure under the passed
+    /// quorum is not an unmet prerequisite. Breaks if members are judged by
+    /// their own runs instead of the ensemble's verdict.
+    #[test]
+    fn directed_start_past_passed_two_member_ensemble_accepts_failed_member() {
+        let s = spec("spec-1");
+        let nodes = vec![
+            node("A", "A", 0, Value::Null),
+            node("m1", "M1", 1, Value::Null),
+            node("m2", "M2", 2, Value::Null),
+            node("j", "Join", 3, Value::Null),
+            node("B", "B", 4, Value::Null),
+        ];
+        let edges = vec![
+            edge("A", "m1", GraphEdgeCondition::Always),
+            edge("A", "m2", GraphEdgeCondition::Always),
+            edge("m1", "j", GraphEdgeCondition::Always),
+            edge("m2", "j", GraphEdgeCondition::Always),
+            edge("j", "B", GraphEdgeCondition::Pass),
+        ];
+        let mut details = ensemble_details("ens", "rr", "A", &["m1", "m2"], "j");
+        details.ensemble.kind = EnsembleKind::RoundRobin;
+        details.ensemble.min_pass = 1;
+        let ensembles = vec![details];
+        let runs = vec![
+            run("m1", GraphRunStatus::Fail, Some(serde_json::json!(1)), None),
+            run("m2", GraphRunStatus::Pass, Some(serde_json::json!(2)), None),
+            run(
+                "j",
+                GraphRunStatus::Pass,
+                Some(serde_json::json!(true)),
+                None,
+            ),
+        ];
+        let directed = DirectedStart {
+            spec_id: s.id.clone(),
+            node_arg: "B".to_string(),
+        };
+        resolve_spec_start(
+            &nodes,
+            &edges,
+            &s,
+            &runs,
+            &ensembles,
+            false,
+            Some(&directed),
+        )
+        .expect("a passed ensemble satisfies every node downstream of it");
+    }
+
+    /// FR2: when the ensemble's own quorum result failed, the prerequisite
+    /// is unmet and the refusal names the ensemble — not a member or the
+    /// join node.
     #[test]
     fn directed_start_past_a_failed_round_robin_quorum_is_refused() {
         let s = spec("spec-1");
@@ -783,19 +846,25 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            err.to_string().contains("prerequisite node 'Join'"),
+            err.to_string()
+                .contains("prerequisite ensemble 'rr' last run was fail"),
             "{err}"
         );
         assert!(
             !err.to_string().contains("'M1'"),
-            "the quorum result, not a member, is the prerequisite: {err}"
+            "the ensemble verdict, not a member, is the prerequisite: {err}"
+        );
+        assert!(
+            !err.to_string().contains("'Join'"),
+            "the refusal names the ensemble, not its join node: {err}"
         );
     }
 
-    /// FR2/FR3: a quorum only judges the pass it settled. Here the member ran
+    /// FR2: a quorum only judges the pass it settled. Here the member ran
     /// again after the last join — a shutdown between a member and its join —
-    /// so that attempt has no verdict: its failure still refuses the start and
-    /// is named, instead of hiding behind an older passed quorum.
+    /// so that attempt has no verdict: it still refuses the start, naming the
+    /// ensemble and the missing verdict instead of hiding behind an older
+    /// passed quorum.
     #[test]
     fn directed_start_refuses_a_failed_member_of_an_unsettled_ensemble_pass() {
         let s = spec("spec-1");
@@ -825,8 +894,12 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            err.to_string().contains("prerequisite node 'M1'"),
-            "the unjudged attempt is the member's own, so it is named: {err}"
+            err.to_string().contains("prerequisite ensemble 'rr'"),
+            "the unsettled attempt refuses against the ensemble: {err}"
+        );
+        assert!(
+            err.to_string().contains("no recorded verdict"),
+            "with no covering join the attempt has no verdict: {err}"
         );
     }
 

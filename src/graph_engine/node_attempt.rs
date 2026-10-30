@@ -539,12 +539,13 @@ impl GraphEngine {
 
     pub(crate) async fn resolve_spec_baseline(
         &self,
+        graph_id: &str,
         spec: &GraphSpec,
         spec_details: &GraphSpecDetails,
         workdir: &str,
         is_resume: bool,
         directed: bool,
-    ) -> Result<(Option<String>, Option<String>)> {
+    ) -> Result<(Option<String>, Option<i64>, Option<String>)> {
         // B10: capture the workdir's git HEAD once, at the moment the engine
         // starts executing this spec in the *current run attempt*. The
         // persisted value is only ever reused, never re-derived, and only
@@ -554,17 +555,15 @@ impl GraphEngine {
         //
         // A directed run is a third case. It reuses the spec's recorded
         // start head when one exists — the earlier nodes it skipped already
-        // established the baseline — and otherwise captures a fresh one, which
-        // the response reports.
-        let (spec_start_head, _spec_start_dirty) = if directed {
+        // established the baseline — and otherwise reuses the head this run's
+        // first `spec_started` recorded when one exists (FR4), capturing a
+        // fresh one only when none does. The response reports which.
+        let (spec_start_head, spec_start_dirty) = if directed {
             match spec_details.spec.spec_start_head.clone() {
                 Some(head) => (Some(head), spec_details.spec.spec_start_dirty),
                 None => {
-                    let head = capture_workdir_head(workdir).await;
-                    let dirty = capture_workdir_dirty(workdir).await;
-                    self.db
-                        .set_graph_spec_start_state(&spec.id, head.as_deref(), dirty)?;
-                    (head, dirty)
+                    self.directed_fallback_baseline(graph_id, &spec.id, workdir)
+                        .await?
                 }
             }
         } else if is_resume && spec.status == GraphSpecStatus::Running {
@@ -590,7 +589,63 @@ impl GraphEngine {
                 self.db.set_graph_spec_committed_head(&spec.id, None)?;
                 None
             };
-        Ok((spec_start_head, spec_committed_head))
+        Ok((spec_start_head, spec_start_dirty, spec_committed_head))
+    }
+
+    /// FR4: the baseline for a directed start with no recorded head — the
+    /// baseline this run's first `spec_started` recorded when one exists
+    /// (persisted, so later starts reuse the column), else a fresh capture.
+    /// A failed event lookup captures fresh; it never fails the start.
+    async fn directed_fallback_baseline(
+        &self,
+        graph_id: &str,
+        spec_id: &str,
+        workdir: &str,
+    ) -> Result<(Option<String>, Option<i64>)> {
+        let recorded = self.db.spec_started_head(graph_id, spec_id).ok().flatten();
+        let (head, dirty) = match recorded {
+            Some(baseline) => baseline,
+            None => (
+                capture_workdir_head(workdir).await,
+                capture_workdir_dirty(workdir).await,
+            ),
+        };
+        self.db
+            .set_graph_spec_start_state(spec_id, head.as_deref(), dirty)?;
+        Ok((head, dirty))
+    }
+
+    /// Record the spec's `spec_started` event carrying its resolved baseline
+    /// (`spec_start_head`/`spec_start_dirty`), so a directed start after a
+    /// pause — where reconcile cleared the columns — reuses this run's first
+    /// baseline instead of capturing a fresh one. Called after
+    /// [`Self::resolve_spec_baseline`], still before any node runs or the
+    /// status update.
+    pub(crate) fn record_spec_started(
+        &self,
+        lp: &Graph,
+        spec: &GraphSpec,
+        workdir: &str,
+        head: Option<&str>,
+        dirty: Option<i64>,
+    ) {
+        activity::record(
+            &self.db,
+            activity::GraphEvent {
+                graph_id: &lp.id,
+                graph_name: &lp.name,
+                workdir,
+                spec_id: Some(&spec.id),
+                node_id: None,
+                run_id: None,
+                kind: activity::GraphEventKind::SpecStarted,
+                message: format!("Spec {} started.", activity::spec_label(spec)),
+                payload: Some(serde_json::json!({
+                    "spec_start_head": head,
+                    "spec_start_dirty": dirty,
+                })),
+            },
+        );
     }
 
     pub(crate) async fn record_spec_end_dirty(

@@ -255,13 +255,13 @@ spec; the start node and everything downstream of it always run again, and
 its own old output is never reused. If an upstream node's latest run is
 `failed`, `error` or `interrupted`, the directed run is refused and that node
 is named: a failed prerequisite is never treated as passed. An upstream node
-that is a member of an ensemble is judged by the ensemble's quorum result —
-its join node's run for this spec — not by that member's own latest run: a
-member that failed while the quorum passed is a satisfied prerequisite, while
-a failed quorum refuses the run and names the join. A quorum only governs the
-pass it settled: a member that ran again after the last join (a crash between
-the two) has no verdict yet and is judged on its own run, still naming the
-member. The spec cursor
+that belongs to an ensemble is judged by the ensemble's quorum result — its
+join node's run for this spec — not by any member's own latest run: a member
+that failed while the quorum passed is a satisfied prerequisite, while a failed
+quorum refuses the run and names the ensemble. A quorum only governs the pass
+it settled: a member that ran again after the last join (a crash between the
+two) has no verdict for that attempt yet, so the run is refused naming the
+ensemble and its missing verdict — re-run the ensemble first or start at an earlier node. The spec cursor
 is set to the start node, and the graph then runs with its normal edges,
 routers, ensembles and gates. On a queue-driven graph the chosen spec is
 what runs first: queue members before it are marked `skipped`, members

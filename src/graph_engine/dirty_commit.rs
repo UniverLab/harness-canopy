@@ -483,54 +483,114 @@ pub(crate) fn directed_upstream_node_ids(
         .collect()
 }
 
-/// FR2: the run a directed start should judge `node` by. For a member of an
-/// ensemble (never the join node itself), that is the ensemble's quorum result
-/// — the latest run of `join_node_id` — because a round-robin ensemble passes
-/// through whichever member carried the vote: one member's failure under a
-/// passed quorum is not an unmet prerequisite. When the ensemble has not
-/// reported a quorum yet (no join run), fall back to the member's own latest
-/// run, which is then the only evidence there is.
-///
-/// A quorum only judges the pass it settled, though. A member whose latest run
-/// is *newer* than the last join ran again after that verdict — the daemon died
-/// between the member and its join — so that attempt has no quorum and is
-/// judged by its own run: accepting it would seed a failed member's output,
-/// exactly what this check exists to prevent.
-fn prerequisite_run<'a>(
+/// FR1/FR2: what a directed start judges an upstream `node` by. A plain node
+/// is judged by its own latest run; a node owned by an ensemble — a member
+/// or the join itself — is judged by the ensemble's quorum verdict, never by
+/// a member's own run: a round-robin ensemble passes through whichever member
+/// carried the vote, so one member's failure under a passed quorum is not an
+/// unmet prerequisite. `verdict: None` means the node ran but no join run
+/// covers its latest attempt yet, so there is nothing to judge it by — that
+/// refuses, it never silently passes.
+enum PrerequisiteJudge<'a> {
+    Plain {
+        run: &'a GraphNodeRun,
+    },
+    Ensemble {
+        details: &'a EnsembleDetails,
+        verdict: Option<&'a GraphNodeRun>,
+    },
+}
+
+/// FR1: the judge for one upstream node. `None` means the node has no runs
+/// and is skipped, as today. The covering join is the latest join run at the
+/// member's iteration or later — one pass runs members and join under the
+/// same `iteration`, so that join has seen the member's attempt. A member
+/// whose latest run is *newer* than the last join ran again after that
+/// verdict (the daemon died between the member and its join): that attempt
+/// has no quorum, so the verdict is `None`.
+fn prerequisite_judge<'a>(
     node: &'a GraphNode,
-    nodes: &'a [GraphNode],
     runs: &'a [GraphNodeRun],
     ensembles: &'a [EnsembleDetails],
-) -> Option<(&'a GraphNode, &'a GraphNodeRun)> {
+) -> Option<PrerequisiteJudge<'a>> {
     let own = runs.iter().rev().find(|run| run.node_id == node.id);
-    let quorum = ensembles
+    let Some(owner_id) = ensemble_owning_node(&node.id, ensembles) else {
+        return own.map(|run| PrerequisiteJudge::Plain { run });
+    };
+    let details = ensembles
         .iter()
-        .filter(|details| details.ensemble.join_node_id != node.id)
-        .find(|details| {
-            details
-                .members
-                .iter()
-                .any(|member| member.node_id == node.id)
-        })
-        .and_then(|details| {
-            runs.iter()
-                .rev()
-                .find(|run| run.node_id == details.ensemble.join_node_id)
-        })
-        // One pass of an ensemble runs its members and its join under the same
-        // `iteration` (a bounce re-enters it within that iteration), so a join
-        // at the member's iteration or later has seen that member's attempt.
-        .filter(|join| own.is_none_or(|run| join.iteration >= run.iteration));
-    if let Some(run) = quorum {
-        let join = nodes.iter().find(|candidate| candidate.id == run.node_id);
-        return Some((join.unwrap_or(node), run));
+        .find(|candidate| candidate.ensemble.id == owner_id)?;
+    // The join judges its own latest run — it IS the ensemble's verdict.
+    if details.ensemble.join_node_id == node.id {
+        return own.map(|run| PrerequisiteJudge::Ensemble {
+            details,
+            verdict: Some(run),
+        });
     }
-    own.map(|run| (node, run))
+    let own = own?;
+    let covering = runs
+        .iter()
+        .rev()
+        .find(|run| run.node_id == details.ensemble.join_node_id)
+        .filter(|join| join.iteration >= own.iteration);
+    Some(PrerequisiteJudge::Ensemble {
+        details,
+        verdict: covering,
+    })
+}
+
+/// Refuses a directed start when one upstream prerequisite is unmet: a plain
+/// node whose latest run is Fail, Error or Interrupted, an ensemble whose
+/// verdict is, or an ensemble with no verdict for the latest attempt.
+/// Skipping any of those as if it had passed would route on work that never
+/// cleared its gates. Refusals name the ensemble, never a member or the join.
+fn check_one_prerequisite(
+    node: &GraphNode,
+    runs: &[GraphNodeRun],
+    ensembles: &[EnsembleDetails],
+) -> anyhow::Result<()> {
+    let Some(judge) = prerequisite_judge(node, runs, ensembles) else {
+        return Ok(());
+    };
+    match judge {
+        PrerequisiteJudge::Plain { run } => {
+            if matches!(
+                run.status,
+                GraphRunStatus::Fail | GraphRunStatus::Error | GraphRunStatus::Interrupted
+            ) {
+                bail!(
+                    "Directed run refused: prerequisite node '{}' last run was {} ({}). Re-run it first or start at an earlier node.",
+                    node.name,
+                    run.status.as_str(),
+                    run.id
+                );
+            }
+        }
+        PrerequisiteJudge::Ensemble { details, verdict } => {
+            let Some(latest) = verdict else {
+                bail!(
+                    "Directed run refused: prerequisite ensemble '{}' has no recorded verdict for this spec's latest attempt. Re-run it first or start at an earlier node.",
+                    details.ensemble.name
+                );
+            };
+            if matches!(
+                latest.status,
+                GraphRunStatus::Fail | GraphRunStatus::Error | GraphRunStatus::Interrupted
+            ) {
+                bail!(
+                    "Directed run refused: prerequisite ensemble '{}' last run was {} ({}). Re-run it first or start at an earlier node.",
+                    details.ensemble.name,
+                    latest.status.as_str(),
+                    latest.id
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Refuses a directed start when an upstream prerequisite (one whose output
-/// would be reused) last ran Fail, Error or Interrupted. Skipping it as if it
-/// had passed would route on work that never cleared its gates.
+/// would be reused) is unmet — see [`check_one_prerequisite`].
 pub(crate) fn check_upstream_prerequisites(
     nodes: &[GraphNode],
     upstream_ids: &HashSet<String>,
@@ -538,20 +598,7 @@ pub(crate) fn check_upstream_prerequisites(
     ensembles: &[EnsembleDetails],
 ) -> anyhow::Result<()> {
     for node in nodes.iter().filter(|n| upstream_ids.contains(&n.id)) {
-        let Some((judged, latest)) = prerequisite_run(node, nodes, runs, ensembles) else {
-            continue;
-        };
-        if matches!(
-            latest.status,
-            GraphRunStatus::Fail | GraphRunStatus::Error | GraphRunStatus::Interrupted
-        ) {
-            bail!(
-                "Directed run refused: prerequisite node '{}' last run was {} ({}). Re-run it first or start at an earlier node.",
-                judged.name,
-                latest.status.as_str(),
-                latest.id
-            );
-        }
+        check_one_prerequisite(node, runs, ensembles)?;
     }
     Ok(())
 }

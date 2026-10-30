@@ -494,3 +494,120 @@ async fn queue_run_completes_past_a_stale_standalone_dirty_record() {
         "no blocker may be stored for the stale record"
     );
 }
+
+/// FR4: a directed start after a pause reuses the head recorded at the
+/// spec's first `spec_started` of the current run — it does not capture a
+/// fresh one. The pause cleared the columns (reconcile state) and the tree
+/// moved on (H2), so a fresh capture would miss the spec's earlier commits.
+/// Breaks if the plan or the dispatch captures fresh instead of reusing H1.
+#[tokio::test]
+async fn directed_run_reuses_spec_start_head_from_first_spec_started_event() {
+    let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+    // The fixture's database lives in the worktree: ignore it before the
+    // repo commits, or every write to it reads as a dirty tree.
+    std::fs::write(
+        dir.path().join(".gitignore"),
+        format!("{TEST_DB_FILENAME}*\n"),
+    )
+    .unwrap();
+    init_git_repo(dir.path());
+    let h1 = git_head(dir.path());
+
+    let mut spec = standalone_spec("spec-t5", 1);
+    spec.graph_id = Some(graph_id.clone());
+    db.insert_graph_spec(&spec).unwrap();
+    // Upstream pass row for A; the directed start at B reuses it.
+    insert_run_row(
+        &db,
+        &graph_id,
+        &spec.id,
+        "node-a",
+        1,
+        chrono::Utc::now().timestamp() - 60,
+    )
+    .unwrap();
+    db.insert_graph_node(&GraphNode {
+        id: "node-b".to_string(),
+        spec_id: None,
+        graph_id: Some(graph_id.clone()),
+        name: "B".to_string(),
+        kind: GraphNodeKind::Check,
+        config: serde_json::json!({
+            "command": "printf APPROVED",
+            "success_condition": "exit_code_0"
+        }),
+        position: 2,
+        created_at: chrono::Utc::now(),
+    })
+    .unwrap();
+    db.insert_graph_edge(&GraphEdge {
+        id: "edge-a-b".to_string(),
+        spec_id: None,
+        graph_id: Some(graph_id.clone()),
+        from_node: "node-a".to_string(),
+        to_node: "node-b".to_string(),
+        condition: GraphEdgeCondition::Pass,
+    })
+    .unwrap();
+    // The spec's first start in this run recorded H1 — the pause that
+    // followed cleared the columns, exactly like reconcile does.
+    db.insert_graph_event(&crate::domain::activity::GraphEventRecord {
+        graph_id: graph_id.clone(),
+        spec_id: Some(spec.id.clone()),
+        node_id: None,
+        run_id: None,
+        kind: "spec_started".to_string(),
+        message: "Spec 'spec-t5' started.".to_string(),
+        payload: Some(
+            serde_json::json!({"spec_start_head": h1.clone(), "spec_start_dirty": 0}).to_string(),
+        ),
+    })
+    .unwrap();
+    db.set_graph_spec_start_state(&spec.id, None, None).unwrap();
+    // The tree moved on: a fresh capture now would see H2, not H1.
+    std::fs::write(dir.path().join("later.txt"), "later").unwrap();
+    let run = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir.path())
+            .status()
+            .expect("git command failed to run");
+        assert!(status.success(), "git {args:?} failed");
+    };
+    run(&["add", "-A"]);
+    run(&["commit", "-q", "-m", "later"]);
+    let h2 = git_head(dir.path());
+    assert_ne!(h1, h2, "the test needs a moved tree to discriminate");
+
+    // The plan reports the reused head too — pre-change it reports none.
+    let plan = engine
+        .plan_directed_run(&graph_id, &spec.id, "B")
+        .expect("the directed plan must be accepted");
+    assert_eq!(
+        plan.start_head.as_deref(),
+        Some(h1.as_str()),
+        "the plan must report the recorded head, not a fresh capture"
+    );
+
+    engine
+        .run_graph_dispatch(
+            graph_id.clone(),
+            None,
+            None,
+            DispatchMode::resume_from(DirectedStart {
+                spec_id: spec.id.clone(),
+                node_arg: "B".to_string(),
+            }),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let spec = db.get_graph_spec(&spec.id).unwrap().unwrap();
+    assert_eq!(
+        spec.spec_start_head.as_deref(),
+        Some(h1.as_str()),
+        "the dispatch must reuse H1 from the first spec_started, not fresh H2 ({h2})"
+    );
+}
