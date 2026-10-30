@@ -2,13 +2,15 @@
 //!
 //! The daemon serves MCP over rmcp's stateful streamable-HTTP transport,
 //! which rejects bare `tools/call` POSTs with "Unexpected message, expect
-//! initialize request". Every call therefore runs a short-lived session:
-//! `initialize` → `notifications/initialized` → `tools/call` → `DELETE`
-//! (best-effort cleanup). Responses arrive as SSE `data:` lines inside a
-//! chunked HTTP body.
+//! initialize request". Calls therefore reuse one lazily created session
+//! per daemon port: `initialize` → `notifications/initialized` once, then
+//! one `tools/call` per call, re-initialising only when the transport
+//! fails. Responses arrive as SSE `data:` lines inside a chunked HTTP body.
 
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -24,16 +26,52 @@ pub(crate) struct McpToolOutcome {
     pub text: String,
 }
 
+/// Cached MCP session ids, one per daemon port. The TUI talks to a single
+/// port, so this is one session per TUI process; the per-port map keeps
+/// parallel tests on distinct fake-daemon ports from evicting each other.
+static SESSIONS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+
+fn sessions() -> &'static Mutex<HashMap<String, String>> {
+    SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// Call one daemon MCP tool synchronously and return its result.
 ///
 /// Transport-level failures (daemon down, malformed response) return `Err`;
 /// tool-level failures (e.g. validation errors) return `Ok` with
 /// `is_error = true` so callers can surface the daemon's message as-is.
+/// The MCP session is reused across calls and re-initialised once when a
+/// transport error suggests it went stale.
 pub(crate) fn call_daemon_tool(
     port: &str,
     tool: &str,
     arguments: &serde_json::Value,
 ) -> Result<McpToolOutcome> {
+    let mut cached = sessions()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let session = match cached.get(port) {
+        Some(session) => session.clone(),
+        None => {
+            let session = initialize_session(port)?;
+            cached.insert(port.to_string(), session.clone());
+            session
+        }
+    };
+    match tools_call(port, &session, tool, arguments) {
+        Ok(outcome) => Ok(outcome),
+        Err(_) => {
+            cached.remove(port);
+            let session = initialize_session(port)?;
+            cached.insert(port.to_string(), session.clone());
+            tools_call(port, &session, tool, arguments)
+        }
+    }
+}
+
+/// Run the MCP handshake (`initialize` + `notifications/initialized`) and
+/// return the new session id.
+fn initialize_session(port: &str) -> Result<String> {
     let init_body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -56,18 +94,24 @@ pub(crate) fn call_daemon_tool(
         "method": "notifications/initialized"
     });
     http_post(port, Some(&session), &initialized.to_string())?;
+    Ok(session)
+}
 
+/// Run one `tools/call` on an already-initialised session.
+fn tools_call(
+    port: &str,
+    session: &str,
+    tool: &str,
+    arguments: &serde_json::Value,
+) -> Result<McpToolOutcome> {
     let call_body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 2,
         "method": "tools/call",
         "params": { "name": tool, "arguments": arguments }
     });
-    let call = http_post(port, Some(&session), &call_body.to_string());
-    // Always try to close the session, even when the call failed.
-    let _ = http_delete(port, &session);
-
-    let result = jsonrpc_response(&call?.body, 2)?;
+    let call = http_post(port, Some(session), &call_body.to_string())?;
+    let result = jsonrpc_response(&call.body, 2)?;
     Ok(parse_tool_outcome(&result))
 }
 
@@ -116,17 +160,6 @@ fn http_post(port: &str, session: Option<&str>, body: &str) -> Result<HttpRespon
         ));
     }
     Ok(response)
-}
-
-fn http_delete(port: &str, session: &str) -> Result<HttpResponse> {
-    let request = format!(
-        "DELETE /mcp HTTP/1.1\r\n\
-         Host: 127.0.0.1:{port}\r\n\
-         Mcp-Session-Id: {session}\r\n\
-         Connection: close\r\n\
-         \r\n"
-    );
-    http_request(port, &request)
 }
 
 fn http_request(port: &str, request: &str) -> Result<HttpResponse> {
@@ -285,6 +318,8 @@ pub(crate) mod test_support {
         /// Number of HTTP requests received. Bare TCP connects (the TUI's
         /// port-liveness probe) don't count — only actual MCP traffic does.
         pub requests: Arc<Mutex<usize>>,
+        /// Number of `initialize` handshakes received.
+        pub initializes: Arc<Mutex<usize>>,
     }
 
     impl FakeDaemon {
@@ -294,6 +329,10 @@ pub(crate) mod test_support {
 
         pub fn request_count(&self) -> usize {
             *self.requests.lock().unwrap()
+        }
+
+        pub fn initialize_count(&self) -> usize {
+            *self.initializes.lock().unwrap()
         }
     }
 
@@ -305,18 +344,27 @@ pub(crate) mod test_support {
         let port = listener.local_addr().unwrap().port().to_string();
         let calls: CallLog = Arc::default();
         let requests = Arc::new(Mutex::new(0));
+        let initializes = Arc::new(Mutex::new(0));
         let calls_bg = Arc::clone(&calls);
         let requests_bg = Arc::clone(&requests);
+        let initializes_bg = Arc::clone(&initializes);
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { break };
-                handle_connection(&mut stream, &calls_bg, &requests_bg, &tool_result);
+                handle_connection(
+                    &mut stream,
+                    &calls_bg,
+                    &requests_bg,
+                    &initializes_bg,
+                    &tool_result,
+                );
             }
         });
         FakeDaemon {
             port,
             calls,
             requests,
+            initializes,
         }
     }
 
@@ -330,6 +378,7 @@ pub(crate) mod test_support {
         stream: &mut TcpStream,
         calls: &CallLog,
         requests: &Arc<Mutex<usize>>,
+        initializes: &Arc<Mutex<usize>>,
         tool_result: &serde_json::Value,
     ) {
         let Some((request_line, body)) = read_request(stream) else {
@@ -344,6 +393,7 @@ pub(crate) mod test_support {
         let message: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
         match message.get("method").and_then(|m| m.as_str()) {
             Some("initialize") => {
+                *initializes.lock().unwrap() += 1;
                 let result = serde_json::json!({
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": {}},
@@ -522,5 +572,29 @@ mod tests {
 
         let err = send_mcp_task_run(&fake.port, "x").unwrap_err();
         assert!(err.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn cached_session_initializes_once() {
+        let fake = spawn_fake_daemon(serde_json::json!({
+            "content": [{"type": "text", "text": "{}"}],
+            "isError": false
+        }));
+
+        for _ in 0..3 {
+            call_daemon_tool(
+                &fake.port,
+                "remote",
+                &serde_json::json!({"action": "status"}),
+            )
+            .expect("call should succeed");
+        }
+
+        assert_eq!(
+            fake.initialize_count(),
+            1,
+            "three refreshes must reuse one MCP session"
+        );
+        assert_eq!(fake.recorded_calls().len(), 3);
     }
 }

@@ -24,7 +24,7 @@ use crate::tui::app::dialog::GraphActionMessage;
 pub(crate) const REMOTE_REFRESH_ON_TAB: Duration = Duration::from_secs(2);
 /// Minimum gap between two `remote_status` fetches otherwise (the sidebar
 /// indicator reads the same cached view).
-pub(crate) const REMOTE_REFRESH_IDLE: Duration = Duration::from_secs(5);
+pub(crate) const REMOTE_REFRESH_IDLE: Duration = Duration::from_secs(30);
 
 /// One selectable row of the Remote tab: the four fixed rows, then one per
 /// paired device.
@@ -196,7 +196,7 @@ impl App {
     }
 
     /// Spawn a `remote_status` fetch unless one is in flight, the daemon is
-    /// down, or the throttle still holds — 2 s on the tab, 5 s otherwise.
+    /// down, or the throttle still holds — 2 s on the tab, 30 s otherwise.
     /// The very first pass only arms the throttle, so `App::new` never
     /// issues a daemon call by itself; the sidebar indicator's first fetch
     /// waits out one idle interval.
@@ -784,6 +784,49 @@ mod tests {
         assert!(
             app.hub.remote.rows_rx.is_some(),
             "an explicit request still fetches immediately"
+        );
+    }
+
+    #[test]
+    fn remote_throttle_30s_idle_2s_on_tab() {
+        assert_eq!(REMOTE_REFRESH_IDLE, Duration::from_secs(30));
+        assert_eq!(REMOTE_REFRESH_ON_TAB, Duration::from_secs(2));
+
+        let mut app = test_app();
+        app.daemon_running = true;
+
+        // Idle (hub closed): 10 s still throttled, 31 s fetches.
+        app.hub.remote.last_fetch = Some(Instant::now() - Duration::from_secs(10));
+        app.refresh_remote_status();
+        assert!(
+            app.hub.remote.rows_rx.is_none(),
+            "10 s idle must still throttle at a 30 s cadence"
+        );
+
+        app.hub.remote.last_fetch = Some(Instant::now() - Duration::from_secs(31));
+        app.refresh_remote_status();
+        assert!(
+            app.hub.remote.rows_rx.is_some(),
+            "31 s idle must fetch at a 30 s cadence"
+        );
+        app.hub.remote.rows_rx = None;
+
+        // On the Remote tab: 3 s fetches, a fresh fetch throttles.
+        app.open_hub();
+        app.set_hub_tab(HubTab::Remote);
+        app.hub.remote.last_fetch = Some(Instant::now() - Duration::from_secs(3));
+        app.refresh_remote_status();
+        assert!(
+            app.hub.remote.rows_rx.is_some(),
+            "3 s on the tab must fetch at a 2 s cadence"
+        );
+        app.hub.remote.rows_rx = None;
+
+        app.hub.remote.last_fetch = Some(Instant::now());
+        app.refresh_remote_status();
+        assert!(
+            app.hub.remote.rows_rx.is_none(),
+            "a fresh fetch on the tab must throttle"
         );
     }
 
