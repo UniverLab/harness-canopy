@@ -131,6 +131,92 @@ fn focused_section_index_section_returns_some() {
     assert_eq!(dialog.focused_section_index(), Some(0));
 }
 
+// ── attachment chips ───────────────────────────────────────────
+
+fn dialog_with_chips() -> SimplePromptDialog {
+    let mut dialog = SimplePromptDialog::new();
+    dialog.attachments = vec![
+        BuilderAttachment::for_test("/shelf/aaa", 120),
+        BuilderAttachment::for_test("/shelf/bbb", 2048),
+    ];
+    dialog
+}
+
+#[test]
+fn chips_row_is_a_focus_stop_only_with_attachments() {
+    let dialog = SimplePromptDialog::new();
+    assert_eq!(dialog.chips_stop(), None);
+    assert!(!dialog.is_chips_focused());
+
+    let chips = dialog_with_chips();
+    assert_eq!(chips.chips_stop(), Some(chips.enabled_sections.len() + 1));
+    assert!(!chips.is_chips_focused());
+}
+
+#[test]
+fn focus_cycles_through_the_chips_row() {
+    let mut dialog = dialog_with_chips();
+    dialog.focused_section = dialog.enabled_sections.len();
+    dialog.focus_next();
+    assert!(dialog.is_chips_focused());
+    assert_eq!(dialog.attachment_focus, Some(0));
+    dialog.focus_next();
+    assert_eq!(dialog.focused_section, 0);
+    dialog.focus_prev();
+    assert!(dialog.is_chips_focused());
+}
+
+#[test]
+fn chips_move_clamps_to_the_row() {
+    let mut dialog = dialog_with_chips();
+    dialog.focused_section = dialog.chips_stop().unwrap();
+    dialog.attachment_focus = Some(0);
+    dialog.chips_move(1);
+    assert_eq!(dialog.attachment_focus, Some(1));
+    dialog.chips_move(1);
+    assert_eq!(dialog.attachment_focus, Some(1));
+    dialog.chips_move(-5);
+    assert_eq!(dialog.attachment_focus, Some(0));
+}
+
+#[test]
+fn remove_focused_chip_keeps_the_row_while_chips_remain() {
+    let mut dialog = dialog_with_chips();
+    dialog.focused_section = dialog.chips_stop().unwrap();
+    dialog.attachment_focus = Some(0);
+    dialog.remove_focused_chip();
+    assert_eq!(dialog.attachments.len(), 1);
+    assert_eq!(dialog.attachment_focus, Some(0));
+    assert!(dialog.is_chips_focused());
+    dialog.remove_focused_chip();
+    assert!(dialog.attachments.is_empty());
+    assert!(!dialog.is_chips_focused());
+    assert_eq!(dialog.focused_section, dialog.enabled_sections.len());
+}
+
+#[test]
+fn attachments_survive_a_builder_session_round_trip() {
+    let dialog = dialog_with_chips();
+    let session = PromptBuilderSession::from_dialog(&dialog);
+    let mut reopened = SimplePromptDialog::new();
+    session.restore_into(&mut reopened);
+    assert_eq!(reopened.attachments, dialog.attachments);
+}
+
+#[test]
+fn attachments_survive_a_persisted_state_round_trip() {
+    let dialog = dialog_with_chips();
+    let json = serde_json::to_string(&PersistedBuilderState::from_dialog(&dialog)).unwrap();
+    let restored: PersistedBuilderState = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored.attachments, dialog.attachments);
+    // …and older stored states without the field still deserialize.
+    let legacy: PersistedBuilderState = serde_json::from_str(
+        r#"{"sections":{},"enabled_sections":[],"focused_section":1,"section_counters":{},"section_cursors":{},"section_scrolls":{},"collapsed_pastes":{},"locked_sections":[]}"#,
+    )
+    .unwrap();
+    assert!(legacy.attachments.is_empty());
+}
+
 // ── send display ─────────────────────────────────────────────
 
 #[test]

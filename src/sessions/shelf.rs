@@ -323,23 +323,62 @@ impl ShelfStore {
 
         let bytes = std::fs::read(&resolved)
             .map_err(|e| ShelfError::new(ERR_IO, format!("{}: {e}", src.display())))?;
-        let head_len = bytes.len().min(SNIFF_HEAD_BYTES);
-        let mime = sniff_mime(&bytes[..head_len], &bytes).ok_or_else(|| {
-            ShelfError::new(
-                ERR_UNSUPPORTED_TYPE,
-                format!(
-                    "{} is not one of {} (sniffed from its content, never the extension)",
-                    src.display(),
-                    ALLOWED_MIMES.join(", "),
-                ),
-            )
-        })?;
 
         let name = src
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| "file".to_string());
+        self.store_bytes_locked(&bytes, name, session_id, caption, from_label)
+    }
+
+    /// Store in-memory bytes on the shelf: the same size cap, MIME sniff,
+    /// row + rename commit and maintenance sweep as [`Self::insert`], for
+    /// callers that have bytes but no source path (prompt-builder image
+    /// attachments). `name` is the display name stored on the row.
+    pub fn insert_bytes(
+        &self,
+        bytes: &[u8],
+        name: String,
+        session_id: Option<&str>,
+        caption: Option<&str>,
+        from_label: &str,
+    ) -> Result<ShelfItem, ShelfError> {
+        let _gate = self.gate.lock().unwrap_or_else(|e| e.into_inner());
+        if bytes.len() as u64 > MAX_FILE_BYTES {
+            return Err(ShelfError::new(
+                ERR_TOO_LARGE,
+                format!(
+                    "{name} is {} bytes; the shelf accepts at most {MAX_FILE_BYTES}",
+                    bytes.len()
+                ),
+            ));
+        }
+        self.store_bytes_locked(bytes, name, session_id, caption, from_label)
+    }
+
+    /// The shared tail of every insert: sniff the MIME from the bytes, write
+    /// the row plus a temp file, rename it into place, emit `shelf_added`,
+    /// and run the lifecycle sweep. The caller holds the gate.
+    fn store_bytes_locked(
+        &self,
+        bytes: &[u8],
+        name: String,
+        session_id: Option<&str>,
+        caption: Option<&str>,
+        from_label: &str,
+    ) -> Result<ShelfItem, ShelfError> {
+        let head_len = bytes.len().min(SNIFF_HEAD_BYTES);
+        let mime = sniff_mime(&bytes[..head_len], bytes).ok_or_else(|| {
+            ShelfError::new(
+                ERR_UNSUPPORTED_TYPE,
+                format!(
+                    "{name} is not one of {} (sniffed from its content, never the extension)",
+                    ALLOWED_MIMES.join(", "),
+                ),
+            )
+        })?;
+
         let file_id = new_file_id();
         let row = ShelfRow {
             file_id: file_id.clone(),
@@ -347,7 +386,7 @@ impl ShelfStore {
             name,
             mime: mime.to_string(),
             size: bytes.len() as i64,
-            sha256: hex_hash(&bytes),
+            sha256: hex_hash(bytes),
             caption: caption
                 .map(str::trim)
                 .filter(|c| !c.is_empty())
@@ -358,7 +397,7 @@ impl ShelfStore {
 
         let final_path = self.dir.join(&file_id);
         let tmp_path = self.dir.join(format!(".{file_id}.tmp"));
-        write_shelf_file(&tmp_path, &bytes)?;
+        write_shelf_file(&tmp_path, bytes)?;
 
         if let Err(e) = self.db.insert_shelf_file(&row) {
             let _ = std::fs::remove_file(&tmp_path);

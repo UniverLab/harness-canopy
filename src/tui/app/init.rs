@@ -4,7 +4,8 @@ use super::*;
 
 macro_rules! app_new_fields {
     ($db:expr, $data_dir:expr, $canopy_config:expr, $system_info_rx:expr,
-     $system_monitor_active:expr, $mission_manager:expr) => {
+     $system_monitor_active:expr, $mission_manager:expr,
+     $clipboard_image_tx:expr, $clipboard_image_rx:expr) => {
         App {
             db: $db,
             data_dir: $data_dir,
@@ -152,6 +153,9 @@ macro_rules! app_new_fields {
             system_info_target: crate::system::SystemInfo::default(),
             system_info_rx: $system_info_rx,
             system_monitor_active: $system_monitor_active,
+            clipboard_image_tx: $clipboard_image_tx,
+            clipboard_image_rx: $clipboard_image_rx,
+            clipboard_image_pending: false,
             last_system_update: std::time::Instant::now() - std::time::Duration::from_secs(10),
             last_system_frame_at: std::time::Instant::now(),
             process_start_time: std::time::Instant::now(),
@@ -231,6 +235,7 @@ impl App {
         let system_monitor_active = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let system_info_rx = spawn_system_monitor(&system_monitor_active);
         let mission_manager = Self::init_mission_manager(Arc::clone(&db))?;
+        let (clipboard_image_tx, clipboard_image_rx) = std::sync::mpsc::channel();
 
         let mut app = app_new_fields!(
             db,
@@ -238,7 +243,9 @@ impl App {
             canopy_config,
             system_info_rx,
             system_monitor_active,
-            mission_manager
+            mission_manager,
+            clipboard_image_tx,
+            clipboard_image_rx
         );
         app.refresh()?;
         Ok(app)

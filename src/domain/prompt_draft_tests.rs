@@ -6,6 +6,7 @@ use super::prompt_draft::{
 };
 
 const GOLDEN: &str = include_str!("prompt_draft/golden_two_sections.txt");
+const GOLDEN_ATTACHMENTS: &str = include_str!("prompt_draft/golden_attachments.txt");
 
 /// The FR4 draft: two sections, a preset, two skills and a project.
 fn golden_draft() -> PromptDraft {
@@ -26,6 +27,7 @@ fn golden_draft() -> PromptDraft {
             "canopy:golden-beta".to_string(),
         ],
         project: Some("golden-proj".to_string()),
+        attachments: Vec::new(),
     }
 }
 
@@ -67,6 +69,21 @@ fn golden_two_sections_equal_the_frozen_dialog_output() {
     };
     let text = build_prompt_text(&golden_draft(), &ctx).expect("golden draft builds");
     assert_eq!(text, GOLDEN);
+}
+
+#[test]
+fn golden_attachments_append_last_as_escaped_image_paths() {
+    let mut draft = golden_draft();
+    draft.attachments = vec![
+        "/home/u/shots/first.png".to_string(),
+        "/home/u/my & shots/second.png".to_string(),
+    ];
+    let ctx = PromptContext {
+        catalog: golden_catalog(),
+        ..PromptContext::default()
+    };
+    let text = build_prompt_text(&draft, &ctx).expect("golden draft builds");
+    assert_eq!(text, GOLDEN_ATTACHMENTS);
 }
 
 #[test]

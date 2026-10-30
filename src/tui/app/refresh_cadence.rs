@@ -108,6 +108,7 @@ impl App {
             self.system_info_target = info;
             self.last_system_update = Instant::now();
         }
+        let clipboard_changed = self.drain_clipboard_images();
         if system_settling(&self.system_info, &self.system_info_target) {
             self.interpolate_system_info();
         } else {
@@ -137,6 +138,37 @@ impl App {
             || remote_message_cleared
             || at_picker_changed
             || ctrl_c_cleared
+            || clipboard_changed
+    }
+
+    /// Drain off-thread clipboard-image results into the open builder: a
+    /// `None` payload (no image on the Windows clipboard) is a no-op, bytes
+    /// attach as PNG. True when a result landed on an open builder, so the
+    /// tick redraws the chips row.
+    fn drain_clipboard_images(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(payload) = self.clipboard_image_rx.try_recv() {
+            self.clipboard_image_pending = false;
+            let Some(bytes) = payload else { continue };
+            let db = self.db.clone();
+            let shelf_dir = self.data_dir.join("shelf");
+            let session_key = self.current_prompt_session_key();
+            if let Some(dialog) = self.simple_prompt_dialog.as_mut() {
+                match crate::tui::app::dialog::attach_image_bytes(
+                    &db,
+                    &shelf_dir,
+                    &session_key,
+                    &mut dialog.attachments,
+                    &bytes,
+                    "png",
+                ) {
+                    Ok(()) => dialog.attach_error = None,
+                    Err(error) => dialog.attach_error = Some(error),
+                }
+                changed = true;
+            }
+        }
+        changed
     }
 
     /// Throttled work (FR2): every database read, daemon round-trip and port

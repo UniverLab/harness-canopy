@@ -118,6 +118,8 @@ rand = "0.10"
 
 # Clipboard for text copy from TUI
 arboard = "3.6"
+# PNG-encode clipboard RGBA for prompt-builder image attachments (png only)
+image = { version = "0.25", default-features = false, features = ["png"] }
 # Decode OSC 52 clipboard payloads emitted by PTY programs
 base64 = "0.22"
 toml = "1.1.2"

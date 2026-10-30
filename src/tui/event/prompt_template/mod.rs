@@ -13,8 +13,10 @@ mod at_picker;
 use at_picker::*;
 mod scheduled_sends;
 use scheduled_sends::*;
+mod image_paste;
+use image_paste::*;
 
-enum PromptAction {
+pub(super) enum PromptAction {
     None,
     Close,
     Send(String),
@@ -57,6 +59,12 @@ pub fn handle_prompt_template_key(
             enter_scheduled_list(app);
             return Ok(());
         }
+    }
+
+    // Clipboard-image paste (no-op unless the chord lands on an idle
+    // builder with an image ready).
+    if try_paste_clipboard_image(app, code, modifiers) {
+        return Ok(());
     }
 
     let Some(dialog) = app.simple_prompt_dialog.as_mut() else {
@@ -143,6 +151,14 @@ pub fn handle_prompt_template_key(
         )?
     };
 
+    dispatch_prompt_action(app, action);
+
+    Ok(())
+}
+
+/// Carry out the key handler's decision: close, send now, schedule, cancel a
+/// scheduled send, or recall the last prompt.
+fn dispatch_prompt_action(app: &mut App, action: PromptAction) {
     match action {
         PromptAction::None => {}
         PromptAction::Close => app.close_simple_prompt_dialog(),
@@ -153,8 +169,6 @@ pub fn handle_prompt_template_key(
         PromptAction::CancelNextScheduled => cancel_scheduled_send(app),
         PromptAction::RecallLastPrompt => recall_last_prompt(app),
     }
-
-    Ok(())
 }
 
 pub(crate) fn prompt_field_width(app: &App) -> usize {
@@ -187,6 +201,11 @@ fn focused_section_name(dialog: &mut SimplePromptDialog) -> Option<String> {
     // section 1 on every keypress, which made the send control impossible
     // to operate (its advertised keys never fired).
     if dialog.focused_section == 0 {
+        return None;
+    }
+    // The chips row is a real focus target too: clamping it here would yank
+    // focus back into the last section on every keypress.
+    if dialog.is_chips_focused() {
         return None;
     }
     let last_index = dialog.enabled_sections.len().checked_sub(1)?;
@@ -319,8 +338,8 @@ fn handle_send_control_key(
             PromptAction::None
         }
         KeyCode::BackTab => {
-            // wrap to last section
-            dialog.focused_section = dialog.total_focusable() - 1;
+            // wrap to the last stop (the chips row when attachments show)
+            dialog.focus_prev();
             PromptAction::None
         }
         _ => PromptAction::None,
@@ -470,6 +489,11 @@ fn handle_dialog_key(
         ));
     }
 
+    // ── Attachment chips row ────────────────────────────────────────────
+    if dialog.is_chips_focused() {
+        return handle_chips_row_key(dialog, code, modifiers, db, workdir);
+    }
+
     // ── Section field keys ──────────────────────────────────────────────
     let section_name = section_name.unwrap_or("");
 
@@ -613,7 +637,11 @@ fn handle_enter_key(
     Ok(PromptAction::None)
 }
 
-fn build_prompt_action(dialog: &SimplePromptDialog, db: &Database, workdir: &Path) -> PromptAction {
+pub(super) fn build_prompt_action(
+    dialog: &SimplePromptDialog,
+    db: &Database,
+    workdir: &Path,
+) -> PromptAction {
     // Raw tab with a non-empty buffer sends the text verbatim; otherwise the
     // composed Normal-form prompt (see `resolve_outgoing_prompt`).
     let Ok(prompt) = dialog.resolve_outgoing_prompt(db, workdir) else {

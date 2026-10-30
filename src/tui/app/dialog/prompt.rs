@@ -19,6 +19,7 @@ mod prompt_edit;
 mod prompt_schedule;
 // `prompt_protocol` holds only an `impl SimplePromptDialog` block, so
 // there is nothing to re-export (same as `prompt_edit`/`prompt_schedule`).
+mod prompt_attachments;
 mod prompt_protocol;
 
 /// Picker state for adding/removing sections
@@ -203,6 +204,16 @@ pub struct SimplePromptDialog {
     /// row in place (delete + re-insert) instead of creating a duplicate — the
     /// select-to-edit flow (B33). Transient; cleared once the builder closes.
     pub editing_scheduled_id: Option<String>,
+    /// Attached images (shelf paths + sizes), drawn as a chip row under the
+    /// sections and sent as the trailing `# [ATTACHMENTS]` block. Survives
+    /// close/reopen through `PromptBuilderSession`.
+    pub attachments: Vec<BuilderAttachment>,
+    /// Focused chip while the chips row holds focus (`Some`), else whatever
+    /// it was — only meaningful together with `is_chips_focused`.
+    pub attachment_focus: Option<usize>,
+    /// Inline attach error (over the cap, shelf rejection), drawn under the
+    /// chips row. Cleared on the next successful attach.
+    pub attach_error: Option<String>,
 }
 
 impl SimplePromptDialog {
@@ -243,6 +254,9 @@ impl SimplePromptDialog {
             raw_edit_scroll: None,
             scheduled_list_selected: None,
             editing_scheduled_id: None,
+            attachments: Vec::new(),
+            attachment_focus: None,
+            attach_error: None,
         }
     }
 
@@ -272,6 +286,11 @@ impl SimplePromptDialog {
         self.locked_sections.clear();
         self.section_counters.clear();
         self.section_counters.insert("instruction".to_string(), 2);
+        // A flat recall carries text only: previously attached images do not
+        // belong to the recalled prompt.
+        self.attachments.clear();
+        self.attachment_focus = None;
+        self.attach_error = None;
 
         let cursor = text.chars().count();
         self.sections
@@ -648,4 +667,5 @@ impl SimplePromptDialog {
 mod prompt_session;
 #[cfg(test)]
 mod tests;
+pub use prompt_attachments::{attach_image_bytes, remove_attachment, BuilderAttachment};
 pub use prompt_session::{PersistedBuilderState, PromptBuilderSession};

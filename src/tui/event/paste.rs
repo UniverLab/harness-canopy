@@ -70,26 +70,14 @@ pub fn handle_paste(app: &mut App, text: &str) {
             // threshold, collapsed-vs-inline branch) sees real newlines
             // regardless of the clipboard's line-ending convention.
             let text = normalize_line_endings(text);
-            // Insert pasted text into the SimplePromptDialog sections.
-            // Multi-line pastes are collapsed to a placeholder while keeping the real text.
-            let field_width = super::prompt_template::prompt_field_width(app);
-            if let Some(dialog) = &mut app.simple_prompt_dialog {
-                // Resolve the focused section through the offset-aware mapper
-                // (focus index 0 is the send control, sections start at 1).
-                // Indexing enabled_sections[focused_section] directly pasted
-                // into the NEXT section — never where the cursor was.
-                if let Some(section_name) = dialog.focused_section_name().map(str::to_string) {
-                    // "Multi-line" means more than one logical line — a lone
-                    // trailing newline stays inline (as a space), it should
-                    // not produce a collapse placeholder.
-                    if text.lines().count() > 1 || text.chars().count() > 200 {
-                        // Preserve newlines for collapsed multi-line paste
-                        dialog.insert_collapsed_paste_at_cursor(&section_name, &text, field_width);
-                    } else {
-                        let clean = text.replace('\n', " ");
-                        dialog.insert_text_at_cursor(&section_name, &clean, field_width);
-                    }
-                }
+            // A paste of dropped image files attaches them instead of
+            // inserting text (drag-and-drop from a file manager arrives as
+            // bracketed-paste paths).
+            let image_paths = crate::tui::clipboard::parse_image_path_paste(&text);
+            if !image_paths.is_empty() && app.simple_prompt_dialog.is_some() {
+                attach_dropped_images(app, &image_paths);
+            } else {
+                insert_builder_paste(app, &text);
             }
             // New-agent dialog has its own prompt input box; route pasted text
             // there too. Newlines are preserved as hard breaks (the renderer
@@ -104,6 +92,69 @@ pub fn handle_paste(app: &mut App, text: &str) {
             for c in clean.chars() {
                 let _ = handle_key(app, KeyCode::Char(c), KeyModifiers::NONE);
             }
+        }
+    }
+}
+
+/// Insert pasted text into the builder's focused section. Multi-line pastes
+/// are collapsed to a placeholder while keeping the real text.
+fn insert_builder_paste(app: &mut App, text: &str) {
+    let field_width = super::prompt_template::prompt_field_width(app);
+    if let Some(dialog) = &mut app.simple_prompt_dialog {
+        // Resolve the focused section through the offset-aware mapper
+        // (focus index 0 is the send control, sections start at 1).
+        // Indexing enabled_sections[focused_section] directly pasted
+        // into the NEXT section — never where the cursor was.
+        if let Some(section_name) = dialog.focused_section_name().map(str::to_string) {
+            // "Multi-line" means more than one logical line — a lone
+            // trailing newline stays inline (as a space), it should
+            // not produce a collapse placeholder.
+            if text.lines().count() > 1 || text.chars().count() > 200 {
+                // Preserve newlines for collapsed multi-line paste
+                dialog.insert_collapsed_paste_at_cursor(&section_name, text, field_width);
+            } else {
+                let clean = text.replace('\n', " ");
+                dialog.insert_text_at_cursor(&section_name, &clean, field_width);
+            }
+        }
+    }
+}
+
+/// Attach dropped image files to the open builder. The first failure
+/// (unreadable file, over the cap, shelf rejection) stops the batch with an
+/// inline error.
+fn attach_dropped_images(app: &mut App, paths: &[std::path::PathBuf]) {
+    let db = app.db.clone();
+    let shelf_dir = app.data_dir.join("shelf");
+    let session_key = app.current_prompt_session_key();
+    let Some(dialog) = app.simple_prompt_dialog.as_mut() else {
+        return;
+    };
+    dialog.attach_error = None;
+    for path in paths {
+        // The parse guarantees an image extension; the fallback is unreachable.
+        let ext = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("png")
+            .to_ascii_lowercase();
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                dialog.attach_error = Some(format!("{}: {e}", path.display()));
+                break;
+            }
+        };
+        if let Err(error) = crate::tui::app::dialog::attach_image_bytes(
+            &db,
+            &shelf_dir,
+            &session_key,
+            &mut dialog.attachments,
+            &bytes,
+            &ext,
+        ) {
+            dialog.attach_error = Some(error);
+            break;
         }
     }
 }
@@ -352,6 +403,72 @@ mod tests {
 
         let dialog = app.simple_prompt_dialog.as_ref().unwrap();
         assert_eq!(dialog.get_section_content("instruction_1"), "single line ");
+    }
+
+    /// A paste of dropped image files attaches them instead of inserting
+    /// text (drag-and-drop from a file manager arrives as bracketed-paste
+    /// paths).
+    #[test]
+    fn prompt_builder_path_paste_attaches_images_not_text() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        app.focus = Focus::PromptTemplateDialog;
+        app.simple_prompt_dialog = Some(crate::tui::app::dialog::SimplePromptDialog::new());
+
+        let shot = data_dir.path().join("shot.png");
+        std::fs::write(
+            &shot,
+            [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x42],
+        )
+        .expect("write image fixture");
+
+        handle_paste(&mut app, &shot.to_string_lossy());
+
+        let dialog = app.simple_prompt_dialog.as_ref().unwrap();
+        assert_eq!(dialog.attachments.len(), 1);
+        assert_eq!(dialog.get_section_content("instruction_1"), "");
+        assert!(dialog.attach_error.is_none());
+        // …and a later text paste still inserts text, leaving chips alone.
+        handle_paste(&mut app, "hello");
+
+        let dialog = app.simple_prompt_dialog.as_ref().unwrap();
+        assert_eq!(dialog.get_section_content("instruction_1"), "hello");
+        assert_eq!(dialog.attachments.len(), 1);
+    }
+
+    /// A paste of non-image paths stays text: only all-image pastes attach.
+    #[test]
+    fn prompt_builder_non_image_path_paste_stays_text() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        app.focus = Focus::PromptTemplateDialog;
+        app.simple_prompt_dialog = Some(crate::tui::app::dialog::SimplePromptDialog::new());
+
+        let notes = data_dir.path().join("notes.txt");
+        std::fs::write(&notes, b"not an image").expect("write fixture");
+
+        handle_paste(&mut app, &notes.to_string_lossy());
+
+        let dialog = app.simple_prompt_dialog.as_ref().unwrap();
+        assert!(dialog.attachments.is_empty());
+        assert!(
+            dialog
+                .get_section_content("instruction_1")
+                .contains("notes.txt"),
+            "the path should be inserted as text"
+        );
     }
 
     /// B30 regression: the new-agent dialog's paste path must apply the same

@@ -1,7 +1,7 @@
 //! Prompt builder session persistence (split from `dialog::prompt`, pure move).
 use std::collections::{HashMap, HashSet};
 
-use super::{PromptTab, SectionPickerMode, SendChoice, SimplePromptDialog};
+use super::{BuilderAttachment, PromptTab, SectionPickerMode, SendChoice, SimplePromptDialog};
 
 /// Snapshot of `SimplePromptDialog` state used to persist the prompt builder
 /// per agent/session across openings within the same canopy TUI session.
@@ -19,6 +19,9 @@ pub struct PromptBuilderSession {
     /// Which tab was active when the builder was hidden. The Raw buffer itself
     /// rides along inside `sections` under `RAW_SECTION_ID`.
     pub active_tab: PromptTab,
+    /// Attached images: the shelf paths survive with the draft (the bytes
+    /// live on the shelf, not here).
+    pub attachments: Vec<BuilderAttachment>,
 }
 
 impl PromptBuilderSession {
@@ -34,6 +37,7 @@ impl PromptBuilderSession {
             send_choice: dialog.send_choice,
             send_at: dialog.send_at,
             active_tab: dialog.active_tab,
+            attachments: dialog.attachments.clone(),
         }
     }
 
@@ -48,6 +52,9 @@ impl PromptBuilderSession {
         dialog.send_choice = self.send_choice;
         dialog.send_at = self.send_at;
         dialog.active_tab = self.active_tab;
+        dialog.attachments = self.attachments.clone();
+        dialog.attachment_focus = None;
+        dialog.attach_error = None;
         // A reopened builder always starts in the first section, regardless of
         // where focus sat when the session was captured — the send control is
         // the last stop of the cycle, never the entry point. On the Raw tab
@@ -88,6 +95,10 @@ pub struct PersistedBuilderState {
     pub section_scrolls: HashMap<String, usize>,
     pub collapsed_pastes: HashMap<String, String>,
     pub locked_sections: HashSet<String>,
+    /// Attached images, so recall and scheduled-send editing restore the
+    /// chips row. Defaulted so older stored states still deserialize.
+    #[serde(default)]
+    pub attachments: Vec<BuilderAttachment>,
 }
 
 impl PersistedBuilderState {
@@ -117,6 +128,7 @@ impl PersistedBuilderState {
             section_scrolls,
             collapsed_pastes: HashMap::new(),
             locked_sections: HashSet::new(),
+            attachments: Vec::new(),
         }
     }
 
@@ -130,6 +142,7 @@ impl PersistedBuilderState {
             section_scrolls: dialog.section_scrolls.clone(),
             collapsed_pastes: dialog.collapsed_pastes.clone(),
             locked_sections: dialog.locked_sections.clone(),
+            attachments: dialog.attachments.clone(),
         }
     }
 
@@ -141,6 +154,9 @@ impl PersistedBuilderState {
         dialog.section_scrolls = self.section_scrolls.clone();
         dialog.collapsed_pastes = self.collapsed_pastes.clone();
         dialog.locked_sections = self.locked_sections.clone();
+        dialog.attachments = self.attachments.clone();
+        dialog.attachment_focus = None;
+        dialog.attach_error = None;
         // A recalled prompt opens focused on the first section, ready to type —
         // never on the send control (focus 0), whatever was persisted.
         dialog.focus_first_section();

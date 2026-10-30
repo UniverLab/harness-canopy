@@ -218,6 +218,7 @@ impl SimplePromptDialog {
             preset: None,
             skills: Vec::new(),
             project: None,
+            attachments: self.attachments.iter().map(|a| a.path.clone()).collect(),
         }
     }
 

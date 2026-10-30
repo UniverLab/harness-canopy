@@ -4,7 +4,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use super::content::{style_collapsed_paste_blocks, wrap_styled_content};
+use super::content::{
+    attachment_chips_height, draw_attachment_chips, style_collapsed_paste_blocks,
+    wrap_styled_content,
+};
 use super::geometry::{generate_bottom_border, generate_top_border};
 use super::NormalContentCtx;
 use crate::tui::app::dialog::SimplePromptDialog;
@@ -282,15 +285,24 @@ pub(super) fn draw_prompt_normal_content(
 ) -> Option<Rect> {
     // sections_available_h = inner height minus tab(1) + hint(1) + gap(1) at the
     // top and gap(1) + send line(1) at the bottom, and the scheduled-list
-    // panel (B33) reserved just above the send line.
+    // panel (B33) plus the attachment chips block reserved just above the
+    // send line.
+    let chips_h = attachment_chips_height(ctx.dialog);
     let sections_top = ctx.inner.y + 3;
-    let sections_available_h = ctx.inner.height.saturating_sub(5 + ctx.list_panel_height);
+    let sections_available_h = ctx
+        .inner
+        .height
+        .saturating_sub(5 + ctx.list_panel_height + chips_h);
 
     let start_idx = normal_start_idx(ctx.dialog, ctx.section_heights, sections_available_h);
 
     // Scroll indicators. The effective bottom excludes the scheduled-list
-    // panel (B33) so sections never draw over it.
-    let inner_bottom = ctx.inner.y + ctx.inner.height.saturating_sub(ctx.list_panel_height);
+    // panel (B33) and the chips block so sections never draw over them.
+    let inner_bottom = ctx.inner.y.saturating_add(
+        ctx.inner
+            .height
+            .saturating_sub(ctx.list_panel_height + chips_h),
+    );
     if start_idx > 0 {
         draw_scroll_arrow(frame, ctx.inner, sections_top, " ▲ ", ctx.accent);
     }
@@ -331,6 +343,23 @@ pub(super) fn draw_prompt_normal_content(
             inner_bottom.saturating_sub(1),
             " ▼ ",
             ctx.accent,
+        );
+    }
+
+    // Attachment chips (+ inline error) dock under the sections, above the
+    // scheduled-list panel and the send line.
+    if chips_h > 0 {
+        draw_attachment_chips(
+            frame,
+            ctx.dialog,
+            Rect {
+                x: ctx.inner.x,
+                y: inner_bottom,
+                width: ctx.inner.width,
+                height: chips_h,
+            },
+            ctx.accent,
+            ctx.theme,
         );
     }
     picker_anchor

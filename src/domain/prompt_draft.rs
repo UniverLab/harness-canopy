@@ -43,6 +43,11 @@ pub struct PromptDraft {
     pub skills: Vec<String>,
     #[serde(default)]
     pub project: Option<String>,
+    /// Absolute shelf paths of attached images, rendered LAST as
+    /// `# [ATTACHMENTS]: Images`. `#[serde(default)]` so old remote
+    /// clients that never send the field keep working.
+    #[serde(default)]
+    pub attachments: Vec<String>,
 }
 
 /// A named preset from `~/.canopy/prompts/*.md`: file-stem name, first
@@ -391,8 +396,33 @@ pub fn build_prompt_text(
         body.push_str(&section);
     }
 
+    // Attached images travel as absolute paths, one `<image>` line each, so
+    // any harness CLI can open them. Always the LAST section.
+    if let Some(section) = format_attachments_section(&draft.attachments) {
+        body.push_str(&section);
+    }
+
     // System block stays first so its protocol is read before the task.
     Ok(format!("{system}{body}"))
+}
+
+/// Render the trailing attachments section, or `None` when there is nothing
+/// attached. Paths are attribute-escaped (`&`, `"`).
+pub fn format_attachments_section(attachments: &[String]) -> Option<String> {
+    if attachments.is_empty() {
+        return None;
+    }
+    let mut result = String::from("# [ATTACHMENTS]: Images\n<images>\n");
+    for path in attachments {
+        result.push_str(&format!("  <image path=\"{}\"/>\n", escape_attribute(path)));
+    }
+    result.push_str("</images>\n\n");
+    Some(result)
+}
+
+/// Escape a path for an XML attribute value.
+fn escape_attribute(value: &str) -> String {
+    value.replace('&', "&amp;").replace('"', "&quot;")
 }
 
 /// Render one project registry row as the `project` item content of PROJECT

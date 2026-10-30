@@ -3069,6 +3069,7 @@ dependencies = [
  "futures",
  "hf-hub",
  "hmac 0.13.0",
+ "image",
  "inquire",
  "lancedb",
  "libc",

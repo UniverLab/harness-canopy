@@ -134,8 +134,9 @@ pub(super) fn shelf_time(created_at: &str) -> String {
         .unwrap_or_else(|_| created_at.to_string())
 }
 
-/// Bytes as `B` / `KiB` / `MiB`.
-fn human_size(bytes: i64) -> String {
+/// Bytes as `B` / `KiB` / `MiB`. Shared with the prompt builder's
+/// attachment chips.
+pub(crate) fn human_size(bytes: i64) -> String {
     let bytes = bytes.max(0) as f64;
     if bytes < 1024.0 {
         format!("{bytes:.0} B")

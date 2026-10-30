@@ -299,6 +299,14 @@ pub struct App {
     pub(crate) system_info: crate::system::SystemInfo,
     pub(crate) system_info_target: crate::system::SystemInfo,
     pub(crate) system_info_rx: std::sync::mpsc::Receiver<crate::system::SystemInfo>,
+    /// PowerShell clipboard-image results (WSL): the fetch runs off-thread
+    /// and `refresh_fast` attaches the bytes to the open builder. A `None`
+    /// payload means no image and is a no-op. The `tx` half is cloned for
+    /// each fetch; `pending` guards against stacking fetches while one is
+    /// already in flight.
+    pub(crate) clipboard_image_tx: std::sync::mpsc::Sender<Option<Vec<u8>>>,
+    pub(crate) clipboard_image_rx: std::sync::mpsc::Receiver<Option<Vec<u8>>>,
+    pub(crate) clipboard_image_pending: bool,
     /// Controls system monitor activity: true = poll, false = pause polling.
     pub(crate) system_monitor_active: Arc<AtomicBool>,
     pub(crate) last_system_update: std::time::Instant,

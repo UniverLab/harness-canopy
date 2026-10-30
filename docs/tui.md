@@ -315,7 +315,11 @@ row: `/` filters, `n` creates, `e` edits and `F4` deletes.
   Selecting a `[canopy]:` entry renders
   `canopy skill <name> — load it with the skill tool's get action (name="<name>")` in the
   built prompt's tools block, so the agent fetches it over MCP; on-disk
-  skills keep their plain `skill:<name>` entry.
+  skills keep their plain `skill:<name>` entry. `Ctrl+V` (or `Alt+V`, for
+  terminals that bind `Ctrl+V` to text paste) attaches the clipboard image,
+  and pasting or dropping image-file paths attaches those files instead of
+  inserting text; attachments ride along as `<image path="…"/>` lines in a
+  trailing attachments block every harness CLI can open.
 - **Canopy protocol — once per session** — the builder prepends the
   `[CANOPY]` session-start protocol to the *first* prompt of an
   interactive session, never to the ones that follow. That fact is stored

@@ -1,5 +1,12 @@
-use ratatui::style::{Color, Style};
+use ratatui::layout::Rect;
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
+use ratatui::Frame;
+
+use super::super::hub_shelf::human_size;
+use crate::tui::app::dialog::SimplePromptDialog;
+use crate::tui::ui::theme::Theme;
 
 /// Apply styling to collapsed paste blocks, making them stand out with accent color.
 pub(super) fn style_collapsed_paste_blocks(
@@ -131,4 +138,65 @@ pub(super) fn wrap_styled_content(
     }
     lines.push(Line::from(spans));
     lines
+}
+
+/// Rows the attachment chips block needs: one for the chips row when
+/// attachments are showing, one more for the inline attach error.
+pub(super) fn attachment_chips_height(dialog: &SimplePromptDialog) -> u16 {
+    u16::from(!dialog.attachments.is_empty()) + u16::from(dialog.attach_error.is_some())
+}
+
+/// Draw the attached-images chip row (`[img 1 · 120 B]` …) plus the inline
+/// attach error, if any. The focused chip paints as the accent pill; the
+/// rest are plain. `area` is exactly `attachment_chips_height` rows tall.
+pub(super) fn draw_attachment_chips(
+    frame: &mut Frame,
+    dialog: &SimplePromptDialog,
+    area: Rect,
+    accent: Color,
+    theme: &Theme,
+) {
+    let mut y = area.y;
+    if !dialog.attachments.is_empty() {
+        let mut spans: Vec<Span> = Vec::new();
+        for (index, attachment) in dialog.attachments.iter().enumerate() {
+            if index > 0 {
+                spans.push(Span::raw(" "));
+            }
+            let focused = dialog.is_chips_focused() && dialog.attachment_focus == Some(index);
+            let style = if focused {
+                Style::default()
+                    .fg(theme.accent_fg)
+                    .bg(accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.text_primary)
+            };
+            spans.push(Span::styled(
+                format!(
+                    "[img {} · {}]",
+                    index + 1,
+                    human_size(i64::try_from(attachment.size_bytes).unwrap_or(i64::MAX))
+                ),
+                style,
+            ));
+        }
+        let row = Rect { height: 1, ..area };
+        frame.render_widget(Paragraph::new(Line::from(spans)), row);
+        y += 1;
+    }
+    if let Some(error) = dialog.attach_error.as_deref() {
+        let row = Rect {
+            y,
+            height: 1,
+            ..area
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!("⚠ {error}"),
+                Style::default().fg(theme.warning),
+            ))),
+            row,
+        );
+    }
 }
