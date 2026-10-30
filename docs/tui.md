@@ -99,6 +99,12 @@ step instead of launching straight away:
   idle, red for failed, gray for exited. A running session whose daemon
   connection dropped shows dim gray until it reconnects. The sidebar shows
   a colored gutter bar per agent.
+- **Focus pill placement** — the `Focus`/`Preview` pill (the `Auto-follow`/
+  `Manual` label in graph view) sits right-aligned on the panel's first row,
+  after the session name (or the graph name in graph view), so it never
+  covers the text there. When the panel is too narrow for both, the pill is
+  dropped and the name stays. The `classic` (bordered) theme is unchanged:
+  the label keeps its place in the border title.
 - **Split groups** — side-by-side horizontal/vertical views to watch
   multiple agents simultaneously.
 - **System dashboard** — CPU, memory, disk, GPU (NVIDIA/Linux/macOS) and
