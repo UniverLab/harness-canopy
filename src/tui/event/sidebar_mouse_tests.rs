@@ -252,6 +252,14 @@ fn shift_arrows_step_one_sidebar_tab_each_way_and_wrap() {
         KeyModifiers::SHIFT
     ));
     assert_eq!(app.sidebar_layer, crate::tui::app::SidebarLayer::Knowledge);
+    assert!(
+        matches!(app.focus, Focus::Home),
+        "stepping from sidebar level must stay at sidebar level"
+    );
+    assert!(
+        app.project_focus.is_none(),
+        "arriving on Knowledge must not open its project tabs"
+    );
 
     assert!(handle_global_key(
         &mut app,
@@ -273,6 +281,14 @@ fn shift_arrows_step_one_sidebar_tab_each_way_and_wrap() {
         app.sidebar_layer,
         crate::tui::app::SidebarLayer::Knowledge,
         "stepping left off the start wraps to the last tab"
+    );
+    assert!(
+        matches!(app.focus, Focus::Home),
+        "stepping from sidebar level must stay at sidebar level"
+    );
+    assert!(
+        app.project_focus.is_none(),
+        "arriving on Knowledge must not open its project tabs"
     );
 }
 
