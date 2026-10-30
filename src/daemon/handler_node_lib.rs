@@ -64,6 +64,11 @@ impl TaskTriggerHandler {
         // nothing: the review comes first. A draft is consumed by the review
         // fetch, so the accept call reuses the parked body — with no parked
         // body it re-fetches and the 404 says the draft is gone.
+        if let Some(name) = &params.as_name {
+            if let Err(message) = crate::daemon::node_install::validate_as_name(name) {
+                return Ok(error_result(&message));
+            }
+        }
         let accepted = params.accept == Some(true);
         let reference = params.reference.clone();
         let cached = if accepted {

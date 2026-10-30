@@ -129,6 +129,19 @@ pub(crate) fn write_node_install(
     Ok(presets_written)
 }
 
+/// Refuse a `--as` local name that is not a slug — the check [`apply_as`]
+/// runs, exposed so callers can validate before fetching: a one-use draft
+/// must not be consumed by a request whose `--as` was never valid.
+pub(crate) fn validate_as_name(local_name: &str) -> Result<(), String> {
+    let trimmed = local_name.trim();
+    if !crate::domain::nodes::is_slug(trimmed) {
+        return Err(format!(
+            "Invalid node name '{trimmed}': use 1-48 lowercase letters, digits, or '-'."
+        ));
+    }
+    Ok(())
+}
+
 /// Rename a fetched document under `--as` (`local_name`): the document
 /// takes the new name, its bundled preset is renamed with it — a
 /// `<doc>-…` preset keeps its suffix under the new name, any other preset
@@ -137,12 +150,8 @@ pub(crate) fn write_node_install(
 /// refused. The caller applies this to the fetched document for the review
 /// as well, so the review shows the names that will be written.
 pub(crate) fn apply_as(document: &NodeDocument, local_name: &str) -> Result<NodeDocument, String> {
+    validate_as_name(local_name)?;
     let local_name = local_name.trim();
-    if !crate::domain::nodes::is_slug(local_name) {
-        return Err(format!(
-            "Invalid node name '{local_name}': use 1-48 lowercase letters, digits, or '-'."
-        ));
-    }
     let mut renamed = document.clone();
     let old_name = renamed.name.clone();
     renamed.name = local_name.to_string();
@@ -751,5 +760,159 @@ mod tests {
             .unwrap()
             .expect("stored");
         assert_eq!(stored.document.config["prompt_template"], "alice audits");
+    }
+
+    fn reviewer_doc(name: &str, preset_content: &str) -> serde_json::Value {
+        serde_json::json!({
+            "format_version": 1,
+            "name": name,
+            "kind": "agent",
+            "config": {"prompt_template": "review this", "timeout_minutes": 10},
+            "preset": {"name": "shared-preset", "content": preset_content},
+        })
+    }
+
+    /// Two different node names sharing one preset name: the second source
+    /// refuses on the preset — never silently taking it — naming both
+    /// sources, and writes neither its preset nor its node.
+    #[test]
+    fn preset_owned_by_another_source_refuses_when_node_names_differ() {
+        let official = reviewer_doc("reviewer", "official text");
+        let mut community = reviewer_doc("reviewer", "alice text");
+        community["name"] = serde_json::json!("alice-reviewer");
+        let stub = StubCatalogue::start(
+            [
+                (
+                    "/i/node/reviewer".to_string(),
+                    StubRoute::ok(&official.to_string()),
+                ),
+                (
+                    "/i/alice/lab/node/alice-reviewer".to_string(),
+                    StubRoute::ok(&community.to_string()),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let (_home, nodes, prompts) = dirs();
+        let first = fetch_node_document(&stub.base_url(), "reviewer").unwrap();
+        write_node_install(
+            &first.document,
+            &options(&first.source_ref),
+            &nodes,
+            &prompts,
+        )
+        .unwrap();
+
+        let second = fetch_node_document(&stub.base_url(), "alice/lab/alice-reviewer").unwrap();
+        let error = write_node_install(
+            &second.document,
+            &options(&second.source_ref),
+            &nodes,
+            &prompts,
+        )
+        .expect_err("a preset owned by another source must refuse");
+        assert!(error.contains("'shared-preset'"), "{error}");
+        assert!(error.contains("'reviewer'"), "{error}");
+        assert!(error.contains("'alice/lab/alice-reviewer'"), "{error}");
+        assert!(error.contains("--as"), "{error}");
+        assert!(
+            !nodes.join("alice-reviewer.json").exists(),
+            "a preset collision writes no node document"
+        );
+        assert_eq!(
+            std::fs::read_to_string(prompts.join("shared-preset.md")).unwrap(),
+            "official text"
+        );
+    }
+
+    /// The preset-only collision's ways out: `--overwrite-presets` replaces
+    /// the preset, `--replace` replaces it too, and `--as` renames the
+    /// preset with the node so both copies coexist.
+    #[test]
+    fn preset_owned_by_another_source_has_three_ways_out() {
+        let official = reviewer_doc("reviewer", "official text");
+        let mut community = reviewer_doc("reviewer", "alice text");
+        community["name"] = serde_json::json!("alice-reviewer");
+
+        // `--overwrite-presets` replaces the preset and keeps the node name.
+        let stub = StubCatalogue::start(
+            [
+                (
+                    "/i/node/reviewer".to_string(),
+                    StubRoute::ok(&official.to_string()),
+                ),
+                (
+                    "/i/alice/lab/node/alice-reviewer".to_string(),
+                    StubRoute::ok(&community.to_string()),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let (_home, nodes, prompts) = dirs();
+        let first = fetch_node_document(&stub.base_url(), "reviewer").unwrap();
+        write_node_install(
+            &first.document,
+            &options(&first.source_ref),
+            &nodes,
+            &prompts,
+        )
+        .unwrap();
+        let second = fetch_node_document(&stub.base_url(), "alice/lab/alice-reviewer").unwrap();
+        let mut overwrite = options(&second.source_ref);
+        overwrite.overwrite_presets = true;
+        write_node_install(&second.document, &overwrite, &nodes, &prompts)
+            .expect("--overwrite-presets replaces the preset");
+        assert_eq!(
+            std::fs::read_to_string(prompts.join("shared-preset.md")).unwrap(),
+            "alice text"
+        );
+        assert!(nodes.join("alice-reviewer.json").exists());
+
+        // `--replace` replaces the preset too.
+        let (_home, nodes, prompts) = dirs();
+        let first = fetch_node_document(&stub.base_url(), "reviewer").unwrap();
+        write_node_install(
+            &first.document,
+            &options(&first.source_ref),
+            &nodes,
+            &prompts,
+        )
+        .unwrap();
+        let second = fetch_node_document(&stub.base_url(), "alice/lab/alice-reviewer").unwrap();
+        let mut replace = options(&second.source_ref);
+        replace.replace = true;
+        write_node_install(&second.document, &replace, &nodes, &prompts)
+            .expect("--replace replaces the preset");
+        assert_eq!(
+            std::fs::read_to_string(prompts.join("shared-preset.md")).unwrap(),
+            "alice text"
+        );
+
+        // `--as` renames the preset with the node: both files coexist.
+        let (_home, nodes, prompts) = dirs();
+        let first = fetch_node_document(&stub.base_url(), "reviewer").unwrap();
+        write_node_install(
+            &first.document,
+            &options(&first.source_ref),
+            &nodes,
+            &prompts,
+        )
+        .unwrap();
+        let second = fetch_node_document(&stub.base_url(), "alice/lab/alice-reviewer").unwrap();
+        let mut renamed = options(&second.source_ref);
+        renamed.local_name = Some("alice-reviewer-2".to_string());
+        write_node_install(&second.document, &renamed, &nodes, &prompts)
+            .expect("--as renames the preset with the node");
+        assert_eq!(
+            std::fs::read_to_string(prompts.join("shared-preset.md")).unwrap(),
+            "official text",
+            "the owned preset is untouched"
+        );
+        assert_eq!(
+            std::fs::read_to_string(prompts.join("alice-reviewer-2-shared-preset.md")).unwrap(),
+            "alice text"
+        );
     }
 }

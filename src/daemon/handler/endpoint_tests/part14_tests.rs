@@ -691,3 +691,138 @@ async fn install_as_renames_a_colliding_bundled_preset() {
         .expect("start node imported");
     assert_eq!(start.config["prompt_preset"], "alice-custom");
 }
+
+/// `replace: true` is the graph install's alias for `overwrite_presets`:
+/// a bundled preset owned by another source is replaced and restamped.
+#[tokio::test]
+async fn install_replace_overwrites_a_preset_owned_by_another_source() {
+    let (dir, _db, handler) = endpoint_test_handler();
+    let workdir = dir.path().to_string_lossy().to_string();
+    let stub = StubCatalogue::start(
+        [
+            (
+                "/i/graph/my-graph".to_string(),
+                StubRoute::ok(&graph_doc_with_preset("shared", "official text").to_string()),
+            ),
+            (
+                "/i/alice/lab/graph/my-graph".to_string(),
+                StubRoute::ok(&graph_doc_with_preset("shared", "alice text").to_string()),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    let (_home, _guard, prompts) = install_home(&stub.base_url());
+
+    let installed = install_accepted(&handler, "my-graph", &workdir, None, None).await;
+    assert!(!is_err(&installed), "{}", text(&installed));
+
+    let replaced = install_params(
+        &handler,
+        GraphInstallParams {
+            reference: "alice/lab/my-graph".to_string(),
+            workdir: workdir.clone(),
+            name: None,
+            as_prefix: None,
+            replace: Some(true),
+            overwrite_presets: None,
+            accept: Some(true),
+        },
+    )
+    .await;
+    assert!(!is_err(&replaced), "{}", text(&replaced));
+    assert_eq!(
+        std::fs::read_to_string(prompts.join("custom.md")).unwrap(),
+        "alice text"
+    );
+}
+
+/// The review shows the `--as` renames before anything is written: a
+/// caller reviewing with `as` sees the prefixed preset, not the
+/// catalogue's own name.
+#[tokio::test]
+async fn install_review_with_as_shows_the_renamed_preset() {
+    let (dir, db, handler) = endpoint_test_handler();
+    let workdir = dir.path().to_string_lossy().to_string();
+    let stub = StubCatalogue::start(
+        [(
+            "/i/alice/lab/graph/my-graph".to_string(),
+            StubRoute::ok(&graph_doc_with_preset("shared", "alice text").to_string()),
+        )]
+        .into_iter()
+        .collect(),
+    );
+    let (_home, _guard, prompts) = install_home(&stub.base_url());
+    std::fs::write(prompts.join("custom.md"), "official text").unwrap();
+
+    let pending = install_params(
+        &handler,
+        GraphInstallParams {
+            reference: "alice/lab/my-graph".to_string(),
+            workdir: workdir.clone(),
+            name: None,
+            as_prefix: Some("alice".to_string()),
+            replace: None,
+            overwrite_presets: None,
+            accept: None,
+        },
+    )
+    .await;
+    assert!(!is_err(&pending), "{}", text(&pending));
+    let body: serde_json::Value = serde_json::from_str(&raw_text(&pending)).unwrap();
+    assert_eq!(body["needs_review"], true);
+    let labels: Vec<&str> = body["review"]["prompts"]
+        .as_array()
+        .expect("prompts list")
+        .iter()
+        .filter_map(|prompt| prompt["label"].as_str())
+        .collect();
+    assert!(
+        labels.contains(&"preset \"alice-custom\""),
+        "the renamed preset labels the review: {labels:?}"
+    );
+    assert!(
+        !labels.contains(&"preset \"custom\""),
+        "the colliding name is gone from the review: {labels:?}"
+    );
+    assert!(
+        db.list_graphs(None, true).unwrap().is_empty(),
+        "a call without accept imports nothing"
+    );
+    assert!(!prompts.join("alice-custom.md").exists());
+}
+
+/// An invalid `as` prefix is refused before any fetch — the catalogue is
+/// never hit, so a one-use draft survives a request whose `--as` was
+/// never valid.
+#[tokio::test]
+async fn install_invalid_as_refuses_without_fetching() {
+    let (dir, _db, handler) = endpoint_test_handler();
+    let workdir = dir.path().to_string_lossy().to_string();
+    let stub = StubCatalogue::start(std::collections::HashMap::new());
+    let (_home, _guard, _prompts) = install_home(&stub.base_url());
+
+    let refused = install_params(
+        &handler,
+        GraphInstallParams {
+            reference: "my-graph".to_string(),
+            workdir: workdir.clone(),
+            name: None,
+            as_prefix: Some("Not A Prefix".to_string()),
+            replace: None,
+            overwrite_presets: None,
+            accept: Some(true),
+        },
+    )
+    .await;
+    assert!(is_err(&refused), "{}", text(&refused));
+    assert!(
+        text(&refused).contains("Invalid --as prefix"),
+        "{}",
+        text(&refused)
+    );
+    assert!(
+        stub.hits().is_empty(),
+        "an invalid --as refuses before any fetch"
+    );
+}

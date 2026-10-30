@@ -296,7 +296,7 @@ fn owned_preset_refusal(
     };
     format!(
         "Prompt preset '{name}' already exists at {} with different content ({existing}); \
-         '{source_ref}' also ships it. Install with --as to rename it, or pass --overwrite-presets to replace it.",
+         '{source_ref}' also ships it. Install with --as to rename it, or pass --replace (or --overwrite-presets) to replace it.",
         path.display()
     )
 }

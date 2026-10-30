@@ -178,6 +178,9 @@ pub(crate) fn run_install(
         show_prompts,
         json,
     } = flags;
+    if let Some(name) = &as_name {
+        crate::daemon::node_install::validate_as_name(name).map_err(|e| anyhow!(e))?;
+    }
     let canopy_dir = crate::domain::prompts::canopy_dir();
     let fetched = crate::daemon::node_install::fetch_node_document(
         &crate::daemon::graph_install::catalogue_url(),
@@ -718,5 +721,80 @@ mod tests {
         )
         .expect_err("an empty answer refuses");
         assert!(declined.to_string().contains("'auditor'"), "{declined}");
+    }
+
+    /// The JSON list rows carry which catalogue entry installed each
+    /// document (`null` for builtins and local documents).
+    #[test]
+    fn list_rows_carry_the_catalogue_source() {
+        let mut installed = crate::domain::nodes::builtin("implementer").unwrap();
+        installed.catalogue_source = Some("auditor".to_string());
+        let entries = vec![
+            NodeEntry {
+                document: installed,
+                source: nodes::Source::Installed,
+            },
+            NodeEntry {
+                document: crate::domain::nodes::builtin("resilience").unwrap(),
+                source: nodes::Source::Builtin,
+            },
+        ];
+        let rows = list_rows(&entries);
+        assert_eq!(rows[0]["catalogue_source"], "auditor");
+        assert_eq!(rows[0]["source"], "installed");
+        assert!(rows[1]["catalogue_source"].is_null());
+        assert_eq!(rows[1]["source"], "builtin");
+    }
+
+    /// `--as` installs under another local name with its preset renamed
+    /// with it — and an invalid `--as` refuses before any fetch.
+    #[test]
+    fn yes_with_as_installs_under_another_local_name() {
+        use crate::daemon::graph_install::stub::{StubCatalogue, StubRoute};
+        let stub = StubCatalogue::start(
+            [(
+                "/i/node/auditor".to_string(),
+                StubRoute::ok(&auditor_doc().to_string()),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let (_home, _guard, nodes, prompts) = install_home(&stub.base_url());
+
+        run_install(
+            "auditor",
+            InstallFlags {
+                as_name: Some("alice-auditor".to_string()),
+                yes: true,
+                ..Default::default()
+            },
+            false,
+            &mut "".as_bytes(),
+        )
+        .expect("--as installs");
+        assert!(nodes.join("alice-auditor.json").exists());
+        assert!(!nodes.join("auditor.json").exists());
+        assert_eq!(
+            std::fs::read_to_string(prompts.join("alice-auditor-preset.md")).unwrap(),
+            "audit well"
+        );
+
+        let error = run_install(
+            "auditor",
+            InstallFlags {
+                as_name: Some("Not A Slug".to_string()),
+                yes: true,
+                ..Default::default()
+            },
+            false,
+            &mut "".as_bytes(),
+        )
+        .expect_err("an invalid --as must refuse");
+        assert!(error.to_string().contains("Invalid node name"), "{error}");
+        assert_eq!(
+            stub.hits().len(),
+            1,
+            "the invalid --as refused before any second fetch"
+        );
     }
 }

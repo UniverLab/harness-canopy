@@ -312,6 +312,20 @@ pub(crate) fn write_presets(
     Ok(presets_written)
 }
 
+/// Refuse a `--as` prefix that is not a slug — the check
+/// [`rename_colliding_presets`] runs, exposed so callers can validate before
+/// fetching: a one-use draft must not be consumed by a request whose `--as`
+/// was never valid.
+pub(crate) fn validate_as_prefix(prefix: &str) -> Result<(), String> {
+    let trimmed = prefix.trim();
+    if !is_slug(trimmed) {
+        return Err(format!(
+            "Invalid --as prefix '{trimmed}': use 1-48 lowercase letters, digits, or '-'."
+        ));
+    }
+    Ok(())
+}
+
 /// Rename every bundled preset the install would refuse under the ownership
 /// rule to `{prefix}-{preset}`, rewriting the agent node configs that
 /// reference it — the `--as PREFIX` path of `canopy graph install`. The
@@ -326,12 +340,8 @@ pub(crate) fn rename_colliding_presets(
     overwrite: bool,
     prompts_dir: &Path,
 ) -> Result<(), String> {
+    validate_as_prefix(prefix)?;
     let prefix = prefix.trim();
-    if !is_slug(prefix) {
-        return Err(format!(
-            "Invalid --as prefix '{prefix}': use 1-48 lowercase letters, digits, or '-'."
-        ));
-    }
     let mut renames: Vec<(String, String)> = Vec::new();
     for preset in &document.prompt_presets {
         let single = std::slice::from_ref(preset);

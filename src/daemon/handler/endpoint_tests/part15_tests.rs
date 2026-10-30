@@ -901,3 +901,120 @@ async fn node_reinstall_from_the_same_source_updates() {
         "audit very well"
     );
 }
+
+/// `replace: true` overwrites a name installed from another source — the
+/// document, its source stamp, and its preset all become the incoming
+/// source's.
+#[tokio::test]
+async fn node_install_replace_overwrites_a_name_from_another_source() {
+    let (_dir, _db, handler) = endpoint_test_handler();
+    let stub = stub_serving_official_and_community(
+        &auditor_doc().to_string(),
+        &community_auditor_doc().to_string(),
+    );
+    let (_home, _guard, nodes_dir, prompts_dir) = node_home(&stub.base_url());
+
+    let installed = install_node_accepted(&handler, "auditor", None).await;
+    assert!(!is_err(&installed), "{}", text(&installed));
+
+    let replaced = install_node_with_as(
+        &handler,
+        "alice/lab/auditor",
+        None,
+        Some(true),
+        None,
+        Some(true),
+    )
+    .await;
+    assert!(!is_err(&replaced), "{}", text(&replaced));
+
+    let stored =
+        nodes::parse_document(&std::fs::read_to_string(nodes_dir.join("auditor.json")).unwrap())
+            .unwrap();
+    assert_eq!(stored.config["prompt_template"], "alice audits");
+    assert_eq!(
+        stored.catalogue_source.as_deref(),
+        Some("alice/lab/auditor")
+    );
+    assert_eq!(
+        std::fs::read_to_string(prompts_dir.join("auditor-preset.md")).unwrap(),
+        "alice audits well"
+    );
+}
+
+/// The review shows the `--as` names before anything is written: a caller
+/// reviewing with `as` sees the renamed document and preset, not the
+/// catalogue's own names.
+#[tokio::test]
+async fn node_install_review_with_as_shows_the_renamed_names() {
+    let (_dir, _db, handler) = endpoint_test_handler();
+    let stub = stub_serving("/i/node/auditor", &auditor_doc().to_string());
+    let (_home, _guard, nodes_dir, prompts_dir) = node_home(&stub.base_url());
+
+    let pending = install_node_with_as(
+        &handler,
+        "auditor",
+        Some("alice-auditor".to_string()),
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert!(!is_err(&pending), "{}", text(&pending));
+    let body: serde_json::Value = serde_json::from_str(&raw_text(&pending)).unwrap();
+    assert_eq!(body["needs_review"], true);
+    let review = &body["review"];
+    assert_eq!(review["name"], "alice-auditor");
+    let labels: Vec<&str> = review["prompts"]
+        .as_array()
+        .expect("prompts list")
+        .iter()
+        .filter_map(|prompt| prompt["label"].as_str())
+        .collect();
+    assert!(
+        labels.iter().any(|label| label.contains("alice-auditor")),
+        "the renamed document labels the review: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"preset \"alice-auditor-preset\""),
+        "the renamed preset labels the review: {labels:?}"
+    );
+    assert!(
+        !nodes_dir.join("alice-auditor.json").exists(),
+        "a call without accept writes no node document"
+    );
+    assert!(
+        !prompts_dir.join("alice-auditor-preset.md").exists(),
+        "a call without accept writes no preset"
+    );
+}
+
+/// An invalid `as` is refused before any fetch — the catalogue is never
+/// hit, so a one-use draft survives a request whose `--as` was never valid.
+#[tokio::test]
+async fn node_install_invalid_as_refuses_without_fetching() {
+    let (_dir, _db, handler) = endpoint_test_handler();
+    let stub = stub_serving("/i/node/auditor", &auditor_doc().to_string());
+    let (_home, _guard, nodes_dir, _prompts_dir) = node_home(&stub.base_url());
+
+    let refused = install_node_with_as(
+        &handler,
+        "auditor",
+        Some("Not A Slug".to_string()),
+        None,
+        None,
+        Some(true),
+    )
+    .await;
+    assert!(is_err(&refused), "{}", text(&refused));
+    assert!(
+        text(&refused).contains("Invalid node name"),
+        "{}",
+        text(&refused)
+    );
+    assert!(
+        stub.hits().is_empty(),
+        "an invalid --as refuses before any fetch"
+    );
+    assert!(!nodes_dir.join("auditor.json").exists());
+}

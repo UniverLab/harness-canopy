@@ -522,6 +522,7 @@ fn install_for_install_refuses_a_preset_owned_by_another_source() {
     assert!(error.contains("'my-graph'"), "{error}");
     assert!(error.contains("'alice/lab/my-graph'"), "{error}");
     assert!(error.contains("--as"), "{error}");
+    assert!(error.contains("--replace"), "{error}");
     assert!(error.contains("--overwrite-presets"), "{error}");
     assert!(
         !dir.path().join("aaa.md").exists(),
