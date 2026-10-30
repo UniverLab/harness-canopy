@@ -4,8 +4,8 @@
 use crate::daemon::handler::{OptionalExtension, TaskTriggerHandler};
 use crate::daemon::handler_formatting::internal_error;
 use crate::daemon::handler_run_directive::{
-    limit_reset_note, not_continuable_refusal, reset_execution_limit, restart_at_node,
-    retry_restart_target,
+    limit_reset_note, not_continuable_refusal, persist_continue_workdir, reset_execution_limit,
+    restart_at_node, retry_restart_target,
 };
 use crate::daemon::handler_run_exec::{
     directed_run_report, find_in_flight_run, handle_retry_current_node, handle_skip_next_spec,
@@ -281,23 +281,33 @@ impl TaskTriggerHandler {
         // An explicit workdir replaces the run's workdir for the continued
         // run; without it the run keeps the workdir it was launched with
         // (never the stored one — the resume path reads the persisted run
-        // workdir). Invalid means a tool error with no resume.
-        if let Some(workdir) = params
+        // workdir). The format is validated up front so an invalid workdir
+        // is a tool error with no resume; the write itself happens on each
+        // resume path below, after every refusal check, so a refused
+        // continue never mutates the run's workdir.
+        let continue_workdir: Option<String> = match params
             .workdir
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            if let Err(e) = validate_absolute_dir(workdir) {
-                return Ok(error_result(&e));
+            Some(workdir) => {
+                if let Err(e) = validate_absolute_dir(workdir) {
+                    return Ok(error_result(&e));
+                }
+                Some(workdir.to_string())
             }
-            self.db
-                .set_graph_active_run_workdir(&graph_id, Some(workdir))
-                .map_err(internal_error)?;
-        }
+            None => None,
+        };
         if params.mode.trim() == "run_from_node" {
             return self
-                .graph_continue_run_from_node(graph_id, lp, params.node_id, params.spec_id)
+                .graph_continue_run_from_node(
+                    graph_id,
+                    lp,
+                    params.node_id,
+                    params.spec_id,
+                    continue_workdir.as_deref(),
+                )
                 .await;
         }
         // FR6: a failed graph takes the same two actions as a paused one.
@@ -316,6 +326,7 @@ impl TaskTriggerHandler {
                         &graph_id,
                         &spec,
                         node_id,
+                        continue_workdir.as_deref(),
                     );
                 }
                 // FR3: same never-run idea-graph refusal as run_from_node.
@@ -345,6 +356,7 @@ impl TaskTriggerHandler {
             }
         };
 
+        persist_continue_workdir(&self.db, &graph_id, continue_workdir.as_deref())?;
         Arc::clone(&self.graph_engine).resume_background(graph_id.clone(), None);
 
         Ok(success_result(&format!(
@@ -363,6 +375,7 @@ impl TaskTriggerHandler {
         lp: crate::domain::graphs::Graph,
         node_id: Option<String>,
         spec_id: Option<String>,
+        workdir: Option<&str>,
     ) -> Result<CallToolResult, McpError> {
         // FR2: "the graph has no active run" is checked against the run rows,
         // not the graph's own status — a blocker can flip a graph to `paused`
@@ -427,6 +440,7 @@ impl TaskTriggerHandler {
         };
         // FR1: the engine zeroes the count when the directed run starts.
         let limit = limit_reset_note(&spec.name);
+        persist_continue_workdir(&self.db, &graph_id, workdir)?;
         Arc::clone(&self.graph_engine).resume_background(
             graph_id.clone(),
             Some(crate::graph_engine::DirectedStart {

@@ -92,6 +92,23 @@ pub(crate) fn retry_restart_target(
     Ok(spec_current_node(db, &spec.id)?.map(|node| (spec, node)))
 }
 
+/// Persist an explicit `graph_control continue` workdir for the resumed run
+/// (`None` keeps the run's workdir untouched). Called only on resume paths,
+/// after every refusal check, so a refused continue never mutates the run's
+/// workdir — a value written by a refused call would silently steer the
+/// next resume at the wrong checkout.
+pub(crate) fn persist_continue_workdir(
+    db: &Database,
+    graph_id: &str,
+    workdir: Option<&str>,
+) -> Result<(), McpError> {
+    if let Some(workdir) = workdir {
+        db.set_graph_active_run_workdir(graph_id, Some(workdir))
+            .map_err(internal_error)?;
+    }
+    Ok(())
+}
+
 /// A directed run at `node_id` of `spec`, the same path `run_from_node` takes:
 /// earlier outputs are reused and `{{spec_start_head}}` is kept or captured
 /// fresh exactly as that directed run would. The limit is reset first.
@@ -101,6 +118,7 @@ pub(crate) fn restart_at_node(
     graph_id: &str,
     spec: &GraphSpec,
     node_id: String,
+    workdir: Option<&str>,
 ) -> Result<CallToolResult, McpError> {
     if let Some(run) = find_in_flight_run(db, graph_id).map_err(internal_error)? {
         let node_name = node_name_for_error(db, &run.node_id).map_err(internal_error)?;
@@ -116,6 +134,7 @@ pub(crate) fn restart_at_node(
         Err(message) => return Ok(error_result(&message)),
     };
     let limit = limit_reset_note(&spec.name);
+    persist_continue_workdir(db, graph_id, workdir)?;
     Arc::clone(engine).resume_background(
         graph_id.to_string(),
         Some(DirectedStart {

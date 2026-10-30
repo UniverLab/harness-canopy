@@ -302,7 +302,7 @@ pub(crate) static GRAPH_CONTROL: ToolSpec = ToolSpec {
         ActionSpec {
             name: "continue",
             required: &["graph_id", "mode"],
-            optional: &["node_id", "spec_id"],
+            optional: &["node_id", "spec_id", "workdir"],
         },
         ActionSpec {
             name: "reset",

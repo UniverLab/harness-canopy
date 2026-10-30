@@ -1199,6 +1199,89 @@ async fn continue_workdir_replaces_and_is_kept_without_override() {
     );
 }
 
+/// The `graph_control` action table must declare `workdir` for `continue`:
+/// without it a real MCP call carrying the documented parameter is refused
+/// as undeclared before the handler ever runs. Direct `graph_continue_impl`
+/// tests bypass the table, so they cannot catch the drift — this one pins
+/// the dispatch layer itself.
+#[test]
+fn graph_control_continue_declares_workdir() {
+    let table = &crate::daemon::handler_graph_tools::GRAPH_CONTROL;
+    let spec = table.action("continue").expect("continue action declared");
+    assert!(
+        spec.optional.contains(&"workdir"),
+        "continue must declare optional workdir"
+    );
+    let params = serde_json::json!({
+        "action": "continue",
+        "graph_id": "graph-1",
+        "mode": "retry_current_node",
+        "workdir": "/tmp",
+    });
+    assert!(
+        table.validate(&params).is_ok(),
+        "continue carrying workdir must validate"
+    );
+}
+
+/// A refused `continue` persists nothing: neither a bad mode nor a
+/// run_from_node refusal (unknown node) may replace the run's workdir —
+/// otherwise the next continue without a workdir would silently resume at
+/// the refused call's checkout.
+#[tokio::test]
+async fn refused_continue_persists_no_workdir() {
+    use crate::daemon::params::GraphContinueParams;
+
+    let (dir, db, handler) = queue_test_handler();
+    let stored = dir.path().to_string_lossy().to_string();
+    let candidate = tempdir().unwrap();
+    let candidate_path = candidate.path().to_string_lossy().to_string();
+
+    insert_paused_graph(&db, "graph-bad-mode", &stored);
+    let bad_mode = handler
+        .graph_continue_impl(GraphContinueParams {
+            graph_id: "graph-bad-mode".to_string(),
+            mode: "sideways".to_string(),
+            node_id: None,
+            spec_id: None,
+            workdir: Some(candidate_path.clone()),
+        })
+        .await
+        .unwrap();
+    assert!(
+        bad_mode.is_error.unwrap_or(false),
+        "a bad mode must be a tool error: {:?}",
+        bad_mode.content
+    );
+    assert_eq!(
+        db.graph_active_run_workdir("graph-bad-mode").unwrap(),
+        None,
+        "a bad mode must persist no workdir"
+    );
+
+    insert_paused_graph(&db, "graph-bad-node", &stored);
+    let bad_node = handler
+        .graph_continue_impl(GraphContinueParams {
+            graph_id: "graph-bad-node".to_string(),
+            mode: "run_from_node".to_string(),
+            node_id: Some("Nope".to_string()),
+            spec_id: None,
+            workdir: Some(candidate_path.clone()),
+        })
+        .await
+        .unwrap();
+    assert!(
+        bad_node.is_error.unwrap_or(false),
+        "an unknown node must be a tool error: {:?}",
+        bad_node.content
+    );
+    assert_eq!(
+        db.graph_active_run_workdir("graph-bad-node").unwrap(),
+        None,
+        "a refused run_from_node must persist no workdir"
+    );
+}
+
 /// `graph get` and `graph list` show the active run's workdir next to the
 /// stored one — but only when they differ.
 #[test]
