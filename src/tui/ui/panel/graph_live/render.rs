@@ -230,12 +230,12 @@ fn status_icon_and_label(
         );
     }
     if blocked {
-        return ("⛔", "blocked".to_string(), theme.status_fail);
+        return ("⊘", "blocked".to_string(), theme.status_fail);
     }
     match state.graph_status {
         GraphStatus::Running => ("▶", "running".to_string(), theme.status_running),
-        GraphStatus::Pausing => ("⏸", "pausing".to_string(), Color::Yellow),
-        GraphStatus::Paused => ("⏸", "paused".to_string(), Color::Yellow),
+        GraphStatus::Pausing => ("‖", "pausing".to_string(), Color::Yellow),
+        GraphStatus::Paused => ("‖", "paused".to_string(), Color::Yellow),
         GraphStatus::Completed => ("✓", "completed".to_string(), theme.status_ok),
         GraphStatus::Failed => ("✗", "failed".to_string(), theme.status_fail),
         GraphStatus::Draft => ("·", "draft".to_string(), theme.dim_text),

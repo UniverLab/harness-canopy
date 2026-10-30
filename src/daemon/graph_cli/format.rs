@@ -167,8 +167,8 @@ pub(super) fn short_id(id: &str) -> String {
 pub(super) fn status_icon(status: GraphStatus) -> &'static str {
     match status {
         GraphStatus::Running => "\x1b[36m▶\x1b[0m",
-        GraphStatus::Pausing => "\x1b[33m⏸\x1b[0m",
-        GraphStatus::Paused => "\x1b[33m⏸\x1b[0m",
+        GraphStatus::Pausing => "\x1b[33m‖\x1b[0m",
+        GraphStatus::Paused => "\x1b[33m‖\x1b[0m",
         GraphStatus::Completed => "\x1b[32m✓\x1b[0m",
         GraphStatus::Failed => "\x1b[31m✗\x1b[0m",
         GraphStatus::Draft => "\x1b[90m●\x1b[0m",

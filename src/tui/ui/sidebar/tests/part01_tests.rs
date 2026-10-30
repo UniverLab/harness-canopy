@@ -392,7 +392,7 @@ fn blocked_indicator_still_renders_for_paused_graph_with_blocker() {
         );
     });
     assert!(
-        text.contains('⛔'),
+        text.contains('⊘'),
         "a paused graph with a reported blocker must still show the blocked icon: {text}"
     );
 }
@@ -1303,7 +1303,7 @@ fn rag_info_title_when_paused() {
     )
     .unwrap();
     app.rag_paused = true;
-    assert_eq!(rag_info_title(&app), " ragInfo ⏸ ");
+    assert_eq!(rag_info_title(&app), " ragInfo ‖ ");
 }
 
 #[test]

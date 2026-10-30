@@ -14,7 +14,7 @@ pub(super) fn rag_status(app: &App, theme: &Theme) -> (&'static str, Color) {
         RagModelStatus::DownloadFailed(_) => ("✗ download failed", Color::Red),
         RagModelStatus::Downloading { .. } => ("⬇ downloading", Color::Yellow),
         RagModelStatus::Preparing { .. } => ("⚙ preparing", Color::Yellow),
-        RagModelStatus::Paused => ("⏸ paused", Color::Yellow),
+        RagModelStatus::Paused => ("‖ paused", Color::Yellow),
         RagModelStatus::Ready if app.rag_info.processing_items > 0 => ("◉ indexing", Color::Yellow),
         RagModelStatus::Ready => ("● ready", theme.header_color),
         RagModelStatus::Sleeping => ("○ sleeping", theme.dim_text),

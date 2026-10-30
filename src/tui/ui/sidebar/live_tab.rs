@@ -177,9 +177,9 @@ pub(super) fn graph_status_icon(
 ) -> (&'static str, Color) {
     match lp.status {
         GraphStatus::Running => ("▶", STATUS_RUNNING),
-        GraphStatus::Pausing => ("⏸", theme.warning),
-        GraphStatus::Paused if meta.blocked => ("⛔", STATUS_FAIL),
-        GraphStatus::Paused => ("⏸", theme.warning),
+        GraphStatus::Pausing => ("‖", theme.warning),
+        GraphStatus::Paused if meta.blocked => ("⊘", STATUS_FAIL),
+        GraphStatus::Paused => ("‖", theme.warning),
         GraphStatus::Draft => ("○", theme.dim_text),
         GraphStatus::Completed => ("✓", STATUS_OK),
         GraphStatus::Failed => ("✗", STATUS_FAIL),

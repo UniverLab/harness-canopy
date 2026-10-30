@@ -294,7 +294,7 @@ fn seed_queue_driven_run(
 fn status_icon_cell(buffer: &ratatui::buffer::Buffer, y: u16) -> (String, Color) {
     for x in 0..buffer.area.width {
         let cell = &buffer[(x, y)];
-        if matches!(cell.symbol(), "▶" | "⏸" | "⛔" | "○" | "✓" | "✗") {
+        if matches!(cell.symbol(), "▶" | "‖" | "⊘" | "○" | "✓" | "✗") {
             return (cell.symbol().to_string(), cell.fg);
         }
     }

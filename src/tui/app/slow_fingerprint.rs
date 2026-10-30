@@ -192,7 +192,7 @@ fn split_groups_digest(app: &App) -> u64 {
 }
 
 /// Per-graph sidebar meta: the raw last-activity instant (the sort key)
-/// and the blocker flag (⏸ vs ⛔). The precomputed relative labels are
+/// and the blocker flag (‖ vs ⊘). The precomputed relative labels are
 /// deliberately excluded: they drift with wall-clock time, and hashing
 /// them would dirty an idle tick every minute.
 fn graphs_meta_digest(app: &App) -> u64 {
@@ -576,7 +576,7 @@ mod cadence_tests {
         );
     }
 
-    /// A blocker landing on a paused graph flips its sidebar icon (⏸ → ⛔)
+    /// A blocker landing on a paused graph flips its sidebar icon (‖ → ⊘)
     /// without changing any status, so the graph meta must be fingerprinted.
     #[test]
     fn fingerprint_sees_graph_blocker_flip() {

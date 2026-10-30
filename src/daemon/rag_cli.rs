@@ -58,14 +58,14 @@ pub(crate) async fn handle_rag_action(action: RagAction) -> Result<()> {
             action: AutoIndexAction::Start,
         } => {
             db.set_state("rag_paused", "0")?;
-            println!("\x1b[32m✓\x1b[0m  RAG auto-indexing \x1b[1menabled\x1b[0m");
+            println!("\x1b[32m✓\x1b[0m RAG auto-indexing \x1b[1menabled\x1b[0m");
         }
         RagAction::AutoIndex {
             action: AutoIndexAction::Stop,
         } => {
             db.set_state("rag_paused", "1")?;
-            println!("\x1b[33m⏸\x1b[0m  RAG auto-indexing \x1b[1mpaused\x1b[0m");
-            println!("     Run \x1b[1mcanopy rag auto-index start\x1b[0m to resume.");
+            println!("\x1b[33m‖\x1b[0m RAG auto-indexing \x1b[1mpaused\x1b[0m");
+            println!("  Run \x1b[1mcanopy rag auto-index start\x1b[0m to resume.");
         }
         RagAction::Report => handle_rag_report(&data_dir, &db).await?,
         RagAction::Compact => handle_rag_compact(&data_dir).await?,
@@ -468,7 +468,7 @@ fn print_rag_report_summary(db: &Database, report: &RagReportData<'_>) -> Result
     println!(
         " Status: {}",
         match &model_status {
-            crate::rag::status::RagModelStatus::Paused => "\x1b[33m⏸ paused\x1b[0m".to_string(),
+            crate::rag::status::RagModelStatus::Paused => "\x1b[33m‖ paused\x1b[0m".to_string(),
             crate::rag::status::RagModelStatus::Ready =>
                 "\x1b[32m● ready (model loaded)\x1b[0m".to_string(),
             crate::rag::status::RagModelStatus::Sleeping =>
