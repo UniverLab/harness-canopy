@@ -354,8 +354,10 @@ mod tests {
 
     /// The hub/prompt tab bar's active tab is the pill pair (`accent_fg` on
     /// `header_color`) in every theme. It must never regress onto a dark
-    /// raise (`selected_bg` is only ~1.2:1 against `accent_fg` in modern)
-    /// and `accent_fg` must stay the dark ink it is meant to be.
+    /// raise (`selected_bg` is only ~1.4:1 against `accent_fg` in modern)
+    /// and `accent_fg` must stay the dark ink it is meant to be. The inactive
+    /// tabs are `dim_text` straight on the dialog ground, so that pair has to
+    /// clear the bar too.
     #[test]
     fn active_tab_contrast() {
         for theme in [Theme::classic(), Theme::modern()] {
@@ -364,6 +366,12 @@ mod tests {
                 "active-tab pill {:?} on {:?} must clear 4.5:1",
                 theme.accent_fg,
                 theme.header_color
+            );
+            assert!(
+                contrast_ratio(theme.dim_text, theme.dialog_bg) >= 4.5,
+                "inactive-tab {:?} on the dialog ground {:?} must clear 4.5:1",
+                theme.dim_text,
+                theme.dialog_bg
             );
         }
     }

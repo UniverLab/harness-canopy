@@ -483,12 +483,13 @@ mod redraw_tests {
         app.sidebar_visible = true;
         app.sidebar_brain_rect = Some(Rect::new(0, 0, 5, 2));
         app.sidebar_brain = None;
-        // Freeze the background system sampler: `App::new` leaves a blend in
-        // progress, and a sample arriving mid-test would legitimately dirty
-        // via settling — neither is what this test pins.
-        app.system_monitor_active
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-        while app.system_info_rx.try_recv().is_ok() {}
+        // Detach the system sampler: a sample arriving mid-test would
+        // legitimately dirty via settling, and freezing the shared
+        // `system_monitor_active` flag cannot do that (the fast path re-arms
+        // it from `sidebar_visible`). A terminated channel never delivers
+        // another sample, which is what this test actually pins.
+        let (_dead_tx, dead_rx) = std::sync::mpsc::channel();
+        app.system_info_rx = dead_rx;
         app.system_info_target = app.system_info.clone();
         assert!(
             !brain_visible(&app),

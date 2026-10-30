@@ -383,6 +383,9 @@ on.
   (a light or purple one, say), no part of the sidebar shows that foreign
   colour. The active tab keeps its accent colour and inactive tabs stay
   dimmed, both at readable contrast against that surface.
+- **Hub** — the `F1` hub's tab strip paints the active tab as the accent pill
+  (dark ink on the theme's accent colour) and the remaining tabs dimmed, so
+  the selected tab never reads as dark text on the dark selection raise.
 
 The header, footer and session panes are unchanged.
 

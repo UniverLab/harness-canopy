@@ -421,6 +421,10 @@ mod tests {
                 );
             } else {
                 assert_eq!(cell.fg, theme.dim_text, "inactive tab {tab:?} must be dim");
+                assert_eq!(
+                    cell.bg, theme.dialog_bg,
+                    "inactive tab {tab:?} sits on the dialog ground, not a raise"
+                );
                 inactive_seen = true;
             }
         }
