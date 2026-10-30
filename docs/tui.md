@@ -319,7 +319,14 @@ row: `/` filters, `n` creates, `e` edits and `F4` deletes.
   terminals that bind `Ctrl+V` to text paste) attaches the clipboard image,
   and pasting or dropping image-file paths attaches those files instead of
   inserting text; attachments ride along as `<image path="…"/>` lines in a
-  trailing attachments block every harness CLI can open.
+  trailing attachments block every harness CLI can open. Attached images are
+  stored on the target session's shelf as `prompt-<timestamp>-<n>.<ext>`
+  (so they also show in the hub Shelf tab), at most 10 per prompt and
+  20 MiB each — past either limit an inline error appears and nothing
+  attaches. They render as `[img 1 · 120 KB]` chips under the sections:
+  `Tab` reaches the row, `←`/`→` move along it and `Backspace`/`Delete`
+  removes the focused chip (the shelf copy stays). Attachments persist with
+  the draft across close/reopen, recall and scheduled sends.
 - **Canopy protocol — once per session** — the builder prepends the
   `[CANOPY]` session-start protocol to the *first* prompt of an
   interactive session, never to the ones that follow. That fact is stored
