@@ -635,3 +635,69 @@ fn strip_absent_after_ct11() {
 }
 // Breaks if: the strip is re-added to the live view instead of
 // the border title.
+
+#[test]
+fn header_shows_single_width_glyphs_for_paused_pausing_and_blocked() {
+    let render_header = |status: DomainGraphStatus, blocked: bool| {
+        let mut state = running_state();
+        state.graph_status = status;
+        let node_info = NodeRunInfo::default();
+        render_to_text(80, 40, |frame, area| {
+            render_graph_live_view(
+                frame,
+                area,
+                &LiveViewContext {
+                    state: &state,
+                    follow: true,
+                    follow_anchor: None,
+                    highlighted_node_id: None,
+                    node_info: &node_info,
+                    blocked,
+                    now: Utc::now(),
+                    theme: &Theme::classic(),
+                    time_format: "%H:%M",
+                    selected_spec_id: None,
+                    spec_scroll: 0,
+                    scroll: 0,
+                },
+            );
+        })
+    };
+    // `concat!` needles: a glyph-plus-two-spaces literal here would trip
+    // the `tests/no_emoji_glyphs.rs` source guard, which scans this file too.
+    let double_pause = concat!("‖", "  ");
+    let double_blocked = concat!("⊘", "  ");
+
+    for status in [DomainGraphStatus::Paused, DomainGraphStatus::Pausing] {
+        let text = render_header(status, false);
+        let header = text
+            .lines()
+            .find(|line| line.contains("paus"))
+            .expect("paused/pausing header line missing");
+        assert!(
+            header.starts_with("‖ "),
+            "paused header must start with `‖` plus one space, got: {header:?}"
+        );
+        assert!(
+            !header.starts_with(double_pause),
+            "paused header must not take two spaces after `‖`: {header:?}"
+        );
+    }
+
+    // `blocked` is a paused sub-state that overrides the status glyph.
+    let text = render_header(DomainGraphStatus::Paused, true);
+    let header = text
+        .lines()
+        .find(|line| line.contains("blocked"))
+        .expect("blocked header line missing");
+    assert!(
+        header.starts_with("⊘ "),
+        "blocked header must start with `⊘` plus one space, got: {header:?}"
+    );
+    assert!(
+        !header.starts_with(double_blocked),
+        "blocked header must not take two spaces after `⊘`: {header:?}"
+    );
+}
+// Breaks if: the header glyphs regress to the emoji-presentation forms
+// (U+23F8/U+26D4) or pick up a second space after the glyph.

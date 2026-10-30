@@ -1325,6 +1325,27 @@ fn rag_info_title_when_not_paused() {
 }
 
 #[test]
+fn rag_status_line_when_paused() {
+    use crate::db::Database;
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+    std::mem::forget(tmp);
+    let db = Arc::new(Database::new(&path).unwrap());
+    let data_dir = tempfile::tempdir().unwrap();
+    let mut app = App::new(
+        Arc::clone(&db),
+        data_dir.path(),
+        &crate::domain::canopy_config::CanopyConfig::default(),
+    )
+    .unwrap();
+    // The default config names no embeddings model, so nothing outranks
+    // the paused flag and the status reads as paused deterministically.
+    app.rag_paused = true;
+    let line = rag_status_line(&app, &Theme::classic());
+    assert_eq!(line.to_string(), " ‖ paused ");
+}
+
+#[test]
 fn rag_queue_text_with_items() {
     use crate::db::Database;
     let tmp = tempfile::NamedTempFile::new().unwrap();

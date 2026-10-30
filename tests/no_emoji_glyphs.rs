@@ -48,6 +48,33 @@ fn no_pause_or_blocked_emoji_in_src() {
     );
 }
 
+/// Every status-glyph literal this spec re-spaced renders exactly one
+/// space after the glyph (`‖ paused`, `✓ RAG …`). A two-space literal is
+/// the pre-fix shape, so it fails here. Scoped to the three glyphs this
+/// spec touched — other glyphs keep their spacing until their own spec.
+#[test]
+fn status_glyph_literals_take_exactly_one_space() {
+    // Built with `concat!` so this guard itself never contains the needles.
+    let needles = [concat!("‖", "  "), concat!("⊘", "  "), concat!("✓", "  ")];
+    let mut files = Vec::new();
+    rs_files(&src_dir(), &mut files);
+    assert!(!files.is_empty(), "expected to find sources under src");
+    let mut hits = Vec::new();
+    for path in &files {
+        let content = std::fs::read_to_string(path).expect("read source file");
+        for needle in &needles {
+            if content.contains(needle) {
+                hits.push(format!("{} contains {needle:?}", path.display()));
+            }
+        }
+    }
+    assert!(
+        hits.is_empty(),
+        "status glyph followed by two spaces in src:\n{}",
+        hits.join("\n")
+    );
+}
+
 #[test]
 fn status_glyphs_are_single_width() {
     for glyph in ["▶", "‖", "⊘", "○", "✓", "✗"] {
