@@ -248,7 +248,16 @@ fn device_line(
     push("  ".to_string(), Style::default());
     push(device.id.clone(), dim);
     push("  paired ".to_string(), Style::default());
-    push(super::hub_shelf::shelf_time(&device.paired_at), dim);
+    // An old daemon's status JSON has no `paired_at` (serde default `""`):
+    // `?` keeps the row aligned instead of a blank gap.
+    push(
+        if device.paired_at.is_empty() {
+            "?".to_string()
+        } else {
+            super::hub_shelf::shelf_time(&device.paired_at)
+        },
+        dim,
+    );
     push("  last seen ".to_string(), Style::default());
     push(
         device
@@ -259,7 +268,9 @@ fn device_line(
         dim,
     );
     if device.live {
-        push("  ".to_string(), Style::default());
+        // A single space: the paired time widened the row past 80 columns,
+        // and this one cell keeps the `live` badge visible there.
+        push(" ".to_string(), Style::default());
         push("live".to_string(), Style::default().fg(theme.success));
     }
     let line = Line::from(spans);
@@ -639,6 +650,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn device_line_shows_a_placeholder_for_a_missing_paired_at() {
+        let theme = Theme::classic();
+        let view = DeviceView {
+            id: "bfcba2b742a807bb".to_string(),
+            label: "laptop".to_string(),
+            paired_at: String::new(),
+            last_seen: None,
+            live: false,
+        };
+        let line = device_line(&view, &theme, false, 120);
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(text.contains("paired ?"), "{text}");
+    }
+
     fn draw(app: &mut App, width: u16, height: u16) -> String {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -700,12 +730,7 @@ mod tests {
                 text.contains("bfcba2b742a807bb"),
                 "{width}x{height}: {text}"
             );
-            if width > 80 {
-                // The paired time widens the row past 80 columns, so the
-                // trailing live badge truncates there by design; the
-                // sidebar `⇄ n` still signals live devices.
-                assert!(text.contains("live"), "{width}x{height}: {text}");
-            }
+            assert!(text.contains("live"), "{width}x{height}: {text}");
             assert!(text.contains("last seen 10:00"), "{width}x{height}: {text}");
             assert!(text.contains("paired 09:05"), "{width}x{height}: {text}");
             assert!(text.contains("tablet"), "{width}x{height}: {text}");

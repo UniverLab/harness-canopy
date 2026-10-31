@@ -1,8 +1,8 @@
 //! `remote_devices` rows: browsers paired with this host.
 //!
 //! A device is identified by the first 16 hex chars of SHA-256 over its
-//! P-256 SPKI DER. Re-pairing the same key updates the label and
-//! `paired_at`; revoking deletes the row, which is what the next spec's
+//! P-256 SPKI DER. Re-pairing the same key updates the label, `paired_at`
+//! and `last_seen`; revoking deletes the row, which is what the next spec's
 //! live connections check through [`crate::remote::devices::RemoteDevices::is_paired`].
 
 use anyhow::Result;
@@ -33,13 +33,13 @@ pub struct RemoteDevice {
     pub github_login: String,
     /// RFC 3339 UTC.
     pub paired_at: String,
-    /// RFC 3339 UTC, `None` until the first connection (next spec).
+    /// RFC 3339 UTC, `None` until the first connection or re-pair.
     pub last_seen: Option<String>,
 }
 
 impl Database {
-    /// Insert a device, or update label and `paired_at` for a device whose
-    /// key is already known.
+    /// Insert a device, or update label, `paired_at` and `last_seen` for a
+    /// device whose key is already known.
     pub fn upsert_remote_device(&self, device: &RemoteDevice) -> Result<()> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         conn.execute(

@@ -85,12 +85,32 @@ fn status_view_marks_live_devices() {
     assert_eq!(view.devices.len(), 1);
     assert_eq!(view.devices[0].id, id);
     assert_eq!(view.devices[0].label, "laptop");
+    assert_eq!(view.devices[0].paired_at, "2026-01-01T00:00:00Z");
+    assert_eq!(view.devices[0].last_seen, None);
     assert!(view.devices[0].live);
+
+    db.touch_remote_device(&id, "2026-02-01T00:00:00Z")
+        .expect("touch");
+    let view = status_view(dir.path(), &db, &live).expect("status");
+    assert_eq!(view.devices[0].paired_at, "2026-01-01T00:00:00Z");
+    assert_eq!(
+        view.devices[0].last_seen.as_deref(),
+        Some("2026-02-01T00:00:00Z")
+    );
 
     live.peers().close(&id);
     let view = status_view(dir.path(), &db, &live).expect("status");
     assert!(view.live_devices.is_empty());
     assert!(!view.devices[0].live, "closing the peer clears the flag");
+}
+
+#[test]
+fn device_view_without_paired_at_parses_for_old_daemons() {
+    let view: DeviceView = serde_json::from_str(
+        r#"{"id":"bfcba2b742a807bb","label":"laptop","last_seen":null,"live":false}"#,
+    )
+    .expect("old status JSON without paired_at still parses");
+    assert_eq!(view.paired_at, String::new());
 }
 
 #[test]

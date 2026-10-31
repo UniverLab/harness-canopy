@@ -313,7 +313,8 @@ an unknown id with `no paired device with id <device_id>`. `canopy
 remote disconnect <device_id>` closes the live connection the same way
 but keeps the pairing, printing `disconnected <device_id>` and refusing
 an unknown id the same way. Re-pairing the
-same browser updates its label and `paired_at` instead of adding a row.
+same browser updates its label, `paired_at` and `last_seen` instead of
+adding a row.
 
 The host key lives in `~/.canopy/remote/host_key` (PKCS#8 DER, mode 0600)
 and `host_id` is the first 16 hex chars of SHA-256 over its public key;

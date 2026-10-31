@@ -37,8 +37,9 @@ impl RemoteDevices {
         Self { db }
     }
 
-    /// Store a newly paired device, or refresh label and `paired_at` when
-    /// the same key pairs again. An empty label becomes `browser`.
+    /// Store a newly paired device, or refresh label, `paired_at` and
+    /// `last_seen` when the same key pairs again. An empty label becomes
+    /// `browser`.
     pub fn pair(
         &self,
         spki: Vec<u8>,
