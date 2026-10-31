@@ -157,6 +157,20 @@ told apart. `graph` `audit` lists every node/member whose
 effective budget differs from its platform's own under
 `infra_config_overrides`.
 
+## Transient database-busy retries
+
+Engine-internal database writes on the run path (event recording, run
+bookkeeping, mutex leases) can hit transient `SQLITE_BUSY`/`SQLITE_LOCKED`
+contention when another connection holds a write lock. Those errors are
+retried automatically — 3 attempts with a short backoff, each attempt
+waiting out the 5 s busy timeout — instead of failing the graph.
+
+If the contention persists past the retry budget, the node settles as a
+normal **fail** with a `transient database busy during {operation} ...
+safe to retry the node` message, routed through the node's `fail` edge.
+Re-run the node with `graph_control` `continue`
+(`mode: retry_current_node`); only non-busy errors fail immediately.
+
 ## Execution limit
 
 A spec that fails with a genuine verdict in separate graph executions is
