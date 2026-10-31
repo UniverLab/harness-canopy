@@ -415,6 +415,10 @@ spec's name), `current_node` (the node's *name*, never its id),
 {"t": "graphs", "req": "g1"}
 ```
 
+A graph whose stored row cannot be read is skipped — the host logs the
+skip — instead of failing the whole list, so one corrupt row never
+blanks the answer.
+
 `graph_watch{req,id}` first answers `graph{req,id,document,state}` — the
 graph's export document, exactly what `canopy graph export` writes, plus
 its live `state` — and then pushes `graph_state{id,state}` only when
