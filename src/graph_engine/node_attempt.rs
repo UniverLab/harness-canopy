@@ -538,12 +538,14 @@ impl GraphEngine {
                 "Spec '{}' has no nodes of its own and graph '{}' has no top-level graph to fall back to.",
                 spec.name, lp.name
             );
-            self.db.update_graph_spec_status(
-                &spec.id,
-                GraphSpecStatus::Failed,
-                Some(chrono::Utc::now()),
-                Some(chrono::Utc::now()),
-            )?;
+            let _ = persist_bookkeeping("update_graph_spec_status", || {
+                self.db.update_graph_spec_status(
+                    &spec.id,
+                    GraphSpecStatus::Failed,
+                    Some(chrono::Utc::now()),
+                    Some(chrono::Utc::now()),
+                )
+            })?;
             let (dirty, paths) = self.record_spec_end_dirty(&spec.id, workdir).await;
             let summary = match dirty_tree_note(dirty, &paths) {
                 Some(note) => format!("{summary} ({note})"),

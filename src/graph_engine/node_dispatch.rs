@@ -1,4 +1,5 @@
 use super::*;
+use crate::db::connection::{is_busy_error, with_busy_retry};
 
 impl GraphEngine {
     #[expect(clippy::too_many_arguments)]
@@ -90,6 +91,21 @@ impl GraphEngine {
             .db
             .get_graph(graph_id)?
             .is_some_and(|lp| lp.status == GraphStatus::Paused))
+    }
+
+    /// Loop-top pause check with busy retry. An exhausted busy warns and
+    /// reports not-paused — the dispatch keeps going and the pause is
+    /// re-checked on the next step instead of failing the graph (same
+    /// rationale as [`Self::claim_pause`).
+    pub(crate) fn is_paused_busy_tolerant(&self, graph_id: &str) -> Result<bool> {
+        match with_busy_retry("get_graph", || self.is_paused(graph_id)) {
+            Ok(paused) => Ok(paused),
+            Err(error) if is_busy_error(&error) => {
+                tracing::warn!("{error:#}; pause check deferred to the next step");
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub(crate) fn is_pausing(&self, graph_id: &str) -> Result<bool> {

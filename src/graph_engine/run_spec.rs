@@ -215,7 +215,7 @@ impl GraphEngine {
         state: &mut SpecRunState,
     ) -> Result<SpecExecutionOutcome> {
         loop {
-            if self.is_paused(&ctx.lp.id)? {
+            if self.is_paused_busy_tolerant(&ctx.lp.id)? {
                 return Ok(SpecExecutionOutcome::Paused);
             }
 

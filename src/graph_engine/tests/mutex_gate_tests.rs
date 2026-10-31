@@ -394,6 +394,31 @@ fn spawn_db_write_holder(
     (held_rx, handle)
 }
 
+/// Hold a write lock like [`spawn_db_write_holder`], but release it on
+/// signal instead of after a fixed time (30 s fallback so a test bug fails
+/// instead of hanging). Lets a test release the lock exactly once the first
+/// busy-retry warn is observed — retry-then-success with no timing window.
+fn spawn_db_write_holder_until_release(
+    db_path: std::path::PathBuf,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    std::sync::mpsc::Sender<()>,
+    std::thread::JoinHandle<()>,
+) {
+    let (held_tx, held_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.busy_timeout(std::time::Duration::from_secs(30))
+            .unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let _ = held_tx.send(());
+        let _ = release_rx.recv_timeout(std::time::Duration::from_secs(30));
+        conn.execute_batch("ROLLBACK").unwrap();
+    });
+    (held_rx, release_tx, handle)
+}
+
 /// One plain (mutex-free) check node on `spec_id`.
 fn insert_plain_check(db: &Database, spec_id: &str, node_id: &str, command: &str, position: i64) {
     db.insert_graph_node(&GraphNode {
@@ -484,19 +509,61 @@ async fn busy_gate_waits_then_proceeds() {
         "waiter must queue behind the holder"
     );
 
-    // A second connection holds a write lock for 6 s — past the 5 s busy
-    // timeout — while B's gate waits. The gate is woken in the last 300 ms
-    // of the hold: `try_acquire_mutex_set` runs in an explicit transaction
-    // (read-then-write), which fails busy INSTANTLY under a write holder
-    // instead of waiting out the busy timeout, so the 3-attempt budget
-    // spans ~300 ms — the first attempt(s) warn and the last lands after
-    // the release. (Waking at the start of the hold would exhaust the
-    // budget instead; that is the persistent-busy test below.)
+    // A second connection holds a write lock while B's gate waits, and the
+    // gate is woken under the hold. `try_acquire_mutex_set` runs in an
+    // explicit transaction (read-then-write), which fails busy INSTANTLY
+    // under a write holder instead of waiting out the busy timeout, so the
+    // 3-attempt budget spans ~300 ms. The lock is released once the first
+    // retry warn is observed, so a later attempt lands after the release:
+    // retry-then-success with no fixed-timing window for the wake to hit.
+    // (A hold the gate never outlives exhausts the budget instead; that is
+    // the persistent-busy test below.)
     let db_path = dir.path().join(TEST_DB_FILENAME);
-    let (held_rx, holder_thread) = spawn_db_write_holder(db_path, 6);
+    let (held_rx, release_tx, holder_thread) = spawn_db_write_holder_until_release(db_path);
+    // The release signal comes from its own thread: the gate retry is
+    // synchronous blocking work on this test's current-thread runtime, so
+    // the test task itself cannot react until the iteration is over — by
+    // then the ~300 ms budget would be exhausted. The observer polls the
+    // captured warns independently and releases inside the budget.
+    let observed = captured.clone();
+    let observer =
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            loop {
+                let warned =
+                    observed.0.lock().unwrap().iter().any(|line| {
+                        line.contains("db busy during try_acquire_mutex_set attempt 1/3")
+                    });
+                if warned || std::time::Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let _ = release_tx.send(());
+        });
     held_rx.await.expect("holder took the write lock");
-    tokio::time::sleep(Duration::from_millis(5800)).await;
-    db.notify_mutex_waiters();
+    // `notify_waiters` drops a notify nobody is parked for, so re-notify
+    // until the warn lands: extra notifies while the gate computes are
+    // dropped, and exactly one iteration runs under the hold.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let warned = captured
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.contains("db busy during try_acquire_mutex_set attempt 1/3"));
+        if warned {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the gate must warn on its first busy attempt"
+        );
+        db.notify_mutex_waiters();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    observer.join().unwrap();
 
     waiter.await.unwrap().unwrap();
     holder.await.unwrap().unwrap();

@@ -419,12 +419,14 @@ impl GraphEngine {
         state: &SpecRunState,
         step: &NodeStepResult,
     ) -> Result<SpecExecutionOutcome> {
-        self.db.update_graph_spec_status(
-            &ctx.spec.id,
-            GraphSpecStatus::Completed,
-            None,
-            Some(chrono::Utc::now()),
-        )?;
+        let _ = persist_bookkeeping("update_graph_spec_status", || {
+            self.db.update_graph_spec_status(
+                &ctx.spec.id,
+                GraphSpecStatus::Completed,
+                None,
+                Some(chrono::Utc::now()),
+            )
+        })?;
         self.record_spec_end_dirty(&ctx.spec.id, ctx.workdir).await;
         self.notify_spec_completed(ctx.lp, ctx.spec, ctx.queue_id)?;
         activity::record(
@@ -503,8 +505,10 @@ impl GraphEngine {
         final_status: GraphSpecStatus,
         blocked: bool,
     ) -> Result<SpecExecutionOutcome> {
-        self.db
-            .update_graph_spec_status(&spec.id, final_status, None, Some(chrono::Utc::now()))?;
+        let _ = persist_bookkeeping("update_graph_spec_status", || {
+            self.db
+                .update_graph_spec_status(&spec.id, final_status, None, Some(chrono::Utc::now()))
+        })?;
         let (dirty, paths) = self.record_spec_end_dirty(&spec.id, workdir).await;
         let summary = match dirty_tree_note(dirty, &paths) {
             Some(note) => format!("{summary} ({note})"),
@@ -527,11 +531,59 @@ impl GraphEngine {
         ensembles: &[EnsembleDetails],
     ) -> Result<()> {
         for node_id in cursor_node_ids(cursor, ensembles) {
-            if let Some(stale) = self.db.get_active_graph_run_for_node(&node_id)? {
+            let stale = match with_busy_retry("get_active_graph_run_for_node", || {
+                self.db.get_active_graph_run_for_node(&node_id)
+            }) {
+                Ok(stale) => stale,
+                Err(error) if is_busy_error(&error) => {
+                    tracing::warn!("{error:#}; stale-run reap deferred to the next step");
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            if let Some(stale) = stale {
                 self.terminate_run(&stale, SUPERSEDE_REASON);
             }
         }
         Ok(())
+    }
+
+    /// Loop-top operator-pause probe with busy retry. An exhausted busy warns
+    /// and reports a genuine attempt — over-counting one iteration is harmless
+    /// (the ceiling guard still fires on re-entry), while failing the graph
+    /// over a transient lock is not.
+    fn previous_was_operator_paused_busy_tolerant(
+        &self,
+        spec_id: &str,
+        cursor_nodes: &[String],
+    ) -> Result<bool> {
+        match with_busy_retry("last_spec_node_run_was_operator_paused", || {
+            self.db
+                .last_spec_node_run_was_operator_paused(spec_id, cursor_nodes)
+        }) {
+            Ok(paused) => Ok(paused),
+            Err(error) if is_busy_error(&error) => {
+                tracing::warn!("{error:#}; counting this step as a genuine attempt");
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Last run row for `spec_id` with busy retry, for the budget-exhaustion
+    /// blocker write. An exhausted busy warns and reports none — the blocker
+    /// write is skipped this once, the budget outcome itself is unaffected.
+    fn last_spec_run_busy_tolerant(&self, spec_id: &str) -> Result<Option<GraphNodeRun>> {
+        match with_busy_retry("list_graph_runs_for_spec", || {
+            self.db.list_graph_runs_for_spec(spec_id)
+        }) {
+            Ok(mut runs) => Ok(runs.pop()),
+            Err(error) if is_busy_error(&error) => {
+                tracing::warn!("{error:#}; skipping the budget blocker write");
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub(crate) async fn check_iteration_budget(
@@ -550,7 +602,7 @@ impl GraphEngine {
         // `graph_control` reuses the same iteration number instead of
         // consuming a fresh one. Only genuine node outcomes count against
         // `graphs.max_iterations_per_node`.
-        let previous_was_operator_paused = self.db.last_spec_node_run_was_operator_paused(
+        let previous_was_operator_paused = self.previous_was_operator_paused_busy_tolerant(
             &ctx.spec.id,
             &cursor_node_ids(&state.cursor, ctx.ensembles),
         )?;
@@ -586,7 +638,7 @@ impl GraphEngine {
                 );
             // CB7: SIEMPRE escribir el blocker en el último run para que sea visible
             // en graph/graph sin necesidad de encadenar graph
-            if let Some(run) = self.db.list_graph_runs_for_spec(&ctx.spec.id)?.last() {
+            if let Some(run) = self.last_spec_run_busy_tolerant(&ctx.spec.id)? {
                 self.set_run_blocker(
                     &run.id,
                     run.status,
@@ -607,7 +659,7 @@ impl GraphEngine {
                 // cross-run text (it embeds the iteration message as its
                 // "last failure"), so the single-call diagnosis still
                 // names the cross-execution count, not just this run's.
-                if let Some(run) = self.db.list_graph_runs_for_spec(&ctx.spec.id)?.last() {
+                if let Some(run) = self.last_spec_run_busy_tolerant(&ctx.spec.id)? {
                     self.set_run_blocker(
                         &run.id,
                         run.status,
@@ -615,12 +667,14 @@ impl GraphEngine {
                         &blocker,
                     )?;
                 }
-                self.db.update_graph_spec_status(
-                    &ctx.spec.id,
-                    GraphSpecStatus::Failed,
-                    None,
-                    Some(chrono::Utc::now()),
-                )?;
+                let _ = persist_bookkeeping("update_graph_spec_status", || {
+                    self.db.update_graph_spec_status(
+                        &ctx.spec.id,
+                        GraphSpecStatus::Failed,
+                        None,
+                        Some(chrono::Utc::now()),
+                    )
+                })?;
                 let (dirty, paths) = self.record_spec_end_dirty(&ctx.spec.id, ctx.workdir).await;
                 let blocker = match dirty_tree_note(dirty, &paths) {
                     Some(note) => format!("{blocker} ({note})"),
@@ -628,12 +682,14 @@ impl GraphEngine {
                 };
                 return Ok((0, Some(SpecExecutionOutcome::Blocked(blocker))));
             }
-            self.db.update_graph_spec_status(
-                &ctx.spec.id,
-                GraphSpecStatus::Failed,
-                None,
-                Some(chrono::Utc::now()),
-            )?;
+            let _ = persist_bookkeeping("update_graph_spec_status", || {
+                self.db.update_graph_spec_status(
+                    &ctx.spec.id,
+                    GraphSpecStatus::Failed,
+                    None,
+                    Some(chrono::Utc::now()),
+                )
+            })?;
             let (dirty, paths) = self.record_spec_end_dirty(&ctx.spec.id, ctx.workdir).await;
             let iteration_budget_blocker = match dirty_tree_note(dirty, &paths) {
                 Some(note) => format!("{iteration_budget_blocker} ({note})"),
