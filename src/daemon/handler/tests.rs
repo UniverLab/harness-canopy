@@ -662,3 +662,4 @@ mod part01_tests;
 mod part02_tests;
 mod part03_tests;
 mod part04_tests;
+mod part05_tests;

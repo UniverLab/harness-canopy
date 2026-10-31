@@ -38,6 +38,12 @@ pub enum GraphEventKind {
     MutexWaiting,
     /// A node run was granted every mutex it waited for.
     MutexAcquired,
+    /// A pause was requested while node(s) were still running; the graph
+    /// reaches `paused` once they finish.
+    PauseRequested,
+    /// A pending pause was cancelled by a resume while node(s) were still
+    /// running; the graph keeps running.
+    PauseCancelled,
 }
 
 impl GraphEventKind {
@@ -60,6 +66,8 @@ impl GraphEventKind {
             Self::Note => "note",
             Self::MutexWaiting => "mutex_waiting",
             Self::MutexAcquired => "mutex_acquired",
+            Self::PauseRequested => "pause_requested",
+            Self::PauseCancelled => "pause_cancelled",
         }
     }
 

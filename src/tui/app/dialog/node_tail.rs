@@ -653,6 +653,7 @@ mod tests {
             schedule_expr: None,
             watch_path: None,
             autorun_at: None,
+            pause_waiting_for: Vec::new(),
             spec_queue: vec![crate::tui::app::graph_live_state::SpecQueueEntry {
                 spec_id: spec_id.to_string(),
                 spec_name: "Pane spec".to_string(),

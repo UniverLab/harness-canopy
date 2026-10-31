@@ -13,7 +13,9 @@ use super::lines::graph_lines;
 use super::{LiveViewContext, LiveViewRenderResult};
 use crate::db::mutex_store::MutexWaitDetail;
 use crate::domain::graphs::{GraphRunStatus, GraphSpecStatus, GraphStatus};
-use crate::tui::app::graph_live_state::{GraphLiveState, NodeRunInfo, SpecQueueEntry};
+use crate::tui::app::graph_live_state::{
+    pausing_label, GraphLiveState, NodeRunInfo, SpecQueueEntry,
+};
 use crate::tui::ui::panel::compact_cwd;
 use crate::tui::ui::sidebar::draw_scroll_indicators;
 use crate::tui::ui::theme::Theme;
@@ -234,7 +236,7 @@ fn status_icon_and_label(
     }
     match state.graph_status {
         GraphStatus::Running => ("▶", "running".to_string(), theme.status_running),
-        GraphStatus::Pausing => ("‖", "pausing".to_string(), Color::Yellow),
+        GraphStatus::Pausing => ("‖", pausing_label(&state.pause_waiting_for), Color::Yellow),
         GraphStatus::Paused => ("‖", "paused".to_string(), Color::Yellow),
         GraphStatus::Completed => ("✓", "completed".to_string(), theme.status_ok),
         GraphStatus::Failed => ("✗", "failed".to_string(), theme.status_fail),
@@ -669,6 +671,7 @@ mod tests {
             schedule_expr: None,
             watch_path: None,
             autorun_at: None,
+            pause_waiting_for: Vec::new(),
             spec_queue: Vec::new(),
             done_count: 0,
             total_count: 0,

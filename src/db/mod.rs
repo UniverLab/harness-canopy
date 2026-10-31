@@ -692,6 +692,7 @@ impl Database {
         Self::migrate_agent_action_columns(&conn)?;
         Self::migrate_ensemble_mutex_column(&conn)?;
         Self::migrate_graph_events_mutex_kinds(&conn)?;
+        Self::migrate_graph_events_pause_kinds(&conn)?;
         Self::migrate_drop_blueprint_tables(&conn)?;
         Self::migrate_sandbox_intelligence_attribution(&conn)?;
         Self::migrate_shelf_files(&conn)?;

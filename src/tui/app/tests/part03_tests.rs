@@ -143,6 +143,7 @@ fn navigate_child_through_ensemble_member_target() {
         schedule_expr: None,
         watch_path: None,
         autorun_at: None,
+        pause_waiting_for: Vec::new(),
         spec_queue: Vec::new(),
         done_count: 0,
         total_count: 0,
@@ -574,6 +575,7 @@ fn dfs_order_collapses_ensemble_members_to_first_member() {
         schedule_expr: None,
         watch_path: None,
         autorun_at: None,
+        pause_waiting_for: Vec::new(),
         spec_queue: vec![SpecQueueEntry {
             spec_id: "s1".into(),
             spec_name: "S1".into(),
@@ -701,6 +703,7 @@ fn collapse_nodes_skips_join_node_ids() {
         schedule_expr: None,
         watch_path: None,
         autorun_at: None,
+        pause_waiting_for: Vec::new(),
         spec_queue: vec![],
         done_count: 0,
         total_count: 0,

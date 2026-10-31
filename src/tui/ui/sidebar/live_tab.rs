@@ -219,6 +219,8 @@ pub(super) fn draw_active_graph_card(
 
     let last_run_style = if lp.status == GraphStatus::Running {
         Style::default().fg(STATUS_RUNNING)
+    } else if lp.status == GraphStatus::Pausing {
+        Style::default().fg(theme.warning)
     } else {
         meta_style
     };

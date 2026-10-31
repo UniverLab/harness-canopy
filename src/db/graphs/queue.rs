@@ -163,6 +163,38 @@ impl Database {
         Ok(rows > 0)
     }
 
+    /// Cancel a pending pause, flipping the graph back to `Running` — the
+    /// resume path's counterpart to [`Self::complete_pause`]. A single
+    /// compare-and-set, so a concurrent node-boundary completion wins or
+    /// loses atomically rather than resurrecting a finished pause.
+    pub fn cancel_pause_pending(&self, graph_id: &str) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let rows = conn.execute(
+            "UPDATE graphs SET status = ?1 WHERE id = ?2 AND status = 'pausing'",
+            params![GraphStatus::Running.as_str(), graph_id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Display names of the node runs a pending pause is waiting for: every
+    /// still-`running` (or mutex-`waiting`) run under the graph, resolved to
+    /// its node name, falling back to the raw node id when the node row is
+    /// gone. Empty when nothing is in flight.
+    pub fn pause_waiting_node_names(&self, graph_id: &str) -> Result<Vec<String>> {
+        let mut names = Vec::new();
+        for run in self.list_running_graph_runs(graph_id)? {
+            let name = self
+                .get_graph_node(&run.node_id)?
+                .map(|node| node.name)
+                .unwrap_or(run.node_id);
+            names.push(name);
+        }
+        Ok(names)
+    }
+
     /// Atomically claim `graph_id` for a run by flipping it to `Running`, but
     /// only if it is not *already* `Running` (B42). Returns `true` when this
     /// call won the claim (the graph was fireable and is now `Running`), `false`

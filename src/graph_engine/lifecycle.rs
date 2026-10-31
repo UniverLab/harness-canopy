@@ -76,25 +76,11 @@ impl GraphEngine {
             GraphStatus::Running => {
                 if interrupt {
                     // Immediate termination mode: mark paused and interrupt running nodes
-                    let result =
+                    let result = self.record_paused_if_accepted(
                         self.db
-                            .update_graph_status(graph_id, GraphStatus::Paused, None, None);
-                    if matches!(result, Ok(true)) {
-                        activity::record(
-                            &self.db,
-                            activity::GraphEvent {
-                                graph_id,
-                                graph_name: &lp.name,
-                                workdir: &lp.workdir,
-                                spec_id: None,
-                                node_id: None,
-                                run_id: None,
-                                kind: activity::GraphEventKind::GraphPaused,
-                                message: "Paused.".to_string(),
-                                payload: None,
-                            },
-                        );
-                    }
+                            .update_graph_status(graph_id, GraphStatus::Paused, None, None),
+                        &lp,
+                    );
                     for run in self
                         .db
                         .list_running_graph_runs(graph_id)
@@ -111,31 +97,16 @@ impl GraphEngine {
                 {
                     // Req 6: nothing is in flight, so there is nothing to wait
                     // for — pause immediately, exactly as before this change.
-                    let result =
+                    self.record_paused_if_accepted(
                         self.db
-                            .update_graph_status(graph_id, GraphStatus::Paused, None, None);
-                    if matches!(result, Ok(true)) {
-                        activity::record(
-                            &self.db,
-                            activity::GraphEvent {
-                                graph_id,
-                                graph_name: &lp.name,
-                                workdir: &lp.workdir,
-                                spec_id: None,
-                                node_id: None,
-                                run_id: None,
-                                kind: activity::GraphEventKind::GraphPaused,
-                                message: "Paused.".to_string(),
-                                payload: None,
-                            },
-                        );
-                    }
-                    result
+                            .update_graph_status(graph_id, GraphStatus::Paused, None, None),
+                        &lp,
+                    )
                 } else {
                     // Wait-for-completion mode: a node is running. Record the
                     // pending pause; the engine transitions the graph to
                     // `Paused` once that node finishes on its own.
-                    self.db.request_pause_pending(graph_id)
+                    self.request_pause_wait_for_completion(&lp)
                 }
             }
             GraphStatus::Pausing => {
@@ -148,26 +119,11 @@ impl GraphEngine {
                     {
                         self.interrupt_run(&run, "operator requested interrupt");
                     }
-                    let result =
+                    self.record_paused_if_accepted(
                         self.db
-                            .update_graph_status(graph_id, GraphStatus::Paused, None, None);
-                    if matches!(result, Ok(true)) {
-                        activity::record(
-                            &self.db,
-                            activity::GraphEvent {
-                                graph_id,
-                                graph_name: &lp.name,
-                                workdir: &lp.workdir,
-                                spec_id: None,
-                                node_id: None,
-                                run_id: None,
-                                kind: activity::GraphEventKind::GraphPaused,
-                                message: "Paused.".to_string(),
-                                payload: None,
-                            },
-                        );
-                    }
-                    result
+                            .update_graph_status(graph_id, GraphStatus::Paused, None, None),
+                        &lp,
+                    )
                 } else {
                     Ok(true) // Already pausing, nothing to do
                 }
@@ -175,6 +131,74 @@ impl GraphEngine {
             GraphStatus::Paused => Ok(true), // Already paused
             _ => Ok(false),                  // Not running
         }
+    }
+
+    /// Record `graph_paused` for an accepted immediate pause, passing the
+    /// status-write result through — one helper so the three immediate-pause
+    /// branches narrate identically.
+    fn record_paused_if_accepted(&self, result: Result<bool>, lp: &Graph) -> Result<bool> {
+        if matches!(result, Ok(true)) {
+            activity::record(
+                &self.db,
+                activity::GraphEvent {
+                    graph_id: &lp.id,
+                    graph_name: &lp.name,
+                    workdir: &lp.workdir,
+                    spec_id: None,
+                    node_id: None,
+                    run_id: None,
+                    kind: activity::GraphEventKind::GraphPaused,
+                    message: "Paused.".to_string(),
+                    payload: None,
+                },
+            );
+        }
+        result
+    }
+
+    /// The wait-for-completion leg of [`Self::request_pause`]: record the
+    /// pending pause and narrate it, once the caller has established a node
+    /// is running.
+    fn request_pause_wait_for_completion(&self, lp: &Graph) -> Result<bool> {
+        match self.db.request_pause_pending(&lp.id) {
+            Ok(true) => {
+                self.record_pause_requested(lp);
+                Ok(true)
+            }
+            other => other,
+        }
+    }
+
+    /// Narrate an accepted wait-for-completion pause: a `pause_requested`
+    /// event naming every node run the pause is waiting for, so the request
+    /// is visible from the moment it is made instead of only as `graph_paused`
+    /// minutes later.
+    fn record_pause_requested(&self, lp: &Graph) {
+        let names = self.db.pause_waiting_node_names(&lp.id).unwrap_or_default();
+        let quoted = names
+            .iter()
+            .map(|name| format!("'{name}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let message = if quoted.is_empty() {
+            "Pause requested.".to_string()
+        } else {
+            format!("Pause requested; waiting for {quoted} to finish.")
+        };
+        activity::record(
+            &self.db,
+            activity::GraphEvent {
+                graph_id: &lp.id,
+                graph_name: &lp.name,
+                workdir: &lp.workdir,
+                spec_id: None,
+                node_id: None,
+                run_id: None,
+                kind: activity::GraphEventKind::PauseRequested,
+                message,
+                payload: None,
+            },
+        );
     }
 
     /// Interrupt a running node, marking it as `Interrupted` (not `Fail`).

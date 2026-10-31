@@ -50,6 +50,7 @@ fn app_on_graph_live_view() -> App {
         schedule_expr: None,
         watch_path: None,
         autorun_at: None,
+        pause_waiting_for: Vec::new(),
         spec_queue: vec![
             spec_entry("s1", GraphSpecStatus::Completed),
             spec_entry("s2", GraphSpecStatus::Running),

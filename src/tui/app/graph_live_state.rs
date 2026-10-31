@@ -52,6 +52,11 @@ pub(crate) struct GraphLiveState {
     /// which of a router's N edges a run actually took, not just list them.
     pub router_taken_routes: HashMap<String, String>,
 
+    // ── Pending pause ───────────────────────────────────────────
+    /// Node names the pending pause is waiting for — non-empty only while
+    /// `graph_status` is `Pausing`.
+    pub pause_waiting_for: Vec<String>,
+
     // ── Current node ────────────────────────────────────────────
     /// Id of the node currently executing, or the most recent completed node.
     pub current_node_id: Option<String>,
@@ -171,6 +176,13 @@ pub(crate) fn assemble_graph_live_state(
     // ── Current node + output tail ──────────────────────────────
     let (current_node_id, current_node_info) = resolve_current_node(db, current_spec_id.as_deref());
 
+    // ── Pending pause ───────────────────────────────────────────
+    let pause_waiting_for = if lp.status == GraphStatus::Pausing {
+        db.pause_waiting_node_names(&lp.id).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
     Some(GraphLiveState {
         graph_id: lp.id.clone(),
         graph_name: lp.name.clone(),
@@ -180,6 +192,7 @@ pub(crate) fn assemble_graph_live_state(
         schedule_expr: lp.schedule_expr().map(String::from),
         watch_path: lp.watch_path().map(String::from),
         autorun_at: lp.autorun_at,
+        pause_waiting_for,
         spec_queue,
         done_count,
         total_count,
@@ -193,6 +206,17 @@ pub(crate) fn assemble_graph_live_state(
         current_node_started_at: current_node_info.started_at,
         current_node_iteration: current_node_info.iteration,
     })
+}
+
+/// The pending-pause label shared by the graph detail header and the sidebar
+/// row: `pausing — waiting for A, B`, or bare `pausing` when the waited-for
+/// runs are already gone.
+pub(crate) fn pausing_label(waiting_for: &[String]) -> String {
+    if waiting_for.is_empty() {
+        "pausing".to_string()
+    } else {
+        format!("pausing — waiting for {}", waiting_for.join(", "))
+    }
 }
 
 /// Resolve every ensemble (F1) whose join node appears in `effective_nodes`,

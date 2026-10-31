@@ -8,8 +8,8 @@ use crate::daemon::handler_run_directive::{
     restart_at_node, retry_restart_target,
 };
 use crate::daemon::handler_run_exec::{
-    directed_run_report, find_in_flight_run, handle_retry_current_node, handle_skip_next_spec,
-    in_flight_run_error, node_name_for_error, resolve_directed_spec,
+    cancel_pending_pause, directed_run_report, find_in_flight_run, handle_retry_current_node,
+    handle_skip_next_spec, in_flight_run_error, node_name_for_error, resolve_directed_spec,
 };
 use crate::daemon::handler_validate::{resolve_prefix_or_error, validate_absolute_dir};
 use crate::daemon::helpers::{error_result, success_result, with_deprecated_note};
@@ -176,6 +176,19 @@ impl TaskTriggerHandler {
             Err(e) => return Ok(e),
         };
         let interrupt = params.interrupt.unwrap_or(false);
+        if !interrupt
+            && self
+                .db
+                .get_graph(&graph_id)
+                .map_err(internal_error)?
+                .is_some_and(|lp| lp.status == GraphStatus::Pausing)
+        {
+            // A second pause while one is pending: a no-op that says so, with
+            // no duplicate `pause_requested` event.
+            return Ok(success_result(&format!(
+                "Graph '{graph_id}' pause already pending; waiting for the running node to finish."
+            )));
+        }
         let paused = self
             .graph_engine
             .request_pause(&graph_id, interrupt)
@@ -273,7 +286,7 @@ impl TaskTriggerHandler {
             Ok(id) => id,
             Err(e) => return Ok(e),
         };
-        let lp = match self.db.get_graph(&graph_id) {
+        let mut lp = match self.db.get_graph(&graph_id) {
             Ok(Some(w)) => w,
             Ok(None) => return Ok(error_result(&format!("Graph '{}' not found.", graph_id))),
             Err(e) => return Err(internal_error(e.to_string())),
@@ -309,6 +322,18 @@ impl TaskTriggerHandler {
                     continue_workdir.as_deref(),
                 )
                 .await;
+        }
+        // A resume while a pause is pending cancels it: with a node still in
+        // flight the graph keeps running (no new dispatch — one is already
+        // live); with nothing in flight the pause completes and the resume
+        // proceeds as a normal continue from `Paused`.
+        if lp.status == GraphStatus::Pausing {
+            if cancel_pending_pause(&self.db, &lp).map_err(internal_error)? {
+                return Ok(success_result(&format!(
+                    "Graph '{graph_id}' pending pause cancelled; keeps running."
+                )));
+            }
+            lp.status = GraphStatus::Paused;
         }
         // FR6: a failed graph takes the same two actions as a paused one.
         if !matches!(lp.status, GraphStatus::Paused | GraphStatus::Failed) {

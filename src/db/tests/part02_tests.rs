@@ -220,6 +220,53 @@ fn reconcile_orphaned_graphs_pauses_running_graph_and_interrupts_its_run() {
     assert_eq!(spec_after.spec_start_head, None);
 }
 
+/// Req 7: a graph caught mid-`Pausing` (a pending pause whose node never
+/// finished) by a daemon restart reconciles to `Paused` exactly like a
+/// `Running` one — the pending pause survives as a real pause, and
+/// `graph_control` alone resumes it.
+#[test]
+fn reconcile_orphaned_graphs_pauses_pausing_graph_and_interrupts_its_run() {
+    let db = test_db();
+    let data_dir = tempdir().unwrap();
+    let mut lp = sample_graph("wf-pausing");
+    lp.status = GraphStatus::Pausing;
+    let mut spec = sample_graph_spec(&lp.id, "spec-pausing", 1);
+    spec.status = GraphSpecStatus::Running;
+    let node = sample_graph_node(&spec.id, "node-pausing", 1);
+    let run = GraphNodeRun {
+        id: "run-pausing".to_string(),
+        graph_id: lp.id.clone(),
+        spec_id: spec.id.clone(),
+        node_id: node.id.clone(),
+        status: GraphRunStatus::Running,
+        input: None,
+        output: None,
+        started_at: Utc::now(),
+        completed_at: None,
+        iteration: 1,
+        pid: None,
+        boot_id: None,
+        session_id: None,
+        executed_platform: None,
+        executed_model: None,
+    };
+
+    db.insert_graph(&lp).unwrap();
+    db.insert_graph_spec(&spec).unwrap();
+    db.insert_graph_node(&node).unwrap();
+    db.insert_graph_run(&run).unwrap();
+
+    let reconciled = db.reconcile_orphaned_graphs(data_dir.path()).unwrap();
+    assert_eq!(reconciled.len(), 1);
+
+    let lp_after = db.get_graph(&lp.id).unwrap().unwrap();
+    assert_eq!(lp_after.status, GraphStatus::Paused);
+    let run_after = db.get_graph_run(&run.id).unwrap().unwrap();
+    assert_ne!(run_after.status, GraphRunStatus::Running);
+    let spec_after = db.get_graph_spec(&spec.id).unwrap().unwrap();
+    assert_eq!(spec_after.status, GraphSpecStatus::Interrupted);
+}
+
 /// B18: the real incident — a queue-driven run's in-flight member (a
 /// standalone spec, `graph_id: None`, never bound to the graph that's
 /// currently running it) must be marked `interrupted` exactly like a

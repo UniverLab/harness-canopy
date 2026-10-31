@@ -217,14 +217,17 @@ fn hub_spawn_from_the_resume_step_keeps_the_source_id_and_name() {
         .expect("finish source row");
     let workdir = tempfile::tempdir().expect("workdir");
     let hub = test_hub(&db);
+    // `sleep` (not `cat` with a flag): the child must stay alive past the
+    // assertions below — a flag `cat` rejects exits at once and the hub's
+    // reader thread flips the reactivated row to `error` before it is read.
     let req = SpawnRequest {
         kind: SessionKind::Agent,
-        cli: "cat".to_string(),
+        cli: "sleep".to_string(),
         model: None,
         workdir: workdir.path().to_string_lossy().to_string(),
         name: Some("marasmius".to_string()),
         prompt: None,
-        interactive_args: Some("--continue".to_string()),
+        interactive_args: Some("300".to_string()),
         fallback_args: None,
         model_flag: None,
         id: Some("sess-resume-2".to_string()),

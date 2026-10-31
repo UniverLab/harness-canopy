@@ -147,6 +147,7 @@ fn app_with_spec_queue(ids: &[&str]) -> App {
         schedule_expr: None,
         watch_path: None,
         autorun_at: None,
+        pause_waiting_for: Vec::new(),
         spec_queue: ids
             .iter()
             .map(|id| spec_queue_entry(id, GraphSpecStatus::Pending))
@@ -432,6 +433,7 @@ fn graph_state(
         done_count: 0,
         total_count: 0,
         current_spec_id: Some("s1".to_string()),
+        pause_waiting_for: Vec::new(),
         effective_nodes,
         effective_edges,
         ensembles: Vec::new(),

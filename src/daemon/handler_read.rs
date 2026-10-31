@@ -3,6 +3,7 @@
 
 use crate::daemon::handler::TaskTriggerHandler;
 use crate::daemon::handler_formatting::internal_error;
+use crate::daemon::handler_read_pause::{set_pause_pending_json, visible_graph_status};
 use crate::daemon::handler_run_exec::{graph_run_blocker, graph_run_json};
 use crate::daemon::handler_specs_helpers::build_spec_run_info;
 use crate::daemon::handler_validate::{parse_router_routes, resolve_prefix_or_error};
@@ -91,7 +92,7 @@ pub(crate) fn build_graph_summary_json(
     let mut out = serde_json::json!({
         "id": lp.id,
         "name": lp.name,
-        "status": lp.status.as_str(),
+        "status": visible_graph_status(lp.status),
         "trigger": graph_trigger_json(lp),
         "current_spec": current_spec.as_ref().map(|v| &v.name),
         "current_node": current_spec.as_ref().and_then(|v| v.current_node.as_ref()),
@@ -102,6 +103,7 @@ pub(crate) fn build_graph_summary_json(
         "workdir": lp.workdir,
         "archived": lp.archived,
     });
+    set_pause_pending_json(db, &mut out, lp).map_err(internal_error)?;
     set_run_workdir_json(db, &mut out, &lp.id, &lp.workdir).map_err(internal_error)?;
     // CB30: when the graph draws from a queue, say so and name it, so the
     // reader knows where the sequence comes from.
@@ -433,7 +435,7 @@ pub(crate) fn graph_details_json(
         "name": lp.lp.name,
         "description": lp.lp.description,
         "workdir": lp.lp.workdir,
-        "status": lp.lp.status.as_str(),
+        "status": visible_graph_status(lp.lp.status),
         "blocked": blocker.is_some(),
         "blocker": blocker,
         "trigger": graph_trigger_json(&lp.lp),
@@ -465,6 +467,7 @@ pub(crate) fn graph_details_json(
             .collect::<Vec<_>>(),
         "orphan_join_warnings": orphan_join_warnings,
     });
+    set_pause_pending_json(db, &mut out, &lp.lp)?;
     set_run_workdir_json(db, &mut out, &lp.lp.id, &lp.lp.workdir)?;
     // CB30: when the graph draws from a queue, say so and name it; when it
     // runs a loose idea, say that instead of leaving an empty `specs` to be

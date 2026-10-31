@@ -12,7 +12,8 @@ use crate::daemon::handler_validate::resolve_prefix_or_error;
 use crate::daemon::helpers::{error_result, success_result};
 use crate::daemon::params::*;
 use crate::db::Database;
-use crate::domain::graphs::{GraphNodeRun, GraphSpec, GraphSpecStatus, GraphStatus};
+use crate::domain::activity;
+use crate::domain::graphs::{Graph, GraphNodeRun, GraphSpec, GraphSpecStatus, GraphStatus};
 use crate::graph_engine::DirectedPlan;
 use crate::or_early_return;
 use rmcp::model::CallToolResult;
@@ -35,11 +36,23 @@ impl TaskTriggerHandler {
             Ok(id) => id,
             Err(e) => return Ok(e),
         };
-        let lp = match self.db.get_graph(&graph_id) {
+        let mut lp = match self.db.get_graph(&graph_id) {
             Ok(Some(w)) => w,
             Ok(None) => return Ok(error_result(&format!("Graph '{}' not found.", graph_id))),
             Err(e) => return Err(internal_error(e.to_string())),
         };
+        // A run while a pause is pending cancels it, same as continue: with
+        // a node still in flight the graph keeps running (no new dispatch —
+        // one is already live); with nothing in flight the pause completes
+        // and the launch proceeds normally.
+        if lp.status == GraphStatus::Pausing {
+            if cancel_pending_pause(&self.db, &lp).map_err(internal_error)? {
+                return Ok(success_result(&format!(
+                    "Graph '{graph_id}' pending pause cancelled; keeps running."
+                )));
+            }
+            lp.status = GraphStatus::Paused;
+        }
 
         let start_node_id = params
             .start_node_id
@@ -174,6 +187,35 @@ pub(crate) fn find_in_flight_run(
         .map_err(|e| e.to_string())?
         .into_iter()
         .next())
+}
+
+/// Resolve a `Pausing` graph's pending pause from a resume call (`graph_control`
+/// continue/run): with a node still in flight the pause is cancelled back to
+/// `Running` and the live dispatch keeps running; with nothing in flight the
+/// pause is completed to `Paused` so the resume proceeds normally. Records
+/// `pause_cancelled` either way. Returns whether a node was in flight.
+pub(crate) fn cancel_pending_pause(db: &Database, lp: &Graph) -> Result<bool, String> {
+    let in_flight = find_in_flight_run(db, &lp.id)?.is_some();
+    if in_flight {
+        db.cancel_pause_pending(&lp.id).map_err(|e| e.to_string())?;
+    } else {
+        db.complete_pause(&lp.id).map_err(|e| e.to_string())?;
+    }
+    activity::record(
+        db,
+        activity::GraphEvent {
+            graph_id: &lp.id,
+            graph_name: &lp.name,
+            workdir: &lp.workdir,
+            spec_id: None,
+            node_id: None,
+            run_id: None,
+            kind: activity::GraphEventKind::PauseCancelled,
+            message: "Pending pause cancelled.".to_string(),
+            payload: None,
+        },
+    );
+    Ok(in_flight)
 }
 
 /// The actionable refusal text for a `graph_control`/`graph_control` call blocked by

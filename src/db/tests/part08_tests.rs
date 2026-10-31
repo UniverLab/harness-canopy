@@ -170,3 +170,67 @@ fn migrate_sandbox_intelligence_attribution_moves_nodes_without_stray_project_ro
         .unwrap();
     assert_eq!(project_rows, 0);
 }
+
+/// An existing database whose `graph_events.kind` CHECK still ends at
+/// `mutex_acquired` is widened to admit `pause_requested`/`pause_cancelled` —
+/// data preserved, migration idempotent, and afterwards the new kinds insert.
+#[test]
+fn graph_events_pause_kinds_migration_widens_check_and_preserves_rows() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE graph_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            graph_id TEXT NOT NULL,
+            spec_id TEXT,
+            node_id TEXT,
+            run_id TEXT,
+            kind TEXT NOT NULL
+                CHECK (kind IN (
+                    'graph_started','graph_paused','graph_resumed','graph_completed','graph_failed','graph_blocked',
+                    'spec_started','spec_completed','spec_failed','spec_skipped',
+                    'node_started','node_finished',
+                    'hook_fired',
+                    'config_changed',
+                    'note',
+                    'mutex_waiting','mutex_acquired'
+                )),
+            message TEXT NOT NULL,
+            payload TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_graph_events_graph_id_id ON graph_events(graph_id, id);
+        INSERT INTO graph_events (graph_id, kind, message, created_at)
+            VALUES ('g1', 'graph_started', 'started', '2026-01-01T00:00:00Z');",
+    )
+    .unwrap();
+
+    Database::migrate_graph_events_pause_kinds(&conn).unwrap();
+    // Idempotent: a second run is a no-op.
+    Database::migrate_graph_events_pause_kinds(&conn).unwrap();
+
+    let ddl: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'graph_events'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(ddl.contains("'pause_requested'"), "{ddl}");
+    assert!(ddl.contains("'pause_cancelled'"), "{ddl}");
+
+    // The pre-migration row survived the rebuild.
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM graph_events", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 1);
+
+    // The new kinds insert now.
+    for kind in ["pause_requested", "pause_cancelled"] {
+        conn.execute(
+            "INSERT INTO graph_events (graph_id, kind, message, created_at)
+                VALUES ('g1', ?1, 'x', '2026-01-01T00:00:00Z')",
+            [kind],
+        )
+        .unwrap();
+    }
+}

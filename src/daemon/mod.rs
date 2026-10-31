@@ -49,6 +49,7 @@ pub(crate) mod handler_preflight_roster;
 pub(crate) mod handler_preflight_sections;
 pub(crate) mod handler_queues;
 pub(crate) mod handler_read;
+pub(crate) mod handler_read_pause;
 pub(crate) mod handler_registry;
 pub(crate) mod handler_remote;
 pub(crate) mod handler_report_ids;

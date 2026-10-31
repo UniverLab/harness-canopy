@@ -103,6 +103,7 @@ fn running_live_state() -> crate::tui::app::graph_live_state::GraphLiveState {
         schedule_expr: None,
         watch_path: None,
         autorun_at: None,
+        pause_waiting_for: Vec::new(),
         spec_queue: Vec::new(),
         done_count: 0,
         total_count: 0,

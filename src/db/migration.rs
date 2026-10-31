@@ -5,6 +5,7 @@ use super::{Database, SCHEMA_VERSION};
 
 mod late;
 mod mutex_schema;
+mod pause_kinds_schema;
 
 impl Database {
     /// Refuses to open a database stamped with a schema version newer than
@@ -449,7 +450,8 @@ impl Database {
                         'hook_fired',
                         'config_changed',
                         'note',
-                        'mutex_waiting','mutex_acquired'
+                        'mutex_waiting','mutex_acquired',
+                        'pause_requested','pause_cancelled'
                     )),
                 message TEXT NOT NULL,
                 payload TEXT,

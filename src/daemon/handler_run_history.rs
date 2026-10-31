@@ -37,6 +37,8 @@ const GRAPH_EVENT_KINDS: &[&str] = &[
     "note",
     "mutex_waiting",
     "mutex_acquired",
+    "pause_requested",
+    "pause_cancelled",
 ];
 
 #[tool_router(router = tool_router_run_history, vis = "pub(crate)")]

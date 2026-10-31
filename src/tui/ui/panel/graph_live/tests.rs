@@ -92,6 +92,7 @@ fn running_state() -> GraphLiveState {
         schedule_expr: None,
         watch_path: None,
         autorun_at: None,
+        pause_waiting_for: Vec::new(),
         spec_queue: vec![
             SpecQueueEntry {
                 spec_id: "s1".to_string(),

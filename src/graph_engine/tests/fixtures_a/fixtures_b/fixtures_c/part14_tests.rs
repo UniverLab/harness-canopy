@@ -1348,3 +1348,100 @@ async fn interrupt_and_continue_consumes_no_iteration() {
         after.iter().map(|r| r.iteration).collect::<Vec<_>>()
     );
 }
+
+// ── Pending pause visibility: request → pending → paused ──
+
+/// A pause requested while a node runs writes `pause_requested` naming the
+/// node at request time; the graph only reaches `paused` (with `graph_paused`)
+/// once the node finishes.
+#[tokio::test]
+async fn pause_request_writes_pending_event_naming_running_node() {
+    let (_dir, db, engine, graph_id, _spec_id) = cb31_fixture("sleep 2 && true");
+    let disp = {
+        let (e, id) = (Arc::clone(&engine), graph_id.clone());
+        tokio::spawn(async move { e.run_graph(id, None, None, None, None, None).await })
+    };
+
+    cb31_wait_for_running_run(&db, &graph_id).await;
+    assert!(engine.request_pause(&graph_id, false).unwrap());
+
+    assert_eq!(
+        db.get_graph(&graph_id).unwrap().unwrap().status,
+        GraphStatus::Pausing,
+    );
+    let pending = db
+        .list_graph_events(
+            &graph_id,
+            None,
+            None,
+            Some(&["pause_requested".to_string()]),
+            50,
+        )
+        .unwrap();
+    assert_eq!(
+        pending.len(),
+        1,
+        "exactly one pause_requested event, got {pending:?}"
+    );
+    assert_eq!(
+        pending[0].message,
+        "Pause requested; waiting for 'work' to finish."
+    );
+
+    disp.await.unwrap().unwrap();
+
+    assert_eq!(
+        db.get_graph(&graph_id).unwrap().unwrap().status,
+        GraphStatus::Paused,
+    );
+    let paused = db
+        .list_graph_events(
+            &graph_id,
+            None,
+            None,
+            Some(&["graph_paused".to_string()]),
+            50,
+        )
+        .unwrap();
+    assert_eq!(
+        paused.len(),
+        1,
+        "the node boundary still writes graph_paused, got {paused:?}"
+    );
+}
+
+/// Requesting pause twice while one is pending writes a single
+/// `pause_requested` event — the second request is a silent no-op.
+#[tokio::test]
+async fn double_pause_request_writes_single_pending_event() {
+    let (_dir, db, engine, graph_id, _spec_id) = cb31_fixture("sleep 2 && true");
+    let disp = {
+        let (e, id) = (Arc::clone(&engine), graph_id.clone());
+        tokio::spawn(async move { e.run_graph(id, None, None, None, None, None).await })
+    };
+
+    cb31_wait_for_running_run(&db, &graph_id).await;
+    assert!(engine.request_pause(&graph_id, false).unwrap());
+    assert!(engine.request_pause(&graph_id, false).unwrap());
+
+    let pending = db
+        .list_graph_events(
+            &graph_id,
+            None,
+            None,
+            Some(&["pause_requested".to_string()]),
+            50,
+        )
+        .unwrap();
+    assert_eq!(
+        pending.len(),
+        1,
+        "a second pending pause writes no duplicate event, got {pending:?}"
+    );
+
+    disp.await.unwrap().unwrap();
+    assert_eq!(
+        db.get_graph(&graph_id).unwrap().unwrap().status,
+        GraphStatus::Paused,
+    );
+}

@@ -303,7 +303,11 @@ impl App {
             let running = lp.status == GraphStatus::Running;
             let last_run_at = last_run_times.get(&lp.id).copied();
             let last_activity = last_run_at.unwrap_or(lp.created_at);
-            let last_run_label = if running {
+            let last_run_label = if lp.status == GraphStatus::Pausing {
+                graph_live_state::pausing_label(
+                    &self.db.pause_waiting_node_names(&lp.id).unwrap_or_default(),
+                )
+            } else if running {
                 "running".to_string()
             } else {
                 match last_run_at {

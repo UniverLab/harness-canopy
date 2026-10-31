@@ -701,3 +701,42 @@ fn header_shows_single_width_glyphs_for_paused_pausing_and_blocked() {
 }
 // Breaks if: the header glyphs regress to the emoji-presentation forms
 // (U+23F8/U+26D4) or pick up a second space after the glyph.
+
+/// A pending pause renders `pausing — waiting for <node>` in the graph
+/// header, replacing the bare running indicator until the graph is paused.
+#[test]
+fn pausing_header_names_the_nodes_it_waits_for() {
+    let mut state = running_state();
+    state.graph_status = DomainGraphStatus::Pausing;
+    state.pause_waiting_for = vec!["Implementer [2]".to_string()];
+    let node_info = NodeRunInfo::default();
+    let text = render_to_text(80, 40, |frame, area| {
+        render_graph_live_view(
+            frame,
+            area,
+            &LiveViewContext {
+                state: &state,
+                follow: true,
+                follow_anchor: None,
+                highlighted_node_id: None,
+                node_info: &node_info,
+                blocked: false,
+                now: Utc::now(),
+                theme: &Theme::classic(),
+                time_format: "%H:%M",
+                selected_spec_id: None,
+                spec_scroll: 0,
+                scroll: 0,
+            },
+        );
+    });
+    let header = text
+        .lines()
+        .find(|line| line.contains("pausing"))
+        .expect("pausing header line missing");
+    assert!(
+        header.contains("pausing — waiting for Implementer [2]"),
+        "the header names the waited-for node, got: {header:?}"
+    );
+}
+// Breaks if: the pending-pause label regresses to bare `pausing`.
