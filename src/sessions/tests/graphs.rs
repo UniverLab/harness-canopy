@@ -20,7 +20,7 @@ use crate::domain::graphs::{
 };
 use crate::domain::queues::Queue;
 use crate::sessions::graphs::{
-    graph_frame, graph_state_frame, graphs_frame, GraphState, GraphSummary,
+    graph_frame, graph_state_frame, graphs_frame, GraphState, GraphSummary, MAX_SUMMARIES,
 };
 use crate::sessions::protocol::{parse_client_frame, parse_host_frame, ClientFrame, HostFrame};
 use crate::sessions::ws::SessionsState;
@@ -273,6 +273,126 @@ async fn graphs_answers_progress_names_and_filters_archived_and_stale() {
     assert_ne!(row["current_node"], "n-plate", "never the node id: {row}");
     assert_eq!(row["blocked"], false);
     assert!(row["updated_at"].is_string(), "RFC3339 stamp: {row}");
+    server.abort();
+}
+
+// ── poisoned rows ───────────────────────────────────────────────────────
+
+/// One unreadable graph must never blank the whole served list: the running
+/// graph stays listed while the poisoned one is skipped.
+#[tokio::test]
+async fn graphs_skips_poisoned_row_and_lists_running() {
+    let (db, dir) = test_db();
+    db.insert_graph(&graph_row("g-run", GraphStatus::Running, "/srv/work/run"))
+        .unwrap();
+    db.insert_graph(&graph_row(
+        "g-poison",
+        GraphStatus::Running,
+        "/srv/work/poison",
+    ))
+    .unwrap();
+    db.insert_graph_spec(&spec_row(
+        "s-poison",
+        Some("g-poison"),
+        "poisoned spec",
+        0,
+        GraphSpecStatus::Pending,
+    ))
+    .unwrap();
+    // TEXT in an INTEGER column: the i64 read in summarize->current_spec
+    // fails for this graph only.
+    let poison = rusqlite::Connection::open(dir.path().join("test.db")).unwrap();
+    poison
+        .execute(
+            "UPDATE graph_specs SET started_at='not-an-integer' WHERE id='s-poison'",
+            [],
+        )
+        .unwrap();
+    drop(poison);
+
+    let (mut client, server) = connected_client(&db).await;
+    send_json(&mut client, &json!({"t": "graphs", "req": "gp1"})).await;
+    let answer = recv_json(&mut client, "graphs").await;
+    assert_eq!(
+        answer["t"], "graphs",
+        "poisoned row must not fail the list: {answer}"
+    );
+    assert_eq!(answer["req"], "gp1");
+    let listed = answer["graphs"].as_array().expect("graphs array");
+    let ids: Vec<&str> = listed.iter().map(|g| g["id"].as_str().unwrap()).collect();
+    assert!(ids.contains(&"g-run"), "running graph listed: {ids:?}");
+    assert!(
+        !ids.contains(&"g-poison"),
+        "poisoned graph skipped: {ids:?}"
+    );
+    server.abort();
+}
+
+/// Truncation still favors running graphs: one runner plus more fresh
+/// completed graphs than the cap fit keeps the runner at the head.
+#[tokio::test]
+async fn graphs_truncation_keeps_running_first() {
+    let (db, _dir) = test_db();
+    db.insert_graph(&graph_row("g-run", GraphStatus::Running, "/srv/work/run"))
+        .unwrap();
+    for index in 0..(MAX_SUMMARIES + 5) {
+        db.insert_graph(&graph_row(
+            &format!("g-done-{index}"),
+            GraphStatus::Completed,
+            "/srv/work/done",
+        ))
+        .unwrap();
+    }
+
+    let (mut client, server) = connected_client(&db).await;
+    send_json(&mut client, &json!({"t": "graphs", "req": "gt1"})).await;
+    let answer = recv_json(&mut client, "graphs").await;
+    assert_eq!(answer["t"], "graphs");
+    let listed = answer["graphs"].as_array().expect("graphs array");
+    assert_eq!(listed.len(), MAX_SUMMARIES, "list capped: {listed:?}");
+    assert_eq!(
+        listed[0]["id"], "g-run",
+        "running graph survives truncation ahead of completed ones: {listed:?}"
+    );
+    server.abort();
+}
+
+/// Zero readable graphs answers an empty list, not an error.
+#[tokio::test]
+async fn graphs_all_poisoned_answers_empty_list() {
+    let (db, dir) = test_db();
+    db.insert_graph(&graph_row(
+        "g-poison",
+        GraphStatus::Running,
+        "/srv/work/poison",
+    ))
+    .unwrap();
+    db.insert_graph_spec(&spec_row(
+        "s-poison",
+        Some("g-poison"),
+        "poisoned spec",
+        0,
+        GraphSpecStatus::Pending,
+    ))
+    .unwrap();
+    let poison = rusqlite::Connection::open(dir.path().join("test.db")).unwrap();
+    poison
+        .execute(
+            "UPDATE graph_specs SET started_at='not-an-integer' WHERE id='s-poison'",
+            [],
+        )
+        .unwrap();
+    drop(poison);
+
+    let (mut client, server) = connected_client(&db).await;
+    send_json(&mut client, &json!({"t": "graphs", "req": "ge1"})).await;
+    let answer = recv_json(&mut client, "graphs").await;
+    assert_eq!(
+        answer["t"], "graphs",
+        "only poisoned rows must not fail the list: {answer}"
+    );
+    let listed = answer["graphs"].as_array().expect("graphs array");
+    assert!(listed.is_empty(), "empty list, not an error: {listed:?}");
     server.abort();
 }
 

@@ -40,7 +40,7 @@ const MAX_WATCHES: usize = 4;
 /// activity.
 const COMPLETED_TTL: chrono::Duration = chrono::Duration::hours(24);
 /// Hard cap on the `graphs` answer (FR1).
-const MAX_SUMMARIES: usize = 50;
+pub(crate) const MAX_SUMMARIES: usize = 50;
 
 /// One row of the `graphs` answer: what the remote sidebar shows for one
 /// graph.
@@ -447,7 +447,16 @@ pub(crate) fn build_summaries(db: &Database) -> anyhow::Result<Vec<GraphSummary>
         let Some(group) = status_group(graph.status) else {
             continue;
         };
-        let updated = graph_updated_at(db, &graph)?;
+        let updated = match graph_updated_at(db, &graph) {
+            Ok(updated) => updated,
+            Err(error) => {
+                tracing::warn!(
+                    "graphs list: skipping unreadable graph '{}': {error:#}",
+                    graph.id
+                );
+                continue;
+            }
+        };
         if graph.status == GraphStatus::Completed && updated < Utc::now() - COMPLETED_TTL {
             continue;
         }
@@ -455,10 +464,17 @@ pub(crate) fn build_summaries(db: &Database) -> anyhow::Result<Vec<GraphSummary>
     }
     ranked.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
     ranked.truncate(MAX_SUMMARIES);
-    ranked
-        .into_iter()
-        .map(|(_, updated, graph)| summarize(db, graph, updated))
-        .collect()
+    let mut summaries = Vec::with_capacity(ranked.len());
+    for (_, updated, graph) in ranked {
+        let graph_id = graph.id.clone();
+        match summarize(db, graph, updated) {
+            Ok(summary) => summaries.push(summary),
+            Err(error) => {
+                tracing::warn!("graphs list: skipping unreadable graph '{graph_id}': {error:#}");
+            }
+        }
+    }
+    Ok(summaries)
 }
 
 /// The list group of one status: running first, then paused, failed,
