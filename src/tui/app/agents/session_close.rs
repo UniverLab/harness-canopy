@@ -1,7 +1,6 @@
 use super::{remove_session_name, reverse_sorted_indices, selection_after_mutation, SessionTarget};
 use crate::tui::agent::AgentStatus;
 use crate::tui::app::types::{AgentEntry, App};
-use crate::tui::terminal_history::save_history;
 use std::time::Duration;
 
 const SHADOW_SUMMARY_LINGER_SECS: u64 = 7;
@@ -134,39 +133,8 @@ impl App {
             return false;
         };
 
-        // Design decision: keep scrollback as plain text and exclude
-        // full-screen programs, rather than switch to storing a replayable
-        // raw ANSI byte stream.
-        //
-        // A byte stream would let a full-screen app (vim, htop, a nested
-        // canopy) replay faithfully, but it changes what lands on disk in
-        // ways this spec explicitly flags as needing its own size/safety
-        // review, and it would still have to solve accumulation (the same
-        // append-forever bug that corrupts the current text format).
-        // Excluding full-screen output instead reuses the existing
-        // plain-text, line-capped format and needs no new on-disk shape.
-        //
-        // vt100 already tells us when a full-screen program is active:
-        // `Screen::alternate_screen()` mirrors DECSET 1049, and the crate
-        // never threads the alternate grid into scrollback (it's allocated
-        // with `scrollback_len: 0` — see vt100::Screen::new). So if the
-        // session is still in alternate-screen mode at close time,
-        // `last_lines` would only be able to return the program's current
-        // on-screen frame (there's no line history to fall back to), and
-        // persisting that as scrollback text is exactly the "rendered
-        // frames printed back as literal text" bug. Skip the capture
-        // entirely in that case and keep whatever was already persisted —
-        // once the program exits back to the shell, a later close captures
-        // real shell history again, since alternate-grid content never
-        // reached the primary grid's scrollback in the first place.
-        if !agent.in_alternate_screen() {
-            let scrollback = agent.last_lines(2000);
-            if let Some(hist) = self.terminal_histories.get_mut(&agent.name) {
-                let lines: Vec<String> = scrollback.lines().map(|s| s.to_string()).collect();
-                hist.update_scrollback(&lines);
-                save_history(&self.data_dir, &agent.name, hist);
-            }
-        }
+        // Terminals always open clean: close persists nothing. Command
+        // history is saved at capture time by the warp input path.
         agent.kill();
         self.remove_session_target(SessionTarget::Terminal(idx))
     }

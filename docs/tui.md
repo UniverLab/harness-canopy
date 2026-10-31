@@ -83,8 +83,8 @@ step instead of launching straight away:
   but the new daemon respawns every session the database still lists as
   active as soon as it starts, under the same id and name, resuming the
   harness conversation where the platform supports it. A terminal comes back
-  in its working directory with the scrollback it had when the daemon shut
-  down, above a `--- restored session history above ---` divider.
+  in its working directory with a clean pane and a fresh prompt — no stored
+  output is replayed into it.
   While the TUI runs, a dropped daemon connection is retried on its own
   (0.5 s doubling up to 5 s) and the sidebar re-lists what the daemon still
   has; sessions started or closed from another TUI appear in, or leave, the

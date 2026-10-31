@@ -100,42 +100,7 @@ fn push_stripped_response_line(collected: &mut Vec<String>, sanitized: String) {
     }
 }
 
-/// Divider written after replayed scrollback so a restored terminal can't be
-/// mistaken for a fresh one, or for the boundary where live output resumes.
-/// Dim SGR (`\x1b[2m`)/reset so it reads as chrome, not as something the
-/// previous session printed.
-pub(crate) const HISTORY_REPLAY_MARKER: &[u8] =
-    b"\x1b[2m--- restored session history above ---\x1b[0m\r\n";
-
 impl InteractiveAgent {
-    /// Replay persisted plain-text scrollback into the VT100 parser.
-    ///
-    /// This reconstructs terminal history after session resume by feeding each
-    /// line as terminal output with CRLF separators, followed by a dim marker
-    /// line so the operator can see where the replay ends and live output
-    /// begins.
-    pub fn replay_scrollback_lines(&self, lines: &[String]) {
-        if lines.is_empty() {
-            return;
-        }
-
-        if let Ok(mut vt) = self.vt.lock() {
-            let mut replay = Vec::new();
-            for line in lines {
-                replay.extend_from_slice(line.as_bytes());
-                replay.extend_from_slice(b"\r\n");
-            }
-            replay.extend_from_slice(HISTORY_REPLAY_MARKER);
-            vt.process(&replay);
-        }
-        // Do NOT update last_output_at here. Replay is a history reconstruction
-        // (auto-resume, new-terminal scrollback), not fresh PTY output. Stamping
-        // now would make every replayed agent appear "actively working" for the
-        // next ACTIVITY_IDLE_THRESHOLD_MS, which is the root cause of the
-        // "all-green on navigation" bug — the activity timestamp must only move
-        // when the PTY background reader (mod.rs) actually receives bytes.
-    }
-
     /// Get a snapshot of the virtual terminal screen for rendering.
     ///
     /// Uses vt100's native scrollback: `set_scrollback(N)` shifts the
@@ -774,10 +739,10 @@ mod tests {
         assert_eq!(snap.selection_text((0, 0), (0, 2)), "a c");
     }
 
-    // ── replay_scrollback_lines ─────────────────────────────────
+    // ── terminals open clean ────────────────────────────────────
 
     /// `cat` is a lightweight stand-in shell; these tests only exercise the
-    /// vt100 replay path and never depend on what `cat` does with stdin.
+    /// vt100 parser path and never depend on what `cat` does with stdin.
     fn spawn_test_terminal(name: &str) -> InteractiveAgent {
         InteractiveAgent::spawn_terminal(
             "cat",
@@ -792,33 +757,13 @@ mod tests {
     }
 
     #[test]
-    fn replay_scrollback_lines_reproduces_the_given_lines() {
-        let agent = spawn_test_terminal("replay-basic");
-        agent.replay_scrollback_lines(&["old line one".to_string(), "old line two".to_string()]);
-        let out = agent.last_lines(50);
-        assert!(out.contains("old line one"));
-        assert!(out.contains("old line two"));
-    }
-
-    #[test]
-    fn replay_scrollback_lines_marks_replayed_content_as_history() {
-        let agent = spawn_test_terminal("replay-marker");
-        agent.replay_scrollback_lines(&["previous session output".to_string()]);
-        let out = agent.last_lines(50);
+    fn opens_clean() {
+        // A freshly spawned terminal holds no stored output: nothing is
+        // replayed into it on open.
+        let agent = spawn_test_terminal("opens-clean");
         assert!(
-            out.contains("restored session history above"),
-            "restored content must be visually marked as history: {out:?}"
-        );
-    }
-
-    #[test]
-    fn replay_scrollback_lines_empty_is_a_noop() {
-        let agent = spawn_test_terminal("replay-empty");
-        agent.replay_scrollback_lines(&[]);
-        let out = agent.last_lines(50);
-        assert!(
-            out.trim().is_empty(),
-            "replaying no lines must not print a marker or anything else: {out:?}"
+            agent.last_lines(50).trim().is_empty(),
+            "a new terminal must open clean"
         );
     }
 

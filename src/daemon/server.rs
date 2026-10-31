@@ -146,15 +146,7 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
 
     bind_and_serve(router, port, ct).await?;
 
-    shutdown_http_server(
-        background,
-        watcher_engine,
-        &db,
-        &data_dir,
-        &graph_engine,
-        &sessions_state.hub,
-    )
-    .await;
+    shutdown_http_server(background, watcher_engine, &db, &data_dir, &graph_engine).await;
 
     Ok(())
 }
@@ -429,12 +421,7 @@ async fn shutdown_http_server(
     db: &Arc<Database>,
     data_dir: &std::path::Path,
     graph_engine: &Arc<GraphEngine>,
-    sessions: &crate::sessions::SessionHub,
 ) {
-    // Terminals first: the PTYs die with this process, so their scrollback has
-    // to be persisted while the hub's parsers still hold it, before anything
-    // below stops or terminates work.
-    crate::sessions::save_terminal_histories(sessions, data_dir);
     // CB82: FIRST — before the scheduler/health cancels and before
     // `terminate_all_...` sends SIGTERM — so the engine finalizes in-flight
     // runs as interrupted instead of routing the fail edge of a killed node.

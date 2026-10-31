@@ -18,14 +18,14 @@ use std::sync::Arc;
 
 /// Reconcile the hub with the database after a daemon start: sweep orphaned
 /// rows, then respawn every `active` interactive session (and every terminal
-/// session with saved history) that no live PTY in the hub owns.
+/// session) that no live PTY in the hub owns. Respawned terminals open clean.
 pub fn reconcile_at_startup(hub: &SessionHub, data_dir: &Path) {
     sweep_orphaned_sessions(hub.db());
 
     let current_boot_id = crate::system::boot_id();
     let canopy_config = CanopyConfig::load(data_dir);
     resume_agent_sessions(hub, &canopy_config, current_boot_id.as_deref());
-    resume_terminal_sessions(hub, data_dir);
+    resume_terminal_sessions(hub);
 }
 
 /// Startup sweep (B32): retire any row still in the removed `orphaned`
@@ -242,9 +242,9 @@ fn resume_accent(cli_config: Option<&crate::domain::cli_config::CliConfig>) -> O
     }
 }
 
-/// Respawn every terminal session left `idle` by a previous run, replaying
-/// the scrollback saved for it.
-fn resume_terminal_sessions(hub: &SessionHub, data_dir: &Path) {
+/// Respawn every terminal session left `idle` by a previous run. Each
+/// respawned terminal opens clean.
+fn resume_terminal_sessions(hub: &SessionHub) {
     let Ok(sessions) = hub.db().get_active_terminal_sessions() else {
         return;
     };
@@ -258,13 +258,13 @@ fn resume_terminal_sessions(hub: &SessionHub, data_dir: &Path) {
     }
 
     for session in &sessions {
-        resume_terminal_session(hub, data_dir, session);
+        resume_terminal_session(hub, session);
     }
 }
 
 /// Respawn one terminal in its workdir with its shell, keeping its id and
-/// name, and replay the history stored for that name.
-fn resume_terminal_session(hub: &SessionHub, data_dir: &Path, session: &TerminalSession) {
+/// name. The respawned terminal opens clean — no stored output is replayed.
+fn resume_terminal_session(hub: &SessionHub, session: &TerminalSession) {
     let request = SpawnRequest {
         kind: SessionKind::Terminal,
         cli: session.shell.clone(),
@@ -282,10 +282,7 @@ fn resume_terminal_session(hub: &SessionHub, data_dir: &Path, session: &Terminal
         yolo: false,
     };
     match hub.spawn(&request) {
-        Ok(spawned) => {
-            let history = crate::tui::terminal_history::load_history(data_dir, &spawned.name);
-            spawned.replay_scrollback_lines(&history.scrollback);
-        }
+        Ok(_) => {}
         Err(e) => tracing::warn!(
             "Failed to auto-resume terminal session '{}': {e}",
             session.name

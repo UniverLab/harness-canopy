@@ -25,6 +25,10 @@ fn spawn_test_terminal(name: &str) -> InteractiveAgent {
     .expect("spawn terminal")
 }
 
+fn feed(agent: &InteractiveAgent, bytes: &[u8]) {
+    agent.vt.lock().expect("lock vt").process(bytes);
+}
+
 /// Two terminal sessions in a horizontal split. Sets `last_panel_*` to
 /// pretend the *focused* half was just rendered at x=41 (the panel to
 /// the right of a 40-column left half), matching what `draw_split_panel`
@@ -109,7 +113,7 @@ fn focused_terminal_like_follows_split_focus_not_sidebar_selection() {
 #[test]
 fn drag_selection_in_split_targets_focused_right_panel() {
     let mut app = app_with_split_terminals(true);
-    app.terminal_agents[1].replay_scrollback_lines(&["RIGHTPANELTEXT".to_string()]);
+    feed(&app.terminal_agents[1], b"RIGHTPANELTEXT\r\n");
 
     let down = mouse(MouseEventKind::Down(MouseButton::Left), 41, 1);
     assert!(handle_selection_mouse(&mut app, &down));
@@ -133,7 +137,7 @@ fn drag_selection_in_split_targets_focused_right_panel() {
 #[test]
 fn drag_selection_in_split_targets_focused_left_panel() {
     let mut app = app_with_split_terminals(false);
-    app.terminal_agents[0].replay_scrollback_lines(&["LEFTPANELTEXT".to_string()]);
+    feed(&app.terminal_agents[0], b"LEFTPANELTEXT\r\n");
 
     let down = mouse(MouseEventKind::Down(MouseButton::Left), 0, 1);
     assert!(handle_selection_mouse(&mut app, &down));
@@ -158,7 +162,7 @@ fn drag_selection_in_split_targets_focused_left_panel() {
 #[test]
 fn shift_click_copy_in_split_resolves_focused_panel_not_sidebar_selection() {
     let mut app = app_with_split_terminals(true);
-    app.terminal_agents[1].replay_scrollback_lines(&["RIGHT SCREEN CONTENT".to_string()]);
+    feed(&app.terminal_agents[1], b"RIGHT SCREEN CONTENT\r\n");
     // `app.agents`/`app.selected` are left at their defaults (no sidebar
     // selection at all) — the old `selected_terminal_like`-based lookup
     // would resolve nothing and shift+click copy would silently no-op.

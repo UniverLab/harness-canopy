@@ -1181,7 +1181,7 @@ mod handle_interactive_exit_tests {
 mod close_terminal_session_tests {
     use super::*;
     use crate::db::Database;
-    use crate::tui::terminal_history::load_history;
+    use crate::tui::terminal_history::{load_history, save_history};
     use std::sync::Arc;
     use tempfile::{tempdir, NamedTempFile, TempDir};
 
@@ -1231,86 +1231,37 @@ mod close_terminal_session_tests {
     }
 
     #[test]
-    fn close_replaces_stored_scrollback_not_appends_across_repeated_closes() {
+    fn close_persists_no_scrollback() {
         let (mut app, data_dir) = app_with_history("caolinita");
+        // The warp path saves commands at capture time; seed one so the
+        // history file exists before the close.
+        let hist = app
+            .terminal_histories
+            .get_mut("caolinita")
+            .expect("cached history");
+        hist.record("cargo build", "/tmp");
+        save_history(data_dir.path(), "caolinita", hist);
 
         let agent = spawn_test_terminal("caolinita");
-        feed(&agent, b"first run output\r\n");
+        feed(&agent, b"session output that must not be stored\r\n");
         app.terminal_agents.push(agent);
         assert!(app.close_terminal_session_at(0));
 
-        let after_first = load_history(data_dir.path(), "caolinita");
-        assert!(after_first
-            .scrollback
-            .iter()
-            .any(|l| l.contains("first run output")));
-
-        // Reopen (mirrors a fresh session with the same name) and close again
-        // with different content.
-        let agent2 = spawn_test_terminal("caolinita");
-        feed(&agent2, b"second run output\r\n");
-        app.terminal_agents.push(agent2);
-        assert!(app.close_terminal_session_at(0));
-
-        let after_second = load_history(data_dir.path(), "caolinita");
-        assert!(after_second
-            .scrollback
-            .iter()
-            .any(|l| l.contains("second run output")));
+        let raw = std::fs::read_to_string(
+            data_dir
+                .path()
+                .join("terminals")
+                .join("caolinita")
+                .join("history.toml"),
+        )
+        .expect("read history file");
         assert!(
-            !after_second
-                .scrollback
-                .iter()
-                .any(|l| l.contains("first run output")),
-            "closing again must replace, not append, the stored snapshot: {:?}",
-            after_second.scrollback
+            !raw.contains("scrollback"),
+            "close must not persist terminal output as scrollback: {raw:?}"
         );
-    }
-
-    #[test]
-    fn close_excludes_full_screen_program_output() {
-        let (mut app, data_dir) = app_with_history("cuarzo");
-
-        let agent = spawn_test_terminal("cuarzo");
-        // Enter the alternate screen (DECSET 1049) and paint a frame, the way
-        // vim/htop/a nested canopy would.
-        feed(&agent, b"\x1b[?1049h");
-        feed(&agent, b"fake full-screen UI chrome\r\n");
-        assert!(agent.in_alternate_screen());
-        app.terminal_agents.push(agent);
-
-        assert!(app.close_terminal_session_at(0));
-
-        let after = load_history(data_dir.path(), "cuarzo");
         assert!(
-            after.scrollback.is_empty(),
-            "closing while a full-screen program is active must not persist its frame \
-             as scrollback text: {:?}",
-            after.scrollback
-        );
-    }
-
-    #[test]
-    fn close_captures_normally_once_full_screen_program_has_exited() {
-        let (mut app, data_dir) = app_with_history("session");
-
-        let agent = spawn_test_terminal("session");
-        feed(&agent, b"\x1b[?1049h");
-        feed(&agent, b"vim frame\r\n");
-        feed(&agent, b"\x1b[?1049l"); // back to the primary screen / shell
-        feed(&agent, b"shell prompt$\r\n");
-        assert!(!agent.in_alternate_screen());
-        app.terminal_agents.push(agent);
-
-        assert!(app.close_terminal_session_at(0));
-
-        let after = load_history(data_dir.path(), "session");
-        assert!(after.scrollback.iter().any(|l| l.contains("shell prompt$")));
-        assert!(
-            !after.scrollback.iter().any(|l| l.contains("vim frame")),
-            "content painted only in the alternate screen must never reach primary \
-             scrollback: {:?}",
-            after.scrollback
+            raw.contains("cargo build"),
+            "commands saved at capture must survive the close: {raw:?}"
         );
     }
 

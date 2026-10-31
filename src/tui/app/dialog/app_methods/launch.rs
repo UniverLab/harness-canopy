@@ -669,9 +669,9 @@ impl App {
         if crate::domain::project::should_auto_register(Path::new(&dir)) {
             let _ = self.db.register_project_path(Path::new(&dir));
         }
-        // Load command history into cache
+        // Load command history into cache. The pane itself always opens
+        // clean — no stored output is replayed into it.
         let hist = crate::tui::terminal_history::load_history(&self.data_dir, &agent.name);
-        agent.replay_scrollback_lines(&hist.scrollback);
         self.terminal_histories.insert(agent.name.clone(), hist);
         let spawned_name = agent.name.clone();
         self.terminal_agents.push(agent);

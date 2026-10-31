@@ -1,9 +1,8 @@
 //! Startup reconciliation: the daemon resumes the sessions its previous run
 //! left `active`. Rules moved here from the TUI unchanged, plus the resume
-//! path end to end: id/name kept, bridges skipped, terminal history replayed.
+//! path end to end: id/name kept, bridges skipped, terminals open clean.
 
 use super::*;
-use crate::sessions::history::save_terminal_histories;
 use crate::sessions::resume::{
     process_is_alive, process_matches_cli, process_outlives_grace, reconcile_at_startup,
     resume_decision, should_resume_session, ResumeDecision,
@@ -302,10 +301,10 @@ fn reconcile_with_no_active_sessions_starts_nothing() {
     );
 }
 
-// ── terminal history across a hub restart ───────────────────────────
+// ── terminals open clean across a hub restart ──────────────────────
 
 #[test]
-fn terminal_history_survives_a_hub_shutdown_and_restart() {
+fn terminal_opens_clean_after_a_hub_restart() {
     let (db, dir) = test_db();
     let hub = test_hub(&db);
     let request = SpawnRequest {
@@ -321,10 +320,8 @@ fn terminal_history_survives_a_hub_shutdown_and_restart() {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         let contents = session.test_contents().unwrap_or_default();
-        // The PTY echoes the typed line back before `sh` runs it, and the
-        // echoed `$ …` prompt line is filtered out of saved scrollback
-        // (`is_ui_line`); wait for the command's own output line, which is
-        // what the history capture keeps.
+        // Wait for the command's own output line, proving the pre-restart
+        // session really produced output — output the respawn must NOT show.
         if contents
             .lines()
             .any(|line| line.trim() == "canopy-history-probe")
@@ -337,19 +334,6 @@ fn terminal_history_survives_a_hub_shutdown_and_restart() {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
-
-    // Graceful daemon shutdown: the hub's scrollback lands in the same
-    // per-session history file the TUI writes.
-    save_terminal_histories(&hub, dir.path());
-    let saved = crate::tui::terminal_history::load_history(dir.path(), "hist-shell");
-    assert!(
-        saved
-            .scrollback
-            .iter()
-            .any(|line| line.contains("canopy-history-probe")),
-        "saved scrollback: {:?}",
-        saved.scrollback
-    );
 
     // A restart: the PTY is gone, the row is what the previous daemon left.
     let _ = hub.kill("term-hist");
@@ -364,8 +348,8 @@ fn terminal_history_survives_a_hub_shutdown_and_restart() {
     assert_eq!(resumed.name, "hist-shell");
     let contents = resumed.test_contents().unwrap_or_default();
     assert!(
-        contents.contains("canopy-history-probe"),
-        "history must be replayed into the respawned terminal: {contents:?}"
+        !contents.contains("canopy-history-probe"),
+        "a respawned terminal must open clean, without the previous run's output: {contents:?}"
     );
     let _ = restarted.kill("term-hist");
 }

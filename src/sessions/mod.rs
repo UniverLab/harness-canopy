@@ -9,7 +9,6 @@ pub mod auth;
 pub mod catalog;
 pub mod client;
 pub mod graphs;
-pub mod history;
 pub mod host_frame;
 pub mod hub;
 pub mod hub_command;
@@ -20,8 +19,6 @@ pub mod resume;
 pub mod shelf;
 pub mod spawn;
 pub mod ws;
-
-pub use history::save_terminal_histories;
 
 pub use hub::{
     HubEvent, HubSession, OutputReceiver, SessionHub, SessionKind, SessionStatus, SpawnRequest,
