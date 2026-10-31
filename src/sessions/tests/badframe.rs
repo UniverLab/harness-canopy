@@ -1,7 +1,7 @@
 //! Bad-frame tests: unknown `t` or missing fields answer
 //! `error{code:"bad_request"}` naming the frame and the field; unknown
-//! sessions answer `not_found`; writes to exited sessions are `forbidden`;
-//! host metrics are remote-only on the local socket.
+//! sessions answer `not_found`; writes to a naturally exited (removed)
+//! session are `not_found`; host metrics are remote-only on the local socket.
 
 use super::{
     agent_spawn, connect_client, recv_json, send_json, serve_state, test_db, test_hub, KillGuard,
@@ -167,7 +167,7 @@ async fn ws_answers_not_found_for_unknown_sessions() {
 }
 
 #[tokio::test]
-async fn writes_to_an_exited_session_are_forbidden() {
+async fn writes_to_a_naturally_exited_session_are_not_found() {
     let (db, _db_dir) = test_db();
     let workdir = tempfile::tempdir().expect("workdir");
     let hub = test_hub(&db);
@@ -178,13 +178,10 @@ async fn writes_to_an_exited_session_are_forbidden() {
     let id = session.id.clone();
     drop(session);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while hub
-        .get(&id)
-        .is_some_and(|s| s.status() == crate::sessions::SessionStatus::Running)
-    {
+    while hub.get(&id).is_some() {
         assert!(
             std::time::Instant::now() < deadline,
-            "the child never exited"
+            "the exited session was never removed"
         );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
@@ -199,7 +196,7 @@ async fn writes_to_an_exited_session_are_forbidden() {
         &serde_json::json!({"t": "input", "id": id, "data": "aGk="}),
     )
     .await;
-    assert_eq!(recv_json(&mut client, "error").await["code"], "forbidden");
+    assert_eq!(recv_json(&mut client, "error").await["code"], "not_found");
 
     send_json(
         &mut client,
@@ -207,7 +204,7 @@ async fn writes_to_an_exited_session_are_forbidden() {
     )
     .await;
     let error = recv_json(&mut client, "error").await;
-    assert_eq!(error["code"], "forbidden");
+    assert_eq!(error["code"], "not_found");
     assert_eq!(error["req"], "p1");
     server.abort();
 }

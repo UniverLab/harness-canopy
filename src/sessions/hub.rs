@@ -583,8 +583,9 @@ impl SessionHub {
     }
 
     /// Record a natural child exit: mark the session exited and its row
-    /// finished, and tell attached connections. A no-op when `kill` already
-    /// recorded the exit, so `exited` is sent once.
+    /// finished, tell attached connections, drop it from the list, and tell
+    /// every connection it is gone. A no-op when `kill` already recorded
+    /// the exit, so the events are sent once.
     pub(crate) fn record_natural_exit(&self, session: &HubSession, code: i32) {
         let Ok(mut status) = session.status.lock() else {
             return;
@@ -594,12 +595,16 @@ impl SessionHub {
         }
         *status = SessionStatus::Exited(code);
         drop(status);
+        if let Ok(mut sessions) = self.inner.sessions.lock() {
+            sessions.remove(session.id.as_str());
+        }
         session.finish_db_row(&self.inner.db);
         self.emit(HubEvent::Exited {
             id: session.id.clone(),
             code,
             to_all: false,
         });
+        self.emit(HubEvent::SessionRemoved(session.id.clone()));
     }
 
     /// End a session the way closing it in the TUI does (signal to the

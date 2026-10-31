@@ -6,6 +6,7 @@ use super::{
     test_db, test_hub, KillGuard,
 };
 use crate::sessions::ws::SessionsState;
+use crate::sessions::HubEvent;
 
 /// Shrinking a hub session moves the rows that fall off into scrollback
 /// instead of dropping them, and the metadata follows the new size.
@@ -178,9 +179,10 @@ async fn kill_sends_exited_and_removed() {
 }
 
 /// A child that exits on its own sends `exited` to attached connections
-/// and stays listed as exited. The exit is triggered after the attach (an
-/// instant child like `true` would exit before anyone attaches, and `exited`
-/// goes only to currently attached connections).
+/// first, then `session_removed` to every connection, and leaves the list:
+/// re-attaching answers `not_found`. The exit is triggered after the attach
+/// (an instant child like `true` would exit before anyone attaches, and
+/// `exited` goes only to currently attached connections).
 #[tokio::test]
 async fn natural_exit_sends_exited_to_attached() {
     let (db, _db_dir) = test_db();
@@ -216,14 +218,21 @@ async fn natural_exit_sends_exited_to_attached() {
     )
     .await;
     let mut exited = false;
-    while !exited {
-        let frame = recv_json(&mut client, "out/exited").await;
+    let mut removed = false;
+    while !(exited && removed) {
+        let frame = recv_json(&mut client, "out/exited/removed").await;
         match frame["t"].as_str() {
             Some("out") => {}
             Some("exited") => {
                 assert_eq!(frame["id"], id);
                 assert_eq!(frame["code"], 0);
+                assert!(!removed, "`exited` arrives before `session_removed`");
                 exited = true;
+            }
+            Some("session_removed") => {
+                assert_eq!(frame["id"], id);
+                assert!(exited, "`exited` arrives before `session_removed`");
+                removed = true;
             }
             other => panic!("unexpected frame: {other:?}"),
         }
@@ -232,10 +241,55 @@ async fn natural_exit_sends_exited_to_attached() {
     send_json(&mut client, &serde_json::json!({"t": "list", "req": "l1"})).await;
     let listed = recv_json(&mut client, "sessions").await;
     let items = listed["items"].as_array().expect("items");
-    assert_eq!(items.len(), 1, "an exited session stays listed");
-    assert_eq!(items[0]["status"], "exited");
-    assert_eq!(items[0]["exit_code"], 0);
+    assert!(
+        items.is_empty(),
+        "a naturally exited session leaves the list"
+    );
+
+    send_json(&mut client, &serde_json::json!({"t": "attach", "id": id})).await;
+    let error = recv_json(&mut client, "not_found").await;
+    assert_eq!(error["t"], "error");
+    assert_eq!(error["code"], "not_found");
     server.abort();
+}
+
+/// A natural exit emits `exited` (attached-only) then `session_removed`,
+/// in that order, and drops the session from `get`/`list`.
+#[test]
+fn natural_exit_drops_from_list_and_emits_both() {
+    let (db, _db_dir) = test_db();
+    let workdir = tempfile::tempdir().expect("workdir");
+    let hub = test_hub(&db);
+    let (session, _guard) = KillGuard::spawn(
+        &hub,
+        &terminal_spawn("cat", &workdir.path().to_string_lossy()),
+    );
+    let id = session.id.clone();
+    let mut events = hub.subscribe_events();
+
+    hub.record_natural_exit(&session, 3);
+
+    match events.blocking_recv().expect("the first event") {
+        HubEvent::Exited {
+            id: got,
+            code,
+            to_all,
+        } => {
+            assert_eq!(got, id);
+            assert_eq!(code, 3);
+            assert!(!to_all, "a natural exit stays attached-only");
+        }
+        other => panic!("expected `exited` first, got {other:?}"),
+    }
+    match events.blocking_recv().expect("the second event") {
+        HubEvent::SessionRemoved(got) => assert_eq!(got, id),
+        other => panic!("expected `session_removed` second, got {other:?}"),
+    }
+    assert!(hub.get(&id).is_none());
+    assert!(
+        hub.list().iter().all(|s| s.id != id),
+        "the exited session leaves the list"
+    );
 }
 
 /// A natural agent exit marks its `interactive_sessions` row finished.
@@ -265,7 +319,8 @@ fn natural_exit_marks_agent_row_finished() {
     }
 }
 
-/// Hub-level kill of a session whose child already exited still removes it.
+/// A natural exit already removes the session, so a later hub-level kill
+/// finds nothing.
 #[test]
 fn kill_after_natural_exit_removes_the_session() {
     let (db, _db_dir) = test_db();
@@ -279,17 +334,14 @@ fn kill_after_natural_exit_removes_the_session() {
     drop(session);
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while hub
-        .get(&id)
-        .is_some_and(|s| s.status() != crate::sessions::SessionStatus::Exited(0))
-    {
+    while hub.get(&id).is_some() {
         assert!(
             std::time::Instant::now() < deadline,
-            "the child never exited"
+            "the exited session was never removed"
         );
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    assert_eq!(hub.kill(&id), Some(0));
+    assert_eq!(hub.kill(&id), None);
     assert!(hub.get(&id).is_none());
     drop(guard);
 }

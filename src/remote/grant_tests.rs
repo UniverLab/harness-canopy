@@ -301,6 +301,60 @@ fn partial_grant_filters_lifecycle_events_to_its_names() {
     bridge.abort();
 }
 
+#[tokio::test]
+async fn natural_exit_removal_reaches_holders_not_ungranted() {
+    let hub = grant_hub();
+
+    // A full-grant holder that listed the session hears its natural-exit
+    // removal; the attached-only `exited` stays silent for a list-holder.
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), Grant::All);
+    bridge.handle_text(&list_frame("r1"), &out_tx).await;
+    assert_eq!(recv_frame(&mut out_rx).await["t"], "sessions");
+    bridge.handle_event(
+        HubEvent::Exited {
+            id: hub.alpha.id.clone(),
+            code: 0,
+            to_all: false,
+        },
+        &out_tx,
+    );
+    bridge.handle_event(HubEvent::SessionRemoved(hub.alpha.id.clone()), &out_tx);
+    let removed: Value =
+        serde_json::from_str(&out_rx.try_recv().expect("the removal reaches the holder"))
+            .expect("JSON");
+    assert_eq!(removed["t"], "session_removed");
+    assert_eq!(removed["id"], hub.alpha.id);
+    assert!(
+        out_rx.try_recv().is_err(),
+        "only the removal forwards to a list-holder"
+    );
+    bridge.abort();
+
+    // A guest granted only beta listed its subset: alpha's natural exit
+    // leaks nothing through either event.
+    let grant = Grant::Sessions(HashSet::from(["beta".to_string()]));
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), grant);
+    bridge.handle_text(&list_frame("r1"), &out_tx).await;
+    let list = recv_frame(&mut out_rx).await;
+    assert_eq!(session_names(&list), vec!["beta".to_string()]);
+    bridge.handle_event(
+        HubEvent::Exited {
+            id: hub.alpha.id.clone(),
+            code: 0,
+            to_all: false,
+        },
+        &out_tx,
+    );
+    bridge.handle_event(HubEvent::SessionRemoved(hub.alpha.id.clone()), &out_tx);
+    assert!(
+        out_rx.try_recv().is_err(),
+        "an ungranted natural exit forwards nothing"
+    );
+    bridge.abort();
+}
+
 #[test]
 fn pairing_binds_the_attested_login_and_refuses_untrusted_guests() {
     let dir = tempfile::tempdir().expect("tempdir");
