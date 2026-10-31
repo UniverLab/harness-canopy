@@ -352,7 +352,13 @@ async fn serve(session: &mut PeerSession, config: WatchdogConfig) {
                 on_hub_event(&mut bridge, &out_tx, greeted, hub_event).err()
             }
             _ = watchdog.tick() => {
-                watchdog_check(session, &mut disconnected_since, greeted, started, config)
+                watchdog_check(
+                    session.peer.link_state(),
+                    &mut disconnected_since,
+                    greeted,
+                    started,
+                    config,
+                )
             }
         };
         if let Some(ended) = reason {
@@ -372,15 +378,17 @@ async fn serve(session: &mut PeerSession, config: WatchdogConfig) {
 /// One watchdog pass over the transport: `Some` reason ends the peer so its
 /// slot frees through the existing `remove`, `None` keeps serving. A failed
 /// or closed link ends now; a disconnected one gets its grace, then ends;
-/// a peer whose channel never opened gets its own grace, then ends.
-fn watchdog_check(
-    session: &PeerSession,
+/// a peer whose channel never opened gets its own grace, then ends. Pure
+/// over the reported link state so the reconnect tests pin every arm; the
+/// integration zombies only ever hold `Up` links.
+pub(crate) fn watchdog_check(
+    link: LinkState,
     disconnected_since: &mut Option<Instant>,
     greeted: bool,
     started: Instant,
     config: WatchdogConfig,
 ) -> Option<&'static str> {
-    match session.peer.link_state() {
+    match link {
         LinkState::Down => Some("the transport failed or closed"),
         LinkState::Disconnected => {
             let since = disconnected_since.get_or_insert_with(Instant::now);

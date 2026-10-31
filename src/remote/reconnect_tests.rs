@@ -21,13 +21,15 @@ use tokio::sync::mpsc;
 use crate::db::Database;
 use crate::domain::canopy_config::CanopyConfig;
 use crate::remote::connection::{
-    spawn_with_watchdog, DevicePeers, PeerSession, WatchdogConfig, MAX_CHANNEL_FRAME,
+    spawn_with_watchdog, watchdog_check, DevicePeers, PeerSession, WatchdogConfig,
+    MAX_CHANNEL_FRAME,
 };
 use crate::remote::devices::{device_id, RemoteDevices};
 use crate::remote::hostkey::{verify_p1363, HostKey};
 use crate::remote::pairing::{derive_k_pair, mac_init, normalize_code, PairingState};
 use crate::remote::peer;
 use crate::remote::peer::device_side::{DeviceEvent, DeviceSide};
+use crate::remote::peer::LinkState;
 use crate::remote::relay::{
     connect_ws, serve_socket_with_idle_timeout, websocket_url, ConnectionRegistry, HostHeaders,
     RelayRuntime, SignalTx,
@@ -434,7 +436,9 @@ async fn client_drop_frees_the_slot_for_the_same_key() {
     let (to, answer) = harness.route_and_answer(&body, "d:2").await;
     assert_eq!(to, "d:2");
     assert_eq!(answer["t"], "answer");
-    assert_eq!(harness.rows(), 1, "the reconnect adds no row");
+    let rows = harness.devices.list().expect("list");
+    assert_eq!(rows.len(), 1, "the reconnect adds no row");
+    assert_eq!(rows[0].id, id, "the reconnect keeps its row");
     harness.peers.close(&id);
     drop(device);
 }
@@ -603,4 +607,64 @@ async fn refusals_keep_their_order_and_rows_stay_stable() {
         assert_eq!(rows[0].id, id, "cycle {cycle} keeps its row");
     }
     harness.peers.close(&id);
+}
+
+/// The watchdog's decision table, branch by branch: a failed link ends now,
+/// a disconnected link gets its grace, an unopened channel gets its own, a
+/// greeted link never trips the open grace. Breaks when any arm is skipped:
+/// the zombies above only ever hold `Up` links, so without this the
+/// `Disconnected` arm could be deleted unnoticed.
+#[test]
+fn watchdog_ends_each_sick_link_on_its_terms() {
+    let live = WatchdogConfig {
+        tick: Duration::from_millis(100),
+        disconnect_grace: Duration::from_secs(60),
+        open_grace: Duration::from_secs(60),
+    };
+    let expired = WatchdogConfig {
+        tick: Duration::from_millis(100),
+        disconnect_grace: Duration::from_millis(1),
+        open_grace: Duration::from_millis(1),
+    };
+    let started = Instant::now();
+    // A failed or closed link ends now.
+    assert_eq!(
+        watchdog_check(LinkState::Down, &mut None, false, started, live),
+        Some("the transport failed or closed")
+    );
+    // A fresh `Disconnected` arms its clock and keeps serving ...
+    let mut since = None;
+    assert_eq!(
+        watchdog_check(LinkState::Disconnected, &mut since, false, started, live),
+        None
+    );
+    assert!(since.is_some(), "the first sighting arms the clock");
+    // ... and ends past its grace.
+    std::thread::sleep(Duration::from_millis(5));
+    assert_eq!(
+        watchdog_check(LinkState::Disconnected, &mut since, false, started, expired),
+        Some("the transport stayed disconnected past its grace")
+    );
+    // `Up` clears a stale disconnect clock instead of ending.
+    let mut since = Some(started);
+    assert_eq!(
+        watchdog_check(LinkState::Up, &mut since, true, started, live),
+        None
+    );
+    assert_eq!(since, None);
+    // An unopened channel ends past its grace, but never while greeted.
+    std::thread::sleep(Duration::from_millis(5));
+    assert_eq!(
+        watchdog_check(LinkState::Up, &mut None, false, started, expired),
+        Some("the channel never opened past its grace")
+    );
+    assert_eq!(
+        watchdog_check(LinkState::Up, &mut None, true, started, expired),
+        None
+    );
+    // A fresh unopened channel keeps serving.
+    assert_eq!(
+        watchdog_check(LinkState::Up, &mut None, false, Instant::now(), live),
+        None
+    );
 }
