@@ -218,8 +218,8 @@ async fn full_grant_lists_every_agent_session_and_attaches() {
     assert!(names.contains(&"alpha".to_string()), "{names:?}");
     assert!(names.contains(&"beta".to_string()), "{names:?}");
     assert!(
-        !names.contains(&"shell".to_string()),
-        "terminals stay hidden even for a full grant: {names:?}"
+        names.contains(&"shell".to_string()),
+        "terminals list for a full grant: {names:?}"
     );
 
     bridge
@@ -228,6 +228,22 @@ async fn full_grant_lists_every_agent_session_and_attaches() {
     let snapshot = recv_frame(&mut out_rx).await;
     assert_eq!(snapshot["t"], "snapshot");
     assert_eq!(snapshot["id"], hub.beta.id);
+    // Drain the snapshot's continuations before the next attach.
+    loop {
+        let more = recv_frame(&mut out_rx).await;
+        assert_eq!(more["t"], "snapshot_more", "got {more}");
+        if more["last"].as_bool().expect("the last flag") {
+            break;
+        }
+    }
+
+    // The terminal attaches too.
+    bridge
+        .handle_text(&attach_frame(&hub.shell.id), &out_tx)
+        .await;
+    let snapshot = recv_frame(&mut out_rx).await;
+    assert_eq!(snapshot["t"], "snapshot");
+    assert_eq!(snapshot["id"], hub.shell.id);
     bridge.abort();
 }
 
@@ -266,12 +282,49 @@ async fn partial_grant_lists_only_the_subset_and_hides_the_rest() {
     let denied = recv_frame(&mut out_rx).await;
     assert_eq!(denied["code"], ERR_NOT_FOUND);
 
+    // The ungranted terminal meets the same `not_found` on every touch.
+    bridge
+        .handle_text(&attach_frame(&hub.shell.id), &out_tx)
+        .await;
+    let denied = recv_frame(&mut out_rx).await;
+    assert_eq!(denied["code"], ERR_NOT_FOUND);
+
+    let prompt = json!({"t": "prompt", "req": "r4", "id": hub.shell.id, "text": "hi"}).to_string();
+    bridge.handle_text(&prompt, &out_tx).await;
+    let denied = recv_frame(&mut out_rx).await;
+    assert_eq!(denied["code"], ERR_NOT_FOUND);
+
+    let kill = json!({"t": "kill", "req": "r5", "id": hub.shell.id}).to_string();
+    bridge.handle_text(&kill, &out_tx).await;
+    let denied = recv_frame(&mut out_rx).await;
+    assert_eq!(denied["code"], ERR_NOT_FOUND);
+
+    let input = json!({"t": "input", "id": hub.shell.id, "data": b64(b"x")}).to_string();
+    bridge.handle_text(&input, &out_tx).await;
+    let denied = recv_frame(&mut out_rx).await;
+    assert_eq!(denied["code"], ERR_NOT_FOUND);
+
     // The granted session still attaches.
     bridge
         .handle_text(&attach_frame(&hub.alpha.id), &out_tx)
         .await;
     let snapshot = recv_frame(&mut out_rx).await;
     assert_eq!(snapshot["t"], "snapshot");
+    bridge.abort();
+
+    // Granted the shell by name, the guest lists and attaches it.
+    let grant = Grant::Sessions(HashSet::from(["shell".to_string()]));
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), grant);
+    bridge.handle_text(&list_frame("r6"), &out_tx).await;
+    let list = recv_frame(&mut out_rx).await;
+    assert_eq!(session_names(&list), vec!["shell".to_string()]);
+    bridge
+        .handle_text(&attach_frame(&hub.shell.id), &out_tx)
+        .await;
+    let snapshot = recv_frame(&mut out_rx).await;
+    assert_eq!(snapshot["t"], "snapshot");
+    assert_eq!(snapshot["id"], hub.shell.id);
     bridge.abort();
 }
 
@@ -286,6 +339,12 @@ fn partial_grant_filters_lifecycle_events_to_its_names() {
     assert!(
         out_rx.try_recv().is_err(),
         "an ungranted arrival must not forward"
+    );
+
+    bridge.handle_event(HubEvent::SessionAdded(Box::new(hub.shell.item())), &out_tx);
+    assert!(
+        out_rx.try_recv().is_err(),
+        "an ungranted terminal arrival must not forward"
     );
 
     bridge.handle_event(HubEvent::SessionAdded(Box::new(hub.alpha.item())), &out_tx);

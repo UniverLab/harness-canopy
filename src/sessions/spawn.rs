@@ -253,6 +253,15 @@ fn expand_home(raw: &str) -> String {
     }
 }
 
+/// The shell a `spawn` without `cli` opens for `kind:"terminal"`: the
+/// host user's `$SHELL`, falling back to `"sh"` when unset or empty.
+pub fn default_terminal_shell() -> String {
+    std::env::var("SHELL")
+        .ok()
+        .filter(|shell| !shell.trim().is_empty())
+        .unwrap_or_else(|| "sh".to_string())
+}
+
 /// The launch-args string recorded in the session's database row: the
 /// interactive (or fallback) args plus the model flag and model, in the same
 /// order [`build_agent_cmd`] passes them to the child.

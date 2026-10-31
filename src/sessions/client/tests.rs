@@ -213,3 +213,30 @@ fn spawn_frame_carries_every_field() {
         }
     }
 }
+
+#[test]
+fn spawn_without_cli_parses_to_an_empty_cli() {
+    // Missing or null `cli` reads as "": a terminal spawn needs no shell.
+    for text in [
+        r#"{"t": "spawn", "req": "r1", "kind": "terminal", "workdir": "/tmp"}"#,
+        r#"{"t": "spawn", "req": "r2", "kind": "terminal", "cli": null, "workdir": "/tmp"}"#,
+    ] {
+        match parse_client_frame(text).expect("spawn frame parses") {
+            ClientFrame::Spawn { cli, workdir, .. } => {
+                assert_eq!(cli, "", "a missing cli reads as empty: {text}");
+                assert_eq!(workdir, "/tmp");
+            }
+            other => panic!("spawn frame parsed as {other:?}"),
+        }
+    }
+    // A non-string `cli` is still refused, naming frame and field.
+    let error = parse_client_frame(
+        r#"{"t": "spawn", "req": "r3", "kind": "terminal", "cli": 42, "workdir": "/tmp"}"#,
+    )
+    .expect_err("a numeric cli must not parse");
+    assert!(
+        error.message.contains("spawn") && error.message.contains("cli"),
+        "must name the frame and the field: {}",
+        error.message
+    );
+}

@@ -33,8 +33,8 @@ use super::protocol::{
 };
 use super::shelf::{ShelfStore, READ_CHUNK_BYTES};
 use super::{
-    resolve_spawn_workdir, yolo_flag_for, HubEvent, HubSession, OutputReceiver, SessionHub,
-    SessionKind, SessionStatus, SpawnRequest,
+    default_terminal_shell, resolve_spawn_workdir, yolo_flag_for, HubEvent, HubSession,
+    OutputReceiver, SessionHub, SessionKind, SessionStatus, SpawnRequest,
 };
 
 /// Shared state for the sessions endpoint: the hub, the shelf it broadcasts
@@ -534,7 +534,7 @@ fn handle_resize(state: &Arc<SessionsState>, out_tx: &OutTx, id: &str, cols: u16
 }
 
 fn handle_spawn(state: &Arc<SessionsState>, out_tx: &OutTx, req: String, mut spawn: SpawnRequest) {
-    if spawn.cli.is_empty() {
+    if spawn.kind == SessionKind::Agent && spawn.cli.is_empty() {
         let _ = out_tx.send(error_frame(
             Some(&req),
             ERR_BAD_REQUEST,
@@ -573,10 +573,10 @@ fn handle_spawn(state: &Arc<SessionsState>, out_tx: &OutTx, req: String, mut spa
 }
 
 /// Validate a spawn's extension fields before the hub opens a PTY: `yolo`
-/// needs an agent whose harness defines a `yolo_flag`, and `workdir` must
-/// expand (`~`, `~/x`) to an absolute path naming a real directory — the
-/// expanded path replaces the frame's own. `Err` carries the `bad_request`
-/// message.
+/// needs an agent whose harness defines a `yolo_flag`; a terminal without
+/// `cli` opens the default shell; and `workdir` must expand (`~`, `~/x`) to
+/// an absolute path naming a real directory — the expanded path replaces the
+/// frame's own. `Err` carries the `bad_request` message.
 pub(crate) fn validate_spawn_extensions(spawn: &mut SpawnRequest) -> Result<(), String> {
     if spawn.yolo {
         if spawn.kind != SessionKind::Agent {
@@ -588,6 +588,9 @@ pub(crate) fn validate_spawn_extensions(spawn: &mut SpawnRequest) -> Result<(), 
         if yolo_flag_for(&spawn.cli).is_none() {
             return Err(format!("spawn: harness '{}' has no yolo mode", spawn.cli));
         }
+    }
+    if spawn.kind == SessionKind::Terminal && spawn.cli.is_empty() {
+        spawn.cli = default_terminal_shell();
     }
     spawn.workdir = resolve_spawn_workdir(&spawn.workdir)?;
     Ok(())

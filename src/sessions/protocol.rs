@@ -314,7 +314,7 @@ fn parse_prompt_frame(value: &Value, frame: &str) -> Result<ClientFrame, FrameEr
 fn parse_spawn_frame(value: &Value, frame: &str) -> Result<ClientFrame, FrameError> {
     let req = req_field(value, frame)?;
     let kind = str_field(value, frame, "kind")?;
-    let cli = str_field(value, frame, "cli")?;
+    let cli = opt_str_field(value, frame, "cli")?.unwrap_or_default();
     let model = opt_str_field(value, frame, "model")?;
     let workdir = str_field(value, frame, "workdir")?;
     let name = opt_str_field(value, frame, "name")?;
@@ -603,8 +603,9 @@ pub fn resize_frame(id: &str, cols: u16, rows: u16) -> String {
     serde_json::json!({"t": "resize", "id": id, "cols": cols, "rows": rows}).to_string()
 }
 
-/// `spawn{req,kind,cli,model?,workdir,name?,prompt?,interactive_args?,fallback_args?,model_flag?,id?,seed_id?,accent?,harness_conversation_id?,yolo?}`:
-/// spawn a hub session. The agent launch fields mirror what the TUI passes to
+/// `spawn{req,kind,cli?,model?,workdir,name?,prompt?,interactive_args?,fallback_args?,model_flag?,id?,seed_id?,accent?,harness_conversation_id?,yolo?}`:
+/// spawn a hub session. `cli` may be absent or `null` for `kind:"terminal"`
+/// (the default shell opens); agents still require it. The agent launch fields mirror what the TUI passes to
 /// `InteractiveAgent::spawn` today: explicit args (resume/yolo included),
 /// the resume identity, the seed, the accent (`"r,g,b"`) and the harness's
 /// own conversation identifier. `yolo` (default

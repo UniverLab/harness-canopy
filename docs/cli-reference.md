@@ -359,10 +359,11 @@ and neither the relay nor a TURN server can read or impersonate the
 session. Nothing but those signaling bodies reaches the relay.
 
 Once the data channel is open, the browser speaks the same protocol v1 as
-`/sessions/ws`, with four restrictions: terminal sessions are hidden from
-the list and cannot be attached, written to, prompted or killed, `resize`
-is always refused (the browser renders the host's size scaled), and `spawn`
-creates `agent` sessions only. A browser paired as a trusted guest login
+`/sessions/ws`, with one restriction: `resize`
+is always refused (the browser renders the host's size scaled). Terminal
+sessions are first-class, as on the local socket: they list, attach, and
+spawn — a terminal `spawn` may omit `cli` (or send `null`) to open the
+host user's default shell. A browser paired as a trusted guest login
 sees only its granted sessions — every other session answers `not_found`,
 as if it did not exist — while the owner keeps the full view. A session
 whose process ends leaves the list for owner and guest alike, as if

@@ -1,14 +1,13 @@
 //! The session hub as a paired device sees it.
 //!
 //! A device peer is a remote client, not a local one: it speaks the same
-//! protocol v1 frames as `/sessions/ws`, with four extra rules —
+//! protocol v1 frames as `/sessions/ws`, with one extra rule —
 //!
-//! * sessions of kind `terminal` are hidden from `sessions` and
-//!   `session_added`;
-//! * `attach`/`input`/`prompt`/`kill` aimed at a terminal answer
-//!   `error{code:"forbidden"}`;
-//! * `resize` always answers `forbidden`;
-//! * `spawn` accepts only `kind:"agent"`.
+//! * `resize` always answers `forbidden`.
+//!
+//! Terminal sessions are first-class here, as on the local socket: they
+//! list, attach, and spawn (without `cli` they open the default shell).
+//! Only their shelf files stay hidden (see `handle_shelf_list`).
 //!
 //! Outbound frames are size-bounded for a data channel: raw `out`,
 //! `snapshot` and `file` payloads are split into chunks that keep the source
@@ -74,9 +73,10 @@ pub struct RemoteBridge {
     scope: GrantScope,
 }
 
-/// The hub request a remote `spawn` frame describes. A device may only spawn
-/// agents, so the request kind is fixed here and [`RemoteBridge::handle_spawn`]
-/// refuses a frame that asked for anything else.
+/// The hub request a remote `spawn` frame describes. The kind is parsed
+/// from the frame and fixed on the request by
+/// [`RemoteBridge::handle_spawn`], which refuses anything but `agent` and
+/// `terminal`.
 fn spawn_request(
     cli: String,
     model: Option<String>,
@@ -167,33 +167,22 @@ impl RemoteBridge {
                 if !self.scope.granted(&self.state.hub, Some(&req), &id, out) {
                     return;
                 }
-                self.guard_terminal(&req, &id, out, |bridge, out| {
-                    let Some(session) = bridge.state.hub.get(&id) else {
-                        let _ = out.send(error_frame(
-                            Some(&req),
-                            ERR_NOT_FOUND,
-                            &no_such_session(&id),
-                        ));
-                        return;
-                    };
-                    if session.status() != SessionStatus::Running {
-                        let _ =
-                            out.send(error_frame(Some(&req), ERR_FORBIDDEN, "session has exited"));
-                        return;
-                    }
-                    deliver_prompt(session, req.clone(), text, out.clone());
-                });
+                let Some(session) = self.state.hub.get(&id) else {
+                    let _ = out.send(error_frame(
+                        Some(&req),
+                        ERR_NOT_FOUND,
+                        &no_such_session(&id),
+                    ));
+                    return;
+                };
+                if session.status() != SessionStatus::Running {
+                    let _ = out.send(error_frame(Some(&req), ERR_FORBIDDEN, "session has exited"));
+                    return;
+                }
+                deliver_prompt(session, req, text, out.clone());
             }
             ClientFrame::PromptDraft { req, id, draft } => {
                 if !self.scope.granted(&self.state.hub, Some(&req), &id, out) {
-                    return;
-                }
-                if self.terminal(&id) {
-                    let _ = out.send(error_frame(
-                        Some(&req),
-                        ERR_FORBIDDEN,
-                        "terminal sessions are not shared",
-                    ));
                     return;
                 }
                 handle_prompt_draft(&self.state, out, req, &id, draft);
@@ -222,14 +211,7 @@ impl RemoteBridge {
                 if !self.scope.granted(&self.state.hub, Some(&req), &id, out) {
                     return;
                 }
-                self.guard_terminal(&req, &id, out, |bridge, out| {
-                    deliver_kill(
-                        bridge.state.hub.clone(),
-                        req.clone(),
-                        id.clone(),
-                        out.clone(),
-                    );
-                });
+                deliver_kill(self.state.hub.clone(), req, id, out.clone());
             }
             frame @ (ClientFrame::ShelfList { .. }
             | ClientFrame::ShelfGet { .. }
@@ -297,14 +279,12 @@ impl RemoteBridge {
         }
     }
 
-    /// Forward one hub lifecycle event, with terminal sessions and
-    /// ungranted sessions filtered out.
+    /// Forward one hub lifecycle event, with ungranted sessions
+    /// filtered out.
     pub fn handle_event(&mut self, event: HubEvent, out: &OutTx) {
         match event {
             HubEvent::SessionAdded(item) => {
-                if item.kind != SessionKind::Terminal.as_str()
-                    && self.scope.note_listed(&item.id, &item.name)
-                {
+                if self.scope.note_listed(&item.id, &item.name) {
                     send(out, session_added_frame(&item));
                 }
             }
@@ -397,34 +377,13 @@ impl RemoteBridge {
         session_id.is_some_and(|id| self.terminal(id))
     }
 
-    /// Run `allowed` unless `id` names a terminal session.
-    fn guard_terminal(
-        &mut self,
-        req: &str,
-        id: &str,
-        out: &OutTx,
-        allowed: impl FnOnce(&mut Self, &OutTx),
-    ) {
-        if self.terminal(id) {
-            let _ = out.send(error_frame(
-                Some(req),
-                ERR_FORBIDDEN,
-                "terminal sessions are not shared with remote devices",
-            ));
-            return;
-        }
-        allowed(self, out);
-    }
-
     fn handle_list(&mut self, req: &str, out: &OutTx) {
         let mut items: Vec<SessionItem> = self
             .state
             .hub
             .list()
             .iter()
-            .filter(|session| {
-                session.kind != SessionKind::Terminal && self.scope.allows(&session.name)
-            })
+            .filter(|session| self.scope.allows(&session.name))
             .map(|session| session.item())
             .collect();
         items.sort_by(|a, b| a.id.cmp(&b.id));
@@ -436,14 +395,6 @@ impl RemoteBridge {
 
     fn attach(&mut self, id: &str, out: &OutTx) {
         if !self.scope.granted(&self.state.hub, None, id, out) {
-            return;
-        }
-        if self.terminal(id) {
-            let _ = out.send(error_frame(
-                None,
-                ERR_FORBIDDEN,
-                "terminal sessions are not shared with remote devices",
-            ));
             return;
         }
         let Some(session) = self.state.hub.get(id) else {
@@ -484,14 +435,6 @@ impl RemoteBridge {
         if !self.scope.granted(&self.state.hub, None, id, out) {
             return;
         }
-        if self.terminal(id) {
-            let _ = out.send(error_frame(
-                None,
-                ERR_FORBIDDEN,
-                "terminal sessions are not shared with remote devices",
-            ));
-            return;
-        }
         let Some(session) = self.state.hub.get(id) else {
             let _ = out.send(error_frame(None, ERR_NOT_FOUND, &no_such_session(id)));
             return;
@@ -514,15 +457,7 @@ impl RemoteBridge {
             ));
             return;
         };
-        if parsed != SessionKind::Agent {
-            let _ = out.send(error_frame(
-                Some(&req),
-                ERR_FORBIDDEN,
-                "remote devices may only spawn kind 'agent'",
-            ));
-            return;
-        }
-        if request.cli.is_empty() || request.workdir.is_empty() {
+        if (parsed == SessionKind::Agent && request.cli.is_empty()) || request.workdir.is_empty() {
             let _ = out.send(error_frame(
                 Some(&req),
                 ERR_BAD_REQUEST,
@@ -530,7 +465,7 @@ impl RemoteBridge {
             ));
             return;
         }
-        request.kind = SessionKind::Agent;
+        request.kind = parsed;
         if let Err(message) = validate_spawn_extensions(&mut request) {
             let _ = out.send(error_frame(Some(&req), ERR_BAD_REQUEST, &message));
             return;

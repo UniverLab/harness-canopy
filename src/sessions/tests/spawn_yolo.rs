@@ -9,7 +9,7 @@ use crate::sessions::host_frame::HostFrame;
 use crate::sessions::hub_command::build_spawn_command;
 use crate::sessions::protocol::parse_host_frame;
 use crate::sessions::ws::SessionsState;
-use crate::sessions::{resolve_spawn_workdir, with_yolo};
+use crate::sessions::{resolve_spawn_workdir, with_yolo, SessionKind, SessionStatus};
 use crate::tui::available_clis_for_catalog;
 
 /// Send one spawn frame and return the `error` frame it answers.
@@ -68,6 +68,105 @@ async fn ws_refuses_yolo_on_a_terminal() {
         error["message"], "spawn: field 'yolo' is not allowed for kind 'terminal'",
         "must name the field and the kind: {error}"
     );
+    server.abort();
+}
+
+/// A terminal spawns without `cli` — missing or null — opening the
+/// default shell; the session runs as a terminal with a non-empty shell.
+#[tokio::test]
+async fn ws_spawns_a_terminal_without_cli() {
+    let (db, _db_dir) = test_db();
+    let workdir = tempfile::tempdir().expect("workdir");
+    let workdir_path = workdir.path().to_string_lossy().to_string();
+    let state = SessionsState::for_test(test_hub(&db), "token".to_string());
+    let hub = state.hub.clone();
+    let (addr, server) = serve_state(state).await;
+    let mut client = connect_client(addr, Some("token")).await;
+    assert_eq!(recv_json(&mut client, "hello").await["t"], "hello");
+
+    for (req, frame) in [
+        (
+            "t-missing",
+            serde_json::json!({
+                "t": "spawn", "req": "t-missing", "kind": "terminal",
+                "workdir": workdir_path,
+            }),
+        ),
+        (
+            "t-null",
+            serde_json::json!({
+                "t": "spawn", "req": "t-null", "kind": "terminal",
+                "cli": null, "workdir": workdir_path,
+            }),
+        ),
+    ] {
+        send_json(&mut client, &frame).await;
+        // The arrival may precede the answer; consume until spawned.
+        let id = loop {
+            let answer = recv_json(&mut client, "the terminal spawn").await;
+            if answer["t"] == "spawned" {
+                assert_eq!(answer["req"], req);
+                break answer["id"].as_str().expect("spawned id").to_string();
+            }
+            assert_eq!(
+                answer["t"], "session_added",
+                "only the arrival precedes the answer: {answer}"
+            );
+        };
+        let session = hub.get(&id).expect("the spawned terminal lives");
+        assert_eq!(session.kind, SessionKind::Terminal);
+        assert_eq!(session.status(), SessionStatus::Running);
+        assert!(
+            !session.cli.is_empty(),
+            "a default shell fills the missing cli"
+        );
+        hub.kill(&id);
+        // Drain the kill's own pushes so the next spawn starts clean.
+        for _ in 0..2 {
+            let pushed = recv_json(&mut client, "the kill pushes").await;
+            assert!(
+                pushed["t"] == "exited" || pushed["t"] == "session_removed",
+                "only the kill pushes follow: {pushed}"
+            );
+        }
+    }
+    server.abort();
+}
+
+/// An agent without `cli` — missing or empty — is refused with the same
+/// message as before.
+#[tokio::test]
+async fn ws_refuses_an_agent_without_cli() {
+    let (db, _db_dir) = test_db();
+    let workdir = tempfile::tempdir().expect("workdir");
+    let workdir_path = workdir.path().to_string_lossy().to_string();
+    let state = SessionsState::for_test(test_hub(&db), "token".to_string());
+    let (addr, server) = serve_state(state).await;
+    let mut client = connect_client(addr, Some("token")).await;
+    assert_eq!(recv_json(&mut client, "hello").await["t"], "hello");
+
+    for (req, frame) in [
+        (
+            "c-missing",
+            serde_json::json!({
+                "t": "spawn", "req": "c-missing", "kind": "agent", "workdir": workdir_path,
+            }),
+        ),
+        (
+            "c-empty",
+            serde_json::json!({
+                "t": "spawn", "req": "c-empty", "kind": "agent",
+                "cli": "", "workdir": workdir_path,
+            }),
+        ),
+    ] {
+        let error = spawn_error(&mut client, frame, req).await;
+        assert_eq!(error["code"], "bad_request");
+        assert_eq!(
+            error["message"], "spawn: field 'cli' must not be empty",
+            "must name the field: {error}"
+        );
+    }
     server.abort();
 }
 

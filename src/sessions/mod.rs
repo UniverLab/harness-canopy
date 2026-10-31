@@ -24,9 +24,10 @@ pub use hub::{
     HubEvent, HubSession, OutputReceiver, SessionHub, SessionKind, SessionStatus, SpawnRequest,
 };
 pub use spawn::{
-    agent_args_string, build_agent_cmd, build_terminal_cmd, format_accent_rgb, parse_accent_rgb,
-    preserve_rows_on_shrink, resolve_spawn_workdir, spawn_identity, with_yolo,
-    write_submitted_prompt, yolo_flag_for, AgentSpawnSpec, TerminalSpawnSpec, VT_SCROLLBACK_LINES,
+    agent_args_string, build_agent_cmd, build_terminal_cmd, default_terminal_shell,
+    format_accent_rgb, parse_accent_rgb, preserve_rows_on_shrink, resolve_spawn_workdir,
+    spawn_identity, with_yolo, write_submitted_prompt, yolo_flag_for, AgentSpawnSpec,
+    TerminalSpawnSpec, VT_SCROLLBACK_LINES,
 };
 
 #[cfg(test)]

@@ -26,7 +26,7 @@ use crate::remote::hostkey::HostKey;
 use crate::remote::peer;
 use crate::remote::signaling::{self, MAX_DEVICE_PEERS};
 use crate::sessions::ws::SessionsState;
-use crate::sessions::{HubSession, SessionHub, SessionKind};
+use crate::sessions::{HubSession, SessionHub, SessionKind, SessionStatus};
 
 /// Device id the d4eb8558 device key (scalar 0x22) derives.
 const DEVICE_ID: &str = "bfcba2b742a807bb";
@@ -418,6 +418,12 @@ impl Loopback {
     /// tail waits only a quiet window: anything that arrives must either
     /// continue the snapshot or belong to whatever comes next.
     async fn recv_snapshot(&mut self, what: &str) -> u64 {
+        let id = self.cat.id.clone();
+        self.recv_snapshot_for(&id, what).await
+    }
+
+    /// The same snapshot consumption for any session, not just the cat one.
+    async fn recv_snapshot_for(&mut self, id: &str, what: &str) -> u64 {
         let frame = self.recv(what).await;
         assert_eq!(
             frame.json["t"], "snapshot",
@@ -425,8 +431,8 @@ impl Loopback {
             frame.raw
         );
         assert_eq!(
-            frame.json["id"], self.cat.id,
-            "{what}: the snapshot must be the cat session's"
+            frame.json["id"], id,
+            "{what}: the snapshot must be session {id}'s"
         );
         let seq = frame.json["seq"].as_u64().expect("snapshot seq");
         loop {
@@ -526,49 +532,101 @@ async fn echo_roundtrip(loopback: &mut Loopback, snapshot_seq: u64) {
     }
 }
 
-/// The remote restrictions of FR3, driven through the data channel: terminal
-/// sessions are refused everywhere, `resize` always, `spawn` unless `agent`.
+/// Terminal sessions are first-class over the data channel: they attach,
+/// take input and prompts, and spawn without `cli` — while `resize` stays
+/// refused and unknown kinds stay `bad_request`.
 async fn assert_restrictions(loopback: &mut Loopback) {
-    loopback
-        .send(json!({"t": "attach", "id": loopback.terminal.id}))
-        .await;
-    assert_eq!(
-        expect_error(loopback, "attach on a terminal").await["code"],
-        "forbidden"
-    );
+    // Input on the unattached terminal: no error, and no output either.
     loopback
         .send(json!({"t": "input", "id": loopback.terminal.id, "data": encode(b"x")}))
         .await;
-    assert_eq!(
-        expect_error(loopback, "input on a terminal").await["code"],
-        "forbidden"
-    );
+    assert_quiet(loopback, "input on an unattached terminal").await;
+
+    // Attach answers the terminal's snapshot.
+    let terminal_id = loopback.terminal.id.clone();
     loopback
-        .send(json!({"t": "prompt", "req": "p1", "id": loopback.terminal.id, "text": "hello"}))
+        .send(json!({"t": "attach", "id": terminal_id}))
         .await;
-    let error = expect_error(loopback, "prompt on a terminal").await;
-    assert_eq!(error["code"], "forbidden");
-    assert_eq!(error["req"], "p1");
     loopback
-        .send(json!({"t": "kill", "req": "k1", "id": loopback.terminal.id}))
+        .recv_snapshot_for(&terminal_id, "the terminal snapshot")
         .await;
-    let error = expect_error(loopback, "kill on a terminal").await;
-    assert_eq!(error["code"], "forbidden");
-    assert_eq!(error["req"], "k1");
-    // `resize` is refused even for the sessions a device may use.
+
+    // Detached again, a prompt answers ok with no echo in the way.
+    loopback
+        .send(json!({"t": "detach", "id": terminal_id}))
+        .await;
+    loopback
+        .send(json!({"t": "prompt", "req": "p1", "id": terminal_id, "text": "hello"}))
+        .await;
+    let answer = loopback.recv("the terminal prompt answer").await;
+    assert_eq!(answer.json["t"], "ok", "got {}", answer.raw);
+    assert_eq!(answer.json["req"], "p1");
+
+    // `resize` is still refused, even for the sessions a device may use.
     loopback
         .send(json!({"t": "resize", "id": loopback.cat.id, "cols": 120, "rows": 40}))
         .await;
     assert_eq!(expect_error(loopback, "resize").await["code"], "forbidden");
-    // `spawn` accepts only kind `agent`; a terminal is refused before spawning.
+
+    // A terminal spawns without `cli` (its arrival may precede the answer).
+    let workdir = tempfile::tempdir().expect("spawn workdir");
     loopback
-        .send(
-            json!({"t": "spawn", "req": "s1", "kind": "terminal", "cli": "cat", "workdir": "/tmp"}),
-        )
+        .send(json!({
+            "t": "spawn", "req": "s1", "kind": "terminal",
+            "workdir": workdir.path().to_string_lossy(),
+        }))
         .await;
-    let error = expect_error(loopback, "spawn a terminal").await;
-    assert_eq!(error["code"], "forbidden");
-    assert_eq!(error["req"], "s1");
+    let spawned_id = loop {
+        let frame = loopback.recv("the terminal spawn").await;
+        if frame.json["t"] == "spawned" {
+            assert_eq!(frame.json["req"], "s1");
+            break frame.json["id"].as_str().expect("spawned id").to_string();
+        }
+        assert_eq!(
+            frame.json["t"], "session_added",
+            "only the arrival precedes the answer: {}",
+            frame.raw
+        );
+    };
+    loopback._kills.push(KillGuard {
+        hub: loopback.state.hub.clone(),
+        id: spawned_id.clone(),
+    });
+
+    // ...and answers kill with ok (its exit pushes may come first).
+    loopback
+        .send(json!({"t": "kill", "req": "k1", "id": spawned_id}))
+        .await;
+    loop {
+        let frame = loopback.recv("the terminal kill").await;
+        match frame.json["t"].as_str() {
+            Some("ok") => {
+                assert_eq!(frame.json["req"], "k1");
+                break;
+            }
+            Some("exited" | "session_removed" | "session_added") => {}
+            _ => panic!("unexpected frame while killing: {}", frame.raw),
+        }
+    }
+    // A lagging lifecycle push must not leak into the next step.
+    loop {
+        match tokio::time::timeout(Duration::from_millis(300), loopback.events.recv()).await {
+            Ok(Some(DeviceEvent::Frame(frame))) => assert!(
+                matches!(
+                    frame.json["t"].as_str(),
+                    Some("exited" | "session_removed" | "session_added")
+                ),
+                "only kill lifecycle strays follow: {}",
+                frame.raw
+            ),
+            Ok(Some(DeviceEvent::Closed)) | Ok(None) => {
+                panic!("the channel closed while draining the kill")
+            }
+            Err(_) => break,
+        }
+    }
+
+    // Unknown kinds are still refused before spawning.
     loopback
         .send(json!({"t": "spawn", "req": "s2", "kind": "banana", "cli": "cat", "workdir": "/tmp"}))
         .await;
@@ -733,7 +791,7 @@ async fn a_paired_device_gets_the_session_hub_over_a_webrtc_data_channel() {
         hello.raw
     );
 
-    // The listing the device sees: the agent session in, the terminal out.
+    // The listing the device sees: agent and terminal sessions alike.
     loopback.send(json!({"t": "list", "req": "l1"})).await;
     let frame = loopback.recv("the sessions answer").await;
     assert_eq!(frame.json["t"], "sessions");
@@ -748,14 +806,19 @@ async fn a_paired_device_gets_the_session_hub_over_a_webrtc_data_channel() {
         "the agent session is listed: {ids:?}"
     );
     assert!(
-        !ids.contains(&loopback.terminal.id.as_str()),
-        "terminal sessions are hidden from the list: {ids:?}"
+        ids.contains(&loopback.terminal.id.as_str()),
+        "the terminal session is listed: {ids:?}"
     );
     let cat_item = items
         .iter()
         .find(|item| item["id"] == loopback.cat.id)
         .expect("the cat session item");
     assert_eq!(cat_item["kind"], "agent");
+    let terminal_item = items
+        .iter()
+        .find(|item| item["id"] == loopback.terminal.id)
+        .expect("the terminal session item");
+    assert_eq!(terminal_item["kind"], "terminal");
 
     // Attach the cat session: its snapshot arrives first, then the echo.
     loopback
@@ -851,13 +914,13 @@ async fn two_peers_share_hello_catalog_list_and_updates() {
         "the agent session is listed: {first_ids:?}"
     );
     assert!(
-        !first_ids.contains(&first.terminal.id),
-        "terminal sessions stay hidden: {first_ids:?}"
+        first_ids.contains(&first.terminal.id),
+        "the terminal session is listed: {first_ids:?}"
     );
 
-    // A session spawned after both connected is announced to both.
+    // A terminal spawned after both connected is announced to both.
     let workdir = tempfile::tempdir().expect("workdir");
-    let (spawned, _kill) = spawn_session(&first.state.hub, SessionKind::Agent, workdir.path());
+    let (spawned, _kill) = spawn_session(&first.state.hub, SessionKind::Terminal, workdir.path());
     for (peer, what) in [(&mut first, "first"), (&mut second, "second")] {
         let added = peer.recv("the session_added").await;
         assert_eq!(
@@ -866,6 +929,7 @@ async fn two_peers_share_hello_catalog_list_and_updates() {
             added.raw
         );
         assert_eq!(added.json["item"]["id"], spawned.id);
+        assert_eq!(added.json["item"]["kind"], "terminal");
     }
 
     close_by_revoking(&mut first, DEVICE_ID).await;
@@ -1404,69 +1468,154 @@ async fn bridge_refusal(state: &Arc<SessionsState>, frame: Value) -> Value {
     error
 }
 
-/// The remote restrictions of FR3 without the transport: terminal sessions
-/// are hidden from `list` and refused everywhere, `resize` always, `spawn`
-/// unless `kind` is `agent` — the same rules the loopback test drives over
-/// the data channel.
+/// One bridge answer that arrives asynchronously: `spawn`, `prompt` and
+/// `kill` answer from a spawned task, after `handle_text` returns, so
+/// `bridge_reply` (synchronous `try_recv`) never sees them.
+async fn bridge_await_frame(state: &Arc<SessionsState>, frame: &Value) -> Value {
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    let mut bridge = crate::remote::bridge::RemoteBridge::new(Arc::clone(state));
+    bridge.handle_text(&frame.to_string(), &out_tx).await;
+    let reply = tokio::time::timeout(Duration::from_secs(10), out_rx.recv())
+        .await
+        .expect("an async answer arrives")
+        .expect("the channel stays open");
+    serde_json::from_str(&reply).expect("JSON frame")
+}
+
+/// Spawn through a fresh bridge; the spawned session id.
+async fn bridge_spawned_id(state: &Arc<SessionsState>, frame: Value) -> String {
+    let spawned = bridge_await_frame(state, &frame).await;
+    assert_eq!(
+        spawned["t"], "spawned",
+        "expected a spawned answer: {spawned}"
+    );
+    assert_eq!(spawned["req"], frame["req"]);
+    spawned["id"].as_str().expect("spawned id").to_string()
+}
+
+/// Terminal sessions are first-class over the bridge: they list, attach,
+/// take input and prompts, and spawn with `cli` optional — while `resize`
+/// stays refused and unknown kinds stay `bad_request`.
 #[tokio::test]
-async fn bridge_restrictions_hide_and_refuse_terminal_sessions() {
+async fn bridge_terminals_are_first_class() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db =
         Arc::new(crate::db::Database::new(&dir.path().join("test.db")).expect("test database"));
     let hub = SessionHub::with_broadcast_capacity(db, "test-host".to_string(), 256);
     let workdir = tempfile::tempdir().expect("workdir");
+    let workdir_path = workdir.path().to_string_lossy().to_string();
     let (cat, _kill_cat) = spawn_session(&hub, SessionKind::Agent, workdir.path());
     let (terminal, _kill_terminal) = spawn_session(&hub, SessionKind::Terminal, workdir.path());
-    let state = SessionsState::for_test(hub, "token".to_string());
+    let state = SessionsState::for_test(hub.clone(), "token".to_string());
+    let mut kills: Vec<KillGuard> = Vec::new();
 
-    // The listing keeps the agent session and hides the terminal one.
+    // The listing keeps both sessions, with their kinds.
     let replies = bridge_reply(&state, &json!({"t": "list", "req": "l1"})).await;
     assert_eq!(replies.len(), 1);
     let listed: Value = serde_json::from_str(&replies[0]).expect("sessions frame");
     assert_eq!(listed["t"], "sessions");
     assert_eq!(listed["req"], "l1");
     let items = listed["items"].as_array().expect("items array");
-    let ids: Vec<&str> = items
-        .iter()
-        .filter_map(|item| item["id"].as_str())
-        .collect();
-    assert!(ids.contains(&cat.id.as_str()), "agent listed: {ids:?}");
+    let kind_of = |id: &str| {
+        items
+            .iter()
+            .find(|item| item["id"] == id)
+            .expect("listed")
+            .get("kind")
+            .and_then(Value::as_str)
+            .expect("kind")
+            .to_string()
+    };
+    assert_eq!(kind_of(&cat.id), "agent");
+    assert_eq!(kind_of(&terminal.id), "terminal");
+
+    // Attach answers the terminal's snapshot.
+    let replies = bridge_reply(&state, &json!({"t": "attach", "id": terminal.id})).await;
+    assert!(!replies.is_empty(), "attach answers at least a snapshot");
+    let first: Value = serde_json::from_str(&replies[0]).expect("snapshot frame");
+    assert_eq!(first["t"], "snapshot");
+    assert_eq!(first["id"], terminal.id);
+
+    // Input on the terminal answers nothing — and no error.
+    let replies = bridge_reply(
+        &state,
+        &json!({"t": "input", "id": terminal.id, "data": encode(b"x")}),
+    )
+    .await;
+    assert!(replies.is_empty(), "input answers nothing: {replies:?}");
+
+    // A prompt on the terminal answers ok.
+    let ok = bridge_await_frame(
+        &state,
+        &json!({"t": "prompt", "req": "p1", "id": terminal.id, "text": "hi"}),
+    )
+    .await;
+    assert_eq!(ok["t"], "ok");
+    assert_eq!(ok["req"], "p1");
+
+    // A terminal spawns without `cli`: running, terminal kind, default shell.
+    let spawned_id = bridge_spawned_id(
+        &state,
+        json!({"t": "spawn", "req": "s1", "kind": "terminal", "workdir": workdir_path}),
+    )
+    .await;
+    kills.push(KillGuard {
+        hub: hub.clone(),
+        id: spawned_id.clone(),
+    });
+    let spawned = hub.get(&spawned_id).expect("the spawned terminal lives");
+    assert_eq!(spawned.kind, SessionKind::Terminal);
+    assert_eq!(spawned.status(), SessionStatus::Running);
     assert!(
-        !ids.contains(&terminal.id.as_str()),
-        "terminal hidden: {ids:?}"
+        !spawned.cli.is_empty(),
+        "a default shell fills the missing cli"
     );
 
-    // attach/input/prompt/kill aimed at a terminal answer forbidden.
-    assert_forbidden(
-        &bridge_reply(&state, &json!({"t": "attach", "id": terminal.id})).await,
-        None,
+    // The spawned terminal attaches like any session.
+    let replies = bridge_reply(&state, &json!({"t": "attach", "id": spawned_id})).await;
+    assert!(!replies.is_empty(), "attach answers at least a snapshot");
+    let first: Value = serde_json::from_str(&replies[0]).expect("snapshot frame");
+    assert_eq!(first["t"], "snapshot");
+    assert_eq!(first["id"], spawned_id);
+
+    // Spawns with `cli` behave as before, for both kinds.
+    let agent_id = bridge_spawned_id(
+        &state,
+        json!({"t": "spawn", "req": "s2", "kind": "agent", "cli": "cat", "workdir": workdir_path}),
+    )
+    .await;
+    kills.push(KillGuard {
+        hub: hub.clone(),
+        id: agent_id.clone(),
+    });
+    assert_eq!(
+        hub.get(&agent_id).expect("the agent lives").kind,
+        SessionKind::Agent
     );
-    assert_forbidden(
-        &bridge_reply(
-            &state,
-            &json!({"t": "input", "id": terminal.id, "data": encode(b"x")}),
-        )
-        .await,
-        None,
-    );
-    assert_forbidden(
-        &bridge_reply(
-            &state,
-            &json!({"t": "prompt", "req": "p1", "id": terminal.id, "text": "hi"}),
-        )
-        .await,
-        Some("p1"),
-    );
-    assert_forbidden(
-        &bridge_reply(
-            &state,
-            &json!({"t": "kill", "req": "k1", "id": terminal.id}),
-        )
-        .await,
-        Some("k1"),
+    let shell_id = bridge_spawned_id(
+        &state,
+        json!({"t": "spawn", "req": "s3", "kind": "terminal", "cli": "cat", "workdir": workdir_path}),
+    )
+    .await;
+    kills.push(KillGuard {
+        hub: hub.clone(),
+        id: shell_id.clone(),
+    });
+    assert_eq!(
+        hub.get(&shell_id).expect("the terminal lives").kind,
+        SessionKind::Terminal
     );
 
-    // resize is refused even for the session a device may use.
+    // Unknown kinds stay bad_request; resize stays forbidden.
+    let bad = bridge_reply(
+        &state,
+        &json!({"t": "spawn", "req": "s4", "kind": "banana", "cli": "cat", "workdir": "/tmp"}),
+    )
+    .await;
+    assert_eq!(bad.len(), 1);
+    let error: Value = serde_json::from_str(&bad[0]).expect("error frame");
+    assert_eq!(error["t"], "error");
+    assert_eq!(error["code"], "bad_request");
     assert_forbidden(
         &bridge_reply(
             &state,
@@ -1476,36 +1625,28 @@ async fn bridge_restrictions_hide_and_refuse_terminal_sessions() {
         None,
     );
 
-    // spawn accepts only kind agent; a terminal is refused before it spawns.
-    assert_forbidden(
-        &bridge_reply(
-            &state,
-            &json!({"t": "spawn", "req": "s1", "kind": "terminal", "cli": "cat", "workdir": "/tmp"}),
-        )
-        .await,
-        Some("s1"),
+    // A terminal arrival forwards through a manual bridge.
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    let mut bridge = crate::remote::bridge::RemoteBridge::new(Arc::clone(&state));
+    bridge.handle_event(
+        crate::sessions::HubEvent::SessionAdded(Box::new(terminal.item())),
+        &out_tx,
     );
-    let bad = bridge_reply(
-        &state,
-        &json!({"t": "spawn", "req": "s2", "kind": "banana", "cli": "cat", "workdir": "/tmp"}),
-    )
-    .await;
-    assert_eq!(bad.len(), 1);
-    let error: Value = serde_json::from_str(&bad[0]).expect("error frame");
-    assert_eq!(error["t"], "error");
-    assert_eq!(error["code"], "bad_request");
+    let pushed = out_rx.try_recv().expect("the terminal arrival forwards");
+    let added: Value = serde_json::from_str(&pushed).expect("JSON");
+    assert_eq!(added["t"], "session_added");
+    assert_eq!(added["item"]["id"], terminal.id);
+    bridge.abort();
 
-    // The agent session answers attach with its snapshot.
-    let replies = bridge_reply(&state, &json!({"t": "attach", "id": cat.id})).await;
-    assert!(!replies.is_empty(), "attach answers at least a snapshot");
-    let first: Value = serde_json::from_str(&replies[0]).expect("snapshot frame");
-    assert_eq!(first["t"], "snapshot");
-    assert_eq!(first["id"], cat.id);
+    // Killed last, the spawned terminal answers ok.
+    let ok = bridge_await_frame(&state, &json!({"t": "kill", "req": "k1", "id": spawned_id})).await;
+    assert_eq!(ok["t"], "ok");
+    assert_eq!(ok["req"], "k1");
 }
 
 /// A remote `spawn` runs the same extension checks as the local one: yolo
-/// needs a flagged harness, `workdir` must be absolute and real. A terminal
-/// stays `forbidden` (the kind check runs first), even with yolo set.
+/// needs a flagged harness, `workdir` must be absolute and real, and yolo
+/// on a terminal is refused exactly like on the local socket.
 #[tokio::test]
 async fn bridge_spawn_validates_yolo_and_workdir() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1561,17 +1702,20 @@ async fn bridge_spawn_validates_yolo_and_workdir() {
         "must name the path: {error}"
     );
 
-    // The agent-only gate wins over the yolo check on the remote path.
-    assert_forbidden(
-        &bridge_reply(
-            &state,
-            &json!({
-                "t": "spawn", "req": "b-term", "kind": "terminal",
-                "cli": "sh", "workdir": workdir, "yolo": true,
-            }),
-        )
-        .await,
-        Some("b-term"),
+    // Yolo on a terminal answers the same refusal as the local socket.
+    let error = bridge_refusal(
+        &state,
+        json!({
+            "t": "spawn", "req": "b-term", "kind": "terminal",
+            "cli": "sh", "workdir": workdir, "yolo": true,
+        }),
+    )
+    .await;
+    assert_eq!(error["code"], "bad_request");
+    assert_eq!(error["req"], "b-term");
+    assert_eq!(
+        error["message"], "spawn: field 'yolo' is not allowed for kind 'terminal'",
+        "must name the field and the kind: {error}"
     );
 }
 
