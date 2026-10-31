@@ -265,6 +265,10 @@ the machine-readable report.
 
 ## Install a graph
 
+To find what is published, search the catalogue first with the
+`catalogue` tool's `search` action (`q`, optional
+`sort`/`page`/`limit`; see [MCP Tools](mcp-tools.md#catalogue-1)).
+
 A published graph becomes a local graph in one command, through the
 graph catalogue at `graphs.univerlab.org` — fetching through the
 catalogue is what counts the install:

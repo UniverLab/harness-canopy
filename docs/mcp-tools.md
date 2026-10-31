@@ -215,7 +215,7 @@ ensembles — a crew.
 
 | Tool | Description |
 |---|---|
-| `catalogue` | Search the community graphs catalogue before building your own. Actions: `search` (`q`, optional `sort`/`page`/`limit` — free-text search over community graphs and nodes; `sort` is `top` (default) or `new`, `page` starts at 1, `limit` (default 10, max 50) truncates the returned page client-side) — pass `action` plus the params the refusal/table lists |
+| `catalogue` | Search the community graphs catalogue before building your own. Actions: `search` (`q`, optional `sort`/`page`/`limit` — free-text search over community graphs and nodes; `sort` is `top` (default) or `new`, `page` starts at 1, `limit` (default 10, max 50) truncates the returned page client-side and deeper access uses `page`; returns `items` with `q`/`sort`/`page`/`total`/`truncated`, each item carrying kind, slug, `repo` (owner/repo), `official`, stars and description — the install ref is the bare slug when official, else `repo/slug` — plus the model verdict when the catalogue exposes it) — pass `action` plus the params the refusal/table lists |
 
 ## Project (1)
 
