@@ -185,7 +185,7 @@ impl App {
 
                 if let Some(run) = self.active_runs.get(&id) {
                     let header = format!(
-                        "⏳ Run {} in progress ({})\n{}\n",
+                        "▶ Run {} in progress ({})\n{}\n",
                         &run.id[..8.min(run.id.len())],
                         relative_time(&run.started_at),
                         "─".repeat(40),
@@ -308,4 +308,67 @@ mod tests {
         // Should skip because no runs exist for this agent
         app.notify_finished_run("agent-no-runs");
     }
+
+    /// An agent with an active run shows `▶ Run … in progress` at the top
+    /// of its log — the tree's running glyph, never the double-width
+    /// hourglass emoji.
+    #[test]
+    fn refresh_log_shows_single_width_glyph_for_active_run() {
+        use crate::domain::models::{Agent, Cli, Trigger};
+        use crate::tui::app::types::AgentEntry;
+        use chrono::Utc;
+        let (mut app, _dir) = test_app();
+        let agent = Agent {
+            id: "agent-active".into(),
+            prompt: "test".into(),
+            trigger: Some(Trigger::Cron {
+                schedule_expr: "0 9 * * *".into(),
+            }),
+            cli: Cli::new("claude"),
+            model: None,
+            effort: None,
+            working_dir: None,
+            enabled: true,
+            enable_at: None,
+            created_at: Utc::now(),
+            log_path: "/tmp/test.log".into(),
+            timeout_minutes: 15,
+            expires_at: None,
+            last_run_at: None,
+            last_run_ok: None,
+            last_triggered_at: None,
+            trigger_count: 0,
+            action: crate::domain::models::AgentAction::Headless,
+        };
+        app.agents = vec![AgentEntry::Agent(agent)];
+        app.selected = 0;
+        app.active_runs.insert(
+            "agent-active".to_string(),
+            crate::domain::models::RunLog {
+                id: "run-active-1".into(),
+                background_agent_id: "agent-active".into(),
+                status: crate::domain::models::RunStatus::InProgress,
+                trigger_type: crate::domain::models::TriggerType::Manual,
+                summary: None,
+                started_at: chrono::Utc::now(),
+                finished_at: None,
+                exit_code: None,
+                timeout_at: None,
+                executed_platform: None,
+                executed_model: None,
+            },
+        );
+        app.refresh_log();
+        let header = app.log_content.lines().next().expect("log header missing");
+        assert!(
+            header.starts_with("▶ Run "),
+            "active-run header must start with the running glyph, got: {header:?}"
+        );
+        let hourglass = char::from_u32(0x23F3).expect("hourglass scalar");
+        assert!(
+            !app.log_content.contains(hourglass),
+            "log must not contain the double-width hourglass"
+        );
+    }
+    // Breaks if: the active-run header regresses to the hourglass emoji.
 }

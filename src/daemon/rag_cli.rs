@@ -682,7 +682,7 @@ fn print_rag_report_file(file: &str, report: &RagReportData<'_>) {
     } else if last_error.is_some() && chunks == 0 {
         "\x1b[31m✗\x1b[0m"
     } else if in_queue {
-        "\x1b[33m⏳\x1b[0m"
+        "\x1b[33m◷\x1b[0m"
     } else if chunks > 0 {
         "\x1b[32m✓\x1b[0m"
     } else {
@@ -1420,6 +1420,18 @@ mod tests {
         assert!(
             out.contains("queue:   queued"),
             "queue detail missing: {out:?}"
+        );
+        let queued_line = out
+            .lines()
+            .find(|line| line.contains("/docs/c.md"))
+            .expect("queued file entry missing");
+        assert!(
+            queued_line.contains('◷'),
+            "queued file must show the waiting glyph, got: {queued_line:?}"
+        );
+        assert!(
+            !out.contains(char::from_u32(0x23F3).expect("hourglass scalar")),
+            "report must not contain the double-width hourglass"
         );
         assert!(out.contains("error"), "error detail missing: {out:?}");
         assert!(

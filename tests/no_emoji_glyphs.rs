@@ -1,9 +1,9 @@
 //! Source guard: the emoji-presentation status glyphs removed by FIX-19
 //! (U+23F8 paused, U+26D4 blocked) and the autorun/RAG follow-up (U+23F0
-//! alarm clock, U+23F2 timer clock, U+2B07 down arrow, U+2699 gear) must
-//! never return to `src/` — many terminals draw them two cells wide while
-//! `unicode-width` counts one, so the text after them loses its space or
-//! overlaps it.
+//! alarm clock, U+23F2 timer clock, U+23F3 hourglass, U+2B07 down arrow,
+//! U+2699 gear) must never return to `src/` — many terminals draw them two
+//! cells wide while `unicode-width` counts one, so the text after them loses
+//! its space or overlaps it.
 
 use std::path::{Path, PathBuf};
 use unicode_width::UnicodeWidthStr;
@@ -29,7 +29,7 @@ fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
 fn no_pause_or_blocked_emoji_in_src() {
     // Escapes, never literals: this guard itself must not contain the needles.
     let needles = [
-        "\u{23F8}", "\u{26D4}", "\u{23F0}", "\u{23F2}", "\u{2B07}", "\u{2699}",
+        "\u{23F8}", "\u{26D4}", "\u{23F0}", "\u{23F2}", "\u{23F3}", "\u{2B07}", "\u{2699}",
     ];
     let mut files = Vec::new();
     rs_files(&src_dir(), &mut files);
@@ -64,6 +64,7 @@ fn status_glyph_literals_take_exactly_one_space() {
         concat!("▼", "  "),
         concat!("◉", "  "),
         concat!("▲", "  "),
+        concat!("▶", "  "),
     ];
     let mut files = Vec::new();
     rs_files(&src_dir(), &mut files);
