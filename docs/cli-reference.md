@@ -298,6 +298,11 @@ The exchange rides the daemon's relay connection, so pairing completes
 only while the daemon is running, `remote status` shows a login, and
 remote is on. A failed exchange tells the browser only `no_code`,
 `expired` or `bad_code`: run `canopy remote pair` again for a fresh code.
+A guest browser — one signed in as a GitHub login other than the owner's —
+pairs only while that login holds a trust grant (add one from the TUI
+Remote tab with `t`, or with the `remote` tool's `trust_add`); without it
+the exchange fails as `bad_code`, so trust the profile before handing out
+the code.
 
 `canopy remote devices [--json]` prints `id`, `label`, `paired_at` and
 `last_seen` (`never` when the registry has no time), one line per device
@@ -380,7 +385,9 @@ rest travels as `snapshot_more`, and the final `snapshot_more` carries
 `shelf_list` and `shelf_get` answer `shelf` and `file` frames, and
 `shelf_added` / `shelf_removed` push arrivals and removals. Files from
 terminal sessions stay hidden from lists and pushes and answer
-`error{code:"forbidden"}` on fetch; host-shelf files are visible. `file`
+`error{code:"forbidden"}` on fetch; host-shelf files are visible. A guest
+fetching a file from a session outside its grant hears
+`error{code:"not_found"}` instead, as if the file did not exist. `file`
 frames stay under 16 KiB, at most two downloads run at once — a third
 answers `error{code:"busy"}` — and their parts interleave with terminal
 output so a large image never stalls it. A host serves at most four device
