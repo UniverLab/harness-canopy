@@ -163,13 +163,16 @@ impl InteractiveAgent {
     }
 
     /// Clear the submit-set latch once the shell is back at an idle
-    /// prompt, so the warp box returns. No-op for agent (non-terminal)
-    /// sessions and while no command is latched as running.
+    /// prompt, so the warp box returns. A shell that already exited also
+    /// releases the latch: it will never reach an idle prompt again, and
+    /// holding the box withdrawn on a dead pane would only hide it. No-op
+    /// for agent (non-terminal) sessions and while no command is latched
+    /// as running.
     pub fn refresh_warp_command_state(&mut self) {
         if !self.is_terminal || !self.warp_command_running {
             return;
         }
-        if self.shell_at_idle_prompt() {
+        if self.status != AgentStatus::Running || self.shell_at_idle_prompt() {
             self.warp_command_running = false;
         }
     }

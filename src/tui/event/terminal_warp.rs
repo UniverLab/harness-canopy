@@ -989,6 +989,7 @@ mod warp_command_latch_tests {
     use super::super::paste::handle_paste;
     use super::*;
     use crate::db::Database;
+    use crate::tui::agent::AgentStatus;
     use crate::tui::app::types::AgentEntry;
     use crate::tui::app::types::{App, Focus};
     use ratatui::style::Color;
@@ -1086,6 +1087,20 @@ mod warp_command_latch_tests {
         feed(&agent, b"\r\nuser@host:~$ ");
         agent.refresh_warp_command_state();
         assert!(!agent.warp_command_running, "idle prompt clears the latch");
+    }
+
+    #[test]
+    fn refresh_clears_the_latch_once_the_shell_has_exited() {
+        let mut agent = spawn_term("refresh-exit");
+        agent.warp_command_running = true;
+        feed(&agent, b"$ sleep 9");
+        agent.status = AgentStatus::Exited(0);
+        agent.refresh_warp_command_state();
+        assert!(
+            !agent.warp_command_running,
+            "a dead shell holds no running command"
+        );
+        agent.kill();
     }
 
     #[test]
