@@ -317,7 +317,21 @@ async fn handle_client_text(
         ClientFrame::GraphUnwatch { id } => {
             handle_graph_unwatch(watches, &id);
         }
+        ClientFrame::HostMetrics { req } => reject_host_metrics(out_tx, Some(&req)),
+        ClientFrame::HostMetricsWatch { .. } | ClientFrame::HostMetricsUnwatch => {
+            reject_host_metrics(out_tx, None);
+        }
     }
+}
+
+/// Host metrics are remote-only: the local socket refuses them with
+/// `error{code:"forbidden"}`, echoing `req` when the frame carried one.
+fn reject_host_metrics(out_tx: &OutTx, req: Option<&str>) {
+    let _ = out_tx.send(error_frame(
+        req,
+        ERR_FORBIDDEN,
+        "host metrics are remote-only",
+    ));
 }
 
 /// `shelf_list`: one shelf's items (host shelf when `id` is absent), newest

@@ -5,6 +5,7 @@
 //! host when possible and fall back to platform-local commands elsewhere.
 
 mod gpu;
+pub mod host_metrics;
 mod platform;
 mod power;
 mod windows;

@@ -23,6 +23,10 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, Semaphore};
 use tokio::task::JoinHandle;
 
+use crate::remote::metrics::{
+    handle_host_metrics, handle_host_metrics_unwatch, handle_host_metrics_watch, MetricsSource,
+    MetricsWatch,
+};
 use crate::sessions::catalog::{handle_catalog, handle_compose, handle_prompt_draft};
 use crate::sessions::graphs::{handle_graph_unwatch, handle_graph_watch, handle_graphs};
 use crate::sessions::protocol::{
@@ -61,6 +65,10 @@ pub struct RemoteBridge {
     /// Terminal-session files hidden from this peer, so their later
     /// `shelf_removed` is hidden too.
     hidden_files: HashSet<String>,
+    /// Where `host.metrics` reads: the sampler's last sample.
+    metrics: MetricsSource,
+    /// The channel's one metrics watch, if any.
+    metrics_watch: Option<MetricsWatch>,
 }
 
 /// The hub request a remote `spawn` frame describes. A device may only spawn
@@ -97,6 +105,10 @@ impl RemoteBridge {
     /// a terminal shelf hide from the start, so their later `shelf_removed`
     /// stays hidden too (one indexed query per terminal session).
     pub fn new(state: Arc<SessionsState>) -> Self {
+        Self::with_metrics(state, Arc::new(crate::system::host_metrics::snapshot))
+    }
+
+    fn with_metrics(state: Arc<SessionsState>, metrics: MetricsSource) -> Self {
         let mut hidden_files = HashSet::new();
         for session in state.hub.list() {
             if session.kind == SessionKind::Terminal {
@@ -112,6 +124,8 @@ impl RemoteBridge {
             transfers: Arc::new(Semaphore::new(2)),
             shelf_tasks: Vec::new(),
             hidden_files,
+            metrics,
+            metrics_watch: None,
         }
     }
 
@@ -195,6 +209,14 @@ impl RemoteBridge {
                     );
                 });
             }
+            frame => self.handle_read_frame(frame, out).await,
+        }
+    }
+
+    /// Answer one read-only frame: shelf, catalog, graphs and host metrics.
+    /// The session-mutating arms stay in [`Self::handle_text`].
+    async fn handle_read_frame(&mut self, frame: ClientFrame, out: &OutTx) {
+        match frame {
             ClientFrame::ShelfList { req, id } => {
                 self.handle_shelf_list(req, id, out);
             }
@@ -213,6 +235,14 @@ impl RemoteBridge {
             ClientFrame::GraphUnwatch { id } => {
                 handle_graph_unwatch(&mut self.watches, &id);
             }
+            ClientFrame::HostMetrics { req } => handle_host_metrics(&self.metrics, out, &req),
+            ClientFrame::HostMetricsWatch { interval_s } => {
+                handle_host_metrics_watch(&mut self.metrics_watch, &self.metrics, out, interval_s);
+            }
+            ClientFrame::HostMetricsUnwatch => {
+                handle_host_metrics_unwatch(&mut self.metrics_watch);
+            }
+            _ => {}
         }
     }
 
@@ -252,8 +282,8 @@ impl RemoteBridge {
         }
     }
 
-    /// Abort every output forwarder, graph watch and shelf transfer (the
-    /// data channel closed or the device was revoked).
+    /// Abort every output forwarder, graph watch, shelf transfer and
+    /// metrics watch (the data channel closed or the device was revoked).
     pub fn abort(&mut self) {
         for task in self.attached.drain() {
             task.1.abort();
@@ -264,6 +294,7 @@ impl RemoteBridge {
         for task in self.shelf_tasks.drain(..) {
             task.abort();
         }
+        self.metrics_watch = None;
     }
 
     /// Record a shelf event's hidden-ness without forwarding it. The serve

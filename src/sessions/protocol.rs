@@ -146,6 +146,19 @@ pub enum ClientFrame {
     GraphUnwatch {
         id: String,
     },
+    /// `host.metrics{req}`: one host-metrics frame. Remote-only: the local
+    /// socket answers `error{code:"forbidden"}`.
+    HostMetrics {
+        req: String,
+    },
+    /// `host.metrics.watch{interval_s?}`: push the metrics frame every N
+    /// seconds (clamped to 5..=60, default 10). Remote-only.
+    HostMetricsWatch {
+        interval_s: Option<u64>,
+    },
+    /// `host.metrics.unwatch`: stop the metrics push; no answer frame.
+    /// Remote-only.
+    HostMetricsUnwatch,
 }
 
 /// Explicit agent launch fields from the New dialog (boxed so the `Spawn`
@@ -260,6 +273,15 @@ pub fn parse_client_frame(text: &str) -> Result<ClientFrame, FrameError> {
             let id = id_field(&value, &frame)?;
             Ok(ClientFrame::GraphUnwatch { id })
         }
+        "host.metrics" => {
+            let req = req_field(&value, &frame)?;
+            Ok(ClientFrame::HostMetrics { req })
+        }
+        "host.metrics.watch" => {
+            let interval_s = opt_u64_field(&value, &frame, "interval_s")?;
+            Ok(ClientFrame::HostMetricsWatch { interval_s })
+        }
+        "host.metrics.unwatch" => Ok(ClientFrame::HostMetricsUnwatch),
         _ => Err(bad_request(None, format!("unknown frame '{frame}'"))),
     }
 }
@@ -355,6 +377,20 @@ fn opt_str_field(value: &Value, frame: &str, field: &str) -> Result<Option<Strin
         Some(_) => Err(bad_request(
             None,
             format!("{frame}: field '{field}' must be a string"),
+        )),
+    }
+}
+
+fn opt_u64_field(value: &Value, frame: &str, field: &str) -> Result<Option<u64>, FrameError> {
+    match value.get(field) {
+        Some(Value::Number(n)) => n
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| bad_request(None, format!("{frame}: field '{field}' must be a number"))),
+        Some(Value::Null) | None => Ok(None),
+        Some(_) => Err(bad_request(
+            None,
+            format!("{frame}: field '{field}' must be a number"),
         )),
     }
 }

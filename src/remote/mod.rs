@@ -12,6 +12,7 @@ pub mod connection;
 pub mod devices;
 pub mod hostkey;
 pub mod live;
+pub mod metrics;
 pub mod pairing;
 pub mod panel;
 pub mod peer;

@@ -431,6 +431,22 @@ deleted, which stops the pushes and frees the slot for another watch.
 None of these frames ever changes a graph, a spec or a queue: pausing
 and continuing stay local.
 
+Host metrics ride the same channel, read-only. `host.metrics{req}`
+answers `host.metrics{req,metrics}` with one sample — `cpu_usage`,
+`cpu_temperature_c`, `cpu_temp_source`, `memory_used_mb`,
+`memory_total_mb`, `gpu` (`name`, `usage`, `temperature_c`,
+`vram_used_mb`, `vram_total_mb`, or null), `power` (`watts`,
+`limit_watts`, `source` — `"battery"` or `"gpu"` — or null) and
+`sampled_at` (RFC 3339). Absent values are null, never omitted.
+`host.metrics.watch{interval_s?}` pushes the same frame without `req`
+every `interval_s` seconds (`interval_s` clamps to 5..60, default 10)
+until `host.metrics.unwatch` or the channel closes; one watcher per
+channel, so a second watch replaces the first:
+
+```json
+{"t": "host.metrics.watch", "interval_s": 10}
+```
+
 The `[remote]` table in `~/.canopy/config.toml` carries `enabled` (default
 `false`), `relay_url`, `github_client_id` (the public Client ID of
 UniverLab's "Canopy Remote" OAuth App — no configuration needed), and
