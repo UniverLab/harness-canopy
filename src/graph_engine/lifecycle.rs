@@ -165,7 +165,13 @@ impl GraphEngine {
                 self.record_pause_requested(lp);
                 Ok(true)
             }
-            other => other,
+            // A lost compare-and-set raced a concurrent transition — the
+            // winner narrated already, so report from the status left
+            // behind rather than refusing a live pause as "not running".
+            Ok(false) => Ok(lost_pause_race_accepted(
+                self.db.get_graph(&lp.id)?.map(|lp| lp.status),
+            )),
+            Err(error) => Err(error),
         }
     }
 
@@ -371,6 +377,17 @@ impl GraphEngine {
     }
 }
 
+/// Whether a wait-for-completion pause whose compare-and-set lost still
+/// counts as accepted, read off the status the race winner left behind:
+/// `Pausing` (the winner recorded `pause_requested`) or `Paused` (the node
+/// boundary completed the pause first) — matching [`GraphEngine::request_pause`]'s
+/// own arms for those states, without writing a duplicate event. Anything
+/// else means the graph genuinely left `Running` (finished, failed, reset)
+/// and the pause is refused.
+fn lost_pause_race_accepted(status: Option<GraphStatus>) -> bool {
+    matches!(status, Some(GraphStatus::Pausing | GraphStatus::Paused))
+}
+
 /// The sandbox a resumed graph must run inside: the `active` — or
 /// operator-`kept` — row whose worktree still exists. `Ok(None)` when the
 /// graph was never sandboxed. `Err`, naming the sandbox id, when the row
@@ -424,6 +441,29 @@ mod tests {
     fn none_without_row() {
         let (_dir, db) = test_db();
         assert!(resolve_resume_sandbox(&db, "graph-1").unwrap().is_none());
+    }
+
+    #[test]
+    fn lost_pause_race_accepts_pausing_and_paused_only() {
+        use GraphStatus::*;
+        for status in [Pausing, Paused] {
+            assert!(
+                lost_pause_race_accepted(Some(status)),
+                "{status:?} left behind by the race winner still accepts the pause"
+            );
+        }
+        for status in [
+            None,
+            Some(Draft),
+            Some(Running),
+            Some(Completed),
+            Some(Failed),
+        ] {
+            assert!(
+                !lost_pause_race_accepted(status),
+                "{status:?} after a lost pause race refuses the pause"
+            );
+        }
     }
 
     #[test]

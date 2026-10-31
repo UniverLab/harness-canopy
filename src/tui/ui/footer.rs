@@ -1108,6 +1108,18 @@ mod tests {
     }
 
     #[test]
+    fn footer_on_a_pausing_graph_offers_pause_and_both_continue_modes() {
+        let app = app_on_graph(crate::domain::graphs::GraphStatus::Pausing);
+        let theme = Theme::classic();
+        let text = render_footer_to_text(200, 1, |frame, area| {
+            draw_footer(frame, area, &app, &theme);
+        });
+        assert!(text.contains("pause"), "{text}");
+        assert!(text.contains("continue (retry)"), "{text}");
+        assert!(text.contains("continue (skip spec)"), "{text}");
+    }
+
+    #[test]
     fn footer_on_a_completed_graph_offers_reset_and_run() {
         let app = app_on_graph(crate::domain::graphs::GraphStatus::Completed);
         let theme = Theme::classic();

@@ -12,13 +12,19 @@ impl GraphEngine {
         state: &SpecRunState,
         iteration_value: usize,
     ) -> Result<Option<SpecExecutionOutcome>> {
-        if self.is_pausing(&ctx.lp.id)? {
+        // A resume (`graph_control` continue/run) may resolve the pending
+        // pause concurrently — cancelling it back to `Running`, or
+        // completing it to `Paused` and proceeding itself. Only the winner
+        // narrates: claim the transition first, and on loss follow whoever
+        // won. Losing to a cancel must fall through and keep this dispatch
+        // going — writing `graph_paused` here would end a `Running` graph's
+        // dispatch with no live run left, stranding it.
+        if self.is_pausing(&ctx.lp.id)? && self.db.complete_pause(&ctx.lp.id)? {
             self.db.mark_spec_node_runs_paused_through(
                 &ctx.spec.id,
                 &cursor_node_ids(&state.cursor, ctx.ensembles),
                 iteration_value as i64,
             )?;
-            self.db.complete_pause(&ctx.lp.id)?;
             activity::record(
                 &self.db,
                 activity::GraphEvent {
@@ -36,6 +42,9 @@ impl GraphEngine {
             return Ok(Some(SpecExecutionOutcome::Paused));
         }
         if self.is_paused(&ctx.lp.id)? {
+            // Either paused all along, or a concurrent resume completed the
+            // pending pause and proceeds itself while this dispatch ends —
+            // both without an event of their own here.
             return Ok(Some(SpecExecutionOutcome::Paused));
         }
         Ok(None)

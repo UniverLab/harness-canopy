@@ -74,6 +74,18 @@ Unlike the shared activity stream (bounded per workdir, free text), this log
 is never pruned by count. `canopy clean` removes events older than
 `graph_event_retention_days` (default 90) for graphs that are not running.
 
+## Pending pauses
+
+Pausing is graceful and visible: a pause requested while a node runs is
+recorded at once as a `pause_requested` event naming the node(s) it waits
+for, and the graph reaches `paused` (with `graph_paused`) at the next node
+boundary. Meanwhile `graph` `get`/`list` still report status `running`,
+with `pause_pending: true` and the waited-for names in `pause_waiting_for`;
+the TUI shows `pausing — waiting for <node>` instead of the running
+indicator. Requesting pause again while one is pending is a no-op answering
+`pause already pending`, and `continue`/`run` while one is pending cancels
+it — one `pause_cancelled` event, then the graph keeps running.
+
 ## Tuning the engine
 
 These `[graphs]` settings (see `canopy config list`) adjust the engine's

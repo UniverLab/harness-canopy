@@ -193,14 +193,42 @@ pub(crate) fn find_in_flight_run(
 /// continue/run): with a node still in flight the pause is cancelled back to
 /// `Running` and the live dispatch keeps running; with nothing in flight the
 /// pause is completed to `Paused` so the resume proceeds normally. Records
-/// `pause_cancelled` either way. Returns whether a node was in flight.
+/// `pause_cancelled` only when this call won the transition — a lost
+/// compare-and-set means the node boundary (or a concurrent resume) resolved
+/// the pause first and narrated already. Returns whether a node was in
+/// flight *and* the pause was cancelled (the resume returns early); `false`
+/// means the resume proceeds down the normal `Paused` path.
 pub(crate) fn cancel_pending_pause(db: &Database, lp: &Graph) -> Result<bool, String> {
     let in_flight = find_in_flight_run(db, &lp.id)?.is_some();
     if in_flight {
-        db.cancel_pause_pending(&lp.id).map_err(|e| e.to_string())?;
-    } else {
-        db.complete_pause(&lp.id).map_err(|e| e.to_string())?;
+        if db.cancel_pause_pending(&lp.id).map_err(|e| e.to_string())? {
+            record_pause_cancelled(db, lp);
+            return Ok(true);
+        }
+        // Lost the race: if the graph is `Running`, a concurrent resume
+        // already cancelled (its event stands) — report cancelled without
+        // a duplicate. Otherwise the node boundary completed the pause
+        // (its `graph_paused` stands) and the resume proceeds from `Paused`.
+        let status = db
+            .get_graph(&lp.id)
+            .map_err(|e| e.to_string())?
+            .map(|lp| lp.status);
+        return Ok(status == Some(GraphStatus::Running));
     }
+    if db.complete_pause(&lp.id).map_err(|e| e.to_string())? {
+        record_pause_cancelled(db, lp);
+    }
+    // Either this call completed the pause, or the node boundary just did
+    // (its `graph_paused` stands) — either way the resume proceeds from
+    // `Paused`.
+    Ok(false)
+}
+
+/// Narrate a pending pause this call resolved: one `pause_cancelled` event.
+/// The graph never visibly paused, so no `graph_paused` accompanies it —
+/// the transient `Paused` row the no-in-flight path funnels through is an
+/// implementation detail of reusing the normal resume path.
+fn record_pause_cancelled(db: &Database, lp: &Graph) {
     activity::record(
         db,
         activity::GraphEvent {
@@ -215,7 +243,6 @@ pub(crate) fn cancel_pending_pause(db: &Database, lp: &Graph) -> Result<bool, St
             payload: None,
         },
     );
-    Ok(in_flight)
 }
 
 /// The actionable refusal text for a `graph_control`/`graph_control` call blocked by

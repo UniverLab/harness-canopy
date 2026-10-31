@@ -288,6 +288,20 @@ fn preview_continue_keys_on_a_non_paused_graph_are_not_bound() {
 }
 
 #[test]
+fn preview_continue_keys_on_a_pausing_graph_dispatch_cancel() {
+    // A pending pause is cancellable from the TUI: both continue modes are
+    // bound on a pausing graph and dispatch (the daemon resolves them to
+    // the pending-pause cancel path).
+    let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Pausing);
+    handle_preview_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE).unwrap();
+    assert!(app.graph_action_pending);
+
+    let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Pausing);
+    handle_preview_key(&mut app, KeyCode::Char('C'), KeyModifiers::SHIFT).unwrap();
+    assert!(app.graph_action_pending);
+}
+
+#[test]
 fn preview_x_on_a_completed_graph_opens_reset_confirm() {
     let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Completed);
     handle_preview_key(&mut app, KeyCode::Char('x'), KeyModifiers::NONE).unwrap();

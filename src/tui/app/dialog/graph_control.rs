@@ -72,13 +72,21 @@ impl GraphControlAction {
 }
 
 /// Controls valid for a graph currently in `status` — a running graph offers
-/// only pause; a paused one offers both continue modes (retrying the
-/// in-flight node vs. abandoning the current spec are not interchangeable,
-/// so both are always presented together); a completed or failed one offers
-/// reset and run; a draft (never launched) graph offers only run.
+/// only pause; a pausing one offers pause (a no-op reporting the pending
+/// pause) plus both continue modes, either of which cancels the pending
+/// pause and keeps the graph running; a paused one offers both continue
+/// modes (retrying the in-flight node vs. abandoning the current spec are
+/// not interchangeable, so both are always presented together); a completed
+/// or failed one offers reset and run; a draft (never launched) graph
+/// offers only run.
 pub(crate) fn available_graph_actions(status: GraphStatus) -> Vec<GraphControlAction> {
     match status {
-        GraphStatus::Running | GraphStatus::Pausing => vec![GraphControlAction::Pause],
+        GraphStatus::Running => vec![GraphControlAction::Pause],
+        GraphStatus::Pausing => vec![
+            GraphControlAction::Pause,
+            GraphControlAction::ContinueRetry,
+            GraphControlAction::ContinueSkip,
+        ],
         GraphStatus::Paused => vec![
             GraphControlAction::ContinueRetry,
             GraphControlAction::ContinueSkip,
@@ -283,7 +291,8 @@ impl App {
         );
     }
 
-    /// Pause the selected graph (`p`) — valid only while it is `running`.
+    /// Pause the selected graph (`p`) — valid while it is `running`, and on
+    /// a `pausing` graph where it reports the already-pending pause.
     pub fn pause_selected_graph(&mut self) {
         let Some(lp) = self.actionable_selected_graph() else {
             return;
@@ -299,13 +308,15 @@ impl App {
     }
 
     /// Continue the selected paused graph, retrying the node that was
-    /// mid-flight when it paused (`c`).
+    /// mid-flight when it paused (`c`) — on a `pausing` graph this cancels
+    /// the pending pause and the graph keeps running instead.
     pub fn continue_selected_graph_retry(&mut self) {
         self.continue_selected_graph(GraphControlAction::ContinueRetry, "retry_current_node");
     }
 
     /// Continue the selected paused graph, abandoning the current spec and
-    /// moving on to the next one (`C`).
+    /// moving on to the next one (`C`) — on a `pausing` graph this cancels
+    /// the pending pause and the graph keeps running instead.
     pub fn continue_selected_graph_skip(&mut self) {
         self.continue_selected_graph(GraphControlAction::ContinueSkip, "skip_next_spec");
     }
@@ -438,6 +449,21 @@ mod tests {
         assert_eq!(
             available_graph_actions(GraphStatus::Running),
             vec![GraphControlAction::Pause]
+        );
+    }
+
+    #[test]
+    fn available_actions_pausing_offers_pause_and_both_continue_modes() {
+        // A pending pause is cancellable from the TUI: either continue mode
+        // resolves to the daemon's cancel path, while pause stays offered
+        // so re-pressing it reports the already-pending pause.
+        assert_eq!(
+            available_graph_actions(GraphStatus::Pausing),
+            vec![
+                GraphControlAction::Pause,
+                GraphControlAction::ContinueRetry,
+                GraphControlAction::ContinueSkip,
+            ]
         );
     }
 

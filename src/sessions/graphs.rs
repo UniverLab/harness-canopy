@@ -48,8 +48,8 @@ const MAX_SUMMARIES: usize = 50;
 pub struct GraphSummary {
     pub id: String,
     pub name: String,
-    /// The graph status string the DB stores (`running`, `paused`,
-    /// `failed`, `completed`, `draft`).
+    /// The graph status string the DB stores (`running`, `pausing`,
+    /// `paused`, `failed`, `completed`, `draft`).
     pub status: String,
     /// The workdir's last path component — never the absolute path.
     pub workdir: String,

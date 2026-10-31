@@ -70,6 +70,47 @@ fn insert_pausing_graph(db: &Database, id: &str, workdir: &str) {
     assert!(db.request_pause_pending(id).unwrap());
 }
 
+/// A bare graph row in `status`, with no specs, nodes or runs — the end
+/// state a lost pause-race compare-and-set leaves behind.
+fn insert_bare_graph(db: &Database, id: &str, workdir: &str, status: GraphStatus) {
+    db.insert_graph(&Graph {
+        archived: false,
+        paused_by_reconciliation: false,
+        allow_dirty_start: false,
+        require_spec_type: false,
+        infra_node_id: None,
+        id: id.to_string(),
+        name: id.to_string(),
+        description: None,
+        workdir: workdir.to_string(),
+        status,
+        trigger: None,
+        created_at: chrono::Utc::now(),
+        started_at: None,
+        completed_at: None,
+        autorun_at: None,
+        auto_continue_at: None,
+        auto_continue_action: None,
+        active_run_queue_id: None,
+        hooks: std::collections::BTreeMap::new(),
+    })
+    .unwrap();
+}
+
+fn pause_cancelled_events(
+    db: &Database,
+    graph_id: &str,
+) -> Vec<crate::db::graphs::events::GraphEventRow> {
+    db.list_graph_events(
+        graph_id,
+        None,
+        None,
+        Some(&["pause_cancelled".to_string()]),
+        50,
+    )
+    .unwrap()
+}
+
 /// A second pause while one is pending answers "pause already pending" and
 /// writes no duplicate `pause_requested` event.
 #[tokio::test]
@@ -253,4 +294,68 @@ fn pending_pause_read_surfaces_report_running_with_waiting_names() {
     assert_eq!(summary["status"], serde_json::json!("running"));
     assert_eq!(summary["pause_pending"], serde_json::json!(false));
     assert_eq!(summary["pause_waiting_for"], serde_json::json!([]));
+}
+
+/// A resume racing the node boundary with nothing in flight completes the
+/// pause to `Paused` (so the resume proceeds normally) and still narrates
+/// one `pause_cancelled` — the graph never visibly paused.
+#[test]
+fn cancel_pending_pause_without_in_flight_completes_and_narrates() {
+    use crate::daemon::handler_run_exec::cancel_pending_pause;
+
+    let dir = tempdir().unwrap();
+    let db = Database::new(&dir.path().join("test.db")).unwrap();
+    let stored = dir.path().to_string_lossy().to_string();
+    insert_bare_graph(&db, "graph-cn", &stored, GraphStatus::Running);
+    assert!(db.request_pause_pending("graph-cn").unwrap());
+
+    let lp = db.get_graph("graph-cn").unwrap().unwrap();
+    assert!(!cancel_pending_pause(&db, &lp).unwrap());
+    assert_eq!(
+        db.get_graph("graph-cn").unwrap().unwrap().status,
+        GraphStatus::Paused,
+    );
+    assert_eq!(pause_cancelled_events(&db, "graph-cn").len(), 1);
+}
+
+/// A resume whose cancel compare-and-set lost to a concurrent resume (the
+/// graph is `Running` again) reports cancelled without a duplicate event —
+/// the winner's `pause_cancelled` stands.
+#[test]
+fn cancel_pending_pause_after_concurrent_cancel_reports_without_duplicate() {
+    use crate::daemon::handler_run_exec::cancel_pending_pause;
+
+    let dir = tempdir().unwrap();
+    let db = Database::new(&dir.path().join("test.db")).unwrap();
+    let stored = dir.path().to_string_lossy().to_string();
+    insert_running_graph_with_node(&db, "graph-cc", &stored);
+
+    let lp = db.get_graph("graph-cc").unwrap().unwrap();
+    assert!(cancel_pending_pause(&db, &lp).unwrap());
+    assert_eq!(
+        db.get_graph("graph-cc").unwrap().unwrap().status,
+        GraphStatus::Running,
+    );
+    assert!(pause_cancelled_events(&db, "graph-cc").is_empty());
+}
+
+/// A resume whose compare-and-set lost to the node boundary (the pause
+/// already completed to `Paused`) proceeds without a `pause_cancelled` —
+/// the boundary's `graph_paused` stands.
+#[test]
+fn cancel_pending_pause_after_boundary_completion_proceeds_silently() {
+    use crate::daemon::handler_run_exec::cancel_pending_pause;
+
+    let dir = tempdir().unwrap();
+    let db = Database::new(&dir.path().join("test.db")).unwrap();
+    let stored = dir.path().to_string_lossy().to_string();
+    insert_bare_graph(&db, "graph-cb", &stored, GraphStatus::Paused);
+
+    let lp = db.get_graph("graph-cb").unwrap().unwrap();
+    assert!(!cancel_pending_pause(&db, &lp).unwrap());
+    assert_eq!(
+        db.get_graph("graph-cb").unwrap().unwrap().status,
+        GraphStatus::Paused,
+    );
+    assert!(pause_cancelled_events(&db, "graph-cb").is_empty());
 }
