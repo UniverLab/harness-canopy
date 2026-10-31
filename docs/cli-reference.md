@@ -364,7 +364,9 @@ the list and cannot be attached, written to, prompted or killed, `resize`
 is always refused (the browser renders the host's size scaled), and `spawn`
 creates `agent` sessions only. A browser paired as a trusted guest login
 sees only its granted sessions — every other session answers `not_found`,
-as if it did not exist — while the owner keeps the full view. A `spawn` names a directory (`workdir`)
+as if it did not exist — while the owner keeps the full view. A session
+whose process ends leaves the list for owner and guest alike, as if
+closed; attaching it afterwards answers `not_found`. A `spawn` names a directory (`workdir`)
 rather than a project. `workdir` may be absolute or start with `~/` (`~` and
 `~/` alone mean the host user's home), and the expanded path must be an
 existing directory; the browser's New dialog types that directory. A
