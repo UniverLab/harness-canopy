@@ -1530,7 +1530,8 @@ mod ct16_warp_fullscreen_handover_tests {
 
     #[test]
     fn never_enters_alt_screen_unaffected() {
-        // T4/FR5: a child that never enters the alternate screen keeps warp
+        // T4/FR5 (pre-submit): no command was submitted here so no latch is
+        // set — a child that never enters the alternate screen keeps warp
         // sizing and never bypasses the input box.
         let agent = spawn_test_terminal("ct16-t4");
         let mut app = app_with_terminal(agent);

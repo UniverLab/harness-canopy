@@ -143,7 +143,7 @@ pub fn handle_terminal_warp_key(
 }
 
 fn should_skip_warp_sync(agent: &InteractiveAgent) -> bool {
-    agent.in_alternate_screen() || agent.is_sensitive_input_active()
+    agent.in_alternate_screen() || agent.is_sensitive_input_active() || agent.warp_command_running
 }
 
 fn should_sync_direct_input(
@@ -291,6 +291,9 @@ fn submit_direct_passthrough(app: &mut App, idx: usize) {
     let captured = trimmed_input_text(&app.terminal_agents[idx]);
     record_terminal_command(app, idx, &captured);
     reset_warp_input(&mut app.terminal_agents[idx]);
+    // Latch AFTER the reset (which must not clear it): the box stays
+    // withdrawn and keys go straight to the PTY until the shell is idle.
+    app.terminal_agents[idx].warp_command_running = true;
 }
 
 pub(super) fn submit_warp_input(app: &mut App, idx: usize) {
@@ -298,6 +301,9 @@ pub(super) fn submit_warp_input(app: &mut App, idx: usize) {
     write_line_to_pty(&app.terminal_agents[idx], &captured);
     record_terminal_command(app, idx, captured.trim());
     reset_warp_input(&mut app.terminal_agents[idx]);
+    // Latch AFTER the reset (which must not clear it): the box stays
+    // withdrawn and keys go straight to the PTY until the shell is idle.
+    app.terminal_agents[idx].warp_command_running = true;
 }
 
 fn write_line_to_pty(agent: &InteractiveAgent, captured: &str) {
@@ -971,6 +977,285 @@ mod alternate_screen_key_routing_tests {
             .expect("page down");
         assert_eq!(app.terminal_agents[0].scroll_offset, 94);
 
+        app.terminal_agents[0].kill();
+    }
+}
+
+// Latch: from warp submit until the shell is back at an idle prompt the
+// box stays withdrawn and keys go straight to the PTY — including for
+// non-fullscreen children (wizards, y/n questions, long commands).
+#[cfg(test)]
+mod warp_command_latch_tests {
+    use super::super::paste::handle_paste;
+    use super::*;
+    use crate::db::Database;
+    use crate::tui::app::types::AgentEntry;
+    use crate::tui::app::types::{App, Focus};
+    use ratatui::style::Color;
+    use std::sync::{Arc, Mutex};
+    use tempfile::{tempdir, NamedTempFile};
+
+    fn spawn_term(name: &str) -> InteractiveAgent {
+        InteractiveAgent::spawn_terminal("cat", "/tmp", 80, 24, Some(name), &[], Color::White)
+            .expect("spawn terminal")
+    }
+
+    fn feed(agent: &InteractiveAgent, bytes: &[u8]) {
+        agent.vt.lock().expect("lock vt").process(bytes);
+    }
+
+    fn test_app(agent: InteractiveAgent) -> App {
+        let tmp = NamedTempFile::new().expect("create temp database");
+        let db = Arc::new(Database::new(&tmp.path().to_path_buf()).expect("create database"));
+        let data_dir = tempdir().expect("create data directory");
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        app.terminal_agents.push(agent);
+        app.agents = vec![AgentEntry::Terminal(0)];
+        app.selected = 0;
+        app.focus = Focus::Agent;
+        app
+    }
+
+    fn warp_active(app: &App) -> bool {
+        app.terminal_agents[0].warp_mode && !app.terminal_agents[0].should_bypass_warp_input()
+    }
+
+    fn buffer_text(app: &App) -> String {
+        app.terminal_agents[0]
+            .input_buffer
+            .lock()
+            .expect("lock input buffer")
+            .clone()
+    }
+
+    fn type_command(app: &mut App, cmd: &str) {
+        replace_input_buffer(&app.terminal_agents[0], cmd);
+        app.terminal_agents[0].warp_cursor = cmd.len();
+    }
+
+    fn submit(app: &mut App) {
+        handle_terminal_warp_key(app, 0, KeyCode::Enter, KeyModifiers::NONE).expect("submit");
+    }
+
+    #[test]
+    fn idle_prompt_markers_count_as_idle() {
+        let agent = spawn_term("idle-markers");
+        feed(&agent, b"$ ");
+        assert!(agent.shell_at_idle_prompt());
+        feed(&agent, b"\r\nuser@host:~/repo$ ");
+        assert!(agent.shell_at_idle_prompt());
+        feed(&agent, b"\r\nuser@host:~/repo$");
+        assert!(agent.shell_at_idle_prompt());
+    }
+
+    #[test]
+    fn wizard_and_busy_lines_are_not_idle() {
+        let agent = spawn_term("busy-lines");
+        feed(&agent, b"? Pick a framework: ");
+        assert!(!agent.shell_at_idle_prompt());
+        feed(&agent, b"\r\n$ sleep 9");
+        assert!(!agent.shell_at_idle_prompt());
+        feed(&agent, b"\r\nplain output");
+        assert!(!agent.shell_at_idle_prompt());
+    }
+
+    #[test]
+    fn alternate_screen_is_never_idle() {
+        let agent = spawn_term("alt-idle");
+        feed(&agent, b"$ ");
+        assert!(agent.shell_at_idle_prompt());
+        feed(&agent, b"\x1b[?1049h");
+        assert!(!agent.shell_at_idle_prompt());
+    }
+
+    #[test]
+    fn refresh_clears_the_latch_only_at_an_idle_prompt() {
+        let mut agent = spawn_term("refresh-idle");
+        agent.warp_command_running = true;
+        feed(&agent, b"$ sleep 9");
+        agent.refresh_warp_command_state();
+        assert!(agent.warp_command_running, "busy line keeps the latch");
+        feed(&agent, b"\r\n? Pick one: ");
+        agent.refresh_warp_command_state();
+        assert!(agent.warp_command_running, "wizard prompt keeps the latch");
+        feed(&agent, b"\r\nuser@host:~$ ");
+        agent.refresh_warp_command_state();
+        assert!(!agent.warp_command_running, "idle prompt clears the latch");
+    }
+
+    #[test]
+    fn refresh_is_a_noop_without_a_latch_or_terminal() {
+        let mut agent = spawn_term("refresh-noop");
+        feed(&agent, b"? Pick one: ");
+        agent.refresh_warp_command_state();
+        assert!(!agent.warp_command_running);
+    }
+
+    #[test]
+    fn submit_withdraws_the_box_and_routes_keys_to_the_pty() {
+        let mut agent = spawn_term("submit-latch");
+        let written = Arc::new(Mutex::new(Vec::new()));
+        agent.test_sink = Some(Arc::clone(&written));
+        let mut app = test_app(agent);
+        assert!(warp_active(&app));
+
+        type_command(&mut app, "sleep 9");
+        submit(&mut app);
+
+        assert!(app.terminal_agents[0].warp_command_running);
+        assert!(app.terminal_agents[0].should_bypass_warp_input());
+        assert!(!warp_active(&app), "box withdraws on submit");
+        assert_eq!(buffer_text(&app), "");
+
+        written.lock().expect("lock sink").clear();
+        handle_terminal_warp_key(&mut app, 0, KeyCode::Char('y'), KeyModifiers::NONE)
+            .expect("mid-command key");
+        assert_eq!(&*written.lock().expect("lock sink"), b"y");
+        assert_eq!(buffer_text(&app), "", "mid-command keys skip the box");
+        app.terminal_agents[0].kill();
+    }
+
+    #[test]
+    fn passthrough_submit_sets_the_latch_too() {
+        let mut agent = spawn_term("passthrough-submit");
+        let written = Arc::new(Mutex::new(Vec::new()));
+        agent.test_sink = Some(Arc::clone(&written));
+        let mut app = test_app(agent);
+        app.terminal_agents[0].warp_passthrough = true;
+        type_command(&mut app, "ls");
+
+        submit(&mut app);
+
+        assert!(app.terminal_agents[0].warp_command_running);
+        assert!(!warp_active(&app));
+        app.terminal_agents[0].kill();
+    }
+
+    #[test]
+    fn box_returns_empty_at_the_next_idle_prompt() {
+        let mut agent = spawn_term("box-returns");
+        let written = Arc::new(Mutex::new(Vec::new()));
+        agent.test_sink = Some(Arc::clone(&written));
+        let mut app = test_app(agent);
+        type_command(&mut app, "sleep 9");
+        submit(&mut app);
+        handle_terminal_warp_key(&mut app, 0, KeyCode::Char('y'), KeyModifiers::NONE)
+            .expect("mid-command key");
+        assert_eq!(buffer_text(&app), "");
+
+        feed(&app.terminal_agents[0], b"\r\nuser@host:~$ ");
+        app.terminal_agents[0].poll();
+
+        assert!(!app.terminal_agents[0].warp_command_running);
+        assert_eq!(buffer_text(&app), "", "box returns with an empty buffer");
+        assert!(warp_active(&app), "box is back at the idle prompt");
+
+        written.lock().expect("lock sink").clear();
+        handle_terminal_warp_key(&mut app, 0, KeyCode::Char('l'), KeyModifiers::NONE)
+            .expect("idle key");
+        assert_eq!(buffer_text(&app), "l");
+        assert!(written.lock().expect("lock sink").is_empty());
+        app.terminal_agents[0].kill();
+    }
+
+    #[test]
+    fn wizard_prompt_needs_no_toggle_for_keys_to_reach_it() {
+        let mut agent = spawn_term("wizard-keys");
+        let written = Arc::new(Mutex::new(Vec::new()));
+        agent.test_sink = Some(Arc::clone(&written));
+        let mut app = test_app(agent);
+        type_command(&mut app, "gitkit clone");
+        submit(&mut app);
+
+        // An inquire-style wizard prompt renders; the user pressed nothing.
+        feed(&app.terminal_agents[0], b"\r\n? Pick a framework: ");
+        app.terminal_agents[0].refresh_warp_command_state();
+        assert!(app.terminal_agents[0].warp_command_running);
+        assert!(!warp_active(&app));
+        assert!(app.terminal_agents[0].warp_mode, "no toggle was pressed");
+
+        written.lock().expect("lock sink").clear();
+        handle_terminal_warp_key(&mut app, 0, KeyCode::Char('y'), KeyModifiers::NONE)
+            .expect("wizard answer");
+        assert_eq!(&*written.lock().expect("lock sink"), b"y");
+        assert_eq!(buffer_text(&app), "");
+        app.terminal_agents[0].kill();
+    }
+
+    #[test]
+    fn paste_goes_to_the_pty_while_a_command_runs() {
+        let mut agent = spawn_term("paste-latch");
+        let written = Arc::new(Mutex::new(Vec::new()));
+        agent.test_sink = Some(Arc::clone(&written));
+        let mut app = test_app(agent);
+        type_command(&mut app, "sleep 9");
+        submit(&mut app);
+        feed(&app.terminal_agents[0], b"\r\n? yn: ");
+        written.lock().expect("lock sink").clear();
+
+        handle_paste(&mut app, "hello");
+
+        assert_eq!(&*written.lock().expect("lock sink"), b"hello");
+        assert_eq!(buffer_text(&app), "");
+        app.terminal_agents[0].kill();
+    }
+
+    #[test]
+    fn paste_wraps_markers_only_when_the_child_enabled_them() {
+        let mut agent = spawn_term("paste-2004");
+        let written = Arc::new(Mutex::new(Vec::new()));
+        agent.test_sink = Some(Arc::clone(&written));
+        let mut app = test_app(agent);
+        type_command(&mut app, "sleep 9");
+        submit(&mut app);
+        feed(&app.terminal_agents[0], b"\x1b[?2004h");
+        assert!(app.terminal_agents[0].bracketed_paste_enabled());
+        written.lock().expect("lock sink").clear();
+
+        handle_paste(&mut app, "hi");
+
+        assert_eq!(
+            &*written.lock().expect("lock sink"),
+            b"\x1b[200~hi\x1b[201~"
+        );
+        app.terminal_agents[0].kill();
+    }
+
+    #[test]
+    fn paste_lands_in_the_box_at_an_idle_prompt() {
+        let mut agent = spawn_term("paste-idle");
+        let written = Arc::new(Mutex::new(Vec::new()));
+        agent.test_sink = Some(Arc::clone(&written));
+        let mut app = test_app(agent);
+        feed(&app.terminal_agents[0], b"$ ");
+
+        handle_paste(&mut app, "ls -la");
+
+        assert_eq!(buffer_text(&app), "ls -la");
+        assert!(written.lock().expect("lock sink").is_empty());
+        app.terminal_agents[0].kill();
+    }
+
+    #[test]
+    fn paste_at_idle_prompt_clears_a_stale_latch_first() {
+        let mut agent = spawn_term("paste-stale");
+        let written = Arc::new(Mutex::new(Vec::new()));
+        agent.test_sink = Some(Arc::clone(&written));
+        let mut app = test_app(agent);
+        // Latch staged as a submit would; the shell is already back.
+        app.terminal_agents[0].warp_command_running = true;
+        feed(&app.terminal_agents[0], b"$ ");
+
+        handle_paste(&mut app, "ls");
+
+        assert!(!app.terminal_agents[0].warp_command_running);
+        assert_eq!(buffer_text(&app), "ls");
+        assert!(written.lock().expect("lock sink").is_empty());
         app.terminal_agents[0].kill();
     }
 }

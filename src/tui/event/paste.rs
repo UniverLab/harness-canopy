@@ -45,6 +45,7 @@ pub fn handle_paste(app: &mut App, text: &str) {
                 app.interactive_agents.get_mut(idx)
             };
             if let Some(agent) = agent {
+                agent.refresh_warp_command_state();
                 let bypass = agent.should_bypass_warp_input();
                 if agent.warp_mode && !bypass && !agent.warp_passthrough {
                     // Warp prompt editing: insert into input buffer at cursor

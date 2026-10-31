@@ -93,6 +93,9 @@ fn handle_terminal_input(
 fn toggle_terminal_warp_mode(app: &mut App, idx: usize) {
     app.terminal_agents[idx].warp_mode = !app.terminal_agents[idx].warp_mode;
     app.terminal_agents[idx].warp_passthrough = false;
+    // Manual override in both directions: the automatic rule re-asserts on
+    // the next submit or prompt return.
+    app.terminal_agents[idx].warp_command_running = false;
 }
 
 fn handle_terminal_warp_input(
@@ -101,6 +104,7 @@ fn handle_terminal_warp_input(
     code: KeyCode,
     modifiers: KeyModifiers,
 ) -> Result<bool> {
+    app.terminal_agents[idx].refresh_warp_command_state();
     if app.terminal_agents[idx].should_bypass_warp_input() {
         handle_terminal_direct_pty_key(app, idx, code, modifiers)?;
         return Ok(true);
@@ -192,4 +196,141 @@ pub(super) fn forward_key_to_focused_agent(
         return;
     };
     let _ = agent.write_to_pty(&bytes);
+}
+
+#[cfg(test)]
+mod warp_toggle_override_tests {
+    use super::*;
+    use crate::db::Database;
+    use crate::tui::agent::InteractiveAgent;
+    use crate::tui::app::types::{AgentEntry, Focus};
+    use ratatui::style::Color;
+    use std::sync::{Arc, Mutex};
+    use tempfile::{tempdir, NamedTempFile};
+
+    fn test_app(agent: InteractiveAgent) -> App {
+        let tmp = NamedTempFile::new().expect("create temp database");
+        let db = Arc::new(Database::new(&tmp.path().to_path_buf()).expect("create database"));
+        let data_dir = tempdir().expect("create data directory");
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        app.terminal_agents.push(agent);
+        app.agents = vec![AgentEntry::Terminal(0)];
+        app.selected = 0;
+        app.focus = Focus::Agent;
+        app
+    }
+
+    fn warp_active(app: &App) -> bool {
+        app.terminal_agents[0].warp_mode && !app.terminal_agents[0].should_bypass_warp_input()
+    }
+
+    fn buffer_text(app: &App) -> String {
+        app.terminal_agents[0]
+            .input_buffer
+            .lock()
+            .expect("lock input buffer")
+            .clone()
+    }
+
+    fn press(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+        handle_terminal_input(app, 0, code, modifiers).expect("terminal input");
+    }
+
+    fn ctrl_w(app: &mut App) {
+        press(app, KeyCode::Char('w'), KeyModifiers::CONTROL);
+    }
+
+    #[test]
+    fn toggle_clears_the_latch_both_ways_and_submit_reasserts() {
+        let mut agent = InteractiveAgent::spawn_terminal(
+            "cat",
+            "/tmp",
+            80,
+            24,
+            Some("toggle-override"),
+            &[],
+            Color::White,
+        )
+        .expect("spawn terminal");
+        let written = Arc::new(Mutex::new(Vec::new()));
+        agent.test_sink = Some(Arc::clone(&written));
+        let mut app = test_app(agent);
+
+        // Submit latches; the box withdraws.
+        {
+            let buf = app.terminal_agents[0].input_buffer.clone();
+            buf.lock().expect("lock buffer").push_str("sleep 9");
+            app.terminal_agents[0].warp_cursor = 7;
+        }
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.terminal_agents[0].warp_command_running);
+        assert!(!warp_active(&app));
+
+        // Warp -> native clears the latch (override, direction one).
+        ctrl_w(&mut app);
+        assert!(!app.terminal_agents[0].warp_mode);
+        assert!(!app.terminal_agents[0].warp_command_running);
+
+        // A command is still running behind the native pane; toggling back
+        // clears the latch again so the box comes back anyway (direction two).
+        app.terminal_agents[0].warp_command_running = true;
+        app.terminal_agents[0]
+            .vt
+            .lock()
+            .expect("lock vt")
+            .process(b"? Pick one: ");
+        ctrl_w(&mut app);
+        assert!(app.terminal_agents[0].warp_mode);
+        assert!(!app.terminal_agents[0].warp_command_running);
+        assert!(warp_active(&app), "box back despite the running command");
+
+        // During the override keys go back to the box, not the PTY.
+        written.lock().expect("lock sink").clear();
+        press(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
+        assert_eq!(buffer_text(&app), "y");
+        assert!(written.lock().expect("lock sink").is_empty());
+
+        // The next submit re-asserts the automatic rule.
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.terminal_agents[0].warp_command_running);
+        assert!(!warp_active(&app));
+        app.terminal_agents[0].kill();
+    }
+
+    #[test]
+    fn warp_key_path_returns_the_box_at_an_idle_prompt() {
+        let mut agent = InteractiveAgent::spawn_terminal(
+            "cat",
+            "/tmp",
+            80,
+            24,
+            Some("key-refresh"),
+            &[],
+            Color::White,
+        )
+        .expect("spawn terminal");
+        let written = Arc::new(Mutex::new(Vec::new()));
+        agent.test_sink = Some(Arc::clone(&written));
+        let mut app = test_app(agent);
+        // Latch staged as a submit would; the shell is already back.
+        app.terminal_agents[0].warp_command_running = true;
+        app.terminal_agents[0]
+            .vt
+            .lock()
+            .expect("lock vt")
+            .process(b"user@host:~$ ");
+
+        press(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
+
+        assert!(!app.terminal_agents[0].warp_command_running);
+        assert_eq!(buffer_text(&app), "x");
+        assert!(written.lock().expect("lock sink").is_empty());
+        assert!(warp_active(&app));
+        app.terminal_agents[0].kill();
+    }
 }

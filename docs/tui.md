@@ -93,6 +93,19 @@ step instead of launching straight away:
   daemon (canopy daemon restart)` and nothing attaches until the restarted
   daemon matches.
 
+## Terminal sessions
+
+- **Warp-like input** — keystrokes accumulate in the input box and are
+  sent to the shell on `Enter`, with per-session history (`↑↓`) and
+  cross-session autocomplete.
+- **While a command runs the box withdraws** — from `Enter` until the
+  shell is back at an idle prompt, every keystroke (and paste) goes
+  straight to the running program, so wizards, `y/n` questions, and
+  long commands just work. The box returns empty at the next prompt.
+- **`Ctrl+W` toggles native mode** as a manual override in both
+  directions; the next submit or prompt return re-asserts the automatic
+  rule.
+
 ## Monitoring
 
 - **Agent status colors** — teal for working (recent output), blue for

@@ -165,6 +165,12 @@ pub struct InteractiveAgent {
     /// True once the current shell line has been materialized in the PTY
     /// and warp input should stay synchronized from PTY edits.
     pub warp_passthrough: bool,
+    /// Submit-set latch: true from warp submit until the shell is back at
+    /// an idle prompt. While set, the warp box stays withdrawn and keys go
+    /// straight to the PTY (see `foreground_app_active`). Set only by the
+    /// terminal submit paths, cleared by `refresh_warp_command_state` and
+    /// by the manual ctrl+w toggle. Only used for terminal sessions.
+    pub warp_command_running: bool,
     /// Flags from the most recent Kitty keyboard protocol "push" the child
     /// sent (`CSI > flags u`), if any — `None` until one is observed.
     /// Populated by a raw scan of PTY output in the reader thread (vt100
@@ -371,6 +377,7 @@ impl InteractiveAgent {
             warp_cursor: 0,
             history_index: None,
             warp_passthrough: false,
+            warp_command_running: false,
             kitty_keyboard_flags: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             test_sink: None,
@@ -608,6 +615,9 @@ impl InteractiveAgent {
         if code != EXIT_UNKNOWN {
             self.status = AgentStatus::Exited(code);
         }
+        // Per-tick return of the warp box once the shell is idle again.
+        // No-op for agent (non-terminal) sessions.
+        self.refresh_warp_command_state();
     }
 
     /// End the hub session with `kill`. Quitting the TUI never calls this —

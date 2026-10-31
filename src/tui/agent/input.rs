@@ -1,5 +1,7 @@
 use crate::domain::cli_config::PasteSubmitSpec;
-use crate::tui::agent::sanitize::{line_looks_sensitive_prompt, strip_shell_prompt_prefix};
+use crate::tui::agent::sanitize::{
+    command_after_shell_prompt, line_looks_sensitive_prompt, strip_shell_prompt_prefix,
+};
 use crate::tui::agent::{
     AgentStatus, InteractiveAgent, PromptEntry, ACTIVITY_IDLE_THRESHOLD_MS, MAX_PROMPT_HISTORY,
 };
@@ -141,10 +143,35 @@ impl InteractiveAgent {
     /// True when an interactive child (wizard, editor, running command)
     /// owns the terminal, so input must go straight to the session instead
     /// of the warp buffer. The session protocol v1 exposes no foreground
-    /// process group, so this is always false: warp decides on the
-    /// alternate screen and sensitive prompts alone.
+    /// process group, so this is the submit-set `warp_command_running`
+    /// latch: set on warp submit, cleared once the shell is back at an
+    /// idle prompt (see `refresh_warp_command_state`).
     pub fn foreground_app_active(&self) -> bool {
-        false
+        self.warp_command_running
+    }
+
+    /// True when the shell owns the cursor line and is idle at a fresh
+    /// prompt: no alternate screen, and the cursor line carries a
+    /// shell-prompt marker with an empty command after it.
+    pub fn shell_at_idle_prompt(&self) -> bool {
+        if self.in_alternate_screen() {
+            return false;
+        }
+        self.current_visible_line_text()
+            .and_then(|line| command_after_shell_prompt(&line))
+            .is_some_and(|command| command.is_empty())
+    }
+
+    /// Clear the submit-set latch once the shell is back at an idle
+    /// prompt, so the warp box returns. No-op for agent (non-terminal)
+    /// sessions and while no command is latched as running.
+    pub fn refresh_warp_command_state(&mut self) {
+        if !self.is_terminal || !self.warp_command_running {
+            return;
+        }
+        if self.shell_at_idle_prompt() {
+            self.warp_command_running = false;
+        }
     }
 
     pub fn should_bypass_warp_input(&self) -> bool {

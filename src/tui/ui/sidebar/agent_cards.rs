@@ -353,9 +353,9 @@ fn hub_session_status_color(agent: &InteractiveAgent, live: Color) -> Color {
 ///   go solid green the moment the shell returns to its prompt, *regardless*
 ///   of output activity. A finished command whose output just scrolled by stops
 ///   pulsing immediately; a still-running `watch`/`tail -f` keeps pulsing.
-///   Since the hub took the PTYs over (protocol v1 exposes no foreground
-///   process group), `foreground_app_active` is a constant `false`, so this
-///   signal stays off until the hub can report it.
+///   The hub took the PTYs over (protocol v1 exposes no foreground process
+///   group), so `foreground_app_active` is the submit-set warp latch, cleared
+///   when prompt detection sees the shell idle again.
 ///
 /// Whichever signal isn't selected for a kind is ignored, so callers pass
 /// `false` for it.
