@@ -6,7 +6,7 @@
 //! `selected_bg` like the Shelf tab. The overlay shows the last fetched
 //! code with its link, QR and countdown.
 
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
@@ -442,14 +442,16 @@ pub(super) fn draw_pair_overlay(frame: &mut Frame, app: &App, theme: &Theme) {
                 .fg(theme.accent_fg)
                 .bg(theme.header_color)
                 .add_modifier(Modifier::BOLD),
-        ))),
+        )))
+        .alignment(Alignment::Center),
         rows[0],
     );
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             truncate(&pair.link, inner_width),
             Style::default().fg(theme.text_primary),
-        ))),
+        )))
+        .alignment(Alignment::Center),
         rows[1],
     );
     let qr: Vec<Line> = qr_lines
@@ -461,19 +463,21 @@ pub(super) fn draw_pair_overlay(frame: &mut Frame, app: &App, theme: &Theme) {
             ))
         })
         .collect();
-    frame.render_widget(Paragraph::new(qr), rows[2]);
+    frame.render_widget(Paragraph::new(qr).alignment(Alignment::Center), rows[2]);
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             truncate(&countdown, inner_width),
             Style::default().fg(theme.dim_text),
-        ))),
+        )))
+        .alignment(Alignment::Center),
         rows[3],
     );
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             "Esc hide — the code stays valid",
             Style::default().fg(theme.dim_text),
-        ))),
+        )))
+        .alignment(Alignment::Center),
         rows[4],
     );
 }
@@ -689,6 +693,56 @@ mod tests {
         text
     }
 
+    /// The rendered buffer as rows of cell symbols, for geometry assertions.
+    fn draw_grid(app: &mut App, width: u16, height: u16) -> Vec<Vec<String>> {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = Theme::classic();
+        terminal
+            .draw(|frame| {
+                super::super::hub::draw_hub(frame, app, &theme);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let mut grid = Vec::new();
+        for y in 0..buffer.area.height {
+            let mut row = Vec::new();
+            for x in 0..buffer.area.width {
+                row.push(buffer[(x, y)].symbol().to_string());
+            }
+            grid.push(row);
+        }
+        grid
+    }
+
+    /// Recompute the pair overlay's inner rect the way `draw_pair_overlay`
+    /// does, so centering asserts measure against centered geometry.
+    fn pair_overlay_inner(pair: &PairView, width: u16, height: u16) -> Rect {
+        let qr_lines: Vec<&str> = pair.qr.lines().collect();
+        let code_line = format!("Pairing code: {}", pair.code);
+        let countdown = pair_countdown(pair.expires_at, chrono::Utc::now().timestamp());
+        let content_width = code_line
+            .chars()
+            .count()
+            .max(pair.link.chars().count())
+            .max(qr_width(&qr_lines))
+            .max(countdown.chars().count());
+        let frame_area = Rect::new(0, 0, width, height);
+        let box_width = ((content_width + 4) as u16).min(frame_area.width.saturating_sub(2));
+        let box_height = (qr_lines.len() as u16 + 6).min(frame_area.height);
+        let area = centered_box(box_width, box_height, frame_area);
+        Block::default()
+            .borders(crate::tui::ui::dialog_borders_for(&Theme::classic()))
+            .inner(area)
+    }
+
+    /// The x of the first non-blank cell of `row` within `inner`'s columns.
+    fn content_x(row: &[String], inner: Rect) -> u16 {
+        (inner.x..inner.x + inner.width)
+            .find(|x| !row[*x as usize].trim().is_empty())
+            .expect("row has content")
+    }
+
     /// Every row state renders at both sizes.
     #[test]
     fn remote_tab_renders_each_row_state_at_both_sizes() {
@@ -835,6 +889,98 @@ mod tests {
                 qr_rendered, qr_symbols,
                 "{width}x{height}: the QR fits unclipped: {text}"
             );
+
+            // Every row is centered in the dialog's inner area.
+            let grid = draw_grid(&mut app, width, height);
+            let pair = app.hub.remote.pair.as_ref().expect("pair");
+            let inner = pair_overlay_inner(pair, width, height);
+            let inner_w = usize::from(inner.width);
+            let qr_lines: Vec<&str> = pair.qr.lines().collect();
+            let qr_line_w = qr_lines[0].chars().count();
+            assert!(
+                qr_lines
+                    .iter()
+                    .all(|line| line.chars().count() == qr_line_w),
+                "{width}x{height}: the QR block has one width"
+            );
+            let code_row = truncate(&format!("Pairing code: {}", pair.code), inner_w);
+            let link_row = truncate(&pair.link, inner_w);
+            let countdown_row = truncate(
+                &pair_countdown(pair.expires_at, chrono::Utc::now().timestamp()),
+                inner_w,
+            );
+            for (name, y, expected) in [
+                ("code", inner.y, code_row.as_str()),
+                ("link", inner.y + 1, link_row.as_str()),
+                (
+                    "countdown",
+                    inner.y + 2 + qr_lines.len() as u16,
+                    countdown_row.as_str(),
+                ),
+                (
+                    "hint",
+                    inner.y + 3 + qr_lines.len() as u16,
+                    "Esc hide — the code stays valid",
+                ),
+            ] {
+                let row_w = expected.chars().count() as u16;
+                let pad = content_x(&grid[usize::from(y)], inner) - inner.x;
+                assert_eq!(
+                    pad,
+                    (inner.width - row_w) / 2,
+                    "{width}x{height}: the {name} row is centered"
+                );
+                let start = usize::from(inner.x + pad);
+                let rendered: String =
+                    grid[usize::from(y)][start..start + usize::from(row_w)].concat();
+                if name == "countdown" {
+                    // A second may tick between the draw and this recompute.
+                    assert_eq!(
+                        rendered.chars().count(),
+                        usize::from(row_w),
+                        "{width}x{height}: the countdown keeps its width"
+                    );
+                    assert!(
+                        rendered.starts_with("Expires in 9:"),
+                        "{width}x{height}: the countdown text: {rendered}"
+                    );
+                } else {
+                    assert_eq!(
+                        rendered, expected,
+                        "{width}x{height}: the {name} row text: {rendered}"
+                    );
+                }
+            }
+            for (index, line) in qr_lines.iter().enumerate() {
+                let y = inner.y + 2 + index as u16;
+                if line.trim().is_empty() {
+                    // All-quiet-zone lines render as background: centering is
+                    // vacuous, so the row must simply be blank.
+                    let start = usize::from(inner.x);
+                    assert!(
+                        grid[usize::from(y)][start..start + inner_w]
+                            .iter()
+                            .all(|cell| cell.trim().is_empty()),
+                        "{width}x{height}: QR line {index} is blank"
+                    );
+                    continue;
+                }
+                // The quiet zone pads the line; the pad below is the line's
+                // start, recovered past its leading blanks.
+                let leading = line.chars().take_while(|c| *c == ' ').count() as u16;
+                let pad = content_x(&grid[usize::from(y)], inner) - inner.x - leading;
+                assert_eq!(
+                    pad,
+                    (inner.width - qr_line_w as u16) / 2,
+                    "{width}x{height}: QR line {index} is centered as a unit"
+                );
+                let start = usize::from(inner.x + pad);
+                let rendered: String = grid[usize::from(y)][start..start + qr_line_w].concat();
+                assert_eq!(
+                    rendered, *line,
+                    "{width}x{height}: QR line {index} sits exactly at its pad"
+                );
+            }
         }
     }
 
