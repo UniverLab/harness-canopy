@@ -51,11 +51,7 @@ Three things are deliberate:
   failure than the one it is fixing. Both hashes are in the output —
   undo it yourself if it doesn't belong.
 
-Ensemble members are checked as a group rather than individually: they
-run concurrently against one workdir, so a moved HEAD can't be
-attributed to a single member, and the quorum fails as a whole.
-Non-git workdirs are unaffected, as is any node that edits files
-without committing — the normal case.
+Ensemble members are checked as a group rather than individually: they run concurrently against one workdir, so a moved HEAD can't be attributed to a single member, and the quorum fails as a whole. Non-git workdirs are unaffected, as is any node that edits files without committing — the normal case.
 
 The same `commit_rights: true` node is also what populates
 `{{spec_committed_head}}`: whenever its own execution moves HEAD, that
@@ -97,12 +93,7 @@ exit fails the node as usual. An explicit self-report always wins
 regardless of this flag, pass or fail; `require_report` only judges the
 case where none was ever made.
 
-Whether or not the flag is set, every agent run that finishes without
-calling `graph_complete_node` carries `"unreported": true` in its output
-— this is unconditional, so a resilience node downstream can always
-tell "the harness ran and chose not to report" apart from "the harness
-never ran," without needing `require_report` itself. Ensemble members
-are judged individually, exactly like a lone node.
+Whether or not the flag is set, every agent run that finishes without calling `graph_complete_node` carries `"unreported": true` in its output — this is unconditional, so a resilience node downstream can always tell "the harness ran and chose not to report" apart from "the harness never ran," without needing `require_report` itself. Ensemble members are judged individually, exactly like a lone node.
 
 An agent never retypes its run's ids to file a verdict: every agent
 process starts with `CANOPY_GRAPH_ID`, `CANOPY_NODE_ID` and
@@ -144,10 +135,7 @@ entries (`infra_retry_limit`, `infra_crash_max_seconds`,
 `config.toml` needs no daemon restart. More specific ensemble/member/node
 overrides win; absent everything, the engine default (2/60/30) applies.
 
-A retry-skipped (`infra_retry_limit: 0`) crash is recorded with
-`infra_retry_skipped: "limit 0"` alongside `infra_crash`/`infra_attempt`,
-readable via `graph` `node_run` (which already surfaces the
-`infra_attempt`/`infra_crash` markers when present).
+A retry-skipped (`infra_retry_limit: 0`) crash is recorded with `infra_retry_skipped: "limit 0"` alongside `infra_crash`/`infra_attempt`, readable via `graph` `node_run` (which already surfaces the `infra_attempt`/`infra_crash` markers when present).
 
 `graph` `get` reports the effective value and its source
 (`"node"`/`"platform"`/`"default"`) per node under `infra_config`, and
@@ -159,17 +147,9 @@ effective budget differs from its platform's own under
 
 ## Transient database-busy retries
 
-Engine-internal database writes on the run path (event recording, run
-bookkeeping, mutex leases) can hit transient `SQLITE_BUSY`/`SQLITE_LOCKED`
-contention when another connection holds a write lock. Those errors are
-retried automatically — 3 attempts with a short backoff, each attempt
-waiting out the 5 s busy timeout — instead of failing the graph.
+Engine-internal writes on the run path (event recording, run bookkeeping, mutex leases) can hit transient `SQLITE_BUSY`/`SQLITE_LOCKED` when another connection holds a write lock; retried automatically — 3 attempts with short backoff over the 5 s busy timeout — instead of failing the graph.
 
-If the contention persists past the retry budget, the node settles as a
-normal **fail** with a `transient database busy during {operation} ...
-safe to retry the node` message, routed through the node's `fail` edge.
-Re-run the node with `graph_control` `continue`
-(`mode: retry_current_node`); only non-busy errors fail immediately.
+If contention persists past the retry budget the node settles as normal **fail** with `transient database busy during {operation} ... safe to retry the node`, routed through its `fail` edge. Re-run via `graph_control` `continue` (`mode: retry_current_node`); only non-busy errors fail immediately.
 
 ## Execution limit
 
