@@ -328,7 +328,7 @@ async fn bridge_watch_registers_and_unwatch_clears() {
         .handle_text(r#"{"t":"host.metrics.unwatch"}"#, &out)
         .await;
     assert!(bridge.metrics_watch.is_none());
-    while rx.try_recv().is_ok() {}
+    assert!(rx.try_recv().is_err(), "unwatch answers nothing");
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(rx.try_recv().is_err(), "no frames after unwatch");
 
@@ -338,4 +338,41 @@ async fn bridge_watch_registers_and_unwatch_clears() {
     assert!(bridge.metrics_watch.is_some());
     bridge.abort();
     assert!(bridge.metrics_watch.is_none(), "abort clears the watch");
+    while rx.try_recv().is_ok() {}
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(rx.try_recv().is_err(), "no frames after abort");
+}
+
+#[tokio::test]
+async fn bridge_second_watch_replaces_the_first() {
+    let (state, _dir) = test_state();
+    let mut bridge = RemoteBridge::with_metrics(state, fake_source(HostMetrics::default()));
+    let (out, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    bridge
+        .handle_text(r#"{"t":"host.metrics.watch","interval_s":5}"#, &out)
+        .await;
+    let first = recv_frame(&mut rx, "first watch push").await;
+    assert_eq!(first["t"], "host.metrics");
+    bridge
+        .handle_text(r#"{"t":"host.metrics.watch","interval_s":5}"#, &out)
+        .await;
+    assert!(bridge.metrics_watch.is_some(), "one watcher per channel");
+    let second = recv_frame(&mut rx, "second watch push").await;
+    assert_eq!(second["t"], "host.metrics");
+    assert!(
+        second.get("req").is_none(),
+        "replacement pushes carry no req"
+    );
+}
+
+#[tokio::test]
+async fn bridge_watch_clamps_a_zero_interval_instead_of_panicking() {
+    let (state, _dir) = test_state();
+    let mut bridge = RemoteBridge::with_metrics(state, fake_source(HostMetrics::default()));
+    let (out, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    bridge
+        .handle_text(r#"{"t":"host.metrics.watch","interval_s":0}"#, &out)
+        .await;
+    let frame = recv_frame(&mut rx, "clamped watch push").await;
+    assert_eq!(frame["t"], "host.metrics");
 }

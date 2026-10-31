@@ -209,12 +209,24 @@ impl RemoteBridge {
                     );
                 });
             }
-            frame => self.handle_read_frame(frame, out).await,
+            frame @ (ClientFrame::ShelfList { .. }
+            | ClientFrame::ShelfGet { .. }
+            | ClientFrame::ShelfDelete { .. }
+            | ClientFrame::Compose { .. }
+            | ClientFrame::Catalog { .. }
+            | ClientFrame::Graphs { .. }
+            | ClientFrame::GraphWatch { .. }
+            | ClientFrame::GraphUnwatch { .. }
+            | ClientFrame::HostMetrics { .. }
+            | ClientFrame::HostMetricsWatch { .. }
+            | ClientFrame::HostMetricsUnwatch) => self.handle_read_frame(frame, out).await,
         }
     }
 
     /// Answer one read-only frame: shelf, catalog, graphs and host metrics.
-    /// The session-mutating arms stay in [`Self::handle_text`].
+    /// The session-mutating arms stay in [`Self::handle_text`], which only
+    /// routes the variants matched here, so both matches stay exhaustive: a
+    /// new frame fails to compile until both sides name it.
     async fn handle_read_frame(&mut self, frame: ClientFrame, out: &OutTx) {
         match frame {
             ClientFrame::ShelfList { req, id } => {
@@ -242,7 +254,17 @@ impl RemoteBridge {
             ClientFrame::HostMetricsUnwatch => {
                 handle_host_metrics_unwatch(&mut self.metrics_watch);
             }
-            _ => {}
+            ClientFrame::List { .. }
+            | ClientFrame::Attach { .. }
+            | ClientFrame::Detach { .. }
+            | ClientFrame::Input { .. }
+            | ClientFrame::Prompt { .. }
+            | ClientFrame::PromptDraft { .. }
+            | ClientFrame::Resize { .. }
+            | ClientFrame::Spawn { .. }
+            | ClientFrame::Kill { .. } => {
+                unreachable!("session frames never route to handle_read_frame");
+            }
         }
     }
 

@@ -1,6 +1,7 @@
 //! Bad-frame tests: unknown `t` or missing fields answer
 //! `error{code:"bad_request"}` naming the frame and the field; unknown
-//! sessions answer `not_found`; writes to exited sessions are `forbidden`.
+//! sessions answer `not_found`; writes to exited sessions are `forbidden`;
+//! host metrics are remote-only on the local socket.
 
 use super::{
     agent_spawn, connect_client, recv_json, send_json, serve_state, test_db, test_hub, KillGuard,
@@ -208,5 +209,33 @@ async fn writes_to_an_exited_session_are_forbidden() {
     let error = recv_json(&mut client, "error").await;
     assert_eq!(error["code"], "forbidden");
     assert_eq!(error["req"], "p1");
+    server.abort();
+}
+
+#[tokio::test]
+async fn host_metrics_are_remote_only_on_the_local_socket() {
+    let (db, _db_dir) = test_db();
+    let state = SessionsState::for_test(test_hub(&db), "token".to_string());
+    let (addr, server) = serve_state(state).await;
+    let mut client = connect_client(addr, Some("token")).await;
+    assert_eq!(recv_json(&mut client, "hello").await["t"], "hello");
+
+    send_json(
+        &mut client,
+        &serde_json::json!({"t": "host.metrics", "req": "m1"}),
+    )
+    .await;
+    let error = recv_json(&mut client, "error").await;
+    assert_eq!(error["code"], "forbidden");
+    assert_eq!(error["req"], "m1", "the one-shot echoes its req");
+
+    send_json(
+        &mut client,
+        &serde_json::json!({"t": "host.metrics.watch", "interval_s": 5}),
+    )
+    .await;
+    let error = recv_json(&mut client, "error").await;
+    assert_eq!(error["code"], "forbidden");
+    assert!(error.get("req").is_none(), "watch carries no req to echo");
     server.abort();
 }
