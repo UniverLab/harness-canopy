@@ -335,6 +335,17 @@ fn terminal_opens_clean_after_a_hub_restart() {
         std::thread::sleep(Duration::from_millis(50));
     }
 
+    // A legacy history.toml still carrying stored scrollback: the respawn
+    // must ignore it. Without this seed the test below would pass even if
+    // replay-on-resume were reintroduced, since nothing is stored anymore.
+    let legacy_dir = dir.path().join("terminals").join("hist-shell");
+    std::fs::create_dir_all(&legacy_dir).expect("create session dir");
+    std::fs::write(
+        legacy_dir.join("history.toml"),
+        "scrollback = [\"canopy-legacy-scrollback-marker\"]\n",
+    )
+    .expect("write legacy history");
+
     // A restart: the PTY is gone, the row is what the previous daemon left.
     let _ = hub.kill("term-hist");
     drop(hub);
@@ -350,6 +361,10 @@ fn terminal_opens_clean_after_a_hub_restart() {
     assert!(
         !contents.contains("canopy-history-probe"),
         "a respawned terminal must open clean, without the previous run's output: {contents:?}"
+    );
+    assert!(
+        !contents.contains("canopy-legacy-scrollback-marker"),
+        "a respawned terminal must ignore legacy stored scrollback: {contents:?}"
     );
     let _ = restarted.kill("term-hist");
 }
