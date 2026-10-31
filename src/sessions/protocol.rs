@@ -548,6 +548,15 @@ pub fn shelf_removed_frame(file_id: &str) -> String {
     serde_json::json!({"t": "shelf_removed", "file_id": file_id}).to_string()
 }
 
+/// `error{code:"not_found"}` for one shelf file, by request.
+pub fn shelf_missing_frame(req: &str, file_id: &str) -> String {
+    error_frame(
+        Some(req),
+        ERR_NOT_FOUND,
+        &format!("no shelf file '{file_id}'"),
+    )
+}
+
 /// `file{req,file_id,part,data,last}`: one base64 chunk of a `shelf_get`
 /// answer, at most [`crate::sessions::shelf::READ_CHUNK_BYTES`] raw bytes
 /// per part; `last` marks the final chunk (an empty file is one empty part

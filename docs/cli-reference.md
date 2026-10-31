@@ -347,7 +347,8 @@ succeeds when it is already gone. `status` prints `login: <login>` (or
 The relay only carries signaling. A paired browser sends a signed WebRTC
 offer through it; the host verifies the signature against
 `remote_devices` and refuses `unknown_device`, `stale` (over 120 seconds
-off) or `bad_signature`, then answers with a signature of its own. Both
+off), `bad_signature` or `forbidden` (paired, but its login holds no
+grant), then answers with a signature of its own. Both
 signatures cover the SDP, so the DTLS fingerprints are pinned end to end
 and neither the relay nor a TURN server can read or impersonate the
 session. Nothing but those signaling bodies reaches the relay.
@@ -356,7 +357,9 @@ Once the data channel is open, the browser speaks the same protocol v1 as
 `/sessions/ws`, with four restrictions: terminal sessions are hidden from
 the list and cannot be attached, written to, prompted or killed, `resize`
 is always refused (the browser renders the host's size scaled), and `spawn`
-creates `agent` sessions only. A `spawn` names a directory (`workdir`)
+creates `agent` sessions only. A browser paired as a trusted guest login
+sees only its granted sessions — every other session answers `not_found`,
+as if it did not exist — while the owner keeps the full view. A `spawn` names a directory (`workdir`)
 rather than a project. `workdir` may be absolute or start with `~/` (`~` and
 `~/` alone mean the host user's home), and the expanded path must be an
 existing directory; the browser's New dialog types that directory. A

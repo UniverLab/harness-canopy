@@ -33,9 +33,9 @@ use crate::sessions::graphs::{handle_graph_unwatch, handle_graph_watch, handle_g
 use crate::sessions::protocol::{
     error_frame, exited_frame, file_frame, ok_frame, out_frame, parse_client_frame,
     session_added_frame, session_removed_frame, sessions_frame, shelf_added_frame, shelf_frame,
-    shelf_removed_frame, snapshot_frame, snapshot_more_frame, ClientFrame, SessionItem, SpawnExt,
-    ERR_BAD_REQUEST, ERR_BUSY, ERR_DELIVERY_FAILED, ERR_FORBIDDEN, ERR_INTERNAL, ERR_NOT_FOUND,
-    ERR_SPAWN_FAILED,
+    shelf_missing_frame, shelf_removed_frame, snapshot_frame, snapshot_more_frame, ClientFrame,
+    SessionItem, SpawnExt, ERR_BAD_REQUEST, ERR_BUSY, ERR_DELIVERY_FAILED, ERR_FORBIDDEN,
+    ERR_INTERNAL, ERR_NOT_FOUND, ERR_SPAWN_FAILED,
 };
 use crate::sessions::ws::no_such_session;
 use crate::sessions::ws::{handle_shelf_delete, validate_spawn_extensions, OutTx, SessionsState};
@@ -262,7 +262,7 @@ impl RemoteBridge {
                     .scope
                     .hidden_shelf_file(&self.state.hub, &self.state.shelf, &file_id)
                 {
-                    missing_shelf_file(out, &req, &file_id);
+                    let _ = out.send(shelf_missing_frame(&req, &file_id));
                 } else {
                     handle_shelf_delete(&self.state, out, req, file_id);
                 }
@@ -570,6 +570,8 @@ impl RemoteBridge {
         let shelf = self.state.shelf.clone();
         let out = out.clone();
         let echo = id.clone();
+        // No grant filter here: `shelf.list(None)` is the host shelf only,
+        // and a `Some(id)` list was already allowed or emptied above.
         tokio::spawn(async move {
             match tokio::task::spawn_blocking(move || shelf.list(id.as_deref())).await {
                 Ok(items) => send(&out, shelf_frame(&req, echo.as_deref(), &items)),
@@ -583,22 +585,22 @@ impl RemoteBridge {
 
     fn handle_shelf_get(&mut self, req: String, file_id: String, out: &OutTx) {
         let Some(row) = self.state.shelf.get(&file_id) else {
-            missing_shelf_file(out, &req, &file_id);
+            let _ = out.send(shelf_missing_frame(&req, &file_id));
             return;
         };
+        if self
+            .scope
+            .hidden_file(&self.state.hub, row.session_id.as_deref())
+        {
+            let _ = out.send(shelf_missing_frame(&req, &file_id));
+            return;
+        }
         if self.hidden_terminal_file(row.session_id.as_deref()) {
             let _ = out.send(error_frame(
                 Some(&req),
                 ERR_FORBIDDEN,
                 "terminal sessions are not shared with remote devices",
             ));
-            return;
-        }
-        if self
-            .scope
-            .hidden_file(&self.state.hub, row.session_id.as_deref())
-        {
-            missing_shelf_file(out, &req, &file_id);
             return;
         }
         let Ok(permit) = self.transfers.clone().try_acquire_owned() else {
@@ -664,15 +666,6 @@ impl RemoteBridge {
 
 fn send(out: &OutTx, frame: String) {
     let _ = out.send(frame);
-}
-
-/// `not_found` for one shelf file, by request.
-fn missing_shelf_file(out: &OutTx, req: &str, file_id: &str) {
-    let _ = out.send(error_frame(
-        Some(req),
-        ERR_NOT_FOUND,
-        &format!("no shelf file '{file_id}'"),
-    ));
 }
 
 fn deliver_prompt(session: Arc<HubSession>, req: String, text: String, out: OutTx) {

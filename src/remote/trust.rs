@@ -84,10 +84,16 @@ impl GrantScope {
         self.grant.allows(session_name)
     }
 
-    /// Whether `id` names a live session inside the grant.
+    /// Whether `id` is inside the grant: everything for [`Grant::All`] (a
+    /// missing id falls through to the handler's own `not_found`, exactly
+    /// like before grants), else a live session with a granted name.
     pub fn allows_id(&self, hub: &SessionHub, id: &str) -> bool {
-        hub.get(id)
-            .is_some_and(|session| self.allows(&session.name))
+        match self.grant {
+            Grant::All => true,
+            Grant::Sessions(_) => hub
+                .get(id)
+                .is_some_and(|session| self.allows(&session.name)),
+        }
     }
 
     /// A file hidden from a scoped peer: it belongs to a session outside

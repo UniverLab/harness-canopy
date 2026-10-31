@@ -26,7 +26,10 @@ use crate::remote::pairing::{derive_k_pair, mac_init, normalize_code, PairingSta
 use crate::remote::panel;
 use crate::remote::relay::{ConnectionRegistry, RelayRuntime, REMOTE_TRUST_REVOKE_KEY};
 use crate::remote::signaling::{offer_message, verify_offer, Refusal};
-use crate::sessions::protocol::{attach_frame, list_frame, ERR_NOT_FOUND};
+use crate::sessions::protocol::{
+    attach_frame, list_frame, shelf_delete_frame, shelf_get_frame, shelf_list_frame, ERR_FORBIDDEN,
+    ERR_NOT_FOUND,
+};
 use crate::sessions::ws::SessionsState;
 use crate::sessions::{HubEvent, HubSession, SessionHub, SessionKind, SpawnRequest};
 
@@ -157,6 +160,7 @@ struct GrantHub {
     state: Arc<SessionsState>,
     alpha: Arc<HubSession>,
     beta: Arc<HubSession>,
+    shell: Arc<HubSession>,
     _kills: Vec<KillGuard>,
     _dir: tempfile::TempDir,
 }
@@ -168,13 +172,13 @@ fn grant_hub() -> GrantHub {
     let workdir = tempfile::tempdir().expect("workdir");
     let (alpha, kill_alpha) = spawn_named(&hub, "alpha", SessionKind::Agent, workdir.path());
     let (beta, kill_beta) = spawn_named(&hub, "beta", SessionKind::Agent, workdir.path());
-    let (_terminal, kill_terminal) =
-        spawn_named(&hub, "shell", SessionKind::Terminal, workdir.path());
+    let (shell, kill_terminal) = spawn_named(&hub, "shell", SessionKind::Terminal, workdir.path());
     let state = SessionsState::for_test(hub, "token".to_string());
     GrantHub {
         state,
         alpha,
         beta,
+        shell,
         _kills: vec![kill_alpha, kill_beta, kill_terminal],
         _dir: dir,
     }
@@ -481,4 +485,135 @@ fn narrowing_a_grant_kicks_but_widening_does_not() {
         .expect("queue read")
         .unwrap_or_default();
     assert!(queue.contains(GUEST), "dropping a name kicks: {queue}");
+}
+
+/// A file that sniffs as PNG: the 8-byte magic plus a tail (the sniffer
+/// only reads the head).
+fn png_bytes() -> Vec<u8> {
+    let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    bytes.extend_from_slice(b"grant-matrix-bytes");
+    bytes
+}
+
+/// File one PNG onto a session's shelf, or the host shelf for `None`.
+fn shelve(state: &SessionsState, name: &str, session_id: Option<&str>) -> String {
+    state
+        .shelf
+        .insert_bytes(&png_bytes(), name.to_string(), session_id, None, "test")
+        .expect("shelf insert")
+        .file_id
+}
+
+fn shelf_names(list: &Value) -> Vec<String> {
+    list["items"]
+        .as_array()
+        .expect("a shelf array")
+        .iter()
+        .map(|item| item["name"].as_str().expect("a name").to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn scoped_grant_lists_only_its_shelf_files_and_hides_the_rest() {
+    let hub = grant_hub();
+    let alpha_file = shelve(&hub.state, "alpha.png", Some(&hub.alpha.id));
+    let beta_file = shelve(&hub.state, "beta.png", Some(&hub.beta.id));
+    let shell_file = shelve(&hub.state, "shell.png", Some(&hub.shell.id));
+    let host_file = shelve(&hub.state, "host.png", None);
+    let orphan_file = shelve(&hub.state, "orphan.png", Some("no-such-session"));
+
+    let grant = Grant::Sessions(HashSet::from(["alpha".to_string()]));
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), grant);
+
+    // The unscoped list is the host shelf, visible to every peer.
+    bridge
+        .handle_text(&shelf_list_frame("s1", None), &out_tx)
+        .await;
+    let list = recv_frame(&mut out_rx).await;
+    assert_eq!(list["t"], "shelf");
+    assert_eq!(shelf_names(&list), vec!["host.png".to_string()]);
+
+    // A scoped list outside the grant is empty, inside it holds the file.
+    bridge
+        .handle_text(&shelf_list_frame("s2", Some(hub.beta.id.as_str())), &out_tx)
+        .await;
+    let list = recv_frame(&mut out_rx).await;
+    assert!(shelf_names(&list).is_empty(), "{list}");
+
+    bridge
+        .handle_text(
+            &shelf_list_frame("s3", Some(hub.alpha.id.as_str())),
+            &out_tx,
+        )
+        .await;
+    let list = recv_frame(&mut out_rx).await;
+    assert_eq!(shelf_names(&list), vec!["alpha.png".to_string()]);
+
+    // Gets and deletes outside the grant answer `not_found` — including a
+    // terminal file, which must not leak through `forbidden`, and a file
+    // whose session is gone, which fails closed.
+    for file_id in [&beta_file, &shell_file, &orphan_file] {
+        bridge
+            .handle_text(&shelf_get_frame("s4", file_id), &out_tx)
+            .await;
+        let denied = recv_frame(&mut out_rx).await;
+        assert_eq!(denied["t"], "error");
+        assert_eq!(denied["code"], ERR_NOT_FOUND, "{denied}");
+    }
+    bridge
+        .handle_text(&shelf_delete_frame("s5", &beta_file), &out_tx)
+        .await;
+    let denied = recv_frame(&mut out_rx).await;
+    assert_eq!(denied["code"], ERR_NOT_FOUND, "{denied}");
+
+    // The granted file and the host file still serve.
+    for file_id in [&alpha_file, &host_file] {
+        bridge
+            .handle_text(&shelf_get_frame("s6", file_id), &out_tx)
+            .await;
+        let file = recv_frame(&mut out_rx).await;
+        assert_eq!(file["t"], "file", "{file}");
+    }
+    bridge.abort();
+}
+
+#[tokio::test]
+async fn full_grant_serves_every_shelf_and_keeps_the_terminal_rule() {
+    let hub = grant_hub();
+    let beta_file = shelve(&hub.state, "beta.png", Some(&hub.beta.id));
+    let shell_file = shelve(&hub.state, "shell.png", Some(&hub.shell.id));
+    let orphan_file = shelve(&hub.state, "orphan.png", Some("no-such-session"));
+
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), Grant::All);
+
+    // A scoped list reaches its session's files.
+    bridge
+        .handle_text(&shelf_list_frame("s1", Some(hub.beta.id.as_str())), &out_tx)
+        .await;
+    let list = recv_frame(&mut out_rx).await;
+    assert_eq!(shelf_names(&list), vec!["beta.png".to_string()]);
+
+    // A file whose session is gone still serves for a full grant — the
+    // owner is unchanged by grants.
+    bridge
+        .handle_text(&shelf_get_frame("s2", &orphan_file), &out_tx)
+        .await;
+    let file = recv_frame(&mut out_rx).await;
+    assert_eq!(file["t"], "file", "{file}");
+
+    // ...while a live terminal file keeps its `forbidden`.
+    bridge
+        .handle_text(&shelf_get_frame("s3", &shell_file), &out_tx)
+        .await;
+    let refused = recv_frame(&mut out_rx).await;
+    assert_eq!(refused["code"], ERR_FORBIDDEN, "{refused}");
+
+    bridge
+        .handle_text(&shelf_delete_frame("s4", &beta_file), &out_tx)
+        .await;
+    let deleted = recv_frame(&mut out_rx).await;
+    assert_eq!(deleted["t"], "ok", "{deleted}");
+    bridge.abort();
 }
