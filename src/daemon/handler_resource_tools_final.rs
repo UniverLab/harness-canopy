@@ -538,7 +538,7 @@ impl TaskTriggerHandler {
         name = "catalogue",
         description = "Search the community graphs catalogue before building your own. Pass `action` plus the parameters listed for it. \
         Actions (required params; optional params): \
-        `search` (required: q; optional: sort, page, limit) — search community graphs and nodes by free text (`topic:canopy-graph` plus description and name); `sort` is `top` (default) or `new`, `page` starts at 1, and `limit` (default 10, max 50) truncates the returned page client-side — deeper access uses `page`. Each item carries everything needed to install and judge it: kind (graph/node), slug, owner/repo, stars, description, the install ref the `graph install` / `node install` commands accept, and the model verdict (label, model, scan date) when the catalogue exposes it."
+        `search` (required: q; optional: sort, page, limit) — search community graphs and nodes by free text (`topic:canopy-graph` plus description and name); `sort` is `top` (default) or `new`, `page` starts at 1, and `limit` (default 10, max 50) truncates the returned page client-side — deeper access uses `page`. Each item carries everything needed to install and judge it: kind (graph/node), slug, `repo` (owner/repo), `official`, stars, and description. The install ref is the bare slug when `official` is true, else `repo/slug`; pass it to the `graph install` / `node install` commands. Items also carry the model verdict (label, model, scan date) when the catalogue exposes it."
     )]
     pub(crate) async fn catalogue(
         &self,

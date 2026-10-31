@@ -142,7 +142,7 @@ use crate::daemon::handler_resource_tools::{
 };
 #[cfg(test)]
 use crate::daemon::handler_resource_tools_final::{
-    IdentityObject, IntelligenceAdminObject, NodeObject, ProjectObject, RagObject,
+    CatalogueObject, IdentityObject, IntelligenceAdminObject, NodeObject, ProjectObject, RagObject,
     ScheduledPromptObject, SkillObject, SubagentObject,
 };
 #[cfg(test)]
@@ -573,10 +573,11 @@ pub(crate) async fn call_graph_action_value(
     }
 }
 
-/// Test-only dispatch seam for the seventeen second- and final-wave resource
+/// Test-only dispatch seam for the eighteen second- and final-wave resource
 /// tools (`spec`, `spec_edit`, `queue`, `agent`, `agent_edit`, `harness`,
 /// `config`, `crew`, `node`, `intelligence_admin`, `project`,
-/// `scheduled_prompts`, `sandbox`, `skill`, `subagent`, `rag`, `identity`): the
+/// `scheduled_prompts`, `sandbox`, `skill`, `subagent`, `rag`, `identity`,
+/// `catalogue`): the
 /// typed params struct is serialized with nulls stripped, `action` is injected,
 /// and the call goes through the tool's own per-tool parameter newtype
 /// validation before reaching the same `_impl` logic the old one-operation
@@ -740,6 +741,13 @@ pub(crate) async fn call_resource_action_value(
                     crate::daemon::params_extract::Parameters(IdentityObject(object)),
                     OptionalExtension(None),
                 )
+                .await
+        }
+        "catalogue" => {
+            handler
+                .catalogue(crate::daemon::params_extract::Parameters(CatalogueObject(
+                    object,
+                )))
                 .await
         }
         other => panic!("unknown resource tool '{other}'"),

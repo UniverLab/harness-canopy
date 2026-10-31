@@ -144,15 +144,20 @@ mod tests {
         .to_string()
     }
 
+    /// One catalogue item in the shape the live API returns (measured
+    /// 2026-10-31): `repo` is the combined `owner/repo`, `official` picks
+    /// the install-ref form (bare slug when true, `repo/slug` otherwise),
+    /// and there is no literal install-ref field.
     fn item(slug: &str) -> serde_json::Value {
         json!({
             "kind": "graph",
             "slug": slug,
-            "owner": "acme",
-            "repo": "widgets",
-            "stars": 7,
+            "name": slug,
             "description": format!("{slug} does things"),
-            "ref": format!("acme/widgets/{slug}"),
+            "repo": "acme/widgets",
+            "official": false,
+            "stars": 7,
+            "sourceRef": "main",
         })
     }
 
@@ -241,11 +246,10 @@ mod tests {
         let first = &found.items[0];
         assert_eq!(first["kind"], "graph");
         assert_eq!(first["slug"], "plain");
-        assert_eq!(first["owner"], "acme");
-        assert_eq!(first["repo"], "widgets");
+        assert_eq!(first["repo"], "acme/widgets");
+        assert_eq!(first["official"], false);
         assert_eq!(first["stars"], 7);
         assert_eq!(first["description"], "plain does things");
-        assert_eq!(first["ref"], "acme/widgets/plain");
         assert!(
             first.get("verdict").is_none(),
             "no verdict shipped yet: {first}"

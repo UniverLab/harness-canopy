@@ -3,6 +3,7 @@
 //! dispatch, the refusal shape for an unknown action, and the `get_tools`
 //! 34-map every scope serves.
 use super::*;
+use crate::daemon::graph_install::stub::{StubCatalogue, StubRoute};
 use serde_json::json;
 
 /// The 34 visible tools, alphabetical: the decision's final surface plus
@@ -233,6 +234,202 @@ async fn identity_list_seeds_smoke() {
     assert!(body.is_array(), "list_seeds returns an array: {body}");
 }
 
+/// RAII guard: points `CANOPY_HOME_OVERRIDE` at `path` for the test body,
+/// restoring the previous value on drop. Safe under `cargo nextest` (one
+/// process per test) but would race under plain `cargo test`.
+struct OverrideHome {
+    prev: Option<std::ffi::OsString>,
+}
+
+impl OverrideHome {
+    fn set(path: &std::path::Path) -> Self {
+        let prev = std::env::var_os("CANOPY_HOME_OVERRIDE");
+        unsafe { std::env::set_var("CANOPY_HOME_OVERRIDE", path) };
+        OverrideHome { prev }
+    }
+}
+
+impl Drop for OverrideHome {
+    fn drop(&mut self) {
+        match &self.prev {
+            Some(value) => unsafe { std::env::set_var("CANOPY_HOME_OVERRIDE", value) },
+            None => unsafe { std::env::remove_var("CANOPY_HOME_OVERRIDE") },
+        }
+    }
+}
+
+/// A temp home whose `config.toml` points the catalogue at `catalogue_url`.
+/// Returns the home and the override guard (both kept alive by the caller).
+fn catalogue_home(catalogue_url: &str) -> (tempfile::TempDir, OverrideHome) {
+    let home = tempdir().unwrap();
+    let canopy = home.path().join(".canopy");
+    std::fs::create_dir_all(&canopy).unwrap();
+    std::fs::write(
+        canopy.join("config.toml"),
+        format!("[graphs]\ncatalogue_url = \"{catalogue_url}\"\n"),
+    )
+    .unwrap();
+    let guard = OverrideHome::set(home.path());
+    (home, guard)
+}
+
+/// One catalogue item in the shape the live API returns (measured
+/// 2026-10-31): `repo` is the combined `owner/repo`, `official` picks the
+/// install-ref form, and there is no literal install-ref field.
+fn catalogue_item(slug: &str) -> serde_json::Value {
+    json!({
+        "kind": "graph",
+        "slug": slug,
+        "name": slug,
+        "description": format!("{slug} does things"),
+        "repo": "acme/widgets",
+        "official": false,
+        "stars": 7,
+        "sourceRef": "main",
+    })
+}
+
+/// `catalogue/search` end to end through the MCP surface: a local HTTP stub
+/// stands in for the catalogue, `CANOPY_HOME_OVERRIDE` points
+/// `[graphs] catalogue_url` at it, and the page comes back truncated to
+/// `limit` with the envelope echoed and the verdict passed through.
+#[tokio::test]
+async fn catalogue_search_dispatch_returns_the_stubbed_page_truncated_to_limit() {
+    let (_dir, _db, handler) = endpoint_test_handler();
+    let mut judged = catalogue_item("judged");
+    judged["verdict"] = json!({
+        "label": "pass",
+        "model": "canopy-reviewer-1",
+        "scan_date": "2026-10-01",
+    });
+    let body = json!({
+        "items": [judged, catalogue_item("second"), catalogue_item("third")],
+        "q": "graphs",
+        "sort": "new",
+        "page": 2,
+        "total": 9,
+        "truncated": false,
+    })
+    .to_string();
+    let stub = StubCatalogue::start(
+        [("/api/search".to_string(), StubRoute::ok(&body))]
+            .into_iter()
+            .collect(),
+    );
+    let (_home, _guard) = catalogue_home(&stub.base_url());
+    assert_eq!(
+        crate::daemon::graph_install::catalogue_url(),
+        stub.base_url(),
+        "the stub must win: a config-parse fallback would hit the live catalogue"
+    );
+
+    let result = call_resource_action(
+        &handler,
+        "catalogue",
+        "search",
+        params_id(CatalogueSearchParams {
+            q: "graphs".to_string(),
+            sort: Some("new".to_string()),
+            page: Some(2),
+            limit: Some(2),
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!is_err(&result), "{}", text(&result));
+    let found: serde_json::Value =
+        serde_json::from_str(&raw_text(&result)).expect("search body is JSON");
+    let items = found["items"].as_array().expect("items is an array");
+    assert_eq!(items.len(), 2, "limit truncates the page client-side");
+    assert_eq!(items[0]["slug"], "judged");
+    assert_eq!(items[0]["kind"], "graph");
+    assert_eq!(items[0]["repo"], "acme/widgets");
+    assert_eq!(items[0]["official"], false);
+    assert_eq!(items[0]["stars"], 7);
+    assert_eq!(items[1]["slug"], "second");
+    assert_eq!(items[0]["verdict"]["label"], "pass");
+    assert_eq!(items[0]["verdict"]["model"], "canopy-reviewer-1");
+    assert_eq!(items[0]["verdict"]["scan_date"], "2026-10-01");
+    assert_eq!(found["q"], "graphs");
+    assert_eq!(found["sort"], "new");
+    assert_eq!(found["page"], 2);
+    assert_eq!(found["total"], 9);
+    assert_eq!(found["truncated"], false);
+
+    // An omitted `limit` defaults to 10, leaving a short page whole.
+    let whole = call_resource_action(
+        &handler,
+        "catalogue",
+        "search",
+        params_id(CatalogueSearchParams {
+            q: "graphs".to_string(),
+            sort: Some("new".to_string()),
+            page: Some(2),
+            limit: None,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!is_err(&whole), "{}", text(&whole));
+    let found: serde_json::Value =
+        serde_json::from_str(&raw_text(&whole)).expect("search body is JSON");
+    assert_eq!(
+        found["items"].as_array().expect("items is an array").len(),
+        3,
+        "the default limit keeps a 3-item page whole"
+    );
+
+    let hits = stub.hits();
+    assert_eq!(hits.len(), 2);
+    for hit in &hits {
+        assert_eq!(hit.target, "/api/search?q=graphs&sort=new&page=2");
+    }
+}
+
+/// A bad `sort` and a zero `page` fail as tool errors through the real
+/// dispatch — before any request is built, so no network is touched.
+#[tokio::test]
+async fn catalogue_search_rejects_a_bad_sort_and_page_zero_without_network() {
+    let (_dir, _db, handler) = endpoint_test_handler();
+    let bad_sort = call_resource_action(
+        &handler,
+        "catalogue",
+        "search",
+        params_id(CatalogueSearchParams {
+            q: "graphs".to_string(),
+            sort: Some("pop".to_string()),
+            page: None,
+            limit: None,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(is_err(&bad_sort));
+    let message = text(&bad_sort);
+    assert!(message.contains("'top'"), "{message}");
+    assert!(message.contains("'new'"), "{message}");
+
+    let bad_page = call_resource_action(
+        &handler,
+        "catalogue",
+        "search",
+        params_id(CatalogueSearchParams {
+            q: "graphs".to_string(),
+            sort: None,
+            page: Some(0),
+            limit: None,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(is_err(&bad_page));
+    assert!(
+        text(&bad_page).contains("starting at 1"),
+        "{}",
+        text(&bad_page)
+    );
+}
+
 /// Every new tool refuses an unknown action with `INVALID_PARAMS` and a
 /// message listing its own action table; a missing required parameter is
 /// refused the same way.
@@ -240,6 +437,7 @@ async fn identity_list_seeds_smoke() {
 async fn new_tools_refuse_unknown_actions_with_their_full_table() {
     let (_dir, _db, handler) = endpoint_test_handler();
     let tables: &[(&str, &[&str])] = &[
+        ("catalogue", &["search"]),
         ("node", &["list", "get", "install", "remove"]),
         (
             "intelligence_admin",
@@ -293,6 +491,22 @@ async fn new_tools_refuse_unknown_actions_with_their_full_table() {
             assert!(
                 err.message.to_string().contains("ref"),
                 "install refusal must name `ref`: {}",
+                err.message
+            );
+        }
+    }
+
+    let missing_q = call_resource_action_value(&handler, "catalogue", "search", json!({})).await;
+    match missing_q {
+        Ok(result) => panic!(
+            "expected a refusal for missing q, got: {}",
+            raw_text(&result)
+        ),
+        Err(err) => {
+            assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+            assert!(
+                err.message.to_string().contains("q"),
+                "search refusal must name `q`: {}",
                 err.message
             );
         }
