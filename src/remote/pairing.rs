@@ -21,6 +21,7 @@ use subtle::ConstantTimeEq as _;
 
 use super::devices::RemoteDevices;
 use super::hostkey::HostKey;
+use super::trust;
 
 /// Crockford base32 alphabet (no `I`, `L`, `O`, `U`).
 pub const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
@@ -122,10 +123,16 @@ impl PairingState {
             self.clear()?;
             return Ok(pair_fail("expired"));
         }
-        let Some((spki, label, nonce_b)) = decode_init(body) else {
+        let Some(init) = decode_init(body) else {
             self.note_failure(&mut code)?;
             return Ok(pair_fail("bad_code"));
         };
+        let DecodedInit {
+            spki,
+            label,
+            nonce_b,
+            claimed,
+        } = init;
         let expected = mac_init(&code.k_pair(), &b64(&spki), &b64(&nonce_b));
         let Some(mac) = body.get("mac").and_then(Value::as_str) else {
             self.note_failure(&mut code)?;
@@ -139,9 +146,20 @@ impl PairingState {
             self.note_failure(&mut code)?;
             return Ok(pair_fail("bad_code"));
         }
+        // The relay attests the pairing party's login; without it the party
+        // is the owner. A non-owner binds only with a trust row — anything
+        // else is refused exactly like a wrong code, without burning it.
+        let claimed = claimed
+            .filter(|login| !login.trim().is_empty())
+            .unwrap_or_else(|| github_login.to_string());
+        if trust::normalize_login(&claimed) != trust::normalize_login(github_login)
+            && !devices.is_trusted_login(&claimed)
+        {
+            return Ok(pair_fail("bad_code"));
+        }
         // Success burns the code before anything slow happens.
         self.clear()?;
-        devices.pair(spki.clone(), &label, github_login, &paired_at(now))?;
+        devices.pair(spki.clone(), &label, &claimed, &paired_at(now))?;
         Ok(pair_ok(
             &code.k_pair(),
             &host.spki_b64(),
@@ -308,7 +326,16 @@ fn pair_ok(
     })
 }
 
-fn decode_init(body: &Value) -> Option<(Vec<u8>, String, Vec<u8>)> {
+/// A decoded `pair_init` body: the device key, its label, its nonce, and
+/// the relay-attested login when the relay sent one.
+struct DecodedInit {
+    spki: Vec<u8>,
+    label: String,
+    nonce_b: Vec<u8>,
+    claimed: Option<String>,
+}
+
+fn decode_init(body: &Value) -> Option<DecodedInit> {
     let spki = b64_decode(body.get("device_spki")?.as_str()?)?;
     let nonce_b = b64_decode(body.get("nonce_b")?.as_str()?)?;
     let label = body
@@ -316,7 +343,16 @@ fn decode_init(body: &Value) -> Option<(Vec<u8>, String, Vec<u8>)> {
         .and_then(Value::as_str)
         .unwrap_or("browser")
         .to_string();
-    Some((spki, label, nonce_b))
+    let claimed = body
+        .get("github_login")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Some(DecodedInit {
+        spki,
+        label,
+        nonce_b,
+        claimed,
+    })
 }
 
 fn b64(bytes: &[u8]) -> String {

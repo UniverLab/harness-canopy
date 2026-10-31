@@ -51,9 +51,10 @@ pub fn draw_hub(frame: &mut Frame, app: &mut App, theme: &Theme) {
         draw_footer(frame, app, theme, rows[1]);
     }
 
-    // The pairing overlay floats over everything else in the hub.
+    // The pairing and trust overlays float over everything else in the hub.
     if app.hub.tab == HubTab::Remote {
         hub_remote::draw_pair_overlay(frame, app, theme);
+        hub_remote::draw_trust_overlay(frame, app, theme);
     }
 }
 
@@ -107,7 +108,7 @@ fn footer_hint(app: &App) -> &'static str {
         HubTab::Keys => "↑↓ scroll · Shift+←→ tab · Esc close",
         HubTab::Missions => "↑↓ mission · Shift+←→ tab · Esc close",
         HubTab::Shelf => "Enter open   d delete   c copy path",
-        HubTab::Remote => "↑↓ move · Enter select · d disconnect · r revoke · Esc close",
+        HubTab::Remote => "↑↓ move · Enter select · d disconnect · r revoke · t trust · Esc close",
     }
 }
 

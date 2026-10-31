@@ -34,6 +34,7 @@ use crate::remote::live::{RelayPhase, RemoteLive};
 use crate::remote::pairing::PairingState;
 use crate::remote::peer;
 use crate::remote::signaling::{self, Refusal};
+use crate::remote::trust;
 use crate::sessions::ws::SessionsState;
 
 /// `daemon_state` key carrying the last terminal relay error.
@@ -42,6 +43,8 @@ pub const REMOTE_ERROR_KEY: &str = "remote_error";
 pub const REMOTE_REVOKE_KEY: &str = "remote_revoke";
 /// `daemon_state` key holding device ids disconnected by another process.
 pub const REMOTE_DISCONNECT_KEY: &str = "remote_disconnect";
+/// `daemon_state` key holding guest logins whose trust narrowed or ended.
+pub const REMOTE_TRUST_REVOKE_KEY: &str = "remote_trust_revoke";
 /// Longest reconnect delay.
 pub const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
@@ -260,6 +263,16 @@ impl RelayRuntime {
                 return;
             }
         };
+        // The hub is the enforcement point: a login without a grant never
+        // gets a peer, so untrusted guests cannot even occupy a slot.
+        let Some(grant) = trust::resolve(&self.db, &self.github_login, &offer.device.github_login)
+        else {
+            let _ = signal.send((
+                from.to_string(),
+                signaling::connect_fail(Refusal::Forbidden),
+            ));
+            return;
+        };
         let Some(sessions) = self.sessions.clone() else {
             let _ = signal.send((from.to_string(), signaling::connect_fail(Refusal::Busy)));
             return;
@@ -311,6 +324,7 @@ impl RelayRuntime {
                 control: control_rx,
                 signal,
                 from,
+                grant,
                 max_frame: connection::peer_frame_cap(&offer.sdp),
             });
         });
@@ -344,9 +358,16 @@ impl RelayRuntime {
         &self.connections
     }
 
+    /// Live peers, for the grant-matrix tests.
+    #[cfg(test)]
+    pub fn peers_handle(&self) -> &DevicePeers {
+        &self.peers
+    }
+
     /// Close every connection whose device was revoked or disconnected by
     /// another process (the CLI queues ids to `remote_revoke` /
-    /// `remote_disconnect`). A revoked peer hears `error{code:"revoked"}`
+    /// `remote_disconnect`), plus every guest peer whose login lost trust
+    /// (`remote_trust_revoke`). A revoked peer hears `error{code:"revoked"}`
     /// before its close; a disconnected one just closes and may reconnect.
     pub fn drain_remote_revocations(&self) {
         self.drain_queue(REMOTE_REVOKE_KEY, |runtime, id| {
@@ -357,6 +378,25 @@ impl RelayRuntime {
             runtime.connections.close(id);
             runtime.peers.close(id);
         });
+        self.drain_queue(REMOTE_TRUST_REVOKE_KEY, |runtime, login| {
+            runtime.close_login_peers(login);
+        });
+    }
+
+    /// Close every live peer paired under one login. A narrowed grant closes
+    /// the whole peer — there is no live-push channel for a smaller grant,
+    /// so the guest reconnects and re-resolves it.
+    fn close_login_peers(&self, login: &str) {
+        let login = trust::normalize_login(login);
+        let Ok(devices) = self.devices.list() else {
+            return;
+        };
+        for device in devices {
+            if trust::normalize_login(&device.github_login) == login {
+                self.peers.close_revoked(&device.id);
+                self.connections.close(&device.id);
+            }
+        }
     }
 
     /// Close every id queued under `key`, leaving ids that landed while
@@ -488,6 +528,11 @@ pub fn queue_revocation(db: &Database, device_id: &str) {
 /// Append a disconnected device id for the daemon to pick up.
 pub fn queue_disconnect(db: &Database, device_id: &str) {
     queue_device_id(db, REMOTE_DISCONNECT_KEY, device_id);
+}
+
+/// Append a guest login for the daemon to kick out of its live peers.
+pub fn queue_trust_revocation(db: &Database, login: &str) {
+    queue_device_id(db, REMOTE_TRUST_REVOKE_KEY, &trust::normalize_login(login));
 }
 
 /// Append a device id to one daemon queue, once.

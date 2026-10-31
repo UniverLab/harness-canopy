@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use ratatui::crossterm::event::KeyCode;
 
 use super::hub::HubTab;
+use super::hub_remote_trust::{TrustField, TrustForm};
 use super::types::App;
 use crate::domain::canopy_config::CanopyConfig;
 use crate::remote::auth::{self, DeviceCodeInfo, RemoteEndpoints};
@@ -27,7 +28,7 @@ pub(crate) const REMOTE_REFRESH_ON_TAB: Duration = Duration::from_secs(2);
 pub(crate) const REMOTE_REFRESH_IDLE: Duration = Duration::from_secs(30);
 
 /// One selectable row of the Remote tab: the four fixed rows, then one per
-/// paired device.
+/// paired device, then one per trusted profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RemoteRow {
     GitHub,
@@ -35,6 +36,7 @@ pub(crate) enum RemoteRow {
     Relay,
     Pair,
     Device(usize),
+    Trusted(usize),
 }
 
 /// The rows the tab shows for one status view.
@@ -46,6 +48,7 @@ pub(crate) fn remote_rows(view: &RemoteView) -> Vec<RemoteRow> {
         RemoteRow::Pair,
     ];
     rows.extend((0..view.devices.len()).map(RemoteRow::Device));
+    rows.extend((0..view.trusted.len()).map(RemoteRow::Trusted));
     rows
 }
 
@@ -74,6 +77,8 @@ pub(crate) enum RemoteWriteResult {
     Pair(Result<PairView, String>),
     Revoke(Result<String, String>),
     Disconnect(Result<String, String>),
+    TrustAdd(Result<String, String>),
+    TrustRemove(Result<String, String>),
 }
 
 /// The Remote tab's state.
@@ -86,6 +91,10 @@ pub(crate) struct RemoteState {
     pub pair_open: bool,
     /// The device id an armed `r` revoke would delete.
     pub revoke_confirm: Option<String>,
+    /// The trust-form draft and its overlay.
+    pub trust: TrustForm,
+    /// The login an armed `r` trust-remove would forget.
+    pub trust_remove_confirm: Option<String>,
     pub login: LoginFlow,
     pub rows_rx: Option<mpsc::Receiver<Result<RemoteView, String>>>,
     pub write_rx: Option<mpsc::Receiver<RemoteWriteResult>>,
@@ -162,6 +171,40 @@ fn disconnect_device(port: &str, device_id: &str) -> Result<String, String> {
         &serde_json::json!({ "action": "disconnect", "device_id": device_id }),
     ) {
         Ok(outcome) if !outcome.is_error => Ok(device_id.to_string()),
+        Ok(outcome) => Err(outcome.text),
+        Err(error) => Err(format!("{error:#}")),
+    }
+}
+
+fn trust_add_profile(
+    port: &str,
+    login: &str,
+    all_sessions: bool,
+    sessions: &[String],
+) -> Result<String, String> {
+    match crate::tui::mcp_client::call_daemon_tool(
+        port,
+        "remote",
+        &serde_json::json!({
+            "action": "trust_add",
+            "login": login,
+            "all_sessions": all_sessions,
+            "sessions": sessions,
+        }),
+    ) {
+        Ok(outcome) if !outcome.is_error => Ok(login.to_string()),
+        Ok(outcome) => Err(outcome.text),
+        Err(error) => Err(format!("{error:#}")),
+    }
+}
+
+fn trust_remove_profile(port: &str, login: &str) -> Result<String, String> {
+    match crate::tui::mcp_client::call_daemon_tool(
+        port,
+        "remote",
+        &serde_json::json!({ "action": "trust_remove", "login": login }),
+    ) {
+        Ok(outcome) if !outcome.is_error => Ok(login.to_string()),
         Ok(outcome) => Err(outcome.text),
         Err(error) => Err(format!("{error:#}")),
     }
@@ -318,6 +361,16 @@ impl App {
                 self.remote_request_refresh();
             }
             RemoteWriteResult::Disconnect(Err(text)) => self.set_remote_message(true, text),
+            RemoteWriteResult::TrustAdd(Ok(login)) => {
+                self.set_remote_message(false, format!("Trusted {login}"));
+                self.remote_request_refresh();
+            }
+            RemoteWriteResult::TrustAdd(Err(text)) => self.set_remote_message(true, text),
+            RemoteWriteResult::TrustRemove(Ok(login)) => {
+                self.set_remote_message(false, format!("Removed trusted profile {login}"));
+                self.remote_request_refresh();
+            }
+            RemoteWriteResult::TrustRemove(Err(text)) => self.set_remote_message(true, text),
         }
     }
 
@@ -346,12 +399,45 @@ impl App {
         if self.hub.remote.pair_open {
             return;
         }
+        // The trust form owns every key while it is open.
+        if self.hub.remote.trust.open {
+            self.trust_form_key(code);
+            return;
+        }
         match code {
             KeyCode::Up | KeyCode::Char('k') => self.move_remote_selection(false),
             KeyCode::Down | KeyCode::Char('j') => self.move_remote_selection(true),
             KeyCode::Enter => self.activate_remote_row(),
             KeyCode::Char('d') => self.disconnect_remote_device(),
-            KeyCode::Char('r') => self.arm_remote_revoke(),
+            KeyCode::Char('r') => match self.selected_remote_row() {
+                Some(RemoteRow::Device(_)) => self.arm_remote_revoke(),
+                Some(RemoteRow::Trusted(_)) => self.arm_trust_remove(),
+                _ => {}
+            },
+            KeyCode::Char('t') => self.open_trust_form(),
+            _ => {}
+        }
+    }
+
+    /// Route one key to the open trust form: typing edits the focused text
+    /// stop, `Tab`/`↑`/`↓` move between stops, `a` or `Space` flips the
+    /// toggle, `Enter` submits, `Esc` closes.
+    pub(crate) fn trust_form_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc => self.hub.remote.trust.close(),
+            KeyCode::Enter => self.submit_trust_form(),
+            KeyCode::Tab => self.hub.remote.trust.cycle_focus(true),
+            KeyCode::BackTab => self.hub.remote.trust.cycle_focus(false),
+            KeyCode::Up => self.hub.remote.trust.cycle_focus(false),
+            KeyCode::Down => self.hub.remote.trust.cycle_focus(true),
+            KeyCode::Backspace => self.hub.remote.trust.pop_char(),
+            KeyCode::Char('a') if self.hub.remote.trust.focus == TrustField::All => {
+                self.hub.remote.trust.toggle_all();
+            }
+            KeyCode::Char(' ') if self.hub.remote.trust.focus == TrustField::All => {
+                self.hub.remote.trust.toggle_all();
+            }
+            KeyCode::Char(c) => self.hub.remote.trust.push_char(c),
             _ => {}
         }
     }
@@ -367,6 +453,7 @@ impl App {
             }
             Some(RemoteRow::Control) => self.toggle_remote_control(),
             Some(RemoteRow::Pair) => self.request_pair_code(),
+            Some(RemoteRow::Trusted(_)) => self.edit_trusted_row(),
             Some(RemoteRow::Relay) | Some(RemoteRow::Device(_)) | None => {}
         }
     }
@@ -436,6 +523,7 @@ impl App {
 
     /// `r` on a device row: arm the y/n revoke confirmation.
     pub(crate) fn arm_remote_revoke(&mut self) {
+        self.hub.remote.trust_remove_confirm = None;
         if let Some(RemoteRow::Device(index)) = self.selected_remote_row() {
             if let Some(device) = self.hub.remote.view.devices.get(index) {
                 self.hub.remote.revoke_confirm = Some(device.id.clone());
@@ -457,6 +545,62 @@ impl App {
     /// `n`/Esc on an armed revoke: stand down.
     pub(crate) fn cancel_remote_revoke(&mut self) {
         self.hub.remote.revoke_confirm = None;
+    }
+
+    /// `t` anywhere on the tab: trust a new profile through the form.
+    pub(crate) fn open_trust_form(&mut self) {
+        self.hub.remote.trust.open_new();
+    }
+
+    /// `Enter` on a trusted row: edit that profile's grant through the form.
+    fn edit_trusted_row(&mut self) {
+        if let Some(RemoteRow::Trusted(index)) = self.selected_remote_row() {
+            if let Some(profile) = self.hub.remote.view.trusted.get(index).cloned() {
+                self.hub.remote.trust.open_edit(&profile);
+            }
+        }
+    }
+
+    /// `Enter` in the trust form: validate the login and save the grant
+    /// through the daemon.
+    pub(crate) fn submit_trust_form(&mut self) {
+        let login = self.hub.remote.trust.login.trim().to_string();
+        if login.is_empty() {
+            self.set_remote_message(true, "Trust needs a GitHub username");
+            return;
+        }
+        let all = self.hub.remote.trust.all;
+        let sessions = self.hub.remote.trust.sessions_list();
+        self.hub.remote.trust.close();
+        self.spawn_remote_write(move |port| {
+            RemoteWriteResult::TrustAdd(trust_add_profile(&port, &login, all, &sessions))
+        });
+    }
+
+    /// `r` on a trusted row: arm the y/n remove confirmation.
+    pub(crate) fn arm_trust_remove(&mut self) {
+        self.hub.remote.revoke_confirm = None;
+        if let Some(RemoteRow::Trusted(index)) = self.selected_remote_row() {
+            if let Some(profile) = self.hub.remote.view.trusted.get(index) {
+                self.hub.remote.trust_remove_confirm = Some(profile.login.clone());
+            }
+        }
+    }
+
+    /// `y` on an armed trust-remove: forget the profile through the daemon.
+    pub(crate) fn confirm_trust_remove(&mut self) {
+        let Some(login) = self.hub.remote.trust_remove_confirm.clone() else {
+            return;
+        };
+        self.hub.remote.trust_remove_confirm = None;
+        self.spawn_remote_write(move |port| {
+            RemoteWriteResult::TrustRemove(trust_remove_profile(&port, &login))
+        });
+    }
+
+    /// `n`/Esc on an armed trust-remove: stand down.
+    pub(crate) fn cancel_trust_remove(&mut self) {
+        self.hub.remote.trust_remove_confirm = None;
     }
 
     /// The row under the cursor, if any.
@@ -517,7 +661,7 @@ impl App {
 mod tests {
     use super::*;
     use crate::db::Database;
-    use crate::remote::panel::DeviceView;
+    use crate::remote::panel::{DeviceView, TrustedView};
     use std::sync::Arc;
 
     fn test_app() -> App {
@@ -655,6 +799,110 @@ mod tests {
 
         app.cancel_remote_revoke();
         assert_eq!(app.hub.remote.revoke_confirm, None);
+    }
+
+    fn trusted(login: &str) -> TrustedView {
+        TrustedView {
+            login: login.to_string(),
+            all_sessions: false,
+            sessions: vec!["alpha".to_string()],
+        }
+    }
+
+    #[test]
+    fn trusted_rows_follow_devices_and_r_arms_only_on_trusted_rows() {
+        let mut app = test_app();
+        app.hub.remote.view.devices = vec![device("bfcba2b742a807bb")];
+        app.hub.remote.view.trusted = vec![trusted("guest")];
+        assert_eq!(remote_rows(&app.hub.remote.view)[5], RemoteRow::Trusted(0));
+
+        app.hub.remote.row_idx = 0; // GitHub.
+        app.hub_remote_key(KeyCode::Char('r'));
+        assert_eq!(app.hub.remote.trust_remove_confirm, None);
+
+        app.hub.remote.row_idx = 4; // Device(0).
+        app.hub_remote_key(KeyCode::Char('r'));
+        assert_eq!(app.hub.remote.trust_remove_confirm, None);
+        assert!(app.hub.remote.revoke_confirm.is_some());
+
+        app.hub.remote.row_idx = 5; // Trusted(0).
+        app.hub_remote_key(KeyCode::Char('r'));
+        assert_eq!(
+            app.hub.remote.trust_remove_confirm.as_deref(),
+            Some("guest")
+        );
+        assert_eq!(
+            app.hub.remote.revoke_confirm, None,
+            "arming one confirm stands the other down"
+        );
+
+        app.cancel_trust_remove();
+        assert_eq!(app.hub.remote.trust_remove_confirm, None);
+    }
+
+    #[test]
+    fn trust_form_types_toggles_and_submits_through_the_write() {
+        let mut app = test_app();
+        app.hub_remote_key(KeyCode::Char('t'));
+        assert!(app.hub.remote.trust.open);
+
+        for c in "guest".chars() {
+            app.hub_remote_key(KeyCode::Char(c));
+        }
+        app.hub_remote_key(KeyCode::Tab);
+        for c in "alpha, beta".chars() {
+            app.hub_remote_key(KeyCode::Char(c));
+        }
+        app.hub_remote_key(KeyCode::Tab);
+        app.hub_remote_key(KeyCode::Char('a'));
+        assert!(app.hub.remote.trust.all);
+        app.hub_remote_key(KeyCode::Char('a'));
+        assert!(!app.hub.remote.trust.all);
+
+        app.hub_remote_key(KeyCode::Enter);
+        assert!(!app.hub.remote.trust.open, "submit closes the form");
+        assert!(
+            app.hub.remote.write_rx.is_some(),
+            "submit saves through the daemon"
+        );
+
+        // An empty login refuses to submit and keeps the form open.
+        app.hub_remote_key(KeyCode::Char('t'));
+        app.hub_remote_key(KeyCode::Enter);
+        assert!(app.hub.remote.trust.open);
+        assert!(
+            app.hub.remote.message.as_ref().is_some_and(|m| m.is_error),
+            "an empty login reports inline"
+        );
+        app.hub_remote_key(KeyCode::Esc);
+        assert!(!app.hub.remote.trust.open);
+    }
+
+    #[test]
+    fn enter_on_a_trusted_row_edits_that_grant() {
+        let mut app = test_app();
+        app.hub.remote.view.trusted = vec![trusted("guest")];
+        app.hub.remote.row_idx = 4; // Trusted(0), no devices.
+        app.hub_remote_key(KeyCode::Enter);
+        assert!(app.hub.remote.trust.open);
+        assert_eq!(app.hub.remote.trust.login, "guest");
+        assert_eq!(app.hub.remote.trust.sessions, "alpha");
+    }
+
+    #[test]
+    fn trust_results_report_inline_and_refresh_on_success() {
+        let mut app = test_app();
+        app.apply_remote_write(RemoteWriteResult::TrustAdd(Ok("guest".to_string())));
+        let message = app.hub.remote.message.as_ref().expect("a message");
+        assert!(!message.is_error);
+        assert!(message.text.contains("Trusted"), "{}", message.text);
+        assert!(app.hub.remote.stale, "success refreshes the status");
+
+        app.apply_remote_write(RemoteWriteResult::TrustRemove(Err(
+            "no trusted profile for 'guest'".to_string(),
+        )));
+        let message = app.hub.remote.message.as_ref().expect("a message");
+        assert!(message.is_error, "the exact error reports inline");
     }
 
     #[test]

@@ -315,6 +315,7 @@ async fn connect_loopback_device(
         signal: signal_tx,
         from: from_owned,
         max_frame,
+        grant: crate::remote::trust::Grant::All,
     });
 
     (device, events_rx, vec![demux, trickle], id)

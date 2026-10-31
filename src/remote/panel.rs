@@ -5,12 +5,14 @@
 //! status view (sign-in, the relay switch, the relay phase, the live and
 //! paired devices), pairing-code creation, the on/off switch and revokes.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use super::live::{RelayPhase, RemoteLive};
+use super::trust;
 use crate::db::Database;
 
 /// One paired device as the panel lists it.
@@ -24,6 +26,17 @@ pub struct DeviceView {
     pub last_seen: Option<String>,
     /// Whether the device has a live peer right now.
     pub live: bool,
+}
+
+/// One trusted GitHub profile as the panel lists it.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct TrustedView {
+    /// Lowercased GitHub login.
+    pub login: String,
+    /// Whether the profile grants every session.
+    pub all_sessions: bool,
+    /// Granted session names, ascending. Empty when `all_sessions`.
+    pub sessions: Vec<String>,
 }
 
 /// Everything the Remote tab shows.
@@ -44,6 +57,9 @@ pub struct RemoteView {
     pub live_devices: Vec<String>,
     /// Every paired device, oldest pairing first.
     pub devices: Vec<DeviceView>,
+    /// Every trusted guest profile, ascending by login.
+    #[serde(default)]
+    pub trusted: Vec<TrustedView>,
 }
 
 /// A fresh pairing code with its link, expiry and QR.
@@ -86,6 +102,15 @@ pub fn status_view(data_dir: &Path, db: &Database, live: &RemoteLive) -> Result<
             last_seen: device.last_seen,
         })
         .collect();
+    let trusted = db
+        .list_trust()?
+        .into_iter()
+        .map(|profile| TrustedView {
+            login: profile.login,
+            all_sessions: profile.all_sessions,
+            sessions: profile.sessions,
+        })
+        .collect();
     Ok(RemoteView {
         signed_in: status.signed_in,
         login: status.login,
@@ -94,6 +119,7 @@ pub fn status_view(data_dir: &Path, db: &Database, live: &RemoteLive) -> Result<
         relay: relay_text(live.phase()).to_string(),
         live_devices: live_ids,
         devices,
+        trusted,
     })
 }
 
@@ -143,6 +169,73 @@ pub fn disconnect(db: &Database, device_id: &str) -> Result<bool> {
     }
     super::relay::queue_disconnect(db, device_id);
     Ok(true)
+}
+
+/// Trust a GitHub profile with every session or a named set. A narrowed
+/// grant kicks the login's live guest peers at once (they reconnect and
+/// re-resolve); a widened or fresh grant kicks nothing. Returns the stored
+/// profile.
+pub fn trust_add(
+    db: &Database,
+    login: &str,
+    all_sessions: bool,
+    sessions: &[String],
+) -> Result<TrustedView> {
+    let login = trust::normalize_login(login);
+    anyhow::ensure!(!login.is_empty(), "login must not be empty");
+    let previous = db.get_trust(&login)?;
+    db.upsert_trust(&login, all_sessions)?;
+    if all_sessions {
+        db.set_grants(&login, &[])?;
+    } else {
+        db.set_grants(&login, sessions)?;
+    }
+    if narrowed(&previous, all_sessions, sessions) {
+        super::relay::queue_trust_revocation(db, &login);
+    }
+    let stored = db
+        .get_trust(&login)?
+        .ok_or_else(|| anyhow::anyhow!("trust row vanished after its own write"))?;
+    Ok(TrustedView {
+        login: stored.login,
+        all_sessions: stored.all_sessions,
+        sessions: stored.sessions,
+    })
+}
+
+/// Whether a rewrite shrinks what `previous` granted: all-to-scoped, or a
+/// scoped set that drops a name (compared trimmed, like the store keeps
+/// them). Fresh and widened grants never narrow.
+fn narrowed(
+    previous: &Option<crate::db::remote_trust::TrustedProfile>,
+    all_sessions: bool,
+    sessions: &[String],
+) -> bool {
+    let Some(previous) = previous else {
+        return false;
+    };
+    if previous.all_sessions {
+        return !all_sessions;
+    }
+    if all_sessions {
+        return false;
+    }
+    let next: HashSet<String> = sessions
+        .iter()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect();
+    previous.sessions.iter().any(|name| !next.contains(name))
+}
+
+/// Forget a GitHub profile and kick its live guest peers at once. Returns
+/// whether a row was removed (an unknown login queues nothing).
+pub fn trust_remove(db: &Database, login: &str) -> Result<bool> {
+    let removed = db.remove_trust(login)?;
+    if removed {
+        super::relay::queue_trust_revocation(db, login);
+    }
+    Ok(removed)
 }
 
 #[cfg(test)]

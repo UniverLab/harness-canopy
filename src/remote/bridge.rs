@@ -27,6 +27,7 @@ use crate::remote::metrics::{
     handle_host_metrics, handle_host_metrics_unwatch, handle_host_metrics_watch, MetricsSource,
     MetricsWatch,
 };
+use crate::remote::trust::{Grant, GrantScope};
 use crate::sessions::catalog::{handle_catalog, handle_compose, handle_prompt_draft};
 use crate::sessions::graphs::{handle_graph_unwatch, handle_graph_watch, handle_graphs};
 use crate::sessions::protocol::{
@@ -69,6 +70,8 @@ pub struct RemoteBridge {
     metrics: MetricsSource,
     /// The channel's one metrics watch, if any.
     metrics_watch: Option<MetricsWatch>,
+    /// What this peer's login may see and touch.
+    scope: GrantScope,
 }
 
 /// The hub request a remote `spawn` frame describes. A device may only spawn
@@ -108,6 +111,15 @@ impl RemoteBridge {
         Self::with_metrics(state, Arc::new(crate::system::host_metrics::snapshot))
     }
 
+    /// Bridge the hub for one guest peer: [`Grant::All`] sees today's view;
+    /// a scoped peer sees only its granted names, and anything outside the
+    /// grant answers `not_found` (never `forbidden`: it would confirm it).
+    pub fn with_grant(state: Arc<SessionsState>, grant: Grant) -> Self {
+        let mut bridge = Self::new(state);
+        bridge.scope = GrantScope::new(grant);
+        bridge
+    }
+
     fn with_metrics(state: Arc<SessionsState>, metrics: MetricsSource) -> Self {
         let mut hidden_files = HashSet::new();
         for session in state.hub.list() {
@@ -126,6 +138,7 @@ impl RemoteBridge {
             hidden_files,
             metrics,
             metrics_watch: None,
+            scope: GrantScope::all(),
         }
     }
 
@@ -151,6 +164,9 @@ impl RemoteBridge {
             ClientFrame::Detach { id } => self.detach(&id, out),
             ClientFrame::Input { id, data } => self.handle_input(&id, &data, out),
             ClientFrame::Prompt { req, id, text } => {
+                if !self.scope.granted(&self.state.hub, Some(&req), &id, out) {
+                    return;
+                }
                 self.guard_terminal(&req, &id, out, |bridge, out| {
                     let Some(session) = bridge.state.hub.get(&id) else {
                         let _ = out.send(error_frame(
@@ -169,6 +185,9 @@ impl RemoteBridge {
                 });
             }
             ClientFrame::PromptDraft { req, id, draft } => {
+                if !self.scope.granted(&self.state.hub, Some(&req), &id, out) {
+                    return;
+                }
                 if self.terminal(&id) {
                     let _ = out.send(error_frame(
                         Some(&req),
@@ -200,6 +219,9 @@ impl RemoteBridge {
                 self.handle_spawn(req, &kind, request, out);
             }
             ClientFrame::Kill { req, id } => {
+                if !self.scope.granted(&self.state.hub, Some(&req), &id, out) {
+                    return;
+                }
                 self.guard_terminal(&req, &id, out, |bridge, out| {
                     deliver_kill(
                         bridge.state.hub.clone(),
@@ -236,7 +258,14 @@ impl RemoteBridge {
                 self.handle_shelf_get(req, file_id, out);
             }
             ClientFrame::ShelfDelete { req, file_id } => {
-                handle_shelf_delete(&self.state, out, req, file_id);
+                if self
+                    .scope
+                    .hidden_shelf_file(&self.state.hub, &self.state.shelf, &file_id)
+                {
+                    missing_shelf_file(out, &req, &file_id);
+                } else {
+                    handle_shelf_delete(&self.state, out, req, file_id);
+                }
             }
             ClientFrame::Compose { req, draft } => handle_compose(&self.state, out, req, draft),
             ClientFrame::Catalog { req } => handle_catalog(&self.state, out, req),
@@ -268,27 +297,41 @@ impl RemoteBridge {
         }
     }
 
-    /// Forward one hub lifecycle event, with terminal sessions filtered out.
+    /// Forward one hub lifecycle event, with terminal sessions and
+    /// ungranted sessions filtered out.
     pub fn handle_event(&mut self, event: HubEvent, out: &OutTx) {
         match event {
             HubEvent::SessionAdded(item) => {
-                if item.kind != SessionKind::Terminal.as_str() {
+                if item.kind != SessionKind::Terminal.as_str()
+                    && self.scope.note_listed(&item.id, &item.name)
+                {
                     send(out, session_added_frame(&item));
                 }
             }
             HubEvent::SessionRemoved(id) => {
+                let mut was_attached = false;
                 if let Some(task) = self.attached.remove(&id) {
                     task.abort();
+                    was_attached = true;
                 }
-                send(out, session_removed_frame(&id));
+                if self.scope.removed_forwards(&id, was_attached) {
+                    send(out, session_removed_frame(&id));
+                }
             }
             HubEvent::Exited { id, code, to_all } => {
-                if to_all || self.attached.contains_key(&id) {
+                if self
+                    .scope
+                    .exited_forwards(&id, to_all, self.attached.contains_key(&id))
+                {
                     send(out, exited_frame(&id, code));
                 }
             }
             HubEvent::ShelfAdded(item) => {
-                if self.hidden_terminal_file(item.session_id.as_deref()) {
+                if self.hidden_terminal_file(item.session_id.as_deref())
+                    || self
+                        .scope
+                        .hidden_file(&self.state.hub, item.session_id.as_deref())
+                {
                     self.hidden_files.insert(item.file_id.clone());
                 } else {
                     send(out, shelf_added_frame(&item));
@@ -326,7 +369,11 @@ impl RemoteBridge {
     pub fn note_hidden(&mut self, event: &HubEvent) {
         match event {
             HubEvent::ShelfAdded(item) => {
-                if self.hidden_terminal_file(item.session_id.as_deref()) {
+                if self.hidden_terminal_file(item.session_id.as_deref())
+                    || self
+                        .scope
+                        .hidden_file(&self.state.hub, item.session_id.as_deref())
+                {
                     self.hidden_files.insert(item.file_id.clone());
                 }
             }
@@ -369,20 +416,28 @@ impl RemoteBridge {
         allowed(self, out);
     }
 
-    fn handle_list(&self, req: &str, out: &OutTx) {
+    fn handle_list(&mut self, req: &str, out: &OutTx) {
         let mut items: Vec<SessionItem> = self
             .state
             .hub
             .list()
             .iter()
-            .filter(|session| session.kind != SessionKind::Terminal)
+            .filter(|session| {
+                session.kind != SessionKind::Terminal && self.scope.allows(&session.name)
+            })
             .map(|session| session.item())
             .collect();
         items.sort_by(|a, b| a.id.cmp(&b.id));
+        for item in &items {
+            self.scope.note_listed(&item.id, &item.name);
+        }
         send(out, sessions_frame(req, &items));
     }
 
     fn attach(&mut self, id: &str, out: &OutTx) {
+        if !self.scope.granted(&self.state.hub, None, id, out) {
+            return;
+        }
         if self.terminal(id) {
             let _ = out.send(error_frame(
                 None,
@@ -426,6 +481,9 @@ impl RemoteBridge {
     }
 
     fn handle_input(&mut self, id: &str, data: &[u8], out: &OutTx) {
+        if !self.scope.granted(&self.state.hub, None, id, out) {
+            return;
+        }
         if self.terminal(id) {
             let _ = out.send(error_frame(
                 None,
@@ -502,6 +560,13 @@ impl RemoteBridge {
             send(out, shelf_frame(&req, id.as_deref(), &[]));
             return;
         }
+        if id
+            .as_deref()
+            .is_some_and(|id| !self.scope.allows_id(&self.state.hub, id))
+        {
+            send(out, shelf_frame(&req, id.as_deref(), &[]));
+            return;
+        }
         let shelf = self.state.shelf.clone();
         let out = out.clone();
         let echo = id.clone();
@@ -518,11 +583,7 @@ impl RemoteBridge {
 
     fn handle_shelf_get(&mut self, req: String, file_id: String, out: &OutTx) {
         let Some(row) = self.state.shelf.get(&file_id) else {
-            let _ = out.send(error_frame(
-                Some(&req),
-                ERR_NOT_FOUND,
-                &format!("no shelf file '{file_id}'"),
-            ));
+            missing_shelf_file(out, &req, &file_id);
             return;
         };
         if self.hidden_terminal_file(row.session_id.as_deref()) {
@@ -531,6 +592,13 @@ impl RemoteBridge {
                 ERR_FORBIDDEN,
                 "terminal sessions are not shared with remote devices",
             ));
+            return;
+        }
+        if self
+            .scope
+            .hidden_file(&self.state.hub, row.session_id.as_deref())
+        {
+            missing_shelf_file(out, &req, &file_id);
             return;
         }
         let Ok(permit) = self.transfers.clone().try_acquire_owned() else {
@@ -596,6 +664,15 @@ impl RemoteBridge {
 
 fn send(out: &OutTx, frame: String) {
     let _ = out.send(frame);
+}
+
+/// `not_found` for one shelf file, by request.
+fn missing_shelf_file(out: &OutTx, req: &str, file_id: &str) {
+    let _ = out.send(error_frame(
+        Some(req),
+        ERR_NOT_FOUND,
+        &format!("no shelf file '{file_id}'"),
+    ));
 }
 
 fn deliver_prompt(session: Arc<HubSession>, req: String, text: String, out: OutTx) {

@@ -87,6 +87,12 @@ impl RemoteDevices {
     pub fn revoke(&self, id: &str) -> Result<bool> {
         self.db.delete_remote_device(id)
     }
+
+    /// Whether a login holds a trust row. Fail closed: an unreadable store
+    /// answers `false`, so guests never pair while the database is down.
+    pub fn is_trusted_login(&self, login: &str) -> bool {
+        self.db.get_trust(login).ok().flatten().is_some()
+    }
 }
 
 #[cfg(test)]

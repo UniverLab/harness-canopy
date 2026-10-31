@@ -48,9 +48,19 @@ pub(super) fn handle_hub_key(app: &mut App, code: KeyCode, modifiers: KeyModifie
         hub_remote_confirm_key(app, code);
         return true;
     }
+    // An armed trust-remove owns every key the same way.
+    if app.hub.tab == HubTab::Remote && app.hub.remote.trust_remove_confirm.is_some() {
+        hub_trust_remove_confirm_key(app, code);
+        return true;
+    }
     // The open pairing overlay owns every key but Esc (which hides it):
     // no tab switch, digit jump or cursor move escapes it.
     if app.hub.tab == HubTab::Remote && app.hub.remote.pair_open && code != KeyCode::Esc {
+        return true;
+    }
+    // The open trust form owns every key too, but it edits with them.
+    if app.hub.tab == HubTab::Remote && app.hub.remote.trust.open {
+        app.hub_remote_key(code);
         return true;
     }
 
@@ -95,6 +105,16 @@ fn hub_remote_confirm_key(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Char('y') | KeyCode::Enter => app.confirm_remote_revoke(),
         KeyCode::Char('n') | KeyCode::Esc => app.cancel_remote_revoke(),
+        _ => {}
+    }
+}
+
+/// While a trust-remove is armed only `y`/Enter confirm and `n`/`Esc`
+/// cancel — every other key, tab switches included, is swallowed.
+fn hub_trust_remove_confirm_key(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Char('y') | KeyCode::Enter => app.confirm_trust_remove(),
+        KeyCode::Char('n') | KeyCode::Esc => app.cancel_trust_remove(),
         _ => {}
     }
 }

@@ -48,6 +48,16 @@ pub(crate) static REMOTE: ToolSpec = ToolSpec {
             required: &["device_id"],
             optional: &[],
         },
+        ActionSpec {
+            name: "trust_add",
+            required: &["login", "all_sessions"],
+            optional: &["sessions"],
+        },
+        ActionSpec {
+            name: "trust_remove",
+            required: &["login"],
+            optional: &[],
+        },
     ],
 };
 
@@ -60,6 +70,8 @@ resource_action_object!(
         ("set_enabled", RemoteSetEnabledParams),
         ("revoke", RemoteRevokeParams),
         ("disconnect", RemoteDisconnectParams),
+        ("trust_add", RemoteTrustAddParams),
+        ("trust_remove", RemoteTrustRemoveParams),
     ]
 );
 
@@ -73,7 +85,9 @@ impl TaskTriggerHandler {
         `pair` (required: none; optional: none) — create a one-time pairing code with its link, expiry and QR, replacing any live one; the same code `canopy remote pair` prints. \
         `set_enabled` (required: enabled; optional: none) — turn the relay connection on or off (`[remote] enabled`); the daemon picks the change up without a restart. \
         `revoke` (required: device_id; optional: none) — revoke a paired device: delete the row and close its live connection at once. \
-        `disconnect` (required: device_id; optional: none) — disconnect a paired device: close its live peer at once, keeping the pairing so it may reconnect."
+        `disconnect` (required: device_id; optional: none) — disconnect a paired device: close its live peer at once, keeping the pairing so it may reconnect. \
+        `trust_add` (required: login, all_sessions; optional: sessions) — trust a GitHub profile with every session or a named set; narrowing kicks its live guest peers. \
+        `trust_remove` (required: login; optional: none) — forget a GitHub profile and kick its live guest peers at once."
     )]
     pub(crate) async fn remote(
         &self,
@@ -96,6 +110,15 @@ impl TaskTriggerHandler {
             "disconnect" => {
                 let params: RemoteDisconnectParams = action_params(&params)?;
                 self.remote_disconnect_impl(params.device_id.trim())
+            }
+            "trust_add" => {
+                let params: RemoteTrustAddParams = action_params(&params)?;
+                let sessions = params.sessions.unwrap_or_default();
+                self.remote_trust_add_impl(params.login.trim(), params.all_sessions, &sessions)
+            }
+            "trust_remove" => {
+                let params: RemoteTrustRemoveParams = action_params(&params)?;
+                self.remote_trust_remove_impl(params.login.trim())
             }
             _ => unreachable!("validated action"),
         }
@@ -129,6 +152,26 @@ impl TaskTriggerHandler {
                 "no paired device with id {device_id}"
             ))),
             Err(error) => Ok(error_result(&format!("remote disconnect: {error:#}"))),
+        }
+    }
+
+    fn remote_trust_add_impl(
+        &self,
+        login: &str,
+        all_sessions: bool,
+        sessions: &[String],
+    ) -> Result<CallToolResult, McpError> {
+        match panel::trust_add(&self.db, login, all_sessions, sessions) {
+            Ok(profile) => to_json(&profile),
+            Err(error) => Ok(error_result(&format!("remote trust_add: {error:#}"))),
+        }
+    }
+
+    fn remote_trust_remove_impl(&self, login: &str) -> Result<CallToolResult, McpError> {
+        match panel::trust_remove(&self.db, login) {
+            Ok(true) => to_json(&json!({ "removed": login })),
+            Ok(false) => Ok(error_result(&format!("no trusted profile for '{login}'"))),
+            Err(error) => Ok(error_result(&format!("remote trust_remove: {error:#}"))),
         }
     }
 }

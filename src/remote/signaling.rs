@@ -17,6 +17,7 @@ use crate::db::remote_devices::RemoteDevice;
 
 use super::devices::RemoteDevices;
 use super::hostkey::{verify_p1363, HostKey};
+use super::trust;
 
 /// Prefix of the signed offer payload.
 pub const OFFER_PREFIX: &str = "canopy-remote/v1/offer\n";
@@ -38,6 +39,8 @@ pub enum Refusal {
     BadSignature,
     /// [`MAX_DEVICE_PEERS`] peers are already live.
     Busy,
+    /// The device is paired but its login holds no grant.
+    Forbidden,
 }
 
 impl Refusal {
@@ -48,6 +51,7 @@ impl Refusal {
             Refusal::Stale => "stale",
             Refusal::BadSignature => "bad_signature",
             Refusal::Busy => "busy",
+            Refusal::Forbidden => "forbidden",
         }
     }
 }
@@ -135,6 +139,14 @@ pub fn verify_offer(
     let sig = decode_b64(sig_b64).ok_or(Refusal::BadSignature)?;
     if sig.len() != 64 {
         return Err(Refusal::BadSignature);
+    }
+    // The relay attests the offering party's login on every offer; it must
+    // match the login bound at pair time, or the offer is not this device's.
+    // Absent on owner offers from before the attestation, so those skip it.
+    if let Some(claimed) = body.get("github_login").and_then(Value::as_str) {
+        if trust::normalize_login(claimed) != trust::normalize_login(&device.github_login) {
+            return Err(Refusal::BadSignature);
+        }
     }
     let message = offer_message_text(host_id, &ts_text, sdp);
     if !verify_p1363(&device.spki, message.as_bytes(), &sig) {

@@ -222,7 +222,8 @@ a refused value keeps the old one and the daemon's message shows in the status
 line. `←`/`→` never change a value.
 
 In **Remote** (`F1`, then `5`), `↑`/`↓` (or `j`/`k`) move over the GitHub,
-Remote control, Relay and Pair rows plus one row per paired device. `Enter`
+Remote control, Relay and Pair rows plus one row per paired device and one
+row per trusted GitHub profile. `Enter`
 on GitHub starts the device flow while signed out (the row shows the user
 code and `https://github.com/login/device` until it completes or expires);
 `Enter` on Remote control flips the relay switch (disabled while signed
@@ -233,7 +234,13 @@ the code stays valid). Each device row shows its label, id, last seen time
 and `live` while a peer is open; `d` disconnects its live peer at once
 (the pairing stays), `r` revokes it behind a `y`/`n`
 confirmation (`Enter` also confirms, `Esc` cancels); both report success
-or the exact error inline. While any device is
+or the exact error inline. Each trusted row shows a guest login with its
+grant (`all sessions` or the named sessions); `t` trusts a new profile
+through a form (username, comma-separated sessions, an all-sessions toggle
+flipped with `a`; `Tab` moves, `Enter` saves, `Esc` cancels), `Enter` on a
+trusted row edits its grant, and `r` forgets it behind a `y`/`n`
+confirmation — removing or narrowing a grant kicks the login's live guest
+peers at once. While any device is
 live the sidebar header shows `⇄ n`.
 
 ### Session shelf

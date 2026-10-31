@@ -13,6 +13,7 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::tui::app::hub_remote::{remote_rows, LoginFlow, RemoteRow};
+use crate::tui::app::hub_remote_trust::TrustField;
 use crate::tui::app::types::App;
 use crate::tui::ui::theme::Theme;
 
@@ -21,8 +22,9 @@ const FIXED_ROWS: usize = 4;
 
 pub(super) fn draw_remote_tab(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let remote = &app.hub.remote;
-    let foot_rows =
-        usize::from(remote.revoke_confirm.is_some()) + usize::from(remote.message.is_some());
+    let foot_rows = usize::from(remote.revoke_confirm.is_some())
+        + usize::from(remote.trust_remove_confirm.is_some())
+        + usize::from(remote.message.is_some());
     let [main_area, foot_area] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(foot_rows as u16)]).areas(area);
 
@@ -43,6 +45,8 @@ pub(super) fn draw_remote_tab(frame: &mut Frame, app: &App, theme: &Theme, area:
     }
     lines.push(devices_header_line(app, theme, width));
     lines.extend(device_lines(app, theme, main_area, width));
+    lines.push(trusted_header_line(app, theme, width));
+    lines.extend(trusted_lines(app, theme, width));
 
     frame.render_widget(Paragraph::new(lines), main_area);
 
@@ -54,6 +58,15 @@ pub(super) fn draw_remote_tab(frame: &mut Frame, app: &App, theme: &Theme, area:
             theme,
             Rect::new(foot_area.x, foot_y, foot_area.width, 1),
             device_id,
+        );
+        foot_y += 1;
+    }
+    if let Some(login) = &remote.trust_remove_confirm {
+        draw_trust_remove_confirm(
+            frame,
+            theme,
+            Rect::new(foot_area.x, foot_y, foot_area.width, 1),
+            login,
         );
         foot_y += 1;
     }
@@ -164,7 +177,9 @@ fn remote_row_text(app: &App, row: RemoteRow) -> (&'static str, String, bool) {
         }
         RemoteRow::Relay => ("Relay", view.relay.clone(), false),
         RemoteRow::Pair => ("Pair a device", "Enter for a new code".to_string(), false),
-        RemoteRow::Device(_) => ("", String::new(), false),
+        // Device and trusted rows render through their own line builders;
+        // this match only feeds the four fixed rows above.
+        RemoteRow::Device(_) | RemoteRow::Trusted(_) => ("", String::new(), false),
     }
 }
 
@@ -251,6 +266,94 @@ fn device_line(
     } else {
         line
     }
+}
+
+fn trusted_header_line(app: &App, theme: &Theme, width: usize) -> Line<'static> {
+    let count = app.hub.remote.view.trusted.len();
+    Line::from(Span::styled(
+        truncate(&format!("  Trusted ({count})"), width),
+        Style::default()
+            .fg(theme.header_color)
+            .add_modifier(Modifier::BOLD),
+    ))
+}
+
+/// Every trusted row, unscrollable: trust lists stay short, and the device
+/// list above owns the scroll math.
+fn trusted_lines(app: &App, theme: &Theme, width: usize) -> Vec<Line<'static>> {
+    let remote = &app.hub.remote;
+    let base = FIXED_ROWS + remote.view.devices.len();
+    remote
+        .view
+        .trusted
+        .iter()
+        .enumerate()
+        .map(|(index, profile)| trusted_line(profile, theme, remote.row_idx == base + index, width))
+        .collect()
+}
+
+/// One `login  all sessions|name, …` trusted row.
+fn trusted_line(
+    profile: &crate::remote::panel::TrustedView,
+    theme: &Theme,
+    selected: bool,
+    width: usize,
+) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        if selected { "▸" } else { " " },
+        marker_style(theme, selected),
+    )];
+    let name_style = if selected {
+        // The pill pair (`accent_fg` on `header_color`): ink on the
+        // accent; the row's `selected_bg` raise covers the rest of the
+        // line, so the name never sits dark on dark.
+        Style::default()
+            .fg(theme.accent_fg)
+            .bg(theme.header_color)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.text_primary)
+    };
+    let dim = Style::default().fg(theme.dim_text);
+    let mut rest = width.saturating_sub(1);
+    let mut push = |text: String, style: Style| {
+        if rest == 0 {
+            return;
+        }
+        let text = truncate(&text, rest);
+        rest -= text.chars().count();
+        spans.push(Span::styled(text, style));
+    };
+    push(" ".to_string(), Style::default());
+    push(profile.login.clone(), name_style);
+    push("  ".to_string(), Style::default());
+    if profile.all_sessions {
+        push("all sessions".to_string(), dim);
+    } else if profile.sessions.is_empty() {
+        push("no sessions".to_string(), dim);
+    } else {
+        push(profile.sessions.join(", "), Style::default());
+    }
+    let line = Line::from(spans);
+    if selected {
+        line.style(Style::default().bg(theme.selected_bg))
+    } else {
+        line
+    }
+}
+
+/// The trust-remove confirmation pinned above the message line.
+fn draw_trust_remove_confirm(frame: &mut Frame, theme: &Theme, area: Rect, login: &str) {
+    let text = format!("Forget {login} and kick its guests?  y = confirm  n = cancel");
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            truncate(&text, area.width as usize),
+            Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD),
+        ))),
+        area,
+    );
 }
 
 /// The revoke confirmation pinned above the message line.
@@ -362,6 +465,91 @@ pub(super) fn draw_pair_overlay(frame: &mut Frame, app: &App, theme: &Theme) {
     );
 }
 
+/// The trust overlay: username, comma-separated sessions, the
+/// all-sessions toggle and the key hints, centered on the frame.
+pub(super) fn draw_trust_overlay(frame: &mut Frame, app: &App, theme: &Theme) {
+    let form = &app.hub.remote.trust;
+    if !form.open {
+        return;
+    }
+    let login = if form.login.is_empty() {
+        "(username)".to_string()
+    } else {
+        form.login.clone()
+    };
+    let sessions = if form.sessions.is_empty() {
+        "(comma, separated, names)".to_string()
+    } else {
+        form.sessions.clone()
+    };
+    let toggle = if form.all { "[x]" } else { "[ ]" };
+    let rows = [
+        (TrustField::Login, "User", login),
+        (TrustField::Sessions, "Sessions", sessions),
+        (
+            TrustField::All,
+            "All sessions",
+            format!("{toggle} (a toggles)"),
+        ),
+    ];
+    let content_width = rows
+        .iter()
+        .map(|(_, label, value)| label.len() + value.chars().count() + 3)
+        .max()
+        .unwrap_or(0)
+        .max("Tab move · Enter save · Esc cancel".len());
+    let frame_area = frame.area();
+    let width = ((content_width + 4) as u16).min(frame_area.width.saturating_sub(2));
+    let height = 6u16.min(frame_area.height);
+    if width < 10 || height < 6 {
+        return;
+    }
+    let area = centered_box(width, height, frame_area);
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .title(" Trust a GitHub profile ")
+        .borders(crate::tui::ui::dialog_borders_for(theme))
+        .border_style(Style::default().fg(theme.header_color))
+        .style(Style::default().bg(theme.dialog_bg));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let layout = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+    let inner_width = inner.width as usize;
+    for (index, (field, label, value)) in rows.iter().enumerate() {
+        let focused = *field == form.focus;
+        let style = if focused {
+            Style::default()
+                .fg(theme.accent_fg)
+                .bg(theme.header_color)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.text_primary)
+        };
+        let text = format!("{label}: {value}");
+        let line = Line::from(Span::styled(truncate(&text, inner_width), style));
+        let line = if focused {
+            line.style(Style::default().bg(theme.selected_bg))
+        } else {
+            line
+        };
+        frame.render_widget(Paragraph::new(line), layout[index]);
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "Tab move · Enter save · Esc cancel",
+            Style::default().fg(theme.dim_text),
+        ))),
+        layout[3],
+    );
+}
+
 fn qr_width(lines: &[&str]) -> usize {
     lines
         .iter()
@@ -401,7 +589,7 @@ mod tests {
     use super::*;
     use crate::db::Database;
     use crate::remote::auth::DeviceCodeInfo;
-    use crate::remote::panel::{DeviceView, PairView, RemoteView};
+    use crate::remote::panel::{DeviceView, PairView, RemoteView, TrustedView};
     use crate::tui::app::hub::HubTab;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -495,6 +683,7 @@ mod tests {
                     device("bfcba2b742a807bb", "laptop", true),
                     unseen_device("aabbccddeeff0011", "tablet"),
                 ],
+                trusted: Vec::new(),
             };
             let text = draw(&mut app, width, height);
             assert!(
@@ -611,6 +800,45 @@ mod tests {
                 "{width}x{height}: the QR fits unclipped: {text}"
             );
         }
+    }
+
+    #[test]
+    fn trusted_section_lists_grants_and_the_form_overlay_edits_one() {
+        let mut app = remote_app();
+        app.hub.remote.view.trusted = vec![
+            TrustedView {
+                login: "guest".to_string(),
+                all_sessions: false,
+                sessions: vec!["alpha".to_string(), "beta".to_string()],
+            },
+            TrustedView {
+                login: "auditor".to_string(),
+                all_sessions: true,
+                sessions: Vec::new(),
+            },
+        ];
+        let text = draw(&mut app, 120, 40);
+        assert!(text.contains("Trusted (2)"), "{text}");
+        assert!(text.contains("guest"), "{text}");
+        assert!(text.contains("alpha, beta"), "{text}");
+        assert!(text.contains("auditor"), "{text}");
+        assert!(text.contains("all sessions"), "{text}");
+
+        // The form overlay floats over the tab with its three stops.
+        app.hub.remote.trust.open_new();
+        app.hub.remote.trust.login = "guest".to_string();
+        let text = draw(&mut app, 120, 40);
+        assert!(text.contains("Trust a GitHub profile"), "{text}");
+        assert!(text.contains("User: guest"), "{text}");
+        assert!(text.contains("Sessions:"), "{text}");
+        assert!(text.contains("All sessions:"), "{text}");
+        assert!(text.contains("Enter save"), "{text}");
+
+        // The remove confirmation pins above the message line.
+        app.hub.remote.trust.close();
+        app.hub.remote.trust_remove_confirm = Some("guest".to_string());
+        let text = draw(&mut app, 120, 40);
+        assert!(text.contains("Forget guest and kick its guests?"), "{text}");
     }
 
     #[test]

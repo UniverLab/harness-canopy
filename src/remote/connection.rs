@@ -24,6 +24,7 @@ use super::bridge::RemoteBridge;
 use super::peer::{Peer, PeerEvent};
 use super::relay::{ConnectionRegistry, SignalTx};
 use super::signaling::{self, MAX_DEVICE_PEERS};
+use super::trust::Grant;
 
 /// What the relay routes into one live peer after the answer.
 #[derive(Debug)]
@@ -198,6 +199,8 @@ pub struct PeerSession {
     pub signal: SignalTx,
     /// Relay peer id to address the candidates to.
     pub from: String,
+    /// What this peer's login may see, resolved when its offer verified.
+    pub grant: Grant,
     /// Largest outbound frame for this peer, from its offer SDP (see
     /// [`peer_frame_cap`]): [`MAX_CHANNEL_FRAME`] for a desktop, less for a
     /// peer that advertised less.
@@ -289,7 +292,7 @@ pub fn spawn(mut session: PeerSession) {
 
 async fn serve(session: &mut PeerSession) {
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<String>();
-    let mut bridge = RemoteBridge::new(session.state.clone());
+    let mut bridge = RemoteBridge::with_grant(session.state.clone(), session.grant.clone());
     let mut events = session.state.hub.subscribe_events();
     // Like the local socket, the first frame the device sees is `hello`; any
     // hub event produced before the channel exists is dropped (the device
