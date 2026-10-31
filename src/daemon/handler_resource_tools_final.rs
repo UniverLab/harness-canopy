@@ -1,4 +1,4 @@
-//! The eight final-wave resource tools: one `#[tool]` method per resource,
+//! The nine final-wave resource tools: one `#[tool]` method per resource,
 //! each dispatching on `action` through the shared [`ToolSpec`] contract in
 //! [`crate::daemon::actions`]. Every action validates first (one refusal
 //! listing the whole action table), then deserializes the same JSON — minus
@@ -179,6 +179,15 @@ pub(crate) static RAG: ToolSpec = ToolSpec {
     ],
 };
 
+pub(crate) static CATALOGUE: ToolSpec = ToolSpec {
+    name: "catalogue",
+    actions: &[ActionSpec {
+        name: "search",
+        required: &["q"],
+        optional: &["sort", "page", "limit"],
+    }],
+};
+
 pub(crate) static IDENTITY: ToolSpec = ToolSpec {
     name: "identity",
     actions: &[
@@ -278,7 +287,13 @@ resource_action_object!(
     ]
 );
 
-// ── The eight resource tools ─────────────────────────────────────────
+resource_action_object!(
+    CatalogueObject,
+    CATALOGUE,
+    [("search", CatalogueSearchParams)]
+);
+
+// ── The nine resource tools ──────────────────────────────────────────
 
 #[tool_router(router = tool_router_resource_tools_final, vis = "pub(crate)")]
 impl TaskTriggerHandler {
@@ -515,6 +530,25 @@ impl TaskTriggerHandler {
                 self.identity_remove_seed_impl(action_params(&params)?)
                     .await
             }
+            _ => unreachable!("validated action"),
+        }
+    }
+
+    #[tool(
+        name = "catalogue",
+        description = "Search the community graphs catalogue before building your own. Pass `action` plus the parameters listed for it. \
+        Actions (required params; optional params): \
+        `search` (required: q; optional: sort, page, limit) — search community graphs and nodes by free text (`topic:canopy-graph` plus description and name); `sort` is `top` (default) or `new`, `page` starts at 1, and `limit` (default 10, max 50) truncates the returned page client-side — deeper access uses `page`. Each item carries everything needed to install and judge it: kind (graph/node), slug, owner/repo, stars, description, the install ref the `graph install` / `node install` commands accept, and the model verdict (label, model, scan date) when the catalogue exposes it."
+    )]
+    pub(crate) async fn catalogue(
+        &self,
+        Parameters(params): Parameters<CatalogueObject>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut params = params.into_value();
+        CatalogueObject::coerce(&mut params);
+        let action = CATALOGUE.validate(&params)?;
+        match action {
+            "search" => self.catalogue_search_impl(action_params(&params)?).await,
             _ => unreachable!("validated action"),
         }
     }

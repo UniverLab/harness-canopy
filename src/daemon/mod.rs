@@ -20,6 +20,7 @@ pub(crate) mod graph_cli;
 pub(crate) mod graph_install;
 pub(crate) mod graph_validate;
 pub(crate) mod handler_agents;
+pub(crate) mod handler_catalogue;
 pub(crate) mod handler_copy;
 pub(crate) mod handler_crew;
 pub(crate) mod handler_edges;

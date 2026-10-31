@@ -29,6 +29,8 @@ mod shelf;
 pub use shelf::*;
 mod remote;
 pub use remote::*;
+mod catalogue;
+pub use catalogue::*;
 
 #[cfg(test)]
 mod tests {

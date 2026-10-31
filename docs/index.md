@@ -30,7 +30,7 @@ no external services, no cloud account.
 |---|---|
 | **Daemon** | MCP server (Streamable HTTP + stdio), scheduler, watcher engine, database |
 | **Canopy Hub (TUI)** | Full-screen terminal UI for agents, graphs and system metrics |
-| **33 MCP tools** | Agent management, harness, intelligence, identity, skills, graphs, crews, config, specs, queues, nodes, RAG, projects, sessions, session shelf, remote control, scheduled prompts |
+| **34 MCP tools** | Agent management, harness, intelligence, identity, skills, graphs, crews, config, specs, queues, nodes, catalogue, RAG, projects, sessions, session shelf, remote control, scheduled prompts |
 | **Seed identities** | Persistent, evolvable agent personalities stored as TOML |
 | **Gamification** | 28 missions across 6 categories tracking usage milestones |
 
@@ -53,7 +53,7 @@ no external services, no cloud account.
 - [Graph patterns](https://graphs.univerlab.org/patterns) — the shapes a graph can take, and where each breaks.
 - [Graph catalogue](https://graphs.univerlab.org) — ready-made graphs to install.
 - [RAG Pipeline](rag.md) — personal document search.
-- [MCP Tools](mcp-tools.md) — all 33 tools by category.
+- [MCP Tools](mcp-tools.md) — all 34 tools by category.
 - [CLI Reference](cli-reference.md) — every `canopy` command.
 
 ## Part of UniverLab

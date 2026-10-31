@@ -1,17 +1,18 @@
 //! Part 17 of `endpoint_tests`: the final-wave surface contract — exactly
-//! the 33 visible tools, one smoke per new resource tool through its own
+//! the 34 visible tools, one smoke per new resource tool through its own
 //! dispatch, the refusal shape for an unknown action, and the `get_tools`
-//! 33-map every scope serves.
+//! 34-map every scope serves.
 use super::*;
 use serde_json::json;
 
-/// The 33 visible tools, alphabetical: the decision's final surface plus
+/// The 34 visible tools, alphabetical: the decision's final surface plus
 /// `remote` and `session_send_file`. The
 /// two hidden `loop_*` aliases stay registered but are not visible.
-const VISIBLE_33: &[&str] = &[
+const VISIBLE_34: &[&str] = &[
     "agent",
     "agent_edit",
     "agent_report",
+    "catalogue",
     "config",
     "crew",
     "get_tools",
@@ -45,11 +46,11 @@ const VISIBLE_33: &[&str] = &[
 ];
 
 #[tokio::test]
-async fn visible_tool_surface_is_exactly_the_33() {
+async fn visible_tool_surface_is_exactly_the_34() {
     let visible = visible_tool_list();
     let names: Vec<&str> = visible.iter().map(|tool| tool.name.as_ref()).collect();
-    assert_eq!(names.len(), 33, "visible tool count drifted: {names:?}");
-    assert_eq!(names, VISIBLE_33, "visible tool list drifted");
+    assert_eq!(names.len(), 34, "visible tool count drifted: {names:?}");
+    assert_eq!(names, VISIBLE_34, "visible tool list drifted");
     assert!(
         !names.iter().any(|name| name.starts_with("loop_")),
         "hidden loop_* aliases must stay out of the visible list"
@@ -298,10 +299,10 @@ async fn new_tools_refuse_unknown_actions_with_their_full_table() {
     }
 }
 
-/// Every scope serves the same 33-map: one line per visible tool, each
+/// Every scope serves the same 34-map: one line per visible tool, each
 /// naming the tool and its actions.
 #[tokio::test]
-async fn get_tools_serves_the_same_33_map_for_every_scope() {
+async fn get_tools_serves_the_same_34_map_for_every_scope() {
     let (_dir, _db, handler) = endpoint_test_handler();
     let scopes = [
         "session_start",
@@ -326,7 +327,7 @@ async fn get_tools_serves_the_same_33_map_for_every_scope() {
         let body: serde_json::Value =
             serde_json::from_str(&raw_text(&result)).expect("get_tools body is JSON");
         let tools = body["tools"].as_array().expect("tools is an array");
-        assert_eq!(tools.len(), 33, "{scope} must serve 33 tools");
+        assert_eq!(tools.len(), 34, "{scope} must serve 34 tools");
         maps.push(
             tools
                 .iter()
@@ -337,7 +338,7 @@ async fn get_tools_serves_the_same_33_map_for_every_scope() {
     for (scope, map) in scopes.iter().zip(maps.iter()).skip(1) {
         assert_eq!(map, &maps[0], "{scope} map must equal session_start's");
     }
-    for (entry, name) in maps[0].iter().zip(VISIBLE_33.iter()) {
+    for (entry, name) in maps[0].iter().zip(VISIBLE_34.iter()) {
         assert!(
             entry.starts_with(&format!("{name} — ")),
             "map entry must lead with its tool name: {entry}"

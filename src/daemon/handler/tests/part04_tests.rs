@@ -717,7 +717,7 @@ use crate::daemon::handler::{
 use rmcp::model::ErrorCode;
 
 /// Every resource tool dispatched through a `ToolSpec`, with its action
-/// table (all 24 — the schema-coverage test walks this list, so a
+/// table (all 25 — the schema-coverage test walks this list, so a
 /// resource tool missing from it, or an action parameter missing from the
 /// published schema, fails there).
 const RESOURCE_TOOL_SPECS: &[(&str, &ToolSpec)] = &[
@@ -725,6 +725,10 @@ const RESOURCE_TOOL_SPECS: &[(&str, &ToolSpec)] = &[
     (
         "agent_edit",
         &crate::daemon::handler_resource_tools::AGENT_EDIT,
+    ),
+    (
+        "catalogue",
+        &crate::daemon::handler_resource_tools_final::CATALOGUE,
     ),
     ("config", &crate::daemon::handler_resource_tools::CONFIG),
     ("crew", &crate::daemon::handler_resource_tools::CREW),
@@ -821,8 +825,8 @@ fn schema_covers_every_action_param_of_every_resource_tool() {
     let tools = TaskTriggerHandler::tool_router().list_all();
     assert_eq!(
         RESOURCE_TOOL_SPECS.len(),
-        24,
-        "all 24 resource tools listed"
+        25,
+        "all 25 resource tools listed"
     );
     for (name, spec) in RESOURCE_TOOL_SPECS {
         let tool = tools

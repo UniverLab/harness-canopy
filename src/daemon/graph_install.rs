@@ -10,6 +10,8 @@
 
 mod fetch;
 pub(crate) use fetch::fetch_document;
+mod search;
+pub(crate) use search::{resolve_limit, search_catalogue};
 #[cfg(test)]
 pub(crate) mod stub;
 

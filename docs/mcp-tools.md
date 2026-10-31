@@ -1,12 +1,12 @@
 ---
 title: MCP Tools
-description: All 33 MCP tools exposed by the canopy daemon, by category.
+description: All 34 MCP tools exposed by the canopy daemon, by category.
 order: 17
 ---
 
 # MCP Tools
 
-The daemon exposes **33 MCP tools** over Streamable HTTP (port 7755) and
+The daemon exposes **34 MCP tools** over Streamable HTTP (port 7755) and
 stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 
 Writes wait up to 5 seconds for a concurrent writer. If the database is still
@@ -131,7 +131,7 @@ See [Graphs](graphs.md).
 
 Kept callable for the whole 3.x line, but excluded from tool listings
 (`tools/list`) so nothing new adopts them — call the 3.x name instead. Not
-counted in the 33 tools above.
+counted in the 34 tools above.
 
 | Deprecated name | Renamed to (3.0.0) |
 |---|---|
@@ -210,6 +210,12 @@ readable.
 Node documents replaced the retired blueprint tools outright: `graph_node`
 and `graph_ensemble` `add` take `node`, `kind` + `config`, or — for
 ensembles — a crew.
+
+## Catalogue (1)
+
+| Tool | Description |
+|---|---|
+| `catalogue` | Search the community graphs catalogue before building your own. Actions: `search` (`q`, optional `sort`/`page`/`limit` — free-text search over community graphs and nodes; `sort` is `top` (default) or `new`, `page` starts at 1, `limit` (default 10, max 50) truncates the returned page client-side) — pass `action` plus the params the refusal/table lists |
 
 ## Project (1)
 

@@ -510,6 +510,7 @@ fn tool_map_entries() -> Vec<&'static str> {
         "agent — list, get, logs, status; read background agents, logs, and daemon health",
         "agent_edit — add, watch, update, remove, enable, disable, schedule, run; manage background agents",
         "agent_report — report a run's execution status (the only way to report a run)",
+        "catalogue — search; search the community graphs catalogue before building your own",
         "config — get, list, set, reset; read and change canopy settings",
         "crew — list, get, create, update, delete, assignments; manage crews and read harness/model assignments",
         "get_tools — this map: the right tools and protocol per scope",
