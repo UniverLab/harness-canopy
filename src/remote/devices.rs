@@ -131,5 +131,10 @@ mod tests {
         assert_eq!(rows[0].id, id);
         assert_eq!(rows[0].label, "renamed");
         assert_eq!(rows[0].paired_at, "2026-02-01T00:00:00Z");
+        assert_eq!(
+            rows[0].last_seen.as_deref(),
+            Some("2026-02-01T00:00:00Z"),
+            "re-pairing refreshes last_seen"
+        );
     }
 }

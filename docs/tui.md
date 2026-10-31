@@ -230,8 +230,8 @@ code and `https://github.com/login/device` until it completes or expires);
 out); Relay only reports the phase (`connected`, `connecting`,
 `token rejected: sign in again`, `off`); `Enter` on Pair a device shows the
 fresh code with its link, QR and countdown in an overlay (`Esc` hides it,
-the code stays valid). Each device row shows its label, id, last seen time
-and `live` while a peer is open; `d` disconnects its live peer at once
+the code stays valid). Each device row shows its label, id, paired time,
+last seen time and `live` while a peer is open; `d` disconnects its live peer at once
 (the pairing stays), `r` revokes it behind a `y`/`n`
 confirmation (`Enter` also confirms, `Esc` cancels); both report success
 or the exact error inline. Each trusted row shows a guest login with its

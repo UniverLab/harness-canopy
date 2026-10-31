@@ -682,6 +682,7 @@ mod tests {
         DeviceView {
             id: id.to_string(),
             label: format!("{id} laptop"),
+            paired_at: "2026-09-01T09:00:00Z".to_string(),
             last_seen: None,
             live: false,
         }

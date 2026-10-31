@@ -49,7 +49,8 @@ impl Database {
                 spki = excluded.spki,
                 label = excluded.label,
                 github_login = excluded.github_login,
-                paired_at = excluded.paired_at",
+                paired_at = excluded.paired_at,
+                last_seen = excluded.paired_at",
             params![
                 device.id,
                 device.spki,

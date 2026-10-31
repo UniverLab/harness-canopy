@@ -22,6 +22,9 @@ pub struct DeviceView {
     pub id: String,
     /// Human label, or `browser`.
     pub label: String,
+    /// RFC 3339 of the pairing.
+    #[serde(default)]
+    pub paired_at: String,
     /// RFC 3339 of the last live connection, if any.
     pub last_seen: Option<String>,
     /// Whether the device has a live peer right now.
@@ -99,6 +102,7 @@ pub fn status_view(data_dir: &Path, db: &Database, live: &RemoteLive) -> Result<
             live: live_ids.contains(&device.id),
             id: device.id,
             label: device.label,
+            paired_at: device.paired_at,
             last_seen: device.last_seen,
         })
         .collect();

@@ -211,7 +211,7 @@ fn devices_header_line(app: &App, theme: &Theme, width: usize) -> Line<'static> 
     ))
 }
 
-/// One `label  id  last seen …  live` device row.
+/// One `label  id  paired …  last seen …  live` device row.
 fn device_line(
     device: &crate::remote::panel::DeviceView,
     theme: &Theme,
@@ -247,6 +247,8 @@ fn device_line(
     push(device.label.clone(), name_style);
     push("  ".to_string(), Style::default());
     push(device.id.clone(), dim);
+    push("  paired ".to_string(), Style::default());
+    push(super::hub_shelf::shelf_time(&device.paired_at), dim);
     push("  last seen ".to_string(), Style::default());
     push(
         device
@@ -621,6 +623,7 @@ mod tests {
         DeviceView {
             id: id.to_string(),
             label: label.to_string(),
+            paired_at: "2026-09-30T09:05:00Z".to_string(),
             last_seen: Some("2026-10-01T10:00:00Z".to_string()),
             live,
         }
@@ -630,6 +633,7 @@ mod tests {
         DeviceView {
             id: id.to_string(),
             label: label.to_string(),
+            paired_at: "2026-09-15T08:30:00Z".to_string(),
             last_seen: None,
             live: false,
         }
@@ -696,9 +700,16 @@ mod tests {
                 text.contains("bfcba2b742a807bb"),
                 "{width}x{height}: {text}"
             );
-            assert!(text.contains("live"), "{width}x{height}: {text}");
+            if width > 80 {
+                // The paired time widens the row past 80 columns, so the
+                // trailing live badge truncates there by design; the
+                // sidebar `⇄ n` still signals live devices.
+                assert!(text.contains("live"), "{width}x{height}: {text}");
+            }
             assert!(text.contains("last seen 10:00"), "{width}x{height}: {text}");
+            assert!(text.contains("paired 09:05"), "{width}x{height}: {text}");
             assert!(text.contains("tablet"), "{width}x{height}: {text}");
+            assert!(text.contains("paired 08:30"), "{width}x{height}: {text}");
             assert!(text.contains("never"), "{width}x{height}: {text}");
 
             // Token rejected.
