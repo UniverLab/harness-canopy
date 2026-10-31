@@ -1,4 +1,5 @@
 use super::*;
+use crate::db::connection::{is_busy_error, with_busy_retry};
 
 impl GraphEngine {
     /// CB31: a wait-for-completion pause requested while this step was
@@ -19,12 +20,14 @@ impl GraphEngine {
         // won. Losing to a cancel must fall through and keep this dispatch
         // going — writing `graph_paused` here would end a `Running` graph's
         // dispatch with no live run left, stranding it.
-        if self.is_pausing(&ctx.lp.id)? && self.db.complete_pause(&ctx.lp.id)? {
-            self.db.mark_spec_node_runs_paused_through(
-                &ctx.spec.id,
-                &cursor_node_ids(&state.cursor, ctx.ensembles),
-                iteration_value as i64,
-            )?;
+        if self.is_pausing(&ctx.lp.id)? && self.claim_pause(&ctx.lp.id)? {
+            let _ = persist_bookkeeping("mark_spec_node_runs_paused_through", || {
+                self.db.mark_spec_node_runs_paused_through(
+                    &ctx.spec.id,
+                    &cursor_node_ids(&state.cursor, ctx.ensembles),
+                    iteration_value as i64,
+                )
+            })?;
             activity::record(
                 &self.db,
                 activity::GraphEvent {
@@ -50,18 +53,35 @@ impl GraphEngine {
         Ok(None)
     }
 
+    /// Claim a pending pause, with busy retry. An exhausted busy warns and
+    /// reports unclaimed — the dispatch keeps going exactly as when it loses
+    /// the claim race to a concurrent resume, and the pause is retried on a
+    /// later step instead of failing the graph.
+    fn claim_pause(&self, graph_id: &str) -> Result<bool> {
+        match with_busy_retry("complete_pause", || self.db.complete_pause(graph_id)) {
+            Ok(claimed) => Ok(claimed),
+            Err(error) if is_busy_error(&error) => {
+                tracing::warn!("{error:#}; leaving the pause pending");
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     pub(crate) async fn finish_advanced_spec(
         &self,
         ctx: &SpecStepCtx<'_>,
         state: &SpecRunState,
         execution: NodeExecution,
     ) -> Result<SpecExecutionOutcome> {
-        self.db.update_graph_spec_status(
-            &ctx.spec.id,
-            GraphSpecStatus::Completed,
-            None,
-            Some(chrono::Utc::now()),
-        )?;
+        let _ = persist_bookkeeping("update_graph_spec_status", || {
+            self.db.update_graph_spec_status(
+                &ctx.spec.id,
+                GraphSpecStatus::Completed,
+                None,
+                Some(chrono::Utc::now()),
+            )
+        })?;
         self.record_spec_end_dirty(&ctx.spec.id, ctx.workdir).await;
         self.notify_spec_completed(ctx.lp, ctx.spec, ctx.queue_id)?;
         activity::record(

@@ -139,12 +139,14 @@ impl GraphEngine {
             spec_start_dirty,
         );
 
-        self.db.update_graph_spec_status(
-            &spec.id,
-            GraphSpecStatus::Running,
-            Some(chrono::Utc::now()),
-            None,
-        )?;
+        let _ = persist_bookkeeping("update_graph_spec_status", || {
+            self.db.update_graph_spec_status(
+                &spec.id,
+                GraphSpecStatus::Running,
+                Some(chrono::Utc::now()),
+                None,
+            )
+        })?;
 
         // record the directed start on the run's activity feed —
         // the start node, the nodes skipped between Start and it, the
@@ -240,7 +242,7 @@ impl GraphEngine {
 
             let stepped_cursor = state.cursor.clone();
             let flow = match stepped_cursor {
-                SpecCursor::Node(node_id) => {
+                SpecCursor::Node(node_id) => busy_backstop_flow(
                     self.run_spec_node_step(
                         ctx,
                         state,
@@ -248,17 +250,26 @@ impl GraphEngine {
                         previous_output.as_ref(),
                         iteration_value,
                     )
-                    .await?
-                }
+                    .await,
+                    &node_id,
+                )?,
                 SpecCursor::Ensemble(ensemble_id) => {
-                    self.run_spec_ensemble_step(
-                        ctx,
-                        state,
-                        &ensemble_id,
-                        previous_output.as_ref(),
-                        iteration_value,
-                    )
-                    .await?
+                    let flow = self
+                        .run_spec_ensemble_step(
+                            ctx,
+                            state,
+                            &ensemble_id,
+                            previous_output.as_ref(),
+                            iteration_value,
+                        )
+                        .await;
+                    let from = ctx
+                        .ensembles
+                        .iter()
+                        .find(|details| details.ensemble.id == ensemble_id)
+                        .map(|details| details.ensemble.join_node_id.clone())
+                        .unwrap_or(ensemble_id);
+                    busy_backstop_flow(flow, &from)?
                 }
             };
             let step = match flow {
@@ -543,13 +554,7 @@ impl GraphEngine {
             run.status,
             GraphRunStatus::Running | GraphRunStatus::Waiting
         ) {
-            self.db.update_graph_run_result(
-                run_id,
-                execution.status,
-                Some(&execution.output),
-                Some(chrono::Utc::now()),
-            )?;
-            return Ok(execution);
+            return settle_node_verdict(&self.db, run_id, execution, "update_graph_run_result");
         }
         // A self-reported run keeps its own output; only the process record
         // (ended_after_verdict / session_end) is merged onto it, never the verdict.
@@ -590,13 +595,7 @@ impl GraphEngine {
             head_after = %head_after,
             "node without commit rights: HEAD moved during its run"
         );
-        self.db.update_graph_run_result(
-            run_id,
-            GraphRunStatus::Fail,
-            Some(&violation.output),
-            Some(chrono::Utc::now()),
-        )?;
-        Ok(violation)
+        settle_node_verdict(&self.db, run_id, violation, "update_graph_run_result")
     }
 
     pub(crate) async fn enforce_commit_ancestry(
@@ -627,8 +626,10 @@ impl GraphEngine {
         if head_after == head_before {
             return Ok((execution, had_infra_crash));
         }
-        self.db
-            .set_graph_spec_committed_head(&ctx.spec.id, Some(&head_after))?;
+        let _ = persist_bookkeeping("set_graph_spec_committed_head", || {
+            self.db
+                .set_graph_spec_committed_head(&ctx.spec.id, Some(&head_after))
+        })?;
         state.spec_committed_head = Some(head_after);
         Ok((execution, had_infra_crash))
     }
@@ -664,13 +665,13 @@ impl GraphEngine {
                     current_head = %current_head,
                     "spec_start_head is no longer an ancestor of HEAD"
                 );
-                self.db.update_graph_run_result(
+                let execution = settle_node_verdict(
+                    &self.db,
                     run_id,
-                    GraphRunStatus::Fail,
-                    Some(&ancestry_fail.output),
-                    Some(chrono::Utc::now()),
+                    ancestry_fail,
+                    "update_graph_run_result",
                 )?;
-                Ok((ancestry_fail, true, true))
+                Ok((execution, true, true))
             }
         }
     }

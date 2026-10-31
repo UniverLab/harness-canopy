@@ -1,4 +1,5 @@
 use super::*;
+use crate::db::connection::with_busy_retry;
 
 pub(crate) fn read_infra_config(node: &GraphNode) -> (u32, u64, u64) {
     let resolved = resolve_node_infra_config(node);
@@ -343,9 +344,11 @@ pub(crate) async fn finalize_infra_crash_shape(
                 Value::String("limit 0".to_string()),
             );
         }
-        db.update_graph_run_result(run_id, run.status, Some(&tagged), Some(chrono::Utc::now()))?;
         execution.output = tagged.clone();
-        run.output = Some(tagged);
+        run.output = Some(tagged.clone());
+        let _ = persist_bookkeeping("update_graph_run_result", || {
+            db.update_graph_run_result(run_id, run.status, Some(&tagged), Some(chrono::Utc::now()))
+        })?;
     }
     Ok(is_crash)
 }
@@ -397,12 +400,15 @@ pub(crate) async fn begin_infra_retry(
     backoff_secs: u64,
     mutex_resources: &[String],
 ) -> Result<String> {
-    db.update_graph_run_result(
-        crashed_run_id,
-        GraphRunStatus::Fail,
-        Some(&merge_attempt_marker(crashed_output, attempt, true)),
-        Some(chrono::Utc::now()),
-    )?;
+    let crashed_tagged = merge_attempt_marker(crashed_output, attempt, true);
+    let _ = persist_bookkeeping("update_graph_run_result", || {
+        db.update_graph_run_result(
+            crashed_run_id,
+            GraphRunStatus::Fail,
+            Some(&crashed_tagged),
+            Some(chrono::Utc::now()),
+        )
+    })?;
     tokio::time::sleep(std::time::Duration::from_secs(
         backoff_secs * 2u64.pow(attempt),
     ))
@@ -428,7 +434,7 @@ pub(crate) async fn begin_infra_retry(
     } else {
         GraphRunStatus::Waiting
     };
-    db.insert_graph_run(&GraphNodeRun {
+    let retry_row = GraphNodeRun {
         id: run_id.clone(),
         graph_id: lp.id.clone(),
         spec_id: spec.id.clone(),
@@ -444,6 +450,9 @@ pub(crate) async fn begin_infra_retry(
         session_id: None,
         executed_platform,
         executed_model,
-    })?;
+    };
+    // An exhausted busy escapes to the spec-loop backstop, which routes it
+    // as a Fail step — never an engine-fatal graph verdict.
+    with_busy_retry("insert_graph_run", || db.insert_graph_run(&retry_row))?;
     Ok(run_id)
 }

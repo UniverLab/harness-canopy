@@ -368,3 +368,339 @@ async fn release_on_fail_timeout_interrupt() {
     );
     assert_mutex_tables_empty(&db);
 }
+
+/// Hold a write lock on the test database for `secs` from a second
+/// connection: `BEGIN IMMEDIATE` (its own 30 s busy timeout absorbs any
+/// engine write in flight), signal once held, `ROLLBACK` at the end. Every
+/// engine write during the hold waits out the 5 s `DB_BUSY_TIMEOUT`, then
+/// fails busy — the transient contention the gate retry exists for.
+fn spawn_db_write_holder(
+    db_path: std::path::PathBuf,
+    secs: u64,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    std::thread::JoinHandle<()>,
+) {
+    let (held_tx, held_rx) = tokio::sync::oneshot::channel();
+    let handle = std::thread::spawn(move || {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.busy_timeout(std::time::Duration::from_secs(30))
+            .unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let _ = held_tx.send(());
+        std::thread::sleep(std::time::Duration::from_secs(secs));
+        conn.execute_batch("ROLLBACK").unwrap();
+    });
+    (held_rx, handle)
+}
+
+/// One plain (mutex-free) check node on `spec_id`.
+fn insert_plain_check(db: &Database, spec_id: &str, node_id: &str, command: &str, position: i64) {
+    db.insert_graph_node(&GraphNode {
+        id: node_id.to_string(),
+        spec_id: Some(spec_id.to_string()),
+        graph_id: None,
+        name: node_id.to_string(),
+        kind: GraphNodeKind::Check,
+        config: serde_json::json!({
+            "command": command,
+            "success_condition": "exit_code_0",
+        }),
+        position,
+        created_at: chrono::Utc::now(),
+    })
+    .unwrap();
+}
+
+/// Thread-local tracing capture for the busy-retry warn line.
+/// `#[tokio::test]` runs a current-thread runtime, so the engine tasks
+/// observe this subscriber (precedent: `mcp_error_logging_tests`).
+#[derive(Default, Clone)]
+struct CapturedWarns(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+struct WarnLayer(CapturedWarns);
+
+impl<S> tracing_subscriber::layer::Layer<S> for WarnLayer
+where
+    S: tracing::Subscriber,
+{
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        struct Visitor(String);
+        impl tracing::field::Visit for Visitor {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0.push_str(&format!("{}={:?} ", field.name(), value));
+            }
+        }
+        let mut visitor = Visitor(String::new());
+        event.record(&mut visitor);
+        self.0 .0.lock().unwrap().push(visitor.0);
+    }
+}
+
+/// A BUSY raised on a run-path write while a node waits in the gate is
+/// retried: the graph survives and the node proceeds once the holder
+/// releases. Without the retry the gate write fails past the 5 s busy
+/// timeout and the graph dies "database is locked".
+#[tokio::test]
+async fn busy_gate_waits_then_proceeds() {
+    use tracing_subscriber::layer::SubscriberExt;
+
+    let (dir, db, engine, graph_a, spec_a) = graph_fixture().unwrap();
+    let workdir = dir.path().to_string_lossy().to_string();
+    let (graph_b, spec_b) = insert_second_graph(&db, &workdir, "b").unwrap();
+    insert_cpu_check(&db, &spec_a, "holder", "sleep 10", None);
+    insert_cpu_check(&db, &spec_b, "waiter", "true", None);
+    let engine = std::sync::Arc::new(engine);
+
+    let captured = CapturedWarns::default();
+    let subscriber = tracing_subscriber::registry().with(WarnLayer(captured.clone()));
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    // A wins cpu; B parks in the gate behind it.
+    let engine_h = Arc::clone(&engine);
+    let graph_h = graph_a.clone();
+    let holder = tokio::spawn(async move {
+        engine_h
+            .run_graph(graph_h, None, None, None, None, None)
+            .await
+    });
+    assert!(
+        poll_lease_for(&db, &graph_a, "cpu").await,
+        "holder must grab cpu first"
+    );
+    let engine_w = Arc::clone(&engine);
+    let graph_w = graph_b.clone();
+    let waiter = tokio::spawn(async move {
+        engine_w
+            .run_graph(graph_w, None, None, None, None, None)
+            .await
+    });
+    assert!(
+        poll_waiter_for(&db, &graph_b).await,
+        "waiter must queue behind the holder"
+    );
+
+    // A second connection holds a write lock for 6 s — past the 5 s busy
+    // timeout — while B's gate waits. The gate is woken in the last 300 ms
+    // of the hold: `try_acquire_mutex_set` runs in an explicit transaction
+    // (read-then-write), which fails busy INSTANTLY under a write holder
+    // instead of waiting out the busy timeout, so the 3-attempt budget
+    // spans ~300 ms — the first attempt(s) warn and the last lands after
+    // the release. (Waking at the start of the hold would exhaust the
+    // budget instead; that is the persistent-busy test below.)
+    let db_path = dir.path().join(TEST_DB_FILENAME);
+    let (held_rx, holder_thread) = spawn_db_write_holder(db_path, 6);
+    held_rx.await.expect("holder took the write lock");
+    tokio::time::sleep(Duration::from_millis(5800)).await;
+    db.notify_mutex_waiters();
+
+    waiter.await.unwrap().unwrap();
+    holder.await.unwrap().unwrap();
+    holder_thread.join().unwrap();
+
+    assert_eq!(
+        latest_run_for_spec(&db, &spec_b).status,
+        GraphRunStatus::Pass,
+        "the waiter must proceed once the lock holder releases"
+    );
+    assert_eq!(
+        db.get_graph(&graph_b).unwrap().unwrap().status,
+        GraphStatus::Completed
+    );
+    let warns = captured.0.lock().unwrap().join("\n");
+    assert!(
+        warns.contains("db busy during try_acquire_mutex_set attempt 1/3"),
+        "expected a retry-then-success warn, got: {warns}"
+    );
+    assert_mutex_tables_empty(&db);
+}
+
+/// A BUSY that persists past the retry budget becomes a node Fail carrying
+/// the busy message — routable through the normal fail edge — never an
+/// engine-fatal "database is locked" graph verdict.
+#[tokio::test]
+async fn persistent_busy_is_node_fail() {
+    let (dir, db, engine, graph_a, spec_a) = graph_fixture().unwrap();
+    let workdir = dir.path().to_string_lossy().to_string();
+    let (graph_b, spec_b) = insert_second_graph(&db, &workdir, "b").unwrap();
+    insert_cpu_check(&db, &spec_a, "holder", "sleep 25", None);
+    insert_cpu_check(&db, &spec_b, "waiter", "true", None);
+    let marker = dir.path().join("triage.marker");
+    insert_plain_check(
+        &db,
+        &spec_b,
+        "triage",
+        &format!("touch '{}'", marker.display()),
+        2,
+    );
+    db.insert_graph_edge(&GraphEdge {
+        id: "edge-waiter-triage".to_string(),
+        spec_id: Some(spec_b.clone()),
+        graph_id: None,
+        from_node: "waiter".to_string(),
+        to_node: "triage".to_string(),
+        condition: GraphEdgeCondition::Fail,
+    })
+    .unwrap();
+    let engine = std::sync::Arc::new(engine);
+
+    // A wins cpu; B parks in the gate behind it.
+    let engine_h = Arc::clone(&engine);
+    let graph_h = graph_a.clone();
+    let holder = tokio::spawn(async move {
+        engine_h
+            .run_graph(graph_h, None, None, None, None, None)
+            .await
+    });
+    assert!(
+        poll_lease_for(&db, &graph_a, "cpu").await,
+        "holder must grab cpu first"
+    );
+    let engine_w = Arc::clone(&engine);
+    let graph_w = graph_b.clone();
+    let waiter = tokio::spawn(async move {
+        engine_w
+            .run_graph(graph_w, None, None, None, None, None)
+            .await
+    });
+    assert!(
+        poll_waiter_for(&db, &graph_b).await,
+        "waiter must queue behind the holder"
+    );
+
+    // The write lock outlives the retry budget: the gate is woken 15 s
+    // into the 20 s hold, so its attempts (which fail busy instantly — see
+    // above) exhaust and the best-effort Fail settle's 5 s window covers
+    // the release and lands.
+    let db_path = dir.path().join(TEST_DB_FILENAME);
+    let (held_rx, holder_thread) = spawn_db_write_holder(db_path, 20);
+    held_rx.await.expect("holder took the write lock");
+    tokio::time::sleep(Duration::from_secs(15)).await;
+    db.notify_mutex_waiters();
+
+    waiter.await.unwrap().unwrap();
+    holder_thread.join().unwrap();
+    // End the cpu holder promptly now that B's verdict is in.
+    let holder_run = latest_run_for_spec(&db, &spec_a);
+    assert!(db.interrupt_graph_run(&holder_run.id, "test done").unwrap());
+    holder.await.unwrap().unwrap();
+
+    let runs = db.list_graph_runs_for_spec(&spec_b).unwrap();
+    let waiter_run = runs
+        .iter()
+        .find(|run| run.node_id == "waiter")
+        .expect("a run row for the waiter node");
+    assert_eq!(waiter_run.status, GraphRunStatus::Fail);
+    let message = serde_json::to_string(&waiter_run.output).unwrap();
+    assert!(
+        message.contains("try_acquire_mutex_set"),
+        "busy Fail must name the operation: {message}"
+    );
+    assert!(
+        message.contains("transient"),
+        "busy Fail must say transient: {message}"
+    );
+    assert_ne!(
+        db.get_graph(&graph_b).unwrap().unwrap().status,
+        GraphStatus::Failed,
+        "a persistent busy must never fail the graph"
+    );
+    let triage_run = runs
+        .iter()
+        .find(|run| run.node_id == "triage")
+        .expect("the fail edge must have routed to triage");
+    assert_eq!(triage_run.status, GraphRunStatus::Pass);
+    assert!(marker.exists(), "triage must have executed");
+    assert_mutex_tables_empty(&db);
+}
+
+/// A BUSY that persists past the retry budget on a settle-path write
+/// becomes a node Fail carrying the busy message — routable through the
+/// normal fail edge — never an engine-fatal "database is locked" verdict.
+#[tokio::test]
+async fn settle_path_persistent_busy_routes_fail_edge() {
+    let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+    insert_plain_check(&db, &spec_id, "worker", "sleep 6", 1);
+    let marker = dir.path().join("settle-triage.marker");
+    insert_plain_check(
+        &db,
+        &spec_id,
+        "triage",
+        &format!("touch '{}'", marker.display()),
+        2,
+    );
+    db.insert_graph_edge(&GraphEdge {
+        id: "edge-worker-triage".to_string(),
+        spec_id: Some(spec_id.clone()),
+        graph_id: None,
+        from_node: "worker".to_string(),
+        to_node: "triage".to_string(),
+        condition: GraphEdgeCondition::Fail,
+    })
+    .unwrap();
+    let engine = std::sync::Arc::new(engine);
+
+    let engine_run = Arc::clone(&engine);
+    let graph_run = graph_id.clone();
+    let run = tokio::spawn(async move {
+        engine_run
+            .run_graph(graph_run, None, None, None, None, None)
+            .await
+    });
+    // Start the hold only once the worker row exists: everything before the
+    // settle (baseline, spec status, dispatch insert) lands uncontended, so
+    // the exhaustion below is deterministically the settle write's. The
+    // worker settles ~11 s in (6 s sleep plus the best-effort pid/tail
+    // writes each waiting out one 5 s busy timeout); each of the 3 settle
+    // attempts then waits out its own 5 s timeout and fails inside the
+    // 35 s hold, the verdict becomes a busy Fail, and the retried
+    // best-effort settle lands after the release.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let dispatched = db
+            .list_graph_runs_for_spec(&spec_id)
+            .is_ok_and(|runs| runs.iter().any(|run| run.node_id == "worker"));
+        if dispatched || tokio::time::Instant::now() >= deadline {
+            assert!(dispatched, "worker must dispatch before the hold starts");
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let db_path = dir.path().join(TEST_DB_FILENAME);
+    let (held_rx, holder_thread) = spawn_db_write_holder(db_path, 35);
+    held_rx.await.expect("holder took the write lock");
+
+    run.await.unwrap().unwrap();
+    holder_thread.join().unwrap();
+
+    let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
+    let worker_run = runs
+        .iter()
+        .find(|run| run.node_id == "worker")
+        .expect("a run row for the worker node");
+    assert_eq!(worker_run.status, GraphRunStatus::Fail);
+    let message = serde_json::to_string(&worker_run.output).unwrap();
+    assert!(
+        message.contains("update_graph_run_result"),
+        "busy Fail must name the operation: {message}"
+    );
+    assert!(
+        message.contains("transient"),
+        "busy Fail must say transient: {message}"
+    );
+    assert_eq!(
+        db.get_graph(&graph_id).unwrap().unwrap().status,
+        GraphStatus::Completed,
+        "a persistent busy must never fail the graph"
+    );
+    let triage_run = runs
+        .iter()
+        .find(|run| run.node_id == "triage")
+        .expect("the fail edge must have routed to triage");
+    assert_eq!(triage_run.status, GraphRunStatus::Pass);
+    assert!(marker.exists(), "triage must have executed");
+}

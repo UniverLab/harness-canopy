@@ -10,6 +10,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::daemon::process::{terminate_process_group_async, KILL_GRACE};
+use crate::db::connection::with_busy_retry;
 use crate::db::Database;
 use crate::domain::canopy_config::CanopyConfig;
 use crate::domain::graphs::{GraphNodeRun, GraphRunStatus};
@@ -206,9 +207,9 @@ pub(crate) fn merge_process_record(
     let before = output.clone();
     carry_verdict_end(&mut output, process);
     if output != before {
-        if let Err(error) =
+        if let Err(error) = with_busy_retry("update_graph_run_result", || {
             db.update_graph_run_result(run_id, run.status, Some(&output), run.completed_at)
-        {
+        }) {
             tracing::warn!(run_id, error = %error, "could not persist the verdict process record");
         }
     }

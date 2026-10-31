@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::daemon::cpu_quota;
+use crate::db::connection::with_busy_retry;
 use crate::db::Database;
 use crate::domain::graphs::GraphRunStatus;
 use anyhow::Context;
@@ -101,6 +102,8 @@ pub(crate) fn spawn_shell_command(
         .with_context(|| format!("Failed to spawn command: {command}"))?;
     let pid = child.id();
     if let Some(pid) = pid {
+        // Single-shot best-effort: a cosmetic pid record must never stall
+        // the spawn path through a full retry budget under contention.
         let _ = db.set_graph_run_pid(run_id, pid as i64, crate::system::boot_id().as_deref());
     }
 
@@ -195,12 +198,14 @@ pub(crate) fn handle_timeout(
         "stdout": stdout_snap,
         "stderr": stderr_snap,
     });
-    let _ = db.update_graph_run_result(
-        run_id,
-        GraphRunStatus::Fail,
-        Some(&output),
-        Some(chrono::Utc::now()),
-    );
+    let _ = with_busy_retry("update_graph_run_result", || {
+        db.update_graph_run_result(
+            run_id,
+            GraphRunStatus::Fail,
+            Some(&output),
+            Some(chrono::Utc::now()),
+        )
+    });
     Ok(ShellCommandResult {
         status: GraphRunStatus::Fail,
         output,

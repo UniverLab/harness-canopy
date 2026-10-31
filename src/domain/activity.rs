@@ -8,6 +8,7 @@
 
 use serde_json::Value;
 
+use crate::db::connection::with_busy_retry;
 use crate::db::Database;
 use crate::domain::graphs::GraphSpec;
 use crate::domain::sync::MessageKind;
@@ -154,7 +155,8 @@ pub fn record(db: &Database, event: GraphEvent<'_>) {
     let workdir = event.workdir.to_string();
     let kind = event.kind;
 
-    if let Err(error) = db.insert_graph_event(&GraphEventRecord::from(event)) {
+    let record = GraphEventRecord::from(event);
+    if let Err(error) = with_busy_retry("insert_graph_event", || db.insert_graph_event(&record)) {
         tracing::warn!(
             graph_id,
             kind = kind.as_str(),
@@ -168,14 +170,16 @@ pub fn record(db: &Database, event: GraphEvent<'_>) {
     if !kind.emits_activity() {
         return;
     }
-    if let Err(error) = db.insert_activity_log_entry(
-        &workdir,
-        &format!("graph:{graph_name}"),
-        Some(&graph_id),
-        MessageKind::Info.as_str(),
-        &activity_msg,
-        None,
-    ) {
+    if let Err(error) = with_busy_retry("insert_activity_log_entry", || {
+        db.insert_activity_log_entry(
+            &workdir,
+            &format!("graph:{graph_name}"),
+            Some(&graph_id),
+            MessageKind::Info.as_str(),
+            &activity_msg,
+            None,
+        )
+    }) {
         tracing::warn!(graph_id, graph_name, "activity publish failed: {:#}", error);
     }
 }

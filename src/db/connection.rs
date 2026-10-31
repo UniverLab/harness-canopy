@@ -1,4 +1,4 @@
-use anyhow::{Error, Result};
+use anyhow::{Context, Error, Result};
 use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -112,6 +112,46 @@ pub(crate) fn is_busy_error(error: &Error) -> bool {
     })
 }
 
+/// Attempts for one [`with_busy_retry`] operation (precedent:
+/// `OPEN_TABLE_MAX_ATTEMPTS` in `rag/vector_store.rs`).
+const BUSY_RETRY_MAX_ATTEMPTS: u32 = 3;
+
+/// Run a synchronous engine-path DB operation, retrying transient
+/// `SQLITE_BUSY`/`SQLITE_LOCKED` failures with backoff instead of failing
+/// the caller. Non-busy errors return at once; a busy error that persists
+/// past the budget returns wrapped, naming the operation and that the
+/// failure is transient.
+///
+/// Sync, not async: every DB call runs synchronously behind the connection
+/// `Mutex`. Single-statement attempts wait out the 5 s `DB_BUSY_TIMEOUT`
+/// before the driver reports busy, but explicit-transaction attempts
+/// (read-then-write, e.g. `try_acquire_mutex_set`) fail busy immediately
+/// under a write holder — either way the sleep here (100 ms × attempt,
+/// precedent `vector_store.rs`) spaces the attempts.
+pub(crate) fn with_busy_retry<T>(operation: &str, mut f: impl FnMut() -> Result<T>) -> Result<T> {
+    let mut last_error = None;
+    for attempt in 1..=BUSY_RETRY_MAX_ATTEMPTS {
+        match f() {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                if !is_busy_error(&error) {
+                    return Err(error);
+                }
+                tracing::warn!(
+                    "db busy during {operation} attempt {attempt}/{BUSY_RETRY_MAX_ATTEMPTS}"
+                );
+                last_error = Some(error);
+                if attempt < BUSY_RETRY_MAX_ATTEMPTS {
+                    std::thread::sleep(std::time::Duration::from_millis(100 * u64::from(attempt)));
+                }
+            }
+        }
+    }
+    Err(last_error.expect("retry loop runs at least once")).with_context(|| {
+        format!("transient database busy during {operation} after {BUSY_RETRY_MAX_ATTEMPTS} attempts; safe to retry the node")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,5 +201,63 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))
             .unwrap();
         assert_eq!(rows, 2, "both writes must be committed");
+    }
+
+    fn busy_error() -> anyhow::Error {
+        anyhow::Error::new(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ErrorCode::DatabaseBusy,
+                extended_code: 5,
+            },
+            None,
+        ))
+    }
+
+    /// Busy failures are retried: busy, busy, ok resolves to ok.
+    #[test]
+    fn with_busy_retry_succeeds_after_transient_busy() {
+        let mut calls = 0;
+        let result = with_busy_retry("test_op", || -> Result<i32> {
+            calls += 1;
+            if calls < 3 {
+                return Err(busy_error());
+            }
+            Ok(7)
+        });
+        assert_eq!(result.unwrap(), 7);
+        assert_eq!(calls, 3);
+    }
+
+    /// Non-busy errors return at once, with no retry.
+    #[test]
+    fn with_busy_retry_returns_non_busy_immediately() {
+        let mut calls = 0;
+        let result = with_busy_retry("test_op", || -> Result<i32> {
+            calls += 1;
+            Err(anyhow::anyhow!("boom"))
+        });
+        assert!(result.unwrap_err().to_string().contains("boom"));
+        assert_eq!(calls, 1);
+    }
+
+    /// A busy error that outlives the budget names the operation and says
+    /// the failure is transient.
+    #[test]
+    fn with_busy_retry_exhausted_names_operation_and_transient() {
+        let mut calls = 0;
+        let result = with_busy_retry("try_acquire_mutex_set", || -> Result<i32> {
+            calls += 1;
+            Err(busy_error())
+        });
+        let message = format!("{:#}", result.unwrap_err());
+        assert_eq!(calls, 3);
+        assert!(
+            message.contains("try_acquire_mutex_set"),
+            "exhausted error must name the operation: {message}"
+        );
+        assert!(
+            message.contains("transient"),
+            "exhausted error must say transient: {message}"
+        );
     }
 }

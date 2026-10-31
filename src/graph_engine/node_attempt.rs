@@ -1,4 +1,5 @@
 use super::*;
+use crate::db::connection::{is_busy_error, with_busy_retry};
 
 /// Owned setup for one node dispatch attempt.
 pub(crate) struct NodeAttemptSetup {
@@ -138,7 +139,7 @@ impl GraphEngine {
         } else {
             GraphRunStatus::Waiting
         };
-        self.db.insert_graph_run(&GraphNodeRun {
+        let run_row = GraphNodeRun {
             id: run_id.clone(),
             graph_id: ctx.lp.id.clone(),
             spec_id: ctx.spec.id.clone(),
@@ -154,7 +155,8 @@ impl GraphEngine {
             session_id: None,
             executed_platform,
             executed_model,
-        })?;
+        };
+        with_busy_retry("insert_graph_run", || self.db.insert_graph_run(&run_row))?;
 
         {
             let node_platform = node
@@ -446,17 +448,31 @@ impl GraphEngine {
         {
             return Ok(None);
         }
-        let run = self.db.get_graph_run(run_id)?.ok_or_else(|| {
-            anyhow!("Graph run '{run_id}' was deleted while waiting for its mutex.")
-        })?;
-        Ok(Some((
-            interrupted_execution(format!(
+        let run = match with_busy_retry("get_graph_run", || self.db.get_graph_run(run_id)) {
+            Ok(run) => run.ok_or_else(|| {
+                anyhow!("Graph run '{run_id}' was deleted while waiting for its mutex.")
+            })?,
+            Err(error) if is_busy_error(&error) => {
+                return Ok(Some(busy_stopped_execution(
+                    &self.db, ctx, node, run_id, &error,
+                )));
+            }
+            Err(error) => return Err(error),
+        };
+        // A gate busy-settle narrates its own message as the verdict summary
+        // instead of the generic stopped-while-waiting text.
+        let execution = match busy_fail_message(&run) {
+            Some(summary) => NodeExecution {
+                status: GraphRunStatus::Fail,
+                output: run.output.clone().unwrap_or_else(|| serde_json::json!({})),
+                summary,
+            },
+            None => interrupted_execution(format!(
                 "Node '{}' stopped while waiting for its mutex.",
                 node.name
             )),
-            run,
-            false,
-        )))
+        };
+        Ok(Some((execution, run, false)))
     }
 
     /// CB82: settle an attempt killed by daemon shutdown — record it as
@@ -467,12 +483,14 @@ impl GraphEngine {
         run_id: &str,
         node: &GraphNode,
     ) -> Result<(NodeExecution, GraphNodeRun, bool)> {
-        let _ = self.db.update_graph_run_result(
-            run_id,
-            GraphRunStatus::Fail,
-            Some(&shutdown_interrupted_output()),
-            Some(chrono::Utc::now()),
-        );
+        let _ = with_busy_retry("update_graph_run_result", || {
+            self.db.update_graph_run_result(
+                run_id,
+                GraphRunStatus::Fail,
+                Some(&shutdown_interrupted_output()),
+                Some(chrono::Utc::now()),
+            )
+        });
         let run = self
             .db
             .get_graph_run(run_id)?
@@ -574,8 +592,10 @@ impl GraphEngine {
         } else {
             let head = capture_workdir_head(workdir).await;
             let dirty = capture_workdir_dirty(workdir).await;
-            self.db
-                .set_graph_spec_start_state(&spec.id, head.as_deref(), dirty)?;
+            let _ = persist_bookkeeping("set_graph_spec_start_state", || {
+                self.db
+                    .set_graph_spec_start_state(&spec.id, head.as_deref(), dirty)
+            })?;
             (head, dirty)
         };
         // C15: `spec_committed_head` follows the exact same
@@ -586,7 +606,9 @@ impl GraphEngine {
             if directed || (is_resume && spec.status == GraphSpecStatus::Running) {
                 spec_details.spec.spec_committed_head.clone()
             } else {
-                self.db.set_graph_spec_committed_head(&spec.id, None)?;
+                let _ = persist_bookkeeping("set_graph_spec_committed_head", || {
+                    self.db.set_graph_spec_committed_head(&spec.id, None)
+                })?;
                 None
             };
         Ok((spec_start_head, spec_start_dirty, spec_committed_head))
@@ -610,8 +632,10 @@ impl GraphEngine {
                 capture_workdir_dirty(workdir).await,
             ),
         };
-        self.db
-            .set_graph_spec_start_state(spec_id, head.as_deref(), dirty)?;
+        let _ = persist_bookkeeping("set_graph_spec_start_state", || {
+            self.db
+                .set_graph_spec_start_state(spec_id, head.as_deref(), dirty)
+        })?;
         Ok((head, dirty))
     }
 
@@ -654,7 +678,9 @@ impl GraphEngine {
         workdir: &str,
     ) -> (Option<i64>, Vec<String>) {
         let (dirty, paths) = capture_workdir_dirty_with_paths(workdir).await;
-        if let Err(e) = self.db.set_graph_spec_end_state(spec_id, dirty, &paths) {
+        if let Err(e) = with_busy_retry("set_graph_spec_end_state", || {
+            self.db.set_graph_spec_end_state(spec_id, dirty, &paths)
+        }) {
             tracing::warn!(
                 "Failed to record spec end dirty state for '{}': {}",
                 spec_id,
@@ -662,69 +688,6 @@ impl GraphEngine {
             );
         }
         (dirty, paths)
-    }
-
-    /// A spec that terminates because a FAILING node had no outgoing edge
-    /// leaves no blocker anywhere a human can see unless something writes
-    /// one — see the module-level defect this closes. Writes a derived
-    /// blocker onto the terminating run's `output.blocker`, the exact key
-    /// `graph_run_blocker` (daemon/handler.rs) already reads for `graph`
-    /// and `graph`'s `blocked`/`blocker` fields, so no reader needs to
-    /// change. Never invoked for a PASSING termination (the normal, correct
-    /// end of a spec — see `Check committed`) and never overwrites a
-    /// blocker `graph_report_blocker` already recorded, since that text is
-    /// more specific than anything derived here.
-    pub(crate) fn record_terminal_blocker(
-        &self,
-        run_id: &str,
-        node_name: &str,
-        final_execution: &NodeExecution,
-    ) -> anyhow::Result<()> {
-        if final_execution.output.get("blocker").is_some() {
-            return Ok(());
-        }
-        let blocker = format!(
-            "Spec terminated: node '{}' ended '{}' with no outgoing edge for that status. {}",
-            node_name,
-            final_execution.status.as_str(),
-            final_execution.summary,
-        );
-        let mut output = final_execution.output.clone();
-        match output.as_object_mut() {
-            Some(map) => {
-                map.insert("blocker".to_string(), Value::String(blocker));
-            }
-            None => output = serde_json::json!({ "blocker": blocker }),
-        }
-        self.db
-            .update_graph_run_result(run_id, final_execution.status, Some(&output), None)?;
-        Ok(())
-    }
-
-    /// Overwrite (not merge-and-preserve, unlike [`Self::record_terminal_blocker`])
-    /// `run_id`'s `output.blocker` with C19's cross-run budget text. Called
-    /// only once [`Self::record_spec_attempt`] has confirmed the budget is
-    /// actually exceeded, at which point this attempt's blocker is strictly
-    /// more informative than whatever dead-end text (if any) is already
-    /// there — naming the spec, the attempt count, and the last failure
-    /// rather than just this one node.
-    pub(crate) fn set_run_blocker(
-        &self,
-        run_id: &str,
-        status: GraphRunStatus,
-        output: &Value,
-        blocker: &str,
-    ) -> Result<()> {
-        let mut merged = output.clone();
-        match merged.as_object_mut() {
-            Some(map) => {
-                map.insert("blocker".to_string(), Value::String(blocker.to_string()));
-            }
-            None => merged = serde_json::json!({ "blocker": blocker }),
-        }
-        self.db
-            .update_graph_run_result(run_id, status, Some(&merged), None)?;
-        Ok(())
     }
 
     /// C19: called from [`Self::run_spec`] every time a spec is about to end
@@ -754,7 +717,16 @@ impl GraphEngine {
         if is_infra_failure {
             return Ok(None);
         }
-        let attempts = self.db.increment_graph_spec_cross_run_attempts(&spec.id)?;
+        let attempts = match with_busy_retry("increment_graph_spec_cross_run_attempts", || {
+            self.db.increment_graph_spec_cross_run_attempts(&spec.id)
+        }) {
+            Ok(attempts) => attempts,
+            Err(error) if is_busy_error(&error) => {
+                tracing::warn!("{error:#}; skipping the cross-run budget this attempt");
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
         if (attempts as usize) < self.spec_attempt_limit {
             return Ok(None);
         }

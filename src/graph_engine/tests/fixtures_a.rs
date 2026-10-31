@@ -6,7 +6,7 @@ use tempfile::{tempdir, TempDir};
 /// CB57: shared by `graph_fixture`/`bare_graph_fixture` and every call site
 /// that needs to hand a fake member script its own DB path for
 /// self-reporting, so the filename can't drift between the two.
-const TEST_DB_FILENAME: &str = "test.db";
+pub(crate) const TEST_DB_FILENAME: &str = "test.db";
 
 /// CB57 (FR5): the test binary itself — the executable fake member
 /// scripts re-execute to run `self_report_verdict_writer` and file
