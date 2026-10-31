@@ -226,7 +226,7 @@ fn status_icon_and_label(
     if let Some(at) = state.autorun_at {
         let local = at.with_timezone(&Local);
         return (
-            "⏰",
+            "◷",
             format!("autorun {}", local.format(time_format)),
             Color::Cyan,
         );

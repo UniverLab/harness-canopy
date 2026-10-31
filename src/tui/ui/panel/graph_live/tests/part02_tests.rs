@@ -740,3 +740,47 @@ fn pausing_header_names_the_nodes_it_waits_for() {
     );
 }
 // Breaks if: the pending-pause label regresses to bare `pausing`.
+
+/// A scheduled autorun renders `◷ autorun …` in the graph header — the
+/// single-width clock already used for CLI `Waiting` — never the
+/// double-width alarm-clock emoji.
+#[test]
+fn header_shows_single_width_glyph_for_autorun() {
+    let mut state = running_state();
+    state.autorun_at = Some(Utc::now() + chrono::Duration::hours(1));
+    let node_info = NodeRunInfo::default();
+    let text = render_to_text(80, 40, |frame, area| {
+        render_graph_live_view(
+            frame,
+            area,
+            &LiveViewContext {
+                state: &state,
+                follow: true,
+                follow_anchor: None,
+                highlighted_node_id: None,
+                node_info: &node_info,
+                blocked: false,
+                now: Utc::now(),
+                theme: &Theme::classic(),
+                time_format: "%H:%M",
+                selected_spec_id: None,
+                spec_scroll: 0,
+                scroll: 0,
+            },
+        );
+    });
+    let header = text
+        .lines()
+        .find(|line| line.contains("autorun"))
+        .expect("autorun header line missing");
+    assert!(
+        header.starts_with("◷ "),
+        "autorun header must start with `◷` plus one space, got: {header:?}"
+    );
+    assert!(
+        !header.starts_with(concat!("◷", "  ")),
+        "autorun header must not take two spaces after `◷`: {header:?}"
+    );
+}
+// Breaks if: the autorun header regresses to the double-width alarm-clock
+// glyph or picks up a second space after the glyph.

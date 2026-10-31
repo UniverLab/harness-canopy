@@ -234,7 +234,7 @@ fn record_model_acquisition_step(
         ));
     } else {
         wiz.add(
-            "\x1b[33m⬇\x1b[0m Model will download in the background — indexing begins once it's ready"
+            "\x1b[33m▼\x1b[0m Model will download in the background — indexing begins once it's ready"
                 .to_string(),
         );
     }

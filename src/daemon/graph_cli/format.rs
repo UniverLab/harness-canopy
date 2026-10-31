@@ -203,7 +203,7 @@ pub(super) fn run_status_icon(
         GraphRunStatus::Pass => "\x1b[32m✓\x1b[0m",
         GraphRunStatus::Fail => "\x1b[31m✗\x1b[0m",
         GraphRunStatus::Interrupted => "\x1b[33m⚑\x1b[0m",
-        GraphRunStatus::Error => "\x1b[33m⚠\x1b[0m",
+        GraphRunStatus::Error => "\x1b[33m▲\x1b[0m",
     }
 }
 
@@ -220,9 +220,9 @@ pub(super) fn format_dt(dt: DateTime<Utc>) -> String {
         .to_string()
 }
 
-/// Compact `⏲ HH:MMZ` badge for a scheduled autorun, used in `graph list` rows.
+/// Compact `◷ HH:MMZ` badge for a scheduled autorun, used in `graph list` rows.
 pub(super) fn format_autorun_compact(at: DateTime<Utc>) -> String {
-    format!("⏲ {}", at.format("%H:%MZ"))
+    format!("◷ {}", at.format("%H:%MZ"))
 }
 
 /// Human relative hint for a scheduled autorun, e.g. "in 2h 14m", used

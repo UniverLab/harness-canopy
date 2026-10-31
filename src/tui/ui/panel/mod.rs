@@ -1702,7 +1702,7 @@ mod tests {
             Some(crate::rag::status::AcquisitionState::Downloading { started_at: 0 });
         let theme = Theme::classic();
         let (text, color) = rag_status(&app, &theme);
-        assert_eq!(text, "⬇ downloading");
+        assert_eq!(text, "▼ downloading");
         assert_eq!(color, Color::Yellow);
     }
 
@@ -1724,7 +1724,7 @@ mod tests {
             Some(crate::rag::status::AcquisitionState::Preparing { started_at: 0 });
         let theme = Theme::classic();
         let (text, color) = rag_status(&app, &theme);
-        assert_eq!(text, "⚙ preparing");
+        assert_eq!(text, "◉ preparing");
         assert_eq!(color, Color::Yellow);
     }
 

@@ -1413,7 +1413,7 @@ mod tests {
     #[test]
     fn format_autorun_compact_renders_utc_badge() {
         let at = DateTime::<Utc>::from_timestamp(5 * 3600, 0).unwrap(); // 05:00:00 UTC
-        assert_eq!(format_autorun_compact(at), "⏲ 05:00Z");
+        assert_eq!(format_autorun_compact(at), "◷ 05:00Z");
     }
 
     #[test]
@@ -1465,7 +1465,7 @@ mod tests {
     fn run_status_icon_error_is_warning_not_fail() {
         let icon = run_status_icon(GraphRunStatus::Error, None);
         assert!(
-            icon.contains("⚠"),
+            icon.contains("▲"),
             "Error must render a warning icon, got {icon:?}"
         );
         assert!(!icon.contains("✗"), "Error must not render the fail icon");

@@ -476,11 +476,11 @@ fn print_rag_report_summary(db: &Database, report: &RagReportData<'_>) -> Result
             crate::rag::status::RagModelStatus::Unavailable(reason) =>
                 format!("\x1b[31m✗ unavailable\x1b[0m — {reason}"),
             crate::rag::status::RagModelStatus::Downloading { started_at } => format!(
-                "\x1b[33m⬇ downloading\x1b[0m ({}s so far)",
+                "\x1b[33m▼ downloading\x1b[0m ({}s so far)",
                 crate::rag::status::elapsed_secs(*started_at)
             ),
             crate::rag::status::RagModelStatus::Preparing { started_at } => format!(
-                "\x1b[33m⚙ preparing\x1b[0m ({}s so far)",
+                "\x1b[33m◉ preparing\x1b[0m ({}s so far)",
                 crate::rag::status::elapsed_secs(*started_at)
             ),
             crate::rag::status::RagModelStatus::DownloadFailed(reason) => format!(
