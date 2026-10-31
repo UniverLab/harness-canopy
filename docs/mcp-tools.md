@@ -95,6 +95,13 @@ session later instead of polling), and `intelligence_upsert` /
 | `graph_report_blocker` | Report a blocker for an active graph node (same optional-ids resolution and prefix correction as `graph_complete_node`) |
 | `sandbox` | List, inspect, land and discard the sandbox worktrees a sandboxed graph run leaves behind. Actions: `list` (optional `graph_id`/`status` — every sandbox with its id, path, graph, branch, base branch, original workdir, status, whether its branch holds unique commits, how far behind its base it is, and whether its worktree is still registered), `get` (`id` — one sandbox by id or unambiguous prefix), `land` (`id` — merges onto the base branch, marks it `merged` and removes the worktree; refuses rather than forcing when the base checkout is on another branch, has uncommitted changes, or the merge conflicts, naming the conflicting paths, and leaves the sandbox untouched), `discard` (`id`, optional `force` — removes the worktree and branch, marks it `discarded`; refuses unique commits unless `force: true`) — pass `action` plus the params the refusal/table lists. The same operations as `canopy sandbox`, which is the CLI form ([Sandboxes](cli-reference.md#sandboxes)) |
 
+A `graph_control` `pause` while a node runs records a pending pause instead
+of pausing at once: `graph` `get`/`list` keep reporting status `running`
+with `pause_pending: true` and the waited-for node names in
+`pause_waiting_for`, a second `pause` is a no-op answering `pause already
+pending`, and `continue`/`run` cancel it — see
+[Pending pauses](graphs-operations.md#pending-pauses).
+
 ## Crews (1)
 
 | Tool | Description |

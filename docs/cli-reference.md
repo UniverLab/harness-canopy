@@ -164,6 +164,11 @@ missing.
 and goes through the daemon like the other `graph` subcommands. See the
 [Event log](graphs-operations.md#event-log) section.
 
+A `pause` requested while a node runs is recorded at once and the graph
+pauses at the next node boundary; meanwhile a second `pause` is a no-op
+answering `pause already pending`, and `continue`/`run` cancel the pending
+pause instead — see [Pending pauses](graphs-operations.md#pending-pauses).
+
 A `continue` on a sandboxed graph resumes inside that run's sandbox worktree;
 when the worktree is gone the continue is refused, naming the sandbox id,
 rather than running the graph against the original workdir. A failed
