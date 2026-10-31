@@ -276,6 +276,15 @@ async fn graphs_answers_progress_names_and_filters_archived_and_stale() {
     server.abort();
 }
 
+/// Run one raw-SQL poison statement against the test database file through
+/// a second connection — TEXT in an INTEGER column fails the i64 read for
+/// that row only.
+fn poison_test_db(dir: &tempfile::TempDir, sql: &str) {
+    let poison = rusqlite::Connection::open(dir.path().join("test.db")).unwrap();
+    poison.execute(sql, []).unwrap();
+    drop(poison);
+}
+
 // ── poisoned rows ───────────────────────────────────────────────────────
 
 /// One unreadable graph must never blank the whole served list: the running
@@ -301,14 +310,10 @@ async fn graphs_skips_poisoned_row_and_lists_running() {
     .unwrap();
     // TEXT in an INTEGER column: the i64 read in summarize->current_spec
     // fails for this graph only.
-    let poison = rusqlite::Connection::open(dir.path().join("test.db")).unwrap();
-    poison
-        .execute(
-            "UPDATE graph_specs SET started_at='not-an-integer' WHERE id='s-poison'",
-            [],
-        )
-        .unwrap();
-    drop(poison);
+    poison_test_db(
+        &dir,
+        "UPDATE graph_specs SET started_at='not-an-integer' WHERE id='s-poison'",
+    );
 
     let (mut client, server) = connected_client(&db).await;
     send_json(&mut client, &json!({"t": "graphs", "req": "gp1"})).await;
@@ -318,6 +323,70 @@ async fn graphs_skips_poisoned_row_and_lists_running() {
         "poisoned row must not fail the list: {answer}"
     );
     assert_eq!(answer["req"], "gp1");
+    let listed = answer["graphs"].as_array().expect("graphs array");
+    let ids: Vec<&str> = listed.iter().map(|g| g["id"].as_str().unwrap()).collect();
+    assert!(ids.contains(&"g-run"), "running graph listed: {ids:?}");
+    assert!(
+        !ids.contains(&"g-poison"),
+        "poisoned graph skipped: {ids:?}"
+    );
+    server.abort();
+}
+
+/// A graph unreadable at the `updated_at` read is skipped on the ranking
+/// pass, not fatal to the list: the poison here is in `graph_runs`, which
+/// only `graph_updated_at` reads before `summarize` is ever reached.
+#[tokio::test]
+async fn graphs_skips_poisoned_run_row_and_lists_running() {
+    let (db, dir) = test_db();
+    db.insert_graph(&graph_row("g-run", GraphStatus::Running, "/srv/work/run"))
+        .unwrap();
+    db.insert_graph(&graph_row(
+        "g-poison",
+        GraphStatus::Running,
+        "/srv/work/poison",
+    ))
+    .unwrap();
+    db.insert_graph_spec(&spec_row(
+        "s-poison",
+        Some("g-poison"),
+        "poisoned spec",
+        0,
+        GraphSpecStatus::Pending,
+    ))
+    .unwrap();
+    db.insert_graph_node(&node_row(
+        "n-poison",
+        Some("s-poison"),
+        None,
+        "poisoned node",
+    ))
+    .unwrap();
+    let run = run_row(
+        "g-poison",
+        "s-poison",
+        "n-poison",
+        GraphRunStatus::Running,
+        Utc::now(),
+        1,
+    );
+    let run_id = run.id.clone();
+    db.insert_graph_run(&run).unwrap();
+    // TEXT in an INTEGER column: latest_graph_run_at's i64 read fails for
+    // this graph only, before summarize runs.
+    poison_test_db(
+        &dir,
+        &format!("UPDATE graph_runs SET started_at='not-an-integer' WHERE id='{run_id}'"),
+    );
+
+    let (mut client, server) = connected_client(&db).await;
+    send_json(&mut client, &json!({"t": "graphs", "req": "gu1"})).await;
+    let answer = recv_json(&mut client, "graphs").await;
+    assert_eq!(
+        answer["t"], "graphs",
+        "poisoned run row must not fail the list: {answer}"
+    );
+    assert_eq!(answer["req"], "gu1");
     let listed = answer["graphs"].as_array().expect("graphs array");
     let ids: Vec<&str> = listed.iter().map(|g| g["id"].as_str().unwrap()).collect();
     assert!(ids.contains(&"g-run"), "running graph listed: {ids:?}");
@@ -375,14 +444,10 @@ async fn graphs_all_poisoned_answers_empty_list() {
         GraphSpecStatus::Pending,
     ))
     .unwrap();
-    let poison = rusqlite::Connection::open(dir.path().join("test.db")).unwrap();
-    poison
-        .execute(
-            "UPDATE graph_specs SET started_at='not-an-integer' WHERE id='s-poison'",
-            [],
-        )
-        .unwrap();
-    drop(poison);
+    poison_test_db(
+        &dir,
+        "UPDATE graph_specs SET started_at='not-an-integer' WHERE id='s-poison'",
+    );
 
     let (mut client, server) = connected_client(&db).await;
     send_json(&mut client, &json!({"t": "graphs", "req": "ge1"})).await;
