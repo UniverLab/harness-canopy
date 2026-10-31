@@ -269,7 +269,7 @@ fn natural_exit_drops_from_list_and_emits_both() {
 
     hub.record_natural_exit(&session, 3);
 
-    match events.blocking_recv().expect("the first event") {
+    match events.try_recv().expect("the first event") {
         HubEvent::Exited {
             id: got,
             code,
@@ -281,7 +281,7 @@ fn natural_exit_drops_from_list_and_emits_both() {
         }
         other => panic!("expected `exited` first, got {other:?}"),
     }
-    match events.blocking_recv().expect("the second event") {
+    match events.try_recv().expect("the second event") {
         HubEvent::SessionRemoved(got) => assert_eq!(got, id),
         other => panic!("expected `session_removed` second, got {other:?}"),
     }

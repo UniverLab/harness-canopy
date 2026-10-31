@@ -353,7 +353,9 @@ impl App {
         // this TUI attached is not: attaching it would replay its exit
         // handling (a failure notification, mission closing) for work that
         // ended in an earlier run, and would put a finished card back in the
-        // sidebar on every start. The hub keeps it for whoever was attached.
+        // sidebar on every start. The hub drops an exited session from the
+        // list, but an exited item can still arrive in a list taken before
+        // the removal.
         if item.status != "running" {
             return;
         }
@@ -517,11 +519,11 @@ mod tests {
         assert_eq!(app.hub_port(), crate::resolve_port(None));
     }
 
-    /// A session the hub still lists after it exited — the hub keeps it for
-    /// whoever was attached — must not be re-attached on a later start:
-    /// attaching it replays its exit handling (a failure notification, mission
-    /// closing) for work that ended in an earlier run, and puts a finished
-    /// card back in the sidebar.
+    /// An exited session item — the hub drops it from the list, but one can
+    /// still arrive from a list taken before the removal — must not be
+    /// re-attached on a later start: attaching it replays its exit handling
+    /// (a failure notification, mission closing) for work that ended in an
+    /// earlier run, and puts a finished card back in the sidebar.
     #[test]
     fn list_attach_skips_sessions_that_already_exited() {
         let hub = &crate::sessions::client::test_client().hub;
