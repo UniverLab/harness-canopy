@@ -17,7 +17,12 @@ pub mod metrics;
 pub mod pairing;
 pub mod panel;
 pub mod peer;
+pub mod peer_ice;
 pub mod qr;
+#[cfg(test)]
+#[path = "reconnect_tests.rs"]
+mod reconnect_tests;
 pub mod relay;
+pub mod relay_socket;
 pub mod signaling;
 pub mod trust;

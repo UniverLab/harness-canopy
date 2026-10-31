@@ -11,7 +11,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -21,7 +21,7 @@ use crate::sessions::ws::SessionsState;
 use crate::sessions::HubEvent;
 
 use super::bridge::RemoteBridge;
-use super::peer::{Peer, PeerEvent};
+use super::peer::{LinkState, Peer, PeerEvent};
 use super::relay::{ConnectionRegistry, SignalTx};
 use super::signaling::{self, MAX_DEVICE_PEERS};
 use super::trust::Grant;
@@ -282,15 +282,50 @@ fn fitting_frame(frame: String, max_frame: usize) -> String {
     )
 }
 
+/// Timing for the serve watchdog: how often liveness is re-checked and how
+/// long a sick link may linger. Production runs minutes; the reconnect
+/// tests pass seconds.
+#[derive(Debug, Clone, Copy)]
+pub struct WatchdogConfig {
+    /// How often the serve loop re-checks transport liveness.
+    pub tick: Duration,
+    /// How long `Disconnected` may last before the peer ends.
+    pub disconnect_grace: Duration,
+    /// How long a peer that never opened its channel may live.
+    pub open_grace: Duration,
+}
+
+impl WatchdogConfig {
+    /// The production timing: a 5 s check with 60 s graces.
+    const fn production() -> Self {
+        Self {
+            tick: Duration::from_secs(5),
+            disconnect_grace: Duration::from_secs(60),
+            open_grace: Duration::from_secs(60),
+        }
+    }
+}
+
 /// Serve one established peer: relay its ICE, bridge its data channel, and
 /// stop as soon as the channel closes or the device is revoked.
-pub fn spawn(mut session: PeerSession) {
+pub fn spawn(session: PeerSession) {
+    spawn_with_config(session, WatchdogConfig::production());
+}
+
+fn spawn_with_config(mut session: PeerSession, config: WatchdogConfig) {
     tokio::spawn(async move {
-        serve(&mut session).await;
+        serve(&mut session, config).await;
     });
 }
 
-async fn serve(session: &mut PeerSession) {
+/// Test hook: serve one peer with shortened watchdog timing, so the
+/// reconnect tests watch eviction in seconds instead of a minute.
+#[cfg(test)]
+pub fn spawn_with_watchdog(session: PeerSession, config: WatchdogConfig) {
+    spawn_with_config(session, config);
+}
+
+async fn serve(session: &mut PeerSession, config: WatchdogConfig) {
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<String>();
     let mut bridge = RemoteBridge::with_grant(session.state.clone(), session.grant.clone());
     let mut events = session.state.hub.subscribe_events();
@@ -298,38 +333,30 @@ async fn serve(session: &mut PeerSession) {
     // hub event produced before the channel exists is dropped (the device
     // resynchronises with `list`), never reordered around the greeting.
     let mut greeted = false;
+    let started = Instant::now();
+    let mut disconnected_since: Option<Instant> = None;
+    let mut watchdog = tokio::time::interval(config.tick);
+    // Every arm resolves to why the peer ends, if it does; one break point
+    // below keeps the loop readable as arms are added.
     let ended = loop {
-        tokio::select! {
-            _ = session.token.cancelled() => break "revoked or closed by the device",
-            message = session.control.recv() => match message {
-                Some(Control::Ice(candidate)) => {
-                    let _ = session.peer.add_remote_candidate(&candidate).await;
-                }
-                None => break "replaced by a newer connection",
-            },
-            frame = out_rx.recv() => {
-                if let Some(frame) = frame {
-                    if greeted
-                        && session
-                            .peer
-                            .send_text(&fitting_frame(frame, session.max_frame))
-                            .await
-                            .is_err()
-                    {
-                        break "the data channel refused a write";
-                    }
-                }
-            }
+        let reason: Option<&'static str> = tokio::select! {
+            _ = session.token.cancelled() => Some("revoked or closed by the device"),
+            message = session.control.recv() => on_control(session, message).await.err(),
+            frame = out_rx.recv() => on_out_frame(session, frame, greeted).await.err(),
             event = session.peer.next() => {
-                if let Err(ended) = on_peer_event(session, event, &mut greeted, &mut bridge, &out_tx).await {
-                    break ended;
-                }
+                on_peer_event(session, event, &mut greeted, &mut bridge, &out_tx)
+                    .await
+                    .err()
             }
-            hub_event = events.recv() => match hub_event {
-                Ok(event) => forward_hub_event(&mut bridge, &out_tx, greeted, event),
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break "the hub stopped",
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-            },
+            hub_event = events.recv() => {
+                on_hub_event(&mut bridge, &out_tx, greeted, hub_event).err()
+            }
+            _ = watchdog.tick() => {
+                watchdog_check(session, &mut disconnected_since, greeted, started, config)
+            }
+        };
+        if let Some(ended) = reason {
+            break ended;
         }
     };
     tracing::info!("remote: device {} disconnected: {ended}", session.device_id);
@@ -340,6 +367,85 @@ async fn serve(session: &mut PeerSession) {
     session
         .connections
         .release(&session.device_id, &session.token);
+}
+
+/// One watchdog pass over the transport: `Some` reason ends the peer so its
+/// slot frees through the existing `remove`, `None` keeps serving. A failed
+/// or closed link ends now; a disconnected one gets its grace, then ends;
+/// a peer whose channel never opened gets its own grace, then ends.
+fn watchdog_check(
+    session: &PeerSession,
+    disconnected_since: &mut Option<Instant>,
+    greeted: bool,
+    started: Instant,
+    config: WatchdogConfig,
+) -> Option<&'static str> {
+    match session.peer.link_state() {
+        LinkState::Down => Some("the transport failed or closed"),
+        LinkState::Disconnected => {
+            let since = disconnected_since.get_or_insert_with(Instant::now);
+            if since.elapsed() > config.disconnect_grace {
+                Some("the transport stayed disconnected past its grace")
+            } else {
+                None
+            }
+        }
+        LinkState::Up => {
+            *disconnected_since = None;
+            if !greeted && started.elapsed() > config.open_grace {
+                Some("the channel never opened past its grace")
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Handle one relay-routed control message; `Err` carries why the peer ends.
+async fn on_control(session: &PeerSession, message: Option<Control>) -> Result<(), &'static str> {
+    match message {
+        Some(Control::Ice(candidate)) => {
+            let _ = session.peer.add_remote_candidate(&candidate).await;
+            Ok(())
+        }
+        None => Err("replaced by a newer connection"),
+    }
+}
+
+/// Forward one queued outbound frame; `Err` carries why the peer ends.
+async fn on_out_frame(
+    session: &PeerSession,
+    frame: Option<String>,
+    greeted: bool,
+) -> Result<(), &'static str> {
+    let Some(frame) = frame else {
+        return Ok(());
+    };
+    if !greeted {
+        return Ok(());
+    }
+    session
+        .peer
+        .send_text(&fitting_frame(frame, session.max_frame))
+        .await
+        .map_err(|_| "the data channel refused a write")
+}
+
+/// Handle one hub receive; `Err` carries why the peer ends.
+fn on_hub_event(
+    bridge: &mut RemoteBridge,
+    out_tx: &mpsc::UnboundedSender<String>,
+    greeted: bool,
+    hub_event: Result<HubEvent, tokio::sync::broadcast::error::RecvError>,
+) -> Result<(), &'static str> {
+    match hub_event {
+        Ok(event) => {
+            forward_hub_event(bridge, out_tx, greeted, event);
+            Ok(())
+        }
+        Err(tokio::sync::broadcast::error::RecvError::Closed) => Err("the hub stopped"),
+        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => Ok(()),
+    }
 }
 
 /// Forward one hub event to the bridge. Held until the greeting is

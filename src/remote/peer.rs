@@ -23,7 +23,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context as _, Result};
-use serde::Deserialize;
 use tokio::sync::{mpsc, Mutex};
 use webrtc::data_channel::{DataChannel, DataChannelEvent, RTCDataChannelInit};
 use webrtc::peer_connection::{
@@ -31,6 +30,9 @@ use webrtc::peer_connection::{
     RTCIceCandidateInit, RTCIceGatheringState, RTCIceServer, RTCPeerConnectionIceEvent,
     RTCPeerConnectionState, RTCSessionDescription,
 };
+
+/// Asks the relay for a short-lived TURN credential; see [`super::peer_ice`].
+pub use super::peer_ice::fetch_ice_servers;
 
 /// The one data channel label this transport accepts.
 pub const CHANNEL_LABEL: &str = "canopy-session-v1";
@@ -43,9 +45,6 @@ const GATHERING_TIMEOUT: Duration = Duration::from_secs(10);
 /// take the full [`GATHERING_TIMEOUT`] (or never finish), so whatever arrives
 /// later is trickled as `ice` frames instead of holding the answer back.
 const ANSWER_GATHER_GRACE: Duration = Duration::from_millis(500);
-
-/// How long to wait for the relay's TURN credential response.
-const RELAY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How often to re-check for a local description while ICE gathers.
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
@@ -75,88 +74,15 @@ impl IceServer {
     }
 }
 
-/// `{ "iceServers": [ { "urls": [...], "username": "...", "credential": "..." } ] }`
-#[derive(Debug, Deserialize)]
-struct TurnResponse {
-    #[serde(rename = "iceServers")]
-    ice_servers: Vec<IceServerBody>,
-}
-
-/// One entry of [`TurnResponse`]; `urls` is either a list or a single string.
-#[derive(Debug, Deserialize)]
-struct IceServerBody {
-    #[serde(default)]
-    urls: Option<Urls>,
-    #[serde(default)]
-    username: Option<String>,
-    #[serde(default)]
-    credential: Option<String>,
-}
-
-/// Both spellings the WebRTC specification allows for `urls`.
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum Urls {
-    /// `"urls": ["turn:...", "stun:..."]`
-    Many(Vec<String>),
-    /// `"urls": "turn:..."`
-    One(String),
-}
-
-impl Urls {
-    /// Flattens either spelling into a list.
-    fn into_vec(self) -> Vec<String> {
-        match self {
-            Self::Many(urls) => urls,
-            Self::One(url) => vec![url],
-        }
-    }
-}
-
-/// Asks the relay for ICE servers: `GET <relay_url>/turn` with the host token.
-///
-/// A non-200 response is an error rather than an empty list, because an empty
-/// list would silently downgrade the session to host candidates and only fail
-/// later, at connection time.
-///
-/// # Errors
-///
-/// Returns an error when the request fails, the status is not 200, or the body
-/// is not the expected JSON shape.
-pub async fn fetch_ice_servers(relay_url: &str, token: &str) -> Result<Vec<IceServer>> {
-    let url = format!("{}/turn", relay_url.trim_end_matches('/'));
-    let client = reqwest::Client::builder()
-        .timeout(RELAY_TIMEOUT)
-        .build()
-        .context("build the relay HTTP client")?;
-    let response = client
-        .get(&url)
-        .bearer_auth(token)
-        .send()
-        .await
-        .with_context(|| format!("GET {url}"))?;
-    if response.status() != reqwest::StatusCode::OK {
-        return Err(anyhow!("GET {url} returned HTTP {}", response.status()));
-    }
-    let body: TurnResponse = response
-        .json()
-        .await
-        .with_context(|| format!("decode the ICE servers in the GET {url} response"))?;
-    Ok(body
-        .ice_servers
-        .into_iter()
-        .filter_map(|server| {
-            let urls = server.urls.map(Urls::into_vec).unwrap_or_default();
-            if urls.is_empty() {
-                return None;
-            }
-            Some(IceServer {
-                urls,
-                username: server.username,
-                credential: server.credential,
-            })
-        })
-        .collect())
+/// What the serve watchdog sees of the transport's liveness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkState {
+    /// New, connecting or connected: the link may still come up or is up.
+    Up,
+    /// The stack reports disconnected: transient, fatal past its grace.
+    Disconnected,
+    /// Failed or closed: terminal, the peer ends now.
+    Down,
 }
 
 /// What a [`Peer`] reports as the session progresses.
@@ -187,6 +113,8 @@ struct Handler {
     channel: Arc<Mutex<Option<Arc<dyn DataChannel>>>>,
     /// Fires once, when ICE gathering completes.
     gathered: mpsc::Sender<()>,
+    /// Latest liveness, shared with [`Peer::link_state`].
+    link: Arc<std::sync::Mutex<LinkState>>,
 }
 
 impl PeerConnectionEventHandler for Handler {
@@ -238,6 +166,12 @@ impl PeerConnectionEventHandler for Handler {
         Self: 'b,
     {
         Box::pin(async move {
+            let link = match state {
+                RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed => LinkState::Down,
+                RTCPeerConnectionState::Disconnected => LinkState::Disconnected,
+                _ => LinkState::Up,
+            };
+            let _ = self.link.lock().map(|mut guard| *guard = link);
             // `Disconnected` is often transient and recovers on its own; only
             // the terminal states end the session.
             if matches!(
@@ -362,6 +296,8 @@ pub struct Peer {
     events: tokio::sync::Mutex<mpsc::Receiver<PeerEvent>>,
     /// The accepted (host) or locally created (device) channel, once there is one.
     channel: Arc<Mutex<Option<Arc<dyn DataChannel>>>>,
+    /// Latest liveness the stack reported, written by the handler.
+    link: Arc<std::sync::Mutex<LinkState>>,
 }
 
 impl Peer {
@@ -457,6 +393,13 @@ impl Peer {
         self.events.lock().await.recv().await
     }
 
+    /// The transport liveness most recently reported by the stack: `Up`
+    /// until the first state change, then whatever the handler saw last. A
+    /// poisoned lock fails open to `Up`.
+    pub fn link_state(&self) -> LinkState {
+        self.link.lock().map_or(LinkState::Up, |guard| *guard)
+    }
+
     /// Adds a candidate received from the other side.
     ///
     /// An empty candidate is the end-of-candidates marker and is ignored.
@@ -522,6 +465,8 @@ struct Wiring {
     channel: Arc<Mutex<Option<Arc<dyn DataChannel>>>>,
     /// Fires when ICE gathering completes.
     gathered: mpsc::Receiver<()>,
+    /// Liveness cell shared with the handler.
+    link: Arc<std::sync::Mutex<LinkState>>,
 }
 
 impl Wiring {
@@ -530,10 +475,12 @@ impl Wiring {
         let (events_tx, events) = mpsc::channel(EVENT_QUEUE);
         let (gathered, gathered_rx) = mpsc::channel(1);
         let channel = Arc::new(Mutex::new(None));
+        let link = Arc::new(std::sync::Mutex::new(LinkState::Up));
         let handler = Arc::new(Handler {
             events: events_tx.clone(),
             channel: channel.clone(),
             gathered,
+            link: Arc::clone(&link),
         });
         let configuration = RTCConfigurationBuilder::new()
             .with_ice_servers(servers.into_iter().map(IceServer::into_webrtc).collect())
@@ -556,6 +503,7 @@ impl Wiring {
             events_tx,
             channel,
             gathered: gathered_rx,
+            link,
         })
     }
 
@@ -565,6 +513,7 @@ impl Wiring {
             pc: self.pc,
             events: tokio::sync::Mutex::new(self.events),
             channel: self.channel,
+            link: self.link,
         }
     }
 }

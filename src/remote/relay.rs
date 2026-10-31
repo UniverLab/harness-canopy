@@ -14,12 +14,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
-use futures::SinkExt as _;
 use serde_json::{json, Value};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
-use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use tokio_util::sync::CancellationToken;
 
@@ -54,6 +52,12 @@ pub type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 /// Outbound relay bodies: `(to, body)`. One connection's task pushes answers
 /// and trickled candidates here; the socket loop writes them.
 pub type SignalTx = tokio::sync::mpsc::UnboundedSender<(String, Value)>;
+
+/// Serve one connected socket; see [`super::relay_socket`].
+pub use super::relay_socket::serve_socket;
+/// Serve one socket with an explicit idle timeout, for the reconnect tests.
+#[cfg(test)]
+pub use super::relay_socket::serve_socket_with_idle_timeout;
 
 /// Headers every host socket carries.
 #[derive(Debug, Clone)]
@@ -364,6 +368,14 @@ impl RelayRuntime {
         &self.peers
     }
 
+    /// Test harness: attach live sessions and a shared peer table, the two
+    /// pieces `supervise` wires per connection in production.
+    #[cfg(test)]
+    pub fn set_test_harness(&mut self, sessions: Arc<SessionsState>, peers: DevicePeers) {
+        self.sessions = Some(sessions);
+        self.peers = peers;
+    }
+
     /// Close every connection whose device was revoked or disconnected by
     /// another process (the CLI queues ids to `remote_revoke` /
     /// `remote_disconnect`), plus every guest peer whose login lost trust
@@ -422,95 +434,6 @@ impl RelayRuntime {
 
 fn pair_fail(reason: &str) -> Value {
     json!({"t": "pair_fail", "reason": reason})
-}
-
-/// Serve one connected socket until it closes, fails, or `remote.enabled`
-/// is switched off (`canopy remote off` takes effect on the next tick).
-pub async fn serve_socket(
-    mut socket: WsStream,
-    runtime: Arc<RelayRuntime>,
-    data_dir: std::path::PathBuf,
-) -> Result<()> {
-    use futures::StreamExt as _;
-    let (signal_tx, mut signal_rx) = tokio::sync::mpsc::unbounded_channel::<(String, Value)>();
-    let mut ticks = tokio::time::interval(Duration::from_secs(1));
-    loop {
-        tokio::select! {
-            message = socket.next() => {
-                let Some(message) = message else { return Ok(()) };
-                let message = message.context("relay socket read failed")?;
-                if !handle_message(&mut socket, &message, &runtime, &signal_tx).await? {
-                    return Ok(());
-                }
-            }
-            Some((to, body)) = signal_rx.recv() => {
-                if !send_body(&mut socket, &to, &body).await? {
-                    return Ok(());
-                }
-            }
-            _ = ticks.tick() => {
-                runtime.drain_remote_revocations();
-                if !remote_enabled(&data_dir) {
-                    return Ok(());
-                }
-            }
-        }
-    }
-}
-
-/// Re-read `[remote] enabled` from the config file.
-fn remote_enabled(data_dir: &Path) -> bool {
-    CanopyConfig::load(data_dir).remote.enabled
-}
-
-/// Handle one frame. `Ok(false)` means the socket should close.
-async fn handle_message(
-    socket: &mut WsStream,
-    message: &Message,
-    runtime: &Arc<RelayRuntime>,
-    signal: &SignalTx,
-) -> Result<bool> {
-    match message {
-        Message::Text(text) => answer_text(socket, text.as_str(), runtime, signal).await,
-        Message::Ping(payload) => {
-            socket.send(Message::Pong(payload.clone())).await?;
-            Ok(true)
-        }
-        Message::Close(_) => Ok(false),
-        _ => Ok(true),
-    }
-}
-
-async fn answer_text(
-    socket: &mut WsStream,
-    text: &str,
-    runtime: &Arc<RelayRuntime>,
-    signal: &SignalTx,
-) -> Result<bool> {
-    let Ok(envelope) = serde_json::from_str::<Value>(text) else {
-        return Ok(true);
-    };
-    let (Some(from), Some(body)) = (
-        envelope.get("from").and_then(Value::as_str),
-        envelope.get("body"),
-    ) else {
-        return Ok(true);
-    };
-    if let Some(reply) = runtime.route(body, chrono::Utc::now().timestamp(), from, signal) {
-        if !send_body(socket, from, &reply).await? {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
-/// Write one `{to, body}` envelope; `false` when the socket is gone.
-async fn send_body(socket: &mut WsStream, to: &str, body: &Value) -> Result<bool> {
-    let outbound = json!({"to": to, "body": body});
-    Ok(socket
-        .send(Message::Text(outbound.to_string().into()))
-        .await
-        .is_ok())
 }
 
 /// Record the terminal 401 message and stop retrying that token.
