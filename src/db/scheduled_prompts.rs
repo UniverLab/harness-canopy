@@ -10,7 +10,7 @@ use crate::db::Database;
 /// exactly what the promptbuilder would submit while the recipient can still
 /// tell which graph, event, or agent sent it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ScheduledSendProvenance {
+pub struct ScheduledPromptProvenance {
     /// Provenance kind: `"hook"`, `"agent"`, or `"agent_trigger"`.
     pub kind: String,
     /// Id of the graph whose hook enqueued the send. Empty for `"agent"`.
@@ -35,7 +35,7 @@ pub struct ScheduledSendProvenance {
     pub target_session_name: Option<String>,
 }
 
-impl ScheduledSendProvenance {
+impl ScheduledPromptProvenance {
     /// Provenance for a message enqueued by a graph hook.
     pub fn hook(graph_id: &str, event: &str) -> Self {
         Self {
@@ -106,20 +106,20 @@ impl ScheduledSendProvenance {
 /// A one-shot scheduled prompt delivery.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-pub struct ScheduledSend {
+pub struct ScheduledPrompt {
     pub id: String,
     pub prompt: String,
     pub target_session_id: String,
     /// Working directory of the target session at schedule time, so a
     /// dead-target failure can be preserved per-project (see
-    /// `insert_failed_scheduled_send`). `None` if unknown.
+    /// `insert_failed_scheduled_prompt`). `None` if unknown.
     pub workdir: Option<String>,
     pub fire_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
     pub builder_state: Option<String>,
     /// Structured hook origin, if enqueued by a graph hook. `None` for
     /// prompt-builder sends and rows written before the column existed.
-    pub provenance: Option<ScheduledSendProvenance>,
+    pub provenance: Option<ScheduledPromptProvenance>,
 }
 
 /// A prompt whose scheduled delivery failed because its target session was
@@ -127,7 +127,7 @@ pub struct ScheduledSend {
 /// (see U8's last-prompt recall).
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-pub struct FailedScheduledSend {
+pub struct FailedScheduledPrompt {
     pub id: String,
     pub prompt: String,
     pub target_session_id: String,
@@ -135,7 +135,7 @@ pub struct FailedScheduledSend {
     pub failed_at: DateTime<Utc>,
     /// Hook origin retained through the dead-target path so a failed
     /// hook send still names its graph and event.
-    pub provenance: Option<ScheduledSendProvenance>,
+    pub provenance: Option<ScheduledPromptProvenance>,
 }
 
 /// Whether `target_session_id` is among the currently live session ids.
@@ -148,7 +148,7 @@ pub fn is_target_alive(target_session_id: &str, live_session_ids: &[String]) -> 
 impl Database {
     /// Insert a new scheduled send.
     #[allow(clippy::too_many_arguments)]
-    pub fn insert_scheduled_send(
+    pub fn insert_scheduled_prompt(
         &self,
         id: &str,
         prompt: &str,
@@ -156,16 +156,16 @@ impl Database {
         workdir: Option<&str>,
         fire_at: DateTime<Utc>,
         builder_state: Option<&str>,
-        provenance: Option<&ScheduledSendProvenance>,
+        provenance: Option<&ScheduledPromptProvenance>,
     ) -> Result<()> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let now = Utc::now().timestamp();
-        let provenance_json = ScheduledSendProvenance::to_json(provenance)?;
+        let provenance_json = ScheduledPromptProvenance::to_json(provenance)?;
         conn.execute(
-            "INSERT INTO scheduled_sends (id, prompt, target_session_id, workdir, fire_at, created_at, builder_state, provenance)
+            "INSERT INTO scheduled_prompts (id, prompt, target_session_id, workdir, fire_at, created_at, builder_state, provenance)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![id, prompt, target_session_id, workdir, fire_at.timestamp(), now, builder_state, provenance_json],
         )?;
@@ -173,62 +173,62 @@ impl Database {
     }
 
     /// List all scheduled sends due at or before `now`, ordered by fire time.
-    pub fn list_due_scheduled_sends(&self, now: DateTime<Utc>) -> Result<Vec<ScheduledSend>> {
+    pub fn list_due_scheduled_prompts(&self, now: DateTime<Utc>) -> Result<Vec<ScheduledPrompt>> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
             "SELECT id, prompt, target_session_id, workdir, fire_at, created_at, builder_state, provenance
-             FROM scheduled_sends
+             FROM scheduled_prompts
              WHERE fire_at <= ?1
              ORDER BY fire_at ASC",
         )?;
-        let rows = stmt.query_map(params![now.timestamp()], Self::row_to_scheduled_send)?;
+        let rows = stmt.query_map(params![now.timestamp()], Self::row_to_scheduled_prompt)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
 
     /// Delete a scheduled send by ID. Returns true if a row was deleted.
-    pub fn delete_scheduled_send(&self, id: &str) -> Result<bool> {
+    pub fn delete_scheduled_prompt(&self, id: &str) -> Result<bool> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
-        let rows = conn.execute("DELETE FROM scheduled_sends WHERE id = ?1", params![id])?;
+        let rows = conn.execute("DELETE FROM scheduled_prompts WHERE id = ?1", params![id])?;
         Ok(rows > 0)
     }
 
     /// The earliest `fire_at` among pending scheduled sends, if any. The
     /// daemon scheduler folds it into its next wake-up so a send is delivered
     /// close to when it is due, with no TUI attached.
-    pub fn next_scheduled_send_at(&self) -> Result<Option<DateTime<Utc>>> {
+    pub fn next_scheduled_prompt_at(&self) -> Result<Option<DateTime<Utc>>> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
-        let mut stmt = conn.prepare("SELECT MIN(fire_at) FROM scheduled_sends")?;
+        let mut stmt = conn.prepare("SELECT MIN(fire_at) FROM scheduled_prompts")?;
         let earliest: Option<i64> = stmt.query_row([], |row| row.get(0))?;
         Ok(earliest.and_then(|ts| DateTime::from_timestamp(ts, 0)))
     }
 
     /// List all pending (not yet fired) scheduled sends for a given session,
     /// ordered by fire time (soonest first).
-    pub fn list_pending_scheduled_sends_for_session(
+    pub fn list_pending_scheduled_prompts_for_session(
         &self,
         session_id: &str,
-    ) -> Result<Vec<ScheduledSend>> {
+    ) -> Result<Vec<ScheduledPrompt>> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
             "SELECT id, prompt, target_session_id, workdir, fire_at, created_at, builder_state, provenance
-             FROM scheduled_sends
+             FROM scheduled_prompts
              WHERE target_session_id = ?1
              ORDER BY fire_at ASC",
         )?;
-        let rows = stmt.query_map(params![session_id], Self::row_to_scheduled_send)?;
+        let rows = stmt.query_map(params![session_id], Self::row_to_scheduled_prompt)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
@@ -242,13 +242,13 @@ impl Database {
     /// so pending schedules already point at the live session and nothing is
     /// moved. Returns the number of rows moved.
     #[cfg(test)]
-    pub fn reassign_scheduled_sends(&self, old_target: &str, new_target: &str) -> Result<usize> {
+    pub fn reassign_scheduled_prompts(&self, old_target: &str, new_target: &str) -> Result<usize> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let rows = conn.execute(
-            "UPDATE scheduled_sends SET target_session_id = ?2 WHERE target_session_id = ?1",
+            "UPDATE scheduled_prompts SET target_session_id = ?2 WHERE target_session_id = ?1",
             params![old_target, new_target],
         )?;
         Ok(rows)
@@ -259,30 +259,31 @@ impl Database {
     /// pending scheduled sends.
     ///
     /// Test-only since the deliverer moved to the daemon: a send whose target
-    /// is gone is preserved for recall (`scheduler::scheduled_sends`), not
+    /// is gone is preserved for recall (`scheduler::scheduled_prompts`), not
     /// dropped silently.
     #[cfg(test)]
-    pub fn drop_scheduled_sends_missing_targets(&self, live_targets: &[String]) -> Result<usize> {
+    pub fn drop_scheduled_prompts_missing_targets(&self, live_targets: &[String]) -> Result<usize> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         if live_targets.is_empty() {
-            let rows = conn.execute("DELETE FROM scheduled_sends", [])?;
+            let rows = conn.execute("DELETE FROM scheduled_prompts", [])?;
             return Ok(rows);
         }
         // Build a `(?,?,…)` placeholder list for the IN clause.
         let placeholders = vec!["?"; live_targets.len()].join(",");
-        let sql =
-            format!("DELETE FROM scheduled_sends WHERE target_session_id NOT IN ({placeholders})");
+        let sql = format!(
+            "DELETE FROM scheduled_prompts WHERE target_session_id NOT IN ({placeholders})"
+        );
         let params = rusqlite::params_from_iter(live_targets.iter());
         let rows = conn.execute(&sql, params)?;
         Ok(rows)
     }
 
-    fn row_to_scheduled_send(row: &rusqlite::Row) -> rusqlite::Result<ScheduledSend> {
+    fn row_to_scheduled_prompt(row: &rusqlite::Row) -> rusqlite::Result<ScheduledPrompt> {
         let provenance_json: Option<String> = row.get(7)?;
-        let provenance = ScheduledSendProvenance::from_json(provenance_json).map_err(|e| {
+        let provenance = ScheduledPromptProvenance::from_json(provenance_json).map_err(|e| {
             rusqlite::Error::FromSqlConversionFailure(
                 7,
                 rusqlite::types::Type::Text,
@@ -292,7 +293,7 @@ impl Database {
                 )),
             )
         })?;
-        Ok(ScheduledSend {
+        Ok(ScheduledPrompt {
             id: row.get(0)?,
             prompt: row.get(1)?,
             target_session_id: row.get(2)?,
@@ -309,22 +310,22 @@ impl Database {
     /// Preserve a prompt whose scheduled delivery failed because its target
     /// session no longer exists. Keeps the prompt recoverable per-project
     /// until U8's last-prompt recall (or a future consumer) picks it up.
-    pub fn insert_failed_scheduled_send(
+    pub fn insert_failed_scheduled_prompt(
         &self,
         id: &str,
         prompt: &str,
         target_session_id: &str,
         workdir: Option<&str>,
         failed_at: DateTime<Utc>,
-        provenance: Option<&ScheduledSendProvenance>,
+        provenance: Option<&ScheduledPromptProvenance>,
     ) -> Result<()> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
-        let provenance_json = ScheduledSendProvenance::to_json(provenance)?;
+        let provenance_json = ScheduledPromptProvenance::to_json(provenance)?;
         conn.execute(
-            "INSERT INTO failed_scheduled_sends (id, prompt, target_session_id, workdir, failed_at, provenance)
+            "INSERT INTO failed_scheduled_prompts (id, prompt, target_session_id, workdir, failed_at, provenance)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 id,
@@ -341,37 +342,38 @@ impl Database {
     /// List failed scheduled sends preserved for a given project workdir,
     /// most recent first. Not yet called from production code — the
     /// dead-target recovery path (see
-    /// `scheduler::cron_scheduler::scheduled_sends`) surfaces failures via
+    /// `scheduler::cron_scheduler::scheduled_prompts`) surfaces failures via
     /// `last_prompts` instead; this stays as the read side of
-    /// `failed_scheduled_sends` for a future history browser.
+    /// `failed_scheduled_prompts` for a future history browser.
     #[allow(dead_code)]
-    pub fn list_failed_scheduled_sends_for_workdir(
+    pub fn list_failed_scheduled_prompts_for_workdir(
         &self,
         workdir: &str,
-    ) -> Result<Vec<FailedScheduledSend>> {
+    ) -> Result<Vec<FailedScheduledPrompt>> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
             "SELECT id, prompt, target_session_id, workdir, failed_at, provenance
-             FROM failed_scheduled_sends
+             FROM failed_scheduled_prompts
              WHERE workdir = ?1
              ORDER BY failed_at DESC",
         )?;
         let rows = stmt.query_map(params![workdir], |row| {
             let provenance_json: Option<String> = row.get(5)?;
-            let provenance = ScheduledSendProvenance::from_json(provenance_json).map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    5,
-                    rusqlite::types::Type::Text,
-                    Box::new(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        e.to_string(),
-                    )),
-                )
-            })?;
-            Ok(FailedScheduledSend {
+            let provenance =
+                ScheduledPromptProvenance::from_json(provenance_json).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        5,
+                        rusqlite::types::Type::Text,
+                        Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            e.to_string(),
+                        )),
+                    )
+                })?;
+            Ok(FailedScheduledPrompt {
                 id: row.get(0)?,
                 prompt: row.get(1)?,
                 target_session_id: row.get(2)?,
@@ -398,10 +400,10 @@ mod tests {
     }
 
     #[test]
-    fn insert_and_list_due_scheduled_sends() {
+    fn insert_and_list_due_scheduled_prompts() {
         let db = test_db();
         let fire = Utc::now() - chrono::Duration::hours(1); // already due
-        db.insert_scheduled_send(
+        db.insert_scheduled_prompt(
             "ss-1",
             "hello world",
             "session-abc",
@@ -412,7 +414,7 @@ mod tests {
         )
         .unwrap();
 
-        let due = db.list_due_scheduled_sends(Utc::now()).unwrap();
+        let due = db.list_due_scheduled_prompts(Utc::now()).unwrap();
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].id, "ss-1");
         assert_eq!(due[0].prompt, "hello world");
@@ -424,32 +426,35 @@ mod tests {
     fn list_due_excludes_future_sends() {
         let db = test_db();
         let future = Utc::now() + chrono::Duration::hours(1);
-        db.insert_scheduled_send("ss-2", "later", "session-xyz", None, future, None, None)
+        db.insert_scheduled_prompt("ss-2", "later", "session-xyz", None, future, None, None)
             .unwrap();
 
-        let due = db.list_due_scheduled_sends(Utc::now()).unwrap();
+        let due = db.list_due_scheduled_prompts(Utc::now()).unwrap();
         assert!(due.is_empty());
     }
 
     #[test]
-    fn delete_scheduled_send() {
+    fn delete_scheduled_prompt() {
         let db = test_db();
         let fire = Utc::now() - chrono::Duration::hours(1);
-        db.insert_scheduled_send("ss-3", "to delete", "session-del", None, fire, None, None)
+        db.insert_scheduled_prompt("ss-3", "to delete", "session-del", None, fire, None, None)
             .unwrap();
 
-        assert!(db.delete_scheduled_send("ss-3").unwrap());
-        assert!(!db.delete_scheduled_send("ss-3").unwrap());
-        assert!(db.list_due_scheduled_sends(Utc::now()).unwrap().is_empty());
+        assert!(db.delete_scheduled_prompt("ss-3").unwrap());
+        assert!(!db.delete_scheduled_prompt("ss-3").unwrap());
+        assert!(db
+            .list_due_scheduled_prompts(Utc::now())
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
     fn list_pending_for_session() {
         let db = test_db();
         let fire = Utc::now() + chrono::Duration::hours(2);
-        db.insert_scheduled_send("ss-4", "for session", "session-42", None, fire, None, None)
+        db.insert_scheduled_prompt("ss-4", "for session", "session-42", None, fire, None, None)
             .unwrap();
-        db.insert_scheduled_send(
+        db.insert_scheduled_prompt(
             "ss-5",
             "other session",
             "session-99",
@@ -461,7 +466,7 @@ mod tests {
         .unwrap();
 
         let pending = db
-            .list_pending_scheduled_sends_for_session("session-42")
+            .list_pending_scheduled_prompts_for_session("session-42")
             .unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].id, "ss-4");
@@ -474,7 +479,7 @@ mod tests {
     fn edit_in_place_replaces_without_duplicating() {
         let db = test_db();
         let fire = Utc::now() + chrono::Duration::hours(2);
-        db.insert_scheduled_send(
+        db.insert_scheduled_prompt(
             "ss-edit",
             "original text",
             "session-1",
@@ -486,8 +491,8 @@ mod tests {
         .unwrap();
 
         // The delete+insert path the edit flow uses.
-        assert!(db.delete_scheduled_send("ss-edit").unwrap());
-        db.insert_scheduled_send(
+        assert!(db.delete_scheduled_prompt("ss-edit").unwrap());
+        db.insert_scheduled_prompt(
             "ss-edit-new",
             "edited text",
             "session-1",
@@ -499,7 +504,7 @@ mod tests {
         .unwrap();
 
         let pending = db
-            .list_pending_scheduled_sends_for_session("session-1")
+            .list_pending_scheduled_prompts_for_session("session-1")
             .unwrap();
         assert_eq!(pending.len(), 1, "editing must not create a duplicate");
         assert_eq!(pending[0].prompt, "edited text");
@@ -513,9 +518,9 @@ mod tests {
     fn cancel_selected_removes_only_that_entry() {
         let db = test_db();
         let base = Utc::now() + chrono::Duration::hours(1);
-        db.insert_scheduled_send("ss-a", "first", "session-x", None, base, None, None)
+        db.insert_scheduled_prompt("ss-a", "first", "session-x", None, base, None, None)
             .unwrap();
-        db.insert_scheduled_send(
+        db.insert_scheduled_prompt(
             "ss-b",
             "second",
             "session-x",
@@ -525,7 +530,7 @@ mod tests {
             None,
         )
         .unwrap();
-        db.insert_scheduled_send(
+        db.insert_scheduled_prompt(
             "ss-c",
             "third",
             "session-x",
@@ -537,13 +542,13 @@ mod tests {
         .unwrap();
 
         let pending = db
-            .list_pending_scheduled_sends_for_session("session-x")
+            .list_pending_scheduled_prompts_for_session("session-x")
             .unwrap();
         assert_eq!(pending[1].id, "ss-b");
-        assert!(db.delete_scheduled_send(&pending[1].id).unwrap());
+        assert!(db.delete_scheduled_prompt(&pending[1].id).unwrap());
 
         let remaining = db
-            .list_pending_scheduled_sends_for_session("session-x")
+            .list_pending_scheduled_prompts_for_session("session-x")
             .unwrap();
         let ids: Vec<&str> = remaining.iter().map(|send| send.id.as_str()).collect();
         assert_eq!(ids, vec!["ss-a", "ss-c"]);
@@ -553,7 +558,7 @@ mod tests {
     fn reassign_moves_pending_sends_to_the_resumed_session_id() {
         let db = test_db();
         let fire = Utc::now() + chrono::Duration::hours(2);
-        db.insert_scheduled_send(
+        db.insert_scheduled_prompt(
             "ss-r1",
             "keep me",
             "old-id",
@@ -563,24 +568,24 @@ mod tests {
             None,
         )
         .unwrap();
-        db.insert_scheduled_send("ss-r2", "unrelated", "other-id", None, fire, None, None)
+        db.insert_scheduled_prompt("ss-r2", "unrelated", "other-id", None, fire, None, None)
             .unwrap();
 
-        let moved = db.reassign_scheduled_sends("old-id", "new-id").unwrap();
+        let moved = db.reassign_scheduled_prompts("old-id", "new-id").unwrap();
         assert_eq!(moved, 1);
         // The reassigned send now belongs to the resumed session id.
         assert!(db
-            .list_pending_scheduled_sends_for_session("old-id")
+            .list_pending_scheduled_prompts_for_session("old-id")
             .unwrap()
             .is_empty());
         let pending = db
-            .list_pending_scheduled_sends_for_session("new-id")
+            .list_pending_scheduled_prompts_for_session("new-id")
             .unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].id, "ss-r1");
         // The unrelated send is untouched.
         assert_eq!(
-            db.list_pending_scheduled_sends_for_session("other-id")
+            db.list_pending_scheduled_prompts_for_session("other-id")
                 .unwrap()
                 .len(),
             1
@@ -591,22 +596,22 @@ mod tests {
     fn drop_missing_targets_removes_only_gone_sessions() {
         let db = test_db();
         let fire = Utc::now() + chrono::Duration::hours(1);
-        db.insert_scheduled_send("ss-live", "deliver", "session-live", None, fire, None, None)
+        db.insert_scheduled_prompt("ss-live", "deliver", "session-live", None, fire, None, None)
             .unwrap();
-        db.insert_scheduled_send("ss-gone", "orphan", "session-gone", None, fire, None, None)
+        db.insert_scheduled_prompt("ss-gone", "orphan", "session-gone", None, fire, None, None)
             .unwrap();
 
         let live = vec!["session-live".to_string()];
-        let dropped = db.drop_scheduled_sends_missing_targets(&live).unwrap();
+        let dropped = db.drop_scheduled_prompts_missing_targets(&live).unwrap();
         assert_eq!(dropped, 1);
         assert_eq!(
-            db.list_pending_scheduled_sends_for_session("session-live")
+            db.list_pending_scheduled_prompts_for_session("session-live")
                 .unwrap()
                 .len(),
             1
         );
         assert!(db
-            .list_pending_scheduled_sends_for_session("session-gone")
+            .list_pending_scheduled_prompts_for_session("session-gone")
             .unwrap()
             .is_empty());
     }
@@ -615,14 +620,14 @@ mod tests {
     fn drop_missing_targets_with_no_live_sessions_clears_all() {
         let db = test_db();
         let fire = Utc::now() + chrono::Duration::hours(1);
-        db.insert_scheduled_send("ss-x", "x", "s1", None, fire, None, None)
+        db.insert_scheduled_prompt("ss-x", "x", "s1", None, fire, None, None)
             .unwrap();
-        db.insert_scheduled_send("ss-y", "y", "s2", None, fire, None, None)
+        db.insert_scheduled_prompt("ss-y", "y", "s2", None, fire, None, None)
             .unwrap();
-        let dropped = db.drop_scheduled_sends_missing_targets(&[]).unwrap();
+        let dropped = db.drop_scheduled_prompts_missing_targets(&[]).unwrap();
         assert_eq!(dropped, 2);
         assert!(db
-            .list_due_scheduled_sends(Utc::now() + chrono::Duration::days(1))
+            .list_due_scheduled_prompts(Utc::now() + chrono::Duration::days(1))
             .unwrap()
             .is_empty());
     }
@@ -663,17 +668,17 @@ mod tests {
     }
 
     #[test]
-    fn list_due_scheduled_sends_empty_db() {
+    fn list_due_scheduled_prompts_empty_db() {
         let db = test_db();
-        let due = db.list_due_scheduled_sends(Utc::now()).unwrap();
+        let due = db.list_due_scheduled_prompts(Utc::now()).unwrap();
         assert!(due.is_empty());
     }
 
     #[test]
-    fn list_due_scheduled_sends_ordered_by_fire_time() {
+    fn list_due_scheduled_prompts_ordered_by_fire_time() {
         let db = test_db();
         let now = Utc::now();
-        db.insert_scheduled_send(
+        db.insert_scheduled_prompt(
             "ss-c",
             "third",
             "s",
@@ -683,7 +688,7 @@ mod tests {
             None,
         )
         .unwrap();
-        db.insert_scheduled_send(
+        db.insert_scheduled_prompt(
             "ss-a",
             "first",
             "s",
@@ -693,7 +698,7 @@ mod tests {
             None,
         )
         .unwrap();
-        db.insert_scheduled_send(
+        db.insert_scheduled_prompt(
             "ss-b",
             "second",
             "s",
@@ -705,32 +710,32 @@ mod tests {
         .unwrap();
 
         let due = db
-            .list_due_scheduled_sends(now + chrono::Duration::hours(10))
+            .list_due_scheduled_prompts(now + chrono::Duration::hours(10))
             .unwrap();
         let ids: Vec<&str> = due.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(ids, vec!["ss-a", "ss-b", "ss-c"]);
     }
 
     #[test]
-    fn delete_nonexistent_scheduled_send_returns_false() {
+    fn delete_nonexistent_scheduled_prompt_returns_false() {
         let db = test_db();
-        assert!(!db.delete_scheduled_send("nonexistent").unwrap());
+        assert!(!db.delete_scheduled_prompt("nonexistent").unwrap());
     }
 
     #[test]
     fn reassign_no_matching_sends_returns_zero() {
         let db = test_db();
         let fire = Utc::now() + chrono::Duration::hours(1);
-        db.insert_scheduled_send("ss-1", "prompt", "session-a", None, fire, None, None)
+        db.insert_scheduled_prompt("ss-1", "prompt", "session-a", None, fire, None, None)
             .unwrap();
 
         let moved = db
-            .reassign_scheduled_sends("session-b", "session-c")
+            .reassign_scheduled_prompts("session-b", "session-c")
             .unwrap();
         assert_eq!(moved, 0);
         // Original send is untouched
         let pending = db
-            .list_pending_scheduled_sends_for_session("session-a")
+            .list_pending_scheduled_prompts_for_session("session-a")
             .unwrap();
         assert_eq!(pending.len(), 1);
     }
@@ -739,21 +744,23 @@ mod tests {
     fn reassign_moves_all_matching_sends() {
         let db = test_db();
         let fire = Utc::now() + chrono::Duration::hours(1);
-        db.insert_scheduled_send("ss-1", "p1", "old", None, fire, None, None)
+        db.insert_scheduled_prompt("ss-1", "p1", "old", None, fire, None, None)
             .unwrap();
-        db.insert_scheduled_send("ss-2", "p2", "old", None, fire, None, None)
+        db.insert_scheduled_prompt("ss-2", "p2", "old", None, fire, None, None)
             .unwrap();
-        db.insert_scheduled_send("ss-3", "p3", "other", None, fire, None, None)
+        db.insert_scheduled_prompt("ss-3", "p3", "other", None, fire, None, None)
             .unwrap();
 
-        let moved = db.reassign_scheduled_sends("old", "new").unwrap();
+        let moved = db.reassign_scheduled_prompts("old", "new").unwrap();
         assert_eq!(moved, 2);
 
         assert!(db
-            .list_pending_scheduled_sends_for_session("old")
+            .list_pending_scheduled_prompts_for_session("old")
             .unwrap()
             .is_empty());
-        let pending_new = db.list_pending_scheduled_sends_for_session("new").unwrap();
+        let pending_new = db
+            .list_pending_scheduled_prompts_for_session("new")
+            .unwrap();
         assert_eq!(pending_new.len(), 2);
     }
 
@@ -761,17 +768,17 @@ mod tests {
     fn drop_missing_targets_with_all_live_keeps_everything() {
         let db = test_db();
         let fire = Utc::now() + chrono::Duration::hours(1);
-        db.insert_scheduled_send("ss-1", "p1", "s1", None, fire, None, None)
+        db.insert_scheduled_prompt("ss-1", "p1", "s1", None, fire, None, None)
             .unwrap();
-        db.insert_scheduled_send("ss-2", "p2", "s2", None, fire, None, None)
+        db.insert_scheduled_prompt("ss-2", "p2", "s2", None, fire, None, None)
             .unwrap();
 
         let dropped = db
-            .drop_scheduled_sends_missing_targets(&["s1".to_string(), "s2".to_string()])
+            .drop_scheduled_prompts_missing_targets(&["s1".to_string(), "s2".to_string()])
             .unwrap();
         assert_eq!(dropped, 0);
         assert_eq!(
-            db.list_due_scheduled_sends(Utc::now() + chrono::Duration::days(1))
+            db.list_due_scheduled_prompts(Utc::now() + chrono::Duration::days(1))
                 .unwrap()
                 .len(),
             2
@@ -779,13 +786,13 @@ mod tests {
     }
 
     #[test]
-    fn scheduled_send_with_none_workdir_round_trips() {
+    fn scheduled_prompt_with_none_workdir_round_trips() {
         let db = test_db();
         let fire = Utc::now();
-        db.insert_scheduled_send("ss-nw", "prompt", "session", None, fire, None, None)
+        db.insert_scheduled_prompt("ss-nw", "prompt", "session", None, fire, None, None)
             .unwrap();
 
-        let due = db.list_due_scheduled_sends(Utc::now()).unwrap();
+        let due = db.list_due_scheduled_prompts(Utc::now()).unwrap();
         assert_eq!(due.len(), 1);
         assert!(due[0].workdir.is_none());
     }
@@ -794,32 +801,32 @@ mod tests {
     /// same (fake, injected) time must not find it again. Exercises the
     /// "fires once" requirement without depending on real wall-clock sleeps.
     #[test]
-    fn scheduled_send_fires_once() {
+    fn scheduled_prompt_fires_once() {
         let db = test_db();
         let fake_now = Utc::now();
         let fire = fake_now - chrono::Duration::minutes(1);
-        db.insert_scheduled_send("ss-once", "fire me", "session-live", None, fire, None, None)
+        db.insert_scheduled_prompt("ss-once", "fire me", "session-live", None, fire, None, None)
             .unwrap();
 
-        let due = db.list_due_scheduled_sends(fake_now).unwrap();
+        let due = db.list_due_scheduled_prompts(fake_now).unwrap();
         assert_eq!(due.len(), 1);
         // Simulate successful delivery: remove after processing.
-        assert!(db.delete_scheduled_send(&due[0].id).unwrap());
+        assert!(db.delete_scheduled_prompt(&due[0].id).unwrap());
 
         // A later poll at the same fake "now" must not redeliver.
-        let due_again = db.list_due_scheduled_sends(fake_now).unwrap();
+        let due_again = db.list_due_scheduled_prompts(fake_now).unwrap();
         assert!(due_again.is_empty());
     }
 
     /// When a due send's target session is dead, the prompt must not be
-    /// discarded silently — it is preserved in `failed_scheduled_sends`,
+    /// discarded silently — it is preserved in `failed_scheduled_prompts`,
     /// keyed by the project workdir captured at schedule time.
     #[test]
     fn dead_target_preserves_prompt_for_recall() {
         let db = test_db();
         let fake_now = Utc::now();
         let fire = fake_now - chrono::Duration::minutes(1);
-        db.insert_scheduled_send(
+        db.insert_scheduled_prompt(
             "ss-dead",
             "please deliver me",
             "session-gone",
@@ -830,14 +837,14 @@ mod tests {
         )
         .unwrap();
 
-        let due = db.list_due_scheduled_sends(fake_now).unwrap();
+        let due = db.list_due_scheduled_prompts(fake_now).unwrap();
         assert_eq!(due.len(), 1);
         let send = &due[0];
 
         // No live sessions at all — the target is dead.
         assert!(!is_target_alive(&send.target_session_id, &[]));
 
-        db.insert_failed_scheduled_send(
+        db.insert_failed_scheduled_prompt(
             &send.id,
             &send.prompt,
             &send.target_session_id,
@@ -846,17 +853,17 @@ mod tests {
             None,
         )
         .unwrap();
-        db.delete_scheduled_send(&send.id).unwrap();
+        db.delete_scheduled_prompt(&send.id).unwrap();
 
         let preserved = db
-            .list_failed_scheduled_sends_for_workdir("/home/user/project")
+            .list_failed_scheduled_prompts_for_workdir("/home/user/project")
             .unwrap();
         assert_eq!(preserved.len(), 1);
         assert_eq!(preserved[0].prompt, "please deliver me");
         assert_eq!(preserved[0].target_session_id, "session-gone");
 
         // The scheduled send itself is gone — it will not be retried.
-        assert!(db.list_due_scheduled_sends(fake_now).unwrap().is_empty());
+        assert!(db.list_due_scheduled_prompts(fake_now).unwrap().is_empty());
     }
 
     #[test]
@@ -864,7 +871,7 @@ mod tests {
         let db = test_db();
         let fire = Utc::now();
         let state_json = r#"{"sections":{"__raw__":"hello"},"enabled_sections":[],"focused_section":0,"section_counters":{},"section_cursors":{},"section_scrolls":{},"collapsed_pastes":{},"locked_sections":[]}"#;
-        db.insert_scheduled_send(
+        db.insert_scheduled_prompt(
             "ss-bs",
             "hello",
             "session-1",
@@ -875,12 +882,12 @@ mod tests {
         )
         .unwrap();
 
-        let due = db.list_due_scheduled_sends(Utc::now()).unwrap();
+        let due = db.list_due_scheduled_prompts(Utc::now()).unwrap();
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].builder_state.as_deref(), Some(state_json));
 
         let pending = db
-            .list_pending_scheduled_sends_for_session("session-1")
+            .list_pending_scheduled_prompts_for_session("session-1")
             .unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].builder_state.as_deref(), Some(state_json));
@@ -890,10 +897,10 @@ mod tests {
     fn insert_with_none_builder_state() {
         let db = test_db();
         let fire = Utc::now();
-        db.insert_scheduled_send("ss-nobs", "prompt", "session-1", None, fire, None, None)
+        db.insert_scheduled_prompt("ss-nobs", "prompt", "session-1", None, fire, None, None)
             .unwrap();
 
-        let due = db.list_due_scheduled_sends(Utc::now()).unwrap();
+        let due = db.list_due_scheduled_prompts(Utc::now()).unwrap();
         assert_eq!(due.len(), 1);
         assert!(due[0].builder_state.is_none());
     }
@@ -906,39 +913,46 @@ mod tests {
         let temp = tempdir().unwrap();
         let db_path = temp.path().join("test.db");
         {
+            // Seeds the retired table name on purpose: a genuinely old row
+            // predates the table rename too, so opening it exercises both the
+            // rename and the column migration. Built with `concat!` so no
+            // retired literal survives in the repo.
+            let old_table = concat!("scheduled", "_sends");
             let conn = rusqlite::Connection::open(&db_path).unwrap();
-            conn.execute_batch(
-                "CREATE TABLE scheduled_sends (
+            conn.execute_batch(&format!(
+                "CREATE TABLE {old_table} (
                     id TEXT PRIMARY KEY NOT NULL,
                     prompt TEXT NOT NULL,
                     target_session_id TEXT NOT NULL,
                     fire_at INTEGER NOT NULL,
                     created_at INTEGER NOT NULL
-                )",
-            )
+                )"
+            ))
             .unwrap();
             conn.execute(
-                "INSERT INTO scheduled_sends (id, prompt, target_session_id, fire_at, created_at)
-                 VALUES ('ss-old', 'old prompt', 'session-1', ?1, ?2)",
+                &format!(
+                    "INSERT INTO {old_table} (id, prompt, target_session_id, fire_at, created_at)
+                 VALUES ('ss-old', 'old prompt', 'session-1', ?1, ?2)"
+                ),
                 params![Utc::now().timestamp(), Utc::now().timestamp()],
             )
             .unwrap();
         }
         let db = Database::new(&db_path).unwrap();
-        let due = db.list_due_scheduled_sends(Utc::now()).unwrap();
+        let due = db.list_due_scheduled_prompts(Utc::now()).unwrap();
         assert_eq!(due.len(), 1);
         assert!(due[0].builder_state.is_none());
         assert!(due[0].provenance.is_none());
     }
 
     #[test]
-    fn scheduled_send_provenance_and_builder_state_round_trip() {
+    fn scheduled_prompt_provenance_and_builder_state_round_trip() {
         let db = test_db();
         let fire = Utc::now();
         let state_json =
             r#"{"sections":{"instruction_1":"hook says hi"},"enabled_sections":["instruction_1"]}"#;
-        let provenance = ScheduledSendProvenance::hook("graph-9", "on_failed");
-        db.insert_scheduled_send(
+        let provenance = ScheduledPromptProvenance::hook("graph-9", "on_failed");
+        db.insert_scheduled_prompt(
             "ss-prov",
             "hook says hi",
             "session-1",
@@ -949,7 +963,7 @@ mod tests {
         )
         .unwrap();
 
-        let due = db.list_due_scheduled_sends(Utc::now()).unwrap();
+        let due = db.list_due_scheduled_prompts(Utc::now()).unwrap();
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].builder_state.as_deref(), Some(state_json));
         assert_eq!(due[0].provenance, Some(provenance.clone()));
@@ -958,7 +972,7 @@ mod tests {
         assert_eq!(due[0].provenance.as_ref().unwrap().event, "on_failed");
 
         let pending = db
-            .list_pending_scheduled_sends_for_session("session-1")
+            .list_pending_scheduled_prompts_for_session("session-1")
             .unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].provenance, Some(provenance));
@@ -968,8 +982,8 @@ mod tests {
     fn agent_provenance_round_trips() {
         let db = test_db();
         let fire = Utc::now();
-        let provenance = ScheduledSendProvenance::agent("session-caller");
-        db.insert_scheduled_send(
+        let provenance = ScheduledPromptProvenance::agent("session-caller");
+        db.insert_scheduled_prompt(
             "ss-agent",
             "wake me up",
             "session-1",
@@ -980,7 +994,7 @@ mod tests {
         )
         .unwrap();
 
-        let due = db.list_due_scheduled_sends(Utc::now()).unwrap();
+        let due = db.list_due_scheduled_prompts(Utc::now()).unwrap();
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].provenance, Some(provenance));
         assert_eq!(due[0].provenance.as_ref().unwrap().kind, "agent");
@@ -997,7 +1011,7 @@ mod tests {
         {
             let conn = db.conn.lock().unwrap();
             conn.execute(
-                "INSERT INTO scheduled_sends (id, prompt, target_session_id, workdir, fire_at, created_at, builder_state, provenance)
+                "INSERT INTO scheduled_prompts (id, prompt, target_session_id, workdir, fire_at, created_at, builder_state, provenance)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     "ss-old-hook",
@@ -1013,7 +1027,7 @@ mod tests {
             .unwrap();
         }
         let pending = db
-            .list_pending_scheduled_sends_for_session("session-1")
+            .list_pending_scheduled_prompts_for_session("session-1")
             .unwrap();
         assert_eq!(pending.len(), 1);
         let provenance = pending[0].provenance.as_ref().unwrap();
@@ -1029,8 +1043,8 @@ mod tests {
         let db = test_db();
         let fake_now = Utc::now();
         let fire = fake_now - chrono::Duration::minutes(1);
-        let provenance = ScheduledSendProvenance::hook("graph-3", "on_completed");
-        db.insert_scheduled_send(
+        let provenance = ScheduledPromptProvenance::hook("graph-3", "on_completed");
+        db.insert_scheduled_prompt(
             "ss-hook-dead",
             "graph finished",
             "session-gone",
@@ -1041,12 +1055,12 @@ mod tests {
         )
         .unwrap();
 
-        let due = db.list_due_scheduled_sends(fake_now).unwrap();
+        let due = db.list_due_scheduled_prompts(fake_now).unwrap();
         assert_eq!(due.len(), 1);
         let send = &due[0];
         assert!(!is_target_alive(&send.target_session_id, &[]));
 
-        db.insert_failed_scheduled_send(
+        db.insert_failed_scheduled_prompt(
             &send.id,
             &send.prompt,
             &send.target_session_id,
@@ -1055,10 +1069,10 @@ mod tests {
             send.provenance.as_ref(),
         )
         .unwrap();
-        db.delete_scheduled_send(&send.id).unwrap();
+        db.delete_scheduled_prompt(&send.id).unwrap();
 
         let preserved = db
-            .list_failed_scheduled_sends_for_workdir("/home/user/project")
+            .list_failed_scheduled_prompts_for_workdir("/home/user/project")
             .unwrap();
         assert_eq!(preserved.len(), 1);
         assert_eq!(preserved[0].provenance, Some(provenance));

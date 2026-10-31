@@ -5,10 +5,6 @@
 //! the dispatch key — into the existing per-operation params struct and
 //! calls the `<tool>_<action>` `_impl` method. No behaviour lives here; the
 //! logic is the old tools' own.
-//!
-//! `scheduled_send_create` stays a standalone tool (creating a send is not
-//! listing or cancelling one) and keeps its own `#[tool]` in
-//! `handler_scheduled_sends`.
 
 use crate::daemon::actions::{action_params, resource_action_object, ActionSpec, ToolSpec};
 use crate::daemon::handler::{OptionalExtension, TaskTriggerHandler};
@@ -105,9 +101,14 @@ pub(crate) static PROJECT: ToolSpec = ToolSpec {
     ],
 };
 
-pub(crate) static SCHEDULED_SEND: ToolSpec = ToolSpec {
-    name: "scheduled_send",
+pub(crate) static SCHEDULED_PROMPTS: ToolSpec = ToolSpec {
+    name: "scheduled_prompts",
     actions: &[
+        ActionSpec {
+            name: "create",
+            required: &["prompt"],
+            optional: &["at", "in_seconds", "target_session_id"],
+        },
         ActionSpec {
             name: "list",
             required: &[],
@@ -245,11 +246,12 @@ resource_action_object!(
 );
 
 resource_action_object!(
-    ScheduledSendObject,
-    SCHEDULED_SEND,
+    ScheduledPromptObject,
+    SCHEDULED_PROMPTS,
     [
-        ("list", ScheduledSendListParams),
-        ("cancel", ScheduledSendCancelParams),
+        ("create", ScheduledPromptCreateParams),
+        ("list", ScheduledPromptListParams),
+        ("cancel", ScheduledPromptCancelParams),
     ]
 );
 
@@ -377,27 +379,32 @@ impl TaskTriggerHandler {
     }
 
     #[tool(
-        name = "scheduled_send",
-        description = "List and cancel pending scheduled sends (`scheduled_send_create` stays its own tool). Pass `action` plus the parameters listed for it. \
+        name = "scheduled_prompts",
+        description = "Schedule prompts for future delivery to a session, and list and cancel pending ones. Pass `action` plus the parameters listed for it. \
         Actions (required params; optional params): \
+        `create` (required: prompt; optional: at, in_seconds, target_session_id) — schedule a prompt for delivery to an interactive session at a future time — the way to have an agent wake itself (or another session) later instead of polling on a cron. Omit `target_session_id` to target your own session. Give exactly one of `at` (ISO 8601, e.g. \"2026-07-10T09:00:00Z\") or `in_seconds` (relative delay, e.g. 2400 for \"in 40 minutes\"). Delivery happens on the target's next TUI refresh tick — if no TUI is attached when the time arrives, the send waits rather than being lost. Refused immediately if the target session does not exist. Returns the new scheduled send's id. \
         `list` (required: none; optional: session_id) — list pending (not yet fired) scheduled sends for a session, soonest first; omit session_id for your own session. \
         `cancel` (required: id; optional: none) — cancel a pending scheduled send by id before it fires."
     )]
-    pub(crate) async fn scheduled_send(
+    pub(crate) async fn scheduled_prompts(
         &self,
-        Parameters(params): Parameters<ScheduledSendObject>,
+        Parameters(params): Parameters<ScheduledPromptObject>,
         OptionalExtension(parts): OptionalExtension<Parts>,
     ) -> Result<CallToolResult, McpError> {
         let mut params = params.into_value();
-        ScheduledSendObject::coerce(&mut params);
-        let action = SCHEDULED_SEND.validate(&params)?;
+        ScheduledPromptObject::coerce(&mut params);
+        let action = SCHEDULED_PROMPTS.validate(&params)?;
         match action {
+            "create" => {
+                self.scheduled_prompt_create_impl(action_params(&params)?, parts.as_ref())
+                    .await
+            }
             "list" => {
-                self.scheduled_send_list_impl(action_params(&params)?, parts.as_ref())
+                self.scheduled_prompt_list_impl(action_params(&params)?, parts.as_ref())
                     .await
             }
             "cancel" => {
-                self.scheduled_send_cancel_impl(action_params(&params)?)
+                self.scheduled_prompt_cancel_impl(action_params(&params)?)
                     .await
             }
             _ => unreachable!("validated action"),

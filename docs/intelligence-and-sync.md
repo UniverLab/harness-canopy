@@ -59,7 +59,7 @@ broadcast messaging, active context) is retired: the live broadcast channels
 and their MCP tools are gone. What remains is the durable history — past
 missions and chatter stay in the database, where `intelligence_get_context`
 surfaces them and the TUI renders them. Sessions coordinate through
-`session_list` (see every live session), `scheduled_send_create` (wake a
+`session_list` (see every live session), `scheduled_prompts` (wake a
 session later instead of polling), and `intelligence_upsert` /
 `intelligence_search` (persist and find shared findings).
 

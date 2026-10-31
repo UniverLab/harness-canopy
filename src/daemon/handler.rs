@@ -143,7 +143,7 @@ use crate::daemon::handler_resource_tools::{
 #[cfg(test)]
 use crate::daemon::handler_resource_tools_final::{
     IdentityObject, IntelligenceAdminObject, NodeObject, ProjectObject, RagObject,
-    ScheduledSendObject, SkillObject, SubagentObject,
+    ScheduledPromptObject, SkillObject, SubagentObject,
 };
 #[cfg(test)]
 use crate::daemon::handler_sandbox::SandboxObject;
@@ -306,7 +306,6 @@ impl TaskTriggerHandler {
     pub(crate) fn tool_router() -> ToolRouter<Self> {
         let mut router = ToolRouter::new();
         router.merge(TaskTriggerHandler::tool_router_agents());
-        router.merge(TaskTriggerHandler::tool_router_scheduled_sends());
         router.merge(TaskTriggerHandler::tool_router_sandbox());
         router.merge(TaskTriggerHandler::tool_router_shelf());
         router.merge(TaskTriggerHandler::tool_router_resource_tools());
@@ -577,7 +576,7 @@ pub(crate) async fn call_graph_action_value(
 /// Test-only dispatch seam for the seventeen second- and final-wave resource
 /// tools (`spec`, `spec_edit`, `queue`, `agent`, `agent_edit`, `harness`,
 /// `config`, `crew`, `node`, `intelligence_admin`, `project`,
-/// `scheduled_send`, `sandbox`, `skill`, `subagent`, `rag`, `identity`): the
+/// `scheduled_prompts`, `sandbox`, `skill`, `subagent`, `rag`, `identity`): the
 /// typed params struct is serialized with nulls stripped, `action` is injected,
 /// and the call goes through the tool's own per-tool parameter newtype
 /// validation before reaching the same `_impl` logic the old one-operation
@@ -697,10 +696,10 @@ pub(crate) async fn call_resource_action_value(
                 )))
                 .await
         }
-        "scheduled_send" => {
+        "scheduled_prompts" => {
             handler
-                .scheduled_send(
-                    crate::daemon::params_extract::Parameters(ScheduledSendObject(object)),
+                .scheduled_prompts(
+                    crate::daemon::params_extract::Parameters(ScheduledPromptObject(object)),
                     OptionalExtension(None),
                 )
                 .await

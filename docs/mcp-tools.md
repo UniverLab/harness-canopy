@@ -1,12 +1,12 @@
 ---
 title: MCP Tools
-description: All 34 MCP tools exposed by the canopy daemon, by category.
+description: All 33 MCP tools exposed by the canopy daemon, by category.
 order: 17
 ---
 
 # MCP Tools
 
-The daemon exposes **34 MCP tools** over Streamable HTTP (port 7755) and
+The daemon exposes **33 MCP tools** over Streamable HTTP (port 7755) and
 stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 
 Writes wait up to 5 seconds for a concurrent writer. If the database is still
@@ -65,7 +65,7 @@ platform-wide entry. An `unavailable` entry past its `until` reads as available
 | `intelligence_admin` | Prune and link the knowledge graph. Actions: `delete_node` (`node_id`, optional `project_hash`), `delete_relation` (`edge_id`, optional `project_hash`), `walk` (`node_id`, optional `depth`/`compact`), `list_projects` (optional `query`/`limit`), `link_projects` (`from_project_hash`, `to_project_hash`, optional `relation`/`weight`) — pass `action` plus the params the refusal/table lists |
 
 The multi-agent sync tools are retired: coordination now goes through
-`session_list` (see every live session), `scheduled_send_create` (wake a
+`session_list` (see every live session), `scheduled_prompts` (wake a
 session later instead of polling), and `intelligence_upsert` /
 `intelligence_search` (persist and find shared findings).
 
@@ -131,7 +131,7 @@ See [Graphs](graphs.md).
 
 Kept callable for the whole 3.x line, but excluded from tool listings
 (`tools/list`) so nothing new adopts them — call the 3.x name instead. Not
-counted in the 34 tools above.
+counted in the 33 tools above.
 
 | Deprecated name | Renamed to (3.0.0) |
 |---|---|
@@ -235,12 +235,11 @@ ensembles — a crew.
 |---|---|
 | `session_list` | List live interactive sessions with the exact ids an interactive graph hook's `target_session_id` accepts, each with platform, workdir, name, and `attached` — whether the session's CLI process is still alive on this host, which stays `yes` for a daemon-hosted session even while no TUI is open; pass `session_id` to look one up. A resumed session appears once, with the id and name it already had — never a dead row plus a freshly-named one; only a name held by another live session mints a fresh name, keeping the id |
 
-## Scheduled sends (2)
+## Scheduled prompts (1)
 
 | Tool | Description |
 |---|---|
-| `scheduled_send_create` | Schedule a prompt for future delivery to a session (own session by default) |
-| `scheduled_send` | List and cancel pending scheduled sends. Actions: `list` (a session's pending sends, soonest first; optional `session_id`), `cancel` (`id`) — pass `action` plus the params the refusal/table lists |
+| `scheduled_prompts` | Schedule a prompt for future delivery to a session (own session by default), and list and cancel pending scheduled sends. Actions: `create` (`prompt`, exactly one of `at`/`in_seconds`, optional `target_session_id`), `list` (a session's pending sends, soonest first; optional `session_id`), `cancel` (`id`) — pass `action` plus the params the refusal/table lists |
 
 ## Session shelf (1)
 

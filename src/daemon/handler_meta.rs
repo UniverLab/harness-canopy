@@ -184,8 +184,8 @@ impl TaskTriggerHandler {
                         "sync_messages": outcome.counts.sync_messages,
                         "sync_locks": outcome.counts.sync_locks,
                         "last_prompts": outcome.counts.last_prompts,
-                        "scheduled_sends": outcome.counts.scheduled_sends,
-                        "failed_scheduled_sends": outcome.counts.failed_scheduled_sends,
+                        "scheduled_prompts": outcome.counts.scheduled_prompts,
+                        "failed_scheduled_prompts": outcome.counts.failed_scheduled_prompts,
                         "agents": outcome.counts.agents,
                         "intelligence_nodes": outcome.counts.intelligence_nodes,
                     },
@@ -500,7 +500,7 @@ impl TaskTriggerHandler {
     }
 }
 
-/// The 34-tool map every `get_tools` scope serves: one line per tool,
+/// The 33-tool map every `get_tools` scope serves: one line per tool,
 /// each naming the tool, its actions, and what it is for. Alphabetical by
 /// tool name, matching the canonical listing. The sync protocol is retired,
 /// so every scope carries the same map — the scopes differ only in their
@@ -533,8 +533,7 @@ fn tool_map_entries() -> Vec<&'static str> {
         "rag — search, compact; semantic search over indexed content and vector-store maintenance",
         "remote — status, pair, set_enabled, revoke; remote control of this hub from the browser",
         "sandbox — list, get, land, discard; deal with the worktrees sandboxed graph runs leave behind",
-        "scheduled_send — list, cancel; list and cancel pending scheduled sends",
-        "scheduled_send_create — schedule a prompt for future delivery to a session",
+        "scheduled_prompts — create, list, cancel; schedule a prompt for future delivery, list and cancel pending scheduled sends",
         "session_list — list live interactive sessions",
         "session_send_file — copy images onto a session's shelf for the user to see",
         "skill — list, get; discover and fetch skills",
@@ -588,7 +587,7 @@ pub(crate) fn build_get_tools_response(scope: &str) -> serde_json::Value {
             "risk": "varies",
             "protocol": [
                 "1. Call session_list to see every live session before addressing one.",
-                "2. Use scheduled_send_create to wake another session (or your future self) instead of polling.",
+                "2. Use scheduled_prompts to wake another session (or your future self) instead of polling.",
                 "3. Persist shared findings with intelligence_upsert so other agents find them via intelligence_search."
             ],
         }),

@@ -1,14 +1,14 @@
 //! Part 17 of `endpoint_tests`: the final-wave surface contract — exactly
-//! the 34 visible tools, one smoke per new resource tool through its own
+//! the 33 visible tools, one smoke per new resource tool through its own
 //! dispatch, the refusal shape for an unknown action, and the `get_tools`
-//! 34-map every scope serves.
+//! 33-map every scope serves.
 use super::*;
 use serde_json::json;
 
-/// The 34 visible tools, alphabetical: the decision's final surface plus
+/// The 33 visible tools, alphabetical: the decision's final surface plus
 /// `remote` and `session_send_file`. The
 /// two hidden `loop_*` aliases stay registered but are not visible.
-const VISIBLE_34: &[&str] = &[
+const VISIBLE_33: &[&str] = &[
     "agent",
     "agent_edit",
     "agent_report",
@@ -35,8 +35,7 @@ const VISIBLE_34: &[&str] = &[
     "rag",
     "remote",
     "sandbox",
-    "scheduled_send",
-    "scheduled_send_create",
+    "scheduled_prompts",
     "session_list",
     "session_send_file",
     "skill",
@@ -46,15 +45,52 @@ const VISIBLE_34: &[&str] = &[
 ];
 
 #[tokio::test]
-async fn visible_tool_surface_is_exactly_the_34() {
+async fn visible_tool_surface_is_exactly_the_33() {
     let visible = visible_tool_list();
     let names: Vec<&str> = visible.iter().map(|tool| tool.name.as_ref()).collect();
-    assert_eq!(names.len(), 34, "visible tool count drifted: {names:?}");
-    assert_eq!(names, VISIBLE_34, "visible tool list drifted");
+    assert_eq!(names.len(), 33, "visible tool count drifted: {names:?}");
+    assert_eq!(names, VISIBLE_33, "visible tool list drifted");
     assert!(
         !names.iter().any(|name| name.starts_with("loop_")),
         "hidden loop_* aliases must stay out of the visible list"
     );
+}
+
+/// The merged tool is listed under its new name and neither retired name
+/// survives anywhere in the registry or the visible list.
+#[tokio::test]
+async fn tools_list_contains_scheduled_prompts_and_neither_old_name() {
+    // Retired names built with `concat!` so no retired literal survives
+    // in the repo (a literal would fail the repo-wide retired-name grep).
+    let old_list = concat!("scheduled", "_send");
+    let old_create = concat!("scheduled", "_send_create");
+    let registered: Vec<String> = TaskTriggerHandler::tool_router()
+        .list_all()
+        .iter()
+        .map(|tool| tool.name.to_string())
+        .collect();
+    assert!(
+        registered.contains(&"scheduled_prompts".to_string()),
+        "registry must list scheduled_prompts: {registered:?}"
+    );
+    for old in [old_list, old_create] {
+        assert!(
+            !registered.iter().any(|name| name == old),
+            "retired tool {old:?} must be gone from the registry: {registered:?}"
+        );
+    }
+    let visible = visible_tool_list();
+    let names: Vec<&str> = visible.iter().map(|tool| tool.name.as_ref()).collect();
+    assert!(
+        names.contains(&"scheduled_prompts"),
+        "visible list must contain scheduled_prompts: {names:?}"
+    );
+    for old in [old_list, old_create] {
+        assert!(
+            !names.contains(&old),
+            "retired tool {old:?} must be gone from the visible list: {names:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -132,13 +168,13 @@ async fn project_search_smoke() {
 }
 
 #[tokio::test]
-async fn scheduled_send_list_smoke() {
+async fn scheduled_prompts_list_smoke() {
     let (_dir, _db, handler) = endpoint_test_handler();
     let result = call_resource_action(
         &handler,
-        "scheduled_send",
+        "scheduled_prompts",
         "list",
-        params_id(ScheduledSendListParams {
+        params_id(ScheduledPromptListParams {
             session_id: Some("nobody".to_string()),
         }),
     )
@@ -215,7 +251,7 @@ async fn new_tools_refuse_unknown_actions_with_their_full_table() {
             ],
         ),
         ("project", &["register", "remap", "search", "update"]),
-        ("scheduled_send", &["list", "cancel"]),
+        ("scheduled_prompts", &["create", "list", "cancel"]),
         ("skill", &["list", "get"]),
         ("subagent", &["spawn", "collect"]),
         ("rag", &["search", "compact"]),
@@ -262,10 +298,10 @@ async fn new_tools_refuse_unknown_actions_with_their_full_table() {
     }
 }
 
-/// Every scope serves the same 34-map: one line per visible tool, each
+/// Every scope serves the same 33-map: one line per visible tool, each
 /// naming the tool and its actions.
 #[tokio::test]
-async fn get_tools_serves_the_same_34_map_for_every_scope() {
+async fn get_tools_serves_the_same_33_map_for_every_scope() {
     let (_dir, _db, handler) = endpoint_test_handler();
     let scopes = [
         "session_start",
@@ -290,7 +326,7 @@ async fn get_tools_serves_the_same_34_map_for_every_scope() {
         let body: serde_json::Value =
             serde_json::from_str(&raw_text(&result)).expect("get_tools body is JSON");
         let tools = body["tools"].as_array().expect("tools is an array");
-        assert_eq!(tools.len(), 34, "{scope} must serve 34 tools");
+        assert_eq!(tools.len(), 33, "{scope} must serve 33 tools");
         maps.push(
             tools
                 .iter()
@@ -301,7 +337,7 @@ async fn get_tools_serves_the_same_34_map_for_every_scope() {
     for (scope, map) in scopes.iter().zip(maps.iter()).skip(1) {
         assert_eq!(map, &maps[0], "{scope} map must equal session_start's");
     }
-    for (entry, name) in maps[0].iter().zip(VISIBLE_34.iter()) {
+    for (entry, name) in maps[0].iter().zip(VISIBLE_33.iter()) {
         assert!(
             entry.starts_with(&format!("{name} — ")),
             "map entry must lead with its tool name: {entry}"

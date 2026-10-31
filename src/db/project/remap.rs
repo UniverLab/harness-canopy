@@ -216,11 +216,11 @@ impl Database {
             params![old_path, new_canonical_path],
         )?;
         tx.execute(
-            "UPDATE scheduled_sends SET workdir = ?2 WHERE workdir = ?1",
+            "UPDATE scheduled_prompts SET workdir = ?2 WHERE workdir = ?1",
             params![old_path, new_canonical_path],
         )?;
         tx.execute(
-            "UPDATE failed_scheduled_sends SET workdir = ?2 WHERE workdir = ?1",
+            "UPDATE failed_scheduled_prompts SET workdir = ?2 WHERE workdir = ?1",
             params![old_path, new_canonical_path],
         )?;
         tx.execute(
@@ -340,13 +340,13 @@ fn count_remap_targets(
         params![old_path],
         |row| row.get(0),
     )?;
-    let scheduled_sends: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM scheduled_sends WHERE workdir = ?1",
+    let scheduled_prompts: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM scheduled_prompts WHERE workdir = ?1",
         params![old_path],
         |row| row.get(0),
     )?;
-    let failed_scheduled_sends: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM failed_scheduled_sends WHERE workdir = ?1",
+    let failed_scheduled_prompts: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM failed_scheduled_prompts WHERE workdir = ?1",
         params![old_path],
         |row| row.get(0),
     )?;
@@ -369,8 +369,8 @@ fn count_remap_targets(
         sync_messages,
         sync_locks,
         last_prompts,
-        scheduled_sends,
-        failed_scheduled_sends,
+        scheduled_prompts,
+        failed_scheduled_prompts,
         agents,
         intelligence_nodes,
     })

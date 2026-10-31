@@ -3,10 +3,10 @@
 //! Moved here from `tui::app::data`: with the hub owning every PTY, a schedule
 //! fires on the daemon's scheduler tick whether or not a TUI is attached. A
 //! send whose target session is gone keeps the prompt recoverable and says so,
-//! exactly as `preserve_dead_scheduled_send` did in the TUI.
+//! exactly as `preserve_dead_scheduled_prompt` did in the TUI.
 
 use crate::application::ports::AgentRepository;
-use crate::db::scheduled_sends::{is_target_alive, ScheduledSend, ScheduledSendProvenance};
+use crate::db::scheduled_prompts::{is_target_alive, ScheduledPrompt, ScheduledPromptProvenance};
 use crate::db::Database;
 use crate::domain::notification::{send_notification, NotificationLevel};
 use crate::sessions::{SessionHub, SessionKind, SessionStatus};
@@ -14,9 +14,9 @@ use crate::sessions::{SessionHub, SessionKind, SessionStatus};
 /// Deliver every send whose `fire_at` has passed: to its live target session,
 /// or — when that session is gone — to the failed-sends table plus a desktop
 /// notification. Either way the schedule is consumed once.
-pub fn deliver_due_scheduled_sends(db: &Database, hub: &SessionHub) {
+pub fn deliver_due_scheduled_prompts(db: &Database, hub: &SessionHub) {
     let now = chrono::Utc::now();
-    let due = match db.list_due_scheduled_sends(now) {
+    let due = match db.list_due_scheduled_prompts(now) {
         Ok(due) => due,
         Err(e) => {
             tracing::warn!("Failed to list due scheduled sends: {e}");
@@ -30,11 +30,11 @@ pub fn deliver_due_scheduled_sends(db: &Database, hub: &SessionHub) {
     let live_session_ids = live_agent_ids(hub);
     for send in &due {
         if is_target_alive(&send.target_session_id, &live_session_ids) {
-            deliver_live_scheduled_send(db, hub, send);
+            deliver_live_scheduled_prompt(db, hub, send);
         } else {
-            preserve_dead_scheduled_send(db, send, now);
+            preserve_dead_scheduled_prompt(db, send, now);
         }
-        if let Err(e) = db.delete_scheduled_send(&send.id) {
+        if let Err(e) = db.delete_scheduled_prompt(&send.id) {
             tracing::warn!("Failed to delete scheduled send '{}': {e}", send.id);
         }
     }
@@ -52,7 +52,7 @@ fn live_agent_ids(hub: &SessionHub) -> Vec<String> {
         .collect()
 }
 
-fn deliver_live_scheduled_send(db: &Database, hub: &SessionHub, send: &ScheduledSend) {
+fn deliver_live_scheduled_prompt(db: &Database, hub: &SessionHub, send: &ScheduledPrompt) {
     let Some(session) = hub.get(&send.target_session_id) else {
         return;
     };
@@ -73,7 +73,7 @@ fn deliver_live_scheduled_send(db: &Database, hub: &SessionHub, send: &Scheduled
     notify_hook_delivery(db, send);
 }
 
-fn notify_hook_delivery(db: &Database, send: &ScheduledSend) -> bool {
+fn notify_hook_delivery(db: &Database, send: &ScheduledPrompt) -> bool {
     let Some(provenance) = send.provenance.as_ref() else {
         return false;
     };
@@ -101,7 +101,7 @@ fn notify_hook_delivery(db: &Database, send: &ScheduledSend) -> bool {
 }
 
 /// Name of the graph behind a hook delivery; `None` once it is gone.
-fn hook_graph_name(db: &Database, provenance: &ScheduledSendProvenance) -> Option<String> {
+fn hook_graph_name(db: &Database, provenance: &ScheduledPromptProvenance) -> Option<String> {
     db.get_graph(&provenance.graph_id)
         .ok()
         .flatten()
@@ -110,7 +110,7 @@ fn hook_graph_name(db: &Database, provenance: &ScheduledSendProvenance) -> Optio
 
 /// Name of the agent behind an agent-trigger delivery; `None` once it is
 /// gone. An agent's name is its id, so the id is what the user sees.
-fn trigger_agent_name(db: &Database, provenance: &ScheduledSendProvenance) -> Option<String> {
+fn trigger_agent_name(db: &Database, provenance: &ScheduledPromptProvenance) -> Option<String> {
     provenance
         .agent_id
         .as_deref()
@@ -120,9 +120,9 @@ fn trigger_agent_name(db: &Database, provenance: &ScheduledSendProvenance) -> Op
 
 /// Keep the prompt of a send whose target is gone recoverable, and tell the
 /// operator it was not delivered.
-fn preserve_dead_scheduled_send(
+fn preserve_dead_scheduled_prompt(
     db: &Database,
-    send: &ScheduledSend,
+    send: &ScheduledPrompt,
     now: chrono::DateTime<chrono::Utc>,
 ) {
     tracing::warn!(
@@ -130,7 +130,7 @@ fn preserve_dead_scheduled_send(
         send.id,
         send.target_session_id
     );
-    if let Err(e) = db.insert_failed_scheduled_send(
+    if let Err(e) = db.insert_failed_scheduled_prompt(
         &send.id,
         &send.prompt,
         &send.target_session_id,
@@ -156,7 +156,7 @@ fn preserve_dead_scheduled_send(
 
 fn record_failed_send_recall(
     db: &Database,
-    send: &ScheduledSend,
+    send: &ScheduledPrompt,
     now: chrono::DateTime<chrono::Utc>,
 ) {
     let Some(workdir) = send.workdir.as_deref() else {
@@ -177,7 +177,7 @@ fn display_name<'a>(resolved: Option<&'a str>, id: &'a str) -> &'a str {
         .unwrap_or_else(|| id.get(..8).unwrap_or(id))
 }
 
-fn hook_delivery_body(provenance: &ScheduledSendProvenance, name: Option<&str>) -> String {
+fn hook_delivery_body(provenance: &ScheduledPromptProvenance, name: Option<&str>) -> String {
     format!(
         "{} · {}: message delivered to this session",
         display_name(name, &provenance.graph_id),
@@ -185,7 +185,10 @@ fn hook_delivery_body(provenance: &ScheduledSendProvenance, name: Option<&str>) 
     )
 }
 
-fn agent_trigger_delivery_body(provenance: &ScheduledSendProvenance, name: Option<&str>) -> String {
+fn agent_trigger_delivery_body(
+    provenance: &ScheduledPromptProvenance,
+    name: Option<&str>,
+) -> String {
     format!(
         "{} ({}): message delivered to this session",
         display_name(name, provenance.agent_id.as_deref().unwrap_or("")),
@@ -199,7 +202,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use crate::db::scheduled_sends::ScheduledSendProvenance;
+    use crate::db::scheduled_prompts::ScheduledPromptProvenance;
     use crate::sessions::{SessionHub, SpawnRequest};
     use tempfile::TempDir;
 
@@ -259,7 +262,7 @@ mod tests {
         // back on the screen.
         let session = hub.spawn(&agent_spawn("cat")).expect("spawn cat session");
 
-        db.insert_scheduled_send(
+        db.insert_scheduled_prompt(
             "ss-live",
             "deliver me from the daemon",
             &session.id,
@@ -270,17 +273,17 @@ mod tests {
         )
         .expect("insert scheduled send");
 
-        deliver_due_scheduled_sends(&db, &hub);
+        deliver_due_scheduled_prompts(&db, &hub);
 
         wait_for_output(&session, "deliver me from the daemon");
         assert!(
-            db.list_due_scheduled_sends(chrono::Utc::now())
+            db.list_due_scheduled_prompts(chrono::Utc::now())
                 .expect("list due")
                 .is_empty(),
             "a delivered send is consumed"
         );
         assert!(
-            db.list_failed_scheduled_sends_for_workdir("/tmp")
+            db.list_failed_scheduled_prompts_for_workdir("/tmp")
                 .expect("list failed")
                 .is_empty(),
             "a delivered send is never preserved as failed"
@@ -296,7 +299,7 @@ mod tests {
         let hub = test_hub(&db);
         let workdir = "/tmp/scheduled-send-dead-target";
 
-        db.insert_scheduled_send(
+        db.insert_scheduled_prompt(
             "ss-dead",
             "please recover me",
             "session-that-no-longer-exists",
@@ -307,16 +310,16 @@ mod tests {
         )
         .expect("insert scheduled send");
 
-        deliver_due_scheduled_sends(&db, &hub);
+        deliver_due_scheduled_prompts(&db, &hub);
 
         assert!(
-            db.list_due_scheduled_sends(chrono::Utc::now())
+            db.list_due_scheduled_prompts(chrono::Utc::now())
                 .expect("list due")
                 .is_empty(),
             "the send fired once, whether delivered or preserved"
         );
         let failed = db
-            .list_failed_scheduled_sends_for_workdir(workdir)
+            .list_failed_scheduled_prompts_for_workdir(workdir)
             .expect("list failed");
         assert_eq!(failed.len(), 1);
         assert_eq!(failed[0].prompt, "please recover me");
@@ -335,7 +338,7 @@ mod tests {
         let hub = test_hub(&db);
         let workdir = "/tmp/scheduled-send-exited";
 
-        db.insert_scheduled_send(
+        db.insert_scheduled_prompt(
             "ss-exited",
             "nobody is listening",
             "exited-session",
@@ -346,10 +349,10 @@ mod tests {
         )
         .expect("insert scheduled send");
 
-        deliver_due_scheduled_sends(&db, &hub);
+        deliver_due_scheduled_prompts(&db, &hub);
 
         assert_eq!(
-            db.list_failed_scheduled_sends_for_workdir(workdir)
+            db.list_failed_scheduled_prompts_for_workdir(workdir)
                 .expect("list failed")
                 .len(),
             1
@@ -357,27 +360,27 @@ mod tests {
     }
 
     #[test]
-    fn next_scheduled_send_at_is_the_earliest_fire_time() {
+    fn next_scheduled_prompt_at_is_the_earliest_fire_time() {
         let (db, _dir) = test_db();
-        assert_eq!(db.next_scheduled_send_at().expect("query"), None);
+        assert_eq!(db.next_scheduled_prompt_at().expect("query"), None);
 
         let earlier = chrono::DateTime::from_timestamp(chrono::Utc::now().timestamp() + 300, 0)
             .expect("whole-second timestamp");
         let later = chrono::DateTime::from_timestamp(chrono::Utc::now().timestamp() + 1800, 0)
             .expect("whole-second timestamp");
-        db.insert_scheduled_send("ss-later", "b", "sess", None, later, None, None)
+        db.insert_scheduled_prompt("ss-later", "b", "sess", None, later, None, None)
             .unwrap();
-        db.insert_scheduled_send("ss-earlier", "a", "sess", None, earlier, None, None)
+        db.insert_scheduled_prompt("ss-earlier", "a", "sess", None, earlier, None, None)
             .unwrap();
 
-        assert_eq!(db.next_scheduled_send_at().expect("query"), Some(earlier));
+        assert_eq!(db.next_scheduled_prompt_at().expect("query"), Some(earlier));
     }
 
     // ── notification text (moved from `tui::app::data`) ─────────────
 
     #[test]
     fn hook_delivery_body_names_the_graph() {
-        let prov = ScheduledSendProvenance::hook("g-canopy", "on_completed");
+        let prov = ScheduledPromptProvenance::hook("g-canopy", "on_completed");
         assert_eq!(
             hook_delivery_body(&prov, Some("canopy-next")),
             "canopy-next · on_completed: message delivered to this session"
@@ -387,7 +390,7 @@ mod tests {
     #[test]
     fn hook_delivery_body_falls_back_to_short_id() {
         let prov =
-            ScheduledSendProvenance::hook("969ee102-0138-4054-95fd-2946ef237431", "on_completed");
+            ScheduledPromptProvenance::hook("969ee102-0138-4054-95fd-2946ef237431", "on_completed");
         assert_eq!(
             hook_delivery_body(&prov, None),
             "969ee102 · on_completed: message delivered to this session"
@@ -396,7 +399,7 @@ mod tests {
 
     #[test]
     fn agent_trigger_delivery_body_names_the_agent() {
-        let prov = ScheduledSendProvenance::agent_trigger("nudger", "cron");
+        let prov = ScheduledPromptProvenance::agent_trigger("nudger", "cron");
         assert_eq!(
             agent_trigger_delivery_body(&prov, Some("nudger")),
             "nudger (cron): message delivered to this session"
@@ -430,7 +433,7 @@ mod tests {
         })
         .expect("insert graph");
 
-        let prov = ScheduledSendProvenance::hook("g-canopy-next", "on_completed");
+        let prov = ScheduledPromptProvenance::hook("g-canopy-next", "on_completed");
         let name = hook_graph_name(&db, &prov);
         assert_eq!(
             hook_delivery_body(&prov, name.as_deref()),
@@ -438,7 +441,7 @@ mod tests {
         );
 
         let unknown =
-            ScheduledSendProvenance::hook("969ee102-0138-4054-95fd-2946ef237431", "on_completed");
+            ScheduledPromptProvenance::hook("969ee102-0138-4054-95fd-2946ef237431", "on_completed");
         assert_eq!(hook_graph_name(&db, &unknown), None);
     }
 
@@ -470,22 +473,24 @@ mod tests {
         })
         .expect("insert agent");
 
-        let prov = ScheduledSendProvenance::agent_trigger("nudger", "cron");
+        let prov = ScheduledPromptProvenance::agent_trigger("nudger", "cron");
         let name = trigger_agent_name(&db, &prov);
         assert_eq!(
             agent_trigger_delivery_body(&prov, name.as_deref()),
             "nudger (cron): message delivered to this session"
         );
 
-        let unknown =
-            ScheduledSendProvenance::agent_trigger("969ee102-0138-4054-95fd-2946ef237431", "cron");
+        let unknown = ScheduledPromptProvenance::agent_trigger(
+            "969ee102-0138-4054-95fd-2946ef237431",
+            "cron",
+        );
         assert_eq!(trigger_agent_name(&db, &unknown), None);
     }
 
     #[test]
     fn notify_hook_delivery_is_true_for_hook_and_agent_trigger_provenance() {
         let (db, _dir) = test_db();
-        let send = |provenance: Option<ScheduledSendProvenance>| ScheduledSend {
+        let send = |provenance: Option<ScheduledPromptProvenance>| ScheduledPrompt {
             id: "ss".into(),
             prompt: "test".into(),
             target_session_id: "sess".into(),
@@ -498,15 +503,18 @@ mod tests {
 
         assert!(notify_hook_delivery(
             &db,
-            &send(Some(ScheduledSendProvenance::hook("graph-1", "on_failed")))
+            &send(Some(ScheduledPromptProvenance::hook(
+                "graph-1",
+                "on_failed"
+            )))
         ));
         assert!(notify_hook_delivery(
             &db,
-            &send(Some(ScheduledSendProvenance::agent_trigger(
+            &send(Some(ScheduledPromptProvenance::agent_trigger(
                 "nudger", "cron"
             )))
         ));
-        let other = ScheduledSendProvenance {
+        let other = ScheduledPromptProvenance {
             kind: "other".into(),
             graph_id: "graph-1".into(),
             event: "on_failed".into(),

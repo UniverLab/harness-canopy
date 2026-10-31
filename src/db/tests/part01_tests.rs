@@ -378,7 +378,7 @@ fn close_orphaned_interactive_sessions_sweeps_historic_orphans() {
 }
 
 #[test]
-fn scheduled_sends_for_closed_session_are_dropped_on_missing_target_restore() {
+fn scheduled_prompts_for_closed_session_are_dropped_on_missing_target_restore() {
     let db = test_db();
     db.insert_interactive_session(
         "sess-x",
@@ -391,10 +391,10 @@ fn scheduled_sends_for_closed_session_are_dropped_on_missing_target_restore() {
         None,
     )
     .unwrap();
-    db.insert_scheduled_send("ss-x", "ping", "sess-x", None, Utc::now(), None, None)
+    db.insert_scheduled_prompt("ss-x", "ping", "sess-x", None, Utc::now(), None, None)
         .unwrap();
     assert_eq!(
-        db.list_pending_scheduled_sends_for_session("sess-x")
+        db.list_pending_scheduled_prompts_for_session("sess-x")
             .unwrap()
             .len(),
         1
@@ -404,10 +404,10 @@ fn scheduled_sends_for_closed_session_are_dropped_on_missing_target_restore() {
     // joins the live-agent set. Dropping schedules for targets that are gone
     // is modelled here with an empty live list.
     db.mark_session_closed("sess-x").unwrap();
-    let dropped = db.drop_scheduled_sends_missing_targets(&[]).unwrap();
+    let dropped = db.drop_scheduled_prompts_missing_targets(&[]).unwrap();
     assert_eq!(dropped, 1);
     assert!(db
-        .list_pending_scheduled_sends_for_session("sess-x")
+        .list_pending_scheduled_prompts_for_session("sess-x")
         .unwrap()
         .is_empty());
 }

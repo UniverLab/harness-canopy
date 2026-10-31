@@ -479,7 +479,7 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
             CREATE INDEX IF NOT EXISTS idx_seed_sessions_seed
                 ON seed_sessions(seed_id);
 
-            CREATE TABLE IF NOT EXISTS scheduled_sends (
+            CREATE TABLE IF NOT EXISTS scheduled_prompts (
                 id TEXT PRIMARY KEY,
                 prompt TEXT NOT NULL,
                 target_session_id TEXT NOT NULL,
@@ -488,7 +488,7 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
                 provenance TEXT
             );
 
-            CREATE TABLE IF NOT EXISTS failed_scheduled_sends (
+            CREATE TABLE IF NOT EXISTS failed_scheduled_prompts (
                 id TEXT PRIMARY KEY,
                 prompt TEXT NOT NULL,
                 target_session_id TEXT NOT NULL,
@@ -646,12 +646,13 @@ impl Database {
         Self::migrate_loop_to_graph_schema(&conn)?;
         Self::migrate_cb52_ensemble_fk(&conn)?;
         Self::migrate_activity_attribution_prefix(&conn)?;
+        Self::migrate_scheduled_prompt_table_names(&conn)?;
 
         Self::create_base_schema(&conn)?;
         Self::migrate_sandbox_cleanup_error_column(&conn)?;
         Self::migrate_operational_sessions_from_intelligence(&conn)?;
         Self::migrate_intelligence_nodes_status_column(&conn)?;
-        Self::migrate_scheduled_send_columns(&conn)?;
+        Self::migrate_scheduled_prompt_columns(&conn)?;
         Self::migrate_interactive_session_columns(&conn)?;
         Self::migrate_interactive_harness_column(&conn)?;
         Self::migrate_agent_optin_columns(&conn)?;
@@ -761,8 +762,8 @@ pub mod remote_devices;
 pub(crate) mod roster_entries;
 pub mod run;
 pub mod sandbox;
-pub mod scheduled_sends;
-pub mod scheduled_sends_agent;
+pub mod scheduled_prompts;
+pub mod scheduled_prompts_agent;
 mod schema;
 pub mod seeds;
 pub mod session;

@@ -275,7 +275,7 @@ impl SimplePromptDialog {
     /// `text` verbatim. Used to recall a prompt whose structured builder
     /// state wasn't captured — a scheduled send recovered after its target
     /// session died only has the flattened prompt string (see
-    /// `Database::insert_failed_scheduled_send`), so a faithful
+    /// `Database::insert_failed_scheduled_prompt`), so a faithful
     /// section-by-section restore isn't possible.
     pub fn load_flat_text(&mut self, text: &str) {
         self.sections.clear();

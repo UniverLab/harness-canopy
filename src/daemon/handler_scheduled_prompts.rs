@@ -1,37 +1,29 @@
-//! MCP handler tools split out of `daemon::handler` (scheduled-send tools).
-//! Moved verbatim; tool names, schemas, and behaviour unchanged.
+//! `scheduled_prompts` action implementations split out of `daemon::handler`.
+//! Called from the resource tool in `handler_resource_tools_final`; behaviour unchanged.
 
-use crate::daemon::handler::{OptionalExtension, TaskTriggerHandler};
+use crate::daemon::handler::TaskTriggerHandler;
 use crate::daemon::helpers::{error_result, success_result};
 use crate::daemon::params::*;
-use crate::daemon::params_extract::Parameters;
-use crate::db::scheduled_sends::ScheduledSendProvenance;
+use crate::db::scheduled_prompts::ScheduledPromptProvenance;
 use axum::http::request::Parts;
 use rmcp::model::{CallToolResult, ContentBlock};
-use rmcp::tool;
-use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
 
-#[tool_router(router = tool_router_scheduled_sends, vis = "pub(crate)")]
 impl TaskTriggerHandler {
     /// Schedule a prompt for future delivery to an interactive session
-    /// (CM22). Exposes the same `scheduled_sends` mechanism the
+    /// (CM22). Exposes the same `scheduled_prompts` mechanism the
     /// promptbuilder and graph hooks already use: delivery happens on the
     /// TUI's next refresh tick, a dead target is preserved in
-    /// `failed_scheduled_sends`, and a message enqueued while no TUI is
+    /// `failed_scheduled_prompts`, and a message enqueued while no TUI is
     /// running simply waits.
-    #[tool(
-        name = "scheduled_send_create",
-        description = "Schedule a prompt for delivery to an interactive session at a future time — the way to have an agent wake itself (or another session) later instead of polling on a cron. Omit `target_session_id` to target your own session. Give exactly one of `at` (ISO 8601, e.g. \"2026-07-10T09:00:00Z\") or `in_seconds` (relative delay, e.g. 2400 for \"in 40 minutes\"). Delivery happens on the target's next TUI refresh tick — if no TUI is attached when the time arrives, the send waits rather than being lost. Refused immediately if the target session does not exist. Returns the new scheduled send's id."
-    )]
-    pub(crate) async fn scheduled_send_create(
+    pub(crate) async fn scheduled_prompt_create_impl(
         &self,
-        Parameters(params): Parameters<ScheduledSendCreateParams>,
-        OptionalExtension(parts): OptionalExtension<Parts>,
+        params: ScheduledPromptCreateParams,
+        parts: Option<&Parts>,
     ) -> Result<CallToolResult, McpError> {
-        self.reject_if_nursery(parts.as_ref())?;
-        self.record_harness_id(parts.as_ref());
-        let agent_id = self.resolve_sync_agent_id(parts.as_ref())?;
+        self.reject_if_nursery(parts)?;
+        self.record_harness_id(parts);
+        let agent_id = self.resolve_sync_agent_id(parts)?;
 
         if let Err(e) = crate::domain::validation::validate_prompt(&params.prompt) {
             return Ok(error_result(&e));
@@ -82,13 +74,13 @@ impl TaskTriggerHandler {
             )));
         };
 
-        let provenance = ScheduledSendProvenance::agent(&agent_id);
+        let provenance = ScheduledPromptProvenance::agent(&agent_id);
         let workdir_opt =
             (!target_session.working_dir.is_empty()).then_some(target_session.working_dir.as_str());
         let id = format!("ss-{}", uuid::Uuid::new_v4());
 
         self.db
-            .insert_scheduled_send(
+            .insert_scheduled_prompt(
                 &id,
                 &params.prompt,
                 &target_session_id,
@@ -108,9 +100,9 @@ impl TaskTriggerHandler {
     }
 
     /// List pending scheduled sends for a session (CM22).
-    pub(crate) async fn scheduled_send_list_impl(
+    pub(crate) async fn scheduled_prompt_list_impl(
         &self,
-        params: ScheduledSendListParams,
+        params: ScheduledPromptListParams,
         parts: Option<&Parts>,
     ) -> Result<CallToolResult, McpError> {
         self.record_harness_id(parts);
@@ -129,7 +121,7 @@ impl TaskTriggerHandler {
 
         let pending = self
             .db
-            .list_pending_scheduled_sends_for_session(&session_id)
+            .list_pending_scheduled_prompts_for_session(&session_id)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         if pending.is_empty() {
@@ -171,13 +163,13 @@ impl TaskTriggerHandler {
     }
 
     /// Cancel a pending scheduled send by id (CM22).
-    pub(crate) async fn scheduled_send_cancel_impl(
+    pub(crate) async fn scheduled_prompt_cancel_impl(
         &self,
-        ScheduledSendCancelParams { id }: ScheduledSendCancelParams,
+        ScheduledPromptCancelParams { id }: ScheduledPromptCancelParams,
     ) -> Result<CallToolResult, McpError> {
         let deleted = self
             .db
-            .delete_scheduled_send(&id)
+            .delete_scheduled_prompt(&id)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         if !deleted {

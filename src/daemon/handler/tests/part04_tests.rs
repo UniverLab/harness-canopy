@@ -768,8 +768,8 @@ const RESOURCE_TOOL_SPECS: &[(&str, &ToolSpec)] = &[
     ("remote", &crate::daemon::handler_remote::REMOTE),
     ("sandbox", &crate::daemon::handler_sandbox::SANDBOX),
     (
-        "scheduled_send",
-        &crate::daemon::handler_resource_tools_final::SCHEDULED_SEND,
+        "scheduled_prompts",
+        &crate::daemon::handler_resource_tools_final::SCHEDULED_PROMPTS,
     ),
     ("skill", &crate::daemon::handler_resource_tools_final::SKILL),
     ("spec", &crate::daemon::handler_resource_tools::SPEC),

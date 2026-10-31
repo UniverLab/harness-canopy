@@ -42,7 +42,7 @@ impl Database {
     }
 
     /// Resolve a configured session *id*, using the same hookable rule as
-    /// `scheduled_send_create` (a bridge sidecar is never a target).
+    /// `scheduled_prompts` (a bridge sidecar is never a target).
     pub fn resolve_target_session_id(&self, id: &str) -> Result<SessionTarget> {
         Ok(match self.get_hookable_session(id)? {
             Some(session) => SessionTarget::Found {

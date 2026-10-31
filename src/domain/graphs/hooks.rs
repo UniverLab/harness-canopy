@@ -11,7 +11,7 @@ use crate::domain::graphs::GraphRunStatus;
 /// the engine validates this at creation time.
 ///
 /// An interactive hook is fire-and-forget: firing it enqueues one due-now
-/// row in `scheduled_sends` for the configured session (`target_session_id`
+/// row in `scheduled_prompts` for the configured session (`target_session_id`
 /// or `target_session_name`, resolved to a live id at fire time), delivered
 /// asynchronously by the TUI (which stays queued, not lost, while no TUI is
 /// running). It never reads or waits for a reply.

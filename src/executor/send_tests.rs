@@ -57,8 +57,8 @@ fn executor(db: &Arc<Database>) -> Executor {
     Executor::new(db.clone(), Arc::new(DefaultNotificationService))
 }
 
-fn pending(db: &Database, session_id: &str) -> Vec<crate::db::scheduled_sends::ScheduledSend> {
-    db.list_pending_scheduled_sends_for_session(session_id)
+fn pending(db: &Database, session_id: &str) -> Vec<crate::db::scheduled_prompts::ScheduledPrompt> {
+    db.list_pending_scheduled_prompts_for_session(session_id)
         .unwrap()
 }
 

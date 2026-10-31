@@ -295,7 +295,7 @@ fn scheduling_from_the_raw_tab_discards_structure_and_reopens_in_raw() {
 
     let rows = app
         .db
-        .list_due_scheduled_sends(chrono::Utc::now() + chrono::Duration::hours(2))
+        .list_due_scheduled_prompts(chrono::Utc::now() + chrono::Duration::hours(2))
         .unwrap();
     let row = rows
         .iter()

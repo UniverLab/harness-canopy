@@ -11,8 +11,8 @@ mod section_picker;
 use section_picker::*;
 mod at_picker;
 use at_picker::*;
-mod scheduled_sends;
-use scheduled_sends::*;
+mod scheduled_prompts;
+use scheduled_prompts::*;
 mod image_paste;
 use image_paste::*;
 
@@ -166,7 +166,7 @@ fn dispatch_prompt_action(app: &mut App, action: PromptAction) {
         PromptAction::ScheduleSend(prompt, when) => {
             schedule_send_prompt(app, &prompt, when);
         }
-        PromptAction::CancelNextScheduled => cancel_scheduled_send(app),
+        PromptAction::CancelNextScheduled => cancel_scheduled_prompt(app),
         PromptAction::RecallLastPrompt => recall_last_prompt(app),
     }
 }

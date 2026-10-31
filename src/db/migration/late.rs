@@ -56,7 +56,7 @@ impl Database {
     pub(in crate::db) fn migrate_intelligence_nodes_status_column(conn: &Connection) -> Result<()> {
         // CM10: knowledge-node status. All pre-existing nodes backfill to
         // 'noted' via the column default. Idempotent pragma guard, same
-        // pattern as the scheduled_sends.workdir migration below.
+        // pattern as the scheduled_prompts.workdir migration below.
         let has_intelligence_status: bool = conn
             .query_row(
                 "SELECT COUNT(*) FROM pragma_table_info('intelligence_nodes') WHERE name = 'status'",
@@ -74,32 +74,32 @@ impl Database {
         Ok(())
     }
 
-    /// Add `scheduled_sends.workdir`/`builder_state` and `provenance` on both send tables.
-    pub(in crate::db) fn migrate_scheduled_send_columns(conn: &Connection) -> Result<()> {
+    /// Add `scheduled_prompts.workdir`/`builder_state` and `provenance` on both prompt tables.
+    pub(in crate::db) fn migrate_scheduled_prompt_columns(conn: &Connection) -> Result<()> {
         // `workdir` records which project a scheduled send targeted so a
         // dead-target failure can be preserved per-project for U8's recall.
-        let has_scheduled_send_workdir: bool = conn
+        let has_scheduled_prompt_workdir: bool = conn
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('scheduled_sends') WHERE name = 'workdir'",
+                "SELECT COUNT(*) FROM pragma_table_info('scheduled_prompts') WHERE name = 'workdir'",
                 [],
                 |row| Ok(row.get::<_, i32>(0)? > 0),
             )
             .unwrap_or(false);
-        if !has_scheduled_send_workdir {
-            conn.execute("ALTER TABLE scheduled_sends ADD COLUMN workdir TEXT", [])
+        if !has_scheduled_prompt_workdir {
+            conn.execute("ALTER TABLE scheduled_prompts ADD COLUMN workdir TEXT", [])
                 .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
 
         let has_scheduled_builder_state: bool = conn
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('scheduled_sends') WHERE name = 'builder_state'",
+                "SELECT COUNT(*) FROM pragma_table_info('scheduled_prompts') WHERE name = 'builder_state'",
                 [],
                 |row| Ok(row.get::<_, i32>(0)? > 0),
             )
             .unwrap_or(false);
         if !has_scheduled_builder_state {
             conn.execute(
-                "ALTER TABLE scheduled_sends ADD COLUMN builder_state TEXT",
+                "ALTER TABLE scheduled_prompts ADD COLUMN builder_state TEXT",
                 [],
             )
             .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
@@ -109,7 +109,7 @@ impl Database {
         // structured JSON so the TUI can name the sender without that
         // metadata being buried in the prompt text. Nullable so legacy
         // prompt-builder sends keep reading as `None`.
-        for table in ["scheduled_sends", "failed_scheduled_sends"] {
+        for table in ["scheduled_prompts", "failed_scheduled_prompts"] {
             let has_column: bool = conn
                 .query_row(
                     &format!(

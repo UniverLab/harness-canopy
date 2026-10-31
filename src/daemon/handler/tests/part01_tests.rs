@@ -57,15 +57,15 @@ fn probe_json_keeps_slug_and_adds_display() {
 fn tool_router_still_advertises_real_input_schemas_for_swapped_parameters_type() {
     let tools = TaskTriggerHandler::tool_router().list_all();
 
-    let scheduled_send_create = tools
+    let scheduled_prompts = tools
         .iter()
-        .find(|tool| tool.name == "scheduled_send_create")
-        .expect("scheduled_send_create tool should be registered");
-    let props = scheduled_send_create
+        .find(|tool| tool.name == "scheduled_prompts")
+        .expect("scheduled_prompts tool should be registered");
+    let props = scheduled_prompts
         .input_schema
         .get("properties")
         .and_then(|p| p.as_object())
-        .expect("scheduled_send_create input_schema should have properties");
+        .expect("scheduled_prompts input_schema should have properties");
     assert!(props.contains_key("prompt"));
     assert!(props.contains_key("target_session_id"));
 

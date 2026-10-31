@@ -136,7 +136,7 @@ docs/ is published at univerlab.org/canopy/docs and holds user documentation onl
 ### 🔄 Multi-Agent Coordination
 
 The sync protocol tools are retired. Sessions coordinate through
-`session_list` (see every live session), `scheduled_send_create` (wake a
+`session_list` (see every live session), `scheduled_prompts` (wake a
 session later instead of polling), and `intelligence_upsert` /
 `intelligence_search` (persist and find shared findings).
 
@@ -195,7 +195,7 @@ session later instead of polling), and `intelligence_upsert` /
 
 ---
 
-## MCP Tools (34)
+## MCP Tools (33)
 
 Graph-node sessions (agent and ensemble nodes launched by the graph engine) receive a fixed node profile of 12 tools via `CANOPY_MCP_PROFILE=node`, so every node stays well under the 128-tool cap of OpenAI-compatible providers. All other sessions — the orchestrator, check nodes, hooks, TUI, subagents, and background agents — keep the full tool list.
 
@@ -216,7 +216,7 @@ Graph-node sessions (agent and ensemble nodes launched by the graph engine) rece
 | `rag` | **RAG** (1) |
 | `get_tools` | **Protocol** (1) |
 | `session_list` | **Interactive sessions** (1) |
-| `scheduled_send_create`, `scheduled_send` | **Scheduled sends** (2) |
+| `scheduled_prompts` | **Scheduled prompts** (1) |
 | `session_send_file` | **Session shelf** (1) |
 | `remote` | **Remote control** (1) |
 

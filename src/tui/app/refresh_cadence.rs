@@ -350,7 +350,7 @@ impl App {
         };
         let pending = self
             .db
-            .list_pending_scheduled_sends_for_session(&id)
+            .list_pending_scheduled_prompts_for_session(&id)
             .unwrap_or_default();
         calculate_log_hash(&format!("{pending:?}"))
     }

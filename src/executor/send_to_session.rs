@@ -3,7 +3,7 @@
 //! When an agent's action is `SendToSession`, a fire delivers the rendered
 //! prompt into a live interactive session by enqueuing one due-now scheduled
 //! send — the same transport the interactive graph hook (CH3) and
-//! `scheduled_send_create` (CM22) use. No CLI process is ever spawned on this
+//! `scheduled_prompts` (CM22) use. No CLI process is ever spawned on this
 //! path; delivery itself stays TUI-driven, so a send enqueued while no TUI is
 //! open simply waits.
 
@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 
 use super::{append_to_log, CliRunResult, ExecutionContext, Executor};
 use crate::application::ports::RunRepository;
-use crate::db::scheduled_sends::ScheduledSendProvenance;
+use crate::db::scheduled_prompts::ScheduledPromptProvenance;
 use crate::db::session_target::SessionTarget;
 use crate::domain::models::{Agent, RunStatus};
 use crate::scheduler::substitute_variables;
@@ -50,7 +50,7 @@ impl Executor {
 
         let now = Utc::now();
         let provenance =
-            ScheduledSendProvenance::agent_trigger(&agent.id, provenance_trigger(agent));
+            ScheduledPromptProvenance::agent_trigger(&agent.id, provenance_trigger(agent));
 
         let (summary, result) = match self.resolve_send_target(agent) {
             Err(failure) => (
@@ -148,7 +148,7 @@ impl Executor {
         target: &ResolvedTarget,
         prompt: &str,
         now: DateTime<Utc>,
-        provenance: &ScheduledSendProvenance,
+        provenance: &ScheduledPromptProvenance,
     ) -> Result<String> {
         if let Some(existing) = self
             .db
@@ -156,7 +156,7 @@ impl Executor {
         {
             if self
                 .db
-                .replace_scheduled_send(&existing.id, prompt, now, provenance)?
+                .replace_scheduled_prompt(&existing.id, prompt, now, provenance)?
             {
                 return Ok(coalesced_summary(&existing.id, &target.display));
             }
@@ -166,7 +166,7 @@ impl Executor {
             );
         }
         let send_id = format!("ss-{}", uuid::Uuid::new_v4());
-        self.db.insert_scheduled_send(
+        self.db.insert_scheduled_prompt(
             &send_id,
             prompt,
             &target.id,

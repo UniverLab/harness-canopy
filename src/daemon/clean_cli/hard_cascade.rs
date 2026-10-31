@@ -107,8 +107,8 @@ fn direct_count(c: &clean::HardCascadeCounts) -> i64 {
         + c.interactive_sessions
         + c.terminal_sessions
         + c.last_prompts
-        + c.scheduled_sends
-        + c.failed_scheduled_sends
+        + c.scheduled_prompts
+        + c.failed_scheduled_prompts
         + c.sync_messages
         + c.sync_locks
         + c.intelligence_nodes
@@ -168,8 +168,8 @@ fn print_hard_cascade_plan(plan: &HardCascadePlan, dry_run: bool) {
                 c.interactive_sessions,
                 c.terminal_sessions,
                 c.last_prompts,
-                c.scheduled_sends,
-                c.failed_scheduled_sends,
+                c.scheduled_prompts,
+                c.failed_scheduled_prompts,
                 c.sync_messages,
                 c.sync_locks,
                 c.intelligence_nodes,

@@ -1063,7 +1063,7 @@ async fn session_list_omits_args_and_output() {
 }
 
 #[tokio::test]
-async fn scheduled_send_create_targets_own_session_when_omitted() {
+async fn scheduled_prompts_targets_own_session_when_omitted() {
     let (_dir, db, handler) = endpoint_test_handler();
     db.insert_interactive_session(
         "self-session",
@@ -1078,22 +1078,18 @@ async fn scheduled_send_create_targets_own_session_when_omitted() {
     .unwrap();
     let _guard = AgentIdVar::set("self-session");
 
-    let result = handler
-        .scheduled_send_create(
-            Parameters(ScheduledSendCreateParams {
-                prompt: "wake up".to_string(),
-                target_session_id: None,
-                at: None,
-                in_seconds: Some(60),
-            }),
-            OptionalExtension(None),
-        )
-        .await
-        .unwrap();
+    let result = call_resource_action_value(
+        &handler,
+        "scheduled_prompts",
+        "create",
+        serde_json::json!({"prompt": "wake up", "in_seconds": 60}),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&result), "{}", text(&result));
 
     let pending = db
-        .list_pending_scheduled_sends_for_session("self-session")
+        .list_pending_scheduled_prompts_for_session("self-session")
         .unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].prompt, "wake up");
@@ -1109,7 +1105,7 @@ async fn scheduled_send_create_targets_own_session_when_omitted() {
 }
 
 #[tokio::test]
-async fn scheduled_send_create_targets_named_session() {
+async fn scheduled_prompts_targets_named_session() {
     let (_dir, db, handler) = endpoint_test_handler();
     db.insert_interactive_session(
         "caller",
@@ -1135,22 +1131,22 @@ async fn scheduled_send_create_targets_named_session() {
     .unwrap();
     let _guard = AgentIdVar::set("caller");
 
-    let result = handler
-        .scheduled_send_create(
-            Parameters(ScheduledSendCreateParams {
-                prompt: "for the other session".to_string(),
-                target_session_id: Some("other".to_string()),
-                at: None,
-                in_seconds: Some(30),
-            }),
-            OptionalExtension(None),
-        )
-        .await
-        .unwrap();
+    let result = call_resource_action_value(
+        &handler,
+        "scheduled_prompts",
+        "create",
+        serde_json::json!({
+            "prompt": "for the other session",
+            "target_session_id": "other",
+            "in_seconds": 30,
+        }),
+    )
+    .await
+    .unwrap();
     assert!(!is_err(&result), "{}", text(&result));
 
     let pending = db
-        .list_pending_scheduled_sends_for_session("other")
+        .list_pending_scheduled_prompts_for_session("other")
         .unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(
@@ -1166,28 +1162,28 @@ async fn scheduled_send_create_targets_named_session() {
 }
 
 #[tokio::test]
-async fn scheduled_send_create_rejects_unknown_target() {
+async fn scheduled_prompts_rejects_unknown_target() {
     let (_dir, _db, handler) = endpoint_test_handler();
     let _guard = AgentIdVar::set("caller-2");
 
-    let result = handler
-        .scheduled_send_create(
-            Parameters(ScheduledSendCreateParams {
-                prompt: "hi".to_string(),
-                target_session_id: Some("no-such-session".to_string()),
-                at: None,
-                in_seconds: Some(60),
-            }),
-            OptionalExtension(None),
-        )
-        .await
-        .unwrap();
+    let result = call_resource_action_value(
+        &handler,
+        "scheduled_prompts",
+        "create",
+        serde_json::json!({
+            "prompt": "hi",
+            "target_session_id": "no-such-session",
+            "in_seconds": 60,
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&result));
     assert!(text(&result).contains("no-such-session"));
 }
 
 #[tokio::test]
-async fn scheduled_send_create_requires_exactly_one_of_at_or_in_seconds() {
+async fn scheduled_prompts_requires_exactly_one_of_at_or_in_seconds() {
     let (_dir, db, handler) = endpoint_test_handler();
     db.insert_interactive_session(
         "caller-3",
@@ -1202,37 +1198,33 @@ async fn scheduled_send_create_requires_exactly_one_of_at_or_in_seconds() {
     .unwrap();
     let _guard = AgentIdVar::set("caller-3");
 
-    let neither = handler
-        .scheduled_send_create(
-            Parameters(ScheduledSendCreateParams {
-                prompt: "hi".to_string(),
-                target_session_id: None,
-                at: None,
-                in_seconds: None,
-            }),
-            OptionalExtension(None),
-        )
-        .await
-        .unwrap();
+    let neither = call_resource_action_value(
+        &handler,
+        "scheduled_prompts",
+        "create",
+        serde_json::json!({"prompt": "hi"}),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&neither));
 
-    let both = handler
-        .scheduled_send_create(
-            Parameters(ScheduledSendCreateParams {
-                prompt: "hi".to_string(),
-                target_session_id: None,
-                at: Some("2026-07-10T09:00:00Z".to_string()),
-                in_seconds: Some(60),
-            }),
-            OptionalExtension(None),
-        )
-        .await
-        .unwrap();
+    let both = call_resource_action_value(
+        &handler,
+        "scheduled_prompts",
+        "create",
+        serde_json::json!({
+            "prompt": "hi",
+            "at": "2026-07-10T09:00:00Z",
+            "in_seconds": 60,
+        }),
+    )
+    .await
+    .unwrap();
     assert!(is_err(&both));
 }
 
 #[tokio::test]
-async fn scheduled_send_list_defaults_to_own_session() {
+async fn scheduled_prompts_list_defaults_to_own_session() {
     let (_dir, db, handler) = endpoint_test_handler();
     db.insert_interactive_session(
         "list-self",
@@ -1246,7 +1238,7 @@ async fn scheduled_send_list_defaults_to_own_session() {
     )
     .unwrap();
     let _guard = AgentIdVar::set("list-self");
-    db.insert_scheduled_send(
+    db.insert_scheduled_prompt(
         "ss-list-1",
         "hello",
         "list-self",
@@ -1259,9 +1251,9 @@ async fn scheduled_send_list_defaults_to_own_session() {
 
     let result = call_resource_action(
         &handler,
-        "scheduled_send",
+        "scheduled_prompts",
         "list",
-        params_id(ScheduledSendListParams { session_id: None }),
+        params_id(ScheduledPromptListParams { session_id: None }),
     )
     .await
     .unwrap();
@@ -1272,9 +1264,9 @@ async fn scheduled_send_list_defaults_to_own_session() {
 }
 
 #[tokio::test]
-async fn scheduled_send_list_explicit_session_needs_no_identity() {
+async fn scheduled_prompts_list_explicit_session_needs_no_identity() {
     let (_dir, db, handler) = endpoint_test_handler();
-    db.insert_scheduled_send(
+    db.insert_scheduled_prompt(
         "ss-list-2",
         "explicit",
         "some-session",
@@ -1287,9 +1279,9 @@ async fn scheduled_send_list_explicit_session_needs_no_identity() {
 
     let result = call_resource_action(
         &handler,
-        "scheduled_send",
+        "scheduled_prompts",
         "list",
-        params_id(ScheduledSendListParams {
+        params_id(ScheduledPromptListParams {
             session_id: Some("some-session".to_string()),
         }),
     )
@@ -1300,13 +1292,13 @@ async fn scheduled_send_list_explicit_session_needs_no_identity() {
 }
 
 #[tokio::test]
-async fn scheduled_send_list_empty_reports_none_pending() {
+async fn scheduled_prompts_list_empty_reports_none_pending() {
     let (_dir, _db, handler) = endpoint_test_handler();
     let result = call_resource_action(
         &handler,
-        "scheduled_send",
+        "scheduled_prompts",
         "list",
-        params_id(ScheduledSendListParams {
+        params_id(ScheduledPromptListParams {
             session_id: Some("nobody".to_string()),
         }),
     )
@@ -1317,9 +1309,9 @@ async fn scheduled_send_list_empty_reports_none_pending() {
 }
 
 #[tokio::test]
-async fn scheduled_send_cancel_removes_pending_send() {
+async fn scheduled_prompts_cancel_removes_pending_send() {
     let (_dir, db, handler) = endpoint_test_handler();
-    db.insert_scheduled_send(
+    db.insert_scheduled_prompt(
         "ss-cancel-1",
         "to cancel",
         "session-x",
@@ -1332,9 +1324,9 @@ async fn scheduled_send_cancel_removes_pending_send() {
 
     let result = call_resource_action(
         &handler,
-        "scheduled_send",
+        "scheduled_prompts",
         "cancel",
-        params_id(ScheduledSendCancelParams {
+        params_id(ScheduledPromptCancelParams {
             id: "ss-cancel-1".to_string(),
         }),
     )
@@ -1342,19 +1334,19 @@ async fn scheduled_send_cancel_removes_pending_send() {
     .unwrap();
     assert!(!is_err(&result), "{}", text(&result));
     assert!(db
-        .list_pending_scheduled_sends_for_session("session-x")
+        .list_pending_scheduled_prompts_for_session("session-x")
         .unwrap()
         .is_empty());
 }
 
 #[tokio::test]
-async fn scheduled_send_cancel_unknown_id_is_not_found() {
+async fn scheduled_prompts_cancel_unknown_id_is_not_found() {
     let (_dir, _db, handler) = endpoint_test_handler();
     let result = call_resource_action(
         &handler,
-        "scheduled_send",
+        "scheduled_prompts",
         "cancel",
-        params_id(ScheduledSendCancelParams {
+        params_id(ScheduledPromptCancelParams {
             id: "no-such-id".to_string(),
         }),
     )

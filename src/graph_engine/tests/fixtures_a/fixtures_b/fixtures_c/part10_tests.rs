@@ -294,7 +294,7 @@ async fn graph_engine_hook_registered_after_completion_does_not_fire() {
 /// to the configured session, with the rendered prompt and a populated,
 /// restorable builder state.
 #[tokio::test]
-async fn interactive_hook_enqueues_rendered_scheduled_send() {
+async fn interactive_hook_enqueues_rendered_scheduled_prompt() {
     let (_dir, db, engine, graph_id, _spec_id) = graph_fixture().unwrap();
     let workdir = db.get_graph(&graph_id).unwrap().unwrap().workdir.clone();
     db.insert_interactive_session(
@@ -339,7 +339,7 @@ async fn interactive_hook_enqueues_rendered_scheduled_send() {
     assert_eq!(hook_runs.len(), 1);
     assert_eq!(hook_runs[0].status, GraphRunStatus::Pass);
 
-    let due = db.list_due_scheduled_sends(chrono::Utc::now()).unwrap();
+    let due = db.list_due_scheduled_prompts(chrono::Utc::now()).unwrap();
     assert_eq!(due.len(), 1);
     assert_eq!(due[0].target_session_id, "session-live");
     assert_eq!(due[0].prompt, "Graph Graph failed: build broke on builder");
@@ -407,7 +407,7 @@ async fn interactive_hook_persists_structured_provenance() {
         )
         .await;
 
-    let due = db.list_due_scheduled_sends(chrono::Utc::now()).unwrap();
+    let due = db.list_due_scheduled_prompts(chrono::Utc::now()).unwrap();
     assert_eq!(due.len(), 1);
     let provenance = due[0].provenance.as_ref().expect("provenance populated");
     assert_eq!(provenance.kind, "hook");
@@ -465,7 +465,7 @@ async fn interactive_hook_missing_target_fails_without_graph_status_change() {
         "failure must name the session id, got: {summary}"
     );
     assert!(db
-        .list_due_scheduled_sends(chrono::Utc::now())
+        .list_due_scheduled_prompts(chrono::Utc::now())
         .unwrap()
         .is_empty());
     assert_eq!(
@@ -526,11 +526,11 @@ async fn interactive_hook_is_pending_without_tui() {
         )
         .await;
 
-    let due = db.list_due_scheduled_sends(chrono::Utc::now()).unwrap();
+    let due = db.list_due_scheduled_prompts(chrono::Utc::now()).unwrap();
     assert_eq!(due.len(), 1);
     assert_eq!(due[0].target_session_id, "session-live");
     assert!(db
-        .list_failed_scheduled_sends_for_workdir(&workdir)
+        .list_failed_scheduled_prompts_for_workdir(&workdir)
         .unwrap()
         .is_empty());
 }
@@ -584,7 +584,7 @@ async fn interactive_hook_name_resolves_single_live_match() {
     assert_eq!(hook_runs.len(), 1);
     assert_eq!(hook_runs[0].status, GraphRunStatus::Pass);
 
-    let due = db.list_due_scheduled_sends(chrono::Utc::now()).unwrap();
+    let due = db.list_due_scheduled_prompts(chrono::Utc::now()).unwrap();
     assert_eq!(due.len(), 1);
     assert_eq!(due[0].target_session_id, "dc4aa96d-live");
     let provenance = due[0].provenance.as_ref().expect("provenance populated");
@@ -657,7 +657,7 @@ async fn interactive_hook_delivers_to_a_resumed_session_by_name() {
         "got: {summary}"
     );
     assert!(db
-        .list_due_scheduled_sends(chrono::Utc::now())
+        .list_due_scheduled_prompts(chrono::Utc::now())
         .unwrap()
         .is_empty());
 
@@ -699,7 +699,7 @@ async fn interactive_hook_delivers_to_a_resumed_session_by_name() {
         "{:?}",
         runs[1].summary
     );
-    let due = db.list_due_scheduled_sends(chrono::Utc::now()).unwrap();
+    let due = db.list_due_scheduled_prompts(chrono::Utc::now()).unwrap();
     assert_eq!(due.len(), 1);
     assert_eq!(
         due[0].target_session_id, "sess-orch",
@@ -756,7 +756,7 @@ async fn interactive_hook_name_fails_when_no_live_match() {
         "failure must name the session name, got: {summary}"
     );
     assert!(db
-        .list_due_scheduled_sends(chrono::Utc::now())
+        .list_due_scheduled_prompts(chrono::Utc::now())
         .unwrap()
         .is_empty());
     assert_eq!(
@@ -832,7 +832,7 @@ async fn interactive_hook_name_fails_when_multiple_live_matches() {
     assert!(summary.contains("twin-a"), "got: {summary}");
     assert!(summary.contains("twin-b"), "got: {summary}");
     assert!(db
-        .list_due_scheduled_sends(chrono::Utc::now())
+        .list_due_scheduled_prompts(chrono::Utc::now())
         .unwrap()
         .is_empty());
 }
@@ -885,7 +885,7 @@ async fn interactive_hook_id_based_hook_unaffected_by_name_resolution() {
     assert_eq!(hook_runs.len(), 1);
     assert_eq!(hook_runs[0].status, GraphRunStatus::Pass);
 
-    let due = db.list_due_scheduled_sends(chrono::Utc::now()).unwrap();
+    let due = db.list_due_scheduled_prompts(chrono::Utc::now()).unwrap();
     assert_eq!(due.len(), 1);
     assert_eq!(due[0].target_session_id, "session-live");
     let provenance = due[0].provenance.as_ref().expect("provenance populated");

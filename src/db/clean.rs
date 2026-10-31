@@ -222,11 +222,11 @@ impl Database {
             params![workdir],
         )?;
         tx.execute(
-            "DELETE FROM scheduled_sends WHERE workdir = ?1",
+            "DELETE FROM scheduled_prompts WHERE workdir = ?1",
             params![workdir],
         )?;
         tx.execute(
-            "DELETE FROM failed_scheduled_sends WHERE workdir = ?1",
+            "DELETE FROM failed_scheduled_prompts WHERE workdir = ?1",
             params![workdir],
         )?;
         tx.execute(
@@ -418,8 +418,8 @@ fn count_hard_cascade(
         interactive_sessions: direct.interactive_sessions,
         terminal_sessions: direct.terminal_sessions,
         last_prompts: direct.last_prompts,
-        scheduled_sends: direct.scheduled_sends,
-        failed_scheduled_sends: direct.failed_scheduled_sends,
+        scheduled_prompts: direct.scheduled_prompts,
+        failed_scheduled_prompts: direct.failed_scheduled_prompts,
         sync_messages: direct.sync_messages,
         sync_locks: direct.sync_locks,
         intelligence_nodes: direct.intelligence_nodes,
@@ -463,13 +463,13 @@ fn count_direct_cascade_targets(
         params![workdir],
         |row| row.get(0),
     )?;
-    let scheduled_sends: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM scheduled_sends WHERE workdir = ?1",
+    let scheduled_prompts: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM scheduled_prompts WHERE workdir = ?1",
         params![workdir],
         |row| row.get(0),
     )?;
-    let failed_scheduled_sends: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM failed_scheduled_sends WHERE workdir = ?1",
+    let failed_scheduled_prompts: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM failed_scheduled_prompts WHERE workdir = ?1",
         params![workdir],
         |row| row.get(0),
     )?;
@@ -499,8 +499,8 @@ fn count_direct_cascade_targets(
         interactive_sessions,
         terminal_sessions,
         last_prompts,
-        scheduled_sends,
-        failed_scheduled_sends,
+        scheduled_prompts,
+        failed_scheduled_prompts,
         sync_messages,
         sync_locks,
         intelligence_nodes,
@@ -627,8 +627,8 @@ struct DirectCascadeTargets {
     interactive_sessions: i64,
     terminal_sessions: i64,
     last_prompts: i64,
-    scheduled_sends: i64,
-    failed_scheduled_sends: i64,
+    scheduled_prompts: i64,
+    failed_scheduled_prompts: i64,
     sync_messages: i64,
     sync_locks: i64,
     intelligence_nodes: i64,
@@ -1229,8 +1229,8 @@ mod tests {
             "interactive_sessions",
             "terminal_sessions",
             "last_prompts",
-            "scheduled_sends",
-            "failed_scheduled_sends",
+            "scheduled_prompts",
+            "failed_scheduled_prompts",
             "sync_messages",
             "sync_locks",
             "intelligence_nodes",
@@ -1253,8 +1253,8 @@ mod tests {
                 "interactive_sessions" => counts.interactive_sessions = 1,
                 "terminal_sessions" => counts.terminal_sessions = 1,
                 "last_prompts" => counts.last_prompts = 1,
-                "scheduled_sends" => counts.scheduled_sends = 1,
-                "failed_scheduled_sends" => counts.failed_scheduled_sends = 1,
+                "scheduled_prompts" => counts.scheduled_prompts = 1,
+                "failed_scheduled_prompts" => counts.failed_scheduled_prompts = 1,
                 "sync_messages" => counts.sync_messages = 1,
                 "sync_locks" => counts.sync_locks = 1,
                 "intelligence_nodes" => counts.intelligence_nodes = 1,

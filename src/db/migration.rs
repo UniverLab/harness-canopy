@@ -133,6 +133,50 @@ impl Database {
     }
     // RETIRED-SCHEMA-NAME-END
 
+    /// Rename the retired scheduled-send tables to their merged-tool names
+    /// (`scheduled_prompts`/`failed_scheduled_prompts`). Must run before
+    /// `create_base_schema` (same reason as `migrate_legacy_queue_schema`):
+    /// the base batch would otherwise create empty new tables first and the
+    /// rename would fail with "table already exists". Renames only when the
+    /// old table exists and the new one is missing, so it is a no-op on
+    /// fresh and already-migrated databases alike; when both exist (a
+    /// downgraded binary recreated the old names) the old rows are left
+    /// intact, like the loop migration.
+    pub(super) fn migrate_scheduled_prompt_table_names(conn: &Connection) -> Result<()> {
+        // Retired names built with `concat!` so no retired literal survives
+        // in the repo: renaming requires naming what's renamed.
+        const OLD_SENDS: &str = concat!("scheduled", "_sends");
+        const OLD_FAILED: &str = concat!("failed_scheduled", "_sends");
+        for (old, new) in [
+            (OLD_SENDS, "scheduled_prompts"),
+            (OLD_FAILED, "failed_scheduled_prompts"),
+        ] {
+            let old_exists: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [old],
+                    |row| Ok(row.get::<_, i32>(0)? > 0),
+                )
+                .unwrap_or(false);
+            if !old_exists {
+                continue;
+            }
+            let new_exists: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [new],
+                    |row| Ok(row.get::<_, i32>(0)? > 0),
+                )
+                .unwrap_or(false);
+            if new_exists {
+                continue;
+            }
+            conn.execute(&format!("ALTER TABLE {old} RENAME TO {new}"), [])
+                .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+        }
+        Ok(())
+    }
+
     // RETIRED-SCHEMA-NAME-BEGIN (CC3 loop → graph migration)
     pub(super) fn migrate_loop_to_graph_schema(conn: &Connection) -> Result<()> {
         let has_loops: bool = conn

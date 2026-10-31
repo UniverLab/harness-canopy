@@ -101,8 +101,8 @@ fn print_counts(counts: &crate::domain::project::RemapCounts, dry_run: bool) {
         ("sync message(s)", counts.sync_messages),
         ("sync lock(s)", counts.sync_locks),
         ("prompt history row(s)", counts.last_prompts),
-        ("scheduled send(s)", counts.scheduled_sends),
-        ("failed scheduled send(s)", counts.failed_scheduled_sends),
+        ("scheduled send(s)", counts.scheduled_prompts),
+        ("failed scheduled send(s)", counts.failed_scheduled_prompts),
         ("background agent(s)", counts.agents),
         ("intelligence node(s)", counts.intelligence_nodes),
     ];

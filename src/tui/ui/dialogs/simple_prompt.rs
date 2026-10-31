@@ -5,7 +5,7 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
 
 use super::{draw_dialog_left_wave, truncate_str};
-use crate::db::scheduled_sends::ScheduledSend;
+use crate::db::scheduled_prompts::ScheduledPrompt;
 use crate::tui::app::dialog::{PromptTab, SimplePromptDialog};
 use crate::tui::app::types::{AgentEntry, App};
 use crate::tui::ui::dialogs::at_picker::draw_at_picker_dropdown;
@@ -60,14 +60,14 @@ struct NormalContentCtx<'a> {
 
 /// Pending scheduled sends targeting the currently selected session —
 /// shown next to the Schedule field and cancelable with Ctrl+K there.
-fn pending_scheduled_for_selection(app: &App) -> Vec<ScheduledSend> {
+fn pending_scheduled_for_selection(app: &App) -> Vec<ScheduledPrompt> {
     let selected_session_id = app.selected_agent().and_then(|a| match a {
         AgentEntry::Interactive(idx) => app.interactive_agents.get(*idx).map(|ia| ia.id.clone()),
         _ => None,
     });
     selected_session_id
         .as_deref()
-        .and_then(|id| app.db.list_pending_scheduled_sends_for_session(id).ok())
+        .and_then(|id| app.db.list_pending_scheduled_prompts_for_session(id).ok())
         .unwrap_or_default()
 }
 

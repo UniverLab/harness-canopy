@@ -41,7 +41,7 @@ pub use retry::RetryPolicy;
 mod autorun;
 mod retry;
 mod schedule_math;
-mod scheduled_sends;
+mod scheduled_prompts;
 /// The internal cron scheduler that runs as a tokio background_agent.
 pub struct CronScheduler {
     db: Arc<Database>,
@@ -222,7 +222,7 @@ impl CronScheduler {
 
         self.fold_fireable_graph_schedules(&mut earliest, now_local);
         self.fold_pending_one_shot_wakeups(&mut earliest);
-        self.fold_pending_scheduled_sends(&mut earliest);
+        self.fold_pending_scheduled_prompts(&mut earliest);
 
         match earliest {
             Some(t) => earliest_duration_before(now_utc, t),
@@ -232,11 +232,11 @@ impl CronScheduler {
 
     /// A pending scheduled send wakes the scheduler at its `fire_at`, so it is
     /// delivered close to when it is due even when no agent is scheduled.
-    fn fold_pending_scheduled_sends(&self, earliest: &mut Option<chrono::DateTime<Utc>>) {
+    fn fold_pending_scheduled_prompts(&self, earliest: &mut Option<chrono::DateTime<Utc>>) {
         if self.hub.is_none() {
             return;
         }
-        if let Ok(next) = self.db.next_scheduled_send_at() {
+        if let Ok(next) = self.db.next_scheduled_prompt_at() {
             fold_earliest_instant(earliest, next);
         }
     }
@@ -323,7 +323,7 @@ impl CronScheduler {
 
     /// Fire all agents whose next cron time is now (within a 1-second tolerance).
     async fn fire_due_tasks(&self) -> anyhow::Result<()> {
-        self.deliver_scheduled_sends().await;
+        self.deliver_scheduled_prompts().await;
         self.quarantine_corrupt_agents()?;
         let agents = self.db.list_cron_agents()?;
         // Evaluate schedules in the user's local timezone. `now_utc` is only
@@ -354,14 +354,14 @@ impl CronScheduler {
     /// Deliver due scheduled sends through the hub. Runs off the async
     /// executor: delivery writes to a PTY and waits out the target CLI's
     /// paste-settle window.
-    async fn deliver_scheduled_sends(&self) {
+    async fn deliver_scheduled_prompts(&self) {
         let Some(hub) = self.hub.as_ref() else {
             return;
         };
         let db = Arc::clone(&self.db);
         let hub = hub.clone();
         let delivered = tokio::task::spawn_blocking(move || {
-            scheduled_sends::deliver_due_scheduled_sends(&db, &hub);
+            scheduled_prompts::deliver_due_scheduled_prompts(&db, &hub);
         })
         .await;
         if delivered.is_err() {

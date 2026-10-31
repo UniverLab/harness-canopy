@@ -10,7 +10,7 @@ use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::params;
 
-use crate::db::scheduled_sends::{ScheduledSend, ScheduledSendProvenance};
+use crate::db::scheduled_prompts::{ScheduledPrompt, ScheduledPromptProvenance};
 use crate::db::Database;
 
 impl Database {
@@ -21,8 +21,8 @@ impl Database {
         &self,
         agent_id: &str,
         target_session_id: &str,
-    ) -> Result<Option<ScheduledSend>> {
-        let pending = self.list_pending_scheduled_sends_for_session(target_session_id)?;
+    ) -> Result<Option<ScheduledPrompt>> {
+        let pending = self.list_pending_scheduled_prompts_for_session(target_session_id)?;
         Ok(pending.into_iter().find(|send| {
             send.provenance.as_ref().is_some_and(|p| {
                 p.kind == "agent_trigger" && p.agent_id.as_deref() == Some(agent_id)
@@ -34,20 +34,20 @@ impl Database {
     /// and target. Returns false when the row vanished (a TUI delivered and
     /// deleted it between the find and this update) so the caller can fall
     /// back to a fresh insert.
-    pub fn replace_scheduled_send(
+    pub fn replace_scheduled_prompt(
         &self,
         id: &str,
         prompt: &str,
         fire_at: DateTime<Utc>,
-        provenance: &ScheduledSendProvenance,
+        provenance: &ScheduledPromptProvenance,
     ) -> Result<bool> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
-        let provenance_json = ScheduledSendProvenance::to_json(Some(provenance))?;
+        let provenance_json = ScheduledPromptProvenance::to_json(Some(provenance))?;
         let rows = conn.execute(
-            "UPDATE scheduled_sends
+            "UPDATE scheduled_prompts
              SET prompt = ?2, fire_at = ?3, provenance = ?4, builder_state = NULL
              WHERE id = ?1",
             params![id, prompt, fire_at.timestamp(), provenance_json],
@@ -59,7 +59,7 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::scheduled_sends::ScheduledSendProvenance;
+    use crate::db::scheduled_prompts::ScheduledPromptProvenance;
 
     fn test_db() -> Database {
         let dir = tempfile::tempdir().unwrap();
@@ -67,8 +67,8 @@ mod tests {
     }
 
     fn insert_send(db: &Database, id: &str, agent_id: &str, prompt: &str) {
-        let provenance = ScheduledSendProvenance::agent_trigger(agent_id, "cron");
-        db.insert_scheduled_send(
+        let provenance = ScheduledPromptProvenance::agent_trigger(agent_id, "cron");
+        db.insert_scheduled_prompt(
             id,
             prompt,
             "sess-1",
@@ -96,14 +96,14 @@ mod tests {
     #[test]
     fn find_skips_non_agent_trigger_provenance() {
         let db = test_db();
-        db.insert_scheduled_send(
+        db.insert_scheduled_prompt(
             "send-hook",
             "hook message",
             "sess-1",
             Some("/tmp"),
             Utc::now(),
             None,
-            Some(&ScheduledSendProvenance::hook("graph-1", "on_passed")),
+            Some(&ScheduledPromptProvenance::hook("graph-1", "on_passed")),
         )
         .unwrap();
         assert!(db
@@ -117,13 +117,13 @@ mod tests {
         let db = test_db();
         insert_send(&db, "send-a", "agent-a", "first");
         let later = Utc::now() + chrono::Duration::minutes(5);
-        let provenance = ScheduledSendProvenance::agent_trigger("agent-a", "watch");
+        let provenance = ScheduledPromptProvenance::agent_trigger("agent-a", "watch");
         assert!(db
-            .replace_scheduled_send("send-a", "second", later, &provenance)
+            .replace_scheduled_prompt("send-a", "second", later, &provenance)
             .unwrap());
 
         let pending = db
-            .list_pending_scheduled_sends_for_session("sess-1")
+            .list_pending_scheduled_prompts_for_session("sess-1")
             .unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].id, "send-a");
@@ -138,9 +138,9 @@ mod tests {
     #[test]
     fn replace_returns_false_when_row_is_gone() {
         let db = test_db();
-        let provenance = ScheduledSendProvenance::agent_trigger("agent-a", "cron");
+        let provenance = ScheduledPromptProvenance::agent_trigger("agent-a", "cron");
         assert!(!db
-            .replace_scheduled_send("missing", "x", Utc::now(), &provenance)
+            .replace_scheduled_prompt("missing", "x", Utc::now(), &provenance)
             .unwrap());
     }
 }

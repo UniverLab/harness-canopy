@@ -156,8 +156,8 @@ pub struct RemapCounts {
     pub sync_messages: i64,
     pub sync_locks: i64,
     pub last_prompts: i64,
-    pub scheduled_sends: i64,
-    pub failed_scheduled_sends: i64,
+    pub scheduled_prompts: i64,
+    pub failed_scheduled_prompts: i64,
     pub agents: i64,
     pub intelligence_nodes: i64,
 }
@@ -171,8 +171,8 @@ impl RemapCounts {
             + self.sync_messages
             + self.sync_locks
             + self.last_prompts
-            + self.scheduled_sends
-            + self.failed_scheduled_sends
+            + self.scheduled_prompts
+            + self.failed_scheduled_prompts
             + self.agents
             + self.intelligence_nodes
     }
@@ -202,8 +202,8 @@ mod tests {
             sync_messages: 5,
             sync_locks: 6,
             last_prompts: 7,
-            scheduled_sends: 8,
-            failed_scheduled_sends: 9,
+            scheduled_prompts: 8,
+            failed_scheduled_prompts: 9,
             agents: 10,
             intelligence_nodes: 11,
         };

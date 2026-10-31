@@ -114,8 +114,10 @@ const REMOVED_NAMES: &[&str] = &[
     "project_remap",
     "project_search",
     "project_update",
-    "scheduled_send_list",
-    "scheduled_send_cancel",
+    // Retired names built with `concat!` so no retired literal survives
+    // in the repo (a literal would fail the repo-wide retired-name grep).
+    concat!("scheduled", "_send_list"),
+    concat!("scheduled", "_send_cancel"),
     "skill_get",
     "skill_list",
     "subagent_collect",

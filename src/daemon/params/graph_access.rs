@@ -96,7 +96,7 @@ pub struct SessionListParams {
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ScheduledSendCreateParams {
+pub struct ScheduledPromptCreateParams {
     /// The prompt text to deliver. Plain text only — delivered to the target
     /// session exactly as typed, the same as a promptbuilder send.
     pub prompt: String,
@@ -109,14 +109,14 @@ pub struct ScheduledSendCreateParams {
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ScheduledSendListParams {
+pub struct ScheduledPromptListParams {
     /// Session id to list pending scheduled sends for. Omit for your own session.
     pub session_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ScheduledSendCancelParams {
-    /// Scheduled send id, as returned by scheduled_send_create.
+pub struct ScheduledPromptCancelParams {
+    /// Scheduled prompt id, as returned by the scheduled_prompts create action.
     pub id: String,
 }
 

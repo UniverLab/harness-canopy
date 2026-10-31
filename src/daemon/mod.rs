@@ -62,7 +62,7 @@ pub(crate) mod handler_run_history;
 pub(crate) mod handler_run_lifecycle;
 pub(crate) mod handler_run_prepare;
 pub(crate) mod handler_sandbox;
-pub(crate) mod handler_scheduled_sends;
+pub(crate) mod handler_scheduled_prompts;
 pub(crate) mod handler_seeds_skills;
 pub(crate) mod handler_send_session;
 pub(crate) mod handler_settings;

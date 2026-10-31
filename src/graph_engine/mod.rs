@@ -9,7 +9,7 @@ use tokio::sync::Semaphore;
 
 use crate::application::notification_service::{GraphFinishOutcome, NotificationService};
 use crate::daemon::process::KILL_GRACE;
-use crate::db::scheduled_sends::ScheduledSendProvenance;
+use crate::db::scheduled_prompts::ScheduledPromptProvenance;
 use crate::db::Database;
 use crate::domain::activity;
 use crate::domain::graphs::{

@@ -19,7 +19,7 @@ impl GraphEngine {
     /// builder state, and structured hook provenance (graph id + event).
     ///
     /// Delivery itself runs in the daemon's scheduler
-    /// (`scheduler::cron_scheduler::scheduled_sends`), so a send is delivered
+    /// (`scheduler::cron_scheduler::scheduled_prompts`), so a send is delivered
     /// on the next tick whether or not a TUI is attached. A missing or
     /// non-live target fails the hook run naming the exact session
     /// id, without inserting anything and without touching the graph's status
@@ -218,15 +218,15 @@ impl GraphEngine {
 
     pub(crate) fn enqueue_interactive_send(&self, send: &InteractiveSend<'_>) -> HookExecution {
         let provenance = match send.target_name {
-            Some(name) => ScheduledSendProvenance::hook_with_target_name(
+            Some(name) => ScheduledPromptProvenance::hook_with_target_name(
                 send.graph_id,
                 send.event.as_str(),
                 name,
             ),
-            None => ScheduledSendProvenance::hook(send.graph_id, send.event.as_str()),
+            None => ScheduledPromptProvenance::hook(send.graph_id, send.event.as_str()),
         };
         let send_id = uuid::Uuid::new_v4().to_string();
-        match self.db.insert_scheduled_send(
+        match self.db.insert_scheduled_prompt(
             &send_id,
             send.rendered,
             send.target,
@@ -237,7 +237,7 @@ impl GraphEngine {
         ) {
             Ok(()) => {
                 let mut output = serde_json::json!({
-                    "scheduled_send_id": send_id,
+                    "scheduled_prompt_id": send_id,
                     "target_session_id": send.target,
                     "provenance": provenance,
                 });

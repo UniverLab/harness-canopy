@@ -589,7 +589,7 @@ mod tests {
             chrono::Utc::now(),
         )
         .unwrap();
-        db.insert_scheduled_send(
+        db.insert_scheduled_prompt(
             "send-1",
             "ping",
             "sess-1",
@@ -599,7 +599,7 @@ mod tests {
             None,
         )
         .unwrap();
-        db.insert_failed_scheduled_send(
+        db.insert_failed_scheduled_prompt(
             "failed-1",
             "ping",
             "sess-1",
@@ -669,8 +669,8 @@ mod tests {
         assert_eq!(outcome.counts.sync_messages, 1);
         assert_eq!(outcome.counts.sync_locks, 1);
         assert_eq!(outcome.counts.last_prompts, 1);
-        assert_eq!(outcome.counts.scheduled_sends, 1);
-        assert_eq!(outcome.counts.failed_scheduled_sends, 1);
+        assert_eq!(outcome.counts.scheduled_prompts, 1);
+        assert_eq!(outcome.counts.failed_scheduled_prompts, 1);
         assert_eq!(outcome.counts.agents, 1);
         // The project-root node `upsert_project` auto-creates, plus the fact
         // node `seed_full_dependents` inserts.

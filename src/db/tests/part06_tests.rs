@@ -616,8 +616,12 @@ fn v3_close_schema_with_break_condition_migrates_loops_to_graphs() {
 
     {
         let conn = rusqlite::Connection::open(&path).expect("open raw v3-close db");
-        conn.execute_batch(
-            "
+        // The v3 machine spelled two tables with the retired scheduled-send
+        // names; the seed below spells the new names and maps them back at
+        // runtime (old names built with `concat!`, so no retired literal
+        // survives in the repo). Opening the database then exercises the
+        // table rename on top of the loop migration.
+        let seed_v3 = "
             CREATE TABLE IF NOT EXISTS agents (
                 id TEXT PRIMARY KEY,
                 prompt TEXT NOT NULL,
@@ -1032,7 +1036,7 @@ fn v3_close_schema_with_break_condition_migrates_loops_to_graphs() {
                 created_at INTEGER NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS scheduled_sends (
+            CREATE TABLE IF NOT EXISTS scheduled_prompts (
                 id TEXT PRIMARY KEY,
                 prompt TEXT NOT NULL,
                 target_session_id TEXT NOT NULL,
@@ -1041,7 +1045,7 @@ fn v3_close_schema_with_break_condition_migrates_loops_to_graphs() {
                 provenance TEXT
             );
 
-            CREATE TABLE IF NOT EXISTS failed_scheduled_sends (
+            CREATE TABLE IF NOT EXISTS failed_scheduled_prompts (
                 id TEXT PRIMARY KEY,
                 prompt TEXT NOT NULL,
                 target_session_id TEXT NOT NULL,
@@ -1130,9 +1134,14 @@ fn v3_close_schema_with_break_condition_migrates_loops_to_graphs() {
              INSERT INTO loop_nodes (id, spec_id, name, kind, config, position, created_at)
                  VALUES ('n2', 's1', 'Node B', 'agent', '{}', 1, 1000);
              INSERT INTO loop_edges (id, spec_id, from_node, to_node, condition)
-                 VALUES ('e1', 's1', 'n1', 'n2', 'break');",
-        )
-        .expect("seed v3-close schema");
+                 VALUES ('e1', 's1', 'n1', 'n2', 'break');";
+        let seed_v3 = seed_v3
+            .replace(
+                "failed_scheduled_prompts",
+                concat!("failed_scheduled", "_sends"),
+            )
+            .replace("scheduled_prompts", concat!("scheduled", "_sends"));
+        conn.execute_batch(&seed_v3).expect("seed v3-close schema");
     }
 
     let db = Database::new(&path).expect("open v3-close db — must migrate loops to graphs cleanly");

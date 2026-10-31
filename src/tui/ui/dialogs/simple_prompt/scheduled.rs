@@ -135,7 +135,7 @@ pub(super) fn scheduled_row_text(
 /// the list has keyboard focus), the scroll offset, how many rows fit, and the
 /// id currently being edited inline.
 pub(super) struct ScheduledList<'a> {
-    pub pending: &'a [crate::db::scheduled_sends::ScheduledSend],
+    pub pending: &'a [crate::db::scheduled_prompts::ScheduledPrompt],
     pub selected: Option<usize>,
     pub scroll: usize,
     pub visible_rows: usize,

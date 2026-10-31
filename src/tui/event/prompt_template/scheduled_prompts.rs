@@ -93,7 +93,7 @@ pub(super) fn schedule_send_prompt(app: &mut App, prompt: &str, when: chrono::Na
         .as_ref()
         .and_then(|d| d.editing_scheduled_id.clone());
     if let Some(old_id) = editing_id.as_deref() {
-        if let Err(e) = app.db.delete_scheduled_send(old_id) {
+        if let Err(e) = app.db.delete_scheduled_prompt(old_id) {
             tracing::warn!("Failed to replace scheduled send '{old_id}': {e}");
         }
     }
@@ -129,7 +129,7 @@ pub(super) fn schedule_send_prompt(app: &mut App, prompt: &str, when: chrono::Na
             .map(crate::tui::app::dialog::PersistedBuilderState::from_dialog)
             .and_then(|state| serde_json::to_string(&state).ok())
     };
-    if let Err(e) = app.db.insert_scheduled_send(
+    if let Err(e) = app.db.insert_scheduled_prompt(
         &id,
         prompt,
         &target_session_id,
@@ -149,7 +149,7 @@ pub(super) fn schedule_send_prompt(app: &mut App, prompt: &str, when: chrono::Na
 
     // Persist as the project's last prompt before discarding — a scheduled
     // send is still a "sent" prompt from the builder's perspective, and this
-    // also covers the U7 dead-target path (see `deliver_due_scheduled_sends`),
+    // also covers the U7 dead-target path (see `deliver_due_scheduled_prompts`),
     // which recovers only the flattened text once the builder is long gone.
     let workdir = app.current_workdir();
     persist_last_prompt(app, &workdir, prompt);
@@ -184,14 +184,14 @@ pub(super) fn schedule_send_prompt(app: &mut App, prompt: &str, when: chrono::Na
 /// interactive session (Ctrl+K). When a list entry is selected (the user is
 /// browsing the scheduled-list panel, B33) that entry is canceled; otherwise it
 /// falls back to the soonest pending send. No-op if there is none.
-pub(super) fn cancel_scheduled_send(app: &mut App) {
+pub(super) fn cancel_scheduled_prompt(app: &mut App) {
     let Some((target_session_id, _)) = selected_session_target(app) else {
         return;
     };
 
     let pending = match app
         .db
-        .list_pending_scheduled_sends_for_session(&target_session_id)
+        .list_pending_scheduled_prompts_for_session(&target_session_id)
     {
         Ok(pending) => pending,
         Err(e) => {
@@ -213,7 +213,7 @@ pub(super) fn cancel_scheduled_send(app: &mut App) {
     let idx = selected.unwrap_or(0).min(pending.len() - 1);
     let target_id = pending[idx].id.clone();
 
-    match app.db.delete_scheduled_send(&target_id) {
+    match app.db.delete_scheduled_prompt(&target_id) {
         Ok(true) => {
             crate::domain::notification::send_notification(
                 "Scheduled send canceled",
@@ -244,7 +244,7 @@ pub(super) fn enter_scheduled_list(app: &mut App) {
     };
     let has_pending = app
         .db
-        .list_pending_scheduled_sends_for_session(&target_session_id)
+        .list_pending_scheduled_prompts_for_session(&target_session_id)
         .map(|pending| !pending.is_empty())
         .unwrap_or(false);
     if !has_pending {
@@ -266,7 +266,7 @@ pub(super) fn handle_scheduled_list_key(app: &mut App, code: KeyCode, modifiers:
     };
     let pending = app
         .db
-        .list_pending_scheduled_sends_for_session(&target_session_id)
+        .list_pending_scheduled_prompts_for_session(&target_session_id)
         .unwrap_or_default();
     if pending.is_empty() {
         clear_scheduled_list_focus(app);
@@ -286,7 +286,7 @@ pub(super) fn handle_scheduled_list_key(app: &mut App, code: KeyCode, modifiers:
         KeyCode::Down => set_scheduled_list_selection(app, (sel + 1).min(pending.len() - 1)),
         KeyCode::Esc => clear_scheduled_list_focus(app),
         KeyCode::Char('p') if ctrl => clear_scheduled_list_focus(app),
-        KeyCode::Char('k') if ctrl => cancel_scheduled_send(app),
+        KeyCode::Char('k') if ctrl => cancel_scheduled_prompt(app),
         KeyCode::Enter => {
             let send = &pending[sel];
             let fire_local = send.fire_at.with_timezone(&chrono::Local).naive_local();

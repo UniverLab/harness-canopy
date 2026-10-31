@@ -70,8 +70,8 @@ pub struct HardCascadeCounts {
     pub interactive_sessions: i64,
     pub terminal_sessions: i64,
     pub last_prompts: i64,
-    pub scheduled_sends: i64,
-    pub failed_scheduled_sends: i64,
+    pub scheduled_prompts: i64,
+    pub failed_scheduled_prompts: i64,
     pub sync_messages: i64,
     pub sync_locks: i64,
     pub intelligence_nodes: i64,
@@ -96,8 +96,8 @@ impl HardCascadeCounts {
             && self.interactive_sessions == 0
             && self.terminal_sessions == 0
             && self.last_prompts == 0
-            && self.scheduled_sends == 0
-            && self.failed_scheduled_sends == 0
+            && self.scheduled_prompts == 0
+            && self.failed_scheduled_prompts == 0
             && self.sync_messages == 0
             && self.sync_locks == 0
             && self.intelligence_nodes == 0
@@ -952,8 +952,8 @@ mod tests {
             interactive_sessions: 0,
             terminal_sessions: 0,
             last_prompts: 0,
-            scheduled_sends: 0,
-            failed_scheduled_sends: 0,
+            scheduled_prompts: 0,
+            failed_scheduled_prompts: 0,
             sync_messages: 0,
             sync_locks: 0,
             intelligence_nodes: 0,
