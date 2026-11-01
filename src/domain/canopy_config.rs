@@ -663,24 +663,10 @@ fn default_theme() -> String {
 }
 
 impl CanopyConfig {
-    /// Load config from `~/.canopy/config.toml`. Returns default if not found.
+    /// Load config from `~/.canopy/config.toml`. Returns default if not found;
+    /// keeps the last valid config (logged) while the file fails to parse.
     pub fn load(canopy_dir: &Path) -> Self {
-        let config_path = canopy_dir.join("config.toml");
-        let mut config: CanopyConfig = std::fs::read_to_string(&config_path)
-            .ok()
-            .and_then(|content| toml::from_str::<CanopyConfig>(&content).ok())
-            .unwrap_or_default();
-        // CM51 (D1): the `CANOPY_RETRY_*` variables overlay the `[scheduler]`
-        // table. Injected as a closure so tests never touch the process
-        // environment.
-        settings::apply_env_overrides(&mut config, &|key| std::env::var(key).ok());
-        // Migrate legacy single-root field to the new multi-dir vec.
-        if config.rag_personal_dirs.is_empty() && !config.rag_personal_root.is_empty() {
-            config
-                .rag_personal_dirs
-                .push(config.rag_personal_root.clone());
-        }
-        config
+        super::config_cache::load(canopy_dir)
     }
 
     /// Serialize this config to `~/.canopy/config.toml`.

@@ -312,3 +312,32 @@ fn logout_is_idempotent() {
     assert!(load_identity(dir.path()).is_none());
     logout(dir.path()).unwrap();
 }
+
+#[test]
+fn config_fault_message_comes_from_the_sidecar() {
+    use crate::domain::config_cache::read_fault_message;
+    crate::domain::config_cache::reset();
+
+    let dir = tempfile::TempDir::new().unwrap();
+    assert_eq!(read_fault_message(dir.path()), None);
+
+    std::fs::write(
+        dir.path().join("config.state.json"),
+        r#"{"last_valid_at":"2026-10-31T12:00:00+00:00","reason":"boom"}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        read_fault_message(dir.path()).as_deref(),
+        Some("config invalid, using last valid from 2026-10-31T12:00:00+00:00")
+    );
+
+    std::fs::write(
+        dir.path().join("config.state.json"),
+        r#"{"last_valid_at":null,"reason":"boom"}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        read_fault_message(dir.path()).as_deref(),
+        Some("config invalid, no last valid config yet")
+    );
+}

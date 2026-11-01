@@ -261,7 +261,7 @@ WebSocket — the CLI never writes the shelf itself. `file_id` is the
 |---|---|
 | `canopy remote login` | Sign in to GitHub with the OAuth device flow (identity only, no scopes) |
 | `canopy remote logout` | Delete the stored GitHub identity |
-| `canopy remote status [--json]` | Show the sign-in state, whether remote is enabled, the relay URL, and the last relay error and reconnect time; `--json` prints `{signed_in, login, enabled, relay_url, last_error, last_reconnect}` (`null` when unrecorded) |
+| `canopy remote status [--json]` | Show the sign-in state, whether remote is enabled, the relay URL, the last relay error and reconnect time, and a `config invalid, ...` line while `config.toml` fails to parse (the last valid config stays live); `--json` prints `{signed_in, login, enabled, relay_url, last_error, last_reconnect}` plus `config_fault` when invalid (`null` when unrecorded) |
 | `canopy remote on` / `off` | Turn the relay connection on or off (`[remote] enabled`); the daemon picks the change up without a restart |
 | `canopy remote pair` | Create a one-time code, print it with its `<relay_url>/pair#<code>` link and expiry, and draw the link as a terminal QR code |
 | `canopy remote devices [--json]` | List paired browsers (`id`, `label`, `paired_at`, `last_seen`) |

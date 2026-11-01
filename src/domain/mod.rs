@@ -8,6 +8,7 @@ pub mod canopy_config;
 pub mod clean;
 pub mod cli_config;
 pub mod cli_strategy;
+pub mod config_cache;
 pub mod crews;
 pub mod daemon_config;
 pub mod db_health;

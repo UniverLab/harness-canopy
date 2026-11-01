@@ -28,7 +28,7 @@ pub enum RemoteAction {
     /// Show the sign-in state, whether remote is enabled, and the relay URL.
     Status {
         /// Print `{signed_in, login, enabled, relay_url, last_error,
-        /// last_reconnect}` as JSON.
+        /// last_reconnect, config_fault?}` as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -105,7 +105,8 @@ fn handle_status(json: bool) -> Result<()> {
     let config = CanopyConfig::load(&data_dir);
     let identity = auth::load_identity(&data_dir);
     let db = open_db(&data_dir).ok();
-    let status = auth::build_remote_status(&config, identity.as_ref(), db.as_ref());
+    let mut status = auth::build_remote_status(&config, identity.as_ref(), db.as_ref());
+    status.config_fault = crate::domain::config_cache::read_fault_message(&data_dir);
     if json {
         println!("{}", serde_json::to_string_pretty(&status)?);
         return Ok(());
@@ -121,6 +122,9 @@ fn handle_status(json: bool) -> Result<()> {
     }
     if let Some(error) = &status.last_error {
         println!("last_error: {error}");
+    }
+    if let Some(fault) = &status.config_fault {
+        println!("{fault}");
     }
     Ok(())
 }

@@ -97,6 +97,10 @@ pub struct RemoteStatus {
     pub last_error: Option<String>,
     /// RFC 3339 instant of the last successful reconnect, if any.
     pub last_reconnect: Option<String>,
+    /// `config invalid, ...` while `config.toml` fails to parse (the daemon
+    /// keeps serving the last valid config); omitted when valid.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_fault: Option<String>,
 }
 
 /// Build the status payload from config plus the stored identity (if any).
@@ -113,6 +117,7 @@ pub fn build_remote_status(
         relay_url: config.remote.relay_url.clone(),
         last_error: state_value(db, super::relay::REMOTE_ERROR_KEY),
         last_reconnect: state_value(db, super::relay::REMOTE_RECONNECT_KEY),
+        config_fault: None,
     }
 }
 
