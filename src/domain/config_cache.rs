@@ -70,18 +70,34 @@ pub fn load(canopy_dir: &Path) -> CanopyConfig {
 /// The `config invalid, ...` line for `remote status`, from the sidecar the
 /// faulted load wrote; `None` when the config is currently valid.
 pub fn read_fault_message(canopy_dir: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(canopy_dir.join(STATE_FILE_NAME)).ok()?;
-    let state: StateFile = serde_json::from_str(&text).ok()?;
+    let state = read_state_file(canopy_dir)?;
     Some(match state.last_valid_at {
         Some(at) => format!("config invalid, using last valid from {at}"),
         None => "config invalid, no last valid config yet".to_string(),
     })
 }
 
+/// Read the on-disk fault record, if it parses.
+fn read_state_file(canopy_dir: &Path) -> Option<StateFile> {
+    let text = std::fs::read_to_string(canopy_dir.join(STATE_FILE_NAME)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
 /// Clear the cache. Test-only: the cache is process-wide.
 #[cfg(test)]
 pub(crate) fn reset() {
     lock_cache().clear();
+}
+
+/// Serialize the cache-reset tests: the cache is process-wide, so two
+/// `reset()` calls racing under `cargo test` could wipe each other's setup.
+/// (Nextest runs each test in its own process; this is for `cargo test`.)
+#[cfg(test)]
+pub(crate) fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// The file could not be read (missing, or a mid-save rename gap): serve the
@@ -93,13 +109,12 @@ fn read_fallback(canopy_dir: &Path) -> CanopyConfig {
 }
 
 /// The file parsed: remember it as the new last-valid config, clearing any
-/// fault and its sidecar.
+/// fault and its sidecar. The sidecar is removed unconditionally: it may be
+/// stale from an earlier faulted run in another process, which leaves no
+/// in-memory fault here to key the removal on.
 fn store_valid(canopy_dir: &Path, config: CanopyConfig) -> CanopyConfig {
-    let had_fault = {
+    {
         let mut guard = lock_cache();
-        let had_fault = guard
-            .get(canopy_dir)
-            .is_some_and(|entry| entry.fault.is_some());
         guard.insert(
             canopy_dir.to_path_buf(),
             Entry {
@@ -108,11 +123,8 @@ fn store_valid(canopy_dir: &Path, config: CanopyConfig) -> CanopyConfig {
                 fault: None,
             },
         );
-        had_fault
-    };
-    if had_fault {
-        let _ = std::fs::remove_file(canopy_dir.join(STATE_FILE_NAME));
     }
+    let _ = std::fs::remove_file(canopy_dir.join(STATE_FILE_NAME));
     config
 }
 
@@ -141,7 +153,15 @@ fn store_fault(canopy_dir: &Path, config_path: &Path, reason: &str) -> CanopyCon
         };
         (fallback, transition)
     };
-    if let Some(state) = transition {
+    if let Some(mut state) = transition {
+        // Another process (the daemon) may have recorded a last-valid
+        // instant this process never saw: keep its timestamp rather than
+        // downgrading the status line to "no last valid config yet".
+        if state.last_valid_at.is_none() {
+            if let Some(existing) = read_state_file(canopy_dir) {
+                state.last_valid_at = existing.last_valid_at;
+            }
+        }
         eprintln!(
             "config: {} invalid: {}; keeping last valid",
             config_path.display(),
@@ -188,6 +208,7 @@ mod tests {
 
     #[test]
     fn corrupt_after_valid_keeps_last_valid_config() {
+        let _guard = test_lock();
         reset();
         let dir = TempDir::new().unwrap();
         let canopy_dir = canopy_dir(&dir);
@@ -211,6 +232,7 @@ mod tests {
 
     #[test]
     fn fixed_file_applies_new_values_and_clears_fault() {
+        let _guard = test_lock();
         reset();
         let dir = TempDir::new().unwrap();
         let canopy_dir = canopy_dir(&dir);
@@ -233,6 +255,7 @@ mod tests {
 
     #[test]
     fn missing_file_returns_default_without_sidecar() {
+        let _guard = test_lock();
         reset();
         let dir = TempDir::new().unwrap();
         let canopy_dir = canopy_dir(&dir);
@@ -245,6 +268,7 @@ mod tests {
 
     #[test]
     fn deleted_file_after_valid_keeps_cached_config() {
+        let _guard = test_lock();
         reset();
         let dir = TempDir::new().unwrap();
         let canopy_dir = canopy_dir(&dir);
@@ -259,5 +283,47 @@ mod tests {
         );
         assert_eq!(read_fault_message(&canopy_dir), None);
         assert!(!canopy_dir.join(STATE_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn valid_load_clears_stale_sidecar_from_another_process() {
+        let _guard = test_lock();
+        reset();
+        let dir = TempDir::new().unwrap();
+        let canopy_dir = canopy_dir(&dir);
+        write_config(&canopy_dir, "[remote]\nenabled = true\n");
+        // A sidecar left by an earlier faulted run: this process holds no
+        // in-memory fault, but the file is valid now.
+        std::fs::write(
+            canopy_dir.join(STATE_FILE_NAME),
+            r#"{"last_valid_at":"2026-10-31T12:00:00+00:00","reason":"boom"}"#,
+        )
+        .unwrap();
+
+        assert!(load(&canopy_dir).remote.enabled);
+        assert_eq!(read_fault_message(&canopy_dir), None);
+        assert!(!canopy_dir.join(STATE_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn fault_keeps_sidecar_timestamp_from_another_process() {
+        let _guard = test_lock();
+        reset();
+        let dir = TempDir::new().unwrap();
+        let canopy_dir = canopy_dir(&dir);
+        write_config(&canopy_dir, "theme = \"classic\n");
+        // The daemon faulted earlier with a last-valid instant this fresh
+        // process never saw: it must survive this process's own fault.
+        std::fs::write(
+            canopy_dir.join(STATE_FILE_NAME),
+            r#"{"last_valid_at":"2026-10-31T12:00:00+00:00","reason":"old"}"#,
+        )
+        .unwrap();
+
+        assert!(!load(&canopy_dir).remote.enabled);
+        assert_eq!(
+            read_fault_message(&canopy_dir).as_deref(),
+            Some("config invalid, using last valid from 2026-10-31T12:00:00+00:00")
+        );
     }
 }

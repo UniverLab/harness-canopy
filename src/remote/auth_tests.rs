@@ -316,6 +316,7 @@ fn logout_is_idempotent() {
 #[test]
 fn config_fault_message_comes_from_the_sidecar() {
     use crate::domain::config_cache::read_fault_message;
+    let _guard = crate::domain::config_cache::test_lock();
     crate::domain::config_cache::reset();
 
     let dir = tempfile::TempDir::new().unwrap();
