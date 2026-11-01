@@ -129,14 +129,16 @@ fn require_string(key: &str, value: &toml_edit::Value) -> Result<(), String> {
 /// default means the hostname — and length is not capped here: an overlong
 /// label truncates at send time.
 fn require_host_label(key: &str, label: &str) -> Result<(), String> {
+    // Debug-format the label: a control-character rejection would otherwise
+    // echo raw control bytes (newline, escape) into the message.
     if label.chars().any(|c| c.is_control()) {
         return Err(format!(
-            "{key}: \"{label}\" is not valid; a host label must not contain control characters"
+            "{key}: {label:?} is not valid; a host label must not contain control characters"
         ));
     }
     if !label.is_empty() && label.trim().is_empty() {
         return Err(format!(
-            "{key}: \"{label}\" is not valid; a host label must not be blank (empty means the hostname)"
+            "{key}: {label:?} is not valid; a host label must not be blank (empty means the hostname)"
         ));
     }
     Ok(())
@@ -274,6 +276,9 @@ mod tests {
         let control = validate_value(def, &value("\"bad\\nlabel\"")).unwrap_err();
         assert!(control.contains("remote.host_label"), "{control}");
         assert!(control.contains("control characters"), "{control}");
+        // The rejected label is Debug-escaped: no raw newline reaches the message.
+        assert!(!control.contains('\n'), "{control:?}");
+        assert!(control.contains("bad\\nlabel"), "{control}");
         let blank = validate_value(def, &value("\"   \"")).unwrap_err();
         assert!(blank.contains("remote.host_label"), "{blank}");
         assert!(blank.contains("blank"), "{blank}");

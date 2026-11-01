@@ -1242,7 +1242,11 @@ async fn http_400_records_the_reason_without_reconnecting() {
     );
     let recorded = state(&db, REMOTE_ERROR_KEY);
     assert!(
-        recorded.contains("400") && recorded.contains("bad_label"),
+        recorded.starts_with("relay rejected the handshake: HTTP 400"),
+        "status must surface the 400 with its code, got {recorded:?}"
+    );
+    assert!(
+        recorded.contains("bad_label"),
         "status must surface the 400 reason, got {recorded:?}"
     );
 }

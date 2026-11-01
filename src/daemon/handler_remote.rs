@@ -81,7 +81,7 @@ impl TaskTriggerHandler {
         name = "remote",
         description = "Remote control of this hub from the browser. Pass `action` plus the parameters listed for it. \
         Actions (required params; optional params): \
-        `status` (required: none; optional: none) — sign-in state, whether remote is enabled, the relay URL, the relay phase (connected, connecting, token rejected: sign in again, off), the live device ids and every paired device with its live flag. \
+        `status` (required: none; optional: none) — sign-in state, whether remote is enabled, the relay URL, the relay phase (connected, connecting, token rejected: sign in again, relay rejected: see remote status, off), the live device ids and every paired device with its live flag. \
         `pair` (required: none; optional: none) — create a one-time pairing code with its link, expiry and QR, replacing any live one; the same code `canopy remote pair` prints. \
         `set_enabled` (required: enabled; optional: none) — turn the relay connection on or off (`[remote] enabled`); the daemon picks the change up without a restart. \
         `revoke` (required: device_id; optional: none) — revoke a paired device: delete the row and close its live connection at once. \

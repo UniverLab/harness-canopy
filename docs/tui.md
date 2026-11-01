@@ -228,7 +228,8 @@ on GitHub starts the device flow while signed out (the row shows the user
 code and `https://github.com/login/device` until it completes or expires);
 `Enter` on Remote control flips the relay switch (disabled while signed
 out); Relay only reports the phase (`connected`, `connecting`,
-`token rejected: sign in again`, `off`); `Enter` on Pair a device shows the
+`token rejected: sign in again`, `relay rejected: see remote status`,
+`off`); `Enter` on Pair a device shows the
 fresh code with its link, QR and countdown in an overlay (`Esc` hides it,
 the code stays valid). Each device row shows its label, id, paired time,
 last seen time and `live` while a peer is open; `d` disconnects its live peer at once
