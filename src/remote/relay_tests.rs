@@ -1032,6 +1032,11 @@ async fn a_killed_relay_socket_reconnects_within_the_minute_and_status_shows_it(
     })
     .await;
 
+    // The first dial already records a reconnect instant; clear it so the
+    // wait below proves the *reconnect* records, not the first dial.
+    crate::application::ports::StateRepository::set_state(&db, REMOTE_RECONNECT_KEY, "")
+        .expect("clear the first reconnect instant");
+
     // The relay is silent from here on: only the host's own Ping + idle
     // timeout can bring the socket back, and the whole cycle must fit in a
     // minute.

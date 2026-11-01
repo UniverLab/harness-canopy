@@ -45,6 +45,8 @@ pub const REMOTE_DISCONNECT_KEY: &str = "remote_disconnect";
 pub const REMOTE_TRUST_REVOKE_KEY: &str = "remote_trust_revoke";
 /// `daemon_state` key holding the instant of the last successful reconnect.
 pub const REMOTE_RECONNECT_KEY: &str = "remote_reconnect";
+/// Shortest reconnect delay; attempts double from here.
+pub const MIN_BACKOFF: Duration = Duration::from_secs(1);
 /// Longest reconnect delay.
 pub const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
@@ -101,7 +103,7 @@ pub fn websocket_url(relay_url: &str) -> String {
 /// Reconnect delay for `attempt` (0-based): 1 s doubling to 30 s, ±20%.
 pub fn backoff_delay(attempt: u32) -> Duration {
     let exponent = attempt.min(6);
-    let base = (1u64 << exponent).min(MAX_BACKOFF.as_secs());
+    let base = (MIN_BACKOFF.as_secs() << exponent).min(MAX_BACKOFF.as_secs());
     let millis = base * 1000;
     let low = millis * 80 / 100;
     let spread = millis * 40 / 100;

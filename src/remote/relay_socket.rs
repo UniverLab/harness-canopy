@@ -51,6 +51,12 @@ pub async fn serve_socket_with_idle_timeout(
     let mut ticks = tokio::time::interval(Duration::from_secs(1));
     // A half-open socket reads nothing forever; the Ping below plus this
     // clock notice it without the relay toggle dance.
+    //
+    // Tests shorten the idle timeout to seconds; the Ping scales down with
+    // it so the Ping→Pong path still runs (a fixed 20 s Ping would never
+    // fire before a 2 s idle trips, and the healthy-link test would pass
+    // with Pinging removed). Production keeps 20 s: min(20, 45/2).
+    let ping_interval = RELAY_PING_INTERVAL.min(idle_timeout / 2);
     let mut last_inbound = Instant::now();
     let mut last_ping = Instant::now();
     loop {
@@ -78,9 +84,9 @@ pub async fn serve_socket_with_idle_timeout(
                 }
                 // End to end through proxies, where a TCP keepalive would
                 // only prove the next hop is alive. One Ping every
-                // `RELAY_PING_INTERVAL`; the tick itself stays at one
-                // second so `remote off` and the idle check react quickly.
-                if last_ping.elapsed() >= RELAY_PING_INTERVAL {
+                // `ping_interval`; the tick itself stays at one second so
+                // `remote off` and the idle check react quickly.
+                if last_ping.elapsed() >= ping_interval {
                     last_ping = Instant::now();
                     socket
                         .send(Message::Ping(Vec::new().into()))
