@@ -329,13 +329,7 @@ impl RelayRuntime {
         let signal = signal.clone();
         let from = from.to_string();
         tokio::spawn(async move {
-            let servers = match peer::fetch_ice_servers(&relay_url, &bearer).await {
-                Ok(servers) => servers,
-                Err(error) => {
-                    tracing::warn!("remote: no ICE servers from the relay: {error:#}");
-                    Vec::new()
-                }
-            };
+            let servers = peer::fetch_ice_servers_or_fallback(&relay_url, &bearer).await;
             let answered = peer::Peer::answer_offer(servers, &offer.sdp).await;
             let Ok((sdp, peer)) = answered else {
                 peers.remove(&device_id, &token);

@@ -32,7 +32,10 @@ use webrtc::peer_connection::{
 };
 
 /// Asks the relay for a short-lived TURN credential; see [`super::peer_ice`].
-pub use super::peer_ice::fetch_ice_servers;
+// Re-exported API surface: `fetch_ice_servers` and `FALLBACK_STUN_URL` are
+// only reached through `peer::` by tests, which warns in non-test builds.
+#[allow(unused_imports)]
+pub use super::peer_ice::{fetch_ice_servers, fetch_ice_servers_or_fallback, FALLBACK_STUN_URL};
 use super::signaling::IceCandidate;
 
 /// The one data channel label this transport accepts.
