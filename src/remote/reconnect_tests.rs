@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message as AxumMessage, WebSocket, WebSocketUpgrade};
+use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
@@ -272,6 +273,89 @@ async fn start_relay(silent: bool) -> String {
         let _ = axum::serve(listener, app).await;
     });
     format!("http://{addr}")
+}
+
+/// A relay that records every Text frame the host sends, Pongs every Ping,
+/// and holds the socket: the join's publish lands in `tx` first.
+async fn start_capturing_relay(tx: mpsc::UnboundedSender<String>) -> String {
+    async fn capturing_upgrade(
+        State(tx): State<mpsc::UnboundedSender<String>>,
+        ws: WebSocketUpgrade,
+    ) -> impl IntoResponse {
+        ws.on_upgrade(|mut socket: WebSocket| async move {
+            while let Some(Ok(message)) = socket.recv().await {
+                match message {
+                    AxumMessage::Text(text) => {
+                        let _ = tx.send(text.as_str().to_string());
+                    }
+                    AxumMessage::Ping(payload) => {
+                        let _ = socket.send(AxumMessage::Pong(payload)).await;
+                    }
+                    _ => {}
+                }
+            }
+        })
+    }
+    let app = Router::new()
+        .route("/ws/host", get(capturing_upgrade))
+        .with_state(tx);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind the fake relay");
+    let addr = listener.local_addr().expect("fake relay addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
+}
+
+/// The join publishes the guest allowlist to the room before anything else:
+/// the first host frame carries `to: "room"` with the resolved uids. The
+/// change detector is primed before serving, so the ticks find no change and
+/// the join's forced publish is the only frame the relay can see — removing
+/// it leaves the relay silent and the test times out.
+#[tokio::test]
+async fn join_publishes_the_guest_allowlist_to_the_room() {
+    let harness = Harness::new();
+    harness.db.upsert_trust("guest", true).expect("trust");
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let url = start_capturing_relay(tx).await;
+    let socket = connect_ws(&websocket_url(&url), &test_headers(&harness.host_id))
+        .await
+        .expect("connect");
+    let runtime = Arc::new(RelayRuntime::new(
+        HostKey::from_scalar_bytes(&[0x11; 32]).expect("host key"),
+        harness.db.clone(),
+        OWNER.to_string(),
+        PairingState::new(harness.data_dir()),
+        harness.connections.clone(),
+    ));
+    runtime.seed_uid_cache("guest", 7);
+    let primed = runtime
+        .maybe_guest_allow(true)
+        .await
+        .expect("priming publishes");
+    assert_eq!(primed["uids"], json!([7]));
+    let serving = tokio::spawn(serve_socket_with_idle_timeout(
+        socket,
+        runtime,
+        harness.data_dir().to_path_buf(),
+        Duration::from_secs(30),
+    ));
+    let first = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+        .await
+        .expect("the join publishes in time")
+        .expect("the relay stays open");
+    let frame: Value = serde_json::from_str(&first).expect("frames are JSON");
+    assert_eq!(frame["to"], "room");
+    assert_eq!(frame["body"], json!({"t": "guest_allow", "uids": [7]}));
+    // Past two ticks with no grant change, the room hears nothing more.
+    tokio::time::sleep(Duration::from_millis(2200)).await;
+    assert!(
+        rx.try_recv().is_err(),
+        "an unchanged store republishes nothing"
+    );
+    serving.abort();
 }
 
 async fn serve_against(

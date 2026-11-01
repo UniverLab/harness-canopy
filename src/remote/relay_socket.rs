@@ -59,6 +59,15 @@ pub async fn serve_socket_with_idle_timeout(
     let ping_interval = RELAY_PING_INTERVAL.min(idle_timeout / 2);
     let mut last_inbound = Instant::now();
     let mut last_ping = Instant::now();
+    // The join publishes the guest allowlist first: the room admits only
+    // hub-invited guests, and an empty list denies all (explicit beats
+    // absent). A closed socket ends the serve; the reconnect re-publishes.
+    if let Some(body) = runtime.maybe_guest_allow(true).await {
+        if !send_body(&mut socket, "room", &body).await? {
+            tracing::warn!("remote: the relay room missed the guest allowlist on join");
+            return Ok(());
+        }
+    }
     loop {
         tokio::select! {
             message = socket.next() => {
@@ -76,6 +85,13 @@ pub async fn serve_socket_with_idle_timeout(
             }
             _ = ticks.tick() => {
                 runtime.drain_remote_revocations();
+                // A grant add/remove republishes the room's allowlist; an
+                // unchanged store resolves to `None` without any network.
+                if let Some(body) = runtime.maybe_guest_allow(false).await {
+                    if !send_body(&mut socket, "room", &body).await? {
+                        return Ok(());
+                    }
+                }
                 if !remote_enabled(&data_dir) {
                     return Ok(());
                 }

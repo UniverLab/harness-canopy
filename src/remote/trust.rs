@@ -8,6 +8,8 @@
 
 use std::collections::HashSet;
 
+use serde_json::{json, Value};
+
 use crate::db::Database;
 use crate::sessions::protocol::{error_frame, ERR_NOT_FOUND};
 use crate::sessions::shelf::ShelfStore;
@@ -54,6 +56,30 @@ pub fn resolve(db: &Database, owner_login: &str, guest_login: &str) -> Option<Gr
         return Some(Grant::All);
     }
     Some(Grant::Sessions(profile.sessions.into_iter().collect()))
+}
+
+/// Build the room's `guest_allow` body for these uids: sorted, deduped, and
+/// byte-exact — the worker matches the shape verbatim, and an empty list is a
+/// present deny-all (explicit beats absent).
+pub fn guest_allow_body(uids: &[u64]) -> Value {
+    let mut sorted: Vec<u64> = uids.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    json!({"t": "guest_allow", "uids": sorted})
+}
+
+/// Fingerprint the trust allowlist for change detection: the trusted logins
+/// in store order, joined with `,`; `"error"` when the store is unreadable,
+/// so a failure still publishes (deny-all) exactly once.
+pub fn allowlist_fingerprint(db: &Database) -> String {
+    match db.list_trust() {
+        Ok(profiles) => profiles
+            .iter()
+            .map(|profile| profile.login.as_str())
+            .collect::<Vec<_>>()
+            .join(","),
+        Err(_) => "error".to_string(),
+    }
 }
 
 /// One peer's enforcement view: its [`Grant`] plus the granted session ids

@@ -8,19 +8,25 @@
 //! production check is skipped: the pairing bind, the bridge filter, or
 //! the kick.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use axum::routing::get;
+use axum::{Json, Router};
 use base64::Engine as _;
 use serde_json::{json, Value};
 
-use super::{normalize_login, resolve, Grant};
+use super::{allowlist_fingerprint, guest_allow_body, normalize_login, resolve, Grant};
 use crate::application::ports::StateRepository as _;
 use crate::db::Database;
 use crate::remote::bridge::RemoteBridge;
 use crate::remote::devices::{device_id, RemoteDevices};
+use crate::remote::guest_allow;
 use crate::remote::hostkey::HostKey;
 use crate::remote::pairing::{derive_k_pair, mac_init, normalize_code, PairingState};
 use crate::remote::panel;
@@ -729,4 +735,154 @@ async fn full_grant_serves_every_shelf_and_keeps_the_terminal_rule() {
     let deleted = recv_frame(&mut out_rx).await;
     assert_eq!(deleted["t"], "ok", "{deleted}");
     bridge.abort();
+}
+
+/// A relay runtime over `db` for the allowlist tests: no sessions, no peers —
+/// publishing only needs the trust store and the uid cache. Returns the
+/// scratch dir too, so it stays alive with the runtime.
+fn allowlist_runtime(db: &Database) -> (tempfile::TempDir, RelayRuntime) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let host = HostKey::from_scalar_bytes(&[0x11; 32]).expect("host key");
+    let runtime = RelayRuntime::new(
+        host,
+        db.clone(),
+        OWNER.to_string(),
+        PairingState::new(dir.path()),
+        ConnectionRegistry::default(),
+    );
+    (dir, runtime)
+}
+
+#[test]
+fn guest_allow_body_is_byte_exact_sorted_and_deduped() {
+    // Breaks on any extra key, key reorder, or surviving duplicate: the
+    // worker matches this shape verbatim.
+    assert_eq!(
+        guest_allow_body(&[222, 7, 7]).to_string(),
+        r#"{"t":"guest_allow","uids":[7,222]}"#
+    );
+    // Empty is a present deny-all, never an absent list.
+    assert_eq!(
+        guest_allow_body(&[]).to_string(),
+        r#"{"t":"guest_allow","uids":[]}"#
+    );
+}
+
+#[tokio::test]
+async fn empty_trust_store_publishes_an_empty_deny_all_list() {
+    let (_db_dir, db) = test_db();
+    let (_scratch, runtime) = allowlist_runtime(&db);
+    // The join always publishes, even with no trusted guests ...
+    let body = runtime
+        .maybe_guest_allow(true)
+        .await
+        .expect("the join always publishes");
+    assert_eq!(body["t"], "guest_allow");
+    assert_eq!(body["uids"], json!([]));
+    // ... and the empty store republishes nothing until a grant lands.
+    assert_eq!(runtime.maybe_guest_allow(false).await, None);
+}
+
+#[tokio::test]
+async fn allowlist_republishes_only_when_trust_membership_changes() {
+    let (_db_dir, db) = test_db();
+    let (_scratch, runtime) = allowlist_runtime(&db);
+    assert_eq!(allowlist_fingerprint(&db), "");
+
+    runtime.seed_uid_cache("a", 1);
+    db.upsert_trust("a", true).expect("trust");
+    assert_eq!(allowlist_fingerprint(&db), "a");
+    let first = runtime
+        .maybe_guest_allow(false)
+        .await
+        .expect("a grant add publishes");
+    assert_eq!(first["uids"], json!([1]));
+    assert_eq!(
+        runtime.maybe_guest_allow(false).await,
+        None,
+        "no change, no publish"
+    );
+
+    runtime.seed_uid_cache("b", 2);
+    db.upsert_trust("b", false).expect("trust");
+    assert_eq!(allowlist_fingerprint(&db), "a,b");
+    let second = runtime
+        .maybe_guest_allow(false)
+        .await
+        .expect("a second grant add republishes");
+    assert_eq!(second["uids"], json!([1, 2]));
+
+    assert!(db.remove_trust("a").expect("remove"));
+    assert_eq!(allowlist_fingerprint(&db), "b");
+    let third = runtime
+        .maybe_guest_allow(false)
+        .await
+        .expect("a grant remove republishes");
+    assert_eq!(third["uids"], json!([2]));
+
+    // A grants-only edit keeps the same logins (and uids): nothing to send.
+    db.set_grants("b", &["alpha".to_string()]).expect("grants");
+    assert_eq!(allowlist_fingerprint(&db), "b");
+    assert_eq!(
+        runtime.maybe_guest_allow(false).await,
+        None,
+        "session edits keep the same uids"
+    );
+}
+
+/// Mock GitHub `GET /users/{login}`: `alice` resolves to 101, `boom` is a
+/// 500, anything else a 404. Returns the base URL and the hit counter.
+async fn spawn_uid_mock() -> (String, Arc<AtomicU32>) {
+    let hits = Arc::new(AtomicU32::new(0));
+    let app = Router::new().route(
+        "/users/{login}",
+        get({
+            let hits = Arc::clone(&hits);
+            move |axum::extract::Path(login): axum::extract::Path<String>| {
+                let hits = Arc::clone(&hits);
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    match login.as_str() {
+                        "alice" => (StatusCode::OK, Json(json!({"login": "alice", "id": 101})))
+                            .into_response(),
+                        "boom" => (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": "boom"})),
+                        )
+                            .into_response(),
+                        _ => (StatusCode::NOT_FOUND, Json(json!({"message": "Not Found"})))
+                            .into_response(),
+                    }
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind the mock GitHub");
+    let base = format!("http://{}", listener.local_addr().expect("mock addr"));
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (base, hits)
+}
+
+#[tokio::test]
+async fn uid_resolution_caches_hits_and_skips_failures() {
+    let (base, hits) = spawn_uid_mock().await;
+    let (_db_dir, db) = test_db();
+    db.upsert_trust("alice", true).expect("trust");
+    db.upsert_trust("boom", true).expect("trust");
+    db.upsert_trust("ghost", true).expect("trust");
+    let cache = Mutex::new(HashMap::new());
+
+    // The 404 and the 500 skip with a warning; they never abort the list.
+    let uids = guest_allow::resolve_guest_uids(&db, &cache, "test-Bearer [REDACTED]", &base).await;
+    assert_eq!(uids, vec![101]);
+    assert_eq!(hits.load(Ordering::SeqCst), 3);
+
+    // Alice serves from the cache now; only the failures hit the network.
+    let again = guest_allow::resolve_guest_uids(&db, &cache, "test-Bearer [REDACTED]", &base).await;
+    assert_eq!(again, vec![101]);
+    assert_eq!(hits.load(Ordering::SeqCst), 5);
 }

@@ -62,12 +62,19 @@ async fn pairing_socket(mut socket: WebSocket, state: PairingRelay) {
     {
         return;
     }
-    if let Some(Ok(AxumMessage::Text(text))) = socket.recv().await {
-        if let Ok(reply) = serde_json::from_str::<Value>(&text) {
-            if let Some(sender) = state.sender.lock().await.take() {
-                let _ = sender.send(reply);
-            }
+    // The host publishes its guest allowlist to the room on join, before any
+    // answer; skip past it here and capture the pairing reply.
+    while let Some(Ok(AxumMessage::Text(text))) = socket.recv().await {
+        let Ok(reply) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        if reply.get("to").and_then(Value::as_str) != Some("d:1") {
+            continue;
         }
+        if let Some(sender) = state.sender.lock().await.take() {
+            let _ = sender.send(reply);
+        }
+        return;
     }
 }
 

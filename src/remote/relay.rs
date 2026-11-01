@@ -19,7 +19,6 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
-use tokio_util::sync::CancellationToken;
 
 use crate::application::ports::StateRepository as _;
 use crate::db::Database;
@@ -172,46 +171,7 @@ pub async fn connect_ws_with_proxy(
     }
 }
 
-/// Live device connections, keyed by `device_id`.
-#[derive(Clone, Default)]
-pub struct ConnectionRegistry {
-    inner: Arc<Mutex<HashMap<String, Arc<CancellationToken>>>>,
-}
-
-impl ConnectionRegistry {
-    /// Register a live connection for `device_id`; cancelling the returned
-    /// token closes it.
-    pub fn register(&self, device_id: &str) -> Arc<CancellationToken> {
-        let token = Arc::new(CancellationToken::new());
-        if let Ok(mut map) = self.inner.lock() {
-            map.insert(device_id.to_string(), Arc::clone(&token));
-        }
-        token
-    }
-
-    /// Close one device's live connection, if any.
-    pub fn close(&self, device_id: &str) {
-        if let Ok(mut map) = self.inner.lock() {
-            if let Some(token) = map.remove(device_id) {
-                token.cancel();
-            }
-        }
-    }
-
-    /// Forget one peer's registration. A newer connection of the same device
-    /// already replaced it, so only the exact token may be removed: the
-    /// reconnect must survive the old peer's cleanup.
-    pub fn release(&self, device_id: &str, token: &Arc<CancellationToken>) {
-        if let Ok(mut map) = self.inner.lock() {
-            if map
-                .get(device_id)
-                .is_some_and(|current| Arc::ptr_eq(current, token))
-            {
-                map.remove(device_id);
-            }
-        }
-    }
-}
+pub use super::connection_registry::ConnectionRegistry;
 
 /// Everything one relay connection needs to answer frames.
 pub struct RelayRuntime {
@@ -226,6 +186,8 @@ pub struct RelayRuntime {
     bearer: String,
     peers: DevicePeers,
     seen_offers: Mutex<signaling::SeenOffers>,
+    uid_cache: Mutex<HashMap<String, u64>>,
+    last_allowlist: Mutex<String>,
 }
 
 impl RelayRuntime {
@@ -251,6 +213,8 @@ impl RelayRuntime {
             bearer: String::new(),
             peers: DevicePeers::default(),
             seen_offers: Mutex::new(signaling::SeenOffers::new()),
+            uid_cache: Mutex::new(HashMap::new()),
+            last_allowlist: Mutex::new(String::new()),
         }
     }
 
@@ -372,6 +336,37 @@ impl RelayRuntime {
                 .respond(body, &self.host, &self.devices, &self.github_login, now)
                 .unwrap_or_else(|_| pair_fail("bad_code")),
             _ => json!({"t": "error", "reason": "unknown_type"}),
+        }
+    }
+
+    /// The `guest_allow` room body when the allowlist changed since the last
+    /// publish (`force` publishes always, for the join); `None` means nothing
+    /// to send. Failures publish as absent — deny-all on an empty store — and
+    /// never surface: the next join or grant change republishes, and the
+    /// owner flow stays untouched.
+    pub async fn maybe_guest_allow(&self, force: bool) -> Option<Value> {
+        use super::guest_allow::{resolve_guest_uids, GITHUB_API};
+
+        let fingerprint = trust::allowlist_fingerprint(&self.db);
+        if !force {
+            if let Ok(last) = self.last_allowlist.lock() {
+                if fingerprint == *last {
+                    return None;
+                }
+            }
+        }
+        let uids = resolve_guest_uids(&self.db, &self.uid_cache, &self.bearer, GITHUB_API).await;
+        if let Ok(mut last) = self.last_allowlist.lock() {
+            *last = fingerprint;
+        }
+        Some(trust::guest_allow_body(&uids))
+    }
+
+    /// Test harness: pretend `login` already resolved to `uid`.
+    #[cfg(test)]
+    pub fn seed_uid_cache(&self, login: &str, uid: u64) {
+        if let Ok(mut cache) = self.uid_cache.lock() {
+            cache.insert(trust::normalize_login(login), uid);
         }
     }
 
