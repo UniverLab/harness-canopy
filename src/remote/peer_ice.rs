@@ -33,19 +33,20 @@ pub fn fallback_ice_servers() -> Vec<IceServer> {
 
 /// Tries [`fetch_ice_servers`] up to [`FETCH_ATTEMPTS`] times with a fixed
 /// backoff, then falls back to [`fallback_ice_servers`] instead of leaving
-/// the host with no ICE servers. A later call that succeeds returns the
-/// provider servers; nothing sticks.
+/// the host with no ICE servers. A 200 that yields no usable servers counts
+/// as a failed attempt: returning it would leave the host with no ICE
+/// servers, which is exactly what the fallback prevents. A later call that
+/// succeeds returns the provider servers; nothing sticks.
 pub async fn fetch_ice_servers_or_fallback(relay_url: &str, token: &str) -> Vec<IceServer> {
     let mut last_error = String::new();
     for attempt in 1..=FETCH_ATTEMPTS {
         match fetch_ice_servers(relay_url, token).await {
-            Ok(servers) => return servers,
-            Err(error) => {
-                last_error = format!("{error:#}");
-                if attempt < FETCH_ATTEMPTS {
-                    tokio::time::sleep(RETRY_BACKOFF_STEP * attempt).await;
-                }
-            }
+            Ok(servers) if !servers.is_empty() => return servers,
+            Ok(_) => last_error = "the relay returned no ICE servers".to_string(),
+            Err(error) => last_error = format!("{error:#}"),
+        }
+        if attempt < FETCH_ATTEMPTS {
+            tokio::time::sleep(RETRY_BACKOFF_STEP * attempt).await;
         }
     }
     tracing::warn!(
@@ -158,16 +159,20 @@ mod tests {
     struct FlakyTurn {
         hits: Arc<AtomicU32>,
         fail_times: Arc<AtomicU32>,
+        empty_times: Arc<AtomicU32>,
     }
 
     async fn flaky_handler(State(state): State<FlakyTurn>) -> impl IntoResponse {
         let n = state.hits.fetch_add(1, Ordering::SeqCst) + 1;
-        if n <= state.fail_times.load(Ordering::SeqCst) {
+        let fail_times = state.fail_times.load(Ordering::SeqCst);
+        if n <= fail_times {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": "boom"})),
             )
                 .into_response()
+        } else if n <= fail_times.saturating_add(state.empty_times.load(Ordering::SeqCst)) {
+            (StatusCode::OK, Json(json!({"iceServers": []}))).into_response()
         } else {
             (
                 StatusCode::OK,
@@ -178,11 +183,19 @@ mod tests {
     }
 
     async fn start_flaky(fail_times: u32) -> (String, Arc<AtomicU32>, Arc<AtomicU32>) {
+        start_flaky_with_empty(fail_times, 0).await
+    }
+
+    async fn start_flaky_with_empty(
+        fail_times: u32,
+        empty_times: u32,
+    ) -> (String, Arc<AtomicU32>, Arc<AtomicU32>) {
         let hits = Arc::new(AtomicU32::new(0));
         let fail_times = Arc::new(AtomicU32::new(fail_times));
         let state = FlakyTurn {
             hits: Arc::clone(&hits),
             fail_times: Arc::clone(&fail_times),
+            empty_times: Arc::new(AtomicU32::new(empty_times)),
         };
         let app = Router::new()
             .route("/turn", get(flaky_handler))
@@ -235,6 +248,35 @@ mod tests {
         assert!(servers[0].credential.is_none(), "STUN has no credential");
         let expected = fallback_ice_servers();
         assert_eq!(servers[0].urls, expected[0].urls);
+    }
+
+    #[tokio::test]
+    async fn empty_list_retries_then_falls_back_to_stun() {
+        let (relay_url, hits, _) = start_flaky_with_empty(0, u32::MAX).await;
+        let servers = fetch_ice_servers_or_fallback(&relay_url, "test-token").await;
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            3,
+            "an empty list retries like a failure"
+        );
+        assert_eq!(servers.len(), 1, "the fallback replaces the empty list");
+        assert_eq!(servers[0].urls, vec![FALLBACK_STUN_URL.to_string()]);
+        assert!(servers[0].username.is_none(), "STUN has no username");
+        assert!(servers[0].credential.is_none(), "STUN has no credential");
+    }
+
+    #[tokio::test]
+    async fn empty_then_ok_recovers_without_fallback() {
+        let (relay_url, hits, _) = start_flaky_with_empty(0, 2).await;
+        let servers = fetch_ice_servers_or_fallback(&relay_url, "test-token").await;
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            3,
+            "two empty lists then a success"
+        );
+        assert_eq!(servers.len(), 1, "the provider hands out one server");
+        assert_eq!(servers[0].urls, vec![PROVIDER_URL.to_string()]);
+        assert!(!has_fallback(&servers), "no fallback after a success");
     }
 
     #[tokio::test]

@@ -4,7 +4,8 @@
 //! direct `SCTP` data channel, authenticated end to end by the DTLS fingerprint
 //! inside the signed SDP. This module owns that half of the protocol:
 //!
-//! - [`fetch_ice_servers`] asks the relay for a short-lived TURN credential.
+//! - [`fetch_ice_servers_or_fallback`] asks the relay for a short-lived TURN
+//!   credential, falling back to STUN when the relay has none to give.
 //! - [`Peer::answer_offer`] is the host side: a device's offer goes in, the
 //!   answer SDP comes out, and the accepted channel arrives through
 //!   [`Peer::next`] as [`PeerEvent::Channel`].
@@ -31,11 +32,11 @@ use webrtc::peer_connection::{
     RTCPeerConnectionState, RTCSessionDescription,
 };
 
-/// Asks the relay for a short-lived TURN credential; see [`super::peer_ice`].
-// Re-exported API surface: `fetch_ice_servers` and `FALLBACK_STUN_URL` are
-// only reached through `peer::` by tests, which warns in non-test builds.
-#[allow(unused_imports)]
-pub use super::peer_ice::{fetch_ice_servers, fetch_ice_servers_or_fallback, FALLBACK_STUN_URL};
+/// Single-attempt fetch, for the fake relay in `connection_tests` only.
+#[cfg(test)]
+pub use super::peer_ice::fetch_ice_servers;
+/// Fetches TURN credentials with a STUN fallback; see [`super::peer_ice`].
+pub use super::peer_ice::fetch_ice_servers_or_fallback;
 use super::signaling::IceCandidate;
 
 /// The one data channel label this transport accepts.

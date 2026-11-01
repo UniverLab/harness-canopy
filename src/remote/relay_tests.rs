@@ -791,7 +791,7 @@ async fn a_verified_offer_gets_a_signed_answer_and_updates_last_seen() {
     );
     runtime.sessions = Some(test_sessions(&db));
     // `relay_url` stays empty: the `/turn` fetch fails and the peer falls
-    // back to host candidates, which is all loopback needs.
+    // back to the compiled STUN server; host candidates alone carry loopback.
     let (signal, mut inbox) = tokio::sync::mpsc::unbounded_channel();
 
     let (offer_sdp, device) = crate::remote::peer::device_side::DeviceSide::offer()
