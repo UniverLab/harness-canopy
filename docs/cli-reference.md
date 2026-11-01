@@ -261,7 +261,7 @@ WebSocket — the CLI never writes the shelf itself. `file_id` is the
 |---|---|
 | `canopy remote login` | Sign in to GitHub with the OAuth device flow (identity only, no scopes) |
 | `canopy remote logout` | Delete the stored GitHub identity |
-| `canopy remote status [--json]` | Show the sign-in state, whether remote is enabled, the relay URL, the last relay error and reconnect time, and a `config invalid, ...` line while `config.toml` fails to parse (the last valid config stays live); `--json` prints `{signed_in, login, enabled, relay_url, last_error, last_reconnect}` plus `config_fault` when invalid (`null` when unrecorded) |
+| `canopy remote status [--json]` | Show the sign-in state, whether remote is enabled, the relay URL, the last relay error and reconnect time, and a `config invalid, ...` line while `config.toml` fails to parse (the last valid config stays live); `--json` prints `{signed_in, login, enabled, relay_url, last_error, last_reconnect}` plus `config_fault` when invalid (`last_error`/`last_reconnect` are `null` when unrecorded; `config_fault` is omitted while the file parses) |
 | `canopy remote on` / `off` | Turn the relay connection on or off (`[remote] enabled`); the daemon picks the change up without a restart |
 | `canopy remote pair` | Create a one-time code, print it with its `<relay_url>/pair#<code>` link and expiry, and draw the link as a terminal QR code |
 | `canopy remote devices [--json]` | List paired browsers (`id`, `label`, `paired_at`, `last_seen`) |
@@ -526,7 +526,10 @@ being applied. `pending_restart` marks a restart-only setting whose value on
 disk differs from the one the running daemon loaded, including a key the file
 no longer holds, and a `config.toml` that will not parse at all is reported
 as a single `config.toml` row (and doctor warning) instead of being silently
-ignored. `skills.sources` (a list of tables) must still be edited by
+ignored. While the file stays broken the daemon logs the parse error once and
+keeps serving the last config that parsed (remote included) until a valid
+file appears — `canopy remote status` shows the fault meanwhile.
+`skills.sources` (a list of tables) must still be edited by
 hand.
 
 ## Spec queues
