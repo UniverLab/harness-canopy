@@ -233,6 +233,27 @@ fn a_replayed_offer_is_refused_as_bad_signature() {
 }
 
 #[test]
+fn a_fresh_signature_from_the_same_device_is_not_a_replay() {
+    // The registry keys by signature hash, never by device: a device that
+    // re-signs (new ts/sdp) after its first offer is accepted. A
+    // device-keyed registry would refuse this second offer.
+    let (_dir, devices) = registry();
+    let mut seen = SeenOffers::new();
+    let first = offer_body(VECTOR_TS, VECTOR_OFFER_SDP, VECTOR_OFFER_SIG);
+    verify_offer_seen(&devices, HOST_ID, &first, VECTOR_TS, &mut seen)
+        .expect("the first offer is fresh");
+    let ts = VECTOR_TS + 10;
+    let sdp = "v=0\r\no=- 5 6 IN IP4 127.0.0.1\r\n";
+    let message = offer_message(HOST_ID, ts, sdp);
+    let sig =
+        base64::engine::general_purpose::STANDARD.encode(device_key().sign(message.as_bytes()));
+    let second = offer_body(ts, sdp, &sig);
+    verify_offer_seen(&devices, HOST_ID, &second, VECTOR_TS, &mut seen)
+        .expect("a fresh signature from the same device is not a replay");
+    assert_eq!(seen.len(), 2);
+}
+
+#[test]
 fn a_seen_signature_expires_after_twice_the_clock_window() {
     // The TTL boundary lives in `check_and_insert`: the clock window would
     // refuse a re-signed body past 120 s as `stale` long before the registry

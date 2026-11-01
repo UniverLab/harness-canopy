@@ -587,6 +587,54 @@ async fn the_fifth_concurrent_offer_is_answered_busy() {
     assert_eq!(refusal, json!({"t": "connect_fail", "reason": "busy"}));
 }
 
+#[tokio::test]
+async fn a_replayed_offer_is_refused_and_keeps_the_live_peer() {
+    // The replay registry sits in `start_offer`: the same offer body routed
+    // twice refuses the second as `bad_signature`, so a captured offer can
+    // never replace the victim's live peer. Without the wiring the second
+    // route would re-register the peer and send nothing.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = test_db();
+    let host = HostKey::load_or_create(dir.path()).expect("host key");
+    let host_id = host.host_id();
+    let key = HostKey::from_scalar_bytes(&[0x22; 32]).expect("device key");
+    crate::remote::devices::RemoteDevices::new(db.clone())
+        .pair(
+            key.spki_der().to_vec(),
+            "browser",
+            "octocat",
+            "2026-01-01T00:00:00Z",
+        )
+        .expect("pair a device");
+    let mut runtime = RelayRuntime::new(
+        host,
+        db.clone(),
+        "octocat".to_string(),
+        crate::remote::pairing::PairingState::new(dir.path()),
+        ConnectionRegistry::default(),
+    );
+    runtime.sessions = Some(test_sessions(&db));
+    let (signal, mut inbox) = tokio::sync::mpsc::unbounded_channel();
+    let ts = chrono::Utc::now().timestamp();
+
+    let body = signed_offer(&key, &host_id, ts);
+    assert_eq!(runtime.route(&body, ts, "d:1", &signal), None);
+    assert_eq!(runtime.peers.len(), 1);
+
+    // The replay arrives over another connection, as a captured offer would;
+    // no await between the routes, so the spawned answer build cannot answer
+    // first: the refusal below is the replay's, sent synchronously.
+    assert_eq!(runtime.route(&body, ts, "d:9", &signal), None);
+    let (to, refusal) = inbox.try_recv().expect("the replay is refused at once");
+    assert_eq!(to, "d:9");
+    assert_eq!(
+        refusal,
+        json!({"t": "connect_fail", "reason": "bad_signature"})
+    );
+    assert!(inbox.is_empty(), "the live peer's route sent nothing");
+    assert_eq!(runtime.peers.len(), 1);
+}
+
 /// The contract's `ice{candidate}` and `bye` bodies carry no device id: the
 /// relay envelope's `from` is the only address, so routing must not need one.
 #[tokio::test]
