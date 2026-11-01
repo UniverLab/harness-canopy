@@ -57,7 +57,6 @@ pub async fn serve_socket_with_idle_timeout(
     // fire before a 2 s idle trips, and the healthy-link test would pass
     // with Pinging removed). Production keeps 20 s: min(20, 45/2).
     let ping_interval = RELAY_PING_INTERVAL.min(idle_timeout / 2);
-    let mut last_inbound = Instant::now();
     let mut last_ping = Instant::now();
     // The join publishes the guest allowlist first: the room admits only
     // hub-invited guests, and an empty list denies all (explicit beats
@@ -68,6 +67,10 @@ pub async fn serve_socket_with_idle_timeout(
             return Ok(());
         }
     }
+    // The join's uid lookups are host-side network, not relay silence: the
+    // idle clock starts once the room heard the allowlist, so a slow GitHub
+    // cannot trip the timeout on the first tick.
+    let mut last_inbound = Instant::now();
     loop {
         tokio::select! {
             message = socket.next() => {

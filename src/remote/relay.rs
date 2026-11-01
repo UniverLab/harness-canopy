@@ -341,8 +341,8 @@ impl RelayRuntime {
 
     /// The `guest_allow` room body when the allowlist changed since the last
     /// publish (`force` publishes always, for the join); `None` means nothing
-    /// to send. Failures publish as absent — deny-all on an empty store — and
-    /// never surface: the next join or grant change republishes, and the
+    /// to send. Unresolvable logins are skipped with a warning — fail closed,
+    /// never fatal: the next join or grant change republishes, and the
     /// owner flow stays untouched.
     pub async fn maybe_guest_allow(&self, force: bool) -> Option<Value> {
         use super::guest_allow::{resolve_guest_uids, GITHUB_API};

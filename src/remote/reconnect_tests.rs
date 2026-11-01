@@ -358,6 +358,54 @@ async fn join_publishes_the_guest_allowlist_to_the_room() {
     serving.abort();
 }
 
+/// A grant change republishes the allowlist on the tick: after the join's
+/// frame, trusting one more guest (already uid-resolved) lands a second
+/// `guest_allow` frame with both uids. Breaks when the tick stops asking
+/// `maybe_guest_allow`: the room keeps the stale list and the wait times out.
+#[tokio::test]
+async fn grant_change_republishes_the_guest_allowlist_to_the_room() {
+    let harness = Harness::new();
+    harness.db.upsert_trust("guest", true).expect("trust");
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let url = start_capturing_relay(tx).await;
+    let socket = connect_ws(&websocket_url(&url), &test_headers(&harness.host_id))
+        .await
+        .expect("connect");
+    let runtime = Arc::new(RelayRuntime::new(
+        HostKey::from_scalar_bytes(&[0x11; 32]).expect("host key"),
+        harness.db.clone(),
+        OWNER.to_string(),
+        PairingState::new(harness.data_dir()),
+        harness.connections.clone(),
+    ));
+    runtime.seed_uid_cache("guest", 7);
+    runtime.seed_uid_cache("newbie", 9);
+    let serving = tokio::spawn(serve_socket_with_idle_timeout(
+        socket,
+        Arc::clone(&runtime),
+        harness.data_dir().to_path_buf(),
+        Duration::from_secs(30),
+    ));
+    // The join's frame carries the one trusted guest.
+    let first = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+        .await
+        .expect("the join publishes in time")
+        .expect("the relay stays open");
+    let frame: Value = serde_json::from_str(&first).expect("frames are JSON");
+    assert_eq!(frame["to"], "room");
+    assert_eq!(frame["body"], json!({"t": "guest_allow", "uids": [7]}));
+    // Trusting one more guest republishes with both uids on the next tick.
+    harness.db.upsert_trust("newbie", true).expect("trust");
+    let second = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+        .await
+        .expect("the grant change republishes in time")
+        .expect("the relay stays open");
+    let frame: Value = serde_json::from_str(&second).expect("frames are JSON");
+    assert_eq!(frame["to"], "room");
+    assert_eq!(frame["body"], json!({"t": "guest_allow", "uids": [7, 9]}));
+    serving.abort();
+}
+
 async fn serve_against(
     harness: &Harness,
     url: &str,
