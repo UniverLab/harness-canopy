@@ -24,14 +24,14 @@ use crate::application::ports::StateRepository as _;
 use crate::db::Database;
 use crate::domain::canopy_config::CanopyConfig;
 use crate::remote::auth;
-use crate::remote::connection::{self, Control, DevicePeers, PeerSession};
+use crate::remote::connection::{Control, DevicePeers};
 use crate::remote::devices::RemoteDevices;
+use crate::remote::guest::GuestConns;
 use crate::remote::hostkey::HostKey;
 use crate::remote::label::{encode_label, host_label};
 use crate::remote::live::{RelayPhase, RemoteLive};
 use crate::remote::pairing::PairingState;
-use crate::remote::peer;
-use crate::remote::signaling::{self, Refusal};
+use crate::remote::signaling;
 use crate::remote::trust;
 use crate::sessions::ws::SessionsState;
 
@@ -180,17 +180,18 @@ pub use super::connection_registry::ConnectionRegistry;
 
 /// Everything one relay connection needs to answer frames.
 pub struct RelayRuntime {
-    host: Arc<HostKey>,
+    pub(crate) host: Arc<HostKey>,
     pairing: PairingState,
-    devices: RemoteDevices,
-    connections: ConnectionRegistry,
-    github_login: String,
-    db: Database,
-    sessions: Option<Arc<SessionsState>>,
-    relay_url: String,
-    bearer: String,
-    peers: DevicePeers,
-    seen_offers: Mutex<signaling::SeenOffers>,
+    pub(crate) devices: RemoteDevices,
+    pub(crate) connections: ConnectionRegistry,
+    pub(crate) github_login: String,
+    pub(crate) db: Database,
+    pub(crate) sessions: Option<Arc<SessionsState>>,
+    pub(crate) relay_url: String,
+    pub(crate) bearer: String,
+    pub(crate) peers: DevicePeers,
+    pub(crate) guests: GuestConns,
+    pub(crate) seen_offers: Mutex<signaling::SeenOffers>,
     uid_cache: Mutex<HashMap<String, u64>>,
     last_allowlist: Mutex<String>,
 }
@@ -217,6 +218,7 @@ impl RelayRuntime {
             relay_url: String::new(),
             bearer: String::new(),
             peers: DevicePeers::default(),
+            guests: GuestConns::default(),
             seen_offers: Mutex::new(signaling::SeenOffers::new()),
             uid_cache: Mutex::new(HashMap::new()),
             last_allowlist: Mutex::new(String::new()),
@@ -224,12 +226,29 @@ impl RelayRuntime {
     }
 
     /// Route one body: `pair_init` answers inline, signalling bodies spawn or
-    /// reach a live peer, anything else is `unknown_type`.
+    /// reach a live peer, `device_identity` tracks guest connections, anything
+    /// else is `unknown_type`. Guest connections never reach the device path:
+    /// their `pair_init` fails like a wrong code and their offers verify
+    /// against relay-injected identity instead of a device row.
     pub fn route(&self, body: &Value, now: i64, from: &str, signal: &SignalTx) -> Option<Value> {
         match body.get("t").and_then(Value::as_str) {
-            Some("pair_init") => Some(self.answer(body, now)),
+            Some("pair_init") => {
+                if self.guests.is_guest(from) {
+                    Some(pair_fail("bad_code"))
+                } else {
+                    Some(self.answer(body, now))
+                }
+            }
+            Some("device_identity") => {
+                self.guests.note_device_identity(body, from);
+                None
+            }
             Some("offer") => {
-                self.start_offer(body, now, from, signal);
+                if self.guests.is_guest(from) {
+                    self.start_guest_offer(body, now, from, signal);
+                } else {
+                    self.start_offer(body, now, from, signal);
+                }
                 None
             }
             Some("ice") => {
@@ -254,83 +273,6 @@ impl RelayRuntime {
             }
             _ => Some(json!({"t": "error", "reason": "unknown_type"})),
         }
-    }
-
-    /// Verify an offer, refuse it, or build the answer off the socket loop.
-    fn start_offer(&self, body: &Value, now: i64, from: &str, signal: &SignalTx) {
-        let host_id = self.host.host_id();
-        let mut seen = self
-            .seen_offers
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let offer =
-            match signaling::verify_offer_seen(&self.devices, &host_id, body, now, &mut seen) {
-                Ok(offer) => offer,
-                Err(refusal) => {
-                    let _ = signal.send((from.to_string(), signaling::connect_fail(refusal)));
-                    return;
-                }
-            };
-        drop(seen);
-        // The hub is the enforcement point: a login without a grant never
-        // gets a peer, so untrusted guests cannot even occupy a slot.
-        let Some(grant) = trust::resolve(&self.db, &self.github_login, &offer.device.github_login)
-        else {
-            let _ = signal.send((
-                from.to_string(),
-                signaling::connect_fail(Refusal::Forbidden),
-            ));
-            return;
-        };
-        let Some(sessions) = self.sessions.clone() else {
-            let _ = signal.send((from.to_string(), signaling::connect_fail(Refusal::Busy)));
-            return;
-        };
-        let device_id = offer.device.id.clone();
-        let token = self.connections.register(&device_id);
-        let (control_tx, control_rx) = tokio::sync::mpsc::unbounded_channel();
-        if !self
-            .peers
-            .register(&device_id, from, Arc::clone(&token), control_tx)
-        {
-            self.connections.release(&device_id, &token);
-            let _ = signal.send((from.to_string(), signaling::connect_fail(Refusal::Busy)));
-            return;
-        }
-        let host = Arc::clone(&self.host);
-        let devices = self.devices.clone();
-        let peers = self.peers.clone();
-        let connections = self.connections.clone();
-        let relay_url = self.relay_url.clone();
-        let bearer = self.bearer.clone();
-        let signal = signal.clone();
-        let from = from.to_string();
-        tokio::spawn(async move {
-            let servers = peer::fetch_ice_servers_or_fallback(&relay_url, &bearer).await;
-            let answered = peer::Peer::answer_offer(servers, &offer.sdp).await;
-            let Ok((sdp, peer)) = answered else {
-                peers.remove(&device_id, &token);
-                connections.release(&device_id, &token);
-                let _ = signal.send((from, signaling::connect_fail(Refusal::BadSignature)));
-                return;
-            };
-            let answer = signaling::answer_body(&host, &device_id, &offer.sig_b64, &sdp);
-            let _ = signal.send((from.clone(), answer));
-            let _ = devices.touch(&device_id);
-            connection::spawn(PeerSession {
-                peer,
-                device_id,
-                state: sessions,
-                peers,
-                connections,
-                token,
-                control: control_rx,
-                signal,
-                from,
-                grant,
-                max_frame: connection::peer_frame_cap(&offer.sdp),
-            });
-        });
     }
 
     /// One protocol reply for one relay body.
@@ -361,10 +303,11 @@ impl RelayRuntime {
             }
         }
         let uids = resolve_guest_uids(&self.db, &self.uid_cache, &self.bearer, GITHUB_API).await;
+        let invites = super::invite::live(&self.db, chrono::Utc::now().timestamp());
         if let Ok(mut last) = self.last_allowlist.lock() {
             *last = fingerprint;
         }
-        Some(trust::guest_allow_body(&uids))
+        Some(trust::guest_allow_body(&uids, &invites))
     }
 
     /// Test harness: pretend `login` already resolved to `uid`.
@@ -798,3 +741,7 @@ pub async fn supervise(
 #[cfg(test)]
 #[path = "relay_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "relay_guest_tests.rs"]
+mod guest_tests;

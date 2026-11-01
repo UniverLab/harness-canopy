@@ -348,7 +348,10 @@ async fn join_publishes_the_guest_allowlist_to_the_room() {
         .expect("the relay stays open");
     let frame: Value = serde_json::from_str(&first).expect("frames are JSON");
     assert_eq!(frame["to"], "room");
-    assert_eq!(frame["body"], json!({"t": "guest_allow", "uids": [7]}));
+    assert_eq!(
+        frame["body"],
+        json!({"t": "guest_allow", "uids": [7], "invites": []})
+    );
     // Past two ticks with no grant change, the room hears nothing more.
     tokio::time::sleep(Duration::from_millis(2200)).await;
     assert!(
@@ -393,7 +396,10 @@ async fn grant_change_republishes_the_guest_allowlist_to_the_room() {
         .expect("the relay stays open");
     let frame: Value = serde_json::from_str(&first).expect("frames are JSON");
     assert_eq!(frame["to"], "room");
-    assert_eq!(frame["body"], json!({"t": "guest_allow", "uids": [7]}));
+    assert_eq!(
+        frame["body"],
+        json!({"t": "guest_allow", "uids": [7], "invites": []})
+    );
     // Trusting one more guest republishes with both uids on the next tick.
     harness.db.upsert_trust("newbie", true).expect("trust");
     let second = tokio::time::timeout(Duration::from_secs(10), rx.recv())
@@ -402,7 +408,10 @@ async fn grant_change_republishes_the_guest_allowlist_to_the_room() {
         .expect("the relay stays open");
     let frame: Value = serde_json::from_str(&second).expect("frames are JSON");
     assert_eq!(frame["to"], "room");
-    assert_eq!(frame["body"], json!({"t": "guest_allow", "uids": [7, 9]}));
+    assert_eq!(
+        frame["body"],
+        json!({"t": "guest_allow", "uids": [7, 9], "invites": []})
+    );
     serving.abort();
 }
 

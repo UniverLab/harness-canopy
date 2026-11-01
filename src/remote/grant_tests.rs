@@ -28,6 +28,7 @@ use crate::remote::bridge::RemoteBridge;
 use crate::remote::devices::{device_id, RemoteDevices};
 use crate::remote::guest_allow;
 use crate::remote::hostkey::HostKey;
+use crate::remote::invite::PublishedInvite;
 use crate::remote::pairing::{derive_k_pair, mac_init, normalize_code, PairingState};
 use crate::remote::panel;
 use crate::remote::relay::{ConnectionRegistry, RelayRuntime, REMOTE_TRUST_REVOKE_KEY};
@@ -421,7 +422,7 @@ async fn natural_exit_removal_reaches_holders_not_ungranted() {
 }
 
 #[test]
-fn pairing_binds_the_attested_login_and_refuses_untrusted_guests() {
+fn pairing_binds_the_claimed_login_and_refuses_untrusted_guests() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (_db_dir, db) = test_db();
     let devices = RemoteDevices::new(db.clone());
@@ -758,13 +759,36 @@ fn guest_allow_body_is_byte_exact_sorted_and_deduped() {
     // Breaks on any extra key, key reorder, or surviving duplicate: the
     // worker matches this shape verbatim.
     assert_eq!(
-        guest_allow_body(&[222, 7, 7]).to_string(),
-        r#"{"t":"guest_allow","uids":[7,222]}"#
+        guest_allow_body(&[222, 7, 7], &[]).to_string(),
+        r#"{"invites":[],"t":"guest_allow","uids":[7,222]}"#
     );
-    // Empty is a present deny-all, never an absent list.
+    // Empty is a present deny-all, never an absent list — and `invites` is
+    // always present too.
     assert_eq!(
-        guest_allow_body(&[]).to_string(),
-        r#"{"t":"guest_allow","uids":[]}"#
+        guest_allow_body(&[], &[]).to_string(),
+        r#"{"invites":[],"t":"guest_allow","uids":[]}"#
+    );
+    // Invites sort by hash and dedupe, like uids do.
+    let invites = vec![
+        PublishedInvite {
+            code_hash: "bb".to_string(),
+            uid: 9,
+            expires: 200,
+        },
+        PublishedInvite {
+            code_hash: "aa".to_string(),
+            uid: 7,
+            expires: 100,
+        },
+        PublishedInvite {
+            code_hash: "aa".to_string(),
+            uid: 7,
+            expires: 100,
+        },
+    ];
+    assert_eq!(
+        guest_allow_body(&[9], &invites).to_string(),
+        r#"{"invites":[{"code_hash":"aa","expires":100,"uid":7},{"code_hash":"bb","expires":200,"uid":9}],"t":"guest_allow","uids":[9]}"#
     );
 }
 

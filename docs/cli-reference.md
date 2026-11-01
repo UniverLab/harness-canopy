@@ -267,6 +267,9 @@ WebSocket — the CLI never writes the shelf itself. `file_id` is the
 | `canopy remote devices [--json]` | List paired browsers (`id`, `label`, `paired_at`, `last_seen`) |
 | `canopy remote revoke <device_id>` | Delete a paired browser and close its live connection at once |
 | `canopy remote disconnect <device_id>` | Close a paired browser's live connection at once, keeping the pairing so it may reconnect |
+| `canopy remote invite <login> [--days N]` | Issue a single-use guest invite code for a GitHub login, printed once with its expiry (default 7 days; stored as a hash only) |
+| `canopy remote invites [--json]` | List guest invites (`login`, expiry, `live`/`used`/`expired`) |
+| `canopy remote uninvite <code-or-login>` | Revoke one invite by code, or every live invite by login |
 
 The same actions live in the TUI: `F1`, then `5` opens the hub's **Remote**
 tab — GitHub sign-in with the device flow, the relay switch and phase,
@@ -323,6 +326,22 @@ the live code and its derived key sit in `~/.canopy/remote/pairing.json`
 deleting it cancels the code). Paired browsers are recorded in the
 `remote_devices` table and identified by the first 16 hex chars of SHA-256
 over their own key.
+
+### Inviting a guest
+
+A guest has no paired device, so it cannot pair: the host hands it an
+invite code instead. The code is `CNR-` plus 16 Crockford base32 characters
+(80-bit random), works once, and lives 7 days unless `--days N` says
+otherwise. `canopy remote invite <login>` resolves the login to its GitHub
+uid, stores only the code's SHA256 hash, and prints the code once with its
+expiry — copy it to the guest by hand (v1 has no delivery). The guest opens
+the relay's guest door with the code; the host publishes only hashes to the
+room, and the first accepted guest offer burns the code, so a shared code
+opens nothing afterwards. `canopy remote invites [--json]` lists each
+invite's login, expiry and `live`/`used`/`expired` state (`no invites` when
+there are none), and `canopy remote uninvite <code-or-login>` revokes one
+code or every live invite for a login, refusing with `no live invite for
+<target>` when there is nothing to revoke.
 
 ### The relay connection
 

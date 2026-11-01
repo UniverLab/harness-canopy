@@ -54,6 +54,26 @@ pub enum RemoteAction {
         /// Device id (first 16 hex chars of SHA-256 over the browser key).
         device_id: String,
     },
+    /// Issue a single-use guest invite code for a GitHub login (printed once,
+    /// stored as a hash only).
+    Invite {
+        /// GitHub login the invite is issued to.
+        login: String,
+        /// Days the invite stays live.
+        #[arg(long, default_value_t = super::invite::DEFAULT_DAYS)]
+        days: i64,
+    },
+    /// List guest invites with expiry and used state.
+    Invites {
+        /// Print the list as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Revoke a guest invite by code, or every live invite by login.
+    Uninvite {
+        /// Invite code (`CNR-…`) or GitHub login.
+        target: String,
+    },
 }
 
 /// Handle one `canopy remote` subcommand.
@@ -68,6 +88,9 @@ pub async fn handle_remote_action(action: RemoteAction) -> Result<()> {
         RemoteAction::Devices { json } => handle_devices(json),
         RemoteAction::Revoke { device_id } => handle_revoke(&device_id),
         RemoteAction::Disconnect { device_id } => handle_disconnect(&device_id),
+        RemoteAction::Invite { login, days } => handle_invite(&login, days).await,
+        RemoteAction::Invites { json } => handle_invites(json),
+        RemoteAction::Uninvite { target } => handle_uninvite(&target),
     }
 }
 
@@ -219,6 +242,108 @@ fn handle_disconnect(device_id: &str) -> Result<()> {
     Ok(())
 }
 
+async fn handle_invite(login: &str, days: i64) -> Result<()> {
+    if days < 1 {
+        bail!("invite lifetime must be at least 1 day");
+    }
+    let data_dir = crate::ensure_data_dir()?;
+    let Some(identity) = auth::load_identity(&data_dir) else {
+        bail!("not signed in: run canopy remote login first");
+    };
+    let login = super::trust::normalize_login(login);
+    if login.is_empty() {
+        bail!("invite login must not be blank");
+    }
+    let Some(uid) = super::guest_allow::resolve_one_login(
+        &login,
+        &identity.token,
+        super::guest_allow::GITHUB_API,
+    )
+    .await
+    else {
+        bail!("could not resolve the GitHub login {login}");
+    };
+    let db = open_db(&data_dir)?;
+    let issued = super::invite::issue(&db, &login, uid, chrono::Utc::now().timestamp(), days)?;
+    // The one and only cleartext sighting: printed, never logged.
+    println!("Invite code for {login}: {}", issued.code);
+    println!("Expires: {}", format_unix(issued.expires_at));
+    Ok(())
+}
+
+fn handle_invites(json_output: bool) -> Result<()> {
+    let data_dir = crate::ensure_data_dir()?;
+    let rows = open_db(&data_dir)?.list_invites()?;
+    if json_output {
+        let payload: Vec<_> = rows
+            .iter()
+            .map(|row| {
+                json!({
+                    "login": row.login,
+                    "uid": row.uid,
+                    "expires_at": row.expires_at,
+                    "used": row.used,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+    if rows.is_empty() {
+        println!("no invites");
+        return Ok(());
+    }
+    let now = chrono::Utc::now().timestamp();
+    for row in rows {
+        let state = if row.used {
+            "used"
+        } else if row.expires_at <= now {
+            "expired"
+        } else {
+            "live"
+        };
+        println!(
+            "{}  expires {}  {state}",
+            row.login,
+            format_unix(row.expires_at)
+        );
+    }
+    Ok(())
+}
+
+fn handle_uninvite(target: &str) -> Result<()> {
+    let data_dir = crate::ensure_data_dir()?;
+    let db = open_db(&data_dir)?;
+    let now = chrono::Utc::now().timestamp();
+    if let Some(canonical) = super::invite::normalize_code_input(target) {
+        let hash = super::invite::code_hash(&canonical);
+        if db.revoke_invite(&hash)? {
+            println!("revoked invite {canonical}");
+            return Ok(());
+        }
+        // A code-shaped login falls through to the login path below.
+    }
+    let removed = db.revoke_invites_for_login(target, now)?;
+    if removed == 0 {
+        bail!("no live invite for {target}");
+    }
+    let login = super::trust::normalize_login(target);
+    if removed == 1 {
+        println!("revoked 1 invite for {login}");
+    } else {
+        println!("revoked {removed} invites for {login}");
+    }
+    Ok(())
+}
+
+/// One Unix timestamp as `YYYY-MM-DD HH:MM:SS UTC`, or the raw number when
+/// out of range.
+fn format_unix(timestamp: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(timestamp, 0)
+        .map(|at| at.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+        .unwrap_or_else(|| timestamp.to_string())
+}
+
 fn open_db(data_dir: &std::path::Path) -> Result<Database> {
     Database::new_safe(&crate::domain::db_paths::database_path(data_dir), data_dir)
 }
@@ -293,6 +418,28 @@ mod tests {
         match cli.action {
             RemoteAction::Disconnect { device_id } => assert_eq!(device_id, "bfcba2b742a807bb"),
             _ => panic!("expected disconnect"),
+        }
+    }
+
+    #[test]
+    fn invite_invites_and_uninvite_parse() {
+        let cli = TestCli::try_parse_from(["test", "invite", "octocat"]).expect("invite");
+        match cli.action {
+            RemoteAction::Invite { login, days } => {
+                assert_eq!(login, "octocat");
+                assert_eq!(days, 7);
+            }
+            _ => panic!("expected invite"),
+        }
+        let cli = TestCli::try_parse_from(["test", "invite", "octocat", "--days", "1"])
+            .expect("invite with days");
+        assert!(matches!(cli.action, RemoteAction::Invite { days: 1, .. }));
+        let cli = TestCli::try_parse_from(["test", "invites", "--json"]).expect("invites");
+        assert!(matches!(cli.action, RemoteAction::Invites { json: true }));
+        let cli = TestCli::try_parse_from(["test", "uninvite", "octocat"]).expect("uninvite");
+        match cli.action {
+            RemoteAction::Uninvite { target } => assert_eq!(target, "octocat"),
+            _ => panic!("expected uninvite"),
         }
     }
 }

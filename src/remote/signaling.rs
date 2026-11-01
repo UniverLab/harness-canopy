@@ -147,9 +147,11 @@ pub fn verify_offer(
     if sig.len() != 64 {
         return Err(Refusal::BadSignature);
     }
-    // The relay attests the offering party's login on every offer; it must
-    // match the login bound at pair time, or the offer is not this device's.
-    // Absent on owner offers from before the attestation, so those skip it.
+    // The body's login is a client hint, not an attestation — the relay
+    // forwards bodies verbatim. It must match the login bound at pair time,
+    // or the offer is not this device's; the signature over the device key
+    // below is the real authentication. Absent on old owner offers, which
+    // skip the hint check.
     if let Some(claimed) = body.get("github_login").and_then(Value::as_str) {
         if trust::normalize_login(claimed) != trust::normalize_login(&device.github_login) {
             return Err(Refusal::BadSignature);
@@ -250,6 +252,14 @@ pub fn verify_offer_seen(
 /// `answer{sdp,sig}`: sign the answer SDP bound to the offer signature.
 pub fn answer_body(host: &HostKey, device_id: &str, offer_sig_b64: &str, sdp: &str) -> Value {
     let message = answer_message(device_id, offer_sig_b64, sdp);
+    let sig = host.sign(message.as_bytes());
+    json!({"t": "answer", "sdp": sdp, "sig": encode_b64(&sig)})
+}
+
+/// `answer{sdp,sig}` for a guest offer: guest offers carry no signature to
+/// bind to, so the signed payload keeps an empty offer-signature slot.
+pub fn guest_answer_body(host: &HostKey, guest_key: &str, sdp: &str) -> Value {
+    let message = answer_message(guest_key, "", sdp);
     let sig = host.sign(message.as_bytes());
     json!({"t": "answer", "sdp": sdp, "sig": encode_b64(&sig)})
 }

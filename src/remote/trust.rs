@@ -1,15 +1,16 @@
 //! What a remote party may see: the owner's everything or a guest's grant.
 //!
-//! The relay attests the party's GitHub login on `pair_init` and on every
-//! offer; the hub binds the login to the device at pair time and re-checks
-//! it per offer. This module resolves the login to a [`Grant`] against the
-//! trust store — the hub holds no GitHub verifier, so the relay's
-//! attestation plus the local trust rows are the whole check.
+//! The party's GitHub login arrives with every offer — injected by the relay
+//! on the guest path, a client hint checked against the pair-time binding on
+//! the device path. This module resolves the login to a [`Grant`] against
+//! the trust store — the hub holds no GitHub verifier, so the login plus the
+//! local trust rows are the whole check.
 
 use std::collections::HashSet;
 
 use serde_json::{json, Value};
 
+use super::invite::PublishedInvite;
 use crate::db::Database;
 use crate::sessions::protocol::{error_frame, ERR_NOT_FOUND};
 use crate::sessions::shelf::ShelfStore;
@@ -58,27 +59,54 @@ pub fn resolve(db: &Database, owner_login: &str, guest_login: &str) -> Option<Gr
     Some(Grant::Sessions(profile.sessions.into_iter().collect()))
 }
 
-/// Build the room's `guest_allow` body for these uids: sorted, deduped, and
-/// byte-exact — the worker matches the shape verbatim, and an empty list is a
-/// present deny-all (explicit beats absent).
-pub fn guest_allow_body(uids: &[u64]) -> Value {
+/// Build the room's `guest_allow` body for these uids and live invites:
+/// sorted, deduped, and byte-exact — the worker matches the shape verbatim,
+/// an empty uid list is a present deny-all (explicit beats absent), and the
+/// `invites` array is always present (`[]` when none is live).
+pub fn guest_allow_body(uids: &[u64], invites: &[PublishedInvite]) -> Value {
     let mut sorted: Vec<u64> = uids.to_vec();
     sorted.sort_unstable();
     sorted.dedup();
-    json!({"t": "guest_allow", "uids": sorted})
+    let mut live: Vec<&PublishedInvite> = invites.iter().collect();
+    live.sort_by(|left, right| left.code_hash.cmp(&right.code_hash));
+    live.dedup_by(|left, right| left.code_hash == right.code_hash);
+    let invites: Vec<Value> = live
+        .into_iter()
+        .map(|invite| {
+            json!({
+                "code_hash": invite.code_hash,
+                "uid": invite.uid,
+                "expires": invite.expires,
+            })
+        })
+        .collect();
+    json!({"t": "guest_allow", "uids": sorted, "invites": invites})
 }
 
 /// Fingerprint the trust allowlist for change detection: the trusted logins
 /// in store order, joined with `,`; `"error"` when the store is unreadable,
-/// so a failure still publishes (deny-all) exactly once.
+/// so a failure still publishes (deny-all) exactly once. While any invite
+/// row exists, `|<hash>:<used>,…` (store order) follows, so issuing,
+/// redeeming or revoking an invite republishes the room's allowlist.
 pub fn allowlist_fingerprint(db: &Database) -> String {
-    match db.list_trust() {
+    let trust = match db.list_trust() {
         Ok(profiles) => profiles
             .iter()
             .map(|profile| profile.login.as_str())
             .collect::<Vec<_>>()
             .join(","),
         Err(_) => "error".to_string(),
+    };
+    match db.list_invites() {
+        Ok(rows) if rows.is_empty() => trust,
+        Ok(rows) => format!(
+            "{trust}|{}",
+            rows.iter()
+                .map(|row| format!("{}:{}", row.code_hash, i64::from(row.used)))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        Err(_) => format!("{trust}|error"),
     }
 }
 

@@ -146,9 +146,12 @@ impl PairingState {
             self.note_failure(&mut code)?;
             return Ok(pair_fail("bad_code"));
         }
-        // The relay attests the pairing party's login; without it the party
-        // is the owner. A non-owner binds only with a trust row — anything
-        // else is refused exactly like a wrong code, without burning it.
+        // The body's login is a client hint, not an attestation — the relay
+        // forwards bodies verbatim. Without it the party claims to be the
+        // owner; the pairing-code MAC above is the authentication, and the
+        // hint only selects which login the device binds to. A non-owner
+        // binds only with a trust row — anything else is refused exactly
+        // like a wrong code, without burning it.
         let claimed = claimed
             .filter(|login| !login.trim().is_empty())
             .unwrap_or_else(|| github_login.to_string());
@@ -327,7 +330,7 @@ fn pair_ok(
 }
 
 /// A decoded `pair_init` body: the device key, its label, its nonce, and
-/// the relay-attested login when the relay sent one.
+/// the login the party claims, when it claimed one.
 struct DecodedInit {
     spki: Vec<u8>,
     label: String,

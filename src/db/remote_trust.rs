@@ -20,6 +20,13 @@ pub(super) const REMOTE_TRUST_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS remote_
                 login TEXT NOT NULL REFERENCES remote_trust_users(login) ON DELETE CASCADE,
                 session_name TEXT NOT NULL,
                 PRIMARY KEY (login, session_name)
+            );
+            CREATE TABLE IF NOT EXISTS remote_invites (
+                code_hash TEXT PRIMARY KEY,
+                login TEXT NOT NULL,
+                uid INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                used INTEGER NOT NULL DEFAULT 0
             );";
 
 /// One trusted profile with its granted session names.
@@ -37,6 +44,23 @@ pub struct TrustedProfile {
 /// case-insensitive, so `OctoCat` and `octocat` are one profile).
 fn normalize(login: &str) -> String {
     login.trim().to_lowercase()
+}
+
+/// One guest invite: the SHA256 hex of the code (the code itself is never
+/// stored), the login it was issued to, that login's GitHub uid, and when it
+/// stops opening the guest door.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteInvite {
+    /// SHA256 hex of the canonical `CNR-…` code.
+    pub code_hash: String,
+    /// Lowercased GitHub login the invite was issued to.
+    pub login: String,
+    /// That login's GitHub uid, resolved at issue time.
+    pub uid: u64,
+    /// Unix seconds when the invite stops opening the door.
+    pub expires_at: i64,
+    /// Whether a guest offer already redeemed this invite (single-use).
+    pub used: bool,
 }
 
 /// Canonical granted names: trimmed, empties dropped, order kept.
@@ -147,6 +171,82 @@ impl Database {
             .query_map([login], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(names)
+    }
+
+    /// Store one invite by its code hash. The cleartext code never reaches
+    /// this table — the caller hashes it first and prints it once.
+    pub fn insert_invite(
+        &self,
+        code_hash: &str,
+        login: &str,
+        uid: u64,
+        expires_at: i64,
+    ) -> Result<()> {
+        let uid = i64::try_from(uid).map_err(|_| anyhow::anyhow!("invite uid out of range"))?;
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        conn.execute(
+            "INSERT INTO remote_invites (code_hash, login, uid, expires_at, used)
+             VALUES (?1, ?2, ?3, ?4, 0)",
+            params![code_hash, normalize(login), uid, expires_at],
+        )?;
+        Ok(())
+    }
+
+    /// Every invite, ascending by login then hash (deterministic, so the
+    /// `guest_allow` publish and its fingerprint are stable).
+    pub fn list_invites(&self) -> Result<Vec<RemoteInvite>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mut stmt = conn.prepare(
+            "SELECT code_hash, login, uid, expires_at, used FROM remote_invites
+             ORDER BY login ASC, code_hash ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let uid: i64 = row.get(2)?;
+            let used: i64 = row.get(4)?;
+            Ok(RemoteInvite {
+                code_hash: row.get(0)?,
+                login: row.get(1)?,
+                uid: u64::try_from(uid).unwrap_or(0),
+                expires_at: row.get(3)?,
+                used: used != 0,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Revoke one invite by its code hash, in any state. Returns whether a
+    /// row was removed.
+    pub fn revoke_invite(&self, code_hash: &str) -> Result<bool> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let removed = conn.execute(
+            "DELETE FROM remote_invites WHERE code_hash = ?1",
+            [code_hash],
+        )?;
+        Ok(removed > 0)
+    }
+
+    /// Revoke every live (unused, unexpired) invite for one login. Returns
+    /// how many rows were removed.
+    pub fn revoke_invites_for_login(&self, login: &str, now: i64) -> Result<u64> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let removed = conn.execute(
+            "DELETE FROM remote_invites WHERE login = ?1 AND used = 0 AND expires_at > ?2",
+            params![normalize(login), now],
+        )?;
+        Ok(removed as u64)
+    }
+
+    /// Burn every live invite for one uid: the first accepted guest offer
+    /// redeems the code, so sharing it afterwards opens nothing. Returns how
+    /// many rows were burned.
+    pub fn consume_invites_for_uid(&self, uid: u64, now: i64) -> Result<u64> {
+        let uid = i64::try_from(uid).map_err(|_| anyhow::anyhow!("invite uid out of range"))?;
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let burned = conn.execute(
+            "UPDATE remote_invites SET used = 1 WHERE uid = ?1 AND used = 0 AND expires_at > ?2",
+            params![uid, now],
+        )?;
+        Ok(burned as u64)
     }
 
     /// Create the trust tables on databases that predate them. Guarded

@@ -1,9 +1,9 @@
 //! The room's guest allowlist: trusted logins resolved to GitHub uids.
 //!
 //! The relay admits only hub-invited guests: on join and on every grant
-//! change the host publishes `{"t":"guest_allow","uids":[...]}` to the room
-//! (see [`crate::remote::trust::guest_allow_body`]) and the worker enforces
-//! it. The trust store holds logins, so each login resolves through
+//! change the host publishes `{"t":"guest_allow","uids":[...],"invites":[...]}`
+//! to the room (see [`crate::remote::trust::guest_allow_body`]) and the
+//! worker enforces it. The trust store holds logins, so each login resolves through
 //! `GET {api}/users/{login}` with the host's bearer token; resolved uids
 //! stay in a memory-only cache for the life of the connection.
 
@@ -63,6 +63,18 @@ pub async fn resolve_guest_uids(
         }
     }
     uids
+}
+
+/// Resolve one login to its GitHub uid, for `canopy remote invite`: the
+/// one-shot form of [`resolve_guest_uids`] with no cache. `None` (with a
+/// warning) on any failure, like the allowlist path.
+pub async fn resolve_one_login(login: &str, bearer: &str, api_base: &str) -> Option<u64> {
+    let login = crate::remote::trust::normalize_login(login);
+    if login.is_empty() {
+        return None;
+    }
+    let client = http_client().ok()?;
+    fetch_uid(&client, api_base, bearer, &login).await
 }
 
 /// The trusted logins in store order; an unreadable store resolves to
