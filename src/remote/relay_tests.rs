@@ -1411,41 +1411,37 @@ async fn direct_connect_without_proxy_unchanged() {
 
 #[test]
 fn proxy_url_precedence() {
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = ENV_LOCK.lock().expect("env lock");
-    let keys = ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"];
-    let saved: Vec<(String, Option<String>)> = keys
-        .iter()
-        .map(|key| ((*key).to_string(), std::env::var(key).ok()))
-        .collect();
-    for key in &keys {
-        std::env::remove_var(key);
+    use std::collections::HashMap;
+
+    fn lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: HashMap<String, String> = pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect();
+        move |key: &str| map.get(key).cloned()
     }
 
-    std::env::set_var("HTTPS_PROXY", "http://https-proxy:8080");
-    std::env::set_var("ALL_PROXY", "http://all-proxy:8080");
+    let dest = "wss://relay.example.com/ws/host";
+    let env = lookup(&[
+        ("HTTPS_PROXY", "http://https-proxy:8080"),
+        ("https_proxy", "http://lower-proxy:8080"),
+        ("ALL_PROXY", "http://all-proxy:8080"),
+    ]);
     assert_eq!(
-        crate::remote::proxy::proxy_url(),
-        Some("http://https-proxy:8080".to_string())
+        crate::remote::proxy::proxy_url_for(dest, &env),
+        Some("http://https-proxy:8080".to_string()),
+        "uppercase scheme proxy wins over lowercase and ALL_PROXY"
     );
-    std::env::set_var("HTTPS_PROXY", "");
+    let env = lookup(&[("HTTPS_PROXY", ""), ("ALL_PROXY", "http://all-proxy:8080")]);
     assert_eq!(
-        crate::remote::proxy::proxy_url(),
+        crate::remote::proxy::proxy_url_for(dest, &env),
         Some("http://all-proxy:8080".to_string()),
         "empty counts as unset"
     );
-    std::env::remove_var("HTTPS_PROXY");
-    std::env::remove_var("ALL_PROXY");
-    std::env::set_var("https_proxy", "http://lower-proxy:8080");
+    let env = lookup(&[("https_proxy", "http://lower-proxy:8080")]);
     assert_eq!(
-        crate::remote::proxy::proxy_url(),
-        Some("http://lower-proxy:8080".to_string())
+        crate::remote::proxy::proxy_url_for(dest, &env),
+        Some("http://lower-proxy:8080".to_string()),
+        "lowercase scheme proxy is used when uppercase is unset"
     );
-
-    for (key, value) in &saved {
-        match value {
-            Some(value) => std::env::set_var(key, value),
-            None => std::env::remove_var(key),
-        }
-    }
 }

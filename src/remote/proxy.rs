@@ -1,24 +1,53 @@
 //! `CONNECT` tunneling for the relay socket behind a corporate proxy.
 //!
-//! The relay client dials direct when no proxy is set. When `HTTPS_PROXY`
-//! (or `ALL_PROXY` as a fallback) is set, the socket is opened through the
-//! proxy with an HTTP `CONNECT` tunnel, authenticating with the proxy URL's
-//! userinfo when present. Errors name the proxy host only: credentials are
-//! never logged or returned.
+//! The relay client dials direct when no proxy is set. Otherwise the socket
+//! is opened through the proxy with an HTTP `CONNECT` tunnel: `ws://`
+//! destinations use `HTTP_PROXY`, `wss://` use `HTTPS_PROXY`, `ALL_PROXY`
+//! is the fallback for both, and `NO_PROXY` bypasses matching hosts.
+//! Errors name the proxy host only: credentials are never logged or
+//! returned.
+
+use std::net::IpAddr;
 
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
 
 use super::relay::{ConnectError, WsStream};
 
-/// Proxy URL from the environment: `HTTPS_PROXY` wins over `ALL_PROXY`,
-/// uppercase before lowercase; an empty value counts as unset.
-pub fn proxy_url() -> Option<String> {
-    ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"]
+/// Proxy URL for `dest` from `env`: `ws://` reads `HTTP_PROXY` first,
+/// `wss://` (and anything else) reads `HTTPS_PROXY` first, uppercase
+/// before lowercase, then `ALL_PROXY` as the fallback; an empty value
+/// counts as unset. Destinations matching `NO_PROXY` bypass the proxy.
+/// Production passes `std::env::var`; tests inject a map.
+pub fn proxy_url_for(dest: &str, env: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+    let (host, _) = ws_host_port(dest);
+    let no_proxy = ["NO_PROXY", "no_proxy"]
         .into_iter()
-        .filter_map(|key| std::env::var(key).ok())
+        .filter_map(env)
+        .map(|value| value.trim().to_string())
+        .find(|value| !value.is_empty());
+    if let Some(raw) = no_proxy {
+        if no_proxy_bypassed(&host, &raw) {
+            return None;
+        }
+    }
+    let scheme_keys: [&str; 2] = if dest.starts_with("ws://") {
+        ["HTTP_PROXY", "http_proxy"]
+    } else {
+        ["HTTPS_PROXY", "https_proxy"]
+    };
+    scheme_keys
+        .into_iter()
+        .chain(["ALL_PROXY", "all_proxy"])
+        .filter_map(env)
         .map(|value| value.trim().to_string())
         .find(|value| !value.is_empty())
+}
+
+/// Production wrapper: `proxy_url_for` reading the process environment.
+/// Honors `HTTP(S)_PROXY`/`ALL_PROXY` plus `NO_PROXY` for `dest`.
+pub fn proxy_url_for_dest(dest: &str) -> Option<String> {
+    proxy_url_for(dest, &|key| std::env::var(key).ok())
 }
 
 /// Split a `ws(s)` URL into its `(host, port)`: `ws` defaults to 80,
@@ -55,6 +84,110 @@ fn split_host_port(authority: &str, default_port: u16) -> (String, u16) {
             Err(_) => (authority.to_string(), default_port),
         },
         _ => (authority.to_string(), default_port),
+    }
+}
+
+/// Whether `host` matches any entry of a raw `NO_PROXY` list: entries are
+/// comma-separated, surrounding whitespace is ignored, and empty entries
+/// match nothing.
+fn no_proxy_bypassed(host: &str, raw: &str) -> bool {
+    raw.split(',').any(|entry| {
+        let entry = entry.trim();
+        !entry.is_empty() && entry_matches(host, entry)
+    })
+}
+
+/// One `NO_PROXY` entry against `host`: `*` bypasses all; otherwise an
+/// exact hostname, a domain suffix (a leading dot is optional), an IP
+/// literal, or a CIDR range. Hostnames match case-insensitively; ports
+/// and IPv6 brackets on either side are ignored.
+fn entry_matches(host: &str, entry: &str) -> bool {
+    let entry = entry.trim();
+    if entry == "*" {
+        return true;
+    }
+    let host = strip_brackets(host.trim());
+    if let Some((network, prefix)) = parse_cidr(entry) {
+        return host
+            .parse::<IpAddr>()
+            .is_ok_and(|ip| cidr_contains(network, prefix, ip));
+    }
+    if let Some(entry_ip) = parse_ip_entry(entry) {
+        return host.parse::<IpAddr>().is_ok_and(|ip| ip == entry_ip);
+    }
+    let want = strip_entry_port(entry).to_lowercase();
+    let want = want.strip_prefix('.').unwrap_or(&want);
+    if want.is_empty() {
+        return false;
+    }
+    let host = host.to_lowercase();
+    host == want || host.ends_with(&format!(".{want}"))
+}
+
+/// Strip one `[...]` IPv6 bracket pair; anything else passes through.
+fn strip_brackets(host: &str) -> &str {
+    host.strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .unwrap_or(host)
+}
+
+/// An entry's host part without any `:port`: bracketed literals cut at
+/// the closing bracket, bare IP literals keep their colons, and anything
+/// else drops a trailing numeric `:port`.
+fn strip_entry_port(entry: &str) -> &str {
+    if let Some(rest) = entry.strip_prefix('[') {
+        return rest.split(']').next().unwrap_or(rest);
+    }
+    if entry.parse::<IpAddr>().is_ok() {
+        return entry;
+    }
+    match entry.rsplit_once(':') {
+        Some((bare, port))
+            if !bare.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            bare
+        }
+        _ => entry,
+    }
+}
+
+/// An entry as an IP literal, ignoring brackets and any port.
+fn parse_ip_entry(entry: &str) -> Option<IpAddr> {
+    strip_entry_port(entry).parse().ok()
+}
+
+/// Split `address/prefix` into its network and prefix length; `None` when
+/// either half is unparseable or the prefix exceeds the address width.
+fn parse_cidr(entry: &str) -> Option<(IpAddr, u8)> {
+    let (address, prefix) = entry.split_once('/')?;
+    let network: IpAddr = strip_entry_port(address.trim()).parse().ok()?;
+    let prefix: u8 = prefix.trim().parse().ok()?;
+    let width = match network {
+        IpAddr::V4(_) => 32,
+        IpAddr::V6(_) => 128,
+    };
+    (prefix <= width).then_some((network, prefix))
+}
+
+/// Whether `host` falls inside `network/prefix`; mixed families match
+/// nothing, and a zero prefix matches its whole family.
+fn cidr_contains(network: IpAddr, prefix: u8, host: IpAddr) -> bool {
+    match (network, host) {
+        (IpAddr::V4(network), IpAddr::V4(host)) => {
+            if prefix == 0 {
+                return true;
+            }
+            let shift = 32 - prefix;
+            u32::from(network) >> shift == u32::from(host) >> shift
+        }
+        (IpAddr::V6(network), IpAddr::V6(host)) => {
+            if prefix == 0 {
+                return true;
+            }
+            let shift = 128 - prefix;
+            u128::from(network) >> shift == u128::from(host) >> shift
+        }
+        _ => false,
     }
 }
 
@@ -290,5 +423,240 @@ mod tests {
     fn dial_host_strips_ipv6_brackets() {
         assert_eq!(dial_host("[2001:db8::1]"), "2001:db8::1");
         assert_eq!(dial_host("proxy.example.com"), "proxy.example.com");
+    }
+
+    fn test_env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: std::collections::HashMap<String, String> = pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect();
+        move |key: &str| map.get(key).cloned()
+    }
+
+    #[test]
+    fn no_proxy_exact_host_bypassed() {
+        let env = test_env(&[
+            ("HTTPS_PROXY", "http://proxy:8080"),
+            ("NO_PROXY", "Relay.Example.COM"),
+        ]);
+        assert_eq!(
+            proxy_url_for("wss://relay.example.com:443/ws/host", &env),
+            None,
+            "exact host matches case-insensitively, dest port ignored"
+        );
+        let env = test_env(&[
+            ("HTTP_PROXY", "http://proxy:8080"),
+            ("NO_PROXY", "127.0.0.1"),
+        ]);
+        assert_eq!(
+            proxy_url_for("ws://127.0.0.1:8787/ws/host", &env),
+            None,
+            "IPv4 literal bypasses, dest port ignored"
+        );
+        let env = test_env(&[
+            ("HTTP_PROXY", "http://proxy:8080"),
+            ("NO_PROXY", "2001:db8::1"),
+        ]);
+        assert_eq!(
+            proxy_url_for(
+                "ws://[2001:0db8:0000:0000:0000:0000:0000:0001]/ws/host",
+                &env
+            ),
+            None,
+            "IPv6 literal matches across spellings, brackets ignored"
+        );
+        let env = test_env(&[
+            ("HTTP_PROXY", "http://proxy:8080"),
+            ("NO_PROXY", "127.0.0.1:8787"),
+        ]);
+        assert_eq!(
+            proxy_url_for("ws://127.0.0.1:8787/ws/host", &env),
+            None,
+            "entry port ignored on IP literals"
+        );
+        let env = test_env(&[
+            ("HTTPS_PROXY", "http://proxy:8080"),
+            ("NO_PROXY", "relay.example.com:443"),
+        ]);
+        assert_eq!(
+            proxy_url_for("wss://relay.example.com:443/ws/host", &env),
+            None,
+            "entry port ignored on hostnames"
+        );
+        let env = test_env(&[
+            ("HTTP_PROXY", "http://proxy:8080"),
+            ("HTTPS_PROXY", "http://proxy:8080"),
+            ("NO_PROXY", "127.0.0.1"),
+        ]);
+        assert_eq!(
+            proxy_url_for("wss://relay.example.com/ws/host", &env),
+            Some("http://proxy:8080".to_string()),
+            "an IP entry never matches a hostname"
+        );
+        assert_eq!(
+            proxy_url_for("ws://127.0.0.2/ws/host", &env),
+            Some("http://proxy:8080".to_string()),
+            "a different IP literal uses the proxy"
+        );
+    }
+
+    #[test]
+    fn no_proxy_suffix_bypassed() {
+        let env = test_env(&[
+            ("HTTPS_PROXY", "http://proxy:8080"),
+            ("NO_PROXY", ".example.com"),
+        ]);
+        assert_eq!(
+            proxy_url_for("wss://api.example.com/ws/host", &env),
+            None,
+            "leading-dot suffix matches subdomains"
+        );
+        let env = test_env(&[
+            ("HTTPS_PROXY", "http://proxy:8080"),
+            ("no_proxy", "Example.COM"),
+        ]);
+        assert_eq!(
+            proxy_url_for("wss://api.example.com/ws/host", &env),
+            None,
+            "bare suffix matches subdomains case-insensitively"
+        );
+        assert_eq!(
+            proxy_url_for("wss://notexample.com/ws/host", &env),
+            Some("http://proxy:8080".to_string()),
+            "a non-dot-boundary host is not a subdomain"
+        );
+    }
+
+    #[test]
+    fn no_proxy_cidr_bypassed() {
+        let env = test_env(&[
+            ("HTTP_PROXY", "http://proxy:8080"),
+            ("NO_PROXY", "10.0.0.0/8, 2001:db8::/32"),
+        ]);
+        assert_eq!(
+            proxy_url_for("ws://10.1.2.3/ws/host", &env),
+            None,
+            "IPv4 host inside the CIDR range bypasses"
+        );
+        assert_eq!(
+            proxy_url_for("ws://[2001:db8::1]/ws/host", &env),
+            None,
+            "IPv6 host inside the CIDR range bypasses"
+        );
+        assert_eq!(
+            proxy_url_for("ws://11.0.0.1/ws/host", &env),
+            Some("http://proxy:8080".to_string()),
+            "IPv4 host outside the CIDR range uses the proxy"
+        );
+    }
+
+    #[test]
+    fn no_proxy_star_bypasses_all() {
+        let env = test_env(&[
+            ("HTTPS_PROXY", "http://proxy:8080"),
+            ("ALL_PROXY", "http://all:8080"),
+            ("NO_PROXY", "*"),
+        ]);
+        assert_eq!(
+            proxy_url_for("wss://anything.example.org/ws/host", &env),
+            None
+        );
+    }
+
+    #[test]
+    fn no_proxy_mismatch_uses_proxy() {
+        let env = test_env(&[
+            ("HTTPS_PROXY", "http://proxy:8080"),
+            ("NO_PROXY", "other.com, 192.168.0.0/16"),
+        ]);
+        assert_eq!(
+            proxy_url_for("wss://relay.example.com/ws/host", &env),
+            Some("http://proxy:8080".to_string())
+        );
+    }
+
+    #[test]
+    fn ws_uses_http_proxy() {
+        let env = test_env(&[
+            ("HTTP_PROXY", "http://http-proxy:8080"),
+            ("HTTPS_PROXY", "http://https-proxy:8080"),
+        ]);
+        assert_eq!(
+            proxy_url_for("ws://relay.example.com/ws/host", &env),
+            Some("http://http-proxy:8080".to_string()),
+            "ws:// reads HTTP_PROXY even when HTTPS_PROXY is set"
+        );
+        let env = test_env(&[("HTTPS_PROXY", "http://https-proxy:8080")]);
+        assert_eq!(
+            proxy_url_for("ws://relay.example.com/ws/host", &env),
+            None,
+            "ws:// ignores HTTPS_PROXY"
+        );
+        let env = test_env(&[("http_proxy", "http://lower-proxy:8080")]);
+        assert_eq!(
+            proxy_url_for("ws://relay.example.com/ws/host", &env),
+            Some("http://lower-proxy:8080".to_string()),
+            "ws:// reads lowercase http_proxy"
+        );
+    }
+
+    #[test]
+    fn wss_uses_https_proxy() {
+        let env = test_env(&[
+            ("HTTP_PROXY", "http://http-proxy:8080"),
+            ("HTTPS_PROXY", "http://https-proxy:8080"),
+        ]);
+        assert_eq!(
+            proxy_url_for("wss://relay.example.com/ws/host", &env),
+            Some("http://https-proxy:8080".to_string()),
+            "wss:// reads HTTPS_PROXY even when HTTP_PROXY is set"
+        );
+        let env = test_env(&[("HTTP_PROXY", "http://http-proxy:8080")]);
+        assert_eq!(
+            proxy_url_for("wss://relay.example.com/ws/host", &env),
+            None,
+            "wss:// ignores HTTP_PROXY"
+        );
+    }
+
+    #[test]
+    fn all_proxy_fallback() {
+        let env = test_env(&[("ALL_PROXY", "http://all:8080")]);
+        assert_eq!(
+            proxy_url_for("ws://relay.example.com/ws/host", &env),
+            Some("http://all:8080".to_string())
+        );
+        assert_eq!(
+            proxy_url_for("wss://relay.example.com/ws/host", &env),
+            Some("http://all:8080".to_string())
+        );
+        let env = test_env(&[
+            ("HTTPS_PROXY", "http://https-proxy:8080"),
+            ("ALL_PROXY", "http://all:8080"),
+        ]);
+        assert_eq!(
+            proxy_url_for("wss://relay.example.com/ws/host", &env),
+            Some("http://https-proxy:8080".to_string()),
+            "scheme proxy wins over ALL_PROXY"
+        );
+        let env = test_env(&[("all_proxy", "http://all-lower:8080")]);
+        assert_eq!(
+            proxy_url_for("ws://relay.example.com/ws/host", &env),
+            Some("http://all-lower:8080".to_string())
+        );
+        assert_eq!(
+            proxy_url_for("wss://relay.example.com/ws/host", &env),
+            Some("http://all-lower:8080".to_string()),
+            "lowercase all_proxy is the fallback for both schemes"
+        );
+        let env = test_env(&[
+            ("ALL_PROXY", "http://all:8080"),
+            ("all_proxy", "http://all-lower:8080"),
+        ]);
+        assert_eq!(
+            proxy_url_for("ws://relay.example.com/ws/host", &env),
+            Some("http://all:8080".to_string()),
+            "uppercase ALL_PROXY wins over lowercase"
+        );
     }
 }

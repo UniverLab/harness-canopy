@@ -147,10 +147,15 @@ pub fn request_for(
 
 /// Connect once, classifying an HTTP 401 apart from a transient failure.
 /// An HTTP 400 is terminal too: the handshake itself was refused, so no
-/// retry of the same headers can succeed. Honors `HTTPS_PROXY`/`ALL_PROXY`
-/// via a `CONNECT` tunnel; without one the dial is direct.
+/// retry of the same headers can succeed. Honors HTTP(S)_PROXY/ALL_PROXY
+/// +NO_PROXY via a `CONNECT` tunnel; without one the dial is direct.
 pub async fn connect_ws(url: &str, headers: &HostHeaders) -> Result<WsStream, ConnectError> {
-    connect_ws_with_proxy(url, headers, super::proxy::proxy_url().as_deref()).await
+    connect_ws_with_proxy(
+        url,
+        headers,
+        super::proxy::proxy_url_for_dest(url).as_deref(),
+    )
+    .await
 }
 
 /// Connect once, via `proxy` when set, `None` for the direct dial. An

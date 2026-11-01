@@ -346,11 +346,15 @@ login` makes it connect again. If the relay answers HTTP 400, the daemon
 stops retrying that label, records `relay rejected the handshake: HTTP 400
 <reason>` for `remote status` (the Remote tab reads `relay rejected: see
 remote status`), and waits: fixing the label reconnects without a restart.
-Behind a corporate proxy the daemon tunnels the socket through `HTTPS_PROXY`
-(`ALL_PROXY` as a fallback; lowercase names work too, empty counts as unset)
-with an HTTP `CONNECT`, authenticating with the proxy URL's userinfo when
-present; without any of them the dial is direct. A proxy URL it cannot parse
-is a retryable relay error in `remote status`, never a silent direct dial.
+Behind a corporate proxy the daemon tunnels the socket with an HTTP `CONNECT`:
+`ws://` relays read `HTTP_PROXY`, `wss://` relays read `HTTPS_PROXY`
+(uppercase wins over lowercase, empty counts as unset, `ALL_PROXY` is the
+fallback for both), and destinations matching `NO_PROXY` dial direct — an
+exact host, a domain suffix with or without a leading dot, an IP literal or
+CIDR range, or `*` for everything. It authenticates with the proxy URL's
+userinfo when present; without any of them the dial is direct. A proxy URL
+it cannot parse is a retryable relay error in `remote status`, never a
+silent direct dial.
 
 Remote control is owner-only: the relay admits only hosts signed in with
 the same GitHub account. `login` prints the device URL and the code to
