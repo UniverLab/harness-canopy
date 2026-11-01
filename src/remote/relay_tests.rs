@@ -676,6 +676,41 @@ async fn ice_object_form_routes_with_its_mids() {
     assert!(!token.is_cancelled(), "ice must not close the peer");
 }
 
+/// Bodies without a usable candidate (V4 missing, V5 null) are ignored at
+/// the relay: nothing routes, the peer stays up, and nothing panics. A
+/// browser sends V5 as end-of-candidates, so this path runs on every call.
+#[tokio::test]
+async fn ice_without_a_candidate_is_ignored_and_keeps_the_peer() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = test_db();
+    let mut runtime = RelayRuntime::new(
+        HostKey::load_or_create(dir.path()).expect("host key"),
+        db,
+        "octocat".to_string(),
+        crate::remote::pairing::PairingState::new(dir.path()),
+        ConnectionRegistry::default(),
+    );
+    let peers = crate::remote::connection::DevicePeers::default();
+    let token = Arc::new(tokio_util::sync::CancellationToken::new());
+    let (control, mut inbox) = tokio::sync::mpsc::unbounded_channel();
+    assert!(peers.register("bfcba2b742a807bb", "d:7", Arc::clone(&token), control));
+    runtime.peers = peers;
+    let (signal, _signal_rx) = tokio::sync::mpsc::unbounded_channel();
+    let now = chrono::Utc::now().timestamp();
+
+    for body in [
+        json!({"t": "ice"}),
+        json!({"t": "ice", "candidate": serde_json::Value::Null}),
+    ] {
+        assert_eq!(runtime.route(&body, now, "d:7", &signal), None);
+    }
+    assert!(inbox.try_recv().is_err(), "nothing must route to the peer");
+    assert!(
+        !token.is_cancelled(),
+        "an empty ice must not close the peer"
+    );
+}
+
 /// A `bye` body `device_id` is never honored: only the sender's own peer
 /// closes, so one paired device cannot knock another one off.
 #[test]
