@@ -332,16 +332,21 @@ over their own key.
 A guest has no paired device, so it cannot pair: the host hands it an
 invite code instead. The code is `CNR-` plus 16 Crockford base32 characters
 (80-bit random), works once, and lives 7 days unless `--days N` says
-otherwise. `canopy remote invite <login>` resolves the login to its GitHub
-uid, stores only the code's SHA256 hash, and prints the code once with its
-expiry — copy it to the guest by hand (v1 has no delivery). The guest opens
-the relay's guest door with the code; the host publishes only hashes to the
-room, and the first accepted guest offer burns the code, so a shared code
-opens nothing afterwards. `canopy remote invites [--json]` lists each
-invite's login, expiry and `live`/`used`/`expired` state (`no invites` when
-there are none), and `canopy remote uninvite <code-or-login>` revokes one
-code or every live invite for a login, refusing with `no live invite for
-<target>` when there is nothing to revoke.
+otherwise (at least 1 day). `canopy remote invite <login>` needs a signed-in
+host, resolves the login to its GitHub uid, stores only the code's SHA256
+hash, and prints the code once with its expiry — copy it to the guest by
+hand (v1 has no delivery). The code alone does not admit the guest: the
+login must also hold a trust grant (add one from the TUI Remote tab with
+`t`, or with the `remote` tool's `trust_add`), or its offer is refused.
+The guest opens the relay's guest door with the code; the host publishes
+only hashes to the room, and the first accepted guest offer burns every
+live invite for that login, so a shared code opens nothing afterwards.
+`canopy remote invites [--json]` lists each invite's login, expiry and
+`live`/`used`/`expired` state (`no invites` when there are none), and
+`canopy remote uninvite <code-or-login>` revokes one code or every live
+invite for a login, refusing with `no live invite for <target>` when there
+is nothing to revoke. A typed code ignores case, dashes and spaces, reads
+`I`/`L` as `1` and `O` as `0`, and may drop the `CNR-` prefix.
 
 ### The relay connection
 
