@@ -473,10 +473,11 @@ pub fn record_token_rejected(db: &Database) {
     tracing::error!("{message}");
 }
 
-/// Record the instant of a successful reconnect, so `remote status` can show
-/// it without reading the daemon log.
+/// Record a successful reconnect and clear the last relay error, so `remote
+/// status` shows the reconnect instant without a stale error.
 pub fn record_reconnect(db: &Database) {
     let _ = db.set_state(REMOTE_RECONNECT_KEY, &chrono::Utc::now().to_rfc3339());
+    let _ = db.set_state(REMOTE_ERROR_KEY, "");
 }
 
 /// Append a revoked device id for the daemon to pick up.

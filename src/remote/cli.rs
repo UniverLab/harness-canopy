@@ -102,7 +102,11 @@ fn handle_logout() -> Result<()> {
 
 fn handle_status(json: bool) -> Result<()> {
     let data_dir = crate::ensure_data_dir()?;
-    let config = CanopyConfig::load(&data_dir);
+    let mut config = CanopyConfig::load(&data_dir);
+    let (enabled, relay_url) =
+        crate::domain::config_cache::effective_status_remote(&data_dir, &config);
+    config.remote.enabled = enabled;
+    config.remote.relay_url = relay_url;
     let identity = auth::load_identity(&data_dir);
     let db = open_db(&data_dir).ok();
     let mut status = auth::build_remote_status(&config, identity.as_ref(), db.as_ref());

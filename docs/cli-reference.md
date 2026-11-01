@@ -261,7 +261,7 @@ WebSocket — the CLI never writes the shelf itself. `file_id` is the
 |---|---|
 | `canopy remote login` | Sign in to GitHub with the OAuth device flow (identity only, no scopes) |
 | `canopy remote logout` | Delete the stored GitHub identity |
-| `canopy remote status [--json]` | Show the sign-in state, whether remote is enabled, the relay URL, the last relay error and reconnect time, and a `config invalid, ...` line while `config.toml` fails to parse (the last valid config stays live); `--json` prints `{signed_in, login, enabled, relay_url, last_error, last_reconnect}` plus `config_fault` when invalid (`last_error`/`last_reconnect` are `null` when unrecorded; `config_fault` is omitted while the file parses) |
+| `canopy remote status [--json]` | Show the sign-in state, whether remote is enabled, the relay URL, the last relay error and reconnect time, and a `config invalid, ...; config.toml: <reason>` line while `config.toml` fails to parse (the last valid config stays live, and `enabled`/`relay_url` show those effective values); `--json` prints `{signed_in, login, enabled, relay_url, last_error, last_reconnect}` plus `config_fault` when invalid (`last_error`/`last_reconnect` are `null` when unrecorded; `config_fault` is omitted while the file parses; a successful reconnect clears `last_error`) |
 | `canopy remote on` / `off` | Turn the relay connection on or off (`[remote] enabled`); the daemon picks the change up without a restart |
 | `canopy remote pair` | Create a one-time code, print it with its `<relay_url>/pair#<code>` link and expiry, and draw the link as a terminal QR code |
 | `canopy remote devices [--json]` | List paired browsers (`id`, `label`, `paired_at`, `last_seen`) |
@@ -369,7 +369,8 @@ appears in logs, errors, or status output. `logout` deletes that file and
 succeeds when it is already gone. `status` prints `login: <login>` (or
 `not signed in`), `enabled: …`, `relay_url: …`, and — once the daemon has
 recorded them — `last_reconnect: <RFC 3339>` and `last_error: <message>`,
-so a dropped relay link is visible without reading the daemon log.
+so a dropped relay link is visible without reading the daemon log; the
+next successful reconnect clears `last_error` again.
 
 ### A paired browser's connection
 

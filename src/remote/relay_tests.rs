@@ -1046,7 +1046,7 @@ async fn silent_counting_upgrade(
 
 /// The FR3 kill-the-socket test: the relay accepts, then drops every packet
 /// (never reads, never Pongs). The host must notice inside a minute, redial,
-/// and leave the drop and the reconnect instant on `remote status`.
+/// clear the drop and leave the reconnect instant on `remote status`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_killed_relay_socket_reconnects_within_the_minute_and_status_shows_it() {
     use crate::remote::live::RemoteLive;
@@ -1110,12 +1110,16 @@ async fn a_killed_relay_socket_reconnects_within_the_minute_and_status_shows_it(
         !state(&db, REMOTE_RECONNECT_KEY).is_empty()
     })
     .await;
+    wait_until(Duration::from_secs(5), "the cleared drop error", || {
+        state(&db, REMOTE_ERROR_KEY).is_empty()
+    })
+    .await;
     running.abort();
 
     let error = state(&db, REMOTE_ERROR_KEY);
     assert!(
-        error.contains("idle"),
-        "status must surface the dead-socket drop, got {error:?}"
+        error.is_empty(),
+        "a successful reconnect clears the dead-socket drop, got {error:?}"
     );
     let reconnect = state(&db, REMOTE_RECONNECT_KEY);
     assert!(

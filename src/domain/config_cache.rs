@@ -14,11 +14,17 @@ use std::sync::{Mutex, OnceLock};
 use serde::{Deserialize, Serialize};
 
 use super::canopy_config::CanopyConfig;
+use super::remote_config::RemoteConfig;
 use super::settings;
 
 /// Sidecar written next to `config.toml` while it fails to parse; removed
 /// again once a valid file is loaded.
 const STATE_FILE_NAME: &str = "config.state.json";
+
+/// Last-valid `[remote]` table, rewritten on every valid load so a fresh
+/// `remote status` process can report the effective values while the file
+/// is broken (its in-memory cache starts empty).
+const LAST_VALID_FILE_NAME: &str = "config.last-valid.json";
 
 /// One cached canopy dir: the last config that parsed, plus fault state.
 struct Entry {
@@ -71,9 +77,17 @@ pub fn load(canopy_dir: &Path) -> CanopyConfig {
 /// faulted load wrote; `None` when the config is currently valid.
 pub fn read_fault_message(canopy_dir: &Path) -> Option<String> {
     let state = read_state_file(canopy_dir)?;
+    let reason: String = state
+        .reason
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .take(120)
+        .collect();
     Some(match state.last_valid_at {
-        Some(at) => format!("config invalid, using last valid from {at}"),
-        None => "config invalid, no last valid config yet".to_string(),
+        Some(at) => format!("config invalid, using last valid from {at}; config.toml: {reason}"),
+        None => format!("config invalid, no last valid config yet; config.toml: {reason}"),
     })
 }
 
@@ -125,7 +139,32 @@ fn store_valid(canopy_dir: &Path, config: CanopyConfig) -> CanopyConfig {
         );
     }
     let _ = std::fs::remove_file(canopy_dir.join(STATE_FILE_NAME));
+    let _ = std::fs::write(
+        canopy_dir.join(LAST_VALID_FILE_NAME),
+        serde_json::to_string(&config.remote).unwrap_or_default(),
+    );
     config
+}
+
+/// The last-valid `[remote]` table from disk, if it parses. `None` on any
+/// failure: a missing or corrupt file must never break status.
+pub fn read_last_valid_remote(canopy_dir: &Path) -> Option<RemoteConfig> {
+    let text = std::fs::read_to_string(canopy_dir.join(LAST_VALID_FILE_NAME)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// The `(enabled, relay_url)` pair `remote status` reports: the last-valid
+/// values the daemon is actually serving while the file is faulted, else
+/// the loaded pair. Env overlays touch `[scheduler]` only, so the stored
+/// remote table equals the effective one.
+pub fn effective_status_remote(canopy_dir: &Path, loaded: &CanopyConfig) -> (bool, String) {
+    if read_state_file(canopy_dir).is_none() {
+        return (loaded.remote.enabled, loaded.remote.relay_url.clone());
+    }
+    match read_last_valid_remote(canopy_dir) {
+        Some(last) => (last.enabled, last.relay_url),
+        None => (loaded.remote.enabled, loaded.remote.relay_url.clone()),
+    }
 }
 
 /// The file failed to parse: keep serving the cached (or default) config.
@@ -323,7 +362,7 @@ mod tests {
         assert!(!load(&canopy_dir).remote.enabled);
         assert_eq!(
             read_fault_message(&canopy_dir).as_deref(),
-            Some("config invalid, using last valid from 2026-10-31T12:00:00+00:00")
+            Some("config invalid, using last valid from 2026-10-31T12:00:00+00:00; config.toml: TOML parse error at line 1, column 17")
         );
     }
 }

@@ -329,7 +329,7 @@ fn config_fault_message_comes_from_the_sidecar() {
     .unwrap();
     assert_eq!(
         read_fault_message(dir.path()).as_deref(),
-        Some("config invalid, using last valid from 2026-10-31T12:00:00+00:00")
+        Some("config invalid, using last valid from 2026-10-31T12:00:00+00:00; config.toml: boom")
     );
 
     std::fs::write(
@@ -339,6 +339,136 @@ fn config_fault_message_comes_from_the_sidecar() {
     .unwrap();
     assert_eq!(
         read_fault_message(dir.path()).as_deref(),
-        Some("config invalid, no last valid config yet")
+        Some("config invalid, no last valid config yet; config.toml: boom")
+    );
+}
+
+#[test]
+fn last_error_cleared_on_reconnect() {
+    use crate::application::ports::StateRepository as _;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("reconnect.db");
+    let db = Database::new(&db_path).unwrap();
+    let config = CanopyConfig::default();
+    db.set_state(
+        crate::remote::relay::REMOTE_ERROR_KEY,
+        "relay socket idle past its timeout",
+    )
+    .unwrap();
+    let before = build_remote_status(&config, None, Some(&db));
+    println!(
+        "before: last_error: {}",
+        before.last_error.as_deref().unwrap()
+    );
+    assert_eq!(
+        before.last_error.as_deref(),
+        Some("relay socket idle past its timeout")
+    );
+
+    crate::remote::relay::record_reconnect(&db);
+
+    assert_eq!(
+        db.get_state(crate::remote::relay::REMOTE_ERROR_KEY)
+            .unwrap()
+            .as_deref(),
+        Some(""),
+        "the persisted last_error must be cleared, not just the read path"
+    );
+    let after = build_remote_status(&config, None, Some(&db));
+    println!("after: last_error: {:?}", after.last_error);
+    assert_eq!(after.last_error, None);
+    assert!(
+        after.last_reconnect.is_some(),
+        "a reconnect still records its instant"
+    );
+
+    // A daemon restart re-reads the same store: the cleared error must not
+    // come back.
+    drop(db);
+    let db = Database::new(&db_path).unwrap();
+    let restarted = build_remote_status(&config, None, Some(&db));
+    assert_eq!(
+        restarted.last_error, None,
+        "a restart must not resurrect the cleared error"
+    );
+}
+
+#[test]
+fn status_shows_effective_config_when_toml_broken() {
+    use crate::domain::config_cache::{
+        effective_status_remote, load, read_fault_message, read_last_valid_remote,
+    };
+
+    const CUSTOM_URL: &str = "https://relay.example.invalid";
+    let _guard = crate::domain::config_cache::test_lock();
+    crate::domain::config_cache::reset();
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let canopy_dir = dir.path();
+    std::fs::write(
+        canopy_dir.join("config.toml"),
+        format!("[remote]\nenabled = true\nrelay_url = \"{CUSTOM_URL}\"\n"),
+    )
+    .unwrap();
+    let valid = load(canopy_dir);
+    assert!(valid.remote.enabled);
+    assert_eq!(valid.remote.relay_url, CUSTOM_URL);
+    assert_eq!(
+        read_last_valid_remote(canopy_dir)
+            .as_ref()
+            .map(|remote| { (remote.enabled, remote.relay_url.clone(),) }),
+        Some((true, CUSTOM_URL.to_string()))
+    );
+    println!("before: enabled: true");
+    println!("before: relay_url: {CUSTOM_URL}");
+
+    // While the file parses, the effective pair is the loaded pair: no
+    // overlay, no marker.
+    let (enabled, relay_url) = effective_status_remote(canopy_dir, &valid);
+    assert!(enabled, "no fault: the effective pair is the loaded pair");
+    assert_eq!(relay_url, CUSTOM_URL);
+    assert_eq!(read_fault_message(canopy_dir), None);
+
+    // Break the file, then reset the cache: this process now behaves like a
+    // fresh `remote status` whose in-memory cache starts empty.
+    std::fs::write(canopy_dir.join("config.toml"), "theme = \"classic\n").unwrap();
+    crate::domain::config_cache::reset();
+    let mut loaded = load(canopy_dir);
+    assert!(
+        !loaded.remote.enabled,
+        "a fresh process with a broken file falls back to the defaults"
+    );
+    assert_eq!(
+        loaded.remote.relay_url, "https://remote.univerlab.org",
+        "a fresh process with a broken file falls back to the default URL"
+    );
+
+    // Compose the status exactly as `handle_status` does: overlay the
+    // effective pair, then build the payload and attach the fault line.
+    let (enabled, relay_url) = effective_status_remote(canopy_dir, &loaded);
+    loaded.remote.enabled = enabled;
+    loaded.remote.relay_url = relay_url;
+    let mut status = build_remote_status(&loaded, None, None);
+    status.config_fault = read_fault_message(canopy_dir);
+    let fault = status
+        .config_fault
+        .as_deref()
+        .expect("a fault message while invalid");
+    println!("after: enabled: {}", status.enabled);
+    println!("after: relay_url: {}", status.relay_url);
+    println!("after: {fault}");
+    assert!(
+        status.enabled,
+        "status must show the effective enabled value"
+    );
+    assert_eq!(status.relay_url, CUSTOM_URL);
+    assert!(
+        fault.contains("config.toml"),
+        "the marker must name the broken file: {fault}"
+    );
+    assert!(
+        fault.contains("TOML parse error"),
+        "the marker must carry the parse reason: {fault}"
     );
 }
