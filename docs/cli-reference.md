@@ -328,7 +328,11 @@ over their own key.
 
 With `remote on` and a stored identity, the daemon keeps one WebSocket to
 `<relay_url>/ws/host`, carrying the GitHub token and this host's id and
-label, and answers the pairing frames the relay forwards to it. The host
+label, and answers the pairing frames the relay forwards to it. The label
+is truncated to 64 characters and percent-encoded for the handshake header
+(`café-ß` travels as `caf%C3%A9-%C3%9F`), so a non-ASCII or long label can
+never wedge the connection; `config set remote.host_label` refuses labels
+with control characters and labels that are blank but non-empty. The host
 sends a protocol Ping every 20 seconds and declares the socket dead when
 nothing comes back — no Pong, no frame — for 45 seconds, so a dead relay
 link is noticed within a minute instead of leaving the relay listing the
@@ -338,7 +342,10 @@ thirty seconds, with jitter.
 — neither needs a daemon restart. If the relay answers HTTP 401, the
 daemon stops retrying that token and logs `github token rejected: run
 canopy remote login` (see `canopy daemon logs`); a fresh `canopy remote
-login` makes it connect again.
+login` makes it connect again. If the relay answers HTTP 400, the daemon
+stops retrying that label, records `relay rejected the handshake: HTTP 400
+<reason>` for `remote status` (the Remote tab reads `relay rejected: see
+remote status`), and waits: fixing the label reconnects without a restart.
 
 Remote control is owner-only: the relay admits only hosts signed in with
 the same GitHub account. `login` prints the device URL and the code to

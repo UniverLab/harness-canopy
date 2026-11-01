@@ -54,7 +54,7 @@ pub struct RemoteView {
     /// The configured relay URL.
     pub relay_url: String,
     /// One of `connected`, `connecting`, `token rejected: sign in again`,
-    /// `off`.
+    /// `relay rejected: see remote status`, `off`.
     pub relay: String,
     /// Ids of the devices with a live peer.
     pub live_devices: Vec<String>,
@@ -84,6 +84,7 @@ pub fn relay_text(phase: RelayPhase) -> &'static str {
         RelayPhase::Connected => "connected",
         RelayPhase::Connecting => "connecting",
         RelayPhase::TokenRejected => "token rejected: sign in again",
+        RelayPhase::RelayRejected => "relay rejected: see remote status",
         RelayPhase::Off => "off",
     }
 }

@@ -28,6 +28,7 @@ use crate::remote::auth;
 use crate::remote::connection::{self, Control, DevicePeers, PeerSession};
 use crate::remote::devices::RemoteDevices;
 use crate::remote::hostkey::HostKey;
+use crate::remote::label::{encode_label, host_label};
 use crate::remote::live::{RelayPhase, RemoteLive};
 use crate::remote::pairing::PairingState;
 use crate::remote::peer;
@@ -79,6 +80,9 @@ pub struct HostHeaders {
 pub enum ConnectError {
     /// HTTP 401: the GitHub token was rejected; do not retry it.
     Unauthorized,
+    /// HTTP 400: the relay rejected the handshake (e.g. `bad_label`); the
+    /// message already reads for `remote status`.
+    BadRequest(String),
     /// Anything else that may succeed on a later attempt.
     Transient(String),
 }
@@ -136,12 +140,15 @@ pub fn request_for(
     );
     values.insert(
         "X-Canopy-Host-Label",
-        HeaderValue::from_str(&headers.label).context("invalid host label header")?,
+        HeaderValue::from_str(&encode_label(&headers.label))
+            .context("invalid host label header")?,
     );
     Ok(request)
 }
 
 /// Connect once, classifying an HTTP 401 apart from a transient failure.
+/// An HTTP 400 is terminal too: the handshake itself was refused, so no
+/// retry of the same headers can succeed.
 pub async fn connect_ws(url: &str, headers: &HostHeaders) -> Result<WsStream, ConnectError> {
     let request = request_for(url, headers).map_err(|e| ConnectError::Transient(e.to_string()))?;
     match tokio_tungstenite::connect_async(request).await {
@@ -149,8 +156,22 @@ pub async fn connect_ws(url: &str, headers: &HostHeaders) -> Result<WsStream, Co
         Err(tokio_tungstenite::tungstenite::Error::Http(response)) if response.status() == 401 => {
             Err(ConnectError::Unauthorized)
         }
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) if response.status() == 400 => {
+            Err(ConnectError::BadRequest(rejection_message(&response)))
+        }
         Err(error) => Err(ConnectError::Transient(error.to_string())),
     }
+}
+
+/// One-line handshake rejection for the status surface: the HTTP 400 body,
+/// lossy and capped at 120 characters, so a `bad_label` reason arrives
+/// intact without flooding `remote_error`.
+fn rejection_message(
+    response: &tokio_tungstenite::tungstenite::http::Response<Option<Vec<u8>>>,
+) -> String {
+    let body = response.body().as_deref().unwrap_or_default();
+    let text: String = String::from_utf8_lossy(body).chars().take(120).collect();
+    format!("relay rejected the handshake: HTTP 400 {text}")
 }
 
 /// Live device connections, keyed by `device_id`.
@@ -498,12 +519,14 @@ pub fn spawn(data_dir: std::path::PathBuf, db: Database, sessions: Arc<SessionsS
 
 /// What keeps the relay from connecting this second.
 enum Wait {
-    /// No GitHub identity stored: forget any rejected token.
+    /// No GitHub identity stored: forget any rejected token or label.
     SignedOut,
     /// `[remote] enabled = false`.
     Disabled,
     /// This token already got a 401; never retry it.
     Rejected,
+    /// This label already got a 400; never retry it.
+    LabelRejected,
 }
 
 /// One supervisor iteration's decision.
@@ -531,6 +554,7 @@ fn next_action(
     data_dir: &Path,
     db: &Database,
     rejected_token: Option<&str>,
+    rejected_label: Option<&str>,
     connections: &ConnectionRegistry,
     sessions: &Arc<SessionsState>,
     peers: &DevicePeers,
@@ -542,6 +566,10 @@ fn next_action(
     if !config.remote.enabled {
         return Next::Wait(Wait::Disabled);
     }
+    let label = host_label(&config);
+    if rejected_label == Some(label.as_str()) {
+        return Next::Wait(Wait::LabelRejected);
+    }
     if rejected_token == Some(identity.token.as_str()) {
         return Next::Wait(Wait::Rejected);
     }
@@ -552,7 +580,7 @@ fn next_action(
     let headers = HostHeaders {
         token: identity.token.clone(),
         host_id: host.host_id(),
-        label: host_label(&config),
+        label,
     };
     let mut runtime = RelayRuntime::new(
         host,
@@ -581,6 +609,8 @@ enum After {
     Served,
     /// HTTP 401: record it and never retry this token.
     Rejected(String),
+    /// HTTP 400: record it and never retry this label.
+    RejectedLabel(String),
     /// Any other failure: wait, then count an attempt.
     Retry(Duration),
 }
@@ -607,21 +637,15 @@ async fn connect_and_serve(
             let rec = Arc::clone(&runtime);
             match serve_socket(socket, runtime, data_dir.to_path_buf()).await {
                 Ok(()) => After::Served,
-                Err(error) => {
-                    // Surface the drop on `remote status` instead of leaving
-                    // it only in the daemon log.
-                    let _ = rec.db.set_state(REMOTE_ERROR_KEY, &format!("{error:#}"));
-                    tracing::warn!("remote: relay connection ended: {error:#}");
-                    // A socket that served a while was healthy: the drop is
-                    // news, not a flapping relay, so redial from the floor.
-                    if started.elapsed() >= crate::remote::relay_socket::RELAY_IDLE_TIMEOUT {
-                        *attempt = 0;
-                    }
-                    After::Retry(backoff_delay(*attempt))
-                }
+                Err(error) => serve_dropped(&rec.db, &error, started.elapsed(), attempt),
             }
         }
         Err(ConnectError::Unauthorized) => After::Rejected(token),
+        Err(ConnectError::BadRequest(message)) => {
+            let _ = runtime.db.set_state(REMOTE_ERROR_KEY, &message);
+            tracing::warn!("remote: {message}");
+            After::RejectedLabel(headers.label.clone())
+        }
         Err(ConnectError::Transient(reason)) => {
             let _ = runtime.db.set_state(REMOTE_ERROR_KEY, &reason);
             tracing::warn!("remote: relay connection failed: {reason}");
@@ -630,33 +654,59 @@ async fn connect_and_serve(
     }
 }
 
+/// Record a dropped socket for `remote status` instead of leaving it only
+/// in the daemon log. A socket that served a while was healthy: the drop
+/// is news, not a flapping relay, so redial from the floor.
+fn serve_dropped(
+    db: &Database,
+    error: &anyhow::Error,
+    served: Duration,
+    attempt: &mut u32,
+) -> After {
+    let _ = db.set_state(REMOTE_ERROR_KEY, &format!("{error:#}"));
+    tracing::warn!("remote: relay connection ended: {error:#}");
+    if served >= crate::remote::relay_socket::RELAY_IDLE_TIMEOUT {
+        *attempt = 0;
+    }
+    After::Retry(backoff_delay(*attempt))
+}
+
 /// Fold one "wait" decision into the loop counters.
-fn apply_wait(wait: &Wait, rejected_token: &mut Option<String>, attempt: &mut u32) {
+fn apply_wait(
+    wait: &Wait,
+    rejected_token: &mut Option<String>,
+    rejected_label: &mut Option<String>,
+    attempt: &mut u32,
+) {
     match wait {
         Wait::SignedOut => {
             *rejected_token = None;
+            *rejected_label = None;
             *attempt = 0;
         }
         Wait::Disabled => *attempt = 0,
-        Wait::Rejected => {}
+        Wait::Rejected | Wait::LabelRejected => {}
     }
 }
 
-/// The phase one wait decision leaves behind: a rejected token stays
-/// rejected, anything else is off.
+/// The phase one wait decision leaves behind: a rejected token or label
+/// stays rejected, anything else is off.
 fn wait_phase(wait: &Wait) -> RelayPhase {
     match wait {
         Wait::Rejected => RelayPhase::TokenRejected,
+        Wait::LabelRejected => RelayPhase::RelayRejected,
         Wait::SignedOut | Wait::Disabled => RelayPhase::Off,
     }
 }
 
 /// The phase one connection attempt leaves behind: a served socket was
-/// connected, a 401 rejects the token, anything else keeps connecting.
+/// connected, a 401 rejects the token, a 400 rejects the label, anything
+/// else keeps connecting.
 fn after_phase(after: &After) -> RelayPhase {
     match after {
         After::Served => RelayPhase::Connected,
         After::Rejected(_) => RelayPhase::TokenRejected,
+        After::RejectedLabel(_) => RelayPhase::RelayRejected,
         After::Retry(_) => RelayPhase::Connecting,
     }
 }
@@ -675,6 +725,7 @@ pub async fn supervise(
 ) {
     let mut attempt = 0u32;
     let mut rejected_token: Option<String> = None;
+    let mut rejected_label: Option<String> = None;
     let connections = ConnectionRegistry::default();
     let peers = live.peers().clone();
     loop {
@@ -682,12 +733,18 @@ pub async fn supervise(
             &data_dir,
             &db,
             rejected_token.as_deref(),
+            rejected_label.as_deref(),
             &connections,
             &sessions,
             &peers,
         ) {
             Next::Wait(wait) => {
-                apply_wait(&wait, &mut rejected_token, &mut attempt);
+                apply_wait(
+                    &wait,
+                    &mut rejected_token,
+                    &mut rejected_label,
+                    &mut attempt,
+                );
                 live.set_phase(wait_phase(&wait));
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
@@ -726,6 +783,7 @@ pub async fn supervise(
                         record_token_rejected(&db);
                         rejected_token = Some(token);
                     }
+                    After::RejectedLabel(label) => rejected_label = Some(label),
                     After::Retry(delay) => {
                         tokio::time::sleep(delay).await;
                         attempt += 1;
@@ -739,19 +797,3 @@ pub async fn supervise(
 #[cfg(test)]
 #[path = "relay_tests.rs"]
 mod tests;
-
-fn host_label(config: &CanopyConfig) -> String {
-    if !config.remote.host_label.trim().is_empty() {
-        return config.remote.host_label.trim().to_string();
-    }
-    hostname()
-}
-
-fn hostname() -> String {
-    std::env::var("HOSTNAME")
-        .or_else(|_| std::fs::read_to_string("/etc/hostname"))
-        .map(|name| name.trim().to_string())
-        .ok()
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "canopy-host".to_string())
-}

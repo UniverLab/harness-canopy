@@ -49,6 +49,10 @@ fn status_view_spells_each_relay_phase() {
         (RelayPhase::Connecting, "connecting"),
         (RelayPhase::Connected, "connected"),
         (RelayPhase::TokenRejected, "token rejected: sign in again"),
+        (
+            RelayPhase::RelayRejected,
+            "relay rejected: see remote status",
+        ),
     ] {
         live.set_phase(phase);
         let view = status_view(dir.path(), &db, &live).expect("status");

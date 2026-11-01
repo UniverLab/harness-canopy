@@ -246,6 +246,24 @@ fn status_surfaces_last_error_and_reconnect() {
 }
 
 #[test]
+fn status_surfaces_a_stored_handshake_rejection() {
+    use crate::application::ports::StateRepository as _;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = Database::new(&dir.path().join("reject.db")).unwrap();
+    let config = CanopyConfig::default();
+    let stored = "relay rejected the handshake: HTTP 400 bad_label: label is not header-safe";
+    db.set_state(crate::remote::relay::REMOTE_ERROR_KEY, stored)
+        .unwrap();
+    let seen = build_remote_status(&config, None, Some(&db));
+    assert_eq!(seen.last_error.as_deref(), Some(stored));
+    assert!(
+        seen.last_error.as_deref().unwrap().contains("bad_label"),
+        "the 400 reason must reach status verbatim"
+    );
+}
+
+#[test]
 fn debug_and_errors_never_carry_the_token() {
     let rendered = format!("{:?}", test_identity());
     assert!(!rendered.contains("gho_test_secret"), "{rendered}");

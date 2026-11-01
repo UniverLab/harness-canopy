@@ -22,6 +22,9 @@ pub enum RelayPhase {
     Connected,
     /// The token got a 401: sign in again, this one is never retried.
     TokenRejected,
+    /// The relay refused the handshake with a 400: fix the label, this one
+    /// is never retried. The reason sits in `remote_error` for status.
+    RelayRejected,
 }
 
 /// Live remote state shared between the supervisor and status surfaces.
@@ -92,6 +95,7 @@ mod tests {
             RelayPhase::Connecting,
             RelayPhase::Connected,
             RelayPhase::TokenRejected,
+            RelayPhase::RelayRejected,
             RelayPhase::Off,
         ] {
             live.set_phase(phase);

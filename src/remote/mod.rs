@@ -12,6 +12,7 @@ pub mod cli;
 pub mod connection;
 pub mod devices;
 pub mod hostkey;
+pub mod label;
 pub mod live;
 pub mod metrics;
 pub mod pairing;

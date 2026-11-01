@@ -889,10 +889,15 @@ fn phase_mappings_are_pure_and_total() {
     assert_eq!(wait_phase(&Wait::SignedOut), RelayPhase::Off);
     assert_eq!(wait_phase(&Wait::Disabled), RelayPhase::Off);
     assert_eq!(wait_phase(&Wait::Rejected), RelayPhase::TokenRejected);
+    assert_eq!(wait_phase(&Wait::LabelRejected), RelayPhase::RelayRejected);
     assert_eq!(after_phase(&After::Served), RelayPhase::Connected);
     assert_eq!(
         after_phase(&After::Rejected("t".to_string())),
         RelayPhase::TokenRejected
+    );
+    assert_eq!(
+        after_phase(&After::RejectedLabel("l".to_string())),
+        RelayPhase::RelayRejected
     );
     assert_eq!(
         after_phase(&After::Retry(Duration::from_secs(1))),
@@ -1143,5 +1148,101 @@ async fn disabled_stays_quiet_without_a_reconnect_storm() {
         live.phase(),
         RelayPhase::Off,
         "a disabled remote reports off, never a reconnect loop"
+    );
+}
+
+#[test]
+fn handshake_header_percent_encodes_a_non_ascii_label() {
+    let mut head = headers();
+    head.label = "caf\u{e9}-\u{df}".to_string();
+    let request = request_for("ws://127.0.0.1:9/ws/host", &head).expect("request");
+    let sent = request.headers()["X-Canopy-Host-Label"]
+        .to_str()
+        .expect("the encoded label is ASCII")
+        .to_string();
+    assert_eq!(sent, "caf%C3%A9-%C3%9F");
+}
+
+#[test]
+fn an_overlong_label_arrives_truncated_to_64_characters() {
+    let mut config = CanopyConfig::default();
+    config.remote.host_label = "a".repeat(100);
+    assert_eq!(host_label(&config), "a".repeat(64));
+
+    // Truncation counts characters, not bytes: 100 two-byte letters still
+    // leave 64 letters.
+    config.remote.host_label = "\u{e9}".repeat(100);
+    let truncated = host_label(&config);
+    assert_eq!(truncated.chars().count(), 64);
+    assert_eq!(truncated, "\u{e9}".repeat(64));
+
+    // The header then carries the truncated label encoded.
+    let mut head = headers();
+    head.label = truncated;
+    let request = request_for("ws://127.0.0.1:9/ws/host", &head).expect("request");
+    let sent = request.headers()["X-Canopy-Host-Label"]
+        .to_str()
+        .expect("the encoded label is ASCII")
+        .to_string();
+    assert_eq!(sent, "%C3%A9".repeat(64));
+}
+
+#[tokio::test]
+async fn http_400_records_the_reason_without_reconnecting() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = test_db();
+    let mut config = CanopyConfig::default();
+    config.remote.enabled = true;
+    let counter = Arc::new(AtomicUsize::new(0));
+    let requests = Arc::clone(&counter);
+    let app = Router::new().fallback(move || {
+        let counter = Arc::clone(&requests);
+        async move {
+            counter.fetch_add(1, Ordering::SeqCst);
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                "bad_label: label is not header-safe",
+            )
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    config.remote.relay_url = format!("http://{addr}");
+    config.save_for_tests(dir.path()).expect("config");
+    crate::remote::auth::save_identity(
+        dir.path(),
+        &crate::remote::auth::GitHubIdentity {
+            token: "[REDACTED]".to_string(),
+            login: "octocat".to_string(),
+            id: 1,
+        },
+    )
+    .expect("identity");
+    let live = Arc::new(crate::remote::live::RemoteLive::new());
+    let running = tokio::spawn(supervise(
+        dir.path().to_path_buf(),
+        db.clone(),
+        test_sessions(&db),
+        Arc::clone(&live),
+    ));
+    // Longer than the slowest first backoff (1200 ms): a 400 misclassified
+    // as transient would have retried by now.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    running.abort();
+    assert_eq!(counter.load(Ordering::SeqCst), 1, "must not retry a 400");
+    assert_eq!(
+        live.phase(),
+        crate::remote::live::RelayPhase::RelayRejected,
+        "a 400 parks the label as rejected, never retried"
+    );
+    let recorded = state(&db, REMOTE_ERROR_KEY);
+    assert!(
+        recorded.contains("400") && recorded.contains("bad_label"),
+        "status must surface the 400 reason, got {recorded:?}"
     );
 }
