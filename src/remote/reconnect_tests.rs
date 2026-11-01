@@ -398,10 +398,12 @@ async fn relay_kill_drop_reconnects_with_the_same_row() {
     );
 
     // A relay that answers Pongs keeps the socket up past the idle timeout:
-    // no false churn on a healthy link.
+    // no false churn on a healthy link. The 4 s idle leaves ~2 s of slack
+    // per Ping window (the Ping fires every idle/2), so gate load cannot
+    // stall a Pong past the timeout.
     let url = start_relay(false).await;
-    let serving = serve_against(&harness, &url, Duration::from_secs(2)).await;
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    let serving = serve_against(&harness, &url, Duration::from_secs(4)).await;
+    tokio::time::sleep(Duration::from_secs(7)).await;
     assert!(
         !serving.is_finished(),
         "a ponging relay must not trip the idle timeout"

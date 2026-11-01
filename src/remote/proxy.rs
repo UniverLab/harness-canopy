@@ -42,7 +42,7 @@ fn split_host_port(authority: &str, default_port: u16) -> (String, u16) {
         let Some(end) = inner.find(']') else {
             return (authority.to_string(), default_port);
         };
-        let host = &authority[..=end];
+        let host = &authority[..=end + 1];
         let port = inner[end + 1..]
             .strip_prefix(':')
             .and_then(|raw| raw.parse().ok())
@@ -96,6 +96,14 @@ fn parse_proxy_url(proxy: &str) -> Option<ProxyTarget> {
     })
 }
 
+/// The proxy host as a dial target: `ToSocketAddrs` takes a bare IPv6
+/// literal, so brackets come off here. The `CONNECT` line keeps them.
+fn dial_host(host: &str) -> &str {
+    host.strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .unwrap_or(host)
+}
+
 /// The proxy URL with any userinfo stripped, for error messages.
 fn redact(proxy: &str) -> String {
     match proxy.rsplit_once('@') {
@@ -111,7 +119,7 @@ pub async fn tunnel_stream(proxy: &str, host: &str, port: u16) -> Result<TcpStre
     let Some(target) = parse_proxy_url(proxy) else {
         return Err(format!("unparseable proxy URL {}", redact(proxy)));
     };
-    let mut stream = TcpStream::connect((target.host.as_str(), target.port))
+    let mut stream = TcpStream::connect((dial_host(&target.host), target.port))
         .await
         .map_err(|error| format!("proxy {} unreachable: {error}", target.host))?;
     let mut request = format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n");
@@ -179,8 +187,8 @@ fn rejection_message(
 }
 
 /// Read the `CONNECT` reply head up to the blank line, returning its status
-/// line. Nothing past the head is consumed: the tunnel is byte-transparent
-/// from there, so no handshake bytes may be swallowed here.
+/// line. The reply carries no body, so the tunnel is byte-transparent from
+/// the blank line: the handshake goes out only after this returns.
 async fn read_connect_status(stream: &mut TcpStream, proxy_host: &str) -> Result<String, String> {
     let mut head = Vec::new();
     let mut chunk = [0u8; 512];
@@ -210,4 +218,77 @@ async fn read_connect_status(stream: &mut TcpStream, proxy_host: &str) -> Result
         .next()
         .unwrap_or_default()
         .to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ws_host_port_defaults_port_by_scheme() {
+        assert_eq!(
+            ws_host_port("wss://relay.example.com/ws/host"),
+            ("relay.example.com".to_string(), 443)
+        );
+        assert_eq!(
+            ws_host_port("ws://relay.example.com/ws/host"),
+            ("relay.example.com".to_string(), 80)
+        );
+    }
+
+    #[test]
+    fn ws_host_port_keeps_explicit_port_and_strips_userinfo() {
+        assert_eq!(
+            ws_host_port("ws://user:pass@127.0.0.1:9000/ws/host"),
+            ("127.0.0.1".to_string(), 9000)
+        );
+    }
+
+    #[test]
+    fn ws_host_port_keeps_ipv6_brackets() {
+        assert_eq!(
+            ws_host_port("wss://[2001:db8::1]/ws/host"),
+            ("[2001:db8::1]".to_string(), 443)
+        );
+        assert_eq!(
+            ws_host_port("wss://[2001:db8::1]:8443/ws/host"),
+            ("[2001:db8::1]".to_string(), 8443)
+        );
+    }
+
+    #[test]
+    fn parse_proxy_url_extracts_userinfo_and_defaults_port() {
+        let target = parse_proxy_url("http://user:pass@proxy.example.com").expect("proxy");
+        assert_eq!(target.host, "proxy.example.com");
+        assert_eq!(target.port, 8080);
+        assert_eq!(target.userinfo.as_deref(), Some("user:pass"));
+    }
+
+    #[test]
+    fn parse_proxy_url_accepts_bare_host_and_rejects_empty() {
+        let target = parse_proxy_url("proxy.example.com:3128").expect("proxy");
+        assert_eq!(target.host, "proxy.example.com");
+        assert_eq!(target.port, 3128);
+        assert!(target.userinfo.is_none());
+        assert!(parse_proxy_url("http://").is_none());
+        assert!(parse_proxy_url("").is_none());
+    }
+
+    #[test]
+    fn redact_strips_userinfo_but_keeps_host() {
+        assert_eq!(
+            redact("http://user:pass@proxy.example.com:8080"),
+            "...@proxy.example.com:8080"
+        );
+        assert_eq!(
+            redact("http://proxy.example.com:8080"),
+            "http://proxy.example.com:8080"
+        );
+    }
+
+    #[test]
+    fn dial_host_strips_ipv6_brackets() {
+        assert_eq!(dial_host("[2001:db8::1]"), "2001:db8::1");
+        assert_eq!(dial_host("proxy.example.com"), "proxy.example.com");
+    }
 }
