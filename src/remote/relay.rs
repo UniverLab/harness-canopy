@@ -148,30 +148,28 @@ pub fn request_for(
 
 /// Connect once, classifying an HTTP 401 apart from a transient failure.
 /// An HTTP 400 is terminal too: the handshake itself was refused, so no
-/// retry of the same headers can succeed.
+/// retry of the same headers can succeed. Honors `HTTPS_PROXY`/`ALL_PROXY`
+/// via a `CONNECT` tunnel; without one the dial is direct.
 pub async fn connect_ws(url: &str, headers: &HostHeaders) -> Result<WsStream, ConnectError> {
-    let request = request_for(url, headers).map_err(|e| ConnectError::Transient(e.to_string()))?;
-    match tokio_tungstenite::connect_async(request).await {
-        Ok((stream, _response)) => Ok(stream),
-        Err(tokio_tungstenite::tungstenite::Error::Http(response)) if response.status() == 401 => {
-            Err(ConnectError::Unauthorized)
-        }
-        Err(tokio_tungstenite::tungstenite::Error::Http(response)) if response.status() == 400 => {
-            Err(ConnectError::BadRequest(rejection_message(&response)))
-        }
-        Err(error) => Err(ConnectError::Transient(error.to_string())),
-    }
+    connect_ws_with_proxy(url, headers, super::proxy::proxy_url().as_deref()).await
 }
 
-/// One-line handshake rejection for the status surface: the HTTP 400 body,
-/// lossy and capped at 120 characters, so a `bad_label` reason arrives
-/// intact without flooding `remote_error`.
-fn rejection_message(
-    response: &tokio_tungstenite::tungstenite::http::Response<Option<Vec<u8>>>,
-) -> String {
-    let body = response.body().as_deref().unwrap_or_default();
-    let text: String = String::from_utf8_lossy(body).chars().take(120).collect();
-    format!("relay rejected the handshake: HTTP 400 {text}")
+/// Connect once, via `proxy` when set, `None` for the direct dial. An
+/// unparseable proxy URL is transient, never a silent direct bypass: the
+/// bypass would leak traffic past the proxy.
+pub async fn connect_ws_with_proxy(
+    url: &str,
+    headers: &HostHeaders,
+    proxy: Option<&str>,
+) -> Result<WsStream, ConnectError> {
+    let request = request_for(url, headers).map_err(|e| ConnectError::Transient(e.to_string()))?;
+    if let Some(proxy) = proxy {
+        return super::proxy::connect_via_proxy(request, url, proxy).await;
+    }
+    match tokio_tungstenite::connect_async(request).await {
+        Ok((stream, _response)) => Ok(stream),
+        Err(error) => Err(super::proxy::classify_handshake_error(error)),
+    }
 }
 
 /// Live device connections, keyed by `device_id`.

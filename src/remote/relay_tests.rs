@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use base64::Engine as _;
 use std::sync::Arc;
@@ -1249,4 +1249,148 @@ async fn http_400_records_the_reason_without_reconnecting() {
         recorded.contains("bad_label"),
         "status must surface the 400 reason, got {recorded:?}"
     );
+}
+
+/// What the mock `CONNECT` proxy saw: the request head plus the flag.
+struct MockProxy {
+    addr: std::net::SocketAddr,
+    observed: Arc<AtomicBool>,
+    head: Arc<Mutex<String>>,
+}
+
+/// A minimal HTTP `CONNECT` proxy in front of `target`: it records the
+/// `CONNECT` head, answers 200, then splices the tunnel. Assertions stay in
+/// the test body: a panic here would only surface as a closed socket.
+async fn start_mock_proxy(target: std::net::SocketAddr) -> MockProxy {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind proxy");
+    let addr = listener.local_addr().expect("proxy addr");
+    let observed = Arc::new(AtomicBool::new(false));
+    let head = Arc::new(Mutex::new(String::new()));
+    let seen = Arc::clone(&observed);
+    let text = Arc::clone(&head);
+    tokio::spawn(async move {
+        let Ok((mut client, _)) = listener.accept().await else {
+            return;
+        };
+        let mut raw = Vec::new();
+        let mut chunk = [0u8; 512];
+        loop {
+            let Ok(size) = client.read(&mut chunk).await else {
+                return;
+            };
+            if size == 0 {
+                return;
+            }
+            raw.extend_from_slice(&chunk[..size]);
+            if raw.windows(4).any(|word| word == b"\r\n\r\n") {
+                break;
+            }
+        }
+        *text.lock().await = String::from_utf8_lossy(&raw).to_string();
+        let Ok(mut upstream) = tokio::net::TcpStream::connect(target).await else {
+            return;
+        };
+        if client
+            .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+            .await
+            .is_err()
+        {
+            return;
+        }
+        seen.store(true, Ordering::SeqCst);
+        let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+    });
+    MockProxy {
+        addr,
+        observed,
+        head,
+    }
+}
+
+#[tokio::test]
+async fn proxied_connect_tunnels_and_auths() {
+    let (relay_url, _reply) = start_pairing_relay(json!({"t": "noop"})).await;
+    let target: std::net::SocketAddr = relay_url
+        .strip_prefix("http://")
+        .expect("relay addr")
+        .parse()
+        .expect("relay socket addr");
+    let tunnel = start_mock_proxy(target).await;
+    let via = format!("http://user:pass@{}", tunnel.addr);
+    let socket = connect_ws_with_proxy(&websocket_url(&relay_url), &headers(), Some(&via))
+        .await
+        .expect("proxied connect");
+    drop(socket);
+    assert!(
+        tunnel.observed.load(Ordering::SeqCst),
+        "the proxy must see a CONNECT it answers 200"
+    );
+    let head = tunnel.head.lock().await.clone();
+    let connect = head.lines().next().unwrap_or_default().to_string();
+    assert!(
+        connect.starts_with("CONNECT "),
+        "the proxy must see a CONNECT request, got {connect:?}"
+    );
+    assert!(
+        connect.contains(&target.to_string()),
+        "the CONNECT must name the relay {target}, got {connect:?}"
+    );
+    assert!(
+        head.contains("Proxy-Authorization: Basic dXNlcjpwYXNz"),
+        "the proxy must see the userinfo auth, got {head:?}"
+    );
+}
+
+#[tokio::test]
+async fn direct_connect_without_proxy_unchanged() {
+    let (relay_url, _reply) = start_pairing_relay(json!({"t": "noop"})).await;
+    let socket = connect_ws_with_proxy(&websocket_url(&relay_url), &headers(), None)
+        .await
+        .expect("direct connect");
+    drop(socket);
+}
+
+#[test]
+fn proxy_url_precedence() {
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = ENV_LOCK.lock().expect("env lock");
+    let keys = ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"];
+    let saved: Vec<(String, Option<String>)> = keys
+        .iter()
+        .map(|key| ((*key).to_string(), std::env::var(key).ok()))
+        .collect();
+    for key in &keys {
+        std::env::remove_var(key);
+    }
+
+    std::env::set_var("HTTPS_PROXY", "http://https-proxy:8080");
+    std::env::set_var("ALL_PROXY", "http://all-proxy:8080");
+    assert_eq!(
+        crate::remote::proxy::proxy_url(),
+        Some("http://https-proxy:8080".to_string())
+    );
+    std::env::set_var("HTTPS_PROXY", "");
+    assert_eq!(
+        crate::remote::proxy::proxy_url(),
+        Some("http://all-proxy:8080".to_string()),
+        "empty counts as unset"
+    );
+    std::env::remove_var("HTTPS_PROXY");
+    std::env::remove_var("ALL_PROXY");
+    std::env::set_var("https_proxy", "http://lower-proxy:8080");
+    assert_eq!(
+        crate::remote::proxy::proxy_url(),
+        Some("http://lower-proxy:8080".to_string())
+    );
+
+    for (key, value) in &saved {
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
 }

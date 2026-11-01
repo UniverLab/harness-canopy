@@ -346,6 +346,10 @@ login` makes it connect again. If the relay answers HTTP 400, the daemon
 stops retrying that label, records `relay rejected the handshake: HTTP 400
 <reason>` for `remote status` (the Remote tab reads `relay rejected: see
 remote status`), and waits: fixing the label reconnects without a restart.
+Behind a corporate proxy the daemon tunnels the socket through `HTTPS_PROXY`
+(`ALL_PROXY` as a fallback) with an HTTP `CONNECT`, authenticating with the
+proxy URL's userinfo when present; without either variable the dial is
+direct.
 
 Remote control is owner-only: the relay admits only hosts signed in with
 the same GitHub account. `login` prints the device URL and the code to

@@ -19,6 +19,7 @@ pub mod pairing;
 pub mod panel;
 pub mod peer;
 pub mod peer_ice;
+pub mod proxy;
 pub mod qr;
 #[cfg(test)]
 #[path = "reconnect_tests.rs"]
