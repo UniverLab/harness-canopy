@@ -349,7 +349,8 @@ remote status`), and waits: fixing the label reconnects without a restart.
 Behind a corporate proxy the daemon tunnels the socket with an HTTP `CONNECT`:
 `ws://` relays read `HTTP_PROXY`, `wss://` relays read `HTTPS_PROXY`
 (uppercase wins over lowercase, empty counts as unset, `ALL_PROXY` is the
-fallback for both), and destinations matching `NO_PROXY` dial direct — an
+fallback for both), and destinations matching `NO_PROXY`/`no_proxy` dial
+direct — an
 exact host, a domain suffix with or without a leading dot, an IP literal or
 CIDR range, or `*` for everything. It authenticates with the proxy URL's
 userinfo when present; without any of them the dial is direct. A proxy URL
