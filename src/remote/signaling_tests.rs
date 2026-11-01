@@ -9,7 +9,8 @@ use crate::remote::devices::RemoteDevices;
 use crate::remote::hostkey::{verify_p1363, HostKey};
 use crate::remote::signaling::{
     answer_body, answer_message, connect_fail, ice_body, ice_candidate, offer_message,
-    verify_offer, IceCandidate, Refusal, MAX_CLOCK_SKEW_SECS,
+    verify_offer, verify_offer_seen, IceCandidate, Refusal, SeenOffers, MAX_CLOCK_SKEW_SECS,
+    SEEN_OFFER_CAP,
 };
 
 const VECTOR_TS: i64 = 1_793_100_000;
@@ -211,6 +212,63 @@ fn a_tampered_sdp_or_signature_is_refused() {
         verify_offer(&devices, HOST_ID, &der_body, VECTOR_TS).err(),
         Some(Refusal::BadSignature)
     );
+}
+
+#[test]
+fn a_replayed_offer_is_refused_as_bad_signature() {
+    let (_dir, devices) = registry();
+    let mut seen = SeenOffers::new();
+    assert!(seen.is_empty());
+    let body = offer_body(VECTOR_TS, VECTOR_OFFER_SDP, VECTOR_OFFER_SIG);
+    verify_offer_seen(&devices, HOST_ID, &body, VECTOR_TS, &mut seen)
+        .expect("the first offer is fresh");
+    assert_eq!(seen.len(), 1);
+    let replay = verify_offer_seen(&devices, HOST_ID, &body, VECTOR_TS, &mut seen);
+    assert_eq!(replay.err(), Some(Refusal::BadSignature));
+    assert_eq!(
+        connect_fail(Refusal::BadSignature)["reason"],
+        "bad_signature",
+        "a replay keeps the bad_signature wire reason"
+    );
+}
+
+#[test]
+fn a_seen_signature_expires_after_twice_the_clock_window() {
+    // The TTL boundary lives in `check_and_insert`: the clock window would
+    // refuse a re-signed body past 120 s as `stale` long before the registry
+    // entry expires, so the boundary is driven with a synthetic hash.
+    let mut seen = SeenOffers::new();
+    let hash = [0xABu8; 32];
+    assert!(!seen.check_and_insert(hash, VECTOR_TS));
+    assert!(
+        seen.check_and_insert(hash, VECTOR_TS + 239),
+        "a repeat inside the 240 s window is still a replay"
+    );
+    assert!(
+        !seen.check_and_insert(hash, VECTOR_TS + 240),
+        "a retry once the entry has expired is fresh again"
+    );
+    assert_eq!(seen.len(), 1);
+}
+
+#[test]
+fn the_seen_registry_stays_bounded_under_a_burst() {
+    let mut seen = SeenOffers::new();
+    for index in 0..1500u32 {
+        let mut hash = [0u8; 32];
+        hash[..4].copy_from_slice(&index.to_be_bytes());
+        seen.check_and_insert(hash, VECTOR_TS);
+    }
+    assert!(
+        seen.len() <= SEEN_OFFER_CAP,
+        "1500 offers must not grow the registry past {SEEN_OFFER_CAP}: {}",
+        seen.len()
+    );
+    // Distinct signatures never collide: two fresh hashes are both unseen,
+    // so concurrent devices do not block each other.
+    assert!(!seen.check_and_insert([0xAAu8; 32], VECTOR_TS));
+    assert!(!seen.check_and_insert([0xBBu8; 32], VECTOR_TS));
+    assert!(seen.len() <= SEEN_OFFER_CAP);
 }
 
 #[test]

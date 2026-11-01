@@ -225,6 +225,7 @@ pub struct RelayRuntime {
     relay_url: String,
     bearer: String,
     peers: DevicePeers,
+    seen_offers: Mutex<signaling::SeenOffers>,
 }
 
 impl RelayRuntime {
@@ -249,6 +250,7 @@ impl RelayRuntime {
             relay_url: String::new(),
             bearer: String::new(),
             peers: DevicePeers::default(),
+            seen_offers: Mutex::new(signaling::SeenOffers::new()),
         }
     }
 
@@ -288,13 +290,19 @@ impl RelayRuntime {
     /// Verify an offer, refuse it, or build the answer off the socket loop.
     fn start_offer(&self, body: &Value, now: i64, from: &str, signal: &SignalTx) {
         let host_id = self.host.host_id();
-        let offer = match signaling::verify_offer(&self.devices, &host_id, body, now) {
-            Ok(offer) => offer,
-            Err(refusal) => {
-                let _ = signal.send((from.to_string(), signaling::connect_fail(refusal)));
-                return;
-            }
-        };
+        let mut seen = self
+            .seen_offers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let offer =
+            match signaling::verify_offer_seen(&self.devices, &host_id, body, now, &mut seen) {
+                Ok(offer) => offer,
+                Err(refusal) => {
+                    let _ = signal.send((from.to_string(), signaling::connect_fail(refusal)));
+                    return;
+                }
+            };
+        drop(seen);
         // The hub is the enforcement point: a login without a grant never
         // gets a peer, so untrusted guests cannot even occupy a slot.
         let Some(grant) = trust::resolve(&self.db, &self.github_login, &offer.device.github_login)

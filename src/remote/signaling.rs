@@ -10,6 +10,8 @@
 //!
 //! This module is pure: it never touches the network and never builds a peer.
 
+use std::collections::HashMap;
+
 use base64::Engine as _;
 use serde_json::{json, Value};
 
@@ -27,6 +29,11 @@ pub const ANSWER_PREFIX: &str = "canopy-remote/v1/answer\n";
 pub const MAX_CLOCK_SKEW_SECS: i64 = 120;
 /// Concurrent device peers a host serves.
 pub const MAX_DEVICE_PEERS: usize = 4;
+/// How long an accepted offer signature stays in the replay registry: twice
+/// the clock window, so no live offer can be replayed after it expires.
+pub const SEEN_OFFER_TTL_SECS: i64 = 2 * MAX_CLOCK_SKEW_SECS;
+/// Upper bound of the replay registry; the oldest entry is evicted past it.
+pub const SEEN_OFFER_CAP: usize = 1024;
 
 /// Why an offer was not answered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,6 +166,85 @@ pub fn verify_offer(
         sig,
         sig_b64: sig_b64.to_string(),
     })
+}
+
+/// Signatures of recently accepted offers, keyed by signature hash only: two
+/// concurrent devices never share a signature, so neither blocks the other.
+#[derive(Debug, Default)]
+pub struct SeenOffers {
+    seen: HashMap<[u8; 32], i64>,
+}
+
+impl SeenOffers {
+    /// An empty replay registry.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Entries currently held, including unexpired ones only after a check.
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.seen.len()
+    }
+
+    /// Whether the registry holds no entries.
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.seen.is_empty()
+    }
+
+    /// Prune expired entries, then report whether `hash` was already seen.
+    /// A fresh hash is recorded; past [`SEEN_OFFER_CAP`] the oldest entry is
+    /// evicted first so the registry stays bounded.
+    pub fn check_and_insert(&mut self, hash: [u8; 32], now: i64) -> bool {
+        self.seen
+            .retain(|_, seen_at| *seen_at + SEEN_OFFER_TTL_SECS > now);
+        if self.seen.contains_key(&hash) {
+            return true;
+        }
+        if self.seen.len() >= SEEN_OFFER_CAP {
+            evict_oldest(&mut self.seen);
+        }
+        self.seen.insert(hash, now);
+        false
+    }
+}
+
+/// Drop the oldest entry of a full replay registry.
+fn evict_oldest(seen: &mut HashMap<[u8; 32], i64>) {
+    let oldest = seen
+        .iter()
+        .min_by_key(|(_, seen_at)| **seen_at)
+        .map(|(hash, _)| *hash);
+    if let Some(hash) = oldest {
+        seen.remove(&hash);
+    }
+}
+
+/// The replay-registry key for one offer signature.
+fn offer_sig_hash(sig: &[u8]) -> [u8; 32] {
+    use sha2::{Digest as _, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(sig);
+    hasher.finalize().into()
+}
+
+/// Verify one `offer` body and refuse a replay of an accepted signature.
+/// The crypto check runs first so garbage cannot poison the registry; a
+/// replay reads `bad_signature` on the wire and is named `replay` in the log.
+pub fn verify_offer_seen(
+    devices: &RemoteDevices,
+    host_id: &str,
+    body: &Value,
+    now: i64,
+    seen: &mut SeenOffers,
+) -> Result<Offer, Refusal> {
+    let offer = verify_offer(devices, host_id, body, now)?;
+    if seen.check_and_insert(offer_sig_hash(&offer.sig), now) {
+        tracing::warn!("remote: replay of a seen offer");
+        return Err(Refusal::BadSignature);
+    }
+    Ok(offer)
 }
 
 /// `answer{sdp,sig}`: sign the answer SDP bound to the offer signature.
