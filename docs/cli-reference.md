@@ -359,6 +359,22 @@ signatures cover the SDP, so the DTLS fingerprints are pinned end to end
 and neither the relay nor a TURN server can read or impersonate the
 session. Nothing but those signaling bodies reaches the relay.
 
+After the answer, each side trickles ICE candidates through the relay in
+the object form, and the host sends the minimal object because its local
+candidates carry no mids:
+
+```json
+{"t": "ice", "candidate": {"candidate": "candidate:1 1 UDP 1694498815 203.0.113.7 5000 typ host", "sdpMid": "0", "sdpMLineIndex": 0}}
+```
+
+`sdpMid` and `sdpMLineIndex` are present only when the sender knows them.
+The host still accepts the legacy bare string
+`{"t": "ice", "candidate": "<candidate-attribute>"}` from older browsers,
+and reads the mids into the peer connection when an object names them, so
+a browser behind NAT, TURN or a mobile network connects like one on the
+LAN. A body with no candidate — the key missing, `null`, or another
+shape — is logged and ignored, and the connection stays up.
+
 Once the data channel is open, the browser speaks the same protocol v1 as
 `/sessions/ws`, with one restriction: `resize`
 is always refused (the browser renders the host's size scaled). Terminal
