@@ -309,7 +309,7 @@ async fn pump_to_hello(harness: &mut Harness, device: &DeviceSide, from: &str) {
         }
         if let Some(candidate) = signaling::ice_candidate(&body) {
             device
-                .add_candidate(candidate)
+                .add_candidate(&candidate.candidate)
                 .await
                 .expect("host candidate");
         }
@@ -326,7 +326,7 @@ async fn pump_to_hello(harness: &mut Harness, device: &DeviceSide, from: &str) {
                 Some(DeviceEvent::Candidate(candidate)) => {
                     let now = chrono::Utc::now().timestamp();
                     harness.runtime.route(
-                        &signaling::ice_body(&candidate),
+                        &signaling::ice_body(&signaling::IceCandidate::bare(candidate)),
                         now,
                         from,
                         &harness.signal,
@@ -344,7 +344,10 @@ async fn pump_to_hello(harness: &mut Harness, device: &DeviceSide, from: &str) {
             signalled = harness.inbox.recv() => {
                 let (_, body) = signalled.expect("the signal channel stays open");
                 if let Some(candidate) = signaling::ice_candidate(&body) {
-                    device.add_candidate(candidate).await.expect("host candidate");
+                    device
+                        .add_candidate(&candidate.candidate)
+                        .await
+                        .expect("host candidate");
                 }
             }
         }

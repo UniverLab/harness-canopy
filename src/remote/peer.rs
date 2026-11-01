@@ -33,6 +33,7 @@ use webrtc::peer_connection::{
 
 /// Asks the relay for a short-lived TURN credential; see [`super::peer_ice`].
 pub use super::peer_ice::fetch_ice_servers;
+use super::signaling::IceCandidate;
 
 /// The one data channel label this transport accepts.
 pub const CHANNEL_LABEL: &str = "canopy-session-v1";
@@ -407,12 +408,14 @@ impl Peer {
     /// # Errors
     ///
     /// Returns an error when the connection rejects the candidate.
-    pub async fn add_remote_candidate(&self, candidate: &str) -> Result<()> {
-        if candidate.trim().is_empty() {
+    pub async fn add_remote_candidate(&self, candidate: &IceCandidate) -> Result<()> {
+        if candidate.candidate.trim().is_empty() {
             return Ok(());
         }
         let init = RTCIceCandidateInit {
-            candidate: candidate.to_string(),
+            candidate: candidate.candidate.clone(),
+            sdp_mid: candidate.sdp_mid.clone(),
+            sdp_mline_index: candidate.sdp_mline_index,
             ..Default::default()
         };
         self.pc

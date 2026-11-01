@@ -239,10 +239,15 @@ impl RelayRuntime {
                 None
             }
             Some("ice") => {
-                if let Some(candidate) = signaling::ice_candidate(body) {
-                    // The contract's `ice{candidate}` carries no device id;
-                    // the relay envelope's `from` is the connection.
-                    self.peers.route(from, Control::Ice(candidate.to_string()));
+                match signaling::ice_candidate(body) {
+                    Some(candidate) => {
+                        // The contract's `ice{candidate}` carries no device id;
+                        // the relay envelope's `from` is the connection.
+                        self.peers.route(from, Control::Ice(candidate));
+                    }
+                    None => {
+                        tracing::warn!("remote: ignoring an ice body without a candidate");
+                    }
                 }
                 None
             }

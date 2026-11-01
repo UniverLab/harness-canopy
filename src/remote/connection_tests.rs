@@ -278,7 +278,10 @@ async fn connect_loopback_device(
             while let Some(event) = device.next().await {
                 match event {
                     peer::device_side::DeviceEvent::Candidate(candidate) => {
-                        let _ = peers.route(&from, Control::Ice(candidate));
+                        let _ = peers.route(
+                            &from,
+                            Control::Ice(signaling::IceCandidate::bare(candidate)),
+                        );
                     }
                     peer::device_side::DeviceEvent::Frame(bytes) => {
                         let _ = events_tx.send(DeviceEvent::Frame(Frame::parse(bytes)));
@@ -298,7 +301,7 @@ async fn connect_loopback_device(
         tokio::spawn(async move {
             while let Some((_from, body)) = signal_rx.recv().await {
                 if let Some(candidate) = signaling::ice_candidate(&body) {
-                    let _ = device.add_candidate(candidate).await;
+                    let _ = device.add_candidate(&candidate.candidate).await;
                 }
             }
         })
@@ -1334,8 +1337,14 @@ fn the_fifth_concurrent_peer_is_refused_busy() {
     );
     assert_eq!(peers.len(), MAX_DEVICE_PEERS);
     // `ice` bodies carry no device id: they route by their relay connection.
-    assert!(peers.route("d:0", Control::Ice("candidate".to_string())));
-    assert!(!peers.route("d:5", Control::Ice("candidate".to_string())));
+    assert!(peers.route(
+        "d:0",
+        Control::Ice(signaling::IceCandidate::bare("candidate".to_string()))
+    ));
+    assert!(!peers.route(
+        "d:5",
+        Control::Ice(signaling::IceCandidate::bare("candidate".to_string()))
+    ));
     // A revoke frees the slot for the next device.
     peers.close("device-0");
     assert_eq!(peers.len(), MAX_DEVICE_PEERS - 1);
@@ -1370,7 +1379,10 @@ fn a_reconnected_device_keeps_its_new_slot_when_the_old_peer_cleans_up() {
     peers.remove("device-a", &old);
     assert_eq!(peers.len(), 1);
     assert!(
-        peers.route("d:new", Control::Ice("candidate".to_string())),
+        peers.route(
+            "d:new",
+            Control::Ice(signaling::IceCandidate::bare("candidate".to_string()))
+        ),
         "the reconnected peer still answers on its own connection"
     );
     assert!(new_rx.try_recv().is_ok());

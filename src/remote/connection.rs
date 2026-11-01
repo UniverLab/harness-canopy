@@ -23,14 +23,14 @@ use crate::sessions::HubEvent;
 use super::bridge::RemoteBridge;
 use super::peer::{LinkState, Peer, PeerEvent};
 use super::relay::{ConnectionRegistry, SignalTx};
-use super::signaling::{self, MAX_DEVICE_PEERS};
+use super::signaling::{self, IceCandidate, MAX_DEVICE_PEERS};
 use super::trust::Grant;
 
 /// What the relay routes into one live peer after the answer.
 #[derive(Debug)]
 pub enum Control {
     /// An `ice` candidate from the device.
-    Ice(String),
+    Ice(IceCandidate),
 }
 
 struct PeerHandle {
@@ -503,9 +503,10 @@ async fn on_peer_event(
             }
         }
         Some(PeerEvent::LocalCandidate(candidate)) => {
-            let _ = session
-                .signal
-                .send((session.from.clone(), signaling::ice_body(&candidate)));
+            let _ = session.signal.send((
+                session.from.clone(),
+                signaling::ice_body(&IceCandidate::bare(candidate)),
+            ));
         }
         Some(PeerEvent::Channel(bytes)) => {
             if let Ok(text) = String::from_utf8(bytes) {

@@ -8,8 +8,8 @@ use crate::db::Database;
 use crate::remote::devices::RemoteDevices;
 use crate::remote::hostkey::{verify_p1363, HostKey};
 use crate::remote::signaling::{
-    answer_body, answer_message, connect_fail, offer_message, verify_offer, Refusal,
-    MAX_CLOCK_SKEW_SECS,
+    answer_body, answer_message, connect_fail, ice_body, ice_candidate, offer_message,
+    verify_offer, IceCandidate, Refusal, MAX_CLOCK_SKEW_SECS,
 };
 
 const VECTOR_TS: i64 = 1_793_100_000;
@@ -226,4 +226,119 @@ fn refusal_reasons_are_the_contract_words() {
     );
     assert_eq!(connect_fail(Refusal::Busy)["reason"], "busy");
     assert_eq!(connect_fail(Refusal::Busy)["t"], "connect_fail");
+}
+
+// The trickle ICE contract vectors, quoted verbatim on both sides (host and
+// web): the object form (`RTCIceCandidateInit`) is canonical, a legacy bare
+// string still reads, and anything else is ignored.
+
+/// The candidate-attribute string every vector below carries.
+const VECTOR_CANDIDATE: &str = "candidate:1 1 UDP 1694498815 203.0.113.7 5000 typ host";
+
+/// V1 `{"t":"ice","candidate":{"candidate":"C","sdpMid":"0","sdpMLineIndex":0}}`
+/// parses with the candidate and both mids.
+#[test]
+fn ice_object_full_keeps_the_candidate_and_both_mids() {
+    let body = json!({
+        "t": "ice",
+        "candidate": {
+            "candidate": VECTOR_CANDIDATE,
+            "sdpMid": "0",
+            "sdpMLineIndex": 0,
+        },
+    });
+    let parsed = ice_candidate(&body).expect("V1 parses");
+    assert_eq!(parsed.candidate, VECTOR_CANDIDATE);
+    assert_eq!(parsed.sdp_mid.as_deref(), Some("0"));
+    assert_eq!(parsed.sdp_mline_index, Some(0));
+}
+
+/// V2 `{"t":"ice","candidate":{"candidate":"C"}}` parses with no mids.
+#[test]
+fn ice_object_minimal_parses_with_no_mids() {
+    let body = json!({
+        "t": "ice",
+        "candidate": {"candidate": VECTOR_CANDIDATE},
+    });
+    let parsed = ice_candidate(&body).expect("V2 parses");
+    assert_eq!(parsed.candidate, VECTOR_CANDIDATE);
+    assert_eq!(parsed.sdp_mid, None);
+    assert_eq!(parsed.sdp_mline_index, None);
+}
+
+/// V3 `{"t":"ice","candidate":"C"}` parses as a legacy bare string.
+#[test]
+fn ice_bare_string_parses_with_no_mids() {
+    let body = json!({"t": "ice", "candidate": VECTOR_CANDIDATE});
+    let parsed = ice_candidate(&body).expect("V3 parses");
+    assert_eq!(parsed.candidate, VECTOR_CANDIDATE);
+    assert_eq!(parsed.sdp_mid, None);
+    assert_eq!(parsed.sdp_mline_index, None);
+}
+
+/// V4 `{"t":"ice"}` carries no candidate and is ignored.
+#[test]
+fn ice_missing_candidate_is_ignored() {
+    assert_eq!(ice_candidate(&json!({"t": "ice"})), None);
+}
+
+/// V5 `{"t":"ice","candidate":null}` carries no candidate and is ignored.
+#[test]
+fn ice_null_candidate_is_ignored() {
+    assert_eq!(
+        ice_candidate(&json!({"t": "ice", "candidate": serde_json::Value::Null})),
+        None
+    );
+}
+
+/// The host emits the object form: a full candidate keeps all three keys, a
+/// bare one emits the minimal object with no mid keys at all.
+#[test]
+fn ice_body_emits_the_object_form() {
+    let full = IceCandidate {
+        candidate: VECTOR_CANDIDATE.to_string(),
+        sdp_mid: Some("0".to_string()),
+        sdp_mline_index: Some(0),
+    };
+    let body = ice_body(&full);
+    assert_eq!(body["t"], "ice");
+    assert_eq!(body["candidate"]["candidate"], VECTOR_CANDIDATE);
+    assert_eq!(body["candidate"]["sdpMid"], "0");
+    assert_eq!(body["candidate"]["sdpMLineIndex"], 0);
+    let bare = ice_body(&IceCandidate::bare(VECTOR_CANDIDATE.to_string()));
+    assert_eq!(bare["t"], "ice");
+    assert_eq!(bare["candidate"]["candidate"], VECTOR_CANDIDATE);
+    assert!(
+        bare["candidate"].get("sdpMid").is_none(),
+        "a bare candidate emits no sdpMid: {bare}"
+    );
+    assert!(
+        bare["candidate"].get("sdpMLineIndex").is_none(),
+        "a bare candidate emits no sdpMLineIndex: {bare}"
+    );
+}
+
+/// A browser-shaped candidate crosses the whole trickle path: parsed from the
+/// V1 body, it reaches a live peer connection through `add_remote_candidate`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trickle_round_trip_reaches_the_peer_connection() {
+    let (offer_sdp, _device) =
+        crate::remote::peer::Peer::offer(Vec::new(), crate::remote::peer::CHANNEL_LABEL)
+            .await
+            .expect("the device offer");
+    let (_answer_sdp, host) = crate::remote::peer::Peer::answer_offer(Vec::new(), &offer_sdp)
+        .await
+        .expect("the host answer");
+    let body = json!({
+        "t": "ice",
+        "candidate": {
+            "candidate": VECTOR_CANDIDATE,
+            "sdpMid": "0",
+            "sdpMLineIndex": 0,
+        },
+    });
+    let parsed = ice_candidate(&body).expect("V1 parses");
+    host.add_remote_candidate(&parsed)
+        .await
+        .expect("the browser-shaped candidate reaches the peer");
 }

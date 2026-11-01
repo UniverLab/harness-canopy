@@ -615,7 +615,11 @@ async fn ice_and_bye_are_routed_by_the_relay_connection() {
     assert_eq!(runtime.route(&ice, now, "d:7", &signal), None);
     match inbox.try_recv() {
         Ok(crate::remote::connection::Control::Ice(candidate)) => {
-            assert!(candidate.contains("candidate:1"), "candidate: {candidate}");
+            assert!(
+                candidate.candidate.contains("candidate:1"),
+                "candidate: {}",
+                candidate.candidate
+            );
         }
         other => panic!("the ice body must reach the peer: {other:?}"),
     }
@@ -626,6 +630,50 @@ async fn ice_and_bye_are_routed_by_the_relay_connection() {
         None
     );
     assert!(token.is_cancelled(), "bye must close the peer");
+}
+
+/// An object-form `ice` body routes with its mids intact: the browser's V1
+/// `RTCIceCandidateInit` reaches the peer as parsed, never as a bare string.
+#[tokio::test]
+async fn ice_object_form_routes_with_its_mids() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = test_db();
+    let mut runtime = RelayRuntime::new(
+        HostKey::load_or_create(dir.path()).expect("host key"),
+        db,
+        "octocat".to_string(),
+        crate::remote::pairing::PairingState::new(dir.path()),
+        ConnectionRegistry::default(),
+    );
+    let peers = crate::remote::connection::DevicePeers::default();
+    let token = Arc::new(tokio_util::sync::CancellationToken::new());
+    let (control, mut inbox) = tokio::sync::mpsc::unbounded_channel();
+    assert!(peers.register("bfcba2b742a807bb", "d:7", Arc::clone(&token), control));
+    runtime.peers = peers;
+    let (signal, _signal_rx) = tokio::sync::mpsc::unbounded_channel();
+    let now = chrono::Utc::now().timestamp();
+
+    let ice = json!({
+        "t": "ice",
+        "candidate": {
+            "candidate": "candidate:1 1 UDP 1694498815 203.0.113.7 5000 typ host",
+            "sdpMid": "0",
+            "sdpMLineIndex": 0,
+        },
+    });
+    assert_eq!(runtime.route(&ice, now, "d:7", &signal), None);
+    match inbox.try_recv() {
+        Ok(crate::remote::connection::Control::Ice(candidate)) => {
+            assert_eq!(
+                candidate.candidate,
+                "candidate:1 1 UDP 1694498815 203.0.113.7 5000 typ host"
+            );
+            assert_eq!(candidate.sdp_mid.as_deref(), Some("0"));
+            assert_eq!(candidate.sdp_mline_index, Some(0));
+        }
+        other => panic!("the ice body must reach the peer: {other:?}"),
+    }
+    assert!(!token.is_cancelled(), "ice must not close the peer");
 }
 
 /// A `bye` body `device_id` is never honored: only the sender's own peer

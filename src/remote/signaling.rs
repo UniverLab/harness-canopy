@@ -168,14 +168,72 @@ pub fn answer_body(host: &HostKey, device_id: &str, offer_sig_b64: &str, sdp: &s
     json!({"t": "answer", "sdp": sdp, "sig": encode_b64(&sig)})
 }
 
-/// `ice{candidate}`: one trickled local candidate.
-pub fn ice_body(candidate: &str) -> Value {
-    json!({"t": "ice", "candidate": candidate})
+/// One trickled ICE candidate: the object form (`RTCIceCandidateInit`) is
+/// canonical, and a legacy bare string reads as a candidate with no mids.
+/// Own struct, not `RTCIceCandidateInit`: `peer` owns the `webrtc` boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IceCandidate {
+    /// The candidate-attribute string.
+    pub candidate: String,
+    /// The `sdpMid` of the "m=" section, when the sender named one.
+    pub sdp_mid: Option<String>,
+    /// The `sdpMLineIndex`, when the sender named one.
+    pub sdp_mline_index: Option<u16>,
 }
 
-/// The candidate string of an inbound `ice` body, if it carries one.
-pub fn ice_candidate(body: &Value) -> Option<&str> {
-    body.get("candidate").and_then(Value::as_str)
+impl IceCandidate {
+    /// A candidate with no mids, from a legacy bare string or a local gather.
+    pub fn bare(candidate: String) -> Self {
+        Self {
+            candidate,
+            sdp_mid: None,
+            sdp_mline_index: None,
+        }
+    }
+}
+
+/// `ice{candidate}`: one trickled local candidate, in the object form. The
+/// `sdpMid`/`sdpMLineIndex` keys are present only when known; host local
+/// candidates carry no mids, so they emit the minimal object.
+pub fn ice_body(candidate: &IceCandidate) -> Value {
+    let mut inner = json!({"candidate": candidate.candidate});
+    if let Some(mid) = &candidate.sdp_mid {
+        inner["sdpMid"] = json!(mid);
+    }
+    if let Some(index) = candidate.sdp_mline_index {
+        inner["sdpMLineIndex"] = json!(index);
+    }
+    json!({"t": "ice", "candidate": inner})
+}
+
+/// The candidate of an inbound `ice` body: the object form
+/// `{candidate, sdpMid, sdpMLineIndex}` or a legacy bare string. A missing,
+/// null or otherwise shaped `candidate` is `None`, never a panic.
+pub fn ice_candidate(body: &Value) -> Option<IceCandidate> {
+    match body.get("candidate")? {
+        Value::String(candidate) => Some(IceCandidate::bare(candidate.clone())),
+        Value::Object(fields) => object_candidate(fields),
+        _ => None,
+    }
+}
+
+/// The object-form arm of [`ice_candidate`]: the inner `candidate` string is
+/// required, the mids are each `None` unless they spell the right type.
+fn object_candidate(fields: &serde_json::Map<String, Value>) -> Option<IceCandidate> {
+    let candidate = fields.get("candidate")?.as_str()?.to_string();
+    let sdp_mid = fields
+        .get("sdpMid")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let sdp_mline_index = fields
+        .get("sdpMLineIndex")
+        .and_then(Value::as_u64)
+        .and_then(|index| u16::try_from(index).ok());
+    Some(IceCandidate {
+        candidate,
+        sdp_mid,
+        sdp_mline_index,
+    })
 }
 
 fn encode_b64(bytes: &[u8]) -> String {
