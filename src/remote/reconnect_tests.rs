@@ -244,12 +244,26 @@ async fn silent_upgrade(ws: WebSocketUpgrade) -> impl IntoResponse {
     })
 }
 
-/// A healthy relay: every Ping gets its Pong.
+/// A healthy relay: every Ping gets its Pong, and the relay Pings back every
+/// 300 ms so the host's own idle check (2 s in these tests) never trips
+/// between its 20 s Pings.
 async fn healthy_upgrade(ws: WebSocketUpgrade) -> impl IntoResponse {
     ws.on_upgrade(|mut socket: WebSocket| async move {
-        while let Some(Ok(message)) = socket.recv().await {
-            if let AxumMessage::Ping(payload) = message {
-                let _ = socket.send(AxumMessage::Pong(payload)).await;
+        let mut pings = tokio::time::interval(Duration::from_millis(300));
+        loop {
+            tokio::select! {
+                message = socket.recv() => match message {
+                    Some(Ok(AxumMessage::Ping(payload))) => {
+                        let _ = socket.send(AxumMessage::Pong(payload)).await;
+                    }
+                    Some(Ok(_)) => {}
+                    _ => break,
+                },
+                _ = pings.tick() => {
+                    if socket.send(AxumMessage::Ping(Vec::new().into())).await.is_err() {
+                        break;
+                    }
+                }
             }
         }
     })

@@ -17,6 +17,8 @@ use anyhow::{bail, Context as _, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::application::ports::StateRepository as _;
+use crate::db::Database;
 use crate::domain::canopy_config::CanopyConfig;
 
 /// Default GitHub endpoints for the device flow; every URL is injectable
@@ -91,6 +93,10 @@ pub struct RemoteStatus {
     pub enabled: bool,
     /// The configured relay URL.
     pub relay_url: String,
+    /// The last relay error the daemon recorded, if any.
+    pub last_error: Option<String>,
+    /// RFC 3339 instant of the last successful reconnect, if any.
+    pub last_reconnect: Option<String>,
 }
 
 /// Build the status payload from config plus the stored identity (if any).
@@ -98,13 +104,24 @@ pub struct RemoteStatus {
 pub fn build_remote_status(
     config: &CanopyConfig,
     identity: Option<&GitHubIdentity>,
+    db: Option<&Database>,
 ) -> RemoteStatus {
     RemoteStatus {
         signed_in: identity.is_some(),
         login: identity.map(|identity| identity.login.clone()),
         enabled: config.remote.enabled,
         relay_url: config.remote.relay_url.clone(),
+        last_error: state_value(db, super::relay::REMOTE_ERROR_KEY),
+        last_reconnect: state_value(db, super::relay::REMOTE_RECONNECT_KEY),
     }
+}
+
+/// One `daemon_state` value, `None` when the database is closed, the key is
+/// missing, or the daemon stored an empty string.
+fn state_value(db: Option<&Database>, key: &str) -> Option<String> {
+    let value = db?.get_state(key).ok().flatten()?;
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 /// Path of the stored identity: `<data_dir>/remote/github.json`.

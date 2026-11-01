@@ -464,10 +464,10 @@ fn live_connections_survive_a_reconnect() {
 }
 
 #[test]
-fn backoff_starts_at_one_second_and_caps_at_sixty() {
+fn backoff_starts_at_one_second_and_caps_at_thirty() {
     for attempt in 0..8 {
         let delay = backoff_delay(attempt);
-        let base = (1u64 << attempt.min(6)).min(60) as f64;
+        let base = (1u64 << attempt.min(6)).min(30) as f64;
         let millis = delay.as_millis() as f64;
         assert!(
             millis >= base * 800.0 && millis <= base * 1200.0,
@@ -944,4 +944,199 @@ async fn a_held_open_socket_reports_connected_while_it_serves() {
         "the panel must read connected while the socket is actually serving"
     );
     running.abort();
+}
+
+/// Poll `check` every 100 ms until it holds, panicking with `what` once
+/// `within` has passed.
+async fn wait_until(within: Duration, what: &str, mut check: impl FnMut() -> bool) {
+    let until = tokio::time::Instant::now() + within;
+    while !check() {
+        assert!(
+            tokio::time::Instant::now() < until,
+            "timed out waiting for {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// One `daemon_state` value as text, empty when absent.
+fn state(db: &Database, key: &str) -> String {
+    crate::application::ports::StateRepository::get_state(db, key)
+        .expect("state")
+        .unwrap_or_default()
+}
+
+/// A relay that counts connections and then goes silent: no reads, no Pongs,
+/// no Close — the shape of a dead link the host must notice by itself.
+#[derive(Clone)]
+struct SilentCountingRelay {
+    connections: Arc<AtomicUsize>,
+}
+
+async fn silent_counting_upgrade(
+    State(state): State<SilentCountingRelay>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket: WebSocket| async move {
+        state.connections.fetch_add(1, Ordering::SeqCst);
+        let _held = socket;
+        tokio::time::sleep(Duration::from_secs(300)).await;
+    })
+}
+
+/// The FR3 kill-the-socket test: the relay accepts, then drops every packet
+/// (never reads, never Pongs). The host must notice inside a minute, redial,
+/// and leave the drop and the reconnect instant on `remote status`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_killed_relay_socket_reconnects_within_the_minute_and_status_shows_it() {
+    use crate::remote::live::RemoteLive;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = test_db();
+    let counter = Arc::new(AtomicUsize::new(0));
+    let app = Router::new()
+        .route("/ws/host", get(silent_counting_upgrade))
+        .with_state(SilentCountingRelay {
+            connections: Arc::clone(&counter),
+        });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let mut config = CanopyConfig::default();
+    config.remote.enabled = true;
+    config.remote.relay_url = format!("http://{addr}");
+    config.save_for_tests(dir.path()).expect("config");
+    crate::remote::auth::save_identity(
+        dir.path(),
+        &crate::remote::auth::GitHubIdentity {
+            token: "gho_killed".to_string(),
+            login: "octocat".to_string(),
+            id: 1,
+        },
+    )
+    .expect("identity");
+    let live = Arc::new(RemoteLive::new());
+    let running = tokio::spawn(supervise(
+        dir.path().to_path_buf(),
+        db.clone(),
+        test_sessions(&db),
+        Arc::clone(&live),
+    ));
+
+    wait_until(Duration::from_secs(10), "the first connection", || {
+        counter.load(Ordering::SeqCst) >= 1
+    })
+    .await;
+
+    // The relay is silent from here on: only the host's own Ping + idle
+    // timeout can bring the socket back, and the whole cycle must fit in a
+    // minute.
+    wait_until(
+        Duration::from_secs(60),
+        "a reconnect within the minute",
+        || counter.load(Ordering::SeqCst) >= 2,
+    )
+    .await;
+    wait_until(Duration::from_secs(5), "the recorded reconnect", || {
+        !state(&db, REMOTE_RECONNECT_KEY).is_empty()
+    })
+    .await;
+    running.abort();
+
+    let error = state(&db, REMOTE_ERROR_KEY);
+    assert!(
+        error.contains("idle"),
+        "status must surface the dead-socket drop, got {error:?}"
+    );
+    let reconnect = state(&db, REMOTE_RECONNECT_KEY);
+    assert!(
+        !reconnect.is_empty(),
+        "status must surface the reconnect instant"
+    );
+}
+
+/// A relay that counts connections and holds each one open, answering
+/// nothing beyond the WebSocket handshake.
+#[derive(Clone)]
+struct CountingHoldOpen {
+    connections: Arc<AtomicUsize>,
+}
+
+async fn counting_hold_open_upgrade(
+    State(state): State<CountingHoldOpen>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |mut socket: WebSocket| async move {
+        state.connections.fetch_add(1, Ordering::SeqCst);
+        while socket.recv().await.is_some() {}
+    })
+}
+
+/// `canopy remote off` stays quiet: the served socket ends on its next tick,
+/// the supervisor reports `off`, and no reconnect storm follows.
+#[tokio::test]
+async fn disabled_stays_quiet_without_a_reconnect_storm() {
+    use crate::remote::live::{RelayPhase, RemoteLive};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = test_db();
+    let counter = Arc::new(AtomicUsize::new(0));
+    let app = Router::new()
+        .route("/ws/host", get(counting_hold_open_upgrade))
+        .with_state(CountingHoldOpen {
+            connections: Arc::clone(&counter),
+        });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let mut config = CanopyConfig::default();
+    config.remote.enabled = true;
+    config.remote.relay_url = format!("http://{addr}");
+    config.save_for_tests(dir.path()).expect("config");
+    crate::remote::auth::save_identity(
+        dir.path(),
+        &crate::remote::auth::GitHubIdentity {
+            token: "gho_quiet".to_string(),
+            login: "octocat".to_string(),
+            id: 1,
+        },
+    )
+    .expect("identity");
+    let live = Arc::new(RemoteLive::new());
+    let running = tokio::spawn(supervise(
+        dir.path().to_path_buf(),
+        db.clone(),
+        test_sessions(&db),
+        Arc::clone(&live),
+    ));
+    wait_until(Duration::from_secs(10), "the first connection", || {
+        counter.load(Ordering::SeqCst) >= 1
+    })
+    .await;
+
+    // `canopy remote off` while the socket serves: the serve loop returns on
+    // its next tick and the supervisor waits instead of dialling again.
+    config.remote.enabled = false;
+    config.save_for_tests(dir.path()).expect("config off");
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    running.abort();
+
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "a disabled remote must not redial"
+    );
+    assert_eq!(
+        live.phase(),
+        RelayPhase::Off,
+        "a disabled remote reports off, never a reconnect loop"
+    );
 }

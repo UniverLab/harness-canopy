@@ -2,8 +2,9 @@
 //!
 //! Frames are JSON envelopes; the [`super::relay::RelayRuntime`] answers
 //! them. A half-open socket reads nothing forever, so the loop Pings every
-//! second and declares the socket dead past the idle timeout, letting the
-//! supervisor reconnect it without the relay toggle dance.
+//! [`RELAY_PING_INTERVAL`] and declares the socket dead past the idle
+//! timeout, letting the supervisor reconnect it without the relay toggle
+//! dance.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -19,7 +20,12 @@ use crate::domain::canopy_config::CanopyConfig;
 
 /// Seconds without any inbound frame before the socket is declared dead and
 /// the supervisor reconnects it.
-const RELAY_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+pub const RELAY_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// How often the serve loop sends a protocol Ping. Kept well under
+/// [`RELAY_IDLE_TIMEOUT`] so a live relay answers long before the socket is
+/// declared dead, and a dead one is noticed inside a minute.
+pub const RELAY_PING_INTERVAL: Duration = Duration::from_secs(20);
 
 /// Serve one connected socket until it closes, fails, or `remote.enabled`
 /// is switched off (`canopy remote off` takes effect on the next tick).
@@ -46,6 +52,7 @@ pub async fn serve_socket_with_idle_timeout(
     // A half-open socket reads nothing forever; the Ping below plus this
     // clock notice it without the relay toggle dance.
     let mut last_inbound = Instant::now();
+    let mut last_ping = Instant::now();
     loop {
         tokio::select! {
             message = socket.next() => {
@@ -70,11 +77,16 @@ pub async fn serve_socket_with_idle_timeout(
                     bail!("relay socket idle past its timeout");
                 }
                 // End to end through proxies, where a TCP keepalive would
-                // only prove the next hop is alive.
-                socket
-                    .send(Message::Ping(Vec::new().into()))
-                    .await
-                    .context("relay ping failed")?;
+                // only prove the next hop is alive. One Ping every
+                // `RELAY_PING_INTERVAL`; the tick itself stays at one
+                // second so `remote off` and the idle check react quickly.
+                if last_ping.elapsed() >= RELAY_PING_INTERVAL {
+                    last_ping = Instant::now();
+                    socket
+                        .send(Message::Ping(Vec::new().into()))
+                        .await
+                        .context("relay ping failed")?;
+                }
             }
         }
     }
@@ -136,4 +148,28 @@ async fn send_body(socket: &mut WsStream, to: &str, body: &Value) -> Result<bool
         .send(Message::Text(outbound.to_string().into()))
         .await
         .is_ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::remote::relay::backoff_delay;
+
+    #[test]
+    fn the_ping_fires_well_before_the_idle_timeout() {
+        assert_eq!(RELAY_PING_INTERVAL, Duration::from_secs(20));
+        assert_eq!(RELAY_IDLE_TIMEOUT, Duration::from_secs(45));
+        assert!(
+            RELAY_PING_INTERVAL < RELAY_IDLE_TIMEOUT,
+            "a Ping must reach the relay before the socket is declared dead"
+        );
+    }
+
+    #[test]
+    fn a_dead_socket_is_redialled_within_the_minute() {
+        // Worst case: the drop lands just after a Ping, so the idle timeout
+        // runs to its full 45 s, then the floored backoff adds at most 1.2 s.
+        let worst = RELAY_IDLE_TIMEOUT + backoff_delay(0);
+        assert!(worst <= Duration::from_secs(60), "{worst:?}");
+    }
 }

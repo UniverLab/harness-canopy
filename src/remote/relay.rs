@@ -4,14 +4,14 @@
 //! keeps a socket to `<relay_url>/ws/host` with the GitHub bearer token and
 //! this host's id and label. Frames are JSON envelopes: relay → host
 //! `{from: "d:<conn>", body}` and host → relay `{to: "d:<conn>", body}`.
-//! Reconnects back off from one second to one minute with ±20% jitter; an
-//! HTTP 401 stops and records `github token rejected: run canopy remote
+//! Reconnects back off from one second to thirty seconds with ±20% jitter;
+//! an HTTP 401 stops and records `github token rejected: run canopy remote
 //! login` instead of retrying.
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use serde_json::{json, Value};
@@ -43,8 +43,10 @@ pub const REMOTE_REVOKE_KEY: &str = "remote_revoke";
 pub const REMOTE_DISCONNECT_KEY: &str = "remote_disconnect";
 /// `daemon_state` key holding guest logins whose trust narrowed or ended.
 pub const REMOTE_TRUST_REVOKE_KEY: &str = "remote_trust_revoke";
+/// `daemon_state` key holding the instant of the last successful reconnect.
+pub const REMOTE_RECONNECT_KEY: &str = "remote_reconnect";
 /// Longest reconnect delay.
-pub const MAX_BACKOFF: Duration = Duration::from_secs(60);
+pub const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
 /// A connected relay socket.
 pub type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -96,7 +98,7 @@ pub fn websocket_url(relay_url: &str) -> String {
     }
 }
 
-/// Reconnect delay for `attempt` (0-based): 1 s doubling to 60 s, ±20%.
+/// Reconnect delay for `attempt` (0-based): 1 s doubling to 30 s, ±20%.
 pub fn backoff_delay(attempt: u32) -> Duration {
     let exponent = attempt.min(6);
     let base = (1u64 << exponent).min(MAX_BACKOFF.as_secs());
@@ -448,6 +450,12 @@ pub fn record_token_rejected(db: &Database) {
     tracing::error!("{message}");
 }
 
+/// Record the instant of a successful reconnect, so `remote status` can show
+/// it without reading the daemon log.
+pub fn record_reconnect(db: &Database) {
+    let _ = db.set_state(REMOTE_RECONNECT_KEY, &chrono::Utc::now().to_rfc3339());
+}
+
 /// Append a revoked device id for the daemon to pick up.
 pub fn queue_revocation(db: &Database, device_id: &str) {
     queue_device_id(db, REMOTE_REVOKE_KEY, device_id);
@@ -585,22 +593,37 @@ async fn connect_and_serve(
     headers: &HostHeaders,
     runtime: Arc<RelayRuntime>,
     token: String,
-    attempt: u32,
+    attempt: &mut u32,
     data_dir: &Path,
     live: &RemoteLive,
 ) -> After {
     match connect_ws(ws_url, headers).await {
         Ok(socket) => {
             live.set_phase(RelayPhase::Connected);
-            if let Err(error) = serve_socket(socket, runtime, data_dir.to_path_buf()).await {
-                tracing::warn!("remote: relay connection ended: {error}");
+            record_reconnect(&runtime.db);
+            let started = Instant::now();
+            let rec = Arc::clone(&runtime);
+            match serve_socket(socket, runtime, data_dir.to_path_buf()).await {
+                Ok(()) => After::Served,
+                Err(error) => {
+                    // Surface the drop on `remote status` instead of leaving
+                    // it only in the daemon log.
+                    let _ = rec.db.set_state(REMOTE_ERROR_KEY, &format!("{error:#}"));
+                    tracing::warn!("remote: relay connection ended: {error:#}");
+                    // A socket that served a while was healthy: the drop is
+                    // news, not a flapping relay, so redial from the floor.
+                    if started.elapsed() >= crate::remote::relay_socket::RELAY_IDLE_TIMEOUT {
+                        *attempt = 0;
+                    }
+                    After::Retry(backoff_delay(*attempt))
+                }
             }
-            After::Served
         }
         Err(ConnectError::Unauthorized) => After::Rejected(token),
         Err(ConnectError::Transient(reason)) => {
+            let _ = runtime.db.set_state(REMOTE_ERROR_KEY, &reason);
             tracing::warn!("remote: relay connection failed: {reason}");
-            After::Retry(backoff_delay(attempt))
+            After::Retry(backoff_delay(*attempt))
         }
     }
 }
@@ -678,9 +701,16 @@ pub async fn supervise(
                 token,
             } => {
                 live.set_phase(RelayPhase::Connecting);
-                let after =
-                    connect_and_serve(&ws_url, &headers, runtime, token, attempt, &data_dir, &live)
-                        .await;
+                let after = connect_and_serve(
+                    &ws_url,
+                    &headers,
+                    runtime,
+                    token,
+                    &mut attempt,
+                    &data_dir,
+                    &live,
+                )
+                .await;
                 live.set_phase(after_phase(&after));
                 match after {
                     After::Served => {

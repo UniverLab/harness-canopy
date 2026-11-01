@@ -178,7 +178,7 @@ fn status_json_reports_signed_in_login_enabled_and_relay_url() {
         },
         ..CanopyConfig::default()
     };
-    let status = build_remote_status(&config, Some(&test_identity()));
+    let status = build_remote_status(&config, Some(&test_identity()), None);
     let json = serde_json::to_value(&status).unwrap();
     assert_eq!(
         json,
@@ -187,15 +187,62 @@ fn status_json_reports_signed_in_login_enabled_and_relay_url() {
             "login": "alice",
             "enabled": true,
             "relay_url": "https://remote.univerlab.org",
+            "last_error": null,
+            "last_reconnect": null,
         })
     );
     assert!(!serde_json::to_string(&status)
         .unwrap()
         .contains("gho_test_secret"));
 
-    let signed_out = build_remote_status(&CanopyConfig::default(), None);
+    let signed_out = build_remote_status(&CanopyConfig::default(), None, None);
     assert!(!signed_out.signed_in);
     assert_eq!(signed_out.login, None);
+}
+
+#[test]
+fn status_surfaces_last_error_and_reconnect() {
+    use crate::application::ports::StateRepository as _;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = Database::new(&dir.path().join("status.db")).unwrap();
+    let config = CanopyConfig::default();
+
+    // A fresh database has recorded neither, so both read as absent.
+    let fresh = build_remote_status(&config, None, Some(&db));
+    assert_eq!(fresh.last_error, None);
+    assert_eq!(fresh.last_reconnect, None);
+
+    db.set_state(
+        crate::remote::relay::REMOTE_ERROR_KEY,
+        "relay socket idle past its timeout",
+    )
+    .unwrap();
+    db.set_state(
+        crate::remote::relay::REMOTE_RECONNECT_KEY,
+        "2026-10-31T12:00:00+00:00",
+    )
+    .unwrap();
+    let seen = build_remote_status(&config, None, Some(&db));
+    assert_eq!(
+        seen.last_error.as_deref(),
+        Some("relay socket idle past its timeout")
+    );
+    assert_eq!(
+        seen.last_reconnect.as_deref(),
+        Some("2026-10-31T12:00:00+00:00")
+    );
+
+    // A cleared error reads as absent, and no database reads as absent too.
+    db.set_state(crate::remote::relay::REMOTE_ERROR_KEY, "")
+        .unwrap();
+    assert_eq!(
+        build_remote_status(&config, None, Some(&db)).last_error,
+        None
+    );
+    let closed = build_remote_status(&config, None, None);
+    assert_eq!(closed.last_error, None);
+    assert_eq!(closed.last_reconnect, None);
 }
 
 #[test]

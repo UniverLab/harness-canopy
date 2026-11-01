@@ -261,7 +261,7 @@ WebSocket — the CLI never writes the shelf itself. `file_id` is the
 |---|---|
 | `canopy remote login` | Sign in to GitHub with the OAuth device flow (identity only, no scopes) |
 | `canopy remote logout` | Delete the stored GitHub identity |
-| `canopy remote status [--json]` | Show the sign-in state, whether remote is enabled, and the relay URL; `--json` prints `{signed_in, login, enabled, relay_url}` |
+| `canopy remote status [--json]` | Show the sign-in state, whether remote is enabled, the relay URL, and the last relay error and reconnect time; `--json` prints `{signed_in, login, enabled, relay_url, last_error, last_reconnect}` (`null` when unrecorded) |
 | `canopy remote on` / `off` | Turn the relay connection on or off (`[remote] enabled`); the daemon picks the change up without a restart |
 | `canopy remote pair` | Create a one-time code, print it with its `<relay_url>/pair#<code>` link and expiry, and draw the link as a terminal QR code |
 | `canopy remote devices [--json]` | List paired browsers (`id`, `label`, `paired_at`, `last_seen`) |
@@ -328,8 +328,12 @@ over their own key.
 
 With `remote on` and a stored identity, the daemon keeps one WebSocket to
 `<relay_url>/ws/host`, carrying the GitHub token and this host's id and
-label, and answers the pairing frames the relay forwards to it. A dropped
-socket is retried after one second, doubling to one minute, with jitter.
+label, and answers the pairing frames the relay forwards to it. The host
+sends a protocol Ping every 20 seconds and declares the socket dead when
+nothing comes back — no Pong, no frame — for 45 seconds, so a dead relay
+link is noticed within a minute instead of leaving the relay listing the
+host as online. A dropped socket is retried after one second, doubling to
+thirty seconds, with jitter.
 `canopy remote off` closes the socket and `on` reconnects within a second
 — neither needs a daemon restart. If the relay answers HTTP 401, the
 daemon stops retrying that token and logs `github token rejected: run
@@ -346,7 +350,9 @@ GitHub as <login>.` It stores `{token, login, id}` in
 `~/.canopy/remote/github.json` (mode 0600, directory 0700); the token never
 appears in logs, errors, or status output. `logout` deletes that file and
 succeeds when it is already gone. `status` prints `login: <login>` (or
-`not signed in`), `enabled: …` and `relay_url: …`.
+`not signed in`), `enabled: …`, `relay_url: …`, and — once the daemon has
+recorded them — `last_reconnect: <RFC 3339>` and `last_error: <message>`,
+so a dropped relay link is visible without reading the daemon log.
 
 ### A paired browser's connection
 

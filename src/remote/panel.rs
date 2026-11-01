@@ -93,7 +93,7 @@ pub fn relay_text(phase: RelayPhase) -> &'static str {
 pub fn status_view(data_dir: &Path, db: &Database, live: &RemoteLive) -> Result<RemoteView> {
     let config = crate::domain::canopy_config::CanopyConfig::load(data_dir);
     let identity = super::auth::load_identity(data_dir);
-    let status = super::auth::build_remote_status(&config, identity.as_ref());
+    let status = super::auth::build_remote_status(&config, identity.as_ref(), Some(db));
     let live_ids = live.live_devices();
     let rows = super::devices::RemoteDevices::new(db.clone()).list()?;
     let devices = rows
