@@ -111,29 +111,7 @@ fn create_system_dashboard_lines(
     max_lines: usize,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
-    create_system_dashboard_lines_with_hint(
-        system_info,
-        system_info.cpu_temp_hint(),
-        temperature_unit,
-        max_lines,
-        theme,
-    )
-}
-
-/// Inner builder taking an explicit hint so tests can pin the hint row
-/// without depending on the host platform.
-fn create_system_dashboard_lines_with_hint(
-    system_info: &SystemInfo,
-    cpu_temp_hint: Option<&str>,
-    temperature_unit: TemperatureUnit,
-    max_lines: usize,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
     let mut lines = vec![cpu_line(system_info, temperature_unit, theme)];
-
-    if let Some(hint) = cpu_temp_hint_line(cpu_temp_hint, theme) {
-        lines.push(hint);
-    }
 
     if let Some(gpu) = gpu_line(system_info, temperature_unit, theme) {
         lines.push(gpu);
@@ -190,17 +168,6 @@ fn cpu_line(
         ));
     }
     Line::from(cpu_spans)
-}
-
-/// Hint row naming the CPU-temperature fix, shown only when the snapshot
-/// carries a hint (no reading on a Windows/WSL host).
-fn cpu_temp_hint_line(hint: Option<&str>, theme: &Theme) -> Option<Line<'static>> {
-    hint.map(|text| {
-        Line::from(vec![Span::styled(
-            text.to_string(),
-            Style::default().fg(theme.dim_text),
-        )])
-    })
 }
 
 /// `gpu:` row, or `None` when there is no GPU data worth showing. The power
@@ -547,12 +514,11 @@ mod tests {
             rendered.len(),
             "height count must equal the rows actually rendered"
         );
-        // The hint row exists only where a fix can be named (Windows/WSL
-        // without a reading), so the base count is platform-dependent.
-        let expected = if info.cpu_temp_hint().is_some() { 4 } else { 3 };
+        // The CPU-temp hint row is gone (it moved to `canopy doctor`),
+        // so the base count is exactly the three always-present rows.
         assert_eq!(
-            count, expected,
-            "no gpu/pwr/swap → only cpu/mem/load rows plus a platform hint, got {count}"
+            count, 3,
+            "no gpu/pwr/swap → only cpu/mem/load rows, got {count}"
         );
         assert!(
             !rendered.iter().any(|l| l.to_string().starts_with("pwr:")),
@@ -671,66 +637,30 @@ mod tests {
     }
 
     #[test]
-    fn cpu_temp_hint_line_shows_given_hint() {
-        let line = cpu_temp_hint_line(
-            Some("run LibreHardwareMonitor (WMI on) to expose CPU temperature"),
-            &Theme::classic(),
-        )
-        .expect("hint row should render");
-        let text = line.to_string();
-        assert!(text.contains("LibreHardwareMonitor"), "got: {text}");
-    }
-
-    #[test]
-    fn cpu_temp_hint_line_hides_without_hint() {
-        assert!(cpu_temp_hint_line(None, &Theme::classic()).is_none());
-    }
-
-    #[test]
-    fn dashboard_shows_hint_row_when_hint_present() {
-        let info = SystemInfo::default();
-        let lines = create_system_dashboard_lines_with_hint(
-            &info,
-            Some("run LibreHardwareMonitor (WMI on) to expose CPU temperature"),
-            TemperatureUnit::Celsius,
-            usize::MAX,
-            &Theme::classic(),
-        );
-        assert!(
-            lines
-                .iter()
-                .any(|l| l.to_string().contains("LibreHardwareMonitor")),
-            "hint row must render when a hint is present"
-        );
-        let without = create_system_dashboard_lines_with_hint(
-            &info,
-            None,
-            TemperatureUnit::Celsius,
-            usize::MAX,
-            &Theme::classic(),
-        );
-        assert_eq!(
-            lines.len(),
-            without.len() + 1,
-            "hint row must add exactly one line"
-        );
-    }
-
-    #[test]
-    fn dashboard_hides_hint_row_without_hint() {
-        let info = SystemInfo::default();
-        let lines = create_system_dashboard_lines_with_hint(
-            &info,
-            None,
-            TemperatureUnit::Celsius,
-            usize::MAX,
-            &Theme::classic(),
-        );
-        assert!(
-            !lines
-                .iter()
-                .any(|l| l.to_string().contains("LibreHardwareMonitor")),
-            "hint row must be absent without a hint"
-        );
+    fn dashboard_never_renders_cpu_temp_hint() {
+        // The LibreHardwareMonitor hint moved to `canopy doctor`: the
+        // dashboard must never render it, on any host, with or without a
+        // reading. `default()` carries no reading, so on a Windows/WSL host
+        // the old hint row would have appeared here.
+        for info in [
+            SystemInfo::default(),
+            SystemInfo {
+                cpu_temperature: Some(45.0),
+                ..SystemInfo::default()
+            },
+        ] {
+            let lines = create_system_dashboard_lines(
+                &info,
+                TemperatureUnit::Celsius,
+                usize::MAX,
+                &Theme::classic(),
+            );
+            assert!(
+                !lines
+                    .iter()
+                    .any(|l| l.to_string().contains("LibreHardwareMonitor")),
+                "dashboard must never render the CPU-temp hint"
+            );
+        }
     }
 }

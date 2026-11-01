@@ -1361,3 +1361,20 @@ async fn run_doctor_reports_corrupt_vector_store_without_a_green_tick() {
         "expected the open failure to be surfaced:\n{output}"
     );
 }
+
+/// The CPU-temperature hint is a recommendation, not a failure: a present
+/// hint lands in `issues` verbatim (stdout capture is `#[ignore]`d in this
+/// file, so `issues` is the assertion surface); no hint stays silent.
+/// Hint-as-param keeps this deterministic on any host — the platform ×
+/// temperature matrix stays covered by the `cpu_temp_hint_*` system tests.
+#[test]
+fn report_cpu_temp_hint_recommends_only_when_hint_present() {
+    let sentence = "run LibreHardwareMonitor (WMI on) to expose CPU temperature";
+    let mut issues = Vec::new();
+    report_cpu_temp_hint(Some(sentence), &mut issues);
+    assert_eq!(issues, vec![sentence.to_string()]);
+
+    let mut silent = Vec::new();
+    report_cpu_temp_hint(None, &mut silent);
+    assert!(silent.is_empty(), "no hint → silent, got: {silent:?}");
+}

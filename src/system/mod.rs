@@ -209,9 +209,9 @@ impl SystemInfo {
         self.cpu_temperature
     }
 
-    /// Dashboard hint naming the CPU-temperature fix, if this snapshot needs
-    /// one: only Windows/WSL hosts without a reading get it — elsewhere a
-    /// missing sensor has no such fix to name.
+    /// Hint naming the CPU-temperature fix, if this snapshot needs one:
+    /// only Windows/WSL hosts without a reading get it — elsewhere a
+    /// missing sensor has no such fix to name. Surfaced by `canopy doctor`.
     pub fn cpu_temp_hint(&self) -> Option<&'static str> {
         Self::cpu_temp_hint_for(detect_host_platform(), self.cpu_temperature)
     }
