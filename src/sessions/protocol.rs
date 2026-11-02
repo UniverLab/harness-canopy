@@ -5,9 +5,12 @@
 //! An unknown `t` or a missing field answers `error{code:"bad_request"}`
 //! naming the frame and the field.
 
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::domain::canopy_config::CanopyConfig;
 use crate::domain::prompt_draft::PromptDraft;
 
 pub use super::host_frame::{parse_host_frame, HostFrame};
@@ -457,14 +460,41 @@ fn encode_b64(data: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(data)
 }
 
-/// `hello{proto,host_label,features}`, sent on connect. `features`
+/// Names of the configured CLIs whose binary resolves right now, sorted
+/// ascending. Resolution is the hub's own lookup
+/// ([`crate::domain::cli_strategy::resolve_binary`]) plus an existence
+/// check — absolute paths come back unchecked, so `.exists()` is mandatory.
+pub fn installed_harnesses() -> Vec<String> {
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    harnesses_in(&home.join(".canopy"))
+}
+
+/// [`installed_harnesses`] against an explicit canopy dir, for tests.
+pub(crate) fn harnesses_in(canopy_dir: &Path) -> Vec<String> {
+    let config = CanopyConfig::load(canopy_dir);
+    let mut names: Vec<String> = config
+        .clis
+        .iter()
+        .filter(|c| {
+            crate::domain::cli_strategy::resolve_binary(&c.binary).is_ok_and(|p| p.exists())
+        })
+        .map(|c| c.name.clone())
+        .collect();
+    names.sort();
+    names
+}
+
+/// `hello{proto,host_label,features,harnesses}`, sent on connect. `features`
 /// advertises the optional extensions this host speaks — currently just
 /// `shelf` — so a client can tell an older host from a newer one without
-/// probing.
-pub fn hello_frame(host_label: &str) -> String {
+/// probing. `harnesses` lists the installed harness names (see
+/// [`installed_harnesses`]) so the New dialog knows what to offer.
+pub fn hello_frame(host_label: &str, harnesses: &[String]) -> String {
     serde_json::json!({
         "t": "hello", "proto": PROTO_VERSION, "host_label": host_label,
-        "features": ["shelf"],
+        "features": ["shelf"], "harnesses": harnesses,
     })
     .to_string()
 }

@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::sessions::protocol::{error_frame, hello_frame, ERR_REVOKED};
+use crate::sessions::protocol::{error_frame, hello_frame, installed_harnesses, ERR_REVOKED};
 use crate::sessions::ws::SessionsState;
 use crate::sessions::HubEvent;
 
@@ -499,7 +499,10 @@ async fn on_peer_event(
         Some(PeerEvent::Open) => {
             if !*greeted {
                 *greeted = true;
-                let _ = out_tx.send(hello_frame(session.state.hub.host_label()));
+                let _ = out_tx.send(hello_frame(
+                    session.state.hub.host_label(),
+                    &installed_harnesses(),
+                ));
             }
         }
         Some(PeerEvent::LocalCandidate(candidate)) => {

@@ -6,6 +6,7 @@ mod auth;
 mod badframe;
 mod catalog;
 mod graphs;
+mod hello;
 mod resize_kill;
 mod resume;
 mod roundtrip;

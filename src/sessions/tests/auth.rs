@@ -96,6 +96,7 @@ async fn ws_accepts_correct_token_and_sends_hello() {
     assert_eq!(hello["t"], "hello");
     assert_eq!(hello["proto"], 1);
     assert_eq!(hello["host_label"], "test-host");
+    assert!(hello.get("harnesses").is_some());
     server.abort();
 }
 

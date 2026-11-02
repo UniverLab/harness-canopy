@@ -26,10 +26,11 @@ use super::auth::{bearer_token, ensure_token, token_valid};
 use super::catalog::{handle_catalog, handle_compose, handle_prompt_draft};
 use super::graphs::{handle_graph_unwatch, handle_graph_watch, handle_graphs};
 use super::protocol::{
-    error_frame, exited_frame, file_frame, hello_frame, ok_frame, out_frame, parse_client_frame,
-    session_added_frame, session_removed_frame, sessions_frame, shelf_added_frame, shelf_frame,
-    shelf_removed_frame, snapshot_frame, spawned_frame, ClientFrame, SessionItem, ERR_BAD_REQUEST,
-    ERR_DELIVERY_FAILED, ERR_FORBIDDEN, ERR_INTERNAL, ERR_NOT_FOUND, ERR_SPAWN_FAILED,
+    error_frame, exited_frame, file_frame, hello_frame, installed_harnesses, ok_frame, out_frame,
+    parse_client_frame, session_added_frame, session_removed_frame, sessions_frame,
+    shelf_added_frame, shelf_frame, shelf_removed_frame, snapshot_frame, spawned_frame,
+    ClientFrame, SessionItem, ERR_BAD_REQUEST, ERR_DELIVERY_FAILED, ERR_FORBIDDEN, ERR_INTERNAL,
+    ERR_NOT_FOUND, ERR_SPAWN_FAILED,
 };
 use super::shelf::{ShelfStore, READ_CHUNK_BYTES};
 use super::{
@@ -177,7 +178,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<SessionsState>) {
         }
     });
 
-    let _ = out_tx.send(hello_frame(state.hub.host_label()));
+    let _ = out_tx.send(hello_frame(state.hub.host_label(), &installed_harnesses()));
     let mut events = state.hub.subscribe_events();
     let mut attached: Attached = HashMap::new();
     // Per-connection `graph_watch` tasks: dropped (aborted) with the
