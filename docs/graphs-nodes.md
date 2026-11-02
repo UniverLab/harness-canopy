@@ -1,6 +1,6 @@
 ---
 title: Node Documents
-description: Reusable node documents: install, list, add, remove.
+description: "Reusable node documents: install, list, add, remove."
 order: 14
 ---
 
