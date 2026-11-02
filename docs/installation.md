@@ -130,6 +130,8 @@ All state lives under `~/.canopy/`:
 | Terminal history | `~/.canopy/terminals/<name>/history.toml` | TOML |
 | Configuration | `~/.canopy/config.toml` | TOML |
 | Agent logs | `~/.canopy/logs/<id>.log` | Text (5 MB rotation) |
+| TUI log | `~/.canopy/logs/tui.log` | Text (append-only) |
+| TUI panic log | `~/.canopy/logs/tui-panic.log` | Text (append-only) |
 | Daemon log | `~/.canopy/daemon.log` | Text |
 
 Each `[[clis]]` entry in `~/.canopy/config.toml` may also carry the

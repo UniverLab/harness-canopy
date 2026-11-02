@@ -98,13 +98,18 @@ step instead of launching straight away:
   keeps running instead of exiting; the same error is appended to
   `~/.canopy/logs/tui.log`. Fix the cause and reopen the dialog to try
   again.
-- **Daemon version check at startup** — the TUI compares its own version
+
+## Startup checks and diagnostics
+
+- **Daemon version check** — at startup the TUI compares its own version
   with the one the daemon recorded (the same version `canopy daemon status`
-  prints). On a mismatch, or when the daemon's version cannot be read, a
-  blocking notice names both versions: `R` restarts the daemon and
-  re-checks, `Esc` dismisses the notice for this run.
-- **Panic log** — if the TUI itself panics, the terminal is restored and
-  the panic with its backtrace is appended to
+  prints). On a mismatch a blocking notice names both versions; when the
+  daemon's version cannot be read at all the notice says so and names the
+  TUI's version. `R` restarts the daemon and re-checks, `Esc` dismisses the
+  notice for this run.
+- **Panic log** — if the TUI itself panics, the terminal is restored (raw
+  mode off, alternate screen left, mouse capture and bracketed paste
+  disabled) and the panic, with its backtrace, is appended to
   `~/.canopy/logs/tui-panic.log`.
 
 ## Terminal sessions
