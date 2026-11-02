@@ -27,6 +27,7 @@ pub mod rag_transfer;
 pub mod section_picker;
 pub mod simple_modals;
 pub mod simple_prompt;
+pub mod version_notice;
 
 // Re-export public drawing functions
 pub use context_transfer::draw_context_transfer_modal;
@@ -46,6 +47,7 @@ pub use simple_modals::{
     draw_permanent_delete_graph_confirm, draw_quit_confirm,
 };
 pub use simple_prompt::draw_simple_prompt_dialog;
+pub use version_notice::draw_version_notice_dialog;
 
 // Common imports shared with submodules
 pub(crate) use super::ERROR_COLOR;

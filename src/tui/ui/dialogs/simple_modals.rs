@@ -65,7 +65,13 @@ pub fn draw_graph_reset_confirm(frame: &mut Frame, app: &App, theme: &Theme) {
     );
 }
 
-fn draw_modal_confirm(frame: &mut Frame, title: &str, text: &str, theme: &Theme, chrome_bg: Color) {
+pub(crate) fn draw_modal_confirm(
+    frame: &mut Frame,
+    title: &str,
+    text: &str,
+    theme: &Theme,
+    chrome_bg: Color,
+) {
     let dialog_width = frame.area().width * 40 / 100;
     let inner_width = dialog_width.saturating_sub(2).max(1);
     let chars_per_line = inner_width as usize;

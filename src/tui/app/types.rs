@@ -213,6 +213,8 @@ pub struct App {
     pub(crate) session_hub: super::session_hub::SessionHubState,
     /// Notice about the hub connection (e.g. protocol mismatch), if any.
     pub(crate) hub_notice: Option<String>,
+    /// Blocking notice when the daemon's version disagrees with this TUI's.
+    pub(crate) version_notice: Option<super::version_check::VersionNotice>,
     /// Streams of sessions closed but still inside their shadow-summary
     /// linger, kept so quitting within that window can still send the
     /// `kill` the linger thread would have sent — that thread dies with

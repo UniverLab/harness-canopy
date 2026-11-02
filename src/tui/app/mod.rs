@@ -29,6 +29,7 @@ mod sidebar_nav;
 mod slow_fingerprint;
 mod sync;
 pub(crate) mod system_monitor;
+pub(crate) mod version_check;
 
 use anyhow::Result;
 use chrono::Utc;

@@ -462,11 +462,15 @@ fn draw_footer_playground(
     } else {
         format!(" v{} ", app.daemon_version)
     };
-    let update_notice = app
-        .update_available
-        .as_deref()
-        .map(|tag| format!(" canopy {tag} available — run canopy update"))
-        .unwrap_or_default();
+    // A hub notice (a failed launch, a dropped hub) preempts the update
+    // notice here too: an error must stay visible on every face.
+    let notice = app.hub_notice.as_deref().map(|notice| format!(" {notice}"));
+    let update_notice = notice.unwrap_or_else(|| {
+        app.update_available
+            .as_deref()
+            .map(|tag| format!(" canopy {tag} available — run canopy update"))
+            .unwrap_or_default()
+    });
 
     let hints_line = Line::from(spans);
     frame.render_widget(Paragraph::new(hints_line), area);
@@ -1015,6 +1019,27 @@ mod tests {
         assert!(
             text.contains("search"),
             "Agent playground footer should show 'search': {text}"
+        );
+    }
+
+    #[test]
+    fn footer_playground_shows_the_hub_notice_first() {
+        let mut app = make_app();
+        app.focus = Focus::Agent;
+        app.playground_active = true;
+        app.hub_notice = Some("Could not open session: hub down".to_string());
+        app.update_available = Some("v3.0.1".to_string());
+        let theme = Theme::classic();
+        let text = render_footer_to_text(120, 1, |frame, area| {
+            draw_footer(frame, area, &app, &theme);
+        });
+        assert!(
+            text.contains("Could not open session: hub down"),
+            "playground footer must show the error notice: {text}"
+        );
+        assert!(
+            !text.contains("run canopy update"),
+            "the error notice preempts the update notice: {text}"
         );
     }
 

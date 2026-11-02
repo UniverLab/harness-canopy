@@ -87,7 +87,19 @@ fn tick_duration(app: &App) -> Duration {
 
 fn drain_pending_events(app: &mut App) -> Result<()> {
     loop {
-        dispatch_event(app, event::read()?)?;
+        match event::read() {
+            Ok(next) => match dispatch_event(app, next) {
+                Ok(()) => {}
+                Err(e) => match route_error(ErrorSource::Handler) {
+                    ErrorRoute::Continue => report_handler_error(app, "Action failed", &e),
+                    ErrorRoute::Exit => return Err(e),
+                },
+            },
+            Err(e) => match route_error(ErrorSource::Read) {
+                ErrorRoute::Exit => return Err(e.into()),
+                ErrorRoute::Continue => {}
+            },
+        }
         if !event::poll(Duration::from_millis(0))? {
             return Ok(());
         }
@@ -162,8 +174,11 @@ use knowledge_viewer::handle_knowledge_viewer_key;
 mod crews_keys;
 mod graph_editor;
 mod graph_form;
+mod handler_errors;
 mod hub;
+mod version_notice;
 
+use handler_errors::{report_handler_error, route_error, ErrorRoute, ErrorSource};
 use mouse::handle_mouse;
 use scroll::{selected_terminal_like, with_terminal_like_agent, with_terminal_like_agent_mut};
 
@@ -185,6 +200,10 @@ use scroll::{
 };
 
 pub fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
+    // The version notice is blocking: nothing else gets the key while it is up.
+    if app.version_notice.is_some() {
+        return version_notice::handle_version_notice_key(app, code);
+    }
     // CT30: while the panel is focused on the Crews face (or one of its
     // dialogs is open) the key belongs to the face first; it reports
     // whether it consumed the key so global keys still work otherwise.
@@ -476,3 +495,7 @@ mod firefly_click_tests;
 // ── Shift+←/→ steps the sidebar strip without entering the tab's panel ──
 #[cfg(test)]
 mod shift_sidebar_step_tests;
+
+// ── Handler errors notify and continue; only read errors exit ───────────
+#[cfg(test)]
+mod handler_error_tests;

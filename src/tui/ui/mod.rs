@@ -249,6 +249,10 @@ fn draw_modal_dialogs(frame: &mut Frame, app: &mut App, theme: &Theme) {
     if app.split_picker_open {
         dialogs::draw_split_picker(frame, app, theme);
     }
+
+    if app.version_notice.is_some() {
+        dialogs::draw_version_notice_dialog(frame, app, theme);
+    }
 }
 
 /// The suggestion picker and the terminal search bar.

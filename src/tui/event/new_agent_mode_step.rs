@@ -11,6 +11,7 @@ use crate::tui::app::dialog::new_agent::{DialogStep, NewAgentDialog, NewTaskMode
 use crate::tui::app::session_resume::SessionResumePicker;
 use crate::tui::app::types::App;
 
+use super::handler_errors::report_handler_error;
 use super::new_agent_dialog::{
     confirm_session_resume_picker, handle_session_picker_key, handle_session_resume_picker_key,
 };
@@ -26,7 +27,12 @@ pub(crate) fn handle_mode_step_key(app: &mut App, code: KeyCode) -> Result<()> {
     };
 
     if launch {
-        let _ = app.launch_new_agent();
+        if let Err(e) = app.launch_new_agent() {
+            report_handler_error(app, "Could not open session", &e);
+            // The failed launch consumed the dialog; without this the focus
+            // would point at a dialog that is gone.
+            app.close_new_agent_dialog();
+        }
     }
     Ok(())
 }

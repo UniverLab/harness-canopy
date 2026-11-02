@@ -92,6 +92,20 @@ step instead of launching straight away:
   footer shows `canopy daemon speaks session protocol <n>; restart the
   daemon (canopy daemon restart)` and nothing attaches until the restarted
   daemon matches.
+- **Failed launches stay in the TUI** — when opening a session fails (the
+  daemon is down or restarting, the hub is unreachable, the mission write
+  fails), the footer shows `Could not open session: <cause>` and the TUI
+  keeps running instead of exiting; the same error is appended to
+  `~/.canopy/logs/tui.log`. Fix the cause and reopen the dialog to try
+  again.
+- **Daemon version check at startup** — the TUI compares its own version
+  with the one the daemon recorded (the same version `canopy daemon status`
+  prints). On a mismatch, or when the daemon's version cannot be read, a
+  blocking notice names both versions: `R` restarts the daemon and
+  re-checks, `Esc` dismisses the notice for this run.
+- **Panic log** — if the TUI itself panics, the terminal is restored and
+  the panic with its backtrace is appended to
+  `~/.canopy/logs/tui-panic.log`.
 
 ## Terminal sessions
 

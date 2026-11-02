@@ -13,7 +13,9 @@ pub(crate) mod context_transfer;
 mod event;
 mod gamification;
 pub mod keymap_reference;
+mod logging;
 pub(crate) mod mcp_client;
+mod panic_hook;
 pub(crate) mod prompt_templates;
 pub(crate) mod selection;
 pub(crate) mod terminal_history;
@@ -58,6 +60,7 @@ use event::run_event_graph;
 
 /// Entry point for `canopy tui`.
 pub fn run_tui() -> Result<()> {
+    panic_hook::install_panic_hook();
     crate::domain::notification::register_aumid();
     crate::domain::notification::clear_stale_notifications();
     let data_dir = crate::ensure_data_dir()?;
@@ -85,6 +88,7 @@ pub fn run_tui() -> Result<()> {
     let home = dirs::home_dir().unwrap_or_default();
     let canopy_config = crate::domain::canopy_config::CanopyConfig::load(&home.join(".canopy"));
     let mut app = App::new(Arc::clone(&db), &data_dir, &canopy_config)?;
+    app.version_notice = crate::tui::app::version_check::check_daemon_version(&db);
 
     // The hub owns every session now: closing the TUI only closes the
     // WebSocket (see `App::cleanup`), so install the SIGHUP handler here —
