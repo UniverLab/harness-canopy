@@ -21,6 +21,7 @@ pub mod notes;
 mod queue;
 mod reconcile;
 mod runs;
+pub use runs::GraphSpecQueueState;
 mod spec_codes;
 mod specs;
 mod telemetry;

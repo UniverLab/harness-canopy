@@ -374,6 +374,25 @@ impl Database {
         Ok(Some(GraphSpecDetails { spec, nodes, edges }))
     }
 
+    /// Count standalone specs matching the [`Self::list_specs`] filters, for
+    /// the preview cache: replaces `list_specs(...).len()`, which loads every
+    /// description.
+    pub fn count_specs(&self, workdir: Option<&str>, pending_only: bool) -> Result<usize> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM graph_specs
+              WHERE (?1 IS NULL OR workdir = ?1)
+                AND (?2 = 0 OR status = 'pending')
+                AND graph_id IS NULL",
+            params![workdir, pending_only],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as usize)
+    }
+
     /// Standalone specs, i.e. the backlog: specs not (yet) assigned to any
     /// graph, optionally filtered by their `workdir` tag and/or status.
     /// `unassigned_only` additionally filters to `graph_id IS NULL` — set it

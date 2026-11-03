@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use crate::application::ports::{AgentRepository, RunRepository, StateRepository};
 
 use super::types::{AgentEntry, App};
-use super::utils::{is_local_port_open, is_process_running, relative_time, tail_lines};
+use super::utils::{is_process_running, relative_time, tail_lines};
 
 impl App {
     pub(super) fn refresh_daemon_status(&mut self) {
@@ -13,21 +13,26 @@ impl App {
             .ok()
             .and_then(|s| s.trim().parse().ok());
         let daemon_running_by_pid = self.daemon_pid.map(is_process_running).unwrap_or(false);
-        self.daemon_version = self
-            .db
-            .get_state("version")
-            .ok()
-            .flatten()
-            .unwrap_or_default();
-        let daemon_port = self
-            .db
-            .get_state("port")
-            .ok()
-            .flatten()
-            .and_then(|v| v.parse::<u16>().ok())
-            .unwrap_or(7755);
-        let daemon_running_by_port = is_local_port_open(daemon_port);
-        self.daemon_running = daemon_running_by_pid || daemon_running_by_port;
+        if self.snapshot_worker.is_none() {
+            self.daemon_version = self
+                .db
+                .get_state("version")
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            self.daemon_port = self
+                .db
+                .get_state("port")
+                .ok()
+                .flatten()
+                .and_then(|v| v.parse::<u16>().ok())
+                .unwrap_or(7755);
+        }
+        // Liveness comes from the live hub connection — a local TCP probe
+        // every second stalls the tick and tells us nothing the stream state
+        // doesn't. Only while the hub is disconnected do we fall back to the
+        // pid file, so a dead daemon still reads dead.
+        self.daemon_running = self.session_hub.is_live() || daemon_running_by_pid;
     }
 
     pub(super) fn refresh_agents(&mut self) -> Result<()> {
@@ -72,13 +77,7 @@ impl App {
     pub(super) fn refresh_active_runs(&mut self) -> Result<()> {
         let prev_ids = std::mem::take(&mut self.prev_active_run_ids);
 
-        self.active_runs.clear();
-        for agent in &self.agents {
-            let id = agent.id(self);
-            if let Ok(Some(run)) = self.db.get_active_run(id) {
-                self.active_runs.insert(id.to_string(), run);
-            }
-        }
+        self.active_runs = self.db.list_active_runs()?;
 
         // Detect background task completions: was active last tick, gone now.
         //
@@ -127,6 +126,22 @@ impl App {
     }
 
     pub(super) fn refresh_log(&mut self) {
+        // Skip the copy entirely while the log pane is hidden: nothing draws
+        // `log_content` until it becomes visible again, and the next visible
+        // tick re-resolves from scratch (the `log_seq` override below).
+        if !self.log_panel_visible() {
+            return;
+        }
+        // Live PTY sessions: only copy when the stream advanced since the
+        // last tick. The byte copy is what used to cost the stall.
+        if let Some(seq) = self.selected_live_output_seq() {
+            if self.log_seq == Some(seq) {
+                return;
+            }
+            self.log_seq = Some(seq);
+        } else {
+            self.log_seq = None;
+        }
         let Some(agent) = self.agents.get(self.selected) else {
             self.log_content = String::new();
             return;
@@ -201,6 +216,26 @@ impl App {
 
                 self.log_content = content;
             }
+        }
+    }
+
+    /// The log pane draws whenever the sidebar is visible and no modal owns
+    /// the frame. Mirrors the draw path (`draw_split_or_log` is reached for
+    /// every body frame); conservative on modals — copying while one is open
+    /// costs nothing visible but keeps `log_content` fresh underneath.
+    fn log_panel_visible(&self) -> bool {
+        self.sidebar_visible
+    }
+
+    /// The selected live session's stream sequence, if the selection is one.
+    fn selected_live_output_seq(&self) -> Option<u64> {
+        let entry = self.agents.get(self.selected)?;
+        match entry {
+            AgentEntry::Interactive(idx) => {
+                self.interactive_agents.get(*idx).map(|a| a.output_seq())
+            }
+            AgentEntry::Terminal(idx) => self.terminal_agents.get(*idx).map(|a| a.output_seq()),
+            _ => None,
         }
     }
 }

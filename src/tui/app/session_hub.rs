@@ -48,6 +48,12 @@ impl Default for SessionHubState {
 }
 
 impl SessionHubState {
+    /// True while the control connection is up. The slow tick reads daemon
+    /// liveness from this instead of probing a TCP port every second.
+    pub(crate) fn is_live(&self) -> bool {
+        self.client.is_some()
+    }
+
     /// Schedule the next reconnect attempt with the current backoff, then
     /// double it up to `MAX_BACKOFF`.
     fn arm_retry(&mut self) {

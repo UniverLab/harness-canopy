@@ -75,8 +75,8 @@ pub(crate) struct SpecQueueEntry {
     pub spec_name: String,
     pub status: GraphSpecStatus,
     /// Why this spec ended up `Failed`/`Skipped`: the admin-recorded reason
-    /// if it was administratively transitioned, else the output tail of its
-    /// last run. `None` for every other status.
+    /// (`completed_via_reason`) when present, else `None` — the queue path
+    /// never loads run outputs. `None` for every other status.
     pub failure_reason: Option<String>,
     /// SPECCODE: engine-generated quick reference (`FIX-7`).
     pub spec_code: Option<String>,
@@ -368,34 +368,39 @@ pub(crate) fn resolve_node_run_info(db: &Database, spec_id: &str, node_id: &str)
 // ── Internal helpers ──────────────────────────────────────────────────
 
 /// Build the ordered spec queue from either the active queue's members or
-/// the graph's bound specs.
+/// the graph's bound specs. One `graph_queue_spec_states` query replaces the
+/// per-member `get_graph_spec` + `list_graph_runs_for_spec` fan-out, and never
+/// reads `graph_runs.output`.
 fn build_spec_queue(db: &Database, lp: &crate::domain::graphs::Graph) -> Vec<SpecQueueEntry> {
-    let spec_ids = if let Some(ref queue_id) = lp.active_run_queue_id {
-        db.list_queue_member_spec_ids(queue_id).unwrap_or_default()
-    } else {
-        db.list_graph_specs(&lp.id)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|s| s.id)
-            .collect()
-    };
-
-    spec_ids
+    db.graph_queue_spec_states(&lp.id, lp.active_run_queue_id.as_deref())
+        .unwrap_or_default()
         .into_iter()
-        .filter_map(|spec_id| {
-            let spec = db.get_graph_spec(&spec_id).ok().flatten()?;
-            let failure_reason = spec_failure_reason(db, &spec);
-            Some(SpecQueueEntry {
-                spec_id: spec.id,
-                spec_name: spec.name,
-                status: spec.status,
-                failure_reason,
-                spec_code: spec.spec_code,
-                spec_type: spec.spec_type,
-                spec_scope: spec.spec_scope,
-            })
-        })
+        .map(queue_state_entry)
         .collect()
+}
+
+/// One [`SpecQueueEntry`] from a [`GraphSpecQueueState`] row: the admin
+/// reason when present, else the latest run's `summary`/`error`/`blocker` is
+/// NOT available (outputs are never loaded on this path), so a failed/skipped
+/// spec without an admin reason carries no reason text.
+fn queue_state_entry(state: crate::db::graphs::GraphSpecQueueState) -> SpecQueueEntry {
+    let failure_reason = if matches!(
+        state.status,
+        GraphSpecStatus::Failed | GraphSpecStatus::Skipped
+    ) {
+        state.completed_via_reason.clone()
+    } else {
+        None
+    };
+    SpecQueueEntry {
+        spec_id: state.spec_id,
+        spec_name: state.spec_name,
+        status: state.status,
+        failure_reason,
+        spec_code: state.spec_code,
+        spec_type: state.spec_type,
+        spec_scope: state.spec_scope,
+    }
 }
 
 /// Completed spec labels for the header's graph events — `[CODE] name`
@@ -414,41 +419,6 @@ pub(crate) fn completed_spec_labels(
             None => e.spec_name,
         })
         .collect()
-}
-
-/// Reason a spec ended up `Failed`/`Skipped`, for the marker strip's detail
-/// view: the admin-recorded reason (`completed_via_reason`, set only for
-/// administrative transitions) if present, else the last run's self-reported
-/// `summary`/`error`/`blocker` — the best available proxy for an
-/// engine-driven failure, which doesn't persist a reason on the spec row
-/// itself. `None` for every other status, and when neither source has
-/// anything.
-fn spec_failure_reason(db: &Database, spec: &crate::domain::graphs::GraphSpec) -> Option<String> {
-    if !matches!(
-        spec.status,
-        GraphSpecStatus::Failed | GraphSpecStatus::Skipped
-    ) {
-        return None;
-    }
-    if let Some(reason) = spec.completed_via_reason.clone() {
-        return Some(reason);
-    }
-    // CT28: the live footer tail is gone; fall back to the run's own
-    // `summary` field (self-reported by the engine) as the best proxy for a
-    // failure reason, then the raw error text.
-    db.list_graph_runs_for_spec(&spec.id)
-        .unwrap_or_default()
-        .iter()
-        .rev()
-        .find_map(|run| {
-            run.output.as_ref().and_then(|o| {
-                o.get("summary")
-                    .or_else(|| o.get("error"))
-                    .or_else(|| o.get("blocker"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            })
-        })
 }
 
 /// Resolve the effective graph: spec's own graph if it has nodes, else the

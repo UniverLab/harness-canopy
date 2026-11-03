@@ -126,6 +126,9 @@ impl App {
         self.normalize_agent_section_focus();
         self.clamp_sidebar_selection();
 
+        // A fresh snapshot swapped in by the last slow tick redraws, even when
+        // nothing on the fast path moved.
+        let snapshot_applied = std::mem::take(&mut self.snapshot_dirty);
         hub_dirty
             || sessions_changed
             || sidebar_changed
@@ -139,6 +142,7 @@ impl App {
             || at_picker_changed
             || ctrl_c_cleared
             || clipboard_changed
+            || snapshot_applied
     }
 
     /// Drain off-thread clipboard-image results into the open builder: a
@@ -174,12 +178,86 @@ impl App {
     /// Throttled work (FR2): every database read, daemon round-trip and port
     /// probe the old per-tick `refresh` performed. Runs at most once per
     /// second, or when [`App::slow_force`] is armed.
+    ///
+    /// With a snapshot worker attached (FR1) no SQL runs here at all: the
+    /// latest finished snapshot is swapped in and the next build kicked.
+    /// Without one (tests, worker fallback) the original synchronous body
+    /// runs instead.
     pub(crate) fn refresh_slow(&mut self) -> Result<()> {
         self.last_slow_refresh = Instant::now();
         self.slow_force = false;
         if self.update_available.is_none() {
             self.update_available = crate::autoupdate::update_available_tag();
         }
+        if self.snapshot_worker.is_some() {
+            return self.refresh_slow_with_snapshot();
+        }
+        self.refresh_slow_sync()
+    }
+
+    /// Worker-mode slow refresh (FR1): swap the latest finished snapshot in,
+    /// kick the next build, then run the UI-only follow-ups. No database call
+    /// on the calling thread. A dead worker retires itself and the tick falls
+    /// back to the synchronous body.
+    fn refresh_slow_with_snapshot(&mut self) -> Result<()> {
+        // Liveness first: the toast fallback in `apply_snapshot` reads it,
+        // and the worker branch below performs no database call.
+        self.refresh_daemon_status();
+        let (snapshot, dead) = self
+            .snapshot_worker
+            .as_mut()
+            .map(super::snapshot::SnapshotWorker::poll)
+            .unwrap_or((None, true));
+        if dead {
+            self.snapshot_worker = None;
+            return self.refresh_slow_sync();
+        }
+        if let Some(snapshot) = snapshot {
+            self.apply_snapshot(snapshot)?;
+        }
+        let request = self.build_snapshot_request();
+        if let Some(worker) = self.snapshot_worker.as_mut() {
+            worker.kick(request);
+        }
+        self.refresh_slow_ui_tail()
+    }
+
+    /// Slow-tick work that needs no database: the log copy, the
+    /// playground/crews/settings/remote polls, and the CT14 selection
+    /// defensives. The worker-mode tail after the snapshot swap.
+    fn refresh_slow_ui_tail(&mut self) -> Result<()> {
+        self.refresh_log();
+        self.poll_playground_search();
+        self.refresh_playground_search()?;
+        // CT30: apply any finished Crews-face fetch/write, then start a new
+        // one if the face is visible and its throttle allows (D5).
+        self.poll_crews_face();
+        self.poll_crews_write();
+        self.refresh_crews_face();
+        // CT31: apply any finished Settings-tab fetch/write, then start a new
+        // one if the hub's Settings tab is visible and the throttle allows.
+        // (The TTL dismissal lives on the fast path so it clears promptly.)
+        // The settings *revision* arrives via the snapshot in this mode.
+        self.poll_settings_rows();
+        self.poll_settings_write();
+        self.refresh_settings_rows();
+        // The Remote tab's cached status, its writes and its device flow;
+        // the status also refreshes off-tab so the sidebar indicator stays
+        // current. (Its TTL dismissal is fast-path too.)
+        self.poll_remote_status();
+        self.poll_remote_write();
+        self.poll_remote_login();
+        self.refresh_remote_status();
+        // Same CT14 defensives as the fast path: slow data can shrink too.
+        self.normalize_automation_kind();
+        self.normalize_agent_section_focus();
+        self.clamp_sidebar_selection();
+        Ok(())
+    }
+
+    /// Synchronous slow refresh: the original body, every read inline. Used
+    /// without a worker (tests, initial load, worker fallback).
+    fn refresh_slow_sync(&mut self) -> Result<()> {
         self.refresh_daemon_status();
         self.refresh_agents()?;
         self.refresh_projects()?;

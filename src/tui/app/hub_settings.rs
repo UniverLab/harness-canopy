@@ -343,6 +343,11 @@ impl App {
     }
 
     pub(crate) fn daemon_port(&self) -> String {
+        // Worker mode: the snapshot feeds `daemon_port` every tick, so the
+        // settings/remote faces never query for it (FR1).
+        if self.snapshot_worker.is_some() {
+            return self.daemon_port.to_string();
+        }
         self.db
             .get_state("port")
             .ok()

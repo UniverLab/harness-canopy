@@ -89,7 +89,28 @@ impl App {
             .max_backlog_updated_at(project.as_ref().map(|(_, path)| path.as_str()))
             .ok()
             .flatten();
+        self.tick_panel_face_with_inputs(graph_running, knowledge_updated, backlog_updated);
+    }
 
+    /// Worker-mode panel tick (FR1): the same switching rule fed by the
+    /// snapshot's MAX values instead of fresh queries. No database call.
+    pub(crate) fn tick_panel_face_from_snapshot(
+        &mut self,
+        knowledge_updated: Option<i64>,
+        backlog_updated: Option<i64>,
+    ) {
+        let graph_running = self.panel_graph_running();
+        self.tick_panel_face_with_inputs(graph_running, knowledge_updated, backlog_updated);
+    }
+
+    /// The switching rule over already-read inputs: baselines, events, dwell,
+    /// pin and interaction. Shared by the sync tick and the worker-mode tick.
+    fn tick_panel_face_with_inputs(
+        &mut self,
+        graph_running: bool,
+        knowledge_updated: Option<i64>,
+        backlog_updated: Option<i64>,
+    ) {
         if !self.panel_baselines_init {
             self.panel_last_knowledge_updated = knowledge_updated;
             self.panel_last_backlog_updated = backlog_updated;

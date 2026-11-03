@@ -1,6 +1,7 @@
 use anyhow::Result;
-use rusqlite::Connection;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+pub(crate) use connection::ConnLock;
 
 /// Bumped whenever a migration changes table/column names in a way that an
 /// older binary's `CREATE TABLE IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS`
@@ -33,12 +34,13 @@ pub(crate) const DB_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::fro
 
 /// Thread-safe `SQLite` database wrapper.
 ///
-/// Uses an `Arc<Mutex<Connection>>` so the handle can be cheaply cloned and
-/// shared across threads (e.g. for background file-scanning tasks) while still
-/// serialising all SQLite writes through a single connection.
+/// Uses a `ConnLock` (an `Arc<Mutex<Connection>>`) so the handle can be
+/// cheaply cloned and shared across threads (e.g. for background file-scanning
+/// tasks) while still serialising all SQLite writes through a single
+/// connection.
 #[derive(Clone)]
 pub struct Database {
-    conn: Arc<Mutex<Connection>>,
+    conn: ConnLock,
     /// Wakes node runs waiting for named mutexes whenever leases or the
     /// waiter queue change (grant path re-checks under the connection lock,
     /// so a notify that lands before the wait is harmless).

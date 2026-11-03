@@ -27,6 +27,8 @@ pub(crate) mod session_hub;
 mod sessions;
 mod sidebar_nav;
 mod slow_fingerprint;
+pub(crate) mod snapshot;
+pub(crate) mod snapshot_build;
 mod sync;
 pub(crate) mod system_monitor;
 pub(crate) mod version_check;
@@ -249,7 +251,7 @@ impl App {
         self.knowledge_filter_mode = false;
     }
 
-    fn normalize_selected_knowledge(&mut self) {
+    pub(crate) fn normalize_selected_knowledge(&mut self) {
         let filtered = self.filtered_knowledge_indices();
         if filtered.is_empty() {
             self.selected_knowledge = 0;
@@ -467,3 +469,5 @@ mod tests;
 // same `test_db()` + `App::new(...)` pattern as the existing sidebar tests.
 #[cfg(test)]
 mod ct14_sidebar_tests;
+#[cfg(test)]
+mod snapshot_tests;

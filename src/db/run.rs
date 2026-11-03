@@ -241,6 +241,41 @@ impl RunRepository for Database {
 }
 
 impl Database {
+    /// Every still-active background run (`pending` or `in_progress`), keyed
+    /// by agent id. One query replaces the per-agent `get_active_run` fan-out
+    /// in `refresh_active_runs`.
+    pub fn list_active_runs(&self) -> Result<std::collections::HashMap<String, RunLog>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+        let mut stmt = conn.prepare(
+            "SELECT id, background_agent_id, status, trigger_type, summary, started_at, finished_at, exit_code, timeout_at, executed_platform, executed_model
+             FROM runs WHERE status IN ('pending', 'in_progress')",
+        )?;
+        let rows = stmt.query_map(params![], |row| {
+            Ok(RunRow {
+                id: row.get(0)?,
+                background_agent_id: row.get(1)?,
+                status_str: row.get(2)?,
+                trigger_str: row.get(3)?,
+                summary: row.get(4)?,
+                started_at_str: row.get(5)?,
+                finished_at_str: row.get(6)?,
+                exit_code: row.get(7)?,
+                timeout_at_str: row.get(8)?,
+                executed_platform: row.get(9)?,
+                executed_model: row.get(10)?,
+            })
+        })?;
+        let mut active = std::collections::HashMap::new();
+        for row_result in rows {
+            let run = row_result?.into_run_log()?;
+            active.insert(run.background_agent_id.clone(), run);
+        }
+        Ok(active)
+    }
+
     fn upsert_run_operational_session(&self, run: &RunLog) -> Result<()> {
         let agent = self.get_agent(&run.background_agent_id)?;
         let working_dir = agent.as_ref().and_then(|item| item.working_dir.clone());

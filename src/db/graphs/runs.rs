@@ -1,6 +1,142 @@
 use super::*;
 
 impl Database {
+    /// Newest run of `graph_id` without its output JSON: the id, node, status
+    /// and a `has_blocker` flag computed in SQL. TUI list paths that only need
+    /// the tail of a graph's history use this instead of
+    /// [`Self::list_graph_runs_for_graph`], which loads every row's output.
+    pub fn last_graph_run_summary(&self, graph_id: &str) -> Result<Option<LastGraphRunSummary>> {
+        let conn = self.conn.lock().map_err(|e| anyhow!("{e}"))?;
+        conn.query_row(
+            "SELECT id, node_id, status, (json_extract(output, '$.blocker') IS NOT NULL)
+             FROM graph_runs WHERE graph_id = ?1
+             ORDER BY started_at DESC, iteration DESC, rowid DESC LIMIT 1",
+            params![graph_id],
+            |row| {
+                Ok(LastGraphRunSummary {
+                    id: row.get(0)?,
+                    node_id: row.get(1)?,
+                    status: GraphRunStatus::from_str(&row.get::<_, String>(2)?),
+                    has_blocker: row.get(3)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Per-spec queue rows for a graph's live queue, with each spec's latest
+    /// run status and timestamp — no descriptions, no run outputs. One query
+    /// replaces the per-member `get_graph_spec` + `list_graph_runs_for_spec`
+    /// fan-out in `build_spec_queue`. `queue_id` selects the queue members;
+    /// when `None` the graph's own bound specs are used instead.
+    pub fn graph_queue_spec_states(
+        &self,
+        graph_id: &str,
+        queue_id: Option<&str>,
+    ) -> Result<Vec<GraphSpecQueueState>> {
+        let conn = self.conn.lock().map_err(|e| anyhow!("{e}"))?;
+        match queue_id {
+            Some(queue_id) => query_queue_member_rows(&conn, queue_id),
+            None => query_bound_spec_rows(&conn, graph_id),
+        }
+    }
+}
+
+/// Newest run of a graph, without its output JSON.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct LastGraphRunSummary {
+    pub id: String,
+    pub node_id: String,
+    pub status: GraphRunStatus,
+    /// True when the newest run's output JSON carries a `blocker` field.
+    pub has_blocker: bool,
+}
+
+/// One spec's queue row plus its latest run state — no descriptions, no
+/// outputs. Carries every field `build_spec_queue` needs for the live view.
+/// (`latest_run_*` is query contract asserted by tests; the live view reads
+/// the spec fields.)
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct GraphSpecQueueState {
+    pub spec_id: String,
+    pub spec_name: String,
+    pub status: GraphSpecStatus,
+    pub latest_run_status: Option<GraphRunStatus>,
+    pub latest_run_started_at: Option<i64>,
+    pub spec_code: Option<String>,
+    pub spec_type: Option<crate::domain::spec_type::SpecType>,
+    pub spec_scope: Option<String>,
+    pub completed_via_reason: Option<String>,
+}
+
+/// Latest-run columns, resolved inside SQLite per spec row: the newest run's
+/// status and start time without its output JSON. Served by the
+/// `graph_runs(spec_id, started_at)` index.
+const LATEST_RUN_COLUMNS: &str = "(SELECT status FROM graph_runs WHERE spec_id = s.id
+             ORDER BY started_at DESC, iteration DESC, rowid DESC LIMIT 1),
+         (SELECT started_at FROM graph_runs WHERE spec_id = s.id
+             ORDER BY started_at DESC, iteration DESC, rowid DESC LIMIT 1)";
+
+fn query_queue_member_rows(
+    conn: &rusqlite::Connection,
+    queue_id: &str,
+) -> Result<Vec<GraphSpecQueueState>> {
+    let sql = format!(
+        "SELECT s.id, s.name, s.status, s.spec_code, s.spec_type, s.spec_scope, s.completed_via_reason,
+         {LATEST_RUN_COLUMNS}
+         FROM graph_specs s JOIN queue_members q ON q.spec_id = s.id
+         WHERE q.queue_id = ?1 ORDER BY q.position ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![queue_id], map_graph_spec_queue_row)?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+fn query_bound_spec_rows(
+    conn: &rusqlite::Connection,
+    graph_id: &str,
+) -> Result<Vec<GraphSpecQueueState>> {
+    let sql = format!(
+        "SELECT s.id, s.name, s.status, s.spec_code, s.spec_type, s.spec_scope, s.completed_via_reason,
+         {LATEST_RUN_COLUMNS}
+         FROM graph_specs s
+         WHERE s.graph_id = ?1 ORDER BY s.position ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![graph_id], map_graph_spec_queue_row)?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+fn map_graph_spec_queue_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GraphSpecQueueState> {
+    let latest_status: Option<String> = row.get(7)?;
+    let latest_started_at: Option<i64> = row.get(8)?;
+    Ok(GraphSpecQueueState {
+        spec_id: row.get(0)?,
+        spec_name: row.get(1)?,
+        status: GraphSpecStatus::from_str(&row.get::<_, String>(2)?),
+        latest_run_status: latest_status.map(|s| GraphRunStatus::from_str(&s)),
+        latest_run_started_at: latest_started_at,
+        spec_code: row.get(3)?,
+        spec_type: row
+            .get::<_, Option<String>>(4)?
+            .and_then(|s| crate::domain::spec_type::SpecType::parse(&s)),
+        spec_scope: row.get(5)?,
+        completed_via_reason: row.get(6)?,
+    })
+}
+
+impl Database {
     pub fn insert_graph_run(&self, run: &GraphNodeRun) -> Result<()> {
         let conn = self
             .conn

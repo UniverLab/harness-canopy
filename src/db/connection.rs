@@ -5,11 +5,67 @@ use std::sync::{Arc, Mutex};
 
 use super::Database;
 
+/// Guard around the SQLite connection: every [`Database`] read or write goes
+/// through [`ConnLock::lock`], so the TUI's once-per-second UI tick can flip a
+/// thread-local flag (see [`guard`]) and any query that would still run on the
+/// UI thread panics in tests instead of silently blocking the frame.
+#[derive(Clone)]
+pub(crate) struct ConnLock {
+    inner: Arc<Mutex<Connection>>,
+}
+
+impl ConnLock {
+    fn new(conn: Connection) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(conn)),
+        }
+    }
+
+    pub(crate) fn lock(
+        &self,
+    ) -> std::result::Result<std::sync::MutexGuard<'_, Connection>, String> {
+        guard::check_ui_tick();
+        self.inner.lock().map_err(|e| format!("Lock poisoned: {e}"))
+    }
+}
+
+/// Panics when the UI tick touches the DB (see [`ConnLock`]).
+pub(crate) mod guard {
+    use std::cell::Cell;
+
+    thread_local! {
+        static UI_TICK: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) fn check_ui_tick() {
+        if UI_TICK.get() {
+            panic!("Database touched on the UI thread during refresh_slow");
+        }
+    }
+
+    /// Run `f` with the UI-tick guard armed: any [`super::ConnLock::lock`]
+    /// inside `f` panics. Test-only: production never arms it. A scope guard
+    /// disarms on unwind too, so a caught guard panic never leaks the armed
+    /// flag into later tests on the same thread.
+    #[cfg(test)]
+    pub(crate) fn with_ui_tick<R>(f: impl FnOnce() -> R) -> R {
+        struct DisarmOnUnwind;
+        impl Drop for DisarmOnUnwind {
+            fn drop(&mut self) {
+                UI_TICK.set(false);
+            }
+        }
+        UI_TICK.set(true);
+        let _guard = DisarmOnUnwind;
+        f()
+    }
+}
+
 impl Database {
     pub fn new(db_path: &PathBuf) -> Result<Self> {
         let conn = Self::open_connection_with_pragmas(db_path)?;
         let db = Database {
-            conn: Arc::new(Mutex::new(conn)),
+            conn: ConnLock::new(conn),
             mutex_notify: Arc::new(tokio::sync::Notify::new()),
         };
         db.init()?;
@@ -87,7 +143,7 @@ impl Database {
         if crate::daemon::process::other_instance_may_be_running(data_dir) {
             let conn = Self::open_connection_with_pragmas(db_path)?;
             return Ok(Database {
-                conn: Arc::new(Mutex::new(conn)),
+                conn: ConnLock::new(conn),
                 mutex_notify: Arc::new(tokio::sync::Notify::new()),
             });
         }

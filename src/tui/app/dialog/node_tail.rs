@@ -125,19 +125,100 @@ impl App {
         }
     }
 
-    /// Refresh the pane from the DB every tick: resolve the run, reset
-    /// scroll/cursor on a genuine transition, then fetch the tail.
+    /// Refresh the pane every tick: resolve the run, reset scroll/cursor on
+    /// a genuine transition, then fetch the tail. With a tail worker (FR6)
+    /// the database resolve runs off-thread and only the finished response
+    /// is applied here; without one it resolves inline as before.
     pub(crate) fn poll_node_tail_dialog(&mut self) {
         // CT28: the pane adds reads to the refresh tick ONLY while it is open.
         // Guard before resolving so a closed pane costs no `list_graph_runs_for_spec`.
         if self.node_tail_dialog.is_none() {
             return;
         }
+        if self.node_tail_worker.is_some() {
+            self.poll_node_tail_dialog_with_worker();
+            return;
+        }
         // Phase 1 (immutable &self): resolve the highlighted node, fetch the
         // full run + tail into owned locals.
         let resolved = self.resolve_for_poll();
-
         // Phase 2 (&mut self): apply to the dialog.
+        self.apply_node_tail_poll_data(resolved);
+    }
+
+    /// Worker-mode poll (FR6): apply the latest finished resolve, then kick
+    /// the next one. No database call on the calling thread. A dead worker
+    /// retires itself and the poll falls back to the inline resolve.
+    fn poll_node_tail_dialog_with_worker(&mut self) {
+        let (response, dead) = self
+            .node_tail_worker
+            .as_mut()
+            .map(super::node_tail_worker::NodeTailWorker::poll)
+            .unwrap_or((None, true));
+        if dead {
+            self.node_tail_worker = None;
+            let resolved = self.resolve_for_poll();
+            self.apply_node_tail_poll_data(resolved);
+            return;
+        }
+        if let Some(response) = response {
+            let resolved = node_tail_response_to_poll_data(response);
+            self.apply_node_tail_poll_data(resolved);
+        }
+        match self.build_node_tail_request() {
+            Some(request) => {
+                if let Some(worker) = self.node_tail_worker.as_mut() {
+                    worker.kick(request);
+                }
+            }
+            // No highlight/state/spec: same clear the inline path applies.
+            None => self.apply_node_tail_poll_data(PollData::None),
+        }
+    }
+
+    /// Live-state inputs for one worker resolve — the same guards
+    /// `resolve_for_poll` applies, without the database calls.
+    fn build_node_tail_request(&self) -> Option<super::node_tail_worker::NodeTailRequest> {
+        let highlighted = self.graph_live_highlighted_node_id()?.to_string();
+        let state = self.graph_live_state.as_ref()?;
+        let spec_id = state.current_spec_id.clone()?;
+        let node_names = state
+            .effective_nodes
+            .iter()
+            .map(|n| (n.id.clone(), n.name.clone()))
+            .collect();
+        let (spec_name, spec_code) = state
+            .spec_queue
+            .iter()
+            .find(|q| q.spec_id == spec_id)
+            .map(|q| (q.spec_name.clone(), q.spec_code.clone()))
+            .unwrap_or_else(|| (spec_id.clone(), None));
+        let ensembles = state
+            .ensembles
+            .iter()
+            .map(|e| super::node_tail_worker::NodeTailEnsemble {
+                join_node_id: e.join_node_id.clone(),
+                member_ids: e.members.iter().map(|m| m.node_id.clone()).collect(),
+            })
+            .collect();
+        let member_cursor = self
+            .node_tail_dialog
+            .as_ref()
+            .map(|d| d.member_cursor)
+            .unwrap_or(0);
+        Some(super::node_tail_worker::NodeTailRequest {
+            spec_id,
+            highlighted,
+            member_cursor,
+            ensembles,
+            node_names,
+            spec_name,
+            spec_code,
+        })
+    }
+
+    /// Phase 2 (&mut self): apply resolved display data to the dialog.
+    fn apply_node_tail_poll_data(&mut self, resolved: PollData) {
         let Some(dialog) = self.node_tail_dialog.as_mut() else {
             return;
         };
@@ -345,6 +426,36 @@ enum PollData {
         spec_code: Option<String>,
     },
     Show(ShowData),
+}
+
+/// Convert a worker resolve into poll data: the worker's owned output has the
+/// same shape as the inline resolve, so both share the apply phase.
+fn node_tail_response_to_poll_data(
+    response: super::node_tail_worker::NodeTailResponse,
+) -> PollData {
+    match response {
+        super::node_tail_worker::NodeTailResponse::NoRun {
+            node_name,
+            spec_name,
+            spec_code,
+        } => PollData::NoRun {
+            node_name,
+            spec_name,
+            spec_code,
+        },
+        super::node_tail_worker::NodeTailResponse::Show(show) => PollData::Show(ShowData {
+            run_id: show.run_id,
+            executed_platform: show.executed_platform,
+            executed_model: show.executed_model,
+            stdout_lines: show.stdout_lines,
+            stderr_lines: show.stderr_lines,
+            status: show.status,
+            started_at: show.started_at,
+            timed_out: show.timed_out,
+            node_name: show.node_name,
+            member_pos: show.member_pos,
+        }),
+    }
 }
 
 /// Apply resolved display data to the dialog: detect transitions, fill fields.

@@ -88,6 +88,15 @@ pub fn run_tui() -> Result<()> {
     let home = dirs::home_dir().unwrap_or_default();
     let canopy_config = crate::domain::canopy_config::CanopyConfig::load(&home.join(".canopy"));
     let mut app = App::new(Arc::clone(&db), &data_dir, &canopy_config)?;
+    // FR1/FR6: the slow-tick snapshot and the node-tail resolver each own a
+    // database connection on their own thread from here on; the initial
+    // `App::new` refresh above ran synchronously without them.
+    app.snapshot_worker = Some(crate::tui::app::snapshot::SnapshotWorker::spawn(
+        &db_path, &data_dir,
+    ));
+    app.node_tail_worker = Some(crate::tui::app::dialog::NodeTailWorker::spawn(
+        &db_path, &data_dir,
+    ));
     app.version_notice = crate::tui::app::version_check::check_daemon_version(&db);
 
     // The hub owns every session now: closing the TUI only closes the

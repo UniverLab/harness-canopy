@@ -1,6 +1,4 @@
 use chrono::{DateTime, Utc};
-use std::net::{SocketAddr, TcpStream};
-use std::time::Duration;
 
 /// `(value, unit)` for a past instant, or `None` for anything under a
 /// minute — the shared rounding rule behind both [`relative_time`] and
@@ -61,11 +59,6 @@ pub fn tail_lines(content: &str, n: usize) -> String {
 
 pub fn is_process_running(pid: u32) -> bool {
     crate::daemon::process::is_process_running(pid)
-}
-
-pub fn is_local_port_open(port: u16) -> bool {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    TcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_ok()
 }
 
 #[cfg(test)]

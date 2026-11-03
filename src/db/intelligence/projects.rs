@@ -194,6 +194,22 @@ impl Database {
         value.get("source").and_then(|s| s.as_str()) == Some("registry")
     }
 
+    /// Count facts and patterns linked to a project, for the preview cache:
+    /// replaces `list_project_knowledge(...).len()`, which loads every body.
+    pub fn count_project_knowledge(&self, project_hash: &str) -> Result<usize> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM intelligence_nodes
+              WHERE project_hash = ?1 AND kind IN ('fact', 'pattern')",
+            rusqlite::params![project_hash],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as usize)
+    }
+
     /// Get facts and patterns linked to a specific project.
     pub fn list_project_knowledge(
         &self,

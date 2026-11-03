@@ -289,8 +289,12 @@ impl App {
     }
 
     /// The daemon port — the only database read the Crews face makes (D4:
-    /// roster/crew/graph data comes exclusively from daemon tools).
+    /// roster/crew/graph data comes exclusively from daemon tools). Worker
+    /// mode reads the snapshot-fed field instead of querying (FR1).
     fn crews_port(&self) -> String {
+        if self.snapshot_worker.is_some() {
+            return self.daemon_port.to_string();
+        }
         self.db
             .get_state("port")
             .ok()

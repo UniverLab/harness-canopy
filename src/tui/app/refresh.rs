@@ -24,6 +24,13 @@ impl App {
         else {
             return;
         };
+        self.apply_settings_revision(revision);
+    }
+
+    /// Apply a settings revision read elsewhere (worker mode: from the
+    /// snapshot). Reloads the config and re-derives the rendered settings.
+    /// No database call — the revision string is the input.
+    pub(crate) fn apply_settings_revision(&mut self, revision: String) {
         if revision == self.settings_seen {
             return;
         }
@@ -177,14 +184,9 @@ impl App {
         for project in &self.projects {
             let pending_backlog = self
                 .db
-                .list_specs(Some(project.path.as_str()), None, true, None)
-                .map(|specs| specs.len())
+                .count_specs(Some(project.path.as_str()), false)
                 .unwrap_or(0);
-            let knowledge_entries = self
-                .db
-                .list_project_knowledge(&project.hash, None, 200)
-                .map(|nodes| nodes.len())
-                .unwrap_or(0);
+            let knowledge_entries = self.db.count_project_knowledge(&project.hash).unwrap_or(0);
             let last_activity = self
                 .db
                 .list_graphs(Some(project.path.as_str()), true)
@@ -288,7 +290,7 @@ impl App {
     /// [`GraphSidebarMeta`]) and blocked status (a `Paused` graph whose latest
     /// run recorded a `graph_report_blocker` description). One
     /// `list_graph_last_run_times` query for every graph's last-run time, plus,
-    /// for paused graphs only, one `list_graph_runs_for_graph` query — bounded
+    /// for paused graphs only, one `last_graph_run_summary` query — bounded
     /// by the (typically small) number of graphs, run on the existing refresh
     /// cadence rather than a dedicated poller.
     ///
@@ -318,10 +320,10 @@ impl App {
             let mut blocked = lp.status == GraphStatus::Paused
                 && self
                     .db
-                    .list_graph_runs_for_graph(&lp.id)
+                    .last_graph_run_summary(&lp.id)
                     .ok()
-                    .and_then(|runs| runs.last().and_then(|run| run.output.clone()))
-                    .is_some_and(|output| output.get("blocker").is_some());
+                    .flatten()
+                    .is_some_and(|summary| summary.has_blocker);
             blocked |= self.db.graph_blocker(&lp.id).ok().flatten().is_some();
             let autorun_label = lp
                 .autorun_at

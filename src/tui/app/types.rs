@@ -239,6 +239,9 @@ pub struct App {
     pub(crate) daemon_running: bool,
     pub(crate) daemon_pid: Option<u32>,
     pub(crate) daemon_version: String,
+    /// Recorded daemon port, from the snapshot in worker mode (the slow tick
+    /// never probes it — liveness comes from the hub connection).
+    pub(crate) daemon_port: u16,
     /// Latest stable release found by the background notice check.
     pub(crate) update_available: Option<String>,
 
@@ -268,6 +271,10 @@ pub struct App {
     pub(crate) project_last_activity: HashMap<String, i64>,
     pub(crate) log_content: String,
     pub(crate) log_scroll: u16,
+    /// Last live-session output sequence `refresh_log` copied. The log copy
+    /// is skipped while the sequence is unchanged; `None` forces the next
+    /// visible tick to re-resolve from scratch.
+    pub(crate) log_seq: Option<u64>,
     pub(crate) running: bool,
     pub(crate) new_agent_dialog: Option<NewAgentDialog>,
     pub(crate) launchpad_dialog: Option<LaunchpadDialog>,
@@ -503,6 +510,9 @@ pub struct App {
     pub(crate) whimsg_graphs: Option<HashMap<String, crate::tui::whimsg::events::GraphSnapshot>>,
     /// Background run ids already announced by the header, so each fires once.
     pub(crate) whimsg_announced_runs: HashSet<String>,
+    /// Per-graph header inputs from the latest snapshot (worker mode), so the
+    /// header's graph events never query the database from the fast tick.
+    pub(crate) graph_whim_cache: HashMap<String, super::snapshot::GraphWhimInfo>,
     pub(crate) context_transfer_modal: Option<crate::tui::context_transfer::ContextTransferModal>,
     pub(crate) rag_transfer_modal: Option<RagTransferModal>,
     pub(crate) context_transfer_config: crate::tui::context_transfer::ContextTransferConfig,
@@ -539,6 +549,16 @@ pub struct App {
     /// A pushed change (hub membership, reconnect) armed an immediate slow
     /// refresh on the next tick, bypassing the one-second cadence.
     pub(crate) slow_force: bool,
+    /// Background snapshot worker (FR1): owns its own database connection and
+    /// builds the slow-tick data off the UI thread. `None` in tests and as a
+    /// fallback when the worker dies, in which case `refresh_slow` reads
+    /// synchronously as before.
+    pub(crate) snapshot_worker: Option<super::snapshot::SnapshotWorker>,
+    /// Set when a fresh snapshot landed this slow tick, so the fast tick
+    /// redraws for it.
+    pub(crate) snapshot_dirty: bool,
+    /// Off-thread node-tail resolver (FR6). `None` resolves inline.
+    pub(crate) node_tail_worker: Option<super::dialog::NodeTailWorker>,
     /// Digests of draw-time database reads, refreshed by [`App::refresh_slow`]
     /// so [`SlowFingerprint`](crate::tui::app::SlowFingerprint) sees them:
     /// the activity panel's log entries for the drawn workdirs,
@@ -707,11 +727,19 @@ pub struct App {
     // Gamification
     pub(crate) mission_manager: crate::tui::gamification::MissionManager,
     pub(crate) mission_pending_events: Vec<crate::tui::gamification::MissionEvent>,
+    /// Unlocks awarded on the UI that the snapshot worker still has to
+    /// persist (worker mode): sent with the next request, confirmed from the
+    /// snapshot's `confirmed_unlocks`.
+    pub(crate) mission_pending_persist: Vec<crate::domain::gamification::MissionId>,
     pub(crate) max_cpu_frequency_seen: Option<u64>,
     /// Whether a CPU temperature reading has ever been observed this session.
     /// Sticky: once seen it stays true, so WSL-style never-present sensors
     /// keep the Nuclear Winter mission marked as not measurable.
     pub(crate) cpu_temperature_seen: bool,
+    /// Cached result of the `has_parallel_graph_run` mission check. The
+    /// mission state is monotonic — once true it stays true — so the
+    /// three-table join runs at most once per TUI run.
+    pub(crate) has_parallel_graph: bool,
     /// Monotonic anchor for accumulating real Canopy uptime (persisted in state).
     pub(crate) uptime_anchor: Option<std::time::Instant>,
 }
