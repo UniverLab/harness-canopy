@@ -217,10 +217,22 @@ fastembed = { version = "5", optional = true, default-features = false, features
 
 [patch.crates-io]
 vt100 = { path = "vendor/vt100" }
+# rtc-turn 0.21.1 deletes a channel binding on any CHANNEL-BIND error, so a
+# stale-nonce retry picks a new number for a peer the server already bound,
+# which RFC 8656 §12 answers with 400 forever; incoming ChannelData on the
+# number the server still holds is then dropped. The vendored copy keeps the
+# number across errors and retries it (see vendor/rtc-turn/CANOPY-PATCH.md).
+# Remove this entry once rtc-turn ships the fix upstream.
+rtc-turn = { path = "vendor/rtc-turn" }
 
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3.8"
+# The TURN channel test runs a fake TURN server speaking the same codec as the
+# patched client (see vendor/rtc-turn/CANOPY-PATCH.md).
+crypto = { package = "rtc-crypto", version = "=0.21.1" }
+stun = { package = "rtc-stun", version = "=0.21.1" }
+rtc-turn = "0.21.1"
 
 [features]
 default = []
