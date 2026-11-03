@@ -1006,8 +1006,14 @@ async fn run_doctor_reports_degraded_state_details() {
     assert!(result.is_ok());
     assert!(output.contains("Legacy config files found"));
     assert!(output.contains("Daemon not running (stale PID: 999999999)"));
-    assert!(output.contains("ghost-cli — not found"));
-    assert!(output.contains("'ghost-cli' binary 'definitely-not-a-real-binary-xyz' not found"));
+    // The ghost harness is uninstalled and referenced nowhere: doctor says
+    // nothing about it — no ✗, no Suggestions entry with a PATH dump.
+    // (Pruning removes it from config on its own; doctor never lists what
+    // is gone.)
+    assert!(
+        !output.contains("ghost-cli"),
+        "a pruned harness must not appear in doctor output:\n{output}"
+    );
     assert!(output.contains("Embeddings model: text-embedding-3-small"));
     assert!(output.contains("OPENAI_API_KEY is NOT set"));
     assert!(output.contains("RAG dir missing:"));

@@ -43,6 +43,7 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
     let data_dir = crate::ensure_data_dir()?;
     let _daemon_lock = acquire_daemon_lock(&data_dir)?;
     let db = Arc::new(Database::new(&database_path(&data_dir))?);
+    crate::setup_module::harness_prune::prune_on_startup(&data_dir, &db);
     if let Err(e) = crate::domain::prompts::seed_builtin_prompt_presets(&data_dir) {
         tracing::warn!("Could not seed builtin prompt presets: {e}");
     }

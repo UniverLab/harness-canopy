@@ -756,6 +756,7 @@ pub mod graph_crew;
 pub mod graph_transfer;
 pub mod graphs;
 pub mod group;
+pub mod harness_refs;
 pub mod health;
 pub mod intelligence;
 pub mod last_prompts;

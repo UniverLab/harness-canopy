@@ -438,7 +438,6 @@ fn apply_registry_refresh(home: &Path, registry: &RegistryRaw) -> Result<Registr
 
     let (changed_fields, kept_fields) =
         merge_existing_cli_entries(&mut config, &registry_by_name, baseline.as_ref());
-    remove_cli_entries_with_missing_binaries(&mut config, &platforms_with_cli);
     add_newly_detected_clis(&mut config, &cli_registry);
 
     // This is the one moment where silence is the failure mode being fixed:
@@ -452,11 +451,26 @@ fn apply_registry_refresh(home: &Path, registry: &RegistryRaw) -> Result<Registr
     let refresh = reconcile_platforms(home, baseline.as_ref(), registry);
     warn_platform_reconciliation(&refresh);
 
-    // Always persist: an empty `clis` here only happens when the registry
-    // confirmed every remaining entry's binary is gone (the retain rule
-    // above never touches a manually-added, registry-unknown entry), so
-    // that's a real state worth writing, not a detection glitch to shield
-    // the config from.
+    let db = Database::new_safe(&database_path(&canopy_dir), &canopy_dir);
+    // Self-healing: drop harnesses whose binary is gone (grace-gated, so a
+    // transient PATH problem never prunes), except ones something still
+    // references. Runs before the config write so a prune is persisted by
+    // the same write. An unopenable database keeps every entry — the refresh
+    // still saves the config and baseline below, and only the refresh-time
+    // record fails afterwards.
+    if let Ok(db) = &db {
+        crate::setup_module::harness_prune::prune_absent(
+            &mut config,
+            db,
+            crate::setup_module::harness_prune::PruneTrigger::DaemonCheck,
+            std::time::SystemTime::now(),
+        );
+    }
+
+    // Always persist: an empty `clis` here only happens when the prune pass
+    // confirmed every remaining entry's harness is gone (referenced entries
+    // are kept, so that's a real state worth writing, not a detection glitch
+    // to shield the config from).
     //
     // CM51: written through the one writer, so a registry refresh can no
     // longer wipe the user's comments out of config.toml.
@@ -468,8 +482,7 @@ fn apply_registry_refresh(home: &Path, registry: &RegistryRaw) -> Result<Registr
     }
     .save(&canopy_dir)?;
 
-    let db = Database::new_safe(&database_path(&canopy_dir), &canopy_dir)?;
-    db.set_state(
+    db?.set_state(
         REGISTRY_LAST_REFRESH_STATE_KEY,
         &chrono::Utc::now().to_rfc3339(),
     )?;
@@ -542,29 +555,6 @@ fn merge_existing_cli_entries(
     }
 
     (changed_fields, kept_fields)
-}
-
-/// Remove CLIs only when the registry explicitly knows the platform AND
-/// the binary is confirmed missing. We deliberately preserve
-/// manually-configured CLIs even if `which` can't find them right now
-/// (e.g. NVM binaries, custom installs) to avoid silently deleting
-/// entries the user set up intentionally.
-fn remove_cli_entries_with_missing_binaries(
-    config: &mut crate::domain::canopy_config::CanopyConfig,
-    platforms_with_cli: &[PlatformWithCli],
-) {
-    let known_names: std::collections::HashSet<String> = platforms_with_cli
-        .iter()
-        .filter_map(|p| p.cli.as_ref().map(|c| c.name.clone()))
-        .collect();
-    config.clis.retain(|c| {
-        // Not in registry at all → keep (manually added)
-        if !known_names.contains(&c.name) {
-            return true;
-        }
-        // In registry → keep only if binary is present
-        c.is_available()
-    });
 }
 
 /// Add newly detected CLIs that aren't already in config.
@@ -1061,7 +1051,8 @@ mod tests {
     }
 
     #[test]
-    fn cli_whose_binary_vanished_is_still_removed() {
+    fn cli_whose_binary_vanished_is_kept_on_first_refresh_then_dropped() {
+        use crate::application::ports::StateRepository;
         let home = TempDir::new().unwrap();
         let canopy_dir = home.path().join(".canopy");
 
@@ -1075,14 +1066,29 @@ mod tests {
 
         // Registry still knows about "ghost" (its marker file is detected),
         // but its binary can never resolve.
-        let registry = registry_of(vec![detected_platform(
-            home.path(),
-            "ghost",
-            serde_json::json!({"binary": "canopy-test-fixture-cli-missing-xyz"}),
-        )]);
+        let registry = || {
+            registry_of(vec![detected_platform(
+                home.path(),
+                "ghost",
+                serde_json::json!({"binary": "canopy-test-fixture-cli-missing-xyz"}),
+            )])
+        };
 
-        apply_registry_refresh(home.path(), &registry).unwrap();
+        // Refresh #1: first sighting — kept, and the sighting is recorded.
+        apply_registry_refresh(home.path(), &registry()).unwrap();
+        let config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
+        assert!(config.get_cli("ghost").is_some());
+        let db = Database::new_safe(&database_path(&canopy_dir), &canopy_dir).unwrap();
+        assert!(db
+            .get_state("harness_absent_since:ghost")
+            .unwrap()
+            .is_some_and(|v| !v.is_empty()));
 
+        // Eleven minutes later: refresh #2 prunes it.
+        let backdated = chrono::Utc::now() - chrono::Duration::minutes(11);
+        db.set_state("harness_absent_since:ghost", &backdated.to_rfc3339())
+            .unwrap();
+        apply_registry_refresh(home.path(), &registry()).unwrap();
         let config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
         assert!(config.get_cli("ghost").is_none());
     }

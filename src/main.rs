@@ -84,7 +84,11 @@ enum Commands {
         yes: bool,
     },
     /// Run a health check diagnosing common issues.
-    Doctor,
+    Doctor {
+        /// Show the searched PATH for missing harnesses.
+        #[arg(long)]
+        verbose: bool,
+    },
     /// Run the MCP server over stdio transport.
     Stdio,
     /// First-run setup wizard to configure agents and directories.
@@ -285,7 +289,13 @@ async fn main() -> Result<()> {
             let code = autoupdate::run_update(check, yes)?;
             std::process::exit(code);
         }
-        Some(Commands::Doctor) => run_doctor().await,
+        Some(Commands::Doctor { verbose }) => {
+            if verbose {
+                crate::daemon::doctor::run_doctor_verbose().await
+            } else {
+                run_doctor().await
+            }
+        }
         Some(Commands::Stdio) => run_stdio_server().await,
         Some(Commands::Serve) => run_http_server(cli.port).await,
         Some(Commands::Setup {

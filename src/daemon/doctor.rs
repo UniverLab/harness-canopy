@@ -19,6 +19,8 @@ use crate::domain::validation::{find_stale_2x_names, StaleNameHit};
 
 mod service_unit;
 use service_unit::*;
+mod harnesses;
+use harnesses::*;
 mod path_copies;
 use path_copies::*;
 mod rag_report;
@@ -175,6 +177,16 @@ fn success_nested(message: impl std::fmt::Display) {
 }
 
 pub(crate) async fn run_doctor() -> Result<()> {
+    run_doctor_inner(false).await
+}
+
+/// Doctor with the `--verbose` flag: the searched PATH is printed for
+/// missing harnesses. Without it, warnings never carry a PATH dump.
+pub(crate) async fn run_doctor_verbose() -> Result<()> {
+    run_doctor_inner(true).await
+}
+
+async fn run_doctor_inner(verbose: bool) -> Result<()> {
     use crate::shared::banner;
 
     banner::print_banner_with_gradient("canopy doctor");
@@ -190,7 +202,20 @@ pub(crate) async fn run_doctor() -> Result<()> {
     report_database(&db_path, &canopy_dir, &mut issues);
 
     let config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
-    report_configuration(&canopy_dir, &config);
+    // Reference labels for harnesses something still names: opened once
+    // here and threaded through both the summary and the resolution
+    // report, so the two can never disagree. No database (or an
+    // unopenable one) means no references — every uninstalled harness is
+    // then silent.
+    let reference_labels = db_path
+        .exists()
+        .then(|| Database::new_safe(&db_path, &canopy_dir).ok())
+        .flatten()
+        .map(|db| reference_labels_by_harness(&db))
+        .unwrap_or_default();
+    let harness_entries = inspect_harnesses(&config, &reference_labels);
+    report_configuration(&canopy_dir, &config, &harness_entries);
+    let mut warned_harnesses = std::collections::HashSet::new();
 
     let daemon = resolve_daemon_facts(&canopy_dir, &db_path);
     report_daemon_status(&daemon, &mut issues);
@@ -232,7 +257,13 @@ pub(crate) async fn run_doctor() -> Result<()> {
 
     report_setup_completion(&config, &mut issues);
     report_cpu_temp_hint(crate::system::SystemInfo::new().cpu_temp_hint());
-    report_cli_resolution(&config, &mut issues);
+    report_cli_resolution(
+        &config,
+        &harness_entries,
+        verbose,
+        &mut warned_harnesses,
+        &mut issues,
+    );
 
     // ── RAG Health ──────────────────────────────────────────────
     // Re-read config.toml here: the RAG checks judge the file as it is now,
@@ -534,19 +565,20 @@ fn stale_names_suggestion(report: &StaleNameReport, total: usize) -> String {
 
 /// Doctor's config.toml section: presence, harness list, legacy fallback.
 ///
-/// declaration: `is_configured()` only checks a persisted marker
-/// (`configured_at.is_some()`) — the claim made here is exactly that
-/// marker's presence, nothing about setup's outcome, so no further
-/// verification applies. A config string existing is not a capability,
-/// so this stays informational (no tick) rather than routing through
-/// `success`.
-fn report_configuration(canopy_dir: &Path, config: &crate::domain::canopy_config::CanopyConfig) {
+/// The harness list shows installed harnesses with their version; an
+/// uninstalled, unreferenced harness never appears (pruning removes it on
+/// its own).
+fn report_configuration(
+    canopy_dir: &Path,
+    config: &crate::domain::canopy_config::CanopyConfig,
+    entries: &[HarnessEntry],
+) {
     if config.is_configured() {
         println!(" \x1b[90m–\x1b[0m Config: config.toml");
-        if config.clis.is_empty() {
+        if entries.is_empty() && config.clis.is_empty() {
             println!(" Harnesses: (none configured)");
         } else {
-            println!(" Harnesses: {}", config.cli_names().join(", "));
+            println!(" {}", installed_summary(entries));
         }
         report_settings_problems(canopy_dir);
         return;

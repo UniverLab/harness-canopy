@@ -49,7 +49,7 @@ Plain `canopy update` exits 2 on the same lookup errors.
 
 | Command | Description |
 |---|---|
-| `canopy setup` | Interactive setup wizard — detects AI CLIs, generates `~/.canopy/config.toml` |
+| `canopy setup` | Interactive setup wizard — detects AI CLIs, generates `~/.canopy/config.toml`. An uninstalled harness (binary no longer on PATH) is dropped from the config on its own; one still referenced by a crew, graph node or scheduled agent is kept and `canopy doctor` warns about it once |
 | `canopy setup --local-registry <path>` | Use a local registry directory (for registry development) |
 | `canopy setup --force-skills` | Overwrite local skill files that diverge from the sync source, even when they were edited locally (default: skip them with a warning) |
 | `canopy mcp` | MCP wizard — sync/add/remove canopy's MCP entry across platforms |
@@ -57,7 +57,8 @@ Plain `canopy update` exits 2 on the same lookup errors.
 | `canopy mcp` → Add | Add a server via pasted README JSON, local stdio command (with args + env), or remote URL (with headers); previews entries, marks `(replaces existing)` overwrites, then asks `Install on N platform(s)?` |
 | `canopy uninstall --dry-run` | Preview removal: stop daemon, remove service unit + `canopy.service.d/` drop-ins, revert platform configs, remove skill symlinks (changes nothing) |
 | `canopy uninstall --keep-shared-servers` | Only remove canopy's own `canopy` server entry; leave shared `fetch`/`filesystem` entries in place |
-| `canopy doctor` | Full health diagnostics |
+| `canopy doctor` | Full health diagnostics (installed harnesses list with versions; an uninstalled harness stays silent unless something still references it) |
+| `canopy doctor --verbose` | Same, plus the searched PATH for missing harnesses (hidden otherwise) |
 
 ## Platform registry
 
@@ -74,7 +75,11 @@ refresh reports it as a local override, so a refresh never overwrites your
 choice. The command needs an existing `~/.canopy/config.toml` — on a machine
 that has not run setup it fails with ``run `canopy setup` first``. The refresh
 time is recorded where the TUI's background refresh records it, so a manual
-refresh also restarts that 24-hour window.
+refresh also restarts that 24-hour window. A harness whose binary is gone is
+pruned from the config on the same terms as setup, except on a grace window:
+the binary must be absent at two checks at least ten minutes apart, so a
+transient PATH problem never drops anything. The daemon runs the same
+grace-gated check on every startup (and reinstalls re-appear on their own).
 
 ## Graph inspection
 
