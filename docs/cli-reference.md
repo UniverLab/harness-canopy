@@ -428,7 +428,7 @@ a browser behind NAT, TURN or a mobile network connects like one on the
 LAN. A body with no candidate — the key missing, `null`, or another
 shape — is logged and ignored, and the connection stays up.
 
-Once the data channel is open, the browser speaks the same protocol v1 as
+Once the data channel is open, the browser speaks the same protocol v2 as
 `/sessions/ws`, with one restriction: `resize`
 is always refused (the browser renders the host's size scaled). Terminal
 sessions are first-class, as on the local socket: they list, attach, and
@@ -479,6 +479,33 @@ the pairing) closes a live connection within a second. A revoked device hears `e
 channel closes, so its app can say the device was removed; answers larger
 than the peer's negotiated frame cap are refused with
 `error{code:"frame_too_large"}` instead of being sent halfway.
+
+Uploads travel the other way, and only for a trusted guest with the
+`upload` grant: `shelf_put_begin{req,id?,name,size,mime?,sha256}` answers
+`shelf_put_ready{req,file_id}`, then `shelf_put_part{file_id,part,data}`
+carries base64 chunks of at most 12 KiB numbered from 0 and the host
+replies `shelf_put_ack{file_id,part}` on every eighth part (the client
+keeps at most eight unacknowledged parts in flight), and
+`shelf_put_end{file_id}` commits it. `id` names the target session; absent
+or empty means the host shelf, which only the owner or a guest with
+every-session trust may write. Every refusal happens at `begin`, before
+any file data: `size` over `[remote] shelf_max_file_mb` (default 20)
+answers `error{code:"too_large"}`, a name with directories or control
+characters, an empty name, or a `sha256` that is not 64 lowercase hex
+characters answers `bad_request`, and a guest without the grant or a
+session outside its grant answers `forbidden`. Parts must arrive in order
+(`bad_request` otherwise) and may not exceed the declared size.
+`shelf_put_end` verifies the SHA-256 over the received bytes and sends no
+success frame at all — the shelf's `shelf_added` event is the completion
+signal; a mismatch answers `error{code:"checksum_mismatch"}` and drops the
+temp. `shelf_put_abort{file_id}` deletes the temp silently, a part or end
+whose grant vanished mid-flight answers `forbidden` and drops the temp,
+and at most three uploads run per device — a fourth `begin` answers
+`error{code:"busy"}`. Uploads are stored with origin `user`, and a live
+target session receives one automatic `📎 the user attached NAME (N.N MB) →
+SHELF_PATH` line. `hello` carries `proto: 2` and
+`features: ["shelf", "shelf_upload"]`; a client offers upload only when
+`shelf_upload` is listed, so an older host without it stays usable.
 
 Graphs ride the same channel, read-only. `graphs{req}` answers
 `graphs{req,graphs}` with the non-archived running, paused and failed
@@ -545,8 +572,12 @@ channel, so a second watch replaces the first:
 
 The `[remote]` table in `~/.canopy/config.toml` carries `enabled` (default
 `false`), `relay_url`, `github_client_id` (the public Client ID of
-UniverLab's "Canopy Remote" OAuth App — no configuration needed), and
-`host_label` (empty means the hostname). Overriding `github_client_id`
+UniverLab's "Canopy Remote" OAuth App — no configuration needed),
+`host_label` (empty means the hostname), and `shelf_max_file_mb` (default
+`20`, clamped to at least 1) — the largest file a remote upload may send
+onto a session shelf; the TUI- and MCP-side `session_send_file` cap stays
+at 20 MiB. The value is read when the daemon starts, so changing it takes
+a restart. Overriding `github_client_id`
 with an empty string makes `login` stop before any request:
 `remote.github_client_id is not set in ~/.canopy/config.toml`.
 
