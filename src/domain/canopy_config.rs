@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+pub use super::animations_mode::AnimationsMode;
 use super::cli_config::CliConfig;
 use super::daemon_config::DaemonConfig;
 pub use super::remote_config::RemoteConfig;
@@ -409,6 +410,8 @@ pub struct TuiConfig {
     pub scroll_step: usize,
     #[serde(default = "default_page_step")]
     pub page_step: usize,
+    #[serde(default = "default_animations")]
+    pub animations: AnimationsMode,
 }
 
 impl Default for TuiConfig {
@@ -421,6 +424,7 @@ impl Default for TuiConfig {
             atmosphere: default_atmosphere(),
             scroll_step: default_scroll_step(),
             page_step: default_page_step(),
+            animations: default_animations(),
         }
     }
 }
@@ -451,6 +455,12 @@ fn default_scroll_step() -> usize {
 
 fn default_page_step() -> usize {
     settings::default_int("tui.page_step") as usize
+}
+
+fn default_animations() -> AnimationsMode {
+    settings::default_string("tui.animations")
+        .parse()
+        .unwrap_or_default()
 }
 
 /// Highest per-file indexing cap a user may configure, in MB. Text/PDF

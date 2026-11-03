@@ -467,7 +467,11 @@ value's apply mode.
 | `tui.atmosphere` | true | false disables fireflies and dandelions. |
 | `tui.scroll_step` | 3 | Terminal scroll step, in lines. |
 | `tui.page_step` | 15 | Terminal page step, in lines. |
+| `tui.animations` | `reduced` | Animation budget: `full` (20 fps), `reduced` (8 fps, pauses on focus loss or 45 s idle), `off` (static frame). |
 
 Both animation toggles off is the master switch: the header spinner, sweep,
 dialog waves and pulse indicators freeze, and an idle TUI performs no
-redraws at all (near-zero CPU when nothing changes).
+redraws at all (near-zero CPU when nothing changes). `tui.animations = "off"`
+freezes them the same way; `"reduced"` (the default) additionally pauses all
+background animation while the terminal reports focus lost or after 45 s
+without key or mouse input, resuming on focus gain or the next input.

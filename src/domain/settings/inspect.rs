@@ -347,6 +347,7 @@ pub fn config_value(config: &CanopyConfig, key: &str) -> Value {
         "tui.atmosphere" => Value::from(config.tui.atmosphere),
         "tui.scroll_step" => Value::from(config.tui.scroll_step as i64),
         "tui.page_step" => Value::from(config.tui.page_step as i64),
+        "tui.animations" => Value::from(config.tui.animations.as_str()),
         "remote.enabled" => Value::from(config.remote.enabled),
         "remote.relay_url" => Value::from(config.remote.relay_url.clone()),
         "remote.github_client_id" => Value::from(config.remote.github_client_id.clone()),

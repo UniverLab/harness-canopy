@@ -644,6 +644,7 @@ it came from. **Apply** says when a change takes effect: `applied` (at once),
 | `tui.atmosphere` | `true` | bool | applied | Fireflies and dandelions |
 | `tui.scroll_step` | 3 | 1–20 | applied | Lines per scroll event |
 | `tui.page_step` | 15 | 5–100 | applied | Lines per page-up/down |
+| `tui.animations` | `reduced` | `full`, `reduced`, `off` | applied | Animation budget: 20 fps, 8 fps with focus/idle pause, or static |
 | `notifications.enabled` | `true` | bool | applied | Desktop notifications |
 | `update.check_enabled` | `true` | bool | applied | Automatic update checks |
 | `update.check_interval_hours` | 24 | 1–720 | applied | Hours between automatic update checks |

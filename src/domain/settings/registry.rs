@@ -457,6 +457,18 @@ pub static REGISTRY: &[SettingDef] = &[
         wizard: false,
     },
     SettingDef {
+        key: "tui.animations",
+        kind: Kind::Enum {
+            options: &["full", "reduced", "off"],
+        },
+        default: DefaultValue::Literal("\"reduced\""),
+        group: Group::TuiAppearance,
+        description:
+            "Background-animation budget: full (20 fps), reduced (8 fps, pauses on focus loss or 45 s idle), or off (static frame).",
+        apply: Apply::Hot,
+        wizard: false,
+    },
+    SettingDef {
         key: "remote.enabled",
         kind: Kind::Bool,
         default: DefaultValue::Literal("false"),
@@ -510,7 +522,7 @@ mod tests {
 
     #[test]
     fn registry_has_one_entry_per_setting_and_they_are_unique() {
-        assert_eq!(REGISTRY.len(), 51);
+        assert_eq!(REGISTRY.len(), 52);
         for def in REGISTRY {
             assert_eq!(find(def.key).map(|d| d.key), Some(def.key));
         }

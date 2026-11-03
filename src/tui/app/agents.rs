@@ -153,8 +153,9 @@ impl App {
     }
 
     pub fn tick_banner_animation(&mut self) {
-        // CM52: `tui.brians_brain = false` keeps the banner static.
-        if self.tui_settings.brians_brain {
+        // CM52: `tui.brians_brain = false` keeps the banner static; the
+        // animations gate freezes it while paused or off (FR2/FR3).
+        if self.tui_settings.brians_brain && crate::tui::ui::animations_enabled(self) {
             if let Some(ref mut brain) = self.home_brain {
                 brain.step();
             }
@@ -196,8 +197,9 @@ impl App {
             self.sidebar_brain = Some(make_brain(rows, cols));
         }
 
-        // CM52: `tui.brians_brain = false` keeps the sidebar brain static too.
-        if self.tui_settings.brians_brain {
+        // CM52: `tui.brians_brain = false` keeps the sidebar brain static too;
+        // the animations gate freezes it while paused or off (FR2/FR3).
+        if self.tui_settings.brians_brain && crate::tui::ui::animations_enabled(self) {
             if let Some(ref mut brain) = self.sidebar_brain {
                 brain.step();
             }

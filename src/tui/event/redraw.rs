@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::Result;
 
 use crate::tui::app::system_monitor::system_settling;
-use crate::tui::app::types::{App, Focus};
+use crate::tui::app::types::{AgentEntry, App, Focus};
 use crate::tui::app::SlowFingerprint;
 use crate::tui::ui::{animations_enabled, atmosphere_active, header_frame_id, header_millis};
 
@@ -97,13 +97,61 @@ pub(crate) fn tick(app: &mut App, state: &mut TickState, input: bool) -> Result<
 
 // ── PTY output ──────────────────────────────────────────────────────
 
-/// True when a hub session is new, gone, or produced output since the last
-/// tick: each session's last applied output sequence is already published on
-/// its agent ([`crate::tui::agent::InteractiveAgent::output_seq`]), so the
-/// loop diffs those instead of adding a wake channel through the
-/// open/attach/reattach paths (FR3: output is still visible within one
-/// frame, since the tick cadence is unchanged).
+/// Ids of the sessions drawn right now: the focused or previewed session
+/// plus both members of the active split (resolved by name, mirroring
+/// `ui::panel`'s session lookup). Output from any other session must not
+/// dirty the frame (FR4) — the sidebar activity pulse still updates through
+/// [`activity_changed`], which diffs its own state.
+fn visible_session_ids(app: &App) -> HashSet<String> {
+    let mut visible = HashSet::new();
+    if matches!(app.focus, Focus::Agent | Focus::Preview) {
+        match app.selected_agent() {
+            Some(AgentEntry::Interactive(idx)) => {
+                if let Some(agent) = app.interactive_agents.get(*idx) {
+                    visible.insert(agent.id.clone());
+                }
+            }
+            Some(AgentEntry::Terminal(idx)) => {
+                if let Some(agent) = app.terminal_agents.get(*idx) {
+                    visible.insert(agent.id.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(split_id) = app.active_split_id.as_deref() {
+        if let Some(group) = app.split_groups.iter().find(|g| g.id == *split_id) {
+            for name in [&group.session_a, &group.session_b] {
+                let id = app
+                    .interactive_agents
+                    .iter()
+                    .find(|agent| &agent.name == name)
+                    .map(|agent| agent.id.clone())
+                    .or_else(|| {
+                        app.terminal_agents
+                            .iter()
+                            .find(|agent| &agent.name == name)
+                            .map(|agent| agent.id.clone())
+                    });
+                if let Some(id) = id {
+                    visible.insert(id);
+                }
+            }
+        }
+    }
+    visible
+}
+
+/// True when a *visible* session produced output since the last tick: each
+/// session's last applied output sequence is already published on its agent
+/// ([`crate::tui::agent::InteractiveAgent::output_seq`]), so the loop diffs
+/// those instead of adding a wake channel through the open/attach/reattach
+/// paths (FR3: output is still visible within one frame, since the tick
+/// cadence is unchanged). The cache still tracks every session, but only a
+/// visible session's new output dirties the frame (FR4); attach and exit
+/// dirty through `refresh_fast`'s session snapshot instead.
 pub(crate) fn pty_seq_changed(app: &App, cache: &mut HashMap<String, u64>) -> bool {
+    let visible = visible_session_ids(app);
     let mut changed = false;
     let mut live = HashSet::new();
     for agent in app
@@ -116,7 +164,9 @@ pub(crate) fn pty_seq_changed(app: &App, cache: &mut HashMap<String, u64>) -> bo
         let same = cache.get(&agent.id).is_some_and(|cached| *cached == seq);
         if !same {
             cache.insert(agent.id.clone(), seq);
-            changed = true;
+            if visible.contains(&agent.id) {
+                changed = true;
+            }
         }
     }
     let gone: Vec<String> = cache
@@ -124,11 +174,8 @@ pub(crate) fn pty_seq_changed(app: &App, cache: &mut HashMap<String, u64>) -> bo
         .filter(|id| !live.contains(id.as_str()))
         .cloned()
         .collect();
-    if !gone.is_empty() {
-        for id in gone {
-            cache.remove(&id);
-        }
-        changed = true;
+    for id in gone {
+        cache.remove(&id);
     }
     changed
 }
@@ -176,7 +223,7 @@ fn brain_visible(app: &App) -> bool {
     if app.focus == Focus::Home && animations_enabled(app) {
         return true;
     }
-    if !app.tui_settings.brians_brain {
+    if !app.tui_settings.brians_brain || !animations_enabled(app) {
         return false;
     }
     app.sidebar_visible && app.sidebar_brain.is_some() && app.sidebar_brain_rect.is_some()
@@ -277,8 +324,9 @@ mod redraw_tests {
         }
     }
 
-    /// FR3: PTY output dirties the tick (visible within one frame), while a
-    /// quiet session stays clean.
+    /// FR3/FR4: PTY output from the focused session dirties the tick
+    /// (visible within one frame), while output from an off-screen session
+    /// does not — and a quiet session stays clean either way.
     #[test]
     fn pty_seq_bump_draws() {
         let (mut app, _dir) = test_app();
@@ -301,6 +349,9 @@ mod redraw_tests {
         )
         .expect("spawn cat as a stand-in interactive child");
         app.interactive_agents.push(agent);
+        app.agents = vec![AgentEntry::Interactive(0)];
+        app.selected = 0;
+        app.focus = Focus::Agent;
         let mut state = TickState::default();
 
         let (dirty, _) = tick(&mut app, &mut state, false).unwrap();
@@ -312,8 +363,51 @@ mod redraw_tests {
         let seq = app.interactive_agents[0].output_seq();
         assert!(app.interactive_agents[0].apply_out_frame(seq + 1, b"hi"));
         let (dirty, _) = tick(&mut app, &mut state, false).unwrap();
-        assert!(dirty, "pty output must draw");
+        assert!(dirty, "pty output from the focused session must draw");
+
+        // The same output from an off-screen session must not draw.
+        app.agents.clear();
+        let seq = app.interactive_agents[0].output_seq();
+        assert!(app.interactive_agents[0].apply_out_frame(seq + 1, b"hi"));
+        let (dirty, _) = tick(&mut app, &mut state, false).unwrap();
+        assert!(
+            !dirty,
+            "pty output from an off-screen session must not draw"
+        );
         app.interactive_agents[0].kill();
+    }
+
+    /// FR2: in `reduced` mode (the default) animations pause — requesting no
+    /// draw — while the terminal reports focus lost or after 45 s without
+    /// input, and resume on the next input.
+    #[test]
+    fn focus_lost_idle_pause_draws() {
+        let (mut app, _dir) = test_app();
+        assert_eq!(
+            app.tui_settings.animations,
+            crate::domain::canopy_config::AnimationsMode::Reduced,
+            "reduced is the default mode"
+        );
+        app.focus = Focus::Home;
+        let mut state = TickState::default();
+
+        let (dirty, _) = tick(&mut app, &mut state, false).unwrap();
+        assert!(dirty, "the Home wave must draw while animations run");
+
+        app.focus_lost = true;
+        let (dirty, _) = tick(&mut app, &mut state, false).unwrap();
+        assert!(!dirty, "focus lost must pause animations");
+
+        app.focus_lost = false;
+        app.last_input_at = std::time::Instant::now()
+            - crate::tui::ui::ANIM_IDLE_PAUSE
+            - std::time::Duration::from_secs(1);
+        let (dirty, _) = tick(&mut app, &mut state, false).unwrap();
+        assert!(!dirty, "45 s idle must pause animations");
+
+        app.last_input_at = std::time::Instant::now();
+        let (dirty, _) = tick(&mut app, &mut state, false).unwrap();
+        assert!(dirty, "fresh input must resume animations");
     }
 
     /// FR2: slow work runs on its own cadence (not every tick) and a slow
@@ -425,6 +519,11 @@ mod redraw_tests {
         )
         .expect("spawn cat as a stand-in interactive child");
         app.interactive_agents.push(agent);
+        // FR4: only the focused session's output dirties the tick, so this
+        // test focuses the session it exercises.
+        app.agents = vec![AgentEntry::Interactive(0)];
+        app.selected = 0;
+        app.focus = Focus::Agent;
         let mut state = TickState::default();
         let (dirty, _) = tick(&mut app, &mut state, false).unwrap();
         assert!(dirty, "attaching a session must draw");

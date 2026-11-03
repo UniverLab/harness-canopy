@@ -544,6 +544,10 @@ pub struct App {
     pub(crate) prev_active_run_ids: std::collections::HashSet<String>,
     /// Tick counter for animation (increments every refresh)
     pub(crate) animation_tick: u32,
+    /// True while the terminal reports focus lost: background animations pause.
+    pub(crate) focus_lost: bool,
+    /// When the last key or mouse input arrived; animations pause after 45 s idle.
+    pub(crate) last_input_at: std::time::Instant,
     /// When the throttled slow refresh last ran (FR2: at most once per second).
     pub(crate) last_slow_refresh: std::time::Instant,
     /// A pushed change (hub membership, reconnect) armed an immediate slow

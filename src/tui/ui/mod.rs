@@ -363,12 +363,26 @@ pub(crate) fn atmosphere_active(app: &App) -> bool {
     !app.atmosphere_hidden && app.tui_settings.atmosphere
 }
 
-/// Master animation switch: either animation toggle on means animated
-/// frames are on screen. Both off freezes every animation source (FR5) —
-/// see [`header_millis`], [`effective_animation_tick`], and the
+/// Idle time without key or mouse input after which background animations
+/// pause in `reduced` mode (FR2).
+pub(crate) const ANIM_IDLE_PAUSE: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// Master animation switch, and the single mode-plus-pause gate: `off` is
+/// always static; `full` keeps today's toggle behavior; `reduced` additionally
+/// pauses while the terminal reports focus lost or after 45 s idle. This also
+/// freezes the header and banner-wave draw paths, so paused frames stay static
+/// — see [`header_millis`], [`effective_animation_tick`], and the
 /// brain/atmosphere gates.
 pub(crate) fn animations_enabled(app: &App) -> bool {
-    app.tui_settings.atmosphere || app.tui_settings.brians_brain
+    use crate::domain::canopy_config::AnimationsMode;
+    let toggles = app.tui_settings.atmosphere || app.tui_settings.brians_brain;
+    match app.tui_settings.animations {
+        AnimationsMode::Off => false,
+        AnimationsMode::Full => toggles,
+        AnimationsMode::Reduced => {
+            toggles && !app.focus_lost && app.last_input_at.elapsed() < ANIM_IDLE_PAUSE
+        }
+    }
 }
 
 /// Wall-clock millis the header animates with — 0 when both animation
@@ -405,9 +419,13 @@ fn draw_top_overlays(frame: &mut Frame, app: &mut App, theme: &Theme) {
 
     // Atmosphere particles — absolute top layer, drawn last over everything.
     // CM52: `tui.atmosphere = false` skips both the scene tick and the draw.
+    // FR2/FR3: while paused or off the scene holds its last state — the
+    // frame renders frozen instead of advancing on unrelated draws.
     if atmosphere_active(app) {
         let area = frame.area();
-        app.atmosphere.tick(area, &mut app.atmosphere_ctx);
+        if animations_enabled(app) {
+            app.atmosphere.tick(area, &mut app.atmosphere_ctx);
+        }
         // Reset mouse deltas after the scene has consumed them
         app.atmosphere_ctx.mouse_delta_col = 0;
         app.atmosphere_ctx.mouse_delta_row = 0;
@@ -532,6 +550,217 @@ mod tests {
         assert!(atmosphere_active(&app));
         app.atmosphere_hidden = true;
         assert!(!atmosphere_active(&app));
+    }
+
+    /// FR2/FR3: the mode-plus-pause gate — `off` is always static, `full`
+    /// follows the toggles alone, and `reduced` additionally pauses on focus
+    /// loss and after 45 s without input, resuming on the next input.
+    #[test]
+    fn animations_gate_modes_and_pauses() {
+        use crate::domain::canopy_config::AnimationsMode;
+
+        let (mut app, _data_dir) = test_app();
+        app.tui_settings.atmosphere = true;
+        app.tui_settings.brians_brain = true;
+
+        // Toggles on, fresh input: full and reduced run.
+        app.tui_settings.animations = AnimationsMode::Full;
+        assert!(animations_enabled(&app));
+        app.tui_settings.animations = AnimationsMode::Reduced;
+        assert!(animations_enabled(&app));
+
+        // Off is static even with toggles on and fresh input.
+        app.tui_settings.animations = AnimationsMode::Off;
+        assert!(!animations_enabled(&app));
+
+        // Reduced pauses on focus loss and on 45 s idle, and resumes on input.
+        app.tui_settings.animations = AnimationsMode::Reduced;
+        app.focus_lost = true;
+        assert!(!animations_enabled(&app));
+        app.focus_lost = false;
+        app.last_input_at =
+            std::time::Instant::now() - ANIM_IDLE_PAUSE - std::time::Duration::from_secs(1);
+        assert!(!animations_enabled(&app));
+        app.last_input_at = std::time::Instant::now();
+        assert!(animations_enabled(&app));
+
+        // Full keeps today's behavior: the pauses never freeze it.
+        app.tui_settings.animations = AnimationsMode::Full;
+        app.focus_lost = true;
+        app.last_input_at =
+            std::time::Instant::now() - ANIM_IDLE_PAUSE - std::time::Duration::from_secs(1);
+        assert!(animations_enabled(&app));
+
+        // Both toggles off freezes every mode.
+        app.tui_settings.atmosphere = false;
+        app.tui_settings.brians_brain = false;
+        app.focus_lost = false;
+        app.last_input_at = std::time::Instant::now();
+        for mode in [
+            AnimationsMode::Full,
+            AnimationsMode::Reduced,
+            AnimationsMode::Off,
+        ] {
+            app.tui_settings.animations = mode;
+            assert!(
+                !animations_enabled(&app),
+                "{mode:?} with both toggles off must be static"
+            );
+        }
+    }
+
+    /// FR2/FR3: pause and `off` freeze both brain automata the same way the
+    /// brain toggle does — their grids must not advance while paused.
+    #[test]
+    fn pause_and_off_freeze_the_brain_automata() {
+        use crate::domain::canopy_config::AnimationsMode;
+
+        let (mut app, _data_dir) = test_app();
+        app.focus = crate::tui::app::types::Focus::Agent;
+        app.tui_settings.brians_brain = true;
+        app.tui_settings.animations = AnimationsMode::Reduced;
+        app.home_brain = Some(crate::tui::brians_brain::BriansBrain::new(6, 10));
+        let before = app.home_brain.as_ref().expect("brain set").grid.clone();
+
+        app.focus_lost = true;
+        app.tick_banner_animation();
+        assert_eq!(
+            app.home_brain.as_ref().expect("brain set").grid,
+            before,
+            "focus lost must not advance the automaton"
+        );
+
+        app.focus_lost = false;
+        app.last_input_at =
+            std::time::Instant::now() - ANIM_IDLE_PAUSE - std::time::Duration::from_secs(1);
+        app.tick_banner_animation();
+        assert_eq!(
+            app.home_brain.as_ref().expect("brain set").grid,
+            before,
+            "45 s idle must not advance the automaton"
+        );
+
+        app.last_input_at = std::time::Instant::now();
+        app.tui_settings.animations = AnimationsMode::Off;
+        app.tick_banner_animation();
+        assert_eq!(
+            app.home_brain.as_ref().expect("brain set").grid,
+            before,
+            "off must not advance the automaton"
+        );
+
+        app.tui_settings.animations = AnimationsMode::Reduced;
+        app.tick_banner_animation();
+        assert_ne!(
+            app.home_brain.as_ref().expect("brain set").grid,
+            before,
+            "fresh input must resume the automaton"
+        );
+
+        // The sidebar automaton freezes the same way (fresh brains per phase:
+        // the constructor arms the first step, so no sleeps are needed).
+        app.sidebar_brain_rect = Some(Rect::new(0, 10, 32, 20));
+        app.focus_lost = true;
+        app.sidebar_brain = Some(crate::tui::brians_brain::BriansBrain::new(20, 32));
+        let before = app
+            .sidebar_brain
+            .as_ref()
+            .expect("sidebar brain set")
+            .grid
+            .clone();
+        app.ensure_sidebar_brain();
+        assert_eq!(
+            app.sidebar_brain.as_ref().expect("sidebar brain set").grid,
+            before,
+            "focus lost must not advance the sidebar automaton"
+        );
+
+        app.focus_lost = false;
+        app.sidebar_brain = Some(crate::tui::brians_brain::BriansBrain::new(20, 32));
+        let before = app
+            .sidebar_brain
+            .as_ref()
+            .expect("sidebar brain set")
+            .grid
+            .clone();
+        app.ensure_sidebar_brain();
+        assert_ne!(
+            app.sidebar_brain.as_ref().expect("sidebar brain set").grid,
+            before,
+            "fresh input must resume the sidebar automaton"
+        );
+    }
+
+    fn buffer_is_blank(buffer: &ratatui::buffer::Buffer) -> bool {
+        let area = buffer.area;
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                if buffer[(x, y)].symbol() != " " {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// FR2/FR3: while paused or off the atmosphere renders frozen instead of
+    /// ticking — repeated draws seed nothing, while `full` seeds flies.
+    #[test]
+    fn paused_atmosphere_renders_frozen() {
+        use crate::domain::canopy_config::AnimationsMode;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let (mut app, _data_dir) = test_app();
+        app.atmosphere_hidden = false;
+        app.tui_settings.atmosphere = true;
+        app.tui_settings.brians_brain = true;
+        app.atmosphere_ctx.hour = 23; // inside the firefly window
+        app.show_copied = false;
+        let theme = app.theme;
+
+        // Off: the scene never ticks, so draws stay blank.
+        app.tui_settings.animations = AnimationsMode::Off;
+        assert!(!animations_enabled(&app));
+        for _ in 0..3 {
+            let backend = TestBackend::new(120, 40);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| draw_top_overlays(frame, &mut app, &theme))
+                .unwrap();
+            assert!(
+                buffer_is_blank(terminal.backend().buffer()),
+                "off must not seed atmosphere particles"
+            );
+        }
+
+        // Reduced + focus lost: frozen too.
+        app.tui_settings.animations = AnimationsMode::Reduced;
+        app.focus_lost = true;
+        assert!(!animations_enabled(&app));
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| draw_top_overlays(frame, &mut app, &theme))
+            .unwrap();
+        assert!(
+            buffer_is_blank(terminal.backend().buffer()),
+            "focus lost must not seed atmosphere particles"
+        );
+
+        // Full: the first draw seeds flies.
+        app.focus_lost = false;
+        app.tui_settings.animations = AnimationsMode::Full;
+        assert!(animations_enabled(&app));
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| draw_top_overlays(frame, &mut app, &theme))
+            .unwrap();
+        assert!(
+            !buffer_is_blank(terminal.backend().buffer()),
+            "full must seed flies on draw"
+        );
     }
 
     #[test]

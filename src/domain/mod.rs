@@ -4,6 +4,7 @@
 //! on infrastructure, frameworks, or external crates beyond basic utilities.
 
 pub mod activity;
+pub mod animations_mode;
 pub mod canopy_config;
 pub mod clean;
 pub mod cli_config;

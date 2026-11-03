@@ -80,7 +80,11 @@ fn tick_duration(app: &App) -> Duration {
         | Focus::GraphFormDialog => Duration::from_millis(50),
         Focus::ProjectRelationDialog => Duration::from_millis(50),
         Focus::Preview => Duration::from_millis(100),
-        Focus::Home if app.home_brain.is_some() => Duration::from_millis(50),
+        Focus::Home if app.home_brain.is_some() => match app.tui_settings.animations {
+            crate::domain::canopy_config::AnimationsMode::Full => Duration::from_millis(50),
+            crate::domain::canopy_config::AnimationsMode::Reduced => Duration::from_millis(125),
+            crate::domain::canopy_config::AnimationsMode::Off => Duration::from_millis(200),
+        },
         Focus::Home => Duration::from_millis(200),
     }
 }
@@ -109,9 +113,13 @@ fn drain_pending_events(app: &mut App) -> Result<()> {
 fn dispatch_event(app: &mut App, event: Event) -> Result<()> {
     match event {
         Event::Key(key) if key.kind == KeyEventKind::Press => {
+            // FR2: key and mouse input (plus paste and focus gain below)
+            // resume the animations; resize, releases and focus loss do not.
+            app.last_input_at = std::time::Instant::now();
             handle_key(app, key.code, key.modifiers)
         }
         Event::Mouse(mouse) => {
+            app.last_input_at = std::time::Instant::now();
             app.notify_atmosphere_mouse(mouse.column, mouse.row);
             // Suppress particles while any mouse button is held
             match mouse.kind {
@@ -140,10 +148,20 @@ fn dispatch_event(app: &mut App, event: Event) -> Result<()> {
             handle_mouse(app, mouse)
         }
         Event::Paste(text) => {
+            app.last_input_at = std::time::Instant::now();
             handle_paste(app, &text);
             Ok(())
         }
-        Event::Resize(_, _) | Event::FocusGained | Event::FocusLost | Event::Key(_) => Ok(()),
+        Event::FocusGained => {
+            app.focus_lost = false;
+            app.last_input_at = std::time::Instant::now();
+            Ok(())
+        }
+        Event::FocusLost => {
+            app.focus_lost = true;
+            Ok(())
+        }
+        Event::Resize(_, _) | Event::Key(_) => Ok(()),
     }
 }
 
@@ -435,6 +453,9 @@ mod graph_live_panel_mouse_tests;
 
 #[cfg(test)]
 mod split_selection_tests;
+
+#[cfg(test)]
+mod input_timer_tests;
 
 #[cfg(test)]
 mod tick_duration_tests;

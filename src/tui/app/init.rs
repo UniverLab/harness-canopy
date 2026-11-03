@@ -142,6 +142,8 @@ macro_rules! app_new_fields {
             notification_service: Arc::new(DefaultNotificationService),
             prev_active_run_ids: std::collections::HashSet::new(),
             animation_tick: 0,
+            focus_lost: false,
+            last_input_at: std::time::Instant::now(),
             last_slow_refresh: std::time::Instant::now(),
             slow_force: false,
             snapshot_worker: None,
