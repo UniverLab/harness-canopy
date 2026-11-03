@@ -449,6 +449,15 @@ impl Peer {
             .context("send on the data channel")
     }
 
+    /// Bytes the data channel has queued but not yet handed to the network:
+    /// part of the connection's outbound budget while a send is in flight.
+    pub async fn buffered_amount(&self) -> usize {
+        let Some(data_channel) = self.channel.lock().await.clone() else {
+            return 0;
+        };
+        data_channel.outstanding_bytes().await.unwrap_or(0)
+    }
+
     /// Closes the channel and the connection; safe to call more than once.
     pub async fn close(&self) {
         let data_channel = self.channel.lock().await.clone();

@@ -191,7 +191,7 @@ fn grant_hub() -> GrantHub {
     }
 }
 
-async fn recv_frame(rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>) -> Value {
+async fn recv_frame(rx: &mut crate::sessions::outbound::ConnRx) -> Value {
     let frame = tokio::time::timeout(Duration::from_secs(5), rx.recv())
         .await
         .expect("a frame arrives")
@@ -216,7 +216,7 @@ async fn full_grant_lists_every_agent_session_and_attaches() {
     let grant = resolve(&db, OWNER, GUEST).expect("a grant");
     assert_eq!(grant, Grant::All);
 
-    let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (out_tx, mut out_rx) = crate::sessions::outbound::channel();
     let mut bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), grant);
     bridge.handle_text(&list_frame("r1"), &out_tx).await;
     let list = recv_frame(&mut out_rx).await;
@@ -258,7 +258,7 @@ async fn full_grant_lists_every_agent_session_and_attaches() {
 async fn partial_grant_lists_only_the_subset_and_hides_the_rest() {
     let hub = grant_hub();
     let grant = Grant::Sessions(HashSet::from(["alpha".to_string()]));
-    let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (out_tx, mut out_rx) = crate::sessions::outbound::channel();
     let mut bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), grant);
 
     bridge.handle_text(&list_frame("r1"), &out_tx).await;
@@ -321,7 +321,7 @@ async fn partial_grant_lists_only_the_subset_and_hides_the_rest() {
 
     // Granted the shell by name, the guest lists and attaches it.
     let grant = Grant::Sessions(HashSet::from(["shell".to_string()]));
-    let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (out_tx, mut out_rx) = crate::sessions::outbound::channel();
     let mut bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), grant);
     bridge.handle_text(&list_frame("r6"), &out_tx).await;
     let list = recv_frame(&mut out_rx).await;
@@ -339,7 +339,7 @@ async fn partial_grant_lists_only_the_subset_and_hides_the_rest() {
 fn partial_grant_filters_lifecycle_events_to_its_names() {
     let hub = grant_hub();
     let grant = Grant::Sessions(HashSet::from(["alpha".to_string()]));
-    let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (out_tx, mut out_rx) = crate::sessions::outbound::channel();
     let mut bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), grant);
 
     bridge.handle_event(HubEvent::SessionAdded(Box::new(hub.beta.item())), &out_tx);
@@ -373,7 +373,7 @@ async fn natural_exit_removal_reaches_holders_not_ungranted() {
 
     // A full-grant holder that listed the session hears its natural-exit
     // removal; the attached-only `exited` stays silent for a list-holder.
-    let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (out_tx, mut out_rx) = crate::sessions::outbound::channel();
     let mut bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), Grant::All);
     bridge.handle_text(&list_frame("r1"), &out_tx).await;
     assert_eq!(recv_frame(&mut out_rx).await["t"], "sessions");
@@ -400,7 +400,7 @@ async fn natural_exit_removal_reaches_holders_not_ungranted() {
     // A guest granted only beta listed its subset: alpha's natural exit
     // leaks nothing through either event.
     let grant = Grant::Sessions(HashSet::from(["beta".to_string()]));
-    let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (out_tx, mut out_rx) = crate::sessions::outbound::channel();
     let mut bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), grant);
     bridge.handle_text(&list_frame("r1"), &out_tx).await;
     let list = recv_frame(&mut out_rx).await;
@@ -643,7 +643,7 @@ async fn scoped_grant_lists_only_its_shelf_files_and_hides_the_rest() {
     let orphan_file = shelve(&hub.state, "orphan.png", Some("no-such-session"));
 
     let grant = Grant::Sessions(HashSet::from(["alpha".to_string()]));
-    let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (out_tx, mut out_rx) = crate::sessions::outbound::channel();
     let mut bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), grant);
 
     // The unscoped list is the host shelf, visible to every peer.
@@ -705,7 +705,7 @@ async fn full_grant_serves_every_shelf_and_keeps_the_terminal_rule() {
     let shell_file = shelve(&hub.state, "shell.png", Some(&hub.shell.id));
     let orphan_file = shelve(&hub.state, "orphan.png", Some("no-such-session"));
 
-    let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (out_tx, mut out_rx) = crate::sessions::outbound::channel();
     let mut bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), Grant::All);
 
     // A scoped list reaches its session's files.

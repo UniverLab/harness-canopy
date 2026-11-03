@@ -449,7 +449,12 @@ row carries `yolo: true|false`, so the browser only offers the switch where
 the host can honor it. Output and snapshot frames are chunked to stay under
 16 KiB; a snapshot's first part carries `cols`/`rows`, the
 rest travels as `snapshot_more`, and the final `snapshot_more` carries
-`last: true` (an empty one when the snapshot fit the first part). The shelf rides the same channel:
+`last: true` (an empty one when the snapshot fit the first part). The host
+folds terminal output into larger `out` frames (up to 12 KiB or 25 ms per
+frame) and the remote data channel sends at most 20 output frames per second
+per attached session; a device that falls more than 512 KiB or half a second
+behind gets a fresh `snapshot` in place of the backlog, so it always catches
+up to the current screen. The shelf rides the same channel:
 `shelf_list` and `shelf_get` answer `shelf` and `file` frames, and
 `shelf_added` / `shelf_removed` push arrivals and removals. Files from
 terminal sessions stay hidden from lists and pushes and answer

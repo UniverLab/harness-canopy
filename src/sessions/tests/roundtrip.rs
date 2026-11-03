@@ -54,7 +54,9 @@ async fn spawn_attach_echo_roundtrip() {
     // `cat` echoes the line back; PTY echo may add a chunk of its own.
     // Either way every `out` seq continues the snapshot's with no gap.
     let mut seen: Vec<u8> = Vec::new();
-    let mut expected = snap_seq + 1;
+    // Coalescing may fold several chunks into one frame, so seq advances
+    // monotonically but not necessarily by one per frame.
+    let mut last_seq = snap_seq;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let needle = b"hello-roundtrip".as_slice();
     while !seen.windows(needle.len()).any(|w| w == needle) {
@@ -67,8 +69,8 @@ async fn spawn_attach_echo_roundtrip() {
         assert_eq!(frame["t"], "out", "only out frames expected here: {frame}");
         assert_eq!(frame["id"], id);
         let seq = frame["seq"].as_u64().expect("out seq");
-        assert_eq!(seq, expected, "out seq must continue the snapshot's");
-        expected += 1;
+        assert!(seq > last_seq, "out seq must advance past the snapshot's");
+        last_seq = seq;
         seen.extend(decode_b64(frame["data"].as_str().expect("out data")));
     }
 

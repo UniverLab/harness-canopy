@@ -17,10 +17,11 @@ use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use futures::{SinkExt as _, StreamExt as _};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
 use crate::db::Database;
+use crate::sessions::outbound::{self, ConnTx, PushOut, SessionCoal};
 
 use super::auth::{bearer_token, ensure_token, token_valid};
 use super::catalog::{handle_catalog, handle_compose, handle_prompt_draft};
@@ -162,14 +163,14 @@ fn request_authorized(headers: &HeaderMap, token: &str) -> bool {
 }
 
 /// Outbound JSON frames for one connection.
-pub(crate) type OutTx = mpsc::UnboundedSender<String>;
+pub(crate) type OutTx = ConnTx;
 
 /// Output forwarders of one connection, by attached session id.
 type Attached = HashMap<String, JoinHandle<()>>;
 
 async fn handle_connection(socket: WebSocket, state: Arc<SessionsState>) {
     let (mut sink, mut stream) = socket.split();
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<String>();
+    let (out_tx, mut out_rx) = outbound::channel();
     let send_task = tokio::spawn(async move {
         while let Some(text) = out_rx.recv().await {
             if sink.send(Message::Text(text.into())).await.is_err() {
@@ -647,8 +648,9 @@ fn handle_hub_event(out_tx: &OutTx, attached: &mut Attached, event: HubEvent) {
     }
 }
 
-/// Forward one attached session's output: `out` frames after `from_seq`, or
-/// a fresh snapshot when the subscriber lagged, then continue.
+/// Forward one attached session's output: coalesced `out` frames after
+/// `from_seq`, or a fresh snapshot when the subscriber lagged or fell too far
+/// behind, then continue.
 fn spawn_forwarder(
     session: Arc<HubSession>,
     from_seq: u64,
@@ -658,21 +660,40 @@ fn spawn_forwarder(
     tokio::spawn(async move {
         let mut rx = rx;
         let mut next = from_seq;
+        let mut coal = SessionCoal::new(false);
         loop {
-            let outcome = rx.recv().await;
-            if !forward_recv(&session, &mut next, outcome, &out_tx) {
-                break;
+            let deadline = coal.next_deadline();
+            tokio::select! {
+                outcome = rx.recv() => {
+                    if !forward_recv(&session, &mut next, outcome, &out_tx, &mut coal) {
+                        break;
+                    }
+                }
+                _ = outbound::wait_until(deadline) => {
+                    if !flush_coal(&session.id, &out_tx, &mut coal) {
+                        break;
+                    }
+                }
             }
         }
     })
 }
 
+/// Send the buffered output as one `out` frame; false stops the forwarder.
+pub(crate) fn flush_coal(id: &str, out_tx: &OutTx, coal: &mut SessionCoal) -> bool {
+    match coal.take_flush() {
+        Some((seq, data)) => out_tx.push_control(out_frame(id, seq, &data)),
+        None => true,
+    }
+}
+
 /// Forward one broadcast outcome to the connection; false stops the forwarder.
-fn forward_recv(
+pub(crate) fn forward_recv(
     session: &HubSession,
     next: &mut u64,
     outcome: Result<(u64, Vec<u8>), broadcast::error::RecvError>,
     out_tx: &OutTx,
+    coal: &mut SessionCoal,
 ) -> bool {
     match outcome {
         Ok((seq, chunk)) => {
@@ -680,23 +701,33 @@ fn forward_recv(
                 return true;
             }
             *next = seq;
-            out_tx.send(out_frame(&session.id, seq, &chunk)).is_ok()
+            match coal.push_out(out_tx, seq, &chunk) {
+                PushOut::Buffered | PushOut::Dropped => true,
+                PushOut::NeedSnapshot => send_snapshot(session, next, out_tx, coal),
+            }
         }
-        Err(broadcast::error::RecvError::Lagged(_)) => {
-            let Some(snapshot) = session.fresh_snapshot() else {
-                return false;
-            };
-            *next = snapshot.seq;
-            out_tx
-                .send(snapshot_frame(
-                    &session.id,
-                    snapshot.cols,
-                    snapshot.rows,
-                    snapshot.seq,
-                    &snapshot.data,
-                ))
-                .is_ok()
-        }
+        Err(broadcast::error::RecvError::Lagged(_)) => send_snapshot(session, next, out_tx, coal),
         Err(broadcast::error::RecvError::Closed) => false,
     }
+}
+
+/// Drop buffered output, queue one fresh snapshot, and resume after its seq.
+fn send_snapshot(
+    session: &HubSession,
+    next: &mut u64,
+    out_tx: &OutTx,
+    coal: &mut SessionCoal,
+) -> bool {
+    let Some(snapshot) = session.fresh_snapshot() else {
+        return false;
+    };
+    *next = snapshot.seq;
+    coal.mark_snapshot_sent();
+    out_tx.push_control(snapshot_frame(
+        &session.id,
+        snapshot.cols,
+        snapshot.rows,
+        snapshot.seq,
+        &snapshot.data,
+    ))
 }

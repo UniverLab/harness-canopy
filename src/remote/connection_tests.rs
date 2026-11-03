@@ -478,7 +478,7 @@ async fn expect_error(loopback: &mut Loopback, what: &str) -> Value {
 }
 
 /// One `out` frame of the echo: this session, size-bounded, seq in order.
-fn assert_echo_out(frame: &Frame, id: &str, expected_seq: u64) {
+fn assert_echo_out(frame: &Frame, id: &str, previous_seq: u64) -> u64 {
     assert_eq!(
         frame.json["t"], "out",
         "only out frames expected here: {}",
@@ -490,11 +490,12 @@ fn assert_echo_out(frame: &Frame, id: &str, expected_seq: u64) {
         "frame of {} bytes exceeds {MAX_FRAME_BYTES}",
         frame.raw.len()
     );
-    assert_eq!(
-        frame.json["seq"].as_u64(),
-        Some(expected_seq),
-        "out seqs continue the snapshot's without a gap"
+    let seq = frame.json["seq"].as_u64().expect("out seq");
+    assert!(
+        seq > previous_seq,
+        "out seq {seq} must advance past {previous_seq}"
     );
+    seq
 }
 
 /// Send one line through the attached `cat` session and collect its echo:
@@ -509,22 +510,22 @@ async fn echo_roundtrip(loopback: &mut Loopback, snapshot_seq: u64) {
         .await;
     let id = loopback.cat.id.clone();
     let mut seen: Vec<u8> = Vec::new();
-    let mut expected_seq = snapshot_seq + 1;
+    // Coalescing may fold several chunks into one frame: seq advances
+    // monotonically but not necessarily by one per frame.
+    let mut last_seq = snapshot_seq;
     while !seen
         .windows(ECHO_NEEDLE.len())
         .any(|window| window == ECHO_NEEDLE)
     {
         let frame = loopback.recv("the echoed input").await;
-        assert_echo_out(&frame, &id, expected_seq);
-        expected_seq += 1;
+        last_seq = assert_echo_out(&frame, &id, last_seq);
         seen.extend(decode(&frame.json));
     }
     loop {
         let next = tokio::time::timeout(ECHO_DRAIN_TIMEOUT, loopback.events.recv()).await;
         match next {
             Ok(Some(DeviceEvent::Frame(frame))) => {
-                assert_echo_out(&frame, &id, expected_seq);
-                expected_seq += 1;
+                last_seq = assert_echo_out(&frame, &id, last_seq);
             }
             Ok(Some(DeviceEvent::Closed)) => {
                 panic!("the channel closed while draining the echo")
@@ -1448,7 +1449,7 @@ async fn only_an_ordered_reliable_session_channel_is_accepted() {
 /// One bridge answer through a channel: the remote-restriction half of the
 /// loopback scenario, driven directly against the hub without a transport.
 async fn bridge_reply(state: &Arc<SessionsState>, frame: &Value) -> Vec<String> {
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    let (out_tx, mut out_rx) = crate::sessions::outbound::channel();
     let mut bridge = crate::remote::bridge::RemoteBridge::new(Arc::clone(state));
     bridge.handle_text(&frame.to_string(), &out_tx).await;
     drop(out_tx);
@@ -1484,7 +1485,7 @@ async fn bridge_refusal(state: &Arc<SessionsState>, frame: Value) -> Value {
 /// `kill` answer from a spawned task, after `handle_text` returns, so
 /// `bridge_reply` (synchronous `try_recv`) never sees them.
 async fn bridge_await_frame(state: &Arc<SessionsState>, frame: &Value) -> Value {
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    let (out_tx, mut out_rx) = crate::sessions::outbound::channel();
     let mut bridge = crate::remote::bridge::RemoteBridge::new(Arc::clone(state));
     bridge.handle_text(&frame.to_string(), &out_tx).await;
     let reply = tokio::time::timeout(Duration::from_secs(10), out_rx.recv())
@@ -1638,7 +1639,7 @@ async fn bridge_terminals_are_first_class() {
     );
 
     // A terminal arrival forwards through a manual bridge.
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    let (out_tx, mut out_rx) = crate::sessions::outbound::channel();
     let mut bridge = crate::remote::bridge::RemoteBridge::new(Arc::clone(&state));
     bridge.handle_event(
         crate::sessions::HubEvent::SessionAdded(Box::new(terminal.item())),
@@ -1748,7 +1749,7 @@ async fn a_new_bridge_hides_pre_existing_terminal_files_removals() {
     let hidden = insert_shelf_png(&state, "term.png", &small_png_bytes(), Some(&terminal.id));
     let shown = insert_shelf_png(&state, "host.png", &small_png_bytes(), None);
 
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    let (out_tx, mut out_rx) = crate::sessions::outbound::channel();
     let mut bridge = crate::remote::bridge::RemoteBridge::new(Arc::clone(&state));
 
     bridge.handle_event(
@@ -1802,7 +1803,7 @@ async fn aborting_the_bridge_cancels_its_shelf_transfers() {
     let source = big_png_bytes();
     let file_id = insert_shelf_png(&state, "photo.png", &source, None);
 
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+    let (out_tx, mut out_rx) = crate::sessions::outbound::channel();
     let mut bridge = crate::remote::bridge::RemoteBridge::new(Arc::clone(&state));
     bridge
         .handle_text(

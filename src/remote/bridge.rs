@@ -29,6 +29,7 @@ use crate::remote::metrics::{
 use crate::remote::trust::{Grant, GrantScope};
 use crate::sessions::catalog::{handle_catalog, handle_compose, handle_prompt_draft};
 use crate::sessions::graphs::{handle_graph_unwatch, handle_graph_watch, handle_graphs};
+use crate::sessions::outbound::{self, PushOut, SessionCoal};
 use crate::sessions::protocol::{
     error_frame, exited_frame, file_frame, ok_frame, out_frame, parse_client_frame,
     session_added_frame, session_removed_frame, sessions_frame, shelf_added_frame, shelf_frame,
@@ -686,39 +687,79 @@ fn spawn_forwarder(
     tokio::spawn(async move {
         let mut rx = rx;
         let mut next = from_seq;
+        let mut coal = SessionCoal::new(true);
         loop {
-            if !pump(&session, &mut next, &mut rx, &out).await {
-                return;
+            let deadline = coal.next_deadline();
+            tokio::select! {
+                outcome = rx.recv() => {
+                    if !pump(&session, &mut next, outcome, &out, &mut coal) {
+                        return;
+                    }
+                }
+                _ = outbound::wait_until(deadline) => {
+                    if !flush_coal(&session.id, &out, &mut coal) {
+                        return;
+                    }
+                }
             }
         }
     })
 }
 
-async fn pump(session: &HubSession, next: &mut u64, rx: &mut OutputReceiver, out: &OutTx) -> bool {
-    match rx.recv().await {
+/// Send the coalesced buffer as size-bounded `out` frames; false ends the
+/// forwarder.
+pub(crate) fn flush_coal(id: &str, out: &OutTx, coal: &mut SessionCoal) -> bool {
+    match coal.take_flush() {
+        Some((seq, data)) => send_frames(out, split_out_frames(id, seq, &data)),
+        None => true,
+    }
+}
+
+/// Buffer one broadcast outcome (or fall back to a snapshot); false ends the
+/// forwarder.
+pub(crate) fn pump(
+    session: &HubSession,
+    next: &mut u64,
+    outcome: Result<(u64, Vec<u8>), broadcast::error::RecvError>,
+    out: &OutTx,
+    coal: &mut SessionCoal,
+) -> bool {
+    match outcome {
         Ok((seq, chunk)) => {
             if seq <= *next {
                 return true;
             }
             *next = seq;
-            send_frames(out, split_out_frames(&session.id, seq, &chunk))
+            match coal.push_out(out, seq, &chunk) {
+                PushOut::Buffered | PushOut::Dropped => true,
+                PushOut::NeedSnapshot => send_snapshot(session, next, out, coal),
+            }
         }
-        Err(broadcast::error::RecvError::Lagged(_)) => {
-            let Some(snapshot) = session.fresh_snapshot() else {
-                return false;
-            };
-            *next = snapshot.seq;
-            let frames = split_snapshot_frames(
-                &session.id,
-                snapshot.cols,
-                snapshot.rows,
-                snapshot.seq,
-                &snapshot.data,
-            );
-            send_frames(out, frames)
-        }
+        Err(broadcast::error::RecvError::Lagged(_)) => send_snapshot(session, next, out, coal),
         Err(broadcast::error::RecvError::Closed) => false,
     }
+}
+
+/// Drop buffered output, queue one fresh snapshot, and resume after its seq.
+fn send_snapshot(
+    session: &HubSession,
+    next: &mut u64,
+    out: &OutTx,
+    coal: &mut SessionCoal,
+) -> bool {
+    let Some(snapshot) = session.fresh_snapshot() else {
+        return false;
+    };
+    *next = snapshot.seq;
+    coal.mark_snapshot_sent();
+    let frames = split_snapshot_frames(
+        &session.id,
+        snapshot.cols,
+        snapshot.rows,
+        snapshot.seq,
+        &snapshot.data,
+    );
+    send_frames(out, frames)
 }
 
 /// Send every frame in order; `false` when the connection is gone.

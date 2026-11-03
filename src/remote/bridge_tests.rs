@@ -6,14 +6,18 @@ use std::time::Duration;
 use base64::Engine as _;
 use serde_json::Value;
 
-use super::{split_out_frames, split_snapshot_frames, RemoteBridge, CHUNK_BYTES, MAX_FRAME_BYTES};
+use super::{
+    flush_coal, pump, split_out_frames, split_snapshot_frames, RemoteBridge, CHUNK_BYTES,
+    MAX_FRAME_BYTES,
+};
 use crate::db::Database;
 use crate::remote::metrics::{
     clamp_interval, host_metrics_frame, spawn_metrics_watch, MetricsSource,
 };
+use crate::sessions::outbound::{self, ConnRx, PushOut, SessionCoal};
 use crate::sessions::protocol::{parse_client_frame, ClientFrame};
 use crate::sessions::ws::SessionsState;
-use crate::sessions::SessionHub;
+use crate::sessions::{HubSession, SessionHub, SessionKind, SpawnRequest};
 use crate::system::host_metrics::{GpuMetrics, HostMetrics, PowerMetrics};
 use crate::system::{GpuInfo, PowerSource, SystemInfo};
 
@@ -109,7 +113,7 @@ fn fake_source(metrics: HostMetrics) -> MetricsSource {
     Arc::new(move || metrics.clone())
 }
 
-async fn recv_frame(rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>, what: &str) -> Value {
+async fn recv_frame(rx: &mut ConnRx, what: &str) -> Value {
     let frame = tokio::time::timeout(Duration::from_secs(5), rx.recv())
         .await
         .unwrap_or_else(|_| panic!("timed out waiting for {what}"))
@@ -262,7 +266,7 @@ async fn metrics_watch_pushes_until_dropped() {
         cpu_usage: Some(1.0),
         ..HostMetrics::default()
     };
-    let (out, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (out, mut rx) = outbound::channel();
     let watch = spawn_metrics_watch(fake_source(metrics), out, Duration::from_millis(20));
     for _ in 0..2 {
         let frame = recv_frame(&mut rx, "metrics push").await;
@@ -278,7 +282,7 @@ async fn metrics_watch_pushes_until_dropped() {
 
 #[tokio::test]
 async fn metrics_watch_ends_when_the_channel_closes() {
-    let (out, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (out, rx) = outbound::channel();
     let watch = spawn_metrics_watch(
         fake_source(HostMetrics::default()),
         out,
@@ -302,7 +306,7 @@ async fn bridge_answers_host_metrics_with_req() {
         ..HostMetrics::default()
     };
     let mut bridge = RemoteBridge::with_metrics(state, fake_source(metrics));
-    let (out, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (out, mut rx) = outbound::channel();
     bridge
         .handle_text(r#"{"t":"host.metrics","req":"m1"}"#, &out)
         .await;
@@ -316,7 +320,7 @@ async fn bridge_answers_host_metrics_with_req() {
 async fn bridge_watch_registers_and_unwatch_clears() {
     let (state, _dir) = test_state();
     let mut bridge = RemoteBridge::with_metrics(state, fake_source(HostMetrics::default()));
-    let (out, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (out, mut rx) = outbound::channel();
     assert!(bridge.metrics_watch.is_none());
     bridge
         .handle_text(r#"{"t":"host.metrics.watch","interval_s":5}"#, &out)
@@ -347,7 +351,7 @@ async fn bridge_watch_registers_and_unwatch_clears() {
 async fn bridge_second_watch_replaces_the_first() {
     let (state, _dir) = test_state();
     let mut bridge = RemoteBridge::with_metrics(state, fake_source(HostMetrics::default()));
-    let (out, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (out, mut rx) = outbound::channel();
     bridge
         .handle_text(r#"{"t":"host.metrics.watch","interval_s":5}"#, &out)
         .await;
@@ -369,10 +373,137 @@ async fn bridge_second_watch_replaces_the_first() {
 async fn bridge_watch_clamps_a_zero_interval_instead_of_panicking() {
     let (state, _dir) = test_state();
     let mut bridge = RemoteBridge::with_metrics(state, fake_source(HostMetrics::default()));
-    let (out, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (out, mut rx) = outbound::channel();
     bridge
         .handle_text(r#"{"t":"host.metrics.watch","interval_s":0}"#, &out)
         .await;
     let frame = recv_frame(&mut rx, "clamped watch push").await;
     assert_eq!(frame["t"], "host.metrics");
+}
+
+fn spawn_cat(hub: &SessionHub, workdir: &str) -> Arc<HubSession> {
+    let request = SpawnRequest {
+        kind: SessionKind::Terminal,
+        cli: "cat".to_string(),
+        model: None,
+        workdir: workdir.to_string(),
+        name: None,
+        prompt: None,
+        interactive_args: None,
+        fallback_args: None,
+        model_flag: None,
+        id: None,
+        harness_conversation_id: None,
+        seed_id: None,
+        accent: None,
+        yolo: false,
+    };
+    hub.spawn(&request).expect("spawn cat")
+}
+
+/// A 50 Hz spinner on the remote data channel yields at most 20 `out`
+/// frames per second, coalescing several chunks into each frame.
+#[tokio::test]
+async fn a_fifty_hertz_spinner_yields_at_most_twenty_out_frames_per_second() {
+    let (tx, mut rx) = outbound::channel();
+    let mut coal = SessionCoal::new(true);
+    let chunk = vec![b'.'; 100];
+    let mut seq = 0u64;
+    let mut frames: Vec<String> = Vec::new();
+    let start = tokio::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(1) {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        seq += 1;
+        assert_eq!(coal.push_out(&tx, seq, &chunk), PushOut::Buffered);
+        flush_coal("s", &tx, &mut coal);
+        // A real device drains as it goes; a stalled one would fall back to a
+        // snapshot instead of being measured for frame rate.
+        while let Ok(frame) = rx.try_recv() {
+            frames.push(frame);
+        }
+    }
+    // Let the last buffered frame leave under the rate cap.
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    flush_coal("s", &tx, &mut coal);
+    while let Ok(frame) = rx.try_recv() {
+        frames.push(frame);
+    }
+
+    let count = frames.len();
+    let mut last_seq = 0;
+    let mut largest = 0;
+    for frame in &frames {
+        let value = json(frame);
+        assert_eq!(value["t"], "out");
+        last_seq = value["seq"].as_u64().expect("out seq");
+        largest = largest.max(data(&value).len());
+    }
+    assert!(
+        count <= 20,
+        "a 50 Hz spinner produced {count} out frames in one second"
+    );
+    assert!(count >= 1, "the spinner does produce output");
+    assert_eq!(last_seq, seq, "the final frame carries the latest seq");
+    assert!(
+        largest > chunk.len(),
+        "chunks are coalesced into a single frame (largest {largest})"
+    );
+}
+
+/// After a lagged broadcast (or a bound fallback) the forwarder sends a fresh
+/// snapshot, then resumes live output at or after the snapshot's seq.
+#[tokio::test]
+async fn a_lagged_forwarder_resumes_live_output_after_the_snapshot_seq() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = Arc::new(Database::new(&dir.path().join("test.db")).expect("test database"));
+    let workdir = tempfile::tempdir().expect("workdir");
+    let hub = SessionHub::with_broadcast_capacity(db, "test-host".to_string(), 8);
+    let session = spawn_cat(&hub, &workdir.path().to_string_lossy());
+    session.ingest_chunk(b"before\r\n");
+
+    let (tx, mut rx) = outbound::channel();
+    let mut coal = SessionCoal::new(true);
+    let mut next = 0u64;
+    assert!(pump(
+        &session,
+        &mut next,
+        Err(tokio::sync::broadcast::error::RecvError::Lagged(1)),
+        &tx,
+        &mut coal
+    ));
+    let snapshot_seq = next;
+    assert_eq!(snapshot_seq, 1, "the snapshot covers ingested output");
+
+    session.ingest_chunk(b"after\r\n");
+    assert!(pump(
+        &session,
+        &mut next,
+        Ok((2, b"after\r\n".to_vec())),
+        &tx,
+        &mut coal
+    ));
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    assert!(flush_coal(&session.id, &tx, &mut coal));
+
+    let mut saw_snapshot = false;
+    let mut live_seq = None;
+    while let Ok(frame) = rx.try_recv() {
+        let value = json(&frame);
+        match value["t"].as_str() {
+            Some("snapshot") => {
+                assert_eq!(value["seq"].as_u64(), Some(snapshot_seq));
+                saw_snapshot = true;
+            }
+            Some("out") => live_seq = value["seq"].as_u64(),
+            Some("snapshot_more") => {}
+            other => panic!("unexpected frame: {other:?}"),
+        }
+    }
+    assert!(saw_snapshot, "the lagged forwarder sends a snapshot");
+    let live_seq = live_seq.expect("live output resumes after the snapshot");
+    assert!(
+        live_seq > snapshot_seq,
+        "live seq {live_seq} must advance past the snapshot seq {snapshot_seq}"
+    );
+    let _ = hub.kill(&session.id);
 }

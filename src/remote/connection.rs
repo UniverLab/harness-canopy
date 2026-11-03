@@ -16,8 +16,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::sessions::outbound;
 use crate::sessions::protocol::{error_frame, hello_frame, installed_harnesses, ERR_REVOKED};
-use crate::sessions::ws::SessionsState;
+use crate::sessions::ws::{OutTx, SessionsState};
 use crate::sessions::HubEvent;
 
 use super::bridge::RemoteBridge;
@@ -326,7 +327,7 @@ pub fn spawn_with_watchdog(session: PeerSession, config: WatchdogConfig) {
 }
 
 async fn serve(session: &mut PeerSession, config: WatchdogConfig) {
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<String>();
+    let (out_tx, mut out_rx) = outbound::channel();
     let mut bridge = RemoteBridge::with_grant(session.state.clone(), session.grant.clone());
     let mut events = session.state.hub.subscribe_events();
     // Like the local socket, the first frame the device sees is `hello`; any
@@ -342,7 +343,7 @@ async fn serve(session: &mut PeerSession, config: WatchdogConfig) {
         let reason: Option<&'static str> = tokio::select! {
             _ = session.token.cancelled() => Some("revoked or closed by the device"),
             message = session.control.recv() => on_control(session, message).await.err(),
-            frame = out_rx.recv() => on_out_frame(session, frame, greeted).await.err(),
+            frame = out_rx.recv() => on_out_frame(session, &out_tx, frame, greeted).await.err(),
             event = session.peer.next() => {
                 on_peer_event(session, event, &mut greeted, &mut bridge, &out_tx)
                     .await
@@ -423,6 +424,7 @@ async fn on_control(session: &PeerSession, message: Option<Control>) -> Result<(
 /// Forward one queued outbound frame; `Err` carries why the peer ends.
 async fn on_out_frame(
     session: &PeerSession,
+    out: &OutTx,
     frame: Option<String>,
     greeted: bool,
 ) -> Result<(), &'static str> {
@@ -432,17 +434,19 @@ async fn on_out_frame(
     if !greeted {
         return Ok(());
     }
-    session
+    let sent = session
         .peer
         .send_text(&fitting_frame(frame, session.max_frame))
-        .await
-        .map_err(|_| "the data channel refused a write")
+        .await;
+    // Count what the transport still buffers toward the connection's budget.
+    out.set_transport_backlog(session.peer.buffered_amount().await);
+    sent.map_err(|_| "the data channel refused a write")
 }
 
 /// Handle one hub receive; `Err` carries why the peer ends.
 fn on_hub_event(
     bridge: &mut RemoteBridge,
-    out_tx: &mpsc::UnboundedSender<String>,
+    out_tx: &OutTx,
     greeted: bool,
     hub_event: Result<HubEvent, tokio::sync::broadcast::error::RecvError>,
 ) -> Result<(), &'static str> {
@@ -460,12 +464,7 @@ fn on_hub_event(
 /// queued: nothing may overtake `hello`, and nothing is attached yet to
 /// miss a removal. Pre-greeting shelf events still feed the hidden set, so
 /// a terminal file that lands during the handshake hides its later removal.
-fn forward_hub_event(
-    bridge: &mut RemoteBridge,
-    out_tx: &mpsc::UnboundedSender<String>,
-    greeted: bool,
-    event: HubEvent,
-) {
+fn forward_hub_event(bridge: &mut RemoteBridge, out_tx: &OutTx, greeted: bool, event: HubEvent) {
     if greeted {
         bridge.handle_event(event, out_tx);
     } else {
@@ -493,7 +492,7 @@ async fn on_peer_event(
     event: Option<PeerEvent>,
     greeted: &mut bool,
     bridge: &mut RemoteBridge,
-    out_tx: &mpsc::UnboundedSender<String>,
+    out_tx: &OutTx,
 ) -> Result<(), &'static str> {
     match event {
         Some(PeerEvent::Open) => {
