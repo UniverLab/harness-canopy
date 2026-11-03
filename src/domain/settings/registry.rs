@@ -505,6 +505,15 @@ pub static REGISTRY: &[SettingDef] = &[
         wizard: false,
     },
     SettingDef {
+        key: "remote.shelf_max_file_mb",
+        kind: Kind::Int { min: 1, max: 1024 },
+        default: DefaultValue::Literal("20"),
+        description: "Largest file a remote upload may send onto a session shelf, in MiB.",
+        group: Group::General,
+        apply: Apply::NextRun,
+        wizard: false,
+    },
+    SettingDef {
         key: "daemon.cpu_quota_percent",
         kind: Kind::Int { min: 0, max: 25600 },
         default: DefaultValue::Computed(crate::domain::daemon_config::default_quota_percent),
@@ -522,7 +531,7 @@ mod tests {
 
     #[test]
     fn registry_has_one_entry_per_setting_and_they_are_unique() {
-        assert_eq!(REGISTRY.len(), 52);
+        assert_eq!(REGISTRY.len(), 53);
         for def in REGISTRY {
             assert_eq!(find(def.key).map(|d| d.key), Some(def.key));
         }

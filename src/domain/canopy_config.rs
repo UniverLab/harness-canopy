@@ -1279,6 +1279,7 @@ mod tests {
                 relay_url: "https://relay.example".to_string(),
                 github_client_id: "custom-id".to_string(),
                 host_label: "home-server".to_string(),
+                shelf_max_file_mb: 20,
             },
             ..CanopyConfig::default()
         };

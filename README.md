@@ -167,7 +167,7 @@ session later instead of polling), and `intelligence_upsert` /
 - **NewAgentDialog** — Three modes (Interactive, Background Cron/Watch, Terminal) with CLI picker, model picker, seed identity selector (`◀ None / SeedName ▶`), directory browser, and yolo mode toggle.
 - **Detachable Sessions** — Sessions run in the daemon, not the TUI: quitting the TUI leaves them running, reopening it reattaches to them live with screen and scrollback, a daemon restart respawns every session still listed as active under the same id and name (a terminal comes back with a clean pane and a fresh prompt), sessions started or closed elsewhere update the sidebar live, and a dropped daemon connection reconnects on its own (0.5 s doubling to 5 s) and re-lists what the daemon still has.
 - **Scheduled Delivery** — `Shift+Enter` (Kitty keyboard protocol) sends prompts at a chosen time instead of immediately.
-- **Session Shelf** — an agent copies up to 10 files per call (PNG, JPEG, WebP, GIF or SVG, sniffed from content, 20 MiB each) onto its session's shelf with the `session_send_file` MCP tool; the F1 hub's `Shelf` tab lists every shelf newest first, toasts each arrival as `📎 <name> — <from>`, and opens, copies the path of, or deletes the selected file, with `canopy shelf list`/`open` reaching the same files from the CLI.
+- **Session Shelf** — an agent copies up to 10 files per call (any type, 20 MiB each; content sniffing only decides how it is displayed) onto its session's shelf with the `session_send_file` MCP tool, lists a shelf with `session_list_files`, and reads one file with `session_read_file` (text or base64, capped at 1 MiB). A trusted remote guest with the `upload` grant sends files into its granted sessions over the session protocol's `shelf_put_*` frames. The F1 hub's `Shelf` tab lists every shelf newest first, toasts each arrival as `📎 <name> — <from>`, and opens, copies the path of, or deletes the selected file, with `canopy shelf list`/`open` reaching the same files from the CLI.
 - **Split Groups** — Side-by-side horizontal/vertical views for monitoring multiple agents simultaneously.
 - **System Dashboard** — CPU, memory, disk, GPU (NVIDIA/Linux/macOS), temperatures with amber/red alert thresholds; a metric without a reading is omitted rather than shown as `n/a`. WSL queries Windows host metrics via PowerShell. Where ACPI thermal zones report nothing on Windows/WSL, `canopy doctor` prints an informational note: run LibreHardwareMonitor (WMI on) to expose CPU temperature.
 - **Live Graph View** — Real-time graph rendering with auto-follow on the running node, manual node inspection, and per-node run info (status, elapsed, output tail).
@@ -195,7 +195,7 @@ session later instead of polling), and `intelligence_upsert` /
 
 ---
 
-## MCP Tools (34)
+## MCP Tools (36)
 
 Graph-node sessions (agent and ensemble nodes launched by the graph engine) receive a fixed node profile of 12 tools via `CANOPY_MCP_PROFILE=node`, so every node stays well under the 128-tool cap of OpenAI-compatible providers. All other sessions — the orchestrator, check nodes, hooks, TUI, subagents, and background agents — keep the full tool list.
 
@@ -218,7 +218,7 @@ Graph-node sessions (agent and ensemble nodes launched by the graph engine) rece
 | `get_tools` | **Protocol** (1) |
 | `session_list` | **Interactive sessions** (1) |
 | `scheduled_prompts` | **Scheduled prompts** (1) |
-| `session_send_file` | **Session shelf** (1) |
+| `session_send_file`, `session_list_files`, `session_read_file` | **Session shelf** (3) |
 | `remote` | **Remote control** (1) |
 
 ---

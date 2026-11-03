@@ -21,6 +21,7 @@ pub(super) const SHELF_FILES_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS shelf_fi
                 sha256 TEXT NOT NULL,
                 caption TEXT CHECK (caption IS NULL OR length(caption) <= 500),
                 from_label TEXT NOT NULL,
+                origin TEXT NOT NULL DEFAULT 'agent',
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_shelf_files_session_created
@@ -39,6 +40,10 @@ pub struct ShelfRow {
     pub sha256: String,
     pub caption: Option<String>,
     pub from_label: String,
+    /// Who put the file on the shelf: `agent` (`session_send_file`) or
+    /// `user` (a remote upload). MCP-only; the `shelf` wire frame never
+    /// carries it.
+    pub origin: String,
     /// RFC 3339 UTC; also the ordering key (same format on every write, so
     /// lexicographic order is chronological order).
     pub created_at: String,
@@ -46,7 +51,7 @@ pub struct ShelfRow {
 
 /// Every column [`ShelfRow`] needs, in the order `shelf_from_row` reads them.
 const SHELF_COLUMNS: &str =
-    "file_id, session_id, name, mime, size, sha256, caption, from_label, created_at";
+    "file_id, session_id, name, mime, size, sha256, caption, from_label, origin, created_at";
 
 fn shelf_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ShelfRow> {
     Ok(ShelfRow {
@@ -58,7 +63,8 @@ fn shelf_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ShelfRow> {
         sha256: row.get(5)?,
         caption: row.get(6)?,
         from_label: row.get(7)?,
-        created_at: row.get(8)?,
+        origin: row.get(8)?,
+        created_at: row.get(9)?,
     })
 }
 
@@ -68,8 +74,8 @@ impl Database {
     pub fn insert_shelf_file(&self, row: &ShelfRow) -> Result<()> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         conn.execute(
-            "INSERT INTO shelf_files (file_id, session_id, name, mime, size, sha256, caption, from_label, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO shelf_files (file_id, session_id, name, mime, size, sha256, caption, from_label, origin, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 row.file_id,
                 row.session_id,
@@ -79,6 +85,7 @@ impl Database {
                 row.sha256,
                 row.caption,
                 row.from_label,
+                row.origin,
                 row.created_at,
             ],
         )?;

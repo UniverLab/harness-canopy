@@ -37,6 +37,8 @@ pub struct GuestOffer {
     pub sdp: String,
     /// What this guest's login may see.
     pub grant: Grant,
+    /// Whether this guest holds the `upload` grant.
+    pub upload: bool,
 }
 
 /// Relay `from` ids currently known to be guest connections.
@@ -117,10 +119,12 @@ impl GuestConns {
             .and_then(Value::as_str)
             .ok_or(Refusal::BadSignature)?;
         let grant = trust::resolve(db, owner_login, login).ok_or(Refusal::Forbidden)?;
+        let upload = trust::resolve_upload(db, owner_login, login);
         Ok(GuestOffer {
             uid,
             sdp: sdp.to_string(),
             grant,
+            upload,
         })
     }
 }

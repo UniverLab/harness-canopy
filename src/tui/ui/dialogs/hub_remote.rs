@@ -347,6 +347,9 @@ fn trusted_line(
     } else {
         push(profile.sessions.join(", "), Style::default());
     }
+    if profile.upload {
+        push(" · upload".to_string(), dim);
+    }
     let line = Line::from(spans);
     if selected {
         line.style(Style::default().bg(theme.selected_bg))
@@ -500,6 +503,7 @@ pub(super) fn draw_trust_overlay(frame: &mut Frame, app: &App, theme: &Theme) {
         form.sessions.clone()
     };
     let toggle = if form.all { "[x]" } else { "[ ]" };
+    let upload_toggle = if form.upload { "[x]" } else { "[ ]" };
     let rows = [
         (TrustField::Login, "User", login),
         (TrustField::Sessions, "Sessions", sessions),
@@ -507,6 +511,11 @@ pub(super) fn draw_trust_overlay(frame: &mut Frame, app: &App, theme: &Theme) {
             TrustField::All,
             "All sessions",
             format!("{toggle} (a toggles)"),
+        ),
+        (
+            TrustField::Upload,
+            "Upload",
+            format!("{upload_toggle} (u toggles)"),
         ),
     ];
     let content_width = rows
@@ -517,8 +526,8 @@ pub(super) fn draw_trust_overlay(frame: &mut Frame, app: &App, theme: &Theme) {
         .max("Tab move · Enter save · Esc cancel".len());
     let frame_area = frame.area();
     let width = ((content_width + 4) as u16).min(frame_area.width.saturating_sub(2));
-    let height = 6u16.min(frame_area.height);
-    if width < 10 || height < 6 {
+    let height = 7u16.min(frame_area.height);
+    if width < 10 || height < 7 {
         return;
     }
     let area = centered_box(width, height, frame_area);
@@ -532,6 +541,7 @@ pub(super) fn draw_trust_overlay(frame: &mut Frame, app: &App, theme: &Theme) {
     frame.render_widget(block, area);
 
     let layout = Layout::vertical([
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
@@ -563,7 +573,7 @@ pub(super) fn draw_trust_overlay(frame: &mut Frame, app: &App, theme: &Theme) {
             "Tab move · Enter save · Esc cancel",
             Style::default().fg(theme.dim_text),
         ))),
-        layout[3],
+        layout[4],
     );
 }
 
@@ -992,11 +1002,13 @@ mod tests {
                 login: "guest".to_string(),
                 all_sessions: false,
                 sessions: vec!["alpha".to_string(), "beta".to_string()],
+                upload: true,
             },
             TrustedView {
                 login: "auditor".to_string(),
                 all_sessions: true,
                 sessions: Vec::new(),
+                upload: false,
             },
         ];
         let text = draw(&mut app, 120, 40);
@@ -1005,8 +1017,9 @@ mod tests {
         assert!(text.contains("alpha, beta"), "{text}");
         assert!(text.contains("auditor"), "{text}");
         assert!(text.contains("all sessions"), "{text}");
+        assert!(text.contains("upload"), "{text}");
 
-        // The form overlay floats over the tab with its three stops.
+        // The form overlay floats over the tab with its four stops.
         app.hub.remote.trust.open_new();
         app.hub.remote.trust.login = "guest".to_string();
         let text = draw(&mut app, 120, 40);
@@ -1014,6 +1027,7 @@ mod tests {
         assert!(text.contains("User: guest"), "{text}");
         assert!(text.contains("Sessions:"), "{text}");
         assert!(text.contains("All sessions:"), "{text}");
+        assert!(text.contains("Upload:"), "{text}");
         assert!(text.contains("Enter save"), "{text}");
 
         // The remove confirmation pins above the message line.

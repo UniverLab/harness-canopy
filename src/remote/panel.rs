@@ -40,6 +40,9 @@ pub struct TrustedView {
     pub all_sessions: bool,
     /// Granted session names, ascending. Empty when `all_sessions`.
     pub sessions: Vec<String>,
+    /// Whether the profile may upload files into its granted sessions.
+    #[serde(default)]
+    pub upload: bool,
 }
 
 /// Everything the Remote tab shows.
@@ -114,6 +117,7 @@ pub fn status_view(data_dir: &Path, db: &Database, live: &RemoteLive) -> Result<
             login: profile.login,
             all_sessions: profile.all_sessions,
             sessions: profile.sessions,
+            upload: profile.upload,
         })
         .collect();
     Ok(RemoteView {
@@ -185,6 +189,7 @@ pub fn trust_add(
     login: &str,
     all_sessions: bool,
     sessions: &[String],
+    upload: bool,
 ) -> Result<TrustedView> {
     let login = trust::normalize_login(login);
     anyhow::ensure!(!login.is_empty(), "login must not be empty");
@@ -195,7 +200,8 @@ pub fn trust_add(
     } else {
         db.set_grants(&login, sessions)?;
     }
-    if narrowed(&previous, all_sessions, sessions) {
+    db.set_upload(&login, upload)?;
+    if narrowed(&previous, all_sessions, sessions, upload) {
         super::relay::queue_trust_revocation(db, &login);
     }
     let stored = db
@@ -205,6 +211,7 @@ pub fn trust_add(
         login: stored.login,
         all_sessions: stored.all_sessions,
         sessions: stored.sessions,
+        upload: stored.upload,
     })
 }
 
@@ -215,10 +222,14 @@ fn narrowed(
     previous: &Option<crate::db::remote_trust::TrustedProfile>,
     all_sessions: bool,
     sessions: &[String],
+    upload: bool,
 ) -> bool {
     let Some(previous) = previous else {
         return false;
     };
+    if previous.upload && !upload {
+        return true;
+    }
     if previous.all_sessions {
         return !all_sessions;
     }

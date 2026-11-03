@@ -14,7 +14,8 @@ use crate::db::Database;
 /// The trust tables, shared by the base schema and the migration.
 pub(super) const REMOTE_TRUST_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS remote_trust_users (
                 login TEXT PRIMARY KEY,
-                all_sessions INTEGER NOT NULL DEFAULT 0
+                all_sessions INTEGER NOT NULL DEFAULT 0,
+                upload INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS remote_trust_grants (
                 login TEXT NOT NULL REFERENCES remote_trust_users(login) ON DELETE CASCADE,
@@ -38,6 +39,8 @@ pub struct TrustedProfile {
     pub all_sessions: bool,
     /// Granted session names, ascending. Empty when `all_sessions`.
     pub sessions: Vec<String>,
+    /// Whether the profile may upload files into its granted sessions.
+    pub upload: bool,
 }
 
 /// Canonical login form: trimmed and lowercased (GitHub logins are
@@ -99,14 +102,14 @@ impl Database {
     pub fn get_trust(&self, login: &str) -> Result<Option<TrustedProfile>> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         let login = normalize(login);
-        let all: Option<i64> = conn
+        let flags: Option<(i64, i64)> = conn
             .query_row(
-                "SELECT all_sessions FROM remote_trust_users WHERE login = ?1",
+                "SELECT all_sessions, upload FROM remote_trust_users WHERE login = ?1",
                 [&login],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        let Some(all) = all else {
+        let Some((all, upload)) = flags else {
             return Ok(None);
         };
         let mut stmt = conn.prepare(
@@ -119,32 +122,48 @@ impl Database {
             login,
             all_sessions: all != 0,
             sessions,
+            upload: upload != 0,
         }))
     }
 
     /// Every trusted profile, ascending by login.
     pub fn list_trust(&self) -> Result<Vec<TrustedProfile>> {
-        let logins: Vec<(String, i64)> = {
+        let logins: Vec<(String, i64, i64)> = {
             let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
-            let mut stmt = conn
-                .prepare("SELECT login, all_sessions FROM remote_trust_users ORDER BY login ASC")?;
+            let mut stmt = conn.prepare(
+                "SELECT login, all_sessions, upload FROM remote_trust_users ORDER BY login ASC",
+            )?;
             let rows = stmt.query_map([], |row| {
                 let login: String = row.get(0)?;
                 let all: i64 = row.get(1)?;
-                Ok((login, all))
+                let upload: i64 = row.get(2)?;
+                Ok((login, all, upload))
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
         let mut profiles = Vec::with_capacity(logins.len());
-        for (login, all) in logins {
+        for (login, all, upload) in logins {
             let sessions = self.grant_names(&login)?;
             profiles.push(TrustedProfile {
                 login,
                 all_sessions: all != 0,
                 sessions,
+                upload: upload != 0,
             });
         }
         Ok(profiles)
+    }
+
+    /// Set one login's upload grant (default deny). Both [`Self::upsert_trust`]
+    /// and [`Self::set_grants`] leave it untouched, so only this call opens
+    /// the door.
+    pub fn set_upload(&self, login: &str, upload: bool) -> Result<()> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        conn.execute(
+            "UPDATE remote_trust_users SET upload = ?1 WHERE login = ?2",
+            params![i64::from(upload), normalize(login)],
+        )?;
+        Ok(())
     }
 
     /// Replace a login's granted session names wholesale.
@@ -255,6 +274,22 @@ impl Database {
     pub(super) fn migrate_remote_trust(conn: &rusqlite::Connection) -> Result<()> {
         conn.execute_batch(super::remote_trust::REMOTE_TRUST_SCHEMA)
             .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+        // The `upload` grant postdates the table: every existing profile
+        // stays deny (the column default) until explicitly opened.
+        let has_upload: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('remote_trust_users') WHERE name = 'upload'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if !has_upload {
+            conn.execute(
+                "ALTER TABLE remote_trust_users ADD COLUMN upload INTEGER NOT NULL DEFAULT 0",
+                [],
+            )
+            .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+        }
         Ok(())
     }
 }

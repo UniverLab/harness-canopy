@@ -10,7 +10,7 @@ use chrono::{Duration, Utc};
 use super::{connect_client, decode_b64, recv_json, send_json, serve_state, test_db, test_hub};
 use crate::sessions::shelf::{
     is_file_id, shelf_file_path, ShelfError, ShelfStore, ERR_NOT_A_FILE, ERR_NOT_FOUND,
-    ERR_TOO_LARGE, ERR_UNSUPPORTED_TYPE, MAX_FILE_BYTES, READ_CHUNK_BYTES,
+    ERR_TOO_LARGE, MAX_FILE_BYTES, READ_CHUNK_BYTES,
 };
 use crate::sessions::ws::SessionsState;
 
@@ -88,21 +88,21 @@ fn png_renamed_txt_is_accepted_as_png() {
 }
 
 #[test]
-fn text_file_renamed_png_is_rejected() {
+fn unknown_content_is_accepted_as_octet_stream() {
     let (db, _dir) = test_db();
     let store = store(&db);
     let src = scratch_dir();
+    // Sniffing decides display only: any type is stored, and an
+    // unrecognised one is labelled as generic binary.
     let path = write_src(&src, "fake.png", b"just some text, not an image");
-    let err = store.insert(&path, None, None, "host").unwrap_err();
-    assert_eq!(code(&err), ERR_UNSUPPORTED_TYPE);
-    assert!(
-        store.list(None).is_empty(),
-        "a rejected file must leave no row"
-    );
+    let item = store.insert(&path, None, None, "host").unwrap();
+    assert_eq!(item.mime, "application/octet-stream");
+    assert_eq!(item.name, "fake.png");
+    assert_eq!(store.list(None).len(), 1);
 }
 
 #[test]
-fn svg_with_xml_prolog_is_accepted_and_html_is_rejected() {
+fn svg_with_xml_prolog_is_accepted_and_html_is_octet_stream() {
     let (db, _dir) = test_db();
     let store = store(&db);
     let src = scratch_dir();
@@ -115,14 +115,15 @@ fn svg_with_xml_prolog_is_accepted_and_html_is_rejected() {
     let item = store.insert(&svg, None, None, "host").expect("prolog svg");
     assert_eq!(item.mime, "image/svg+xml");
 
-    // HTML wearing an .svg extension: root element decides, not the name.
+    // HTML wearing an .svg extension: the root element decides the display
+    // type, and the file is still stored.
     let html = write_src(
         &src,
         "page.svg",
         b"<!DOCTYPE html>\n<html><body><svg width=\"1\"></svg></body></html>",
     );
-    let err = store.insert(&html, None, None, "host").unwrap_err();
-    assert_eq!(code(&err), ERR_UNSUPPORTED_TYPE);
+    let item = store.insert(&html, None, None, "host").unwrap();
+    assert_eq!(item.mime, "application/octet-stream");
 }
 
 // ── limits and error codes (FR2) ──────────────────────────────────────

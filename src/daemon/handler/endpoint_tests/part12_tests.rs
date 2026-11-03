@@ -440,18 +440,22 @@ async fn session_send_file_partial_success_reports_per_path_errors() {
     ];
     let out = send_file(&handler, paths, None).await;
 
-    assert_eq!(out["items"].as_array().unwrap().len(), 1);
+    assert_eq!(out["items"].as_array().unwrap().len(), 2);
     assert_eq!(out["items"][0]["name"], "good.png");
+    assert_eq!(
+        out["items"][1]["mime"], "application/octet-stream",
+        "any type is accepted; sniffing only decides display"
+    );
     let errors = out["errors"].as_array().unwrap();
-    assert_eq!(errors.len(), 3, "three bad paths, three errors: {out}");
+    assert_eq!(errors.len(), 2, "two bad paths, two errors: {out}");
     let codes: Vec<&str> = errors
         .iter()
         .map(|e| e["code"].as_str().expect("a code per error"))
         .collect();
-    assert_eq!(codes, vec!["not_found", "not_a_file", "unsupported_type"]);
+    assert_eq!(codes, vec!["not_found", "not_a_file"]);
     for error in errors {
         assert!(!error["message"].as_str().unwrap_or("").is_empty());
         assert!(!error["path"].as_str().unwrap_or("").is_empty());
     }
-    assert_eq!(handler.shelf.list(Some("me")).len(), 1);
+    assert_eq!(handler.shelf.list(Some("me")).len(), 2);
 }

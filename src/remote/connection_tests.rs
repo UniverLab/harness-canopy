@@ -320,6 +320,7 @@ async fn connect_loopback_device(
         from: from_owned,
         max_frame,
         grant: crate::remote::trust::Grant::All,
+        can_upload: true,
     });
 
     (device, events_rx, vec![demux, trickle], id)
@@ -788,10 +789,10 @@ async fn a_paired_device_gets_the_session_hub_over_a_webrtc_data_channel() {
     // The device is greeted exactly like a local socket: hello, then list.
     let hello = loopback.recv("the hello").await;
     assert_eq!(hello.json["t"], "hello", "got {}", hello.raw);
-    assert_eq!(hello.json["proto"], 1);
+    assert_eq!(hello.json["proto"], 2);
     assert_eq!(
         hello.json["features"],
-        json!(["shelf"]),
+        json!(["shelf", "shelf_upload"]),
         "the data channel advertises the shelf: {}",
         hello.raw
     );
@@ -842,14 +843,14 @@ async fn a_paired_device_gets_the_session_hub_over_a_webrtc_data_channel() {
     close_by_revoking(&mut loopback, DEVICE_ID).await;
 }
 
-/// The greeting every peer sees: hello, proto 1, the shelf feature.
+/// The greeting every peer sees: hello, proto 2, the shelf features.
 async fn assert_hello(peer: &mut Loopback, what: &str) {
     let hello = peer.recv(what).await;
     assert_eq!(hello.json["t"], "hello", "got {}", hello.raw);
-    assert_eq!(hello.json["proto"], 1);
+    assert_eq!(hello.json["proto"], 2);
     assert_eq!(
         hello.json["features"],
-        json!(["shelf"]),
+        json!(["shelf", "shelf_upload"]),
         "the data channel advertises the shelf: {}",
         hello.raw
     );

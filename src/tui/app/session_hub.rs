@@ -552,7 +552,7 @@ mod tests {
 
     #[test]
     fn proto_mismatch_sets_the_notice_and_attaches_nothing() {
-        let url = serve_proto(2);
+        let url = serve_proto(PROTO_VERSION + 1);
         let data_dir = tempfile::tempdir().expect("data dir");
         let db = Arc::new(Database::new(&data_dir.path().join("test.db")).expect("test database"));
         let mut app = App::new(
@@ -564,7 +564,7 @@ mod tests {
 
         app.connect_session_hub_to(&url, "test-token");
 
-        let expected = proto_mismatch_message(2);
+        let expected = proto_mismatch_message(PROTO_VERSION + 1);
         assert_eq!(app.hub_notice.as_deref(), Some(expected.as_str()));
         assert!(app.interactive_agents.is_empty());
         assert!(app.terminal_agents.is_empty());

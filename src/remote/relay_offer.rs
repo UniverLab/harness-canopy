@@ -42,6 +42,8 @@ impl RelayRuntime {
             ));
             return;
         };
+        let can_upload =
+            trust::resolve_upload(&self.db, &self.github_login, &offer.device.github_login);
         let Some(sessions) = self.sessions.clone() else {
             let _ = signal.send((from.to_string(), signaling::connect_fail(Refusal::Busy)));
             return;
@@ -88,6 +90,7 @@ impl RelayRuntime {
                 signal,
                 from,
                 grant,
+                can_upload,
                 max_frame: connection::peer_frame_cap(&offer.sdp),
             });
         });
@@ -155,6 +158,7 @@ impl RelayRuntime {
                 signal,
                 from,
                 grant: offer.grant,
+                can_upload: offer.upload,
                 max_frame: connection::peer_frame_cap(&offer.sdp),
             });
         });

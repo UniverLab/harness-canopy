@@ -314,3 +314,176 @@ async fn session_send_file_anonymous_caller_uses_host_shelf() {
     assert_eq!(host.len(), 1, "anonymous callers use the host shelf");
     assert_eq!(host[0].from_label, "host");
 }
+
+/// Call `session_list_files` directly.
+async fn list_shelf(handler: &TaskTriggerHandler, session_id: Option<String>) -> CallToolResult {
+    handler
+        .session_list_files(
+            Parameters(SessionListFilesParams { session_id }),
+            OptionalExtension(None),
+        )
+        .await
+        .unwrap()
+}
+
+/// Call `session_read_file` directly.
+async fn read_shelf(handler: &TaskTriggerHandler, file_id: String) -> CallToolResult {
+    handler
+        .session_read_file(Parameters(SessionReadFileParams { file_id }))
+        .await
+        .unwrap()
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest as _, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Any type is accepted through the same sniff/store path: a Markdown file
+/// with no magic bytes lands as `application/octet-stream`.
+#[tokio::test]
+async fn session_send_file_accepts_markdown() {
+    let (dir, db, handler) = endpoint_test_handler();
+    let path = dir.path().join("notes.md");
+    std::fs::write(&path, b"# a markdown note\n").unwrap();
+
+    let result = send_files(
+        &handler,
+        vec![path.to_string_lossy().into_owned()],
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert!(!is_err(&result), "{}", text(&result));
+    let body = json_body(&result);
+    assert_eq!(body["items"].as_array().unwrap().len(), 1);
+    assert_eq!(body["items"][0]["mime"], "application/octet-stream");
+    assert_eq!(body["items"][0]["name"], "notes.md");
+
+    let rows = db.list_shelf_files(None).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].origin, "agent");
+    assert_eq!(rows[0].size, b"# a markdown note\n".len() as i64);
+}
+
+/// `session_list_files` and `session_read_file` round-trip both origins:
+/// an agent-sent text file reads as text, a remote-uploaded binary reads as
+/// base64.
+#[tokio::test]
+async fn session_list_files_and_session_read_file_round_trip() {
+    let (dir, db, handler) = endpoint_test_handler();
+    let path = dir.path().join("brief.md");
+    std::fs::write(&path, b"hello from the agent").unwrap();
+    let sent = send_files(
+        &handler,
+        vec![path.to_string_lossy().into_owned()],
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert!(!is_err(&sent), "{}", text(&sent));
+    let agent_id = json_body(&sent)["items"][0]["file_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // A remote-style upload into the host shelf: origin `user`.
+    let png: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0];
+    let user_id = handler
+        .shelf
+        .begin_upload(None, "photo.png", png.len() as u64, None, &sha256_hex(&png))
+        .unwrap();
+    handler
+        .shelf
+        .upload_part(&user_id, 0, &png)
+        .expect("append part");
+    handler.shelf.upload_end(&user_id).expect("commit upload");
+
+    let listed = list_shelf(&handler, None).await;
+    assert!(!is_err(&listed), "{}", text(&listed));
+    let items = json_body(&listed)["items"].as_array().unwrap().clone();
+    assert_eq!(items.len(), 2, "{items:?}");
+    let by_id = |id: &str| {
+        items
+            .iter()
+            .find(|item| item["file_id"] == id)
+            .unwrap_or_else(|| panic!("missing {id} in {items:?}"))
+            .clone()
+    };
+    let agent_item = by_id(&agent_id);
+    assert_eq!(agent_item["origin"], "agent");
+    assert_eq!(agent_item["mime"], "application/octet-stream");
+    let user_item = by_id(&user_id);
+    assert_eq!(user_item["origin"], "user");
+    assert_eq!(user_item["mime"], "image/png");
+    assert!(user_item["created_at"].as_str().is_some());
+
+    let text_read = read_shelf(&handler, agent_id).await;
+    assert!(!is_err(&text_read), "{}", text(&text_read));
+    let text_body = json_body(&text_read);
+    assert_eq!(text_body["enc"], "text");
+    assert_eq!(text_body["content"], "hello from the agent");
+    assert_eq!(text_body["truncated"], false);
+
+    let binary_read = read_shelf(&handler, user_id).await;
+    assert!(!is_err(&binary_read), "{}", text(&binary_read));
+    let binary_body = json_body(&binary_read);
+    assert_eq!(binary_body["enc"], "b64");
+    assert_eq!(binary_body["truncated"], false);
+    use base64::Engine as _;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(binary_body["content"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(decoded, png, "base64 round-trips the binary bytes");
+
+    let missing = read_shelf(&handler, "ffffffffffffffff".to_string()).await;
+    assert!(is_err(&missing), "unknown id: {}", text(&missing));
+    let _ = db;
+}
+
+/// Reads past the 1 MiB cap come back truncated: binary as the first
+/// mebibyte of base64, text as the first mebibyte of UTF-8 floored at a
+/// character boundary (never mislabelled as binary when the cap splits a
+/// multi-byte character).
+#[tokio::test]
+async fn session_read_file_truncates_past_one_mebibyte() {
+    let (_dir, _db, handler) = endpoint_test_handler();
+    const CAP: usize = 1024 * 1024;
+    use base64::Engine as _;
+
+    let big = vec![0xFFu8; CAP + 100];
+    let item = handler
+        .shelf
+        .insert_bytes(&big, "big.bin".to_string(), None, None, "test")
+        .unwrap();
+    let read = read_shelf(&handler, item.file_id).await;
+    assert!(!is_err(&read), "{}", text(&read));
+    let body = json_body(&read);
+    assert_eq!(body["enc"], "b64");
+    assert_eq!(body["truncated"], true);
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(body["content"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(decoded.len(), CAP);
+    assert_eq!(decoded, big[..CAP]);
+
+    // `é` straddles the cap: 1 MiB − 1 ASCII bytes, then two bytes of `é`.
+    let mut text_bytes = vec![b'a'; CAP - 1];
+    text_bytes.extend_from_slice("é".as_bytes());
+    text_bytes.resize(text_bytes.len() + 100, b'b');
+    let item = handler
+        .shelf
+        .insert_bytes(&text_bytes, "big.txt".to_string(), None, None, "test")
+        .unwrap();
+    let read = read_shelf(&handler, item.file_id).await;
+    assert!(!is_err(&read), "{}", text(&read));
+    let body = json_body(&read);
+    assert_eq!(body["enc"], "text");
+    assert_eq!(body["truncated"], true);
+    assert_eq!(body["content"].as_str().unwrap(), "a".repeat(CAP - 1));
+}

@@ -202,6 +202,8 @@ pub struct PeerSession {
     pub from: String,
     /// What this peer's login may see, resolved when its offer verified.
     pub grant: Grant,
+    /// Whether this peer may upload files (the `upload` grant).
+    pub can_upload: bool,
     /// Largest outbound frame for this peer, from its offer SDP (see
     /// [`peer_frame_cap`]): [`MAX_CHANNEL_FRAME`] for a desktop, less for a
     /// peer that advertised less.
@@ -328,7 +330,11 @@ pub fn spawn_with_watchdog(session: PeerSession, config: WatchdogConfig) {
 
 async fn serve(session: &mut PeerSession, config: WatchdogConfig) {
     let (out_tx, mut out_rx) = outbound::channel();
-    let mut bridge = RemoteBridge::with_grant(session.state.clone(), session.grant.clone());
+    let mut bridge = RemoteBridge::with_grant(
+        session.state.clone(),
+        session.grant.clone(),
+        session.can_upload,
+    );
     let mut events = session.state.hub.subscribe_events();
     // Like the local socket, the first frame the device sees is `hello`; any
     // hub event produced before the channel exists is dropped (the device

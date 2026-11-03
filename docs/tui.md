@@ -264,9 +264,10 @@ last seen time and `live` while a peer is open; `d` disconnects its live peer at
 (the pairing stays), `r` revokes it behind a `y`/`n`
 confirmation (`Enter` also confirms, `Esc` cancels); both report success
 or the exact error inline. Each trusted row shows a guest login with its
-grant (`all sessions` or the named sessions); `t` trusts a new profile
-through a form (username, comma-separated sessions, an all-sessions toggle
-flipped with `a`; `Tab` moves, `Enter` saves, `Esc` cancels), `Enter` on a
+grant (`all sessions` or the named sessions) and whether it may upload;
+`t` trusts a new profile through a form (username, comma-separated sessions,
+an all-sessions toggle flipped with `a`, an upload toggle flipped with `u`;
+`Tab` moves, `Enter` saves, `Esc` cancels), `Enter` on a
 trusted row edits its grant, and `r` forgets it behind a `y`/`n`
 confirmation — removing or narrowing a grant kicks the login's live guest
 peers at once. While any device is
@@ -276,8 +277,14 @@ live the sidebar header shows `⇄ n`.
 
 - **Sending** — an agent delivers files to its session with the MCP tool
   `session_send_file`: 1..10 absolute paths per call, up to 20 MiB each.
-  PNG, JPEG, WebP, GIF and SVG are recognised from the file's content, not
-  its extension.
+  Any type is accepted; PNG, JPEG, WebP, GIF and SVG are recognised from the
+  file's content (never its extension) for display. A trusted remote guest
+  with the `upload` grant sends files into its granted sessions through the
+  `shelf_put_*` protocol frames; the session gets one `📎 the user
+  attached …` line and the file lands with origin `user`.
+- **Reading** — an agent lists a shelf with `session_list_files` and reads
+  one file with `session_read_file` (text as UTF-8, binary as base64 capped
+  at 1 MiB).
 - **Listing** — the hub's **Shelf** tab (`F1`, then `4`) lists the files
   agents have sent — the host shelf plus one per session, merged newest
   first — with arrival time, sender, name, size and caption per row.

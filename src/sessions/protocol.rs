@@ -1,4 +1,4 @@
-//! Session protocol v1: JSON text frames over the daemon WebSocket.
+//! Session protocol v2: JSON text frames over the daemon WebSocket.
 //!
 //! Every frame carries `t`. Client frames are parsed by
 //! [`parse_client_frame`]; host frames are built by the `*_frame` helpers.
@@ -15,8 +15,16 @@ use crate::domain::prompt_draft::PromptDraft;
 
 pub use super::host_frame::{parse_host_frame, HostFrame};
 
+#[path = "protocol_put.rs"]
+mod protocol_put;
+#[cfg(test)]
+pub use protocol_put::{
+    shelf_put_abort_frame, shelf_put_begin_frame, shelf_put_end_frame, shelf_put_part_frame,
+};
+pub use protocol_put::{shelf_put_ack_frame, shelf_put_ready_frame};
+
 /// Protocol version the hub speaks.
-pub const PROTO_VERSION: u32 = 1;
+pub const PROTO_VERSION: u32 = 2;
 
 /// Error codes for `error` frames.
 pub const ERR_BAD_REQUEST: &str = "bad_request";
@@ -27,6 +35,8 @@ pub const ERR_DELIVERY_FAILED: &str = "delivery_failed";
 pub const ERR_INTERNAL: &str = "internal";
 pub const ERR_BUSY: &str = "busy";
 pub const ERR_REVOKED: &str = "revoked";
+pub const ERR_TOO_LARGE: &str = "too_large";
+pub const ERR_CHECKSUM_MISMATCH: &str = "checksum_mismatch";
 
 /// One shelf file, as carried by `shelf` / `shelf_added` (FR3).
 /// `session_id: null` is the host shelf; the wire key for the sender label
@@ -123,6 +133,31 @@ pub enum ClientFrame {
     /// answers `ok` and broadcasts `shelf_removed`.
     ShelfDelete {
         req: String,
+        file_id: String,
+    },
+    /// `shelf_put_begin{req,id?,name,size,mime?,sha256}`: reserve an upload
+    /// slot; the host answers `shelf_put_ready{req,file_id}` or an error.
+    ShelfPutBegin {
+        req: String,
+        id: Option<String>,
+        name: String,
+        size: u64,
+        mime: Option<String>,
+        sha256: String,
+    },
+    /// `shelf_put_part{file_id,part,data}`: one base64 chunk, numbered from
+    /// 0; the host acknowledges every eighth part.
+    ShelfPutPart {
+        file_id: String,
+        part: u64,
+        data: Vec<u8>,
+    },
+    /// `shelf_put_end{file_id}`: verify the checksum and commit the file.
+    ShelfPutEnd {
+        file_id: String,
+    },
+    /// `shelf_put_abort{file_id}`: delete the partial upload, no answer.
+    ShelfPutAbort {
         file_id: String,
     },
     /// `compose{req,draft}`: build the text hub-side and answer `composed`.
@@ -257,6 +292,9 @@ pub fn parse_client_frame(text: &str) -> Result<ClientFrame, FrameError> {
             let file_id = str_field(&value, &frame, "file_id")?;
             Ok(ClientFrame::ShelfDelete { req, file_id })
         }
+        "shelf_put_begin" | "shelf_put_part" | "shelf_put_end" | "shelf_put_abort" => {
+            protocol_put::parse(&value, &frame)
+        }
         "compose" => {
             let req = req_field(&value, &frame)?;
             let draft = draft_field(&value, &frame)?;
@@ -389,6 +427,11 @@ fn opt_str_field(value: &Value, frame: &str, field: &str) -> Result<Option<Strin
     }
 }
 
+fn u64_field(value: &Value, frame: &str, field: &str) -> Result<u64, FrameError> {
+    opt_u64_field(value, frame, field)?
+        .ok_or_else(|| bad_request(None, format!("{frame}: missing field '{field}'")))
+}
+
 fn opt_u64_field(value: &Value, frame: &str, field: &str) -> Result<Option<u64>, FrameError> {
     match value.get(field) {
         Some(Value::Number(n)) => n
@@ -492,14 +535,14 @@ pub(crate) fn harnesses_in(canopy_dir: &Path) -> Vec<String> {
 }
 
 /// `hello{proto,host_label,features,harnesses}`, sent on connect. `features`
-/// advertises the optional extensions this host speaks — currently just
-/// `shelf` — so a client can tell an older host from a newer one without
-/// probing. `harnesses` lists the installed harness names (see
+/// advertises the optional extensions this host speaks — `shelf` plus
+/// `shelf_upload` — so a client can tell an older host from a newer one
+/// without probing. `harnesses` lists the installed harness names (see
 /// [`installed_harnesses`]) so the New dialog knows what to offer.
 pub fn hello_frame(host_label: &str, harnesses: &[String]) -> String {
     serde_json::json!({
         "t": "hello", "proto": PROTO_VERSION, "host_label": host_label,
-        "features": ["shelf"], "harnesses": harnesses,
+        "features": ["shelf", "shelf_upload"], "harnesses": harnesses,
     })
     .to_string()
 }

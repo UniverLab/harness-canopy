@@ -352,6 +352,7 @@ pub fn config_value(config: &CanopyConfig, key: &str) -> Value {
         "remote.relay_url" => Value::from(config.remote.relay_url.clone()),
         "remote.github_client_id" => Value::from(config.remote.github_client_id.clone()),
         "remote.host_label" => Value::from(config.remote.host_label.clone()),
+        "remote.shelf_max_file_mb" => Value::from(config.remote.shelf_max_file_mb as i64),
         "daemon.cpu_quota_percent" => Value::from(config.daemon.cpu_quota_percent as i64),
         _ => Value::from(String::new()),
     }

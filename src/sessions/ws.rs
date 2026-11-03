@@ -39,6 +39,9 @@ use super::{
     OutputReceiver, SessionHub, SessionKind, SessionStatus, SpawnRequest,
 };
 
+#[path = "ws_shelf_put.rs"]
+mod ws_shelf_put;
+
 /// Shared state for the sessions endpoint: the hub, the shelf it broadcasts
 /// on, and the bearer token. The token value is never logged.
 pub struct SessionsState {
@@ -61,8 +64,11 @@ impl SessionsState {
     /// the daemon must never serve without auth.
     pub fn ensure(data_dir: &Path, db: Arc<Database>) -> anyhow::Result<Arc<Self>> {
         let token = ensure_token(data_dir)?;
+        let config = crate::domain::canopy_config::CanopyConfig::load(data_dir);
         let hub = SessionHub::new(db.clone(), host_label(data_dir));
         let shelf = ShelfStore::new(db, data_dir.join("shelf"))?;
+        let max_mb = u64::from(config.remote.shelf_max_file_mb.max(1));
+        shelf.set_max_file_bytes(max_mb * 1024 * 1024);
         hub.wire_shelf(shelf.clone());
         shelf.maintenance();
         Ok(Arc::new(Self {
@@ -305,6 +311,10 @@ async fn handle_client_text(
         ClientFrame::ShelfDelete { req, file_id } => {
             handle_shelf_delete(state, out_tx, req, file_id);
         }
+        frame @ (ClientFrame::ShelfPutBegin { .. }
+        | ClientFrame::ShelfPutPart { .. }
+        | ClientFrame::ShelfPutEnd { .. }
+        | ClientFrame::ShelfPutAbort { .. }) => ws_shelf_put::handle(state, out_tx, frame),
         ClientFrame::Compose { req, draft } => {
             handle_compose(state, out_tx, req, draft);
         }

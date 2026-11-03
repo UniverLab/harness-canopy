@@ -54,15 +54,20 @@ type Attached = HashMap<String, JoinHandle<()>>;
 
 /// One device peer's view of the hub.
 pub struct RemoteBridge {
-    state: Arc<SessionsState>,
+    pub(crate) state: Arc<SessionsState>,
     attached: Attached,
     /// Running `graph_watch` polls, by graph id: aborted with the bridge
     /// (the data channel closed), so no watch outlives its connection.
     watches: HashMap<String, JoinHandle<()>>,
     /// At most two `shelf_get` transfers in flight per device.
-    transfers: Arc<Semaphore>,
+    pub(crate) transfers: Arc<Semaphore>,
     /// Running shelf transfers, aborted when the peer goes away.
     shelf_tasks: Vec<JoinHandle<()>>,
+    /// At most three uploads in flight per device.
+    pub(crate) uploads: Arc<Semaphore>,
+    /// The permit each in-flight upload holds; removing an entry frees its
+    /// slot on end, abort or a lost grant.
+    pub(crate) upload_permits: HashMap<String, tokio::sync::OwnedSemaphorePermit>,
     /// Terminal-session files hidden from this peer, so their later
     /// `shelf_removed` is hidden too.
     hidden_files: HashSet<String>,
@@ -71,7 +76,7 @@ pub struct RemoteBridge {
     /// The channel's one metrics watch, if any.
     metrics_watch: Option<MetricsWatch>,
     /// What this peer's login may see and touch.
-    scope: GrantScope,
+    pub(crate) scope: GrantScope,
 }
 
 /// The hub request a remote `spawn` frame describes. The kind is parsed
@@ -116,9 +121,10 @@ impl RemoteBridge {
     /// Bridge the hub for one guest peer: [`Grant::All`] sees today's view;
     /// a scoped peer sees only its granted names, and anything outside the
     /// grant answers `not_found` (never `forbidden`: it would confirm it).
-    pub fn with_grant(state: Arc<SessionsState>, grant: Grant) -> Self {
+    pub fn with_grant(state: Arc<SessionsState>, grant: Grant, can_upload: bool) -> Self {
         let mut bridge = Self::new(state);
         bridge.scope = GrantScope::new(grant);
+        bridge.scope.set_can_upload(can_upload);
         bridge
     }
 
@@ -137,6 +143,8 @@ impl RemoteBridge {
             watches: HashMap::new(),
             transfers: Arc::new(Semaphore::new(2)),
             shelf_tasks: Vec::new(),
+            uploads: Arc::new(Semaphore::new(3)),
+            upload_permits: HashMap::new(),
             hidden_files,
             metrics,
             metrics_watch: None,
@@ -215,6 +223,10 @@ impl RemoteBridge {
                 }
                 deliver_kill(self.state.hub.clone(), req, id, out.clone());
             }
+            frame @ ClientFrame::ShelfPutBegin { .. } => self.handle_shelf_put_begin(frame, out),
+            frame @ ClientFrame::ShelfPutPart { .. } => self.handle_shelf_put_part(frame, out),
+            ClientFrame::ShelfPutEnd { file_id } => self.handle_shelf_put_end(&file_id, out),
+            ClientFrame::ShelfPutAbort { file_id } => self.handle_shelf_put_abort(&file_id),
             frame @ (ClientFrame::ShelfList { .. }
             | ClientFrame::ShelfGet { .. }
             | ClientFrame::ShelfDelete { .. }
@@ -275,7 +287,11 @@ impl RemoteBridge {
             | ClientFrame::PromptDraft { .. }
             | ClientFrame::Resize { .. }
             | ClientFrame::Spawn { .. }
-            | ClientFrame::Kill { .. } => {
+            | ClientFrame::Kill { .. }
+            | ClientFrame::ShelfPutBegin { .. }
+            | ClientFrame::ShelfPutPart { .. }
+            | ClientFrame::ShelfPutEnd { .. }
+            | ClientFrame::ShelfPutAbort { .. } => {
                 unreachable!("session frames never route to handle_read_frame");
             }
         }
@@ -331,6 +347,9 @@ impl RemoteBridge {
 
     /// Abort every output forwarder, graph watch, shelf transfer and
     /// metrics watch (the data channel closed or the device was revoked).
+    /// In-flight uploads are abandoned with their temps: only this bridge
+    /// knows their reserved ids, so nothing else can finish them, and an
+    /// in-map temp would otherwise survive the orphan sweep until a restart.
     pub fn abort(&mut self) {
         for task in self.attached.drain() {
             task.1.abort();
@@ -341,6 +360,10 @@ impl RemoteBridge {
         for task in self.shelf_tasks.drain(..) {
             task.abort();
         }
+        for file_id in self.upload_permits.keys().cloned().collect::<Vec<_>>() {
+            self.state.shelf.abort_upload(&file_id);
+        }
+        self.upload_permits.clear();
         self.metrics_watch = None;
     }
 
@@ -678,6 +701,9 @@ pub fn split_snapshot_frames(id: &str, cols: u16, rows: u16, seq: u64, data: &[u
 #[cfg(test)]
 #[path = "bridge_tests.rs"]
 mod tests;
+
+#[path = "bridge_upload.rs"]
+mod upload;
 
 fn spawn_forwarder(
     session: Arc<HubSession>,

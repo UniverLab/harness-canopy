@@ -181,6 +181,7 @@ fn trust_add_profile(
     login: &str,
     all_sessions: bool,
     sessions: &[String],
+    upload: bool,
 ) -> Result<String, String> {
     match crate::tui::mcp_client::call_daemon_tool(
         port,
@@ -190,6 +191,7 @@ fn trust_add_profile(
             "login": login,
             "all_sessions": all_sessions,
             "sessions": sessions,
+            "upload": upload,
         }),
     ) {
         Ok(outcome) if !outcome.is_error => Ok(login.to_string()),
@@ -437,6 +439,12 @@ impl App {
             KeyCode::Char(' ') if self.hub.remote.trust.focus == TrustField::All => {
                 self.hub.remote.trust.toggle_all();
             }
+            KeyCode::Char('u') if self.hub.remote.trust.focus == TrustField::Upload => {
+                self.hub.remote.trust.toggle_upload();
+            }
+            KeyCode::Char(' ') if self.hub.remote.trust.focus == TrustField::Upload => {
+                self.hub.remote.trust.toggle_upload();
+            }
             KeyCode::Char(c) => self.hub.remote.trust.push_char(c),
             _ => {}
         }
@@ -571,9 +579,10 @@ impl App {
         }
         let all = self.hub.remote.trust.all;
         let sessions = self.hub.remote.trust.sessions_list();
+        let upload = self.hub.remote.trust.upload;
         self.hub.remote.trust.close();
         self.spawn_remote_write(move |port| {
-            RemoteWriteResult::TrustAdd(trust_add_profile(&port, &login, all, &sessions))
+            RemoteWriteResult::TrustAdd(trust_add_profile(&port, &login, all, &sessions, upload))
         });
     }
 
@@ -807,6 +816,7 @@ mod tests {
             login: login.to_string(),
             all_sessions: false,
             sessions: vec!["alpha".to_string()],
+            upload: false,
         }
     }
 

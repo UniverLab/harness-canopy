@@ -21,7 +21,9 @@ use axum::{Json, Router};
 use base64::Engine as _;
 use serde_json::{json, Value};
 
-use super::{allowlist_fingerprint, guest_allow_body, normalize_login, resolve, Grant};
+use super::{
+    allowlist_fingerprint, guest_allow_body, normalize_login, resolve, resolve_upload, Grant,
+};
 use crate::application::ports::StateRepository as _;
 use crate::db::Database;
 use crate::remote::bridge::RemoteBridge;
@@ -33,8 +35,11 @@ use crate::remote::pairing::{derive_k_pair, mac_init, normalize_code, PairingSta
 use crate::remote::panel;
 use crate::remote::relay::{ConnectionRegistry, RelayRuntime, REMOTE_TRUST_REVOKE_KEY};
 use crate::remote::signaling::{offer_message, verify_offer, Refusal};
+use sha2::{Digest as _, Sha256};
+
 use crate::sessions::protocol::{
-    attach_frame, list_frame, shelf_delete_frame, shelf_get_frame, shelf_list_frame, ERR_FORBIDDEN,
+    attach_frame, list_frame, shelf_delete_frame, shelf_get_frame, shelf_list_frame,
+    shelf_put_begin_frame, shelf_put_end_frame, shelf_put_part_frame, ERR_BUSY, ERR_FORBIDDEN,
     ERR_NOT_FOUND,
 };
 use crate::sessions::ws::SessionsState;
@@ -218,7 +223,7 @@ async fn full_grant_lists_every_agent_session_and_attaches() {
     assert_eq!(grant, Grant::All);
 
     let (out_tx, mut out_rx) = crate::sessions::outbound::channel();
-    let mut bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), grant);
+    let mut bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), grant, false);
     bridge.handle_text(&list_frame("r1"), &out_tx).await;
     let list = recv_frame(&mut out_rx).await;
     assert_eq!(list["t"], "sessions");
@@ -260,7 +265,7 @@ async fn partial_grant_lists_only_the_subset_and_hides_the_rest() {
     let hub = grant_hub();
     let grant = Grant::Sessions(HashSet::from(["alpha".to_string()]));
     let (out_tx, mut out_rx) = crate::sessions::outbound::channel();
-    let mut bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), grant);
+    let mut bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), grant, false);
 
     bridge.handle_text(&list_frame("r1"), &out_tx).await;
     let list = recv_frame(&mut out_rx).await;
@@ -323,7 +328,7 @@ async fn partial_grant_lists_only_the_subset_and_hides_the_rest() {
     // Granted the shell by name, the guest lists and attaches it.
     let grant = Grant::Sessions(HashSet::from(["shell".to_string()]));
     let (out_tx, mut out_rx) = crate::sessions::outbound::channel();
-    let mut bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), grant);
+    let mut bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), grant, false);
     bridge.handle_text(&list_frame("r6"), &out_tx).await;
     let list = recv_frame(&mut out_rx).await;
     assert_eq!(session_names(&list), vec!["shell".to_string()]);
@@ -341,7 +346,7 @@ fn partial_grant_filters_lifecycle_events_to_its_names() {
     let hub = grant_hub();
     let grant = Grant::Sessions(HashSet::from(["alpha".to_string()]));
     let (out_tx, mut out_rx) = crate::sessions::outbound::channel();
-    let mut bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), grant);
+    let mut bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), grant, false);
 
     bridge.handle_event(HubEvent::SessionAdded(Box::new(hub.beta.item())), &out_tx);
     assert!(
@@ -375,7 +380,7 @@ async fn natural_exit_removal_reaches_holders_not_ungranted() {
     // A full-grant holder that listed the session hears its natural-exit
     // removal; the attached-only `exited` stays silent for a list-holder.
     let (out_tx, mut out_rx) = crate::sessions::outbound::channel();
-    let mut bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), Grant::All);
+    let mut bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), Grant::All, false);
     bridge.handle_text(&list_frame("r1"), &out_tx).await;
     assert_eq!(recv_frame(&mut out_rx).await["t"], "sessions");
     bridge.handle_event(
@@ -402,7 +407,7 @@ async fn natural_exit_removal_reaches_holders_not_ungranted() {
     // leaks nothing through either event.
     let grant = Grant::Sessions(HashSet::from(["beta".to_string()]));
     let (out_tx, mut out_rx) = crate::sessions::outbound::channel();
-    let mut bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), grant);
+    let mut bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), grant, false);
     bridge.handle_text(&list_frame("r1"), &out_tx).await;
     let list = recv_frame(&mut out_rx).await;
     assert_eq!(session_names(&list), vec!["beta".to_string()]);
@@ -575,7 +580,7 @@ fn narrowing_a_grant_kicks_but_widening_does_not() {
     db.set_grants(GUEST, &[]).expect("grants");
 
     // All-to-scoped narrows: the login is queued for a kick.
-    panel::trust_add(&db, GUEST, false, &["alpha".to_string()]).expect("narrow");
+    panel::trust_add(&db, GUEST, false, &["alpha".to_string()], false).expect("narrow");
     let queue = db
         .get_state(REMOTE_TRUST_REVOKE_KEY)
         .expect("queue read")
@@ -584,7 +589,7 @@ fn narrowing_a_grant_kicks_but_widening_does_not() {
 
     // Scoped-to-all widens: nothing is queued.
     db.set_state(REMOTE_TRUST_REVOKE_KEY, "").expect("clear");
-    panel::trust_add(&db, GUEST, true, &[]).expect("widen");
+    panel::trust_add(&db, GUEST, true, &[], false).expect("widen");
     let queue = db
         .get_state(REMOTE_TRUST_REVOKE_KEY)
         .expect("queue read")
@@ -597,10 +602,11 @@ fn narrowing_a_grant_kicks_but_widening_does_not() {
         GUEST,
         false,
         &["alpha".to_string(), "beta".to_string()],
+        false,
     )
     .expect("scoped");
     db.set_state(REMOTE_TRUST_REVOKE_KEY, "").expect("clear");
-    panel::trust_add(&db, GUEST, false, &["alpha".to_string()]).expect("drop");
+    panel::trust_add(&db, GUEST, false, &["alpha".to_string()], false).expect("drop");
     let queue = db
         .get_state(REMOTE_TRUST_REVOKE_KEY)
         .expect("queue read")
@@ -645,7 +651,7 @@ async fn scoped_grant_lists_only_its_shelf_files_and_hides_the_rest() {
 
     let grant = Grant::Sessions(HashSet::from(["alpha".to_string()]));
     let (out_tx, mut out_rx) = crate::sessions::outbound::channel();
-    let mut bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), grant);
+    let mut bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), grant, false);
 
     // The unscoped list is the host shelf, visible to every peer.
     bridge
@@ -707,7 +713,7 @@ async fn full_grant_serves_every_shelf_and_keeps_the_terminal_rule() {
     let orphan_file = shelve(&hub.state, "orphan.png", Some("no-such-session"));
 
     let (out_tx, mut out_rx) = crate::sessions::outbound::channel();
-    let mut bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), Grant::All);
+    let mut bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), Grant::All, false);
 
     // A scoped list reaches its session's files.
     bridge
@@ -910,4 +916,221 @@ async fn uid_resolution_caches_hits_and_skips_failures() {
     let again = guest_allow::resolve_guest_uids(&db, &cache, "test-Bearer [REDACTED]", &base).await;
     assert_eq!(again, vec![101]);
     assert_eq!(hits.load(Ordering::SeqCst), 5);
+}
+
+// ── uploads (protocol v2 `shelf_put_*`) ───────────────────────────────
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Send `shelf_put_begin` and return its answer frame.
+async fn put_begin(
+    bridge: &mut RemoteBridge,
+    out: &crate::sessions::ws::OutTx,
+    rx: &mut crate::sessions::outbound::ConnRx,
+    req: &str,
+    id: Option<&str>,
+    name: &str,
+    bytes: &[u8],
+) -> Value {
+    let frame = shelf_put_begin_frame(req, id, name, bytes.len() as u64, None, &sha256_hex(bytes));
+    bridge.handle_text(&frame, out).await;
+    recv_frame(rx).await
+}
+
+#[test]
+fn resolve_upload_is_owner_true_and_guest_default_deny() {
+    let (_dir, db) = test_db();
+    assert!(resolve_upload(&db, OWNER, OWNER));
+    assert!(!resolve_upload(&db, OWNER, GUEST), "default deny");
+    assert!(!resolve_upload(&db, OWNER, "  "));
+    db.upsert_trust(GUEST, true).expect("trust");
+    assert!(
+        !resolve_upload(&db, OWNER, GUEST),
+        "all_sessions grants no upload"
+    );
+    db.set_upload(GUEST, true).expect("upload grant");
+    assert!(resolve_upload(&db, OWNER, GUEST));
+}
+
+#[tokio::test]
+async fn guest_without_upload_grant_is_forbidden_at_begin() {
+    let hub = grant_hub();
+    let (out, mut out_rx) = crate::sessions::outbound::channel();
+    let grant = Grant::Sessions(HashSet::from(["alpha".to_string()]));
+    let mut bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), grant, false);
+
+    let answer = put_begin(
+        &mut bridge,
+        &out,
+        &mut out_rx,
+        "u1",
+        Some(&hub.alpha.id),
+        "x.md",
+        b"x",
+    )
+    .await;
+    assert_eq!(answer["t"], "error");
+    assert_eq!(answer["req"], "u1");
+    assert_eq!(answer["code"], ERR_FORBIDDEN);
+    assert!(hub.state.shelf.list(Some(&hub.alpha.id)).is_empty());
+}
+
+#[tokio::test]
+async fn guest_with_upload_is_allowed_only_into_the_granted_session() {
+    let hub = grant_hub();
+    let (out, mut out_rx) = crate::sessions::outbound::channel();
+    let grant = Grant::Sessions(HashSet::from(["alpha".to_string()]));
+    let mut bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), grant, true);
+    let bytes = b"user upload".to_vec();
+
+    let ready = put_begin(
+        &mut bridge,
+        &out,
+        &mut out_rx,
+        "u1",
+        Some(&hub.alpha.id),
+        "notes.md",
+        &bytes,
+    )
+    .await;
+    assert_eq!(ready["t"], "shelf_put_ready", "got {ready}");
+    let file_id = ready["file_id"].as_str().expect("file id").to_string();
+    bridge
+        .handle_text(&shelf_put_part_frame(&file_id, 0, &bytes), &out)
+        .await;
+    bridge
+        .handle_text(&shelf_put_end_frame(&file_id), &out)
+        .await;
+
+    let row = hub.state.shelf.get(&file_id).expect("row");
+    assert_eq!(row.session_id.as_deref(), Some(hub.alpha.id.as_str()));
+    assert_eq!(row.origin, "user");
+    assert_eq!(hub.state.shelf.read_file(&file_id).unwrap(), bytes);
+    let contents = hub.alpha.test_contents().unwrap_or_default();
+    let shelf_path = hub.state.shelf.path_for(&file_id).expect("shelf path");
+    let expected = format!(
+        "📎 the user attached `notes.md` ({:.1} MB) → {}",
+        bytes.len() as f64 / 1_000_000.0,
+        shelf_path.display()
+    );
+    assert!(
+        contents.contains(&expected),
+        "the upload appends the exact session line, got: {contents:?}"
+    );
+
+    // The ungranted session and the host shelf both refuse.
+    let denied = put_begin(
+        &mut bridge,
+        &out,
+        &mut out_rx,
+        "u2",
+        Some(&hub.beta.id),
+        "x.md",
+        b"x",
+    )
+    .await;
+    assert_eq!(denied["code"], ERR_FORBIDDEN, "got {denied}");
+    let host = put_begin(&mut bridge, &out, &mut out_rx, "u3", None, "x.md", b"x").await;
+    assert_eq!(host["code"], ERR_FORBIDDEN, "got {host}");
+}
+
+#[tokio::test]
+async fn a_fourth_concurrent_upload_is_refused_busy() {
+    let hub = grant_hub();
+    let (out, mut out_rx) = crate::sessions::outbound::channel();
+    let mut bridge = RemoteBridge::new(Arc::clone(&hub.state));
+
+    for index in 0..3 {
+        let ready = put_begin(
+            &mut bridge,
+            &out,
+            &mut out_rx,
+            &format!("u{index}"),
+            None,
+            &format!("f{index}.bin"),
+            b"x",
+        )
+        .await;
+        assert_eq!(ready["t"], "shelf_put_ready", "begin {index}: {ready}");
+    }
+    let refused = put_begin(&mut bridge, &out, &mut out_rx, "u3", None, "f3.bin", b"x").await;
+    assert_eq!(refused["t"], "error");
+    assert_eq!(refused["code"], ERR_BUSY);
+}
+
+#[tokio::test]
+async fn a_part_or_end_after_the_grant_vanishes_is_forbidden_and_drops_the_temp() {
+    let hub = grant_hub();
+    let (out, mut out_rx) = crate::sessions::outbound::channel();
+    let grant = Grant::Sessions(HashSet::from(["alpha".to_string()]));
+    let mut bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), grant, true);
+    let bytes = [1u8, 2u8];
+
+    // Two uploads: one mid-parts, one with every part already sent.
+    let ready = put_begin(
+        &mut bridge,
+        &out,
+        &mut out_rx,
+        "u1",
+        Some(&hub.alpha.id),
+        "x.bin",
+        &bytes,
+    )
+    .await;
+    let part_id = ready["file_id"].as_str().expect("file id").to_string();
+    bridge
+        .handle_text(&shelf_put_part_frame(&part_id, 0, &bytes[..1]), &out)
+        .await;
+    let ready = put_begin(
+        &mut bridge,
+        &out,
+        &mut out_rx,
+        "u2",
+        Some(&hub.alpha.id),
+        "y.bin",
+        &bytes,
+    )
+    .await;
+    let end_id = ready["file_id"].as_str().expect("file id").to_string();
+    for (part, chunk) in bytes.chunks(1).enumerate() {
+        bridge
+            .handle_text(&shelf_put_part_frame(&end_id, part as u64, chunk), &out)
+            .await;
+    }
+
+    // The grant covers a live session; killing it removes the target.
+    hub.state.hub.kill(&hub.alpha.id);
+
+    bridge
+        .handle_text(&shelf_put_part_frame(&part_id, 1, &bytes[1..]), &out)
+        .await;
+    let denied = recv_frame(&mut out_rx).await;
+    assert_eq!(denied["code"], ERR_FORBIDDEN, "got {denied}");
+    assert_dropped(&hub, &part_id);
+
+    bridge
+        .handle_text(&shelf_put_end_frame(&end_id), &out)
+        .await;
+    let denied = recv_frame(&mut out_rx).await;
+    assert_eq!(denied["code"], ERR_FORBIDDEN, "got {denied}");
+    assert_dropped(&hub, &end_id);
+}
+
+/// An upload dropped mid-flight leaves no state, no temp and no row.
+fn assert_dropped(hub: &GrantHub, file_id: &str) {
+    assert!(
+        hub.state.shelf.upload_session(file_id).is_none(),
+        "the in-flight upload is dropped"
+    );
+    let temp = hub.state.shelf.dir().join(format!(".{file_id}.upload"));
+    assert!(!temp.exists(), "and its temp bytes are deleted");
+    assert!(
+        hub.state.shelf.get(file_id).is_none(),
+        "and no row is committed"
+    );
 }

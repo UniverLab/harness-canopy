@@ -13,6 +13,7 @@ mod resize_kill;
 mod resume;
 mod roundtrip;
 mod shelf;
+mod shelf_upload;
 mod snapshot;
 mod spawn_yolo;
 

@@ -1,12 +1,12 @@
 ---
 title: MCP Tools
-description: All 34 MCP tools exposed by the canopy daemon, by category.
+description: All 36 MCP tools exposed by the canopy daemon, by category.
 order: 17
 ---
 
 # MCP Tools
 
-The daemon exposes **34 MCP tools** over Streamable HTTP (port 7755) and
+The daemon exposes **36 MCP tools** over Streamable HTTP (port 7755) and
 stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 
 Writes wait up to 5 seconds for a concurrent writer. If the database is still
@@ -131,7 +131,7 @@ See [Graphs](graphs.md).
 
 Kept callable for the whole 3.x line, but excluded from tool listings
 (`tools/list`) so nothing new adopts them — call the 3.x name instead. Not
-counted in the 34 tools above.
+counted in the 36 tools above.
 
 | Deprecated name | Renamed to (3.0.0) |
 |---|---|
@@ -247,14 +247,16 @@ ensembles — a crew.
 |---|---|
 | `scheduled_prompts` | Schedule a prompt for future delivery to a session (own session by default), and list and cancel pending scheduled sends. Actions: `create` (`prompt`, exactly one of `at`/`in_seconds`, optional `target_session_id`), `list` (a session's pending sends, soonest first; optional `session_id`), `cancel` (`id`) — pass `action` plus the params the refusal/table lists |
 
-## Session shelf (1)
+## Session shelf (3)
 
 | Tool | Description |
 |---|---|
-| `session_send_file` | Copy 1 to 10 files onto the session shelf (own session by default, `session_id` to target another, host shelf when the caller has no session). Each file must be PNG, JPEG, WebP, GIF or SVG — sniffed from its content, never its extension — and at most 20 MiB. One bad path never blocks the others: the result lists `items` (`file_id`, `name`, `mime`, `size`) and per-path `errors` (`path`, `code`, `message`), with codes `not_found`, `not_a_file`, `too_large`, `unsupported_type`, `io`. An optional `caption` (at most 500 characters) is stored with every file of the call and shown in the TUI |
+| `session_send_file` | Copy 1 to 10 files onto the session shelf (own session by default, `session_id` to target another, host shelf when the caller has no session). Any file type is accepted — content sniffing only decides how it is displayed — and each file is at most 20 MiB. One bad path never blocks the others: the result lists `items` (`file_id`, `name`, `mime`, `size`) and per-path `errors` (`path`, `code`, `message`), with codes `not_found`, `not_a_file`, `too_large`, `io`. An optional `caption` (at most 500 characters) is stored with every file of the call and shown in the TUI |
+| `session_list_files` | List one session shelf newest first (own session by default, `session_id` to target another, host shelf when the caller has no session). Each item carries `file_id`, `name`, `size`, `mime`, `origin` (`agent` or `user`) and `created_at` |
+| `session_read_file` | Read one shelf file by `file_id`: `file_id`, `name`, `mime`, `size`, `enc` (`text` or `b64`), `content` and `truncated`. Text files come back as UTF-8; binary files as base64 capped at 1 MiB, with `truncated: true` past the cap |
 
 ## Remote control (1)
 
 | Tool | Description |
 |---|---|
-| `remote` | Remote control of this hub from the browser. Actions: `status` (sign-in state, whether remote is enabled, the relay URL, the relay phase — `connected`, `connecting`, `token rejected: sign in again`, `relay rejected: see remote status`, `off` — the live device ids and every paired device with its paired-at and last-seen times and live flag), `pair` (a one-time pairing code with its link, expiry and QR, replacing any live one — the same code `canopy remote pair` prints), `set_enabled` (`enabled`: turn the relay connection on or off; the daemon picks the change up without a restart), `revoke` (`device_id`: delete the paired device and close its live connection at once), `disconnect` (`device_id`: close the paired device's live peer at once, keeping the pairing so it may reconnect), `trust_add` (`login`, `all_sessions`, optional `sessions`: trust a GitHub profile with every session or a named set; narrowing kicks its live guest peers), `trust_remove` (`login`: forget a GitHub profile and kick its live guest peers at once) |
+| `remote` | Remote control of this hub from the browser. Actions: `status` (sign-in state, whether remote is enabled, the relay URL, the relay phase — `connected`, `connecting`, `token rejected: sign in again`, `relay rejected: see remote status`, `off` — the live device ids and every paired device with its paired-at and last-seen times and live flag), `pair` (a one-time pairing code with its link, expiry and QR, replacing any live one — the same code `canopy remote pair` prints), `set_enabled` (`enabled`: turn the relay connection on or off; the daemon picks the change up without a restart), `revoke` (`device_id`: delete the paired device and close its live connection at once), `disconnect` (`device_id`: close the paired device's live peer at once, keeping the pairing so it may reconnect), `trust_add` (`login`, `all_sessions`, optional `sessions`, optional `upload`: trust a GitHub profile with every session or a named set and optionally let it upload files into those sessions; narrowing kicks its live guest peers), `trust_remove` (`login`: forget a GitHub profile and kick its live guest peers at once) |

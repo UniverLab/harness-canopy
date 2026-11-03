@@ -19,6 +19,8 @@ pub enum TrustField {
     Sessions,
     /// The all-sessions toggle.
     All,
+    /// The upload-permission toggle.
+    Upload,
 }
 
 /// The add/edit form state, closed until opened.
@@ -32,6 +34,8 @@ pub struct TrustForm {
     pub sessions: String,
     /// Whether the grant covers every session.
     pub all: bool,
+    /// Whether the grant allows uploads into those sessions.
+    pub upload: bool,
     /// The stop under the cursor.
     pub focus: TrustField,
 }
@@ -52,6 +56,7 @@ impl TrustForm {
             login: profile.login.clone(),
             sessions: profile.sessions.join(", "),
             all: profile.all_sessions,
+            upload: profile.upload,
             focus: TrustField::default(),
         };
     }
@@ -66,9 +71,19 @@ impl TrustForm {
         self.all = !self.all;
     }
 
-    /// Move the cursor between the three stops.
+    /// Flip the upload toggle.
+    pub fn toggle_upload(&mut self) {
+        self.upload = !self.upload;
+    }
+
+    /// Move the cursor between the four stops.
     pub fn cycle_focus(&mut self, forward: bool) {
-        let order = [TrustField::Login, TrustField::Sessions, TrustField::All];
+        let order = [
+            TrustField::Login,
+            TrustField::Sessions,
+            TrustField::All,
+            TrustField::Upload,
+        ];
         let at = order
             .iter()
             .position(|field| *field == self.focus)
@@ -95,7 +110,7 @@ impl TrustForm {
         match self.focus {
             TrustField::Login => self.login.push(c),
             TrustField::Sessions => self.sessions.push(c),
-            TrustField::All => {}
+            TrustField::All | TrustField::Upload => {}
         }
     }
 
@@ -108,7 +123,7 @@ impl TrustForm {
             TrustField::Sessions => {
                 self.sessions.pop();
             }
-            TrustField::All => {}
+            TrustField::All | TrustField::Upload => {}
         }
     }
 }
@@ -130,11 +145,13 @@ mod tests {
             login: "guest".to_string(),
             all_sessions: false,
             sessions: vec!["alpha".to_string(), "beta".to_string()],
+            upload: true,
         });
         assert!(form.open);
         assert_eq!(form.login, "guest");
         assert_eq!(form.sessions, "alpha, beta");
         assert!(!form.all);
+        assert!(form.upload);
 
         form.close();
         assert!(!form.open);
@@ -150,7 +167,7 @@ mod tests {
     }
 
     #[test]
-    fn focus_cycles_through_all_three_stops() {
+    fn focus_cycles_through_all_four_stops() {
         let mut form = TrustForm::default();
         assert_eq!(form.focus, TrustField::Login);
         form.cycle_focus(true);
@@ -158,9 +175,11 @@ mod tests {
         form.cycle_focus(true);
         assert_eq!(form.focus, TrustField::All);
         form.cycle_focus(true);
+        assert_eq!(form.focus, TrustField::Upload);
+        form.cycle_focus(true);
         assert_eq!(form.focus, TrustField::Login);
         form.cycle_focus(false);
-        assert_eq!(form.focus, TrustField::All);
+        assert_eq!(form.focus, TrustField::Upload);
     }
 
     #[test]

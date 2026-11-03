@@ -31,6 +31,10 @@ pub struct RemoteTrustAddParams {
     /// Granted session names when `all_sessions` is `false`.
     #[serde(default)]
     pub sessions: Option<Vec<String>>,
+    /// Allow this profile to upload files into its granted sessions.
+    /// Defaults to deny.
+    #[serde(default)]
+    pub upload: Option<bool>,
 }
 
 /// `remote` `trust_remove` action parameters.

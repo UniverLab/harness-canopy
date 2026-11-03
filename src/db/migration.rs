@@ -594,6 +594,21 @@ impl Database {
     pub(super) fn migrate_shelf_files(conn: &Connection) -> Result<()> {
         conn.execute_batch(super::shelf::SHELF_FILES_SCHEMA)
             .map_err(|e| anyhow::anyhow!("shelf_files schema migration failed: {e}"))?;
+        // Bidirectional transfer: every pre-existing file was agent-sent.
+        let has_origin: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('shelf_files') WHERE name = 'origin'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if !has_origin {
+            conn.execute(
+                "ALTER TABLE shelf_files ADD COLUMN origin TEXT NOT NULL DEFAULT 'agent'",
+                [],
+            )
+            .map_err(|e| anyhow::anyhow!("shelf origin migration failed: {e}"))?;
+        }
         Ok(())
     }
 

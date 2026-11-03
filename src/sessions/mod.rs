@@ -19,6 +19,7 @@ pub mod outbound;
 pub mod protocol;
 pub mod resume;
 pub mod shelf;
+pub mod shelf_upload;
 pub mod spawn;
 pub mod ws;
 

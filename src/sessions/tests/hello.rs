@@ -52,7 +52,7 @@ fn hello_frame_carries_sorted_harnesses_key() {
 
     let hello: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
     assert_eq!(hello["t"], "hello");
-    assert_eq!(hello["proto"], 1);
+    assert_eq!(hello["proto"], 2);
     assert_eq!(hello["host_label"], "test-host");
     assert!(hello["features"].is_array(), "features stays an array");
     let harnesses = hello["harnesses"].as_array().expect("harnesses array");

@@ -59,6 +59,23 @@ pub fn resolve(db: &Database, owner_login: &str, guest_login: &str) -> Option<Gr
     Some(Grant::Sessions(profile.sessions.into_iter().collect()))
 }
 
+/// Resolve a party's upload permission: the owner may always upload, a
+/// trusted login gets exactly its stored `upload` flag (default deny), and
+/// anything else (unknown, blank, unreadable store) is refused.
+pub fn resolve_upload(db: &Database, owner_login: &str, guest_login: &str) -> bool {
+    let guest = normalize_login(guest_login);
+    if guest.is_empty() {
+        return false;
+    }
+    if guest == normalize_login(owner_login) {
+        return true;
+    }
+    db.get_trust(&guest)
+        .ok()
+        .flatten()
+        .is_some_and(|profile| profile.upload)
+}
+
 /// Build the room's `guest_allow` body for these uids and live invites:
 /// sorted, deduped, and byte-exact — the worker matches the shape verbatim,
 /// an empty uid list is a present deny-all (explicit beats absent), and the
@@ -117,6 +134,7 @@ pub fn allowlist_fingerprint(db: &Database) -> String {
 pub struct GrantScope {
     grant: Grant,
     visible: HashSet<String>,
+    can_upload: bool,
 }
 
 impl GrantScope {
@@ -125,12 +143,30 @@ impl GrantScope {
         Self {
             grant,
             visible: HashSet::new(),
+            can_upload: false,
         }
     }
 
     /// Scope a peer to everything (the owner, or a full grant).
     pub fn all() -> Self {
-        Self::new(Grant::All)
+        let mut scope = Self::new(Grant::All);
+        scope.can_upload = true;
+        scope
+    }
+
+    /// Record whether this peer holds the `upload` grant.
+    pub fn set_can_upload(&mut self, can_upload: bool) {
+        self.can_upload = can_upload;
+    }
+
+    /// Whether this peer may upload files into its granted sessions.
+    pub fn can_upload(&self) -> bool {
+        self.can_upload
+    }
+
+    /// Whether the grant covers every session (the owner, or a full grant).
+    pub fn is_all(&self) -> bool {
+        matches!(self.grant, Grant::All)
     }
 
     /// Whether a session name is inside the grant.

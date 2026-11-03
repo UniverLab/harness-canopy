@@ -51,7 +51,7 @@ pub(crate) static REMOTE: ToolSpec = ToolSpec {
         ActionSpec {
             name: "trust_add",
             required: &["login", "all_sessions"],
-            optional: &["sessions"],
+            optional: &["sessions", "upload"],
         },
         ActionSpec {
             name: "trust_remove",
@@ -86,7 +86,7 @@ impl TaskTriggerHandler {
         `set_enabled` (required: enabled; optional: none) — turn the relay connection on or off (`[remote] enabled`); the daemon picks the change up without a restart. \
         `revoke` (required: device_id; optional: none) — revoke a paired device: delete the row and close its live connection at once. \
         `disconnect` (required: device_id; optional: none) — disconnect a paired device: close its live peer at once, keeping the pairing so it may reconnect. \
-        `trust_add` (required: login, all_sessions; optional: sessions) — trust a GitHub profile with every session or a named set; narrowing kicks its live guest peers. \
+        `trust_add` (required: login, all_sessions; optional: sessions, upload) — trust a GitHub profile with every session or a named set, optionally letting it upload files into those sessions; narrowing kicks its live guest peers. \
         `trust_remove` (required: login; optional: none) — forget a GitHub profile and kick its live guest peers at once."
     )]
     pub(crate) async fn remote(
@@ -114,7 +114,13 @@ impl TaskTriggerHandler {
             "trust_add" => {
                 let params: RemoteTrustAddParams = action_params(&params)?;
                 let sessions = params.sessions.unwrap_or_default();
-                self.remote_trust_add_impl(params.login.trim(), params.all_sessions, &sessions)
+                let upload = params.upload.unwrap_or(false);
+                self.remote_trust_add_impl(
+                    params.login.trim(),
+                    params.all_sessions,
+                    &sessions,
+                    upload,
+                )
             }
             "trust_remove" => {
                 let params: RemoteTrustRemoveParams = action_params(&params)?;
@@ -160,8 +166,9 @@ impl TaskTriggerHandler {
         login: &str,
         all_sessions: bool,
         sessions: &[String],
+        upload: bool,
     ) -> Result<CallToolResult, McpError> {
-        match panel::trust_add(&self.db, login, all_sessions, sessions) {
+        match panel::trust_add(&self.db, login, all_sessions, sessions, upload) {
             Ok(profile) => to_json(&profile),
             Err(error) => Ok(error_result(&format!("remote trust_add: {error:#}"))),
         }

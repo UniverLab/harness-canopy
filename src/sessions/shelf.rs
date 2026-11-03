@@ -11,8 +11,10 @@
 //! - a session's files outlive it (7 days after removal) and the whole shelf
 //!   is capped (1 GiB) — oldest pruned first, `shelf_removed` per victim.
 
+use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Duration, Utc};
@@ -24,6 +26,7 @@ use crate::db::Database;
 
 use super::hub::HubEvent;
 use super::protocol::ShelfItem;
+use super::shelf_upload::{UploadState, TEMP_SUFFIX};
 
 /// Largest file the shelf accepts (20 MiB), checked on the resolved path.
 pub const MAX_FILE_BYTES: u64 = 20 * 1024 * 1024;
@@ -38,12 +41,20 @@ pub const MAX_CAPTION_CHARS: usize = 500;
 /// `session_send_file` accepts 1..=10 paths per call.
 pub const MAX_PATHS_PER_CALL: usize = 10;
 
-/// Per-path failure codes for `session_send_file` (FR2).
+/// Per-path failure codes for `session_send_file` (FR2), plus the upload
+/// protocol's own codes.
 pub const ERR_NOT_FOUND: &str = "not_found";
 pub const ERR_NOT_A_FILE: &str = "not_a_file";
 pub const ERR_TOO_LARGE: &str = "too_large";
-pub const ERR_UNSUPPORTED_TYPE: &str = "unsupported_type";
 pub const ERR_IO: &str = "io";
+pub const ERR_BAD_REQUEST: &str = "bad_request";
+pub const ERR_CHECKSUM_MISMATCH: &str = "checksum_mismatch";
+
+/// How long an abandoned upload temp file survives maintenance.
+const ORPHAN_UPLOAD_AGE_HOURS: i64 = 24;
+
+/// Parts between `shelf_put_ack` frames, as the protocol pins it.
+pub const ACK_EVERY_PARTS: u64 = 8;
 
 /// One rejected path: the code from the `ERR_*` set plus a human message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,15 +71,6 @@ impl ShelfError {
         }
     }
 }
-
-/// The v1 MIME allowlist, sniffed from content — never the extension.
-pub const ALLOWED_MIMES: &[&str] = &[
-    "image/png",
-    "image/jpeg",
-    "image/webp",
-    "image/gif",
-    "image/svg+xml",
-];
 
 /// Sniff the MIME type from the file's content: magic bytes for the four
 /// raster formats, an `svg` root element for SVG (so an HTML file named
@@ -189,6 +191,10 @@ pub struct ShelfStore {
     cap_bytes: u64,
     gate: Mutex<()>,
     bus: Mutex<Option<broadcast::Sender<HubEvent>>>,
+    /// In-flight uploads, keyed by their reserved `file_id`.
+    uploads: Mutex<HashMap<String, UploadState>>,
+    /// Largest file an upload may declare (`[remote] shelf_max_file_mb`).
+    max_file_bytes: AtomicU64,
 }
 
 impl ShelfStore {
@@ -201,6 +207,8 @@ impl ShelfStore {
             cap_bytes: CAP_BYTES,
             gate: Mutex::new(()),
             bus: Mutex::new(None),
+            uploads: Mutex::new(HashMap::new()),
+            max_file_bytes: AtomicU64::new(MAX_FILE_BYTES),
         }))
     }
 
@@ -261,6 +269,38 @@ impl ShelfStore {
         self.get(file_id)?;
         let path = self.path_for(file_id)?;
         std::fs::read(path).ok()
+    }
+
+    /// One shelf's rows, newest first — the MCP `session_list_files` view
+    /// needs `origin`, which the `shelf` wire frame deliberately omits.
+    pub fn list_rows(&self, session_id: Option<&str>) -> Vec<ShelfRow> {
+        self.db.list_shelf_files(session_id).unwrap_or_default()
+    }
+
+    /// Set the per-file upload cap (`[remote] shelf_max_file_mb`), clamped
+    /// to at least one byte.
+    pub fn set_max_file_bytes(&self, bytes: u64) {
+        self.max_file_bytes.store(bytes.max(1), Ordering::SeqCst);
+    }
+
+    /// The per-file upload cap in bytes.
+    pub fn max_file_bytes(&self) -> u64 {
+        self.max_file_bytes.load(Ordering::SeqCst)
+    }
+
+    /// The temp path of one in-flight upload.
+    fn upload_path(&self, file_id: &str) -> PathBuf {
+        self.dir.join(format!(".{file_id}{TEMP_SUFFIX}"))
+    }
+
+    /// Sniff the MIME, falling back to the client's declaration and then to
+    /// `application/octet-stream`. `None` only when the caller must pick the
+    /// final fallback itself.
+    fn classify_mime(&self, bytes: &[u8], declared: Option<&str>) -> Option<String> {
+        let head_len = bytes.len().min(SNIFF_HEAD_BYTES);
+        sniff_mime(&bytes[..head_len], bytes)
+            .map(str::to_string)
+            .or_else(|| declared.map(str::to_string))
     }
 
     /// Delete a file: row first, then bytes. Emits `shelf_removed` when
@@ -368,23 +408,18 @@ impl ShelfStore {
         caption: Option<&str>,
         from_label: &str,
     ) -> Result<ShelfItem, ShelfError> {
-        let head_len = bytes.len().min(SNIFF_HEAD_BYTES);
-        let mime = sniff_mime(&bytes[..head_len], bytes).ok_or_else(|| {
-            ShelfError::new(
-                ERR_UNSUPPORTED_TYPE,
-                format!(
-                    "{name} is not one of {} (sniffed from its content, never the extension)",
-                    ALLOWED_MIMES.join(", "),
-                ),
-            )
-        })?;
+        // Content sniffing decides display only: any type is stored, and an
+        // unrecognised one falls back to the generic binary type.
+        let mime = self
+            .classify_mime(bytes, None)
+            .unwrap_or_else(|| "application/octet-stream".to_string());
 
         let file_id = new_file_id();
         let row = ShelfRow {
             file_id: file_id.clone(),
             session_id: session_id.map(str::to_owned),
             name,
-            mime: mime.to_string(),
+            mime,
             size: bytes.len() as i64,
             sha256: hex_hash(bytes),
             caption: caption
@@ -392,6 +427,7 @@ impl ShelfStore {
                 .filter(|c| !c.is_empty())
                 .map(str::to_owned),
             from_label: from_label.to_string(),
+            origin: "agent".to_string(),
             created_at: Utc::now().to_rfc3339(),
         };
 
@@ -511,16 +547,47 @@ impl ShelfStore {
     }
 
     /// Remove shelf-directory entries no row claims (temp files and bytes
-    /// without a row). Never touches a claimed file.
+    /// without a row). Never touches a claimed file. An in-flight upload's
+    /// `.upload` temp survives while it is in the map or younger than
+    /// [`ORPHAN_UPLOAD_AGE_HOURS`]; an older one is an orphan.
     fn sweep_stray_files(&self, rows: &[ShelfRow]) {
         let claimed: std::collections::HashSet<&str> =
             rows.iter().map(|r| r.file_id.as_str()).collect();
+        let in_flight: std::collections::HashSet<String> = self
+            .uploads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .cloned()
+            .collect();
+        let cutoff = Utc::now() - Duration::hours(ORPHAN_UPLOAD_AGE_HOURS);
         let Ok(entries) = std::fs::read_dir(&self.dir) else {
             return;
         };
         for entry in entries.flatten() {
+            if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                continue;
+            }
             let name = entry.file_name();
             let name = name.to_string_lossy();
+            if let Some(upload_id) = name
+                .strip_prefix('.')
+                .and_then(|rest| rest.strip_suffix(TEMP_SUFFIX))
+            {
+                if in_flight.contains(upload_id) {
+                    continue;
+                }
+                let old = entry
+                    .metadata()
+                    .ok()
+                    .and_then(|meta| meta.modified().ok())
+                    .map(DateTime::<Utc>::from)
+                    .is_some_and(|at| at <= cutoff);
+                if old {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+                continue;
+            }
             if (name.starts_with('.') || !claimed.contains(name.as_ref()))
                 && entry.file_type().map(|t| t.is_file()).unwrap_or(false)
             {
@@ -536,6 +603,9 @@ impl ShelfStore {
         }
     }
 }
+
+#[path = "shelf_upload_ops.rs"]
+mod upload_ops;
 
 /// Create the shelf directory with mode 0700 (files get 0600 on create).
 fn create_shelf_dir(dir: &Path) -> anyhow::Result<()> {
@@ -576,6 +646,28 @@ fn write_shelf_file(path: &Path, bytes: &[u8]) -> Result<(), ShelfError> {
             .open(path)?;
         file.write_all(bytes)?;
         file.sync_all()
+    };
+    write().map_err(|e| ShelfError::new(ERR_IO, format!("{}: {e}", path.display())))
+}
+
+/// Append `bytes` to `path`, creating it 0600 when absent.
+fn append_to_file(path: &Path, bytes: &[u8]) -> Result<(), ShelfError> {
+    let write = || -> std::io::Result<()> {
+        #[cfg(unix)]
+        let mut file = {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .mode(0o600)
+                .open(path)?
+        };
+        #[cfg(not(unix))]
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        file.write_all(bytes)
     };
     write().map_err(|e| ShelfError::new(ERR_IO, format!("{}: {e}", path.display())))
 }
