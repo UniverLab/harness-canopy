@@ -231,10 +231,7 @@ pub(crate) async fn run_doctor() -> Result<()> {
     report_canopy_path_copies(&mut issues).await;
 
     report_setup_completion(&config, &mut issues);
-    report_cpu_temp_hint(
-        crate::system::SystemInfo::new().cpu_temp_hint(),
-        &mut issues,
-    );
+    report_cpu_temp_hint(crate::system::SystemInfo::new().cpu_temp_hint());
     report_cli_resolution(&config, &mut issues);
 
     // ── RAG Health ──────────────────────────────────────────────
@@ -719,14 +716,19 @@ fn report_setup_completion(
     }
 }
 
-/// Doctor's CPU-temperature hint: a one-line recommendation naming the fix
-/// when the snapshot carries one (no reading on a Windows/WSL host), silent
-/// otherwise — never a failure, never a tick. The sentence arrives via
-/// `SystemInfo::cpu_temp_hint`, the single source; it is never restated here.
-fn report_cpu_temp_hint(hint: Option<&str>, issues: &mut Vec<String>) {
-    if let Some(hint) = hint {
-        println!(" \x1b[33m⚠\x1b[0m {hint}");
-        issues.push(hint.to_string());
+/// Doctor's CPU-temperature hint, formatted: a one-line informational note
+/// naming the fix when the snapshot carries one (no reading on a Windows/WSL
+/// host), `None` — no line at all — otherwise. Same dim marker as
+/// `report_setup_completion`: informational, not a warning, never a tick.
+/// The sentence arrives via `SystemInfo::cpu_temp_hint`, the single source;
+/// it is never restated here. Pure so tests can assert the exact line.
+fn format_cpu_temp_hint(hint: Option<&str>) -> Option<String> {
+    hint.map(|hint| format!(" \x1b[90m–\x1b[0m {hint}"))
+}
+
+fn report_cpu_temp_hint(hint: Option<&str>) {
+    if let Some(line) = format_cpu_temp_hint(hint) {
+        println!("{line}");
     }
 }
 

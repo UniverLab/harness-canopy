@@ -152,8 +152,6 @@ fn cpu_line(
             format!(" {temp_str}"),
             Style::default().fg(temp_alert_color(temp_c, theme)),
         ));
-    } else {
-        cpu_spans.push(Span::styled(" n/a", Style::default().fg(theme.dim_text)));
     }
     if let Some(freq) = format_cpu_frequency(system_info.cpu_frequency_mhz) {
         cpu_spans.push(Span::styled(
@@ -609,14 +607,16 @@ mod tests {
     }
 
     #[test]
-    fn cpu_line_shows_na_without_reading() {
+    fn cpu_line_omits_temp_without_reading() {
         let info = SystemInfo::default();
         let line = cpu_line(&info, TemperatureUnit::Celsius, &Theme::classic()).to_string();
-        assert!(line.contains("n/a"), "got: {line}");
+        assert_eq!(line, "cpu: 0%", "no reading → bare usage, got: {line}");
+        assert!(!line.contains("n/a"), "no placeholder, got: {line}");
+        assert!(!line.contains("  "), "no double space, got: {line}");
     }
 
     #[test]
-    fn cpu_line_hides_na_with_reading() {
+    fn cpu_line_shows_temp_with_reading() {
         let info = SystemInfo {
             cpu_temperature: Some(45.0),
             ..SystemInfo::default()
@@ -624,6 +624,133 @@ mod tests {
         let line = cpu_line(&info, TemperatureUnit::Celsius, &Theme::classic()).to_string();
         assert!(line.contains("45°C"), "got: {line}");
         assert!(!line.contains("n/a"), "got: {line}");
+    }
+
+    #[test]
+    fn gpu_line_omits_temp_without_gpu_reading() {
+        let info = SystemInfo {
+            gpu_info: Some(crate::system::GpuInfo {
+                name: "Test GPU".to_string(),
+                vendor: "NVIDIA".to_string(),
+                usage: Some(6.0),
+                temperature: None,
+                vram_used: None,
+                vram_total: None,
+                power_watts: None,
+                power_limit_watts: None,
+            }),
+            ..SystemInfo::default()
+        };
+        let line = gpu_line(&info, TemperatureUnit::Celsius, &Theme::classic())
+            .expect("usage alone is enough for a gpu row")
+            .to_string();
+        // Exact: a restored placeholder ("n/a", a dash) or stray separator fails.
+        assert_eq!(line, "gpu: 6%", "temp absent → bare usage, got: {line}");
+    }
+
+    #[test]
+    fn gpu_line_omits_usage_without_gpu_reading() {
+        let info = SystemInfo {
+            gpu_info: Some(crate::system::GpuInfo {
+                name: "Test GPU".to_string(),
+                vendor: "NVIDIA".to_string(),
+                usage: None,
+                temperature: Some(41.0),
+                vram_used: None,
+                vram_total: None,
+                power_watts: None,
+                power_limit_watts: None,
+            }),
+            ..SystemInfo::default()
+        };
+        let line = gpu_line(&info, TemperatureUnit::Celsius, &Theme::classic())
+            .expect("temp alone is enough for a gpu row")
+            .to_string();
+        assert_eq!(line, "gpu: 41°C", "usage absent → bare temp, got: {line}");
+    }
+
+    #[test]
+    fn gpu_line_omits_vram_without_vram_data() {
+        let info = SystemInfo {
+            gpu_info: Some(crate::system::GpuInfo {
+                name: "Test GPU".to_string(),
+                vendor: "NVIDIA".to_string(),
+                usage: Some(6.0),
+                temperature: Some(41.0),
+                vram_used: None,
+                vram_total: None,
+                power_watts: None,
+                power_limit_watts: None,
+            }),
+            ..SystemInfo::default()
+        };
+        let line = gpu_line(&info, TemperatureUnit::Celsius, &Theme::classic())
+            .expect("usage+temp are enough for a gpu row")
+            .to_string();
+        assert_eq!(
+            line, "gpu: 6% 41°C",
+            "vram absent → usage+temp only, got: {line}"
+        );
+    }
+
+    #[test]
+    fn cpu_line_omits_frequency_without_reading() {
+        let info = SystemInfo {
+            cpu_temperature: Some(45.0),
+            cpu_frequency_mhz: None,
+            ..SystemInfo::default()
+        };
+        let line = cpu_line(&info, TemperatureUnit::Celsius, &Theme::classic()).to_string();
+        assert_eq!(
+            line, "cpu: 0% 45°C",
+            "freq absent → usage+temp only, got: {line}"
+        );
+    }
+
+    #[test]
+    fn gpu_line_is_none_when_every_gpu_value_is_absent() {
+        let info = SystemInfo {
+            gpu_info: Some(crate::system::GpuInfo {
+                name: "Test GPU".to_string(),
+                vendor: "NVIDIA".to_string(),
+                usage: None,
+                temperature: None,
+                vram_used: None,
+                vram_total: None,
+                power_watts: None,
+                power_limit_watts: None,
+            }),
+            ..SystemInfo::default()
+        };
+        assert!(
+            gpu_line(&info, TemperatureUnit::Celsius, &Theme::classic()).is_none(),
+            "a row of nothing must not be drawn"
+        );
+    }
+
+    #[test]
+    fn pwr_row_is_absent_without_a_battery_watts_reading() {
+        for info in [
+            SystemInfo::default(),
+            // The battery source alone is not a value: without a watts
+            // reading the row stays absent too.
+            SystemInfo {
+                power_source: Some(PowerSource::Battery),
+                power_watts: None,
+                ..SystemInfo::default()
+            },
+        ] {
+            let lines = create_system_dashboard_lines(
+                &info,
+                TemperatureUnit::Celsius,
+                usize::MAX,
+                &Theme::classic(),
+            );
+            assert!(
+                !lines.iter().any(|l| l.to_string().starts_with("pwr:")),
+                "no watts reading → no pwr row, got: {lines:?}"
+            );
+        }
     }
 
     #[test]

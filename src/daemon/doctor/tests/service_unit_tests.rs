@@ -1362,19 +1362,22 @@ async fn run_doctor_reports_corrupt_vector_store_without_a_green_tick() {
     );
 }
 
-/// The CPU-temperature hint is a recommendation, not a failure: a present
-/// hint lands in `issues` verbatim (stdout capture is `#[ignore]`d in this
-/// file, so `issues` is the assertion surface); no hint stays silent.
-/// Hint-as-param keeps this deterministic on any host — the platform ×
-/// temperature matrix stays covered by the `cpu_temp_hint_*` system tests.
+/// The CPU-temperature hint is informational, not a failure: a present hint
+/// renders the dim `–` marker line (never the `⚠` warning, never an issues
+/// entry); no hint renders nothing. Pure `format_cpu_temp_hint` is the
+/// assertion surface — stdout capture is `#[ignore]`d in this file. The
+/// platform × temperature matrix stays covered by the `cpu_temp_hint_*`
+/// system tests.
 #[test]
-fn report_cpu_temp_hint_recommends_only_when_hint_present() {
+fn cpu_temp_hint_is_informational_and_silent_without_hint() {
     let sentence = "run LibreHardwareMonitor (WMI on) to expose CPU temperature";
-    let mut issues = Vec::new();
-    report_cpu_temp_hint(Some(sentence), &mut issues);
-    assert_eq!(issues, vec![sentence.to_string()]);
+    let line = format_cpu_temp_hint(Some(sentence)).expect("a present hint must render a line");
+    assert!(line.contains(sentence), "got: {line}");
+    assert!(line.contains('–'), "informational marker, got: {line}");
+    assert!(!line.contains('⚠'), "never a warning, got: {line}");
 
-    let mut silent = Vec::new();
-    report_cpu_temp_hint(None, &mut silent);
-    assert!(silent.is_empty(), "no hint → silent, got: {silent:?}");
+    assert!(
+        format_cpu_temp_hint(None).is_none(),
+        "no hint → no line at all"
+    );
 }
