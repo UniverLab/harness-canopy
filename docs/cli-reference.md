@@ -49,7 +49,7 @@ Plain `canopy update` exits 2 on the same lookup errors.
 
 | Command | Description |
 |---|---|
-| `canopy setup` | Interactive setup wizard — detects AI CLIs, generates `~/.canopy/config.toml`. An uninstalled harness (binary no longer on PATH) is dropped from the config on its own; one still referenced by a crew, graph node or scheduled agent is kept and `canopy doctor` warns about it once |
+| `canopy setup` | Interactive setup wizard — detects AI CLIs, generates `~/.canopy/config.toml`. An uninstalled harness (binary no longer on PATH) is dropped from the config on its own; one still referenced by a crew, graph node, graph hook or scheduled agent is kept and `canopy doctor` warns about it once |
 | `canopy setup --local-registry <path>` | Use a local registry directory (for registry development) |
 | `canopy setup --force-skills` | Overwrite local skill files that diverge from the sync source, even when they were edited locally (default: skip them with a warning) |
 | `canopy mcp` | MCP wizard — sync/add/remove canopy's MCP entry across platforms |
