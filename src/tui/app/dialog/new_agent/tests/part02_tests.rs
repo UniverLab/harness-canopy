@@ -146,3 +146,83 @@ fn sort_clis_by_usage_reflects_counts_across_a_deferred_legacy_split() {
         "the newer legacy counts must win the ordering, not the stale usage.toml snapshot"
     );
 }
+
+// ── resume picker relaunches the picked session's own conversation ──
+
+fn muse_cli_config() -> crate::domain::cli_config::CliConfig {
+    crate::domain::cli_config::CliConfig {
+        name: "muse".into(),
+        binary: "muse".into(),
+        headless_mode: String::new(),
+        headless: true,
+        ctrl_c_exits: false,
+        model_flag: None,
+        supports_working_dir: false,
+        working_dir_flag: None,
+        env_vars: std::collections::HashMap::new(),
+        interactive_args: Some("--provider echo".into()),
+        fallback_interactive_args: None,
+        resume_args: Some("resume --last".into()),
+        session_list_cmd: None,
+        session_resume_cmd: Some("resume".into()),
+        session_id_set_flag: None,
+        session_list_format_args: None,
+        session_id_pattern: None,
+        session_title_flag: None,
+        session_list_args: None,
+        session_end_args: None,
+        models_list_cmd: None,
+        identity_check: None,
+        identity_args: None,
+        identity_pattern: None,
+        accent_color: None,
+        yolo_flag: Some("--yolo".into()),
+        trust_flag: None,
+        instruction_file: None,
+        prompt_via_stdin: false,
+        paste_submit_delay_ms: None,
+        paste_submit_key: None,
+        paste_submit_presses: 1,
+        invocation_template: None,
+        effort_declaration: None,
+        infra_retry_limit: None,
+        infra_crash_max_seconds: None,
+        infra_backoff_seconds: None,
+        decision_args: None,
+
+        provider: None,
+        tool_name: None,
+    }
+}
+
+#[test]
+fn selected_args_for_resume_choice_with_recorded_id_resumes_that_session() {
+    let mut dialog = NewAgentDialog::new(None);
+    dialog.task_mode = NewTaskMode::Resume;
+    dialog.available_clis = vec![Cli::new("muse")];
+    dialog.cli_configs = vec![Some(muse_cli_config())];
+    dialog.cli_index = 0;
+    let mut picked = resumable_session("muse", "/proj", Some("--provider echo"));
+    picked.harness_conversation_id = Some("uuid-picked".to_string());
+    dialog.apply_resume_choice(picked);
+
+    let args = dialog.selected_args().expect("resume args");
+    assert_eq!(args, "--provider echo resume uuid-picked");
+    assert!(
+        !args.contains("--last"),
+        "picking a session must resume that session, never the newest: {args}"
+    );
+}
+
+#[test]
+fn selected_args_for_resume_choice_without_id_keeps_the_last_fallback() {
+    let mut dialog = NewAgentDialog::new(None);
+    dialog.task_mode = NewTaskMode::Resume;
+    dialog.available_clis = vec![Cli::new("muse")];
+    dialog.cli_configs = vec![Some(muse_cli_config())];
+    dialog.cli_index = 0;
+    dialog.apply_resume_choice(resumable_session("muse", "/proj", Some("--provider echo")));
+
+    let args = dialog.selected_args().expect("resume args");
+    assert_eq!(args, "--provider echo resume --last");
+}

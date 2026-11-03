@@ -151,6 +151,7 @@ fn spawn_named(
         seed_id: None,
         accent: None,
         yolo: false,
+        preserve_args: false,
     };
     let session = hub.spawn(&request).expect("test spawn");
     assert_eq!(session.name, name);

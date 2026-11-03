@@ -7,6 +7,7 @@ mod badframe;
 mod catalog;
 mod graphs;
 mod hello;
+mod muse_resume;
 mod outbound;
 mod resize_kill;
 mod resume;
@@ -192,6 +193,7 @@ fn terminal_spawn(cli: &str, workdir: &str) -> SpawnRequest {
         seed_id: None,
         accent: None,
         yolo: false,
+        preserve_args: false,
     }
 }
 
@@ -211,5 +213,6 @@ fn agent_spawn(cli: &str, workdir: &str) -> SpawnRequest {
         seed_id: None,
         accent: None,
         yolo: false,
+        preserve_args: false,
     }
 }

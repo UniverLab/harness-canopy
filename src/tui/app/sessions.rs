@@ -47,25 +47,27 @@ impl App {
             cli_config.and_then(|config| config.resume_args.as_deref()),
             cli_config.and_then(|config| config.session_resume_cmd.as_deref()),
             cli_config.and_then(|config| config.yolo_flag.as_deref()),
+            session.harness_conversation_id.as_deref(),
         );
-        let Some((agent, used_args)) =
-            self.spawn_resumed_or_fresh(session, cli_config, resume_args, cols, rows)
+        let Some(agent) =
+            self.spawn_resumed_or_fresh(session, cli_config, resume_args.as_deref(), cols, rows)
         else {
             return;
         };
-        self.finalize_resumed_session(session, used_args.as_ref(), agent, current_boot_id);
+        self.finalize_resumed_session(session, agent, current_boot_id);
     }
 
     fn spawn_resumed_or_fresh(
         &self,
         session: &crate::db::session::InteractiveSession,
         cli_config: Option<&crate::domain::cli_config::CliConfig>,
-        resume_args: Option<String>,
+        resume_args: Option<&str>,
         cols: u16,
         rows: u16,
-    ) -> Option<(InteractiveAgent, Option<String>)> {
+    ) -> Option<InteractiveAgent> {
         let cli = crate::domain::models::Cli::from_str(&session.cli);
         let existing_ids = self.interactive_agent_names();
+        let since = std::time::SystemTime::now();
         let spawn = |args: Option<&str>| {
             InteractiveAgent::spawn(
                 cli.clone(),
@@ -82,10 +84,11 @@ impl App {
                 cli_config.and_then(|config| config.model_flag.as_deref()),
                 None,
                 session.harness_conversation_id.as_deref(),
+                true,
             )
         };
-        match spawn(resume_args.as_deref()) {
-            Ok(agent) => Some((agent, resume_args)),
+        match spawn(resume_args) {
+            Ok(agent) => Some(agent),
             Err(e) => {
                 tracing::warn!(
                     "Failed to auto-resume session '{}': {e}; retrying as a fresh session",
@@ -95,7 +98,23 @@ impl App {
                     .and_then(|config| config.interactive_args.as_deref())
                     .map(str::to_string);
                 match spawn(fresh_args.as_deref()) {
-                    Ok(agent) => Some((agent, fresh_args)),
+                    Ok(agent) => {
+                        // The fresh fallback is a new conversation: forget the
+                        // stale harness id and record the new one, like a
+                        // fresh launch does.
+                        if cli.as_str() == "muse" {
+                            let _ = self.db.clear_session_harness_conversation_id(&session.id);
+                            crate::sessions::muse_conversation::record_fresh_conversation(
+                                self.db.clone(),
+                                session.id.clone(),
+                                session.working_dir.clone(),
+                                since,
+                                agent.pid(),
+                                crate::sessions::muse_conversation::muse_store_dir(),
+                            );
+                        }
+                        Some(agent)
+                    }
                     Err(e2) => {
                         tracing::warn!(
                             "Fresh-session fallback also failed for '{}': {e2}; closing session",
@@ -119,18 +138,19 @@ impl App {
     /// reassign or inherit: the sends and the persisted protocol flag already
     /// point at this same id. Only a source name held by another live session
     /// changes the name (FR5), keeping the id, and the header then names both.
+    /// The recorded launch args are never rewritten with the resume command
+    /// line: it is rebuilt from the stored harness conversation id at every
+    /// startup.
     fn finalize_resumed_session(
         &mut self,
         session: &crate::db::session::InteractiveSession,
-        used_args: Option<&String>,
         agent: InteractiveAgent,
         current_boot_id: Option<&str>,
     ) {
-        if let Err(e) = self.db.reactivate_interactive_session(
+        if let Err(e) = self.db.reactivate_keep_args(
             &session.id,
             agent.pid(),
             &session.working_dir,
-            used_args.map(String::as_str),
             current_boot_id,
         ) {
             tracing::warn!(

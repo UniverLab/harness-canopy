@@ -58,6 +58,21 @@ const EVENT_BROADCAST_CAPACITY: usize = 128;
 const KILL_WAIT_POLLS: u32 = 100;
 const KILL_WAIT_INTERVAL: Duration = Duration::from_millis(20);
 
+/// Bytes of harness output a failed session row keeps as its `exit_detail`.
+const EXIT_DETAIL_MAX_BYTES: usize = 2048;
+
+/// The last `max_bytes` of `text`, cut on a char boundary.
+fn tail_chars(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let start = text.len() - max_bytes;
+    let boundary = (start..=text.len())
+        .find(|at| text.is_char_boundary(*at))
+        .unwrap_or(text.len());
+    text[boundary..].to_string()
+}
+
 /// What a hub session runs: an AI CLI (`agent`) or a plain shell (`terminal`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionKind {
@@ -174,6 +189,10 @@ pub struct SpawnRequest {
     /// to the interactive args. Handlers refuse `yolo` for a terminal or a
     /// harness with no flag before the hub ever sees it.
     pub yolo: bool,
+    /// A resume relaunching an existing row: reactivate it without rewriting
+    /// its recorded launch args — the resume command line is rebuilt from
+    /// the stored harness conversation id at every startup, never stored.
+    pub preserve_args: bool,
 }
 
 impl HubSession {
@@ -303,11 +322,55 @@ impl HubSession {
             SessionKind::Agent => {
                 let code = self.status().exit_code().unwrap_or(-1);
                 let _ = db.finish_interactive_session(&self.id, code);
+                if code == 0 {
+                    let _ = db.clear_session_exit_detail(&self.id);
+                } else {
+                    let _ = db.set_session_exit_detail(&self.id, &self.exit_detail_text(code));
+                }
             }
             SessionKind::Terminal => {
                 let _ = db.finish_terminal_session(&self.id);
             }
         }
+    }
+
+    /// Mark this session's database row finished after an explicit `kill`:
+    /// the user closed it, so no failure detail is recorded or kept — a
+    /// killed session reads as closed, never as a failure with a tail, and
+    /// the TUI drops it instead of retaining an error card for it.
+    fn finish_db_row_killed(&self, db: &Database) {
+        match self.kind {
+            SessionKind::Agent => {
+                let code = self.status().exit_code().unwrap_or(-1);
+                let _ = db.finish_interactive_session(&self.id, code);
+                let _ = db.clear_session_exit_detail(&self.id);
+            }
+            SessionKind::Terminal => {
+                let _ = db.finish_terminal_session(&self.id);
+            }
+        }
+    }
+
+    /// The failure detail a nonzero agent exit records: the harness's
+    /// stderr tail, or the bare exit code when the session died silent so
+    /// no failed row is ever unexplained.
+    fn exit_detail_text(&self, code: i32) -> String {
+        let tail = self.output_tail(EXIT_DETAIL_MAX_BYTES).unwrap_or_default();
+        if tail.trim().is_empty() {
+            format!("exited with code {code}")
+        } else {
+            tail
+        }
+    }
+
+    /// The last `max_bytes` of the session's live screen as plain text (no
+    /// escape sequences): the harness's stderr tail at exit time. `None`
+    /// only when the output lock is poisoned.
+    pub(crate) fn output_tail(&self, max_bytes: usize) -> Option<String> {
+        self.state.lock().ok().map(|out| {
+            let contents = out.parser.screen().contents();
+            tail_chars(contents.trim_end(), max_bytes)
+        })
     }
 
     /// Plain-text visible screen, for tests asserting client parity.
@@ -546,6 +609,7 @@ impl SessionHub {
                     session_type: "interactive",
                     boot_id: boot_id.as_deref(),
                     harness_conversation_id: req.harness_conversation_id.as_deref(),
+                    preserve_args: req.preserve_args,
                 };
                 if let Err(e) = self.inner.db.register_interactive_session(&registration) {
                     tracing::warn!("Failed to register hub session: {e}");
@@ -628,7 +692,7 @@ impl SessionHub {
                 code
             }
         };
-        session.finish_db_row(&self.inner.db);
+        session.finish_db_row_killed(&self.inner.db);
         self.emit(HubEvent::Exited {
             id: id.to_string(),
             code,

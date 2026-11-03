@@ -44,6 +44,15 @@ step instead of launching straight away:
     header then names both. A conversation picked out of the harness's own
     list that canopy has never seen starts a fresh session with a new id and
     a new generated name, as before.
+  - When canopy recorded the harness's own conversation id, the relaunch
+    resumes that exact conversation (`muse resume <id>`); otherwise it
+    falls back to the harness's most-recent resume, and only one session
+    per harness and directory may take that fallback at a restart — the
+    rest fail with an explanation instead of colliding on one
+    conversation. A resume whose harness exits immediately keeps its
+    session row as an error card with the harness's output tail attached
+    until dismissed, so the failure is never silent. Closing a session
+    yourself never leaves such a card.
   - `↑↓` selects, `Enter` confirms, and `Esc` returns to the form with every
   value kept. **Background** and **Terminal** launch from the form as
   before — the Mode step is Interactive-only.

@@ -777,6 +777,7 @@ mod forward_mouse_scroll_tests {
             None,
             None,
             None,
+            false,
         )
         .expect("spawn cat as a stand-in interactive child")
     }
@@ -943,6 +944,7 @@ mod kitty_keyboard_negotiation_tests {
             None,
             None,
             None,
+            false,
         )
         .expect("spawn cat as a stand-in interactive child")
     }

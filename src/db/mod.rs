@@ -105,7 +105,8 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
                 session_type TEXT NOT NULL DEFAULT 'interactive',
                 pid INTEGER,
                 boot_id TEXT,
-                harness_conversation_id TEXT
+                harness_conversation_id TEXT,
+                exit_detail TEXT
             );
 
             CREATE TABLE IF NOT EXISTS terminal_sessions (
@@ -659,6 +660,7 @@ impl Database {
         Self::migrate_scheduled_prompt_columns(&conn)?;
         Self::migrate_interactive_session_columns(&conn)?;
         Self::migrate_interactive_harness_column(&conn)?;
+        Self::migrate_interactive_exit_detail_column(&conn)?;
         Self::migrate_agent_optin_columns(&conn)?;
         Self::migrate_graph_trigger_columns(&conn)?;
         Self::migrate_graph_schedule_columns(&conn)?;

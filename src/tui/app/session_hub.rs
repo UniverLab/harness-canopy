@@ -334,7 +334,43 @@ impl App {
             .map(|agent| agent.id.clone())
             .collect();
         for id in &gone {
+            // A daemon restart can fail a resume while this TUI is away: no
+            // `exited` frame ever arrives, so reload the row's verdict first
+            // — a recorded failure keeps its error card, everything else
+            // drops as before.
+            self.revive_gone_failed_session(id);
             self.remove_hub_session(id);
+        }
+    }
+
+    /// A session the hub lost while this TUI was away (daemon restart) whose
+    /// row records a failure: reload its exit code and detail so the removal
+    /// keeps it as an error card instead of dropping it silently.
+    fn revive_gone_failed_session(&mut self, id: &str) {
+        let Ok(Some(row)) = self.db.get_interactive_session(id) else {
+            return;
+        };
+        if row.status != "error" {
+            return;
+        }
+        let Ok(detail) = self.db.get_session_exit_detail(id) else {
+            return;
+        };
+        let Some(detail) = detail.filter(|detail| !detail.trim().is_empty()) else {
+            return;
+        };
+        let code = self
+            .db
+            .get_session_exit_code(id)
+            .ok()
+            .flatten()
+            .unwrap_or(1);
+        if code == 0 {
+            return;
+        }
+        if let Some(agent) = self.interactive_agents.iter_mut().find(|a| a.id == id) {
+            agent.note_exited(code);
+            agent.exit_detail = Some(detail);
         }
     }
 
@@ -397,8 +433,16 @@ impl App {
             || self.terminal_agents.iter().any(|a| a.id == id)
     }
 
-    /// Drop one hub session from the sidebar.
+    /// Drop one hub session from the sidebar — unless it is a failed
+    /// interactive session, which stays as an `error · <tail>` card until
+    /// the user dismisses it. Without this the `exited` frame that carries
+    /// the failure and the `session_removed` frame that drops the card land
+    /// in the same tick, and no failure is ever visible. Terminals always
+    /// drop: their poll reaps every exited terminal anyway.
     fn remove_hub_session(&mut self, id: &str) {
+        if self.retain_failed_hub_session(id) {
+            return;
+        }
         let names: Vec<String> = self
             .interactive_agents
             .iter()
@@ -414,17 +458,52 @@ impl App {
         self.slow_force = true;
     }
 
+    /// Keep a failed interactive session as its error card: fold the arrived
+    /// exit code into its status so the row reads `error · <first tail
+    /// line>` and the exit poll handles (but never reaps) it. True when the
+    /// session was retained. Only a nonzero exit WITH a recorded detail is
+    /// kept — an explicit `kill` clears the detail, so a user-closed session
+    /// still drops instead of lingering as a false failure.
+    fn retain_failed_hub_session(&mut self, id: &str) -> bool {
+        let Some(agent) = self.interactive_agents.iter_mut().find(|a| a.id == id) else {
+            return false;
+        };
+        agent.poll();
+        let failed = matches!(
+            agent.status,
+            crate::tui::agent::AgentStatus::Exited(code) if code != 0
+        ) && agent
+            .exit_detail
+            .as_deref()
+            .is_some_and(|detail| !detail.trim().is_empty());
+        if failed {
+            self.slow_force = true;
+        }
+        failed
+    }
+
     /// Record an `exited` frame from the control connection. A natural exit
     /// also arrives on the session's own stream; both fold into the same
-    /// exit code and `poll` picks it up on this tick.
+    /// exit code and `poll` picks it up on this tick. A nonzero exit also
+    /// loads the row's failure detail (the hub wrote the harness's stderr
+    /// tail there before emitting this frame) so the sidebar card shows
+    /// *why* without opening logs.
     fn note_hub_session_exited(&mut self, id: &str, code: i32) {
+        let detail = if code == 0 {
+            None
+        } else {
+            self.db.get_session_exit_detail(id).ok().flatten()
+        };
         for agent in self
             .interactive_agents
-            .iter()
-            .chain(self.terminal_agents.iter())
+            .iter_mut()
+            .chain(self.terminal_agents.iter_mut())
         {
             if agent.id == id {
                 agent.note_exited(code);
+                if detail.is_some() {
+                    agent.exit_detail = detail.clone();
+                }
             }
         }
     }
@@ -621,6 +700,205 @@ mod tests {
         );
         for agent in &mut app.terminal_agents {
             agent.kill();
+        }
+    }
+
+    fn retention_app() -> (App, tempfile::TempDir) {
+        let data_dir = tempfile::tempdir().expect("data dir");
+        let db = Arc::new(Database::new(&data_dir.path().join("test.db")).expect("test database"));
+        let app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("test app");
+        (app, data_dir)
+    }
+
+    fn push_running_interactive(app: &mut App, name: &str) -> String {
+        let agent = InteractiveAgent::spawn_terminal(
+            "cat",
+            "/tmp",
+            80,
+            24,
+            Some(name),
+            &[],
+            ratatui::style::Color::White,
+        )
+        .expect("spawn cat as a stand-in session");
+        let id = agent.id.clone();
+        app.interactive_agents.push(agent);
+        id
+    }
+
+    fn kill_test_hub_session(id: &str) {
+        crate::sessions::client::test_client().hub.kill(id);
+    }
+
+    #[test]
+    fn failed_interactive_session_stays_as_an_error_card() {
+        // The `exited` and `session_removed` frames land in the same tick:
+        // without retention the failure is never visible.
+        let (mut app, _dir) = retention_app();
+        let id = push_running_interactive(&mut app, "failed-keep");
+        let agent = app
+            .interactive_agents
+            .iter_mut()
+            .find(|agent| agent.id == id)
+            .expect("pushed agent");
+        agent.note_exited(1);
+        agent.exit_detail = Some("boom tail".to_string());
+
+        app.remove_hub_session(&id);
+
+        let kept = app
+            .interactive_agents
+            .iter()
+            .find(|agent| agent.id == id)
+            .expect("a failed session must stay as its error card");
+        assert!(
+            matches!(kept.status, crate::tui::agent::AgentStatus::Exited(1)),
+            "the retained card folds the exit into its status"
+        );
+        assert_eq!(kept.exit_detail.as_deref(), Some("boom tail"));
+        kill_test_hub_session(&id);
+    }
+
+    #[test]
+    fn clean_killed_and_running_sessions_drop() {
+        let (mut app, _dir) = retention_app();
+        // Clean exit: the poll reaps it anyway.
+        let clean = push_running_interactive(&mut app, "clean-drop");
+        // Killed (nonzero, but no detail — `kill` clears it): a user close,
+        // not a failure.
+        let killed = push_running_interactive(&mut app, "killed-drop");
+        // Still running: nothing failed.
+        let running = push_running_interactive(&mut app, "running-drop");
+        for (id, code) in [(&clean, 0), (&killed, 1)] {
+            app.interactive_agents
+                .iter()
+                .find(|agent| &agent.id == id)
+                .expect("pushed agent")
+                .note_exited(code);
+        }
+
+        for id in [&clean, &killed, &running] {
+            app.remove_hub_session(id);
+        }
+
+        assert!(
+            app.interactive_agents.is_empty(),
+            "only failed-with-detail sessions are retained"
+        );
+        for id in [&clean, &killed, &running] {
+            kill_test_hub_session(id);
+        }
+    }
+
+    #[test]
+    fn failed_terminal_still_drops() {
+        // Terminals always drop: their poll reaps every exited terminal, so
+        // retaining one here would only last until the next poll.
+        let (mut app, _dir) = retention_app();
+        let mut agent = InteractiveAgent::spawn_terminal(
+            "cat",
+            "/tmp",
+            80,
+            24,
+            Some("failed-term"),
+            &[],
+            ratatui::style::Color::White,
+        )
+        .expect("spawn cat as a stand-in terminal");
+        let id = agent.id.clone();
+        agent.note_exited(2);
+        agent.exit_detail = Some("term tail".to_string());
+        app.terminal_agents.push(agent);
+
+        app.remove_hub_session(&id);
+
+        assert!(
+            app.terminal_agents.is_empty(),
+            "a failed terminal still drops"
+        );
+        kill_test_hub_session(&id);
+    }
+
+    #[test]
+    fn gone_failed_session_is_revived_from_its_row() {
+        // A daemon restart can fail a resume while the TUI is away: no
+        // `exited` frame ever arrives, so the relist reloads the row's
+        // verdict instead of dropping the card silently.
+        let (mut app, _dir) = retention_app();
+        let id = push_running_interactive(&mut app, "gone-failed");
+        app.db
+            .insert_interactive_session(
+                &id,
+                "gone-failed",
+                "muse",
+                "/tmp",
+                None,
+                None,
+                "interactive",
+                None,
+            )
+            .expect("insert row");
+        app.db.finish_interactive_session(&id, 3).expect("fail row");
+        app.db
+            .set_session_exit_detail(&id, "resume tail")
+            .expect("record tail");
+
+        app.drop_gone_hub_sessions(&[]);
+
+        let kept = app
+            .interactive_agents
+            .iter()
+            .find(|agent| agent.id == id)
+            .expect("the recorded failure must keep its error card");
+        assert!(
+            matches!(kept.status, crate::tui::agent::AgentStatus::Exited(3)),
+            "the revived card carries the row's exit code"
+        );
+        assert_eq!(kept.exit_detail.as_deref(), Some("resume tail"));
+        kill_test_hub_session(&id);
+    }
+
+    #[test]
+    fn gone_clean_or_detail_less_sessions_drop() {
+        let (mut app, _dir) = retention_app();
+        let clean = push_running_interactive(&mut app, "gone-clean");
+        let bare = push_running_interactive(&mut app, "gone-bare");
+        let unknown = push_running_interactive(&mut app, "gone-unknown");
+        for (id, name) in [(&clean, "gone-clean"), (&bare, "gone-bare")] {
+            app.db
+                .insert_interactive_session(
+                    id,
+                    name,
+                    "muse",
+                    "/tmp",
+                    None,
+                    None,
+                    "interactive",
+                    None,
+                )
+                .expect("insert row");
+        }
+        app.db
+            .finish_interactive_session(&clean, 0)
+            .expect("complete row");
+        // An error row with no detail is a kill, not a failure.
+        app.db
+            .finish_interactive_session(&bare, 1)
+            .expect("fail row");
+
+        app.drop_gone_hub_sessions(&[]);
+
+        assert!(
+            app.interactive_agents.is_empty(),
+            "clean, detail-less and unknown rows all drop"
+        );
+        for id in [&clean, &bare, &unknown] {
+            kill_test_hub_session(id);
         }
     }
 }

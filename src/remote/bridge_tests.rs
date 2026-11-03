@@ -397,6 +397,7 @@ fn spawn_cat(hub: &SessionHub, workdir: &str) -> Arc<HubSession> {
         seed_id: None,
         accent: None,
         yolo: false,
+        preserve_args: false,
     };
     hub.spawn(&request).expect("spawn cat")
 }

@@ -397,6 +397,14 @@ impl App {
         // is held by another live session lands under a fresh name instead
         // (FR5), and the header must name both.
         let requested_name = spawn_name.clone();
+        // A resume relaunches the source session's own id, so the persisted
+        // "protocol sent" flag stays on the reactivated row — nothing is
+        // inherited anymore. Either picker can adopt an existing session's
+        // identity (the Resume step by its row, the CLI list through its
+        // harness id), and either adoption is a resume for the rename notice
+        // and for args preservation.
+        let is_resume = dialog.selected_resume_session.is_some() || known_session.is_some();
+        let spawn_since = std::time::SystemTime::now();
         let agent = InteractiveAgent::spawn(
             cli,
             &dir,
@@ -412,6 +420,7 @@ impl App {
             model_flag.as_deref(),
             seed_id,
             harness_conversation_id.as_deref(),
+            is_resume,
         )?;
         // Persist session in registry
         let session_type = if is_nursery { "nursery" } else { "interactive" };
@@ -421,19 +430,37 @@ impl App {
             args.as_deref(),
             session_type,
             harness_conversation_id.as_deref(),
+            is_resume,
         );
+        self.record_fresh_muse_launch(&agent, &dir, is_resume, spawn_since);
         // Don't register nursery temp dir as a project — it's ephemeral
         if !is_nursery && crate::domain::project::should_auto_register(Path::new(&dir)) {
             let _ = self.db.register_project_path(Path::new(&dir));
         }
-        // A resume relaunches the source session's own id, so the persisted
-        // "protocol sent" flag stays on the reactivated row — nothing is
-        // inherited anymore. Either picker can adopt an existing session's
-        // identity (the Resume step by its row, the CLI list through its
-        // harness id), and either adoption is a resume for the rename notice.
-        let is_resume = dialog.selected_resume_session.is_some() || known_session.is_some();
         self.announce_spawned_agent(agent, is_resume, requested_name.as_deref());
         Ok(())
+    }
+
+    /// A fresh muse launch is a new conversation: discover the harness's own
+    /// id for it in the background so a later restart resumes this
+    /// conversation instead of the workspace's newest one.
+    fn record_fresh_muse_launch(
+        &self,
+        agent: &crate::tui::agent::InteractiveAgent,
+        dir: &str,
+        is_resume: bool,
+        spawn_since: std::time::SystemTime,
+    ) {
+        if agent.cli.as_str() == "muse" && !is_resume {
+            crate::sessions::muse_conversation::record_fresh_conversation(
+                self.db.clone(),
+                agent.id.clone(),
+                dir.to_string(),
+                spawn_since,
+                agent.pid(),
+                crate::sessions::muse_conversation::muse_store_dir(),
+            );
+        }
     }
 
     /// Track a freshly spawned agent and announce it in the header: always
@@ -516,6 +543,7 @@ impl App {
         args: Option<&str>,
         session_type: &str,
         harness_conversation_id: Option<&str>,
+        preserve_args: bool,
     ) {
         let boot_id = crate::system::boot_id();
         let registration = crate::db::session::SessionRegistration {
@@ -528,6 +556,7 @@ impl App {
             session_type,
             boot_id: boot_id.as_deref(),
             harness_conversation_id,
+            preserve_args,
         };
         match self.db.register_interactive_session(&registration) {
             Ok(crate::db::session::RegistrationOutcome::Reactivated { id, .. })

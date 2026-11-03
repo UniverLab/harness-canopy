@@ -349,6 +349,7 @@ impl NewAgentDialog {
                 config.resume_args.as_deref(),
                 config.session_resume_cmd.as_deref(),
                 config.yolo_flag.as_deref(),
+                session.harness_conversation_id.as_deref(),
             );
         }
 

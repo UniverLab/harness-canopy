@@ -171,11 +171,15 @@ pub(super) fn draw_sidebar_card(
     }
     render_sidebar_card_line(frame, area, 0, bg, status_color, name_spans);
 
-    let type_detail = format!(
-        "{} · {}",
-        meta.agent_type,
-        truncate_str(meta.type_detail, area.width.saturating_sub(6) as usize)
-    );
+    let max_detail = area.width.saturating_sub(6) as usize;
+    let type_detail = match error_detail_line(agent, app) {
+        Some(error) => truncate_str(&error, max_detail),
+        None => format!(
+            "{} · {}",
+            meta.agent_type,
+            truncate_str(meta.type_detail, max_detail)
+        ),
+    };
     render_sidebar_card_line(
         frame,
         area,
@@ -201,6 +205,41 @@ pub(super) fn draw_sidebar_card(
         status_color,
         vec![Span::styled(dir_text, Style::default().fg(theme.dim_text))],
     );
+}
+
+/// Line-1 override for a failed session with a recorded failure detail:
+/// `error · <first line of the harness's stderr tail>`, so the row shows
+/// state error *with* the reason attached, visible without opening logs.
+/// `None` keeps today's rendering (running sessions, clean exits, and rows
+/// whose failure predates the detail).
+fn error_detail_line(agent: &AgentEntry, app: &App) -> Option<String> {
+    let session = match agent {
+        AgentEntry::Interactive(index) => app.interactive_agents.get(*index)?,
+        AgentEntry::Terminal(index) => app.terminal_agents.get(*index)?,
+        _ => return None,
+    };
+    let AgentStatus::Exited(code) = session.status else {
+        return None;
+    };
+    if code == 0 {
+        return None;
+    }
+    let first = session
+        .exit_detail
+        .as_deref()
+        .map(first_detail_line)
+        .filter(|line| !line.is_empty())?;
+    Some(format!("error · {first}"))
+}
+
+/// The card-visible head of a failure detail: its first non-empty line.
+fn first_detail_line(detail: &str) -> String {
+    detail
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
+        .to_string()
 }
 
 pub(super) fn agent_card_meta<'a>(

@@ -93,6 +93,9 @@ pub struct SessionRegistration<'a> {
     pub boot_id: Option<&'a str>,
     /// Harness conversation identifier, when the caller knows it.
     pub harness_conversation_id: Option<&'a str>,
+    /// A resume relaunch: reactivate the existing row without rewriting its
+    /// recorded launch args (see [`Database::reactivate_keep_args`]).
+    pub preserve_args: bool,
 }
 
 /// Outcome of [`Database::register_interactive_session`]: either an earlier
@@ -218,6 +221,50 @@ impl Database {
         Ok(())
     }
 
+    /// [`reactivate_interactive_session`](Self::reactivate_interactive_session),
+    /// but the recorded launch args are left untouched: a resume relaunch
+    /// reactivates the row for liveness only, since the resume command line
+    /// is rebuilt from the stored harness conversation id at every startup
+    /// and must never overwrite the original args.
+    pub fn reactivate_keep_args(
+        &self,
+        id: &str,
+        pid: Option<i64>,
+        working_dir: &str,
+        boot_id: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        conn.execute(
+            "UPDATE interactive_sessions
+                SET status = 'active', pid = ?1, working_dir = ?2, boot_id = ?3,
+                    started_at = ?4
+              WHERE id = ?5",
+            params![pid, working_dir, boot_id, Utc::now().to_rfc3339(), id],
+        )?;
+        Ok(())
+    }
+
+    /// Reactivate the row a registration resolves to, preserving its args
+    /// on the resume path.
+    fn reactivate_existing(
+        &self,
+        registration: &SessionRegistration<'_>,
+        id: &str,
+        working_dir: &str,
+    ) -> Result<()> {
+        if registration.preserve_args {
+            self.reactivate_keep_args(id, registration.pid, working_dir, registration.boot_id)
+        } else {
+            self.reactivate_interactive_session(
+                id,
+                registration.pid,
+                working_dir,
+                registration.args,
+                registration.boot_id,
+            )
+        }
+    }
+
     /// Record the harness's own conversation identifier on a session row.
     /// Best-effort by design (the caller never fails on it) and never
     /// overwrites an identifier already recorded for that row: the first
@@ -235,6 +282,59 @@ impl Database {
             params![harness_id, session_id],
         )?;
         Ok(())
+    }
+
+    /// Forget the recorded harness conversation id: a fresh fallback after a
+    /// failed resume is a NEW conversation, and the no-overwrite recorder can
+    /// only store its id once the stale one is gone.
+    pub fn clear_session_harness_conversation_id(&self, session_id: &str) -> Result<()> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        conn.execute(
+            "UPDATE interactive_sessions SET harness_conversation_id = NULL WHERE id = ?1",
+            params![session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Read a session row's exit code, if it finished (`None` while active or
+    /// when the row is gone).
+    pub fn get_session_exit_code(&self, session_id: &str) -> Result<Option<i32>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mut stmt = conn.prepare("SELECT exit_code FROM interactive_sessions WHERE id = ?1")?;
+        let result = stmt.query_row(params![session_id], |row| row.get(0)).ok();
+        Ok(result)
+    }
+
+    /// Attach the failure detail to a session row: the harness's stderr
+    /// tail on a nonzero exit, or the resume guard's explanation. Overwrites
+    /// unconditionally — the latest failure is the one the row shows.
+    pub fn set_session_exit_detail(&self, session_id: &str, detail: &str) -> Result<()> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        conn.execute(
+            "UPDATE interactive_sessions SET exit_detail = ?1 WHERE id = ?2",
+            params![detail, session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Clear a session row's failure detail: a clean exit leaves no
+    /// explanation behind for the next failure to inherit.
+    pub fn clear_session_exit_detail(&self, session_id: &str) -> Result<()> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        conn.execute(
+            "UPDATE interactive_sessions SET exit_detail = NULL WHERE id = ?1",
+            params![session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Read a session row's failure detail, if any was recorded.
+    pub fn get_session_exit_detail(&self, session_id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mut stmt =
+            conn.prepare("SELECT exit_detail FROM interactive_sessions WHERE id = ?1")?;
+        let result = stmt.query_row(params![session_id], |row| row.get(0)).ok();
+        Ok(result)
     }
 
     /// Register a freshly launched interactive session, reusing the earlier row
@@ -259,13 +359,7 @@ impl Database {
         // harness identifier is recorded but never overwrites the recorded
         // one. No second row is ever added for the relaunched session.
         if let Some(existing) = self.get_interactive_session(registration.id)? {
-            self.reactivate_interactive_session(
-                &existing.id,
-                registration.pid,
-                &working_dir,
-                registration.args,
-                registration.boot_id,
-            )?;
+            self.reactivate_existing(registration, &existing.id, &working_dir)?;
             if existing.name != registration.name {
                 self.rename_interactive_session(&existing.id, registration.name)?;
             }
@@ -279,13 +373,7 @@ impl Database {
         }
         if let Some(harness_id) = registration.harness_conversation_id {
             if let Some(existing) = self.find_session_by_harness_id(harness_id)? {
-                self.reactivate_interactive_session(
-                    &existing.id,
-                    registration.pid,
-                    &working_dir,
-                    registration.args,
-                    registration.boot_id,
-                )?;
+                self.reactivate_existing(registration, &existing.id, &working_dir)?;
                 return Ok(RegistrationOutcome::Reactivated {
                     id: existing.id,
                     name: existing.name,
@@ -1111,6 +1199,7 @@ mod tests {
             session_type: "interactive",
             boot_id: Some("boot-new"),
             harness_conversation_id,
+            preserve_args: false,
         })
         .unwrap()
     }

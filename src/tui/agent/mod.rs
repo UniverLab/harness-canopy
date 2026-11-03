@@ -17,19 +17,20 @@ use ratatui::style::Color;
 
 use crate::domain::models::Cli;
 use crate::sessions::client::{
-    new_req, proto_mismatch_message, with_active, SessionEvent, SessionOpenError, SessionSend,
-    SessionStream,
+    proto_mismatch_message, with_active, SessionEvent, SessionOpenError, SessionSend, SessionStream,
 };
-use crate::sessions::protocol::{
-    list_frame, spawn_frame, spawn_frame_full, HostFrame, SessionItem, SpawnExt, SpawnFrameArgs,
-};
+use crate::sessions::protocol::SessionItem;
 use crate::sessions::{format_accent_rgb, preserve_rows_on_shrink, VT_SCROLLBACK_LINES};
+
+use hub_spawn::{spawn_on_hub, spawn_on_hub_terminal, HubSpawnArgs};
 
 pub mod input;
 pub mod naming;
 pub mod pty;
 pub mod sanitize;
 pub mod screen;
+
+mod hub_spawn;
 
 /// Status of an interactive agent.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -155,6 +156,10 @@ pub struct InteractiveAgent {
     last_viewed_at: Arc<Mutex<DateTime<Utc>>>,
     /// Whether the exit notification has already been sent (avoids repeats).
     pub exit_notified: bool,
+    /// Why a failed session failed: the harness's stderr tail (or the
+    /// resume guard's explanation) loaded from the row when the `exited`
+    /// frame arrived. The sidebar card renders it; `None` while running.
+    pub exit_detail: Option<String>,
     /// Warp-like input mode: accumulate keystrokes in input_buffer, send on Enter.
     /// Only used for terminal sessions (is_terminal == true).
     pub warp_mode: bool,
@@ -201,6 +206,8 @@ impl InteractiveAgent {
     /// `name` is an optional user-provided session name (random if None).
     /// `existing_ids` is used to avoid name collisions.
     /// `model` selects the model (e.g. `gpt-4`).
+    /// `preserve_args` marks a resume relaunch: the reactivated row keeps
+    /// its recorded launch args instead of the resume command line.
     #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         cli: Cli,
@@ -217,6 +224,7 @@ impl InteractiveAgent {
         model_flag: Option<&str>,
         seed_id: Option<&str>,
         harness_conversation_id: Option<&str>,
+        preserve_args: bool,
     ) -> Result<Self> {
         let accent = match accent_color {
             Color::Rgb(r, g, b) => Some(format_accent_rgb((r, g, b))),
@@ -238,6 +246,7 @@ impl InteractiveAgent {
             seed_id,
             accent: accent.as_deref(),
             harness_conversation_id,
+            preserve_args,
         })?;
         Self::attach_item(&item, cli, accent_color, seed_id, cols, rows)
     }
@@ -373,6 +382,7 @@ impl InteractiveAgent {
             activity_suppressed_until: Arc::new(Mutex::new(Utc::now())),
             last_viewed_at: Arc::new(Mutex::new(Utc::now())),
             exit_notified: false,
+            exit_detail: None,
             warp_mode: is_terminal,
             warp_cursor: 0,
             history_index: None,
@@ -697,90 +707,6 @@ fn mark_disconnected(stream_gen: &AtomicU64, my_gen: u64, connected: &AtomicBool
     if reader_is_current(stream_gen, my_gen) {
         connected.store(false, Ordering::Relaxed);
     }
-}
-
-/// Launch fields for one hub spawn; a struct so the spawn helper stays
-/// under the argument-count lint without silencing it.
-struct HubSpawnArgs<'a> {
-    kind: &'a str,
-    cli: &'a str,
-    model: Option<&'a str>,
-    workdir: &'a str,
-    name: &'a str,
-    interactive_args: Option<&'a str>,
-    fallback_args: Option<&'a str>,
-    model_flag: Option<&'a str>,
-    id: Option<&'a str>,
-    seed_id: Option<&'a str>,
-    accent: Option<&'a str>,
-    harness_conversation_id: Option<&'a str>,
-}
-
-/// Spawn a hub session and return its metadata row: `spawn` answers the id,
-/// then `list` finds the row the hub announced for it.
-fn spawn_on_hub(args: &HubSpawnArgs<'_>) -> Result<SessionItem> {
-    let ext = SpawnExt {
-        interactive_args: args.interactive_args.map(str::to_owned),
-        fallback_args: args.fallback_args.map(str::to_owned),
-        model_flag: args.model_flag.map(str::to_owned),
-        id: args.id.map(str::to_owned),
-        seed_id: args.seed_id.map(str::to_owned),
-        accent: args.accent.map(str::to_owned),
-        harness_conversation_id: args.harness_conversation_id.map(str::to_owned),
-        yolo: false,
-    };
-    let req = new_req();
-    let frame_args = SpawnFrameArgs {
-        req: &req,
-        kind: args.kind,
-        cli: args.cli,
-        model: args.model,
-        workdir: args.workdir,
-        name: Some(args.name),
-        prompt: None,
-        ext: &ext,
-    };
-    let spawned = with_active(|active| active.client.request(&req, spawn_frame_full(&frame_args)))
-        .ok_or_else(|| anyhow::anyhow!("not connected to the session hub"))??;
-    let HostFrame::Spawned { id, .. } = spawned else {
-        anyhow::bail!("hub answered spawn with an unexpected frame");
-    };
-    let req = new_req();
-    let listed = with_active(|active| active.client.request(&req, list_frame(&req)))
-        .ok_or_else(|| anyhow::anyhow!("not connected to the session hub"))??;
-    let HostFrame::Sessions { items, .. } = listed else {
-        anyhow::bail!("hub answered list with an unexpected frame");
-    };
-    items
-        .into_iter()
-        .find(|item| item.id == id)
-        .ok_or_else(|| anyhow::anyhow!("hub has no session '{id}' it just spawned"))
-}
-
-/// Terminal spawn through the short frame: terminals carry no agent launch
-/// fields, so the 7-arg builder stays the non-test caller of `spawn_frame`.
-fn spawn_on_hub_terminal(kind: &str, cli: &str, workdir: &str, name: &str) -> Result<SessionItem> {
-    let req = new_req();
-    let spawned = with_active(|active| {
-        active.client.request(
-            &req,
-            spawn_frame(&req, kind, cli, None, workdir, Some(name), None),
-        )
-    })
-    .ok_or_else(|| anyhow::anyhow!("not connected to the session hub"))??;
-    let HostFrame::Spawned { id, .. } = spawned else {
-        anyhow::bail!("hub answered spawn with an unexpected frame");
-    };
-    let req = new_req();
-    let listed = with_active(|active| active.client.request(&req, list_frame(&req)))
-        .ok_or_else(|| anyhow::anyhow!("not connected to the session hub"))??;
-    let HostFrame::Sessions { items, .. } = listed else {
-        anyhow::bail!("hub answered list with an unexpected frame");
-    };
-    items
-        .into_iter()
-        .find(|item| item.id == id)
-        .ok_or_else(|| anyhow::anyhow!("hub has no session '{id}' it just spawned"))
 }
 
 /// Parse a hub timestamp; now when it does not parse.

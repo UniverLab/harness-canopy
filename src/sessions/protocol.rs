@@ -183,6 +183,9 @@ pub struct SpawnExt {
     /// `yolo_flag` to the interactive args. Only for `kind:"agent"`, and only
     /// for a harness that defines one.
     pub yolo: bool,
+    /// A resume relaunching an existing row: reactivate it without rewriting
+    /// its recorded launch args. Absent or `null` reads as `false`.
+    pub preserve_args: bool,
 }
 
 /// A rejected client frame: the request id to echo (when the frame carried
@@ -330,6 +333,7 @@ fn parse_spawn_frame(value: &Value, frame: &str) -> Result<ClientFrame, FrameErr
     let accent = opt_str_field(value, frame, "accent")?;
     let harness_conversation_id = opt_str_field(value, frame, "harness_conversation_id")?;
     let yolo = opt_bool_field(value, frame, "yolo")?;
+    let preserve_args = opt_bool_field(value, frame, "preserve_args")?;
     Ok(ClientFrame::Spawn {
         req,
         kind,
@@ -347,6 +351,7 @@ fn parse_spawn_frame(value: &Value, frame: &str) -> Result<ClientFrame, FrameErr
             accent,
             harness_conversation_id,
             yolo,
+            preserve_args,
         }),
     })
 }
@@ -633,7 +638,7 @@ pub fn resize_frame(id: &str, cols: u16, rows: u16) -> String {
     serde_json::json!({"t": "resize", "id": id, "cols": cols, "rows": rows}).to_string()
 }
 
-/// `spawn{req,kind,cli?,model?,workdir,name?,prompt?,interactive_args?,fallback_args?,model_flag?,id?,seed_id?,accent?,harness_conversation_id?,yolo?}`:
+/// `spawn{req,kind,cli?,model?,workdir,name?,prompt?,interactive_args?,fallback_args?,model_flag?,id?,seed_id?,accent?,harness_conversation_id?,yolo?,preserve_args?}`:
 /// spawn a hub session. `cli` may be absent or `null` for `kind:"terminal"`
 /// (the default shell opens); agents still require it. The agent launch fields mirror what the TUI passes to
 /// `InteractiveAgent::spawn` today: explicit args (resume/yolo included),
@@ -687,7 +692,7 @@ pub fn spawn_frame_full(args: &SpawnFrameArgs<'_>) -> String {
         "interactive_args": ext.interactive_args, "fallback_args": ext.fallback_args,
         "model_flag": ext.model_flag, "id": ext.id, "seed_id": ext.seed_id, "accent": ext.accent,
         "harness_conversation_id": ext.harness_conversation_id,
-        "yolo": ext.yolo,
+        "yolo": ext.yolo, "preserve_args": ext.preserve_args,
     })
     .to_string()
 }

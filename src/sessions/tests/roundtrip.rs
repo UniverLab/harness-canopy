@@ -178,6 +178,7 @@ fn agent_spawn_preserves_dialog_launch_fields() {
         seed_id: Some("seed-1".to_string()),
         accent: Some("1,2,3".to_string()),
         yolo: false,
+        preserve_args: false,
     };
     let (session, _guard) = KillGuard::spawn(&hub, &req);
     assert_eq!(session.id, "sess-resume-1");
@@ -237,6 +238,7 @@ fn hub_spawn_from_the_resume_step_keeps_the_source_id_and_name() {
         seed_id: None,
         accent: None,
         yolo: false,
+        preserve_args: false,
     };
     let (session, _guard) = KillGuard::spawn(&hub, &req);
     assert_eq!(session.id, "sess-resume-2");

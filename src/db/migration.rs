@@ -566,6 +566,29 @@ impl Database {
         Ok(())
     }
 
+    /// Adds `interactive_sessions.exit_detail`: the harness's stderr tail
+    /// (or the resume guard's explanation) attached to a failed session so
+    /// the TUI row shows *why* without opening logs. Same pragma guard as
+    /// the harness column above; fresh databases already have it in the
+    /// base schema.
+    pub(super) fn migrate_interactive_exit_detail_column(conn: &Connection) -> Result<()> {
+        let has_exit_detail: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('interactive_sessions') WHERE name = 'exit_detail'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if !has_exit_detail {
+            conn.execute(
+                "ALTER TABLE interactive_sessions ADD COLUMN exit_detail TEXT",
+                [],
+            )
+            .map_err(|e| anyhow::anyhow!("interactive exit detail migration failed: {e}"))?;
+        }
+        Ok(())
+    }
+
     /// The session shelf table on databases created before it existed:
     /// the same batch as the base schema, a no-op once applied.
     pub(super) fn migrate_shelf_files(conn: &Connection) -> Result<()> {

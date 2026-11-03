@@ -57,11 +57,16 @@ fn test_yolo_mode_preservation_in_session_relaunch() {
         harness_conversation_id: None,
     };
 
-    assert!(
-        build_resumed_session_args(session.args.as_deref(), None, None, None, Some("--yolo"))
-            .as_deref()
-            .is_some_and(|args| args.contains("--yolo"))
-    );
+    assert!(build_resumed_session_args(
+        session.args.as_deref(),
+        None,
+        None,
+        None,
+        Some("--yolo"),
+        None
+    )
+    .as_deref()
+    .is_some_and(|args| args.contains("--yolo")));
 }
 
 #[test]
@@ -80,9 +85,15 @@ fn test_yolo_flag_not_duplicated_when_falling_back_to_original_args() {
         harness_conversation_id: None,
     };
 
-    let args =
-        build_resumed_session_args(session.args.as_deref(), None, None, None, Some("--yolo"))
-            .unwrap();
+    let args = build_resumed_session_args(
+        session.args.as_deref(),
+        None,
+        None,
+        None,
+        Some("--yolo"),
+        None,
+    )
+    .unwrap();
     assert_eq!(args.matches("--yolo").count(), 1);
 }
 
@@ -108,6 +119,7 @@ fn test_original_resume_args_preserved_over_reconstructed_args() {
         Some("-c"),
         Some("--session"),
         Some("--yolo"),
+        None,
     )
     .unwrap();
     assert!(args.contains("--session abc123"));
@@ -137,6 +149,7 @@ fn test_rebuilds_resume_args_for_fresh_session() {
         Some("--continue"),
         None,
         Some("--yolo"),
+        None,
     )
     .unwrap();
     assert!(args.contains("--continue"));
@@ -165,6 +178,7 @@ fn test_appends_resume_args_to_original_interactive_command() {
         Some("--resume-picker"),
         None,
         Some("--trust-all-tools"),
+        None,
     )
     .unwrap();
     assert!(args.contains("chat"));

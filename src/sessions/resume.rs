@@ -5,12 +5,14 @@
 //! every PTY, so the daemon runs this before its session endpoint accepts
 //! clients; the TUI no longer resumes anything.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use crate::db::session::{InteractiveSession, TerminalSession};
 use crate::db::Database;
 use crate::domain::canopy_config::CanopyConfig;
 use crate::domain::models::Cli;
+use crate::sessions::muse_conversation::record_fresh_conversation;
 use crate::sessions::{HubSession, SessionHub, SessionKind, SpawnRequest};
 use crate::tui::build_resumed_session_args;
 
@@ -58,27 +60,108 @@ fn resume_agent_sessions(
     }
     tracing::info!("Resuming {} active session(s)", sessions.len());
 
+    // Id-less sessions of one harness+directory share the most-recent
+    // fallback (`resume --last`): resuming more than one would point them
+    // all at the same newest conversation, so only the first is resumed and
+    // the rest fail with an explanation instead of silently colliding.
+    let mut last_resort_used: HashSet<(String, String)> = HashSet::new();
     for session in &sessions {
         // A live PTY in the hub already owns this row: resuming it again
         // would mint a second process fighting the first for the session.
         if hub.get(&session.id).is_some() {
             continue;
         }
-        resume_scanned_session(hub, session, canopy_config, current_boot_id);
+        let shares_fallback = uses_shared_last_resort(session, canopy_config);
+        let key = (session.cli.clone(), session.working_dir.clone());
+        if shares_fallback && last_resort_used.contains(&key) {
+            fail_idless_session(hub, session, canopy_config);
+            continue;
+        }
+        // Only a session that is actually relaunched takes the fallback:
+        // one deferred for a live process conflict (or otherwise not
+        // resumed) must not spend the slot and fail the sessions after it.
+        if resume_scanned_session(hub, session, canopy_config, current_boot_id) && shares_fallback {
+            last_resort_used.insert(key);
+        }
     }
 }
 
+/// Whether a session would resume through the harness's shared most-recent
+/// fallback: it has no recorded harness conversation id, and its harness
+/// defines `resume_args` that resolve to the newest conversation without
+/// one. `session_resume_cmd` alone never shares anything — without an id
+/// it builds no resume at all and each session relaunches its own command
+/// line — so only `resume_args` arms the guard.
+pub(crate) fn uses_shared_last_resort(
+    session: &InteractiveSession,
+    canopy_config: &CanopyConfig,
+) -> bool {
+    if session
+        .harness_conversation_id
+        .as_deref()
+        .is_some_and(|id| !id.trim().is_empty())
+    {
+        return false;
+    }
+    let cli = Cli::from_str(&session.cli);
+    let Some(config) = canopy_config.get_cli(cli.as_str()) else {
+        return false;
+    };
+    config
+        .resume_args
+        .as_deref()
+        .is_some_and(|args| !args.trim().is_empty())
+}
+
+/// Fail an id-less session that lost the `--last` fallback to another
+/// session of the same harness+directory: `error` status with an
+/// explanation on the row, never a silent second `--last` at the same
+/// conversation.
+fn fail_idless_session(
+    hub: &SessionHub,
+    session: &InteractiveSession,
+    canopy_config: &CanopyConfig,
+) {
+    let cli = Cli::from_str(&session.cli);
+    let fallback = canopy_config
+        .get_cli(cli.as_str())
+        .and_then(|config| config.resume_args.as_deref())
+        .filter(|args| !args.trim().is_empty())
+        .unwrap_or("resume --last");
+    tracing::warn!(
+        "Not resuming session '{}': no recorded harness conversation id and another '{}' session in '{}' already took '{fallback}'",
+        session.name,
+        session.cli,
+        session.working_dir,
+    );
+    if let Err(e) = hub.db().finish_interactive_session(&session.id, 1) {
+        tracing::warn!("Failed to close session '{}': {e}", session.name);
+    }
+    let detail = format!(
+        "not resumed: no recorded harness conversation id, and another '{}' session in '{}' was already resumed with '{fallback}'; relaunch it fresh instead",
+        session.cli, session.working_dir,
+    );
+    if let Err(e) = hub.db().set_session_exit_detail(&session.id, &detail) {
+        tracing::warn!(
+            "Failed to record the resume-guard explanation for '{}': {e}",
+            session.name
+        );
+    }
+}
+
+/// Returns whether the session was actually relaunched — false when it was
+/// deferred for a live process that still holds it.
 fn resume_scanned_session(
     hub: &SessionHub,
     session: &InteractiveSession,
     canopy_config: &CanopyConfig,
     current_boot_id: Option<&str>,
-) {
+) -> bool {
     if should_resume_session(session.pid, session.boot_id.as_deref(), current_boot_id) {
         resume_interactive_session(hub, session, canopy_config, current_boot_id);
-        return;
+        return true;
     }
-    resume_or_defer_conflicting_session(hub, session, canopy_config, current_boot_id);
+    resume_or_defer_conflicting_session(hub, session, canopy_config, current_boot_id)
 }
 
 /// The stored PID is alive on the same boot — but that alone is NOT proof of
@@ -93,7 +176,7 @@ fn resume_or_defer_conflicting_session(
     session: &InteractiveSession,
     canopy_config: &CanopyConfig,
     current_boot_id: Option<&str>,
-) {
+) -> bool {
     let pid = session.pid.unwrap_or(0);
     if matches!(
         resume_decision(true, process_outlives_grace(pid, &session.cli)),
@@ -104,7 +187,7 @@ fn resume_or_defer_conflicting_session(
             session.name
         );
         resume_interactive_session(hub, session, canopy_config, current_boot_id);
-        return;
+        return true;
     }
     tracing::warn!(
         "Skipping auto-resume of session '{}' for this start: pid {pid} is still alive and holds it; will retry on the next start",
@@ -115,6 +198,7 @@ fn resume_or_defer_conflicting_session(
     // row exactly as it is — still `active`, still holding its pid and
     // boot_id — so it's retried on every subsequent start and comes back on
     // its own once the holder exits.
+    false
 }
 
 /// Relaunch one interactive session under its own id and name, with the
@@ -133,18 +217,13 @@ fn resume_interactive_session(
         cli_config.and_then(|config| config.resume_args.as_deref()),
         cli_config.and_then(|config| config.session_resume_cmd.as_deref()),
         cli_config.and_then(|config| config.yolo_flag.as_deref()),
+        session.harness_conversation_id.as_deref(),
     );
-    let Some((spawned, used_args)) = spawn_resumed_or_fresh(hub, session, cli_config, resume_args)
+    let Some(spawned) = spawn_resumed_or_fresh(hub, session, cli_config, resume_args.as_deref())
     else {
         return;
     };
-    finalize_resumed_session(
-        hub,
-        session,
-        used_args.as_deref(),
-        spawned.pid,
-        current_boot_id,
-    );
+    finalize_resumed_session(hub, session, spawned.pid, current_boot_id);
 }
 
 /// Spawn the resumed session, falling back to the platform's fresh
@@ -153,8 +232,9 @@ fn spawn_resumed_or_fresh(
     hub: &SessionHub,
     session: &InteractiveSession,
     cli_config: Option<&crate::domain::cli_config::CliConfig>,
-    resume_args: Option<String>,
-) -> Option<(Arc<HubSession>, Option<String>)> {
+    resume_args: Option<&str>,
+) -> Option<Arc<HubSession>> {
+    let since = std::time::SystemTime::now();
     let spawn = |args: Option<&str>| {
         hub.spawn(&SpawnRequest {
             kind: SessionKind::Agent,
@@ -171,10 +251,11 @@ fn spawn_resumed_or_fresh(
             seed_id: None,
             accent: resume_accent(cli_config),
             yolo: false,
+            preserve_args: true,
         })
     };
-    match spawn(resume_args.as_deref()) {
-        Ok(agent) => Some((agent, resume_args)),
+    match spawn(resume_args) {
+        Ok(agent) => Some(agent),
         Err(e) => {
             tracing::warn!(
                 "Failed to auto-resume session '{}': {e}; retrying as a fresh session",
@@ -182,7 +263,12 @@ fn spawn_resumed_or_fresh(
             );
             let fresh_args = cli_config.and_then(|config| config.interactive_args.clone());
             match spawn(fresh_args.as_deref()) {
-                Ok(agent) => Some((agent, fresh_args)),
+                Ok(agent) => {
+                    // The fresh fallback is a new conversation: record its
+                    // harness id like a fresh launch does.
+                    record_fresh_muse_conversation(hub, session, since, agent.pid);
+                    Some(agent)
+                }
                 Err(e2) => {
                     tracing::warn!(
                         "Fresh-session fallback also failed for '{}': {e2}; closing session",
@@ -198,31 +284,53 @@ fn spawn_resumed_or_fresh(
     }
 }
 
+/// After a fresh fallback for a muse session, record the new conversation's
+/// own harness id — the same background discovery a fresh launch runs. The
+/// stale id is forgotten first: the fallback is a NEW conversation, and the
+/// no-overwrite recorder could never store its id over the dead one.
+fn record_fresh_muse_conversation(
+    hub: &SessionHub,
+    session: &InteractiveSession,
+    since: std::time::SystemTime,
+    pid: Option<i64>,
+) {
+    if Cli::from_str(&session.cli).as_str() != "muse" {
+        return;
+    }
+    let _ = hub.db().clear_session_harness_conversation_id(&session.id);
+    record_fresh_conversation(
+        hub.db().clone(),
+        session.id.clone(),
+        session.working_dir.clone(),
+        since,
+        pid,
+        crate::sessions::muse_conversation::muse_store_dir(),
+    );
+}
+
 /// Persist the resumed session once its PTY is up.
 ///
 /// A resumed conversation keeps its canopy session id and name: the earlier
 /// row is reactivated in place — only its liveness fields move — instead of
 /// being superseded by a second, freshly-named row. That is what keeps hooks
 /// and scheduled sends addressed to the session's name or id delivered to the
-/// resumed process.
+/// resumed process. The recorded launch args are never rewritten with the
+/// resume command line: it is rebuilt from the stored harness conversation
+/// id at every startup.
 fn finalize_resumed_session(
     hub: &SessionHub,
     session: &InteractiveSession,
-    used_args: Option<&str>,
     pid: Option<i64>,
     current_boot_id: Option<&str>,
 ) {
     // The hub's spawn already reactivated this same row through
     // `register_interactive_session` (id-first) and recorded the carried
     // harness identifier on it; this second write only moves the liveness
-    // fields to the args the resume actually launched with.
-    if let Err(e) = hub.db().reactivate_interactive_session(
-        &session.id,
-        pid,
-        &session.working_dir,
-        used_args,
-        current_boot_id,
-    ) {
+    // fields, keeping the original launch args.
+    if let Err(e) =
+        hub.db()
+            .reactivate_keep_args(&session.id, pid, &session.working_dir, current_boot_id)
+    {
         tracing::warn!(
             "Failed to reactivate resumed session '{}': {e}",
             session.name
@@ -280,6 +388,7 @@ fn resume_terminal_session(hub: &SessionHub, session: &TerminalSession) {
         seed_id: None,
         accent: None,
         yolo: false,
+        preserve_args: false,
     };
     match hub.spawn(&request) {
         Ok(_) => {}
@@ -390,5 +499,73 @@ pub fn resume_decision(pid_alive_same_boot: bool, outlives_grace: bool) -> Resum
         ResumeDecision::SkipHeldByLiveProcess
     } else {
         ResumeDecision::Resume
+    }
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+
+    fn idless_session(cli: &str) -> InteractiveSession {
+        InteractiveSession {
+            id: "sess-1".to_string(),
+            name: "one".to_string(),
+            cli: cli.to_string(),
+            working_dir: "/work".to_string(),
+            args: Some("--provider echo".to_string()),
+            started_at: "2026-11-03T00:00:00Z".to_string(),
+            status: "active".to_string(),
+            session_type: "interactive".to_string(),
+            pid: None,
+            boot_id: None,
+            harness_conversation_id: None,
+        }
+    }
+
+    fn config_with(cli_toml: &str) -> (tempfile::TempDir, CanopyConfig) {
+        let dir = tempfile::tempdir().expect("config dir");
+        std::fs::write(dir.path().join("config.toml"), cli_toml).expect("write test config");
+        let config = CanopyConfig::load(dir.path());
+        (dir, config)
+    }
+
+    #[test]
+    fn recorded_id_never_uses_the_shared_fallback() {
+        let (_dir, config) = config_with(
+            "[[clis]]\nname = \"muse\"\nresume_args = \"resume --last\"\nsession_resume_cmd = \"resume\"\n",
+        );
+        let mut session = idless_session("muse");
+        session.harness_conversation_id = Some("uuid-aaa".to_string());
+        assert!(!uses_shared_last_resort(&session, &config));
+    }
+
+    #[test]
+    fn idless_with_resume_args_uses_the_shared_fallback() {
+        let (_dir, config) = config_with(
+            "[[clis]]\nname = \"muse\"\nresume_args = \"resume --last\"\nsession_resume_cmd = \"resume\"\n",
+        );
+        assert!(uses_shared_last_resort(&idless_session("muse"), &config));
+    }
+
+    #[test]
+    fn idless_with_resume_cmd_only_resumes_alone() {
+        // `session_resume_cmd` without an id builds no resume at all — each
+        // session relaunches its own command line, so the guard must not
+        // fail all but one.
+        let (_dir, config) =
+            config_with("[[clis]]\nname = \"muse\"\nsession_resume_cmd = \"resume\"\n");
+        assert!(!uses_shared_last_resort(&idless_session("muse"), &config));
+    }
+
+    #[test]
+    fn idless_with_no_resume_machinery_resumes_alone() {
+        let (_dir, config) = config_with("[[clis]]\nname = \"muse\"\n");
+        assert!(!uses_shared_last_resort(&idless_session("muse"), &config));
+    }
+
+    #[test]
+    fn unknown_cli_resumes_alone() {
+        let (_dir, config) = config_with("[[clis]]\nname = \"muse\"\n");
+        assert!(!uses_shared_last_resort(&idless_session("nope"), &config));
     }
 }

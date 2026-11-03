@@ -374,6 +374,7 @@ fn spawn_cat_agent(name: &str) -> crate::tui::agent::InteractiveAgent {
         None,
         None,
         None,
+        false,
     )
     .expect("spawn cat as a stand-in interactive child")
 }

@@ -346,6 +346,7 @@ mod redraw_tests {
             None,
             None,
             None,
+            false,
         )
         .expect("spawn cat as a stand-in interactive child");
         app.interactive_agents.push(agent);
@@ -479,6 +480,7 @@ mod redraw_tests {
             None,
             None,
             None,
+            false,
         )
         .expect("spawn cat as a stand-in interactive child");
         app.interactive_agents.push(agent);
@@ -516,6 +518,7 @@ mod redraw_tests {
             None,
             None,
             None,
+            false,
         )
         .expect("spawn cat as a stand-in interactive child");
         app.interactive_agents.push(agent);

@@ -898,6 +898,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .expect("spawn cat as a stand-in interactive child");
         *agent.kitty_keyboard_flags.lock().expect("lock") = Some(7);
@@ -946,6 +947,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .expect("spawn cat as a stand-in interactive child");
         *agent.kitty_keyboard_flags.lock().expect("lock") = Some(7);
@@ -1234,6 +1236,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .expect("spawn cat as a stand-in interactive child");
         let mut app = make_app();

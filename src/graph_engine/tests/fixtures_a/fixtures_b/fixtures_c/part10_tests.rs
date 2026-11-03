@@ -673,6 +673,7 @@ async fn interactive_hook_delivers_to_a_resumed_session_by_name() {
             session_type: "interactive",
             boot_id: Some("boot-new"),
             harness_conversation_id: Some("conv-abc"),
+            preserve_args: false,
         })
         .unwrap();
     assert_eq!(

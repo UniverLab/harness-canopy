@@ -1396,3 +1396,63 @@ fn pulse_cycles_through_phases() {
     let b = pulse(Color::Red, 10);
     assert_ne!(a, b);
 }
+
+#[test]
+fn failed_card_with_exit_detail_shows_error_and_tail() {
+    // A resumed harness that died immediately: the row shows state error
+    // WITH the harness's stderr tail attached, visible without opening
+    // logs. No silent error states.
+    use crate::db::Database;
+    use crate::tui::agent::InteractiveAgent;
+    use crate::tui::app::App;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+    std::mem::forget(tmp);
+    let db = Arc::new(Database::new(&path).unwrap());
+    let data_dir = tempfile::tempdir().unwrap();
+    let mut app = App::new(
+        Arc::clone(&db),
+        data_dir.path(),
+        &crate::domain::canopy_config::CanopyConfig::default(),
+    )
+    .unwrap();
+
+    let mut failed = InteractiveAgent::spawn_terminal(
+        "cat",
+        "/tmp",
+        80,
+        24,
+        Some("failed-resume"),
+        &[],
+        ratatui::style::Color::White,
+    )
+    .expect("spawn failed-resume agent");
+    failed.status = AgentStatus::Exited(1);
+    failed.exit_detail = Some("retained session not found: no saved log\nsecond line".to_string());
+    app.interactive_agents.push(failed);
+    app.agents.push(AgentEntry::Interactive(0));
+
+    let theme = Theme::classic();
+    let backend = TestBackend::new(50, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            draw_sidebar(frame, area, &mut app, &theme);
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let text = buffer_to_text(&buffer);
+
+    assert!(
+        text.contains("error · retained session not found"),
+        "the failed row must show the error and its tail: {text}"
+    );
+    assert!(
+        !text.contains("second line"),
+        "the card shows the first detail line only: {text}"
+    );
+}

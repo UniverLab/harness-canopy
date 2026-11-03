@@ -136,6 +136,7 @@ fn spawn_frame_carries_every_field() {
         accent: Some("1,2,3".to_string()),
         harness_conversation_id: Some("ses_abc123".to_string()),
         yolo: true,
+        preserve_args: true,
     };
     let frame = spawn_frame_full(&SpawnFrameArgs {
         req: "r1",
@@ -173,6 +174,10 @@ fn spawn_frame_carries_every_field() {
             assert_eq!(ext.accent.as_deref(), Some("1,2,3"));
             assert_eq!(ext.harness_conversation_id.as_deref(), Some("ses_abc123"));
             assert!(ext.yolo, "yolo:true must survive the frame");
+            assert!(
+                ext.preserve_args,
+                "preserve_args:true must survive the frame"
+            );
         }
         other => panic!("spawn frame parsed as {other:?}"),
     }

@@ -160,6 +160,7 @@ mod tests {
                 session_type: "interactive",
                 boot_id: Some("boot-new"),
                 harness_conversation_id: None,
+                preserve_args: true,
             })
             .unwrap();
         assert_eq!(

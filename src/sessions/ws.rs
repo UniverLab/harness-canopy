@@ -295,6 +295,7 @@ async fn handle_client_text(
                     seed_id: ext.seed_id,
                     accent: ext.accent,
                     yolo: ext.yolo,
+                    preserve_args: ext.preserve_args,
                 },
             );
         }
