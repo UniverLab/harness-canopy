@@ -72,7 +72,8 @@ step instead of launching straight away:
   The border takes the accent colour while dragged, and the session resizes
   once on release.
   While a paired device sizes the session narrower, the panel fills the freed
-  strip on its own and cannot be dragged.
+  strip on its own and cannot be dragged; when the device lets go or
+  disconnects, the panel returns to the TUI's own layout.
 - **Interrupting a session** — a platform whose registry entry sets
   `ctrl_c_exits = true` (opencode) exits on a *single* `Ctrl+C`. To protect
   the copy reflex, the first `Ctrl+C` of such a session is held back and the
