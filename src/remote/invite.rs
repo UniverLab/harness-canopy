@@ -120,6 +120,72 @@ pub fn normalize_code_input(input: &str) -> Option<String> {
     Some(format_code(&core))
 }
 
+/// The guest link for one invite: `<relay_url>/g/<owner_uid>/<host_id>`
+/// with the code in the fragment (`#invite=<code>`), which browsers never
+/// send to the relay or put in a `Referer`; the guest page reads it, keeps
+/// it for that tab only and strips it from the address bar. The relay URL
+/// is also the web origin, as in [`super::relay::pair_link`]. `None` when
+/// the relay URL is not an `http(s)://` origin, the uid is zero, or the
+/// host id is not 16 lowercase hex — the web would refuse the link anyway.
+pub fn guest_link(relay_url: &str, owner_uid: u64, host_id: &str, code: &str) -> Option<String> {
+    let origin = relay_url.trim().trim_end_matches('/');
+    let rest = origin
+        .strip_prefix("https://")
+        .or_else(|| origin.strip_prefix("http://"))?;
+    if rest.is_empty() || owner_uid == 0 {
+        return None;
+    }
+    let host_id_ok = host_id.len() == 16
+        && host_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+    if !host_id_ok {
+        return None;
+    }
+    Some(format!("{origin}/g/{owner_uid}/{host_id}#invite={code}"))
+}
+
+/// Why `canopy remote invite` printed the code without a guest link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoGuestLink {
+    /// No host key yet: the host never paired or connected, so it has no
+    /// `host_id` for the link to name.
+    NoHostKey,
+    /// `[remote] relay_url` is not an `http(s)://` origin.
+    BadRelayUrl,
+}
+
+impl NoGuestLink {
+    /// The one-line hint printed after the code instead of a link.
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::NoHostKey => {
+                "No guest link yet: this host has no remote identity. Run `canopy remote on`, \
+                 let the daemon connect to the relay, then run `canopy remote invite` again \
+                 (`canopy remote uninvite <code>` revokes this code)."
+            }
+            Self::BadRelayUrl => {
+                "No guest link: [remote] relay_url is not an http(s) URL. Send the guest the \
+                 code by hand; the guest page asks for it."
+            }
+        }
+    }
+}
+
+/// [`guest_link`] for the CLI: the link, or why there is none. `host_id`
+/// is `None` when this host has no key yet.
+pub fn guest_link_for(
+    relay_url: &str,
+    owner_uid: u64,
+    host_id: Option<&str>,
+    code: &str,
+) -> std::result::Result<String, NoGuestLink> {
+    let Some(host_id) = host_id else {
+        return Err(NoGuestLink::NoHostKey);
+    };
+    guest_link(relay_url, owner_uid, host_id, code).ok_or(NoGuestLink::BadRelayUrl)
+}
+
 /// One fresh code: 10 OS-random bytes shown as 16 five-bit Crockford
 /// symbols, MSB first, so every code carries exactly 80 bits.
 fn generate_code() -> Result<String> {

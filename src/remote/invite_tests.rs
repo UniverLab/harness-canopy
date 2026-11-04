@@ -2,7 +2,9 @@
 
 use serde_json::json;
 
-use super::{code_hash, issue, live, normalize_code_input};
+use super::{
+    code_hash, guest_link, guest_link_for, issue, live, normalize_code_input, NoGuestLink,
+};
 use crate::db::Database;
 use crate::remote::guest::GuestConns;
 use crate::remote::signaling::{connect_fail, verify_offer, Refusal};
@@ -277,6 +279,14 @@ fn invite_cli_transcript() {
         .unwrap_or_else(|| issued.expires_at.to_string());
     println!("$ canopy remote invite octocat");
     println!("Invite code for octocat: {}", issued.code);
+    let link = guest_link(
+        "https://remote.univerlab.org",
+        1001,
+        "76805a63a6980c18",
+        &issued.code,
+    )
+    .expect("link");
+    println!("Guest link: {link}");
     println!("Expires: {expires}");
     println!("$ canopy remote invites");
     for row in db.list_invites().expect("list") {
@@ -286,4 +296,80 @@ fn invite_cli_transcript() {
     println!("$ guest_allow publish:");
     println!("{body}");
     assert_eq!(body["invites"][0]["uid"], json!(7));
+}
+
+#[test]
+fn guest_link_carries_the_code_in_the_fragment() {
+    let (_dir, db) = test_db();
+    let issued = issue(&db, "octocat", 7, NOW, 7).expect("issue");
+    let link = guest_link(
+        "https://remote.univerlab.org/",
+        1001,
+        "76805a63a6980c18",
+        &issued.code,
+    )
+    .expect("link");
+    assert_eq!(
+        link,
+        format!(
+            "https://remote.univerlab.org/g/1001/76805a63a6980c18#invite={}",
+            issued.code
+        )
+    );
+    // The fragment holds the canonical code: the web sends it as is, the
+    // relay hashes exactly what it receives, and that hash is the stored one.
+    let (_, fragment) = link.split_once("#invite=").expect("fragment");
+    assert_eq!(
+        normalize_code_input(fragment).as_deref(),
+        Some(issued.code.as_str())
+    );
+    assert_eq!(
+        code_hash(fragment),
+        db.list_invites().expect("list")[0].code_hash
+    );
+    // A local relay keeps its scheme and port.
+    assert_eq!(
+        guest_link("http://127.0.0.1:8787", 1001, "76805a63a6980c18", "CNR-X").as_deref(),
+        Some("http://127.0.0.1:8787/g/1001/76805a63a6980c18#invite=CNR-X")
+    );
+    // No link the web would refuse: not an http(s) origin, uid 0, or a
+    // host id that is not 16 lowercase hex.
+    for (relay, uid, host) in [
+        ("", 1001, "76805a63a6980c18"),
+        ("wss://remote.univerlab.org", 1001, "76805a63a6980c18"),
+        ("https://", 1001, "76805a63a6980c18"),
+        ("https://remote.univerlab.org", 0, "76805a63a6980c18"),
+        ("https://remote.univerlab.org", 1001, "76805A63A6980C18"),
+        ("https://remote.univerlab.org", 1001, "76805a63"),
+    ] {
+        assert_eq!(
+            guest_link(relay, uid, host, "CNR-X"),
+            None,
+            "{relay} {uid} {host}"
+        );
+    }
+}
+
+#[test]
+fn guest_link_for_names_why_there_is_no_link() {
+    assert_eq!(
+        guest_link_for("https://remote.univerlab.org", 1001, None, "CNR-X"),
+        Err(NoGuestLink::NoHostKey)
+    );
+    assert_eq!(
+        guest_link_for("", 1001, Some("76805a63a6980c18"), "CNR-X"),
+        Err(NoGuestLink::BadRelayUrl)
+    );
+    assert!(NoGuestLink::NoHostKey.hint().contains("canopy remote on"));
+    assert!(NoGuestLink::BadRelayUrl.hint().contains("relay_url"));
+    assert_eq!(
+        guest_link_for(
+            "https://remote.univerlab.org",
+            1001,
+            Some("76805a63a6980c18"),
+            "CNR-X"
+        )
+        .as_deref(),
+        Ok("https://remote.univerlab.org/g/1001/76805a63a6980c18#invite=CNR-X")
+    );
 }

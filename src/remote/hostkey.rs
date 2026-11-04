@@ -77,6 +77,16 @@ impl HostKey {
         Self::from_pkcs8_der(&der)
     }
 
+    /// Load the stored key without creating one: `None` when this host has
+    /// no remote identity yet (never paired, never connected).
+    pub fn load(data_dir: &Path) -> Result<Option<Self>> {
+        match std::fs::read(host_key_path(data_dir)) {
+            Ok(der) => Self::from_pkcs8_der(&der).map(Some),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err).context("could not read the remote host key"),
+        }
+    }
+
     /// Build a key from PKCS#8 DER (tests use the d4eb8558 scalar).
     pub fn from_pkcs8_der(der: &[u8]) -> Result<Self> {
         let signing_key = SigningKey::from_pkcs8_der(der)
@@ -187,6 +197,16 @@ mod tests {
         let second = HostKey::load_or_create(dir.path()).expect("reload");
         assert_eq!(first.host_id(), second.host_id());
         assert_eq!(first.spki_b64(), second.spki_b64());
+    }
+
+    #[test]
+    fn load_never_creates_a_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(HostKey::load(dir.path()).expect("load").is_none());
+        assert!(!host_key_path(dir.path()).exists());
+        let created = HostKey::load_or_create(dir.path()).expect("create");
+        let loaded = HostKey::load(dir.path()).expect("load").expect("key");
+        assert_eq!(created.host_id(), loaded.host_id());
     }
 
     #[test]

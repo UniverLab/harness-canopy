@@ -265,9 +265,39 @@ async fn handle_invite(login: &str, days: i64) -> Result<()> {
     };
     let db = open_db(&data_dir)?;
     let issued = super::invite::issue(&db, &login, uid, chrono::Utc::now().timestamp(), days)?;
+    // The link names the owner's room (this identity's uid) and this host;
+    // a host that never paired or connected has no key, so no link yet.
+    let config = CanopyConfig::load(&data_dir);
+    let host_id = HostKey::load(&data_dir)?.map(|key| key.host_id());
+    let link = super::invite::guest_link_for(
+        &config.remote.relay_url,
+        identity.id,
+        host_id.as_deref(),
+        &issued.code,
+    );
     // The one and only cleartext sighting: printed, never logged.
     println!("Invite code for {login}: {}", issued.code);
+    match &link {
+        Ok(link) => println!("Guest link: {link}"),
+        Err(reason) => println!("{}", reason.hint()),
+    }
     println!("Expires: {}", format_unix(issued.expires_at));
+    if link.is_ok() {
+        println!("Send {login} the link: it works once, after {login} signs in with GitHub.");
+    }
+    if !config.remote.enabled {
+        println!("Note: remote is off; the guest cannot connect until `canopy remote on`.");
+    }
+    if !db
+        .list_trust()?
+        .iter()
+        .any(|profile| profile.login == login)
+    {
+        println!(
+            "Note: {login} holds no trust grant, so the host refuses the guest: add one from \
+             the TUI Remote tab (t) or with the remote tool's trust_add."
+        );
+    }
     Ok(())
 }
 

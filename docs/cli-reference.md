@@ -272,7 +272,7 @@ WebSocket — the CLI never writes the shelf itself. `file_id` is the
 | `canopy remote devices [--json]` | List paired browsers (`id`, `label`, `paired_at`, `last_seen`) |
 | `canopy remote revoke <device_id>` | Delete a paired browser and close its live connection at once |
 | `canopy remote disconnect <device_id>` | Close a paired browser's live connection at once, keeping the pairing so it may reconnect |
-| `canopy remote invite <login> [--days N]` | Issue a single-use guest invite code for a GitHub login, printed once with its expiry (default 7 days; stored as a hash only) |
+| `canopy remote invite <login> [--days N]` | Issue a single-use guest invite code for a GitHub login, printed once with its guest link and expiry (default 7 days; stored as a hash only) |
 | `canopy remote invites [--json]` | List guest invites (`login`, expiry, `live`/`used`/`expired`) |
 | `canopy remote uninvite <code-or-login>` | Revoke one invite by code, or every live invite by login |
 
@@ -339,13 +339,33 @@ invite code instead. The code is `CNR-` plus 16 Crockford base32 characters
 (80-bit random), works once, and lives 7 days unless `--days N` says
 otherwise (at least 1 day). `canopy remote invite <login>` needs a signed-in
 host, resolves the login to its GitHub uid, stores only the code's SHA256
-hash, and prints the code once with its expiry — copy it to the guest by
-hand (v1 has no delivery). The code alone does not admit the guest: the
-login must also hold a trust grant (add one from the TUI Remote tab with
-`t`, or with the `remote` tool's `trust_add`), or its offer is refused.
-The guest opens the relay's guest door with the code; the host publishes
+hash, and prints the code once with the guest link and its expiry:
+
+```text
+Invite code for octocat: CNR-7K3Q-HM9P-2XAB-CDEF
+Guest link: https://remote.univerlab.org/g/1001/76805a63a6980c18#invite=CNR-7K3Q-HM9P-2XAB-CDEF
+Expires: 2026-11-11 15:04:05 UTC
+Send octocat the link: it works once, after octocat signs in with GitHub.
+```
+
+The link is `<relay_url>/g/<owner_uid>/<host_id>#invite=<code>`: the
+signed-in owner's GitHub uid names the room, this host's id names the
+host, and the code rides the fragment, which the browser never sends to
+the relay or in a `Referer`. Send it to the guest yourself (v1 has no
+delivery). The guest page signs the guest in with GitHub, keeps the code
+for that tab only, strips it from the address bar and opens the relay's
+guest door with it; a guest who got only the code opens
+`<relay_url>/g/<owner_uid>/<host_id>` and types it into the form there.
+A host with no host key yet (never paired or connected) prints the code
+with a hint instead of the link: turn remote on, let the daemon connect,
+and invite again. A note follows when remote is off, or when the login
+holds no trust grant: the code alone does not admit the guest, the login
+must also hold one (add it from the TUI Remote tab with `t`, or with the
+`remote` tool's `trust_add`), or its offer is refused. The host publishes
 only hashes to the room, and the first accepted guest offer burns every
-live invite for that login, so a shared code opens nothing afterwards.
+live invite for that login, so a shared code opens nothing afterwards —
+nor does it reopen the door for the same guest: once that guest's relay
+socket closes (a reload, a dropped connection), it needs a fresh invite.
 `canopy remote invites [--json]` lists each invite's login, expiry and
 `live`/`used`/`expired` state (`no invites` when there are none), and
 `canopy remote uninvite <code-or-login>` revokes one code or every live
