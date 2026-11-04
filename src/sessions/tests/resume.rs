@@ -322,9 +322,10 @@ fn terminal_opens_clean_after_a_hub_restart() {
         let contents = session.test_contents().unwrap_or_default();
         // Wait for the command's own output line, proving the pre-restart
         // session really produced output — output the respawn must NOT show.
+        // A prompt can share that line: the input echoes before sh prints it.
         if contents
             .lines()
-            .any(|line| line.trim() == "canopy-history-probe")
+            .any(|line| line.trim().ends_with("canopy-history-probe") && !line.contains("echo"))
         {
             break;
         }
