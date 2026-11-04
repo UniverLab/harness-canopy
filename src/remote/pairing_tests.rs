@@ -236,3 +236,16 @@ fn creating_a_new_code_replaces_the_old_one() {
         .expect("respond");
     assert_eq!(reply["t"], "pair_ok");
 }
+
+#[test]
+fn a_malformed_stored_key_is_no_key_rather_than_a_zero_key() {
+    let stored = |k_pair: String| StoredCode {
+        normalized: "7K3QHM9P2X".to_string(),
+        k_pair,
+        created_at: 0,
+        fails: 0,
+    };
+    assert_eq!(stored("not base64!".to_string()).k_pair(), None);
+    assert_eq!(stored(b64(&[7u8; 16])).k_pair(), None);
+    assert_eq!(stored(b64(&[7u8; 32])).k_pair(), Some([7u8; 32]));
+}

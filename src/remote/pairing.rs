@@ -133,7 +133,11 @@ impl PairingState {
             nonce_b,
             claimed,
         } = init;
-        let expected = mac_init(&code.k_pair(), &b64(&spki), &b64(&nonce_b));
+        let Some(k_pair) = code.k_pair() else {
+            self.clear()?;
+            return Ok(pair_fail("no_code"));
+        };
+        let expected = mac_init(&k_pair, &b64(&spki), &b64(&nonce_b));
         let Some(mac) = body.get("mac").and_then(Value::as_str) else {
             self.note_failure(&mut code)?;
             return Ok(pair_fail("bad_code"));
@@ -164,7 +168,7 @@ impl PairingState {
         self.clear()?;
         devices.pair(spki.clone(), &label, &claimed, &paired_at(now))?;
         Ok(pair_ok(
-            &code.k_pair(),
+            &k_pair,
             &host.spki_b64(),
             &b64(&spki),
             &b64(&nonce_b),
@@ -224,14 +228,11 @@ impl PairingState {
 }
 
 impl StoredCode {
-    fn k_pair(&self) -> [u8; 32] {
-        let mut key = [0u8; 32];
-        if let Some(bytes) = b64_decode(&self.k_pair) {
-            if bytes.len() == 32 {
-                key.copy_from_slice(&bytes);
-            }
-        }
-        key
+    /// The stored key, or `None` when it is not 32 base64-decoded bytes. A
+    /// malformed key must refuse the exchange: a fallback key would let
+    /// anyone compute a valid MAC.
+    fn k_pair(&self) -> Option<[u8; 32]> {
+        b64_decode(&self.k_pair)?.try_into().ok()
     }
 }
 
