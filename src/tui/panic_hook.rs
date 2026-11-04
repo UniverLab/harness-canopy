@@ -60,7 +60,7 @@ fn panic_payload(info: &std::panic::PanicHookInfo<'_>) -> String {
 
 /// Leave raw mode, alternate screen, mouse capture and bracketed paste.
 /// Every step is best-effort: this runs inside a panic.
-fn restore_terminal_best_effort() {
+pub(super) fn restore_terminal_best_effort() {
     use ratatui::crossterm::{
         event::{DisableBracketedPaste, DisableMouseCapture},
         execute,

@@ -15,6 +15,8 @@ mod gamification;
 pub mod keymap_reference;
 mod logging;
 pub(crate) mod mcp_client;
+#[cfg(unix)]
+mod orphan_watchdog;
 mod panic_hook;
 pub(crate) mod prompt_templates;
 pub(crate) mod selection;
@@ -139,6 +141,11 @@ pub fn run_tui() -> Result<()> {
 
     let backend = ratatui::backend::CrosstermBackend::new(stdout);
     let mut terminal = ratatui::Terminal::new(backend)?;
+
+    // A closed terminal can leave the main thread stuck in crossterm's
+    // poll/read, never reaching the SIGHUP check: watch for it from outside.
+    #[cfg(unix)]
+    orphan_watchdog::spawn();
 
     // Run
     let result = run_event_graph(&mut terminal, &mut app);
