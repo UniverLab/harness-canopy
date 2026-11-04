@@ -150,3 +150,68 @@ fn scrollback_render_round_trips_rows_and_attributes() {
     let plain = client.screen().cell(4, 0).expect("cell in range").fgcolor();
     assert_eq!(plain, vt100::Color::Default, "the colour does not leak");
 }
+
+/// A session attached while a full-screen app runs: the snapshot leaves a
+/// fresh client on the alternate screen showing the app, with the main
+/// buffer (scrollback and screen) intact underneath, so the app's later
+/// `?1049l` brings back exactly what the hub shows.
+#[test]
+fn snapshot_of_an_alternate_screen_restores_it_on_the_alternate_screen() {
+    let (db, _db_dir) = test_db();
+    let workdir = tempfile::tempdir().expect("workdir");
+    let hub = test_hub(&db);
+    let (session, _guard) = KillGuard::spawn(
+        &hub,
+        &terminal_spawn("cat", &workdir.path().to_string_lossy()),
+    );
+
+    // The raw stream also feeds a reference parser, to compare the cursor.
+    let mut reference = HubVt::new_with_callbacks(24, 80, VT_SCROLLBACK_LINES, ());
+    let mut feed = |chunk: &[u8]| {
+        session.ingest_chunk(chunk);
+        reference.process(chunk);
+    };
+    for i in 0..40u32 {
+        feed(format!("main line {i:02}\r\n").as_bytes());
+    }
+    feed(b"shell prompt$ ");
+    feed(b"\x1b[?1049h\x1b[H\x1b[2Jfull-screen app\r\n\x1b[7mstatus bar\x1b[m");
+
+    let (snapshot, _rx) = session.attach().expect("attach");
+    let mut client = HubVt::new_with_callbacks(24, 80, VT_SCROLLBACK_LINES, ());
+    client.process(&snapshot.data);
+
+    assert!(
+        client.screen().alternate_screen(),
+        "the client ends on the alternate screen"
+    );
+    assert_eq!(
+        client.screen().contents(),
+        session.test_contents().expect("hub contents"),
+        "the client's alternate screen matches the hub's"
+    );
+    assert!(
+        !client.screen().contents().contains("main line"),
+        "main-buffer rows never paint onto the alternate screen"
+    );
+
+    // The app exits: both return to the main buffer, which must match.
+    feed(b"\x1b[?1049l");
+    client.process(b"\x1b[?1049l");
+    assert!(!client.screen().alternate_screen());
+    assert_eq!(
+        client.screen().contents(),
+        session.test_contents().expect("hub contents"),
+        "the main screen behind the app survives the snapshot"
+    );
+    assert_eq!(
+        client.screen().cursor_position(),
+        reference.screen().cursor_position(),
+        "the main cursor is restored where the hub has it"
+    );
+    client.screen_mut().set_scrollback(usize::MAX);
+    assert!(
+        client.screen().contents().contains("main line 00"),
+        "the main scrollback stays in the client's normal buffer"
+    );
+}

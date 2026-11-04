@@ -469,18 +469,48 @@ pub(crate) fn scrollback_formatted(screen: &mut vt100::Screen) -> Vec<u8> {
 }
 
 /// Render a snapshot from already-locked output state: the scrollback, the
-/// visible screen and the input modes, plus the `seq` they cover.
+/// visible screen and the input modes, plus the `seq` they cover. A session
+/// on the alternate screen (a full-screen app) renders the main buffer
+/// first, then `?1049h`, then the alternate screen, so the client paints
+/// the app on its own alternate screen and keeps the main buffer for the
+/// app's `?1049l`.
 fn snapshot_locked(out: &mut OutputState) -> Snapshot {
-    let screen = out.parser.screen_mut();
-    let mut data = scrollback_formatted(screen);
-    data.extend(screen.contents_formatted());
-    data.extend(screen.input_mode_formatted());
+    let mut data = if out.parser.screen().alternate_screen() {
+        alternate_formatted(out.parser.screen())
+    } else {
+        main_formatted(out.parser.screen_mut())
+    };
+    data.extend(out.parser.screen().input_mode_formatted());
     Snapshot {
         seq: out.seq,
         cols: out.cols,
         rows: out.rows,
         data,
     }
+}
+
+/// The main buffer: its scrollback, then its visible screen.
+fn main_formatted(screen: &mut vt100::Screen) -> Vec<u8> {
+    let mut data = scrollback_formatted(screen);
+    data.extend(screen.contents_formatted());
+    data
+}
+
+/// A screen on the alternate buffer: the main buffer (scrollback and
+/// screen), `?1049h`, then the alternate screen. vt100's public API only
+/// reads the active buffer, so the main one is read from a clone switched
+/// back with `?47l` (mode only: no cursor restore, no clear) inside a fresh
+/// parser; the live parser — possibly mid-escape between two PTY chunks —
+/// is never fed anything.
+fn alternate_formatted(screen: &vt100::Screen) -> Vec<u8> {
+    let (rows, cols) = screen.size();
+    let mut main = vt100::Parser::new(rows, cols, 0);
+    *main.screen_mut() = screen.clone();
+    main.process(b"\x1b[?47l");
+    let mut data = main_formatted(main.screen_mut());
+    data.extend(b"\x1b[?1049h");
+    data.extend(screen.contents_formatted());
+    data
 }
 
 /// The daemon's session hub: owns hub sessions and broadcasts their
