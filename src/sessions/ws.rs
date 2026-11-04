@@ -24,10 +24,7 @@ use crate::db::Database;
 use crate::sessions::outbound::{self, ConnTx, PushOut, SessionCoal};
 
 use super::auth::{bearer_token, ensure_token, token_valid};
-use super::catalog::{
-    handle_catalog, handle_compose, handle_prompt_draft, handle_prompt_schedule,
-    handle_scheduled_cancel, handle_scheduled_list,
-};
+use super::catalog::{handle_catalog, handle_compose, handle_prompt_draft, handle_schedule_frame};
 use super::graphs::{handle_graph_unwatch, handle_graph_watch, handle_graphs};
 use super::protocol::{
     error_frame, exited_frame, file_frame, hello_frame, installed_harnesses, ok_frame, out_frame,
@@ -266,24 +263,9 @@ async fn handle_client_text(
         ClientFrame::PromptDraft { req, id, draft } => {
             handle_prompt_draft(state, out_tx, req, &id, draft);
         }
-        ClientFrame::PromptSchedule {
-            req,
-            id,
-            draft,
-            fire_at,
-        } => {
-            handle_prompt_schedule(state, out_tx, req, &id, draft, &fire_at);
-        }
-        ClientFrame::ScheduledList { req, id } => {
-            handle_scheduled_list(state, out_tx, req, &id);
-        }
-        ClientFrame::ScheduledCancel {
-            req,
-            id,
-            schedule_id,
-        } => {
-            handle_scheduled_cancel(state, out_tx, req, &id, schedule_id);
-        }
+        frame @ (ClientFrame::PromptSchedule { .. }
+        | ClientFrame::ScheduledList { .. }
+        | ClientFrame::ScheduledCancel { .. }) => handle_schedule_frame(state, out_tx, frame),
         ClientFrame::Resize { id, cols, rows } => handle_resize(state, out_tx, &id, cols, rows),
         ClientFrame::Spawn {
             req,

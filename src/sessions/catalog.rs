@@ -19,8 +19,8 @@ use crate::domain::prompt_draft::{build_prompt_text, PromptCatalog, PromptContex
 use crate::tui::{available_clis_for_catalog, cli_label};
 
 use super::protocol::{
-    error_frame, ok_frame, ERR_BAD_REQUEST, ERR_DELIVERY_FAILED, ERR_FORBIDDEN, ERR_INTERNAL,
-    ERR_NOT_FOUND,
+    error_frame, ok_frame, ClientFrame, ERR_BAD_REQUEST, ERR_DELIVERY_FAILED, ERR_FORBIDDEN,
+    ERR_INTERNAL, ERR_NOT_FOUND,
 };
 use super::ws::{no_such_session, OutTx, SessionsState};
 use super::{HubSession, SessionKind, SessionStatus};
@@ -288,11 +288,30 @@ fn scheduled_session(
     Ok(session)
 }
 
+/// Route one schedule frame to its handler; the other frames never reach this.
+pub fn handle_schedule_frame(state: &Arc<SessionsState>, out_tx: &OutTx, frame: ClientFrame) {
+    match frame {
+        ClientFrame::PromptSchedule {
+            req,
+            id,
+            draft,
+            fire_at,
+        } => handle_prompt_schedule(state, out_tx, req, &id, draft, &fire_at),
+        ClientFrame::ScheduledList { req, id } => handle_scheduled_list(state, out_tx, req, &id),
+        ClientFrame::ScheduledCancel {
+            req,
+            id,
+            schedule_id,
+        } => handle_scheduled_cancel(state, out_tx, req, &id, schedule_id),
+        _ => {}
+    }
+}
+
 /// `prompt_schedule`: build the draft's text and store it for delivery at
 /// `fire_at`. Unknown choices fail exactly like `compose`; the row carries
 /// the session's workdir with no provenance or builder state, like the TUI's
 /// raw path. Delivery itself is the daemon scheduler's tick.
-pub fn handle_prompt_schedule(
+fn handle_prompt_schedule(
     state: &Arc<SessionsState>,
     out_tx: &OutTx,
     req: String,
@@ -362,7 +381,7 @@ pub fn handle_prompt_schedule(
 }
 
 /// `scheduled_list`: the session's pending schedules, soonest first.
-pub fn handle_scheduled_list(state: &Arc<SessionsState>, out_tx: &OutTx, req: String, id: &str) {
+fn handle_scheduled_list(state: &Arc<SessionsState>, out_tx: &OutTx, req: String, id: &str) {
     let session = match scheduled_session(state, &req, id) {
         Ok(session) => session,
         Err(answer) => {
@@ -405,7 +424,7 @@ pub fn handle_scheduled_list(state: &Arc<SessionsState>, out_tx: &OutTx, req: St
 
 /// `scheduled_cancel`: drop one pending schedule. The row must belong to the
 /// named session — another session's row answers `not_found` and is kept.
-pub fn handle_scheduled_cancel(
+fn handle_scheduled_cancel(
     state: &Arc<SessionsState>,
     out_tx: &OutTx,
     req: String,

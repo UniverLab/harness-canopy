@@ -31,18 +31,15 @@ use crate::remote::metrics::{
     MetricsWatch,
 };
 use crate::remote::trust::{Grant, GrantScope};
-use crate::sessions::catalog::{
-    handle_catalog, handle_compose, handle_prompt_draft, handle_prompt_schedule,
-    handle_scheduled_cancel, handle_scheduled_list,
-};
+use crate::sessions::catalog::{handle_catalog, handle_compose, handle_prompt_draft};
 use crate::sessions::graphs::{handle_graph_unwatch, handle_graph_watch, handle_graphs};
 use crate::sessions::outbound::{self, PushOut, SessionCoal};
 use crate::sessions::protocol::{
-    error_frame, exited_frame, file_frame, ok_frame, out_frame, parse_client_frame, resized_frame,
-    session_added_frame, session_removed_frame, sessions_frame, shelf_added_frame, shelf_frame,
+    error_frame, exited_frame, ok_frame, out_frame, parse_client_frame, resized_frame,
+    session_added_frame, session_removed_frame, sessions_frame, shelf_added_frame,
     shelf_missing_frame, shelf_removed_frame, snapshot_frame, snapshot_more_frame, ClientFrame,
-    SessionItem, SpawnExt, ERR_BAD_REQUEST, ERR_BUSY, ERR_DELIVERY_FAILED, ERR_FORBIDDEN,
-    ERR_INTERNAL, ERR_NOT_FOUND, ERR_SPAWN_FAILED,
+    SessionItem, SpawnExt, ERR_BAD_REQUEST, ERR_DELIVERY_FAILED, ERR_FORBIDDEN, ERR_INTERNAL,
+    ERR_NOT_FOUND, ERR_SPAWN_FAILED,
 };
 use crate::sessions::ws::no_such_session;
 use crate::sessions::ws::{handle_shelf_delete, validate_spawn_extensions, OutTx, SessionsState};
@@ -137,29 +134,26 @@ impl RemoteBridge {
         bridge.scope = GrantScope::new(grant);
         bridge.scope.set_can_upload(can_upload);
         bridge.scope.set_owner(false);
-        // Files already on a shelf this peer may not see hide from the
-        // start, so their later `shelf_removed` stays hidden too.
         if !bridge.scope.is_all() {
-            let shelves = std::iter::once(None).chain(
-                bridge
-                    .state
-                    .hub
-                    .list()
-                    .into_iter()
-                    .map(|session| Some(session.id.clone())),
-            );
-            for shelf in shelves {
-                if bridge
-                    .scope
-                    .hidden_file(&bridge.state.hub, shelf.as_deref())
-                {
-                    for item in bridge.state.shelf.list(shelf.as_deref()) {
-                        bridge.hidden_files.insert(item.file_id);
-                    }
-                }
-            }
+            bridge.hide_unseen_shelf_files();
         }
         bridge
+    }
+
+    /// Files already on a shelf this peer may not see hide from the start, so
+    /// their later `shelf_removed` stays hidden too.
+    fn hide_unseen_shelf_files(&mut self) {
+        let sessions = self.state.hub.list();
+        let shelves =
+            std::iter::once(None).chain(sessions.iter().map(|session| Some(session.id.clone())));
+        for shelf in shelves {
+            if !self.scope.hidden_file(&self.state.hub, shelf.as_deref()) {
+                continue;
+            }
+            for item in self.state.shelf.list(shelf.as_deref()) {
+                self.hidden_files.insert(item.file_id);
+            }
+        }
     }
 
     /// Mark this peer as the host owner's own paired device (the only remote
@@ -239,33 +233,9 @@ impl RemoteBridge {
                 }
                 handle_prompt_draft(&self.state, out, req, &id, draft);
             }
-            ClientFrame::PromptSchedule {
-                req,
-                id,
-                draft,
-                fire_at,
-            } => {
-                if !self.scope.granted(&self.state.hub, Some(&req), &id, out) {
-                    return;
-                }
-                handle_prompt_schedule(&self.state, out, req, &id, draft, &fire_at);
-            }
-            ClientFrame::ScheduledList { req, id } => {
-                if !self.scope.granted(&self.state.hub, Some(&req), &id, out) {
-                    return;
-                }
-                handle_scheduled_list(&self.state, out, req, &id);
-            }
-            ClientFrame::ScheduledCancel {
-                req,
-                id,
-                schedule_id,
-            } => {
-                if !self.scope.granted(&self.state.hub, Some(&req), &id, out) {
-                    return;
-                }
-                handle_scheduled_cancel(&self.state, out, req, &id, schedule_id);
-            }
+            frame @ (ClientFrame::PromptSchedule { .. }
+            | ClientFrame::ScheduledList { .. }
+            | ClientFrame::ScheduledCancel { .. }) => self.handle_schedule(frame, out),
             ClientFrame::Resize { id, cols, rows } => self.handle_resize(&id, cols, rows, out),
             ClientFrame::Spawn {
                 req,
@@ -464,7 +434,7 @@ impl RemoteBridge {
         }
     }
 
-    fn terminal(&self, id: &str) -> bool {
+    pub(super) fn terminal(&self, id: &str) -> bool {
         self.state
             .hub
             .get(id)
@@ -473,7 +443,7 @@ impl RemoteBridge {
 
     /// A file that stays hidden from this peer: it belongs to a live
     /// terminal session.
-    fn hidden_terminal_file(&self, session_id: Option<&str>) -> bool {
+    pub(super) fn hidden_terminal_file(&self, session_id: Option<&str>) -> bool {
         session_id.is_some_and(|id| self.terminal(id))
     }
 
@@ -589,113 +559,6 @@ impl RemoteBridge {
             }
         });
     }
-
-    fn handle_shelf_list(&self, req: String, id: Option<String>, out: &OutTx) {
-        if id.as_deref().is_some_and(|id| self.terminal(id)) {
-            send(out, shelf_frame(&req, id.as_deref(), &[]));
-            return;
-        }
-        // An ungranted session's shelf, or the host shelf for a peer whose
-        // grant is narrower than every session, lists empty.
-        if self.scope.hidden_file(&self.state.hub, id.as_deref()) {
-            send(out, shelf_frame(&req, id.as_deref(), &[]));
-            return;
-        }
-        let shelf = self.state.shelf.clone();
-        let out = out.clone();
-        let echo = id.clone();
-        // No per-item filter here: `shelf.list(id)` lists exactly one shelf,
-        // and that shelf was allowed or emptied above.
-        tokio::spawn(async move {
-            match tokio::task::spawn_blocking(move || shelf.list(id.as_deref())).await {
-                Ok(items) => send(&out, shelf_frame(&req, echo.as_deref(), &items)),
-                Err(_) => send(
-                    &out,
-                    error_frame(Some(&req), ERR_INTERNAL, "shelf list failed"),
-                ),
-            }
-        });
-    }
-
-    fn handle_shelf_get(&mut self, req: String, file_id: String, out: &OutTx) {
-        let Some(row) = self.state.shelf.get(&file_id) else {
-            let _ = out.send(shelf_missing_frame(&req, &file_id));
-            return;
-        };
-        if self
-            .scope
-            .hidden_file(&self.state.hub, row.session_id.as_deref())
-        {
-            let _ = out.send(shelf_missing_frame(&req, &file_id));
-            return;
-        }
-        if self.hidden_terminal_file(row.session_id.as_deref()) {
-            let _ = out.send(error_frame(
-                Some(&req),
-                ERR_FORBIDDEN,
-                "terminal sessions are not shared with remote devices",
-            ));
-            return;
-        }
-        let Ok(permit) = self.transfers.clone().try_acquire_owned() else {
-            let _ = out.send(error_frame(
-                Some(&req),
-                ERR_BUSY,
-                "too many downloads in flight",
-            ));
-            return;
-        };
-        let shelf = self.state.shelf.clone();
-        let out = out.clone();
-        let task = tokio::spawn(async move {
-            let _permit = permit;
-            let read = tokio::task::spawn_blocking({
-                let file_id = file_id.clone();
-                move || shelf.read_file(&file_id)
-            })
-            .await;
-            let bytes = match read {
-                Ok(Some(bytes)) => bytes,
-                Ok(None) => {
-                    send(
-                        &out,
-                        error_frame(
-                            Some(&req),
-                            ERR_NOT_FOUND,
-                            &format!("no shelf file '{file_id}'"),
-                        ),
-                    );
-                    return;
-                }
-                Err(_) => {
-                    send(
-                        &out,
-                        error_frame(Some(&req), ERR_INTERNAL, "shelf read failed"),
-                    );
-                    return;
-                }
-            };
-            if bytes.is_empty() {
-                send(&out, file_frame(&req, &file_id, 0, &[], true));
-                return;
-            }
-            let total = bytes.len().div_ceil(CHUNK_BYTES);
-            for (index, chunk) in bytes.chunks(CHUNK_BYTES).enumerate() {
-                let last = index + 1 == total;
-                if out
-                    .send(file_frame(&req, &file_id, index as u32, chunk, last))
-                    .is_err()
-                {
-                    return;
-                }
-                if !last {
-                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-                }
-            }
-        });
-        self.shelf_tasks.retain(|task| !task.is_finished());
-        self.shelf_tasks.push(task);
-    }
 }
 
 fn send(out: &OutTx, frame: String) {
@@ -775,6 +638,9 @@ pub fn split_snapshot_frames(id: &str, cols: u16, rows: u16, seq: u64, data: &[u
 #[cfg(test)]
 #[path = "bridge_tests.rs"]
 mod tests;
+
+#[path = "bridge_read.rs"]
+mod read;
 
 #[path = "bridge_upload.rs"]
 mod upload;

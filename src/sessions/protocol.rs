@@ -17,6 +17,8 @@ pub use super::host_frame::{parse_host_frame, HostFrame};
 
 #[path = "protocol_put.rs"]
 mod protocol_put;
+#[path = "protocol_schedule.rs"]
+mod protocol_schedule;
 #[cfg(test)]
 pub use protocol_put::{
     shelf_put_abort_frame, shelf_put_begin_frame, shelf_put_end_frame, shelf_put_part_frame,
@@ -287,32 +289,8 @@ pub fn parse_client_frame(text: &str) -> Result<ClientFrame, FrameError> {
             Ok(ClientFrame::Input { id, data })
         }
         "prompt" => parse_prompt_frame(&value, &frame),
-        "prompt_schedule" => {
-            let req = req_field(&value, &frame)?;
-            let id = id_field(&value, &frame)?;
-            let draft = draft_field(&value, &frame)?;
-            let fire_at = str_field(&value, &frame, "fire_at")?;
-            Ok(ClientFrame::PromptSchedule {
-                req,
-                id,
-                draft,
-                fire_at,
-            })
-        }
-        "scheduled_list" => {
-            let req = req_field(&value, &frame)?;
-            let id = id_field(&value, &frame)?;
-            Ok(ClientFrame::ScheduledList { req, id })
-        }
-        "scheduled_cancel" => {
-            let req = req_field(&value, &frame)?;
-            let id = id_field(&value, &frame)?;
-            let schedule_id = str_field(&value, &frame, "schedule_id")?;
-            Ok(ClientFrame::ScheduledCancel {
-                req,
-                id,
-                schedule_id,
-            })
+        "prompt_schedule" | "scheduled_list" | "scheduled_cancel" => {
+            protocol_schedule::parse(&value, &frame)
         }
         "resize" => {
             let id = id_field(&value, &frame)?;
