@@ -31,7 +31,10 @@ use crate::remote::metrics::{
     MetricsWatch,
 };
 use crate::remote::trust::{Grant, GrantScope};
-use crate::sessions::catalog::{handle_catalog, handle_compose, handle_prompt_draft};
+use crate::sessions::catalog::{
+    handle_catalog, handle_compose, handle_prompt_draft, handle_prompt_schedule,
+    handle_scheduled_cancel, handle_scheduled_list,
+};
 use crate::sessions::graphs::{handle_graph_unwatch, handle_graph_watch, handle_graphs};
 use crate::sessions::outbound::{self, PushOut, SessionCoal};
 use crate::sessions::protocol::{
@@ -236,6 +239,33 @@ impl RemoteBridge {
                 }
                 handle_prompt_draft(&self.state, out, req, &id, draft);
             }
+            ClientFrame::PromptSchedule {
+                req,
+                id,
+                draft,
+                fire_at,
+            } => {
+                if !self.scope.granted(&self.state.hub, Some(&req), &id, out) {
+                    return;
+                }
+                handle_prompt_schedule(&self.state, out, req, &id, draft, &fire_at);
+            }
+            ClientFrame::ScheduledList { req, id } => {
+                if !self.scope.granted(&self.state.hub, Some(&req), &id, out) {
+                    return;
+                }
+                handle_scheduled_list(&self.state, out, req, &id);
+            }
+            ClientFrame::ScheduledCancel {
+                req,
+                id,
+                schedule_id,
+            } => {
+                if !self.scope.granted(&self.state.hub, Some(&req), &id, out) {
+                    return;
+                }
+                handle_scheduled_cancel(&self.state, out, req, &id, schedule_id);
+            }
             ClientFrame::Resize { id, cols, rows } => self.handle_resize(&id, cols, rows, out),
             ClientFrame::Spawn {
                 req,
@@ -318,6 +348,9 @@ impl RemoteBridge {
             | ClientFrame::Input { .. }
             | ClientFrame::Prompt { .. }
             | ClientFrame::PromptDraft { .. }
+            | ClientFrame::PromptSchedule { .. }
+            | ClientFrame::ScheduledList { .. }
+            | ClientFrame::ScheduledCancel { .. }
             | ClientFrame::Resize { .. }
             | ClientFrame::Spawn { .. }
             | ClientFrame::Kill { .. }

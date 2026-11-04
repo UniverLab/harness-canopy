@@ -353,7 +353,7 @@ row: `/` filters, `n` creates, `e` edits and `F4` deletes.
 - **Scheduled delivery** — `Shift+Enter` (requires Kitty keyboard
   enhancement protocol support) opens a time picker to send the prompt
   at a chosen hour instead of immediately. Falls back to `Ctrl+S` on
-  terminals without Kitty protocol.
+  terminals without Kitty protocol. Schedules can also be made from the remote.
 - **Context transfer** — a two-step modal (preview → agent picker)
   transfers conversation context, prompts and output between agents while
   preserving session state and scrollback.

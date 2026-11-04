@@ -1383,3 +1383,79 @@ fn assert_dropped(hub: &GrantHub, file_id: &str) {
         "and no row is committed"
     );
 }
+
+#[tokio::test]
+async fn guest_without_grant_is_refused_on_all_three_schedule_frames() {
+    let hub = grant_hub();
+    // A schedule on beta the guest must neither see nor cancel.
+    let fire_at = chrono::Utc::now() + chrono::Duration::hours(1);
+    hub.state
+        .hub
+        .db()
+        .insert_scheduled_prompt(
+            "ss-beta",
+            "beta secret prompt",
+            &hub.beta.id,
+            None,
+            fire_at,
+            None,
+            None,
+        )
+        .expect("inserts");
+    let grant = Grant::Sessions(HashSet::from(["alpha".to_string()]));
+    let (out_tx, mut out_rx) = crate::sessions::outbound::channel();
+    let mut bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), grant, false);
+
+    let fire_wire = (chrono::Utc::now() + chrono::Duration::hours(2))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let schedule = json!({
+        "t": "prompt_schedule", "req": "r1", "id": hub.beta.id,
+        "draft": {"sections": [{"title": "goal", "content": "g"}]},
+        "fire_at": fire_wire,
+    })
+    .to_string();
+    bridge.handle_text(&schedule, &out_tx).await;
+    let denied = recv_frame(&mut out_rx).await;
+    assert_eq!(denied["t"], "error");
+    assert_eq!(denied["code"], ERR_NOT_FOUND);
+    assert_eq!(denied["req"], "r1");
+
+    let list = json!({"t": "scheduled_list", "req": "r2", "id": hub.beta.id}).to_string();
+    bridge.handle_text(&list, &out_tx).await;
+    let denied = recv_frame(&mut out_rx).await;
+    assert_eq!(denied["code"], ERR_NOT_FOUND);
+    assert_eq!(denied["req"], "r2");
+
+    let cancel = json!({
+        "t": "scheduled_cancel", "req": "r3",
+        "id": hub.beta.id, "schedule_id": "ss-beta",
+    })
+    .to_string();
+    bridge.handle_text(&cancel, &out_tx).await;
+    let denied = recv_frame(&mut out_rx).await;
+    assert_eq!(denied["code"], ERR_NOT_FOUND);
+    assert_eq!(denied["req"], "r3");
+
+    // Nothing leaked, nothing cancelled, nothing stored on beta.
+    let kept = hub
+        .state
+        .hub
+        .db()
+        .list_pending_scheduled_prompts_for_session(&hub.beta.id)
+        .expect("lists");
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].id, "ss-beta");
+
+    // The granted session still schedules.
+    let schedule = json!({
+        "t": "prompt_schedule", "req": "r4", "id": hub.alpha.id,
+        "draft": {"sections": [{"title": "goal", "content": "g"}]},
+        "fire_at": fire_wire,
+    })
+    .to_string();
+    bridge.handle_text(&schedule, &out_tx).await;
+    let scheduled = recv_frame(&mut out_rx).await;
+    assert_eq!(scheduled["t"], "scheduled");
+    assert_eq!(scheduled["req"], "r4");
+    bridge.abort();
+}

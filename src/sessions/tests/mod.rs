@@ -12,6 +12,7 @@ mod outbound;
 mod resize_kill;
 mod resume;
 mod roundtrip;
+mod scheduled;
 mod shelf;
 mod shelf_upload;
 mod snapshot;

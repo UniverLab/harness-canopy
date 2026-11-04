@@ -5,7 +5,9 @@
 
 use serde::{Deserialize, Deserializer};
 
-use super::catalog::{CatalogCli, CatalogData, CatalogPreset, CatalogProject, CatalogSkill};
+use super::catalog::{
+    CatalogCli, CatalogData, CatalogPreset, CatalogProject, CatalogSkill, ScheduledPromptItem,
+};
 use super::graphs::{GraphState, GraphSummary};
 use super::protocol::{SessionItem, ShelfItem};
 use crate::domain::graph_transfer::GraphExportDocument;
@@ -98,6 +100,22 @@ pub enum HostFrame {
         #[allow(dead_code)]
         text: String,
     },
+    /// `scheduled{req,item}`: the answer to `prompt_schedule`.
+    Scheduled {
+        req: String,
+        // Remote clients consume the schedule; the TUI parses it for
+        // protocol completeness but never sends `prompt_schedule` itself.
+        #[allow(dead_code)]
+        item: ScheduledPromptItem,
+    },
+    /// `scheduled_list{req,id,items}`: the answer to `scheduled_list`.
+    ScheduledList {
+        req: String,
+        #[allow(dead_code)]
+        id: String,
+        #[allow(dead_code)]
+        items: Vec<ScheduledPromptItem>,
+    },
     /// `catalog{req,clis,projects,presets,skills}`: the answer to `catalog`.
     Catalog {
         req: String,
@@ -151,6 +169,8 @@ impl HostFrame {
             | HostFrame::Shelf { req, .. }
             | HostFrame::File { req, .. }
             | HostFrame::Composed { req, .. }
+            | HostFrame::Scheduled { req, .. }
+            | HostFrame::ScheduledList { req, .. }
             | HostFrame::Catalog { req, .. }
             | HostFrame::Graphs { req, .. }
             | HostFrame::Graph { req, .. }
@@ -237,6 +257,15 @@ enum HostFrameWire {
         req: String,
         text: String,
     },
+    Scheduled {
+        req: String,
+        item: ScheduledPromptItem,
+    },
+    ScheduledList {
+        req: String,
+        id: String,
+        items: Vec<ScheduledPromptItem>,
+    },
     Catalog {
         req: String,
         clis: Vec<CatalogCli>,
@@ -322,6 +351,10 @@ pub fn parse_host_frame(text: &str) -> Result<HostFrame, String> {
             last,
         },
         HostFrameWire::Composed { req, text } => HostFrame::Composed { req, text },
+        HostFrameWire::Scheduled { req, item } => HostFrame::Scheduled { req, item },
+        HostFrameWire::ScheduledList { req, id, items } => {
+            HostFrame::ScheduledList { req, id, items }
+        }
         HostFrameWire::Graphs { req, graphs } => HostFrame::Graphs { req, graphs },
         HostFrameWire::Graph {
             req,

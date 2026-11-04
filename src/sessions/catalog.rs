@@ -23,7 +23,7 @@ use super::protocol::{
     ERR_NOT_FOUND,
 };
 use super::ws::{no_such_session, OutTx, SessionsState};
-use super::{HubSession, SessionStatus};
+use super::{HubSession, SessionKind, SessionStatus};
 
 /// One CLI row of the wire catalog: the stored slug, the New dialog's
 /// display label, the model ids the New dialog would suggest for it, and
@@ -225,6 +225,229 @@ pub fn handle_prompt_draft(
         draft,
         Some(session),
     );
+}
+
+/// One pending scheduled prompt, as carried by `scheduled` / `scheduled_list`:
+/// the row id, the fire time in RFC 3339 UTC, and the first 120 chars of the
+/// composed prompt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduledPromptItem {
+    pub id: String,
+    pub fire_at: String,
+    pub preview: String,
+}
+
+/// `scheduled{req,item}`: the answer to `prompt_schedule`.
+pub fn scheduled_frame(req: &str, item: &ScheduledPromptItem) -> String {
+    serde_json::json!({"t": "scheduled", "req": req, "item": item}).to_string()
+}
+
+/// `scheduled_list{req,id,items}`: the answer to `scheduled_list`, soonest
+/// first.
+pub fn scheduled_list_frame(req: &str, id: &str, items: &[ScheduledPromptItem]) -> String {
+    serde_json::json!({"t": "scheduled_list", "req": req, "id": id, "items": items}).to_string()
+}
+
+/// The first 120 chars of the composed prompt, cut on char boundaries so a
+/// multibyte char is kept whole or dropped, never split.
+fn preview_of(text: &str) -> String {
+    text.chars().take(120).collect()
+}
+
+/// Parse `fire_at` as RFC 3339 and require it to be in the future. The stored
+/// (and echoed) time is truncated to whole seconds, matching the database.
+fn parse_future_fire_at(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(raw).ok()?;
+    if parsed <= chrono::Utc::now() {
+        return None;
+    }
+    chrono::DateTime::from_timestamp(parsed.timestamp(), 0)
+}
+
+/// The session gate the three schedule frames share: the session must exist,
+/// still be running, and be an agent — the daemon only delivers to those.
+/// `Err` carries the already-framed error answer.
+fn scheduled_session(
+    state: &SessionsState,
+    req: &str,
+    id: &str,
+) -> Result<Arc<HubSession>, String> {
+    let Some(session) = state.hub.get(id) else {
+        return Err(error_frame(Some(req), ERR_NOT_FOUND, &no_such_session(id)));
+    };
+    if session.status() != SessionStatus::Running {
+        return Err(error_frame(Some(req), ERR_FORBIDDEN, "session has exited"));
+    }
+    if session.kind != SessionKind::Agent {
+        return Err(error_frame(
+            Some(req),
+            ERR_FORBIDDEN,
+            "only agent sessions take a scheduled prompt",
+        ));
+    }
+    Ok(session)
+}
+
+/// `prompt_schedule`: build the draft's text and store it for delivery at
+/// `fire_at`. Unknown choices fail exactly like `compose`; the row carries
+/// the session's workdir with no provenance or builder state, like the TUI's
+/// raw path. Delivery itself is the daemon scheduler's tick.
+pub fn handle_prompt_schedule(
+    state: &Arc<SessionsState>,
+    out_tx: &OutTx,
+    req: String,
+    id: &str,
+    draft: PromptDraft,
+    fire_at_raw: &str,
+) {
+    let session = match scheduled_session(state, &req, id) {
+        Ok(session) => session,
+        Err(answer) => {
+            let _ = out_tx.send(answer);
+            return;
+        }
+    };
+    let Some(fire_at) = parse_future_fire_at(fire_at_raw) else {
+        let _ = out_tx.send(error_frame(
+            Some(&req),
+            ERR_BAD_REQUEST,
+            "fire_at must be a future RFC 3339 time",
+        ));
+        return;
+    };
+    let db = Arc::clone(state.hub.db());
+    let out_tx = out_tx.clone();
+    tokio::spawn(async move {
+        let outcome = tokio::task::spawn_blocking(move || {
+            let text = build_draft_text(&db, &draft)?;
+            let schedule_id = format!("ss-{}", uuid::Uuid::new_v4());
+            let workdir_opt = (!session.workdir.is_empty()).then_some(session.workdir.as_str());
+            db.insert_scheduled_prompt(
+                &schedule_id,
+                &text,
+                &session.id,
+                workdir_opt,
+                fire_at,
+                None,
+                None,
+            )
+            .map_err(|_| DraftFailure::Internal)?;
+            Ok::<_, DraftFailure>((schedule_id, text))
+        })
+        .await;
+        // The failure mapping mirrors `serve_built_text` arm for arm.
+        match outcome {
+            Ok(Ok((schedule_id, text))) => {
+                let item = ScheduledPromptItem {
+                    id: schedule_id,
+                    fire_at: fire_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    preview: preview_of(&text),
+                };
+                let _ = out_tx.send(scheduled_frame(&req, &item));
+            }
+            Ok(Err(DraftFailure::BadRequest(message))) => {
+                let _ = out_tx.send(error_frame(Some(&req), ERR_BAD_REQUEST, &message));
+            }
+            Ok(Err(DraftFailure::Internal)) => {
+                let _ = out_tx.send(error_frame(Some(&req), ERR_INTERNAL, "prompt task failed"));
+            }
+            Ok(Err(DraftFailure::Delivery(e))) => {
+                let _ = out_tx.send(error_frame(Some(&req), ERR_DELIVERY_FAILED, &e.to_string()));
+            }
+            Err(_) => {
+                let _ = out_tx.send(error_frame(Some(&req), ERR_INTERNAL, "prompt task failed"));
+            }
+        }
+    });
+}
+
+/// `scheduled_list`: the session's pending schedules, soonest first.
+pub fn handle_scheduled_list(state: &Arc<SessionsState>, out_tx: &OutTx, req: String, id: &str) {
+    let session = match scheduled_session(state, &req, id) {
+        Ok(session) => session,
+        Err(answer) => {
+            let _ = out_tx.send(answer);
+            return;
+        }
+    };
+    let db = Arc::clone(state.hub.db());
+    let out_tx = out_tx.clone();
+    tokio::spawn(async move {
+        let session_id = session.id.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            db.list_pending_scheduled_prompts_for_session(&session_id)
+        })
+        .await;
+        match outcome {
+            Ok(Ok(rows)) => {
+                let items: Vec<ScheduledPromptItem> = rows
+                    .iter()
+                    .map(|row| ScheduledPromptItem {
+                        id: row.id.clone(),
+                        fire_at: row
+                            .fire_at
+                            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                        preview: preview_of(&row.prompt),
+                    })
+                    .collect();
+                let _ = out_tx.send(scheduled_list_frame(&req, &session.id, &items));
+            }
+            Ok(Err(_)) | Err(_) => {
+                let _ = out_tx.send(error_frame(
+                    Some(&req),
+                    ERR_INTERNAL,
+                    "schedule list failed",
+                ));
+            }
+        }
+    });
+}
+
+/// `scheduled_cancel`: drop one pending schedule. The row must belong to the
+/// named session — another session's row answers `not_found` and is kept.
+pub fn handle_scheduled_cancel(
+    state: &Arc<SessionsState>,
+    out_tx: &OutTx,
+    req: String,
+    id: &str,
+    schedule_id: String,
+) {
+    if let Err(answer) = scheduled_session(state, &req, id) {
+        let _ = out_tx.send(answer);
+        return;
+    }
+    let db = Arc::clone(state.hub.db());
+    let out_tx = out_tx.clone();
+    let session_id = id.to_string();
+    tokio::spawn(async move {
+        let outcome = tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
+            let pending = db.list_pending_scheduled_prompts_for_session(&session_id)?;
+            if !pending.iter().any(|row| row.id == schedule_id) {
+                return Ok(false);
+            }
+            db.delete_scheduled_prompt(&schedule_id)
+        })
+        .await;
+        match outcome {
+            Ok(Ok(true)) => {
+                let _ = out_tx.send(ok_frame(&req));
+            }
+            Ok(Ok(false)) => {
+                let _ = out_tx.send(error_frame(
+                    Some(&req),
+                    ERR_NOT_FOUND,
+                    "no such scheduled prompt",
+                ));
+            }
+            Ok(Err(_)) | Err(_) => {
+                let _ = out_tx.send(error_frame(
+                    Some(&req),
+                    ERR_INTERNAL,
+                    "schedule cancel failed",
+                ));
+            }
+        }
+    });
 }
 
 /// Shared tail of `compose` and draft `prompt`: build the text off the

@@ -303,6 +303,16 @@ impl HubSession {
             .unwrap_or(SessionStatus::Running)
     }
 
+    /// Force the status to exited without removing the session: a test-only
+    /// stand-in for the instant between a child dying and the hub reaping it,
+    /// so handlers' `session has exited` branch is reachable.
+    #[cfg(test)]
+    pub(crate) fn mark_exited_for_test(&self, code: i32) {
+        if let Ok(mut status) = self.status.lock() {
+            *status = SessionStatus::Exited(code);
+        }
+    }
+
     /// The session's metadata row for `list` / `session_added` frames.
     pub fn item(&self) -> SessionItem {
         let (cols, rows, last_output_at) = self

@@ -107,6 +107,44 @@ fn documented_shapes_parse() {
     ));
 }
 
+#[test]
+fn schedule_shapes_parse_and_missing_fields_name_them() {
+    assert!(matches!(
+        parse_client_frame(
+            r#"{"t": "prompt_schedule", "req": "r", "id": "x",
+                "draft": {"sections": []}, "fire_at": "2030-01-01T00:00:00Z"}"#
+        ),
+        Ok(ClientFrame::PromptSchedule { .. })
+    ));
+    assert!(matches!(
+        parse_client_frame(r#"{"t": "scheduled_list", "req": "r", "id": "x"}"#),
+        Ok(ClientFrame::ScheduledList { .. })
+    ));
+    assert!(matches!(
+        parse_client_frame(
+            r#"{"t": "scheduled_cancel", "req": "r", "id": "x", "schedule_id": "ss-1"}"#
+        ),
+        Ok(ClientFrame::ScheduledCancel { .. })
+    ));
+
+    let missing =
+        parse_err(r#"{"t": "prompt_schedule", "req": "r", "id": "x", "draft": {"sections": []}}"#);
+    assert!(
+        missing.contains("prompt_schedule") && missing.contains("fire_at"),
+        "must name the frame and the field: {missing}"
+    );
+    let missing = parse_err(r#"{"t": "scheduled_list", "req": "r"}"#);
+    assert!(
+        missing.contains("scheduled_list") && missing.contains("id"),
+        "must name the frame and the field: {missing}"
+    );
+    let missing = parse_err(r#"{"t": "scheduled_cancel", "req": "r", "id": "x"}"#);
+    assert!(
+        missing.contains("scheduled_cancel") && missing.contains("schedule_id"),
+        "must name the frame and the field: {missing}"
+    );
+}
+
 #[tokio::test]
 async fn ws_answers_bad_request_for_bad_frames() {
     let (db, _db_dir) = test_db();

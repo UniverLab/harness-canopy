@@ -100,6 +100,28 @@ pub enum ClientFrame {
         id: String,
         draft: PromptDraft,
     },
+    /// `prompt_schedule{req,id,draft,fire_at}`: build the text hub-side and
+    /// store it for delivery at `fire_at` (RFC 3339); the host answers
+    /// `scheduled`.
+    PromptSchedule {
+        req: String,
+        id: String,
+        draft: PromptDraft,
+        fire_at: String,
+    },
+    /// `scheduled_list{req,id}`: the session's pending schedules, soonest
+    /// first; the host answers `scheduled_list`.
+    ScheduledList {
+        req: String,
+        id: String,
+    },
+    /// `scheduled_cancel{req,id,schedule_id}`: drop one pending schedule;
+    /// the host answers `ok`.
+    ScheduledCancel {
+        req: String,
+        id: String,
+        schedule_id: String,
+    },
     Resize {
         id: String,
         cols: u16,
@@ -265,6 +287,33 @@ pub fn parse_client_frame(text: &str) -> Result<ClientFrame, FrameError> {
             Ok(ClientFrame::Input { id, data })
         }
         "prompt" => parse_prompt_frame(&value, &frame),
+        "prompt_schedule" => {
+            let req = req_field(&value, &frame)?;
+            let id = id_field(&value, &frame)?;
+            let draft = draft_field(&value, &frame)?;
+            let fire_at = str_field(&value, &frame, "fire_at")?;
+            Ok(ClientFrame::PromptSchedule {
+                req,
+                id,
+                draft,
+                fire_at,
+            })
+        }
+        "scheduled_list" => {
+            let req = req_field(&value, &frame)?;
+            let id = id_field(&value, &frame)?;
+            Ok(ClientFrame::ScheduledList { req, id })
+        }
+        "scheduled_cancel" => {
+            let req = req_field(&value, &frame)?;
+            let id = id_field(&value, &frame)?;
+            let schedule_id = str_field(&value, &frame, "schedule_id")?;
+            Ok(ClientFrame::ScheduledCancel {
+                req,
+                id,
+                schedule_id,
+            })
+        }
         "resize" => {
             let id = id_field(&value, &frame)?;
             let cols = size_field(&value, &frame, "cols")?;
