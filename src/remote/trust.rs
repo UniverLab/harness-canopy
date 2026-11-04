@@ -187,9 +187,14 @@ impl GrantScope {
     }
 
     /// A file hidden from a scoped peer: it belongs to a session outside
-    /// the grant. Host files (`None`) stay visible to every peer.
+    /// the grant, or it is a host-shelf file (`None`, tied to no session)
+    /// and the peer's grant is narrower than every session — the host shelf
+    /// is the owner's (and full grants'), never a session guest's.
     pub fn hidden_file(&self, hub: &SessionHub, session_id: Option<&str>) -> bool {
-        session_id.is_some_and(|id| !self.allows_id(hub, id))
+        match session_id {
+            Some(id) => !self.allows_id(hub, id),
+            None => !self.is_all(),
+        }
     }
 
     /// Pass when `id` is inside the grant, else answer `not_found` like a
@@ -203,15 +208,13 @@ impl GrantScope {
         false
     }
 
-    /// Whether a shelf file hides from a scoped peer: it belongs to a
-    /// session outside the grant. Unknown files are not hidden here — the
-    /// delete path answers `not_found` for those itself.
+    /// Whether a shelf file hides from a scoped peer, by
+    /// [`hidden_file`](Self::hidden_file)'s rule. Unknown files are not
+    /// hidden here — the delete path answers `not_found` for those itself.
     pub fn hidden_shelf_file(&self, hub: &SessionHub, shelf: &ShelfStore, file_id: &str) -> bool {
         shelf
             .get(file_id)
-            .as_ref()
-            .and_then(|row| row.session_id.as_deref())
-            .is_some_and(|id| !self.allows_id(hub, id))
+            .is_some_and(|row| self.hidden_file(hub, row.session_id.as_deref()))
     }
 
     /// Remember a listed or announced session; whether it is inside the

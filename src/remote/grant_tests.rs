@@ -703,13 +703,14 @@ async fn scoped_grant_lists_only_its_shelf_files_and_hides_the_rest() {
     let (out_tx, mut out_rx) = crate::sessions::outbound::channel();
     let mut bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), grant, false);
 
-    // The unscoped list is the host shelf, visible to every peer.
+    // The unscoped list is the host shelf: the owner's, never a session
+    // guest's, so it lists empty.
     bridge
         .handle_text(&shelf_list_frame("s1", None), &out_tx)
         .await;
     let list = recv_frame(&mut out_rx).await;
     assert_eq!(list["t"], "shelf");
-    assert_eq!(shelf_names(&list), vec!["host.png".to_string()]);
+    assert!(shelf_names(&list).is_empty(), "{list}");
 
     // A scoped list outside the grant is empty, inside it holds the file.
     bridge
@@ -730,7 +731,8 @@ async fn scoped_grant_lists_only_its_shelf_files_and_hides_the_rest() {
     // Gets and deletes outside the grant answer `not_found` — including a
     // terminal file, which must not leak through `forbidden`, and a file
     // whose session is gone, which fails closed.
-    for file_id in [&beta_file, &shell_file, &orphan_file] {
+    // whose session is gone, which fails closed, and a host-shelf file.
+    for file_id in [&beta_file, &shell_file, &orphan_file, &host_file] {
         bridge
             .handle_text(&shelf_get_frame("s4", file_id), &out_tx)
             .await;
@@ -738,21 +740,79 @@ async fn scoped_grant_lists_only_its_shelf_files_and_hides_the_rest() {
         assert_eq!(denied["t"], "error");
         assert_eq!(denied["code"], ERR_NOT_FOUND, "{denied}");
     }
-    bridge
-        .handle_text(&shelf_delete_frame("s5", &beta_file), &out_tx)
-        .await;
-    let denied = recv_frame(&mut out_rx).await;
-    assert_eq!(denied["code"], ERR_NOT_FOUND, "{denied}");
-
-    // The granted file and the host file still serve.
-    for file_id in [&alpha_file, &host_file] {
+    for file_id in [&beta_file, &host_file] {
         bridge
-            .handle_text(&shelf_get_frame("s6", file_id), &out_tx)
+            .handle_text(&shelf_delete_frame("s5", file_id), &out_tx)
             .await;
-        let file = recv_frame(&mut out_rx).await;
-        assert_eq!(file["t"], "file", "{file}");
+        let denied = recv_frame(&mut out_rx).await;
+        assert_eq!(denied["code"], ERR_NOT_FOUND, "{denied}");
     }
+    assert!(
+        hub.state.shelf.get(&host_file).is_some(),
+        "a refused delete leaves the host file in place"
+    );
+
+    // The granted file still serves.
+    bridge
+        .handle_text(&shelf_get_frame("s6", &alpha_file), &out_tx)
+        .await;
+    let file = recv_frame(&mut out_rx).await;
+    assert_eq!(file["t"], "file", "{file}");
     bridge.abort();
+}
+
+/// Host-shelf arrivals and removals never reach a session-scoped guest —
+/// including the removal of a host file that predates its connection —
+/// while a full grant hears both.
+#[tokio::test]
+async fn host_shelf_pushes_reach_full_grants_only() {
+    let hub = grant_hub();
+    let old_host = shelve(&hub.state, "old-host.png", None);
+    let alpha_file = shelve(&hub.state, "alpha.png", Some(&hub.alpha.id));
+    let scoped = Grant::Sessions(HashSet::from(["alpha".to_string()]));
+    let (scoped_tx, mut scoped_rx) = crate::sessions::outbound::channel();
+    let mut scoped_bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), scoped, false);
+    let (full_tx, mut full_rx) = crate::sessions::outbound::channel();
+    let mut full_bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), Grant::All, false);
+
+    let host_item = hub
+        .state
+        .shelf
+        .list(None)
+        .into_iter()
+        .find(|item| item.file_id == old_host)
+        .expect("the host file is listed");
+    let alpha_item = hub
+        .state
+        .shelf
+        .list(Some(&hub.alpha.id))
+        .into_iter()
+        .find(|item| item.file_id == alpha_file)
+        .expect("the alpha file is listed");
+    // The removal comes first: only the connect-time seeding hides it.
+    for event in [
+        HubEvent::ShelfRemoved {
+            file_id: old_host.clone(),
+        },
+        HubEvent::ShelfAdded(Box::new(host_item)),
+    ] {
+        scoped_bridge.handle_event(event.clone(), &scoped_tx);
+        full_bridge.handle_event(event, &full_tx);
+    }
+    assert!(
+        scoped_rx.try_recv().is_err(),
+        "a session-scoped guest hears nothing about the host shelf"
+    );
+    assert_eq!(recv_frame(&mut full_rx).await["t"], "shelf_removed");
+    assert_eq!(recv_frame(&mut full_rx).await["t"], "shelf_added");
+
+    // A granted session's arrival still reaches the scoped guest.
+    scoped_bridge.handle_event(HubEvent::ShelfAdded(Box::new(alpha_item)), &scoped_tx);
+    let added = recv_frame(&mut scoped_rx).await;
+    assert_eq!(added["t"], "shelf_added");
+    assert_eq!(added["item"]["file_id"], alpha_file);
+    scoped_bridge.abort();
+    full_bridge.abort();
 }
 
 #[tokio::test]
@@ -761,6 +821,7 @@ async fn full_grant_serves_every_shelf_and_keeps_the_terminal_rule() {
     let beta_file = shelve(&hub.state, "beta.png", Some(&hub.beta.id));
     let shell_file = shelve(&hub.state, "shell.png", Some(&hub.shell.id));
     let orphan_file = shelve(&hub.state, "orphan.png", Some("no-such-session"));
+    let host_file = shelve(&hub.state, "host.png", None);
 
     let (out_tx, mut out_rx) = crate::sessions::outbound::channel();
     let mut bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), Grant::All, false);
@@ -771,6 +832,18 @@ async fn full_grant_serves_every_shelf_and_keeps_the_terminal_rule() {
         .await;
     let list = recv_frame(&mut out_rx).await;
     assert_eq!(shelf_names(&list), vec!["beta.png".to_string()]);
+
+    // The host shelf lists and serves for a full grant.
+    bridge
+        .handle_text(&shelf_list_frame("s1h", None), &out_tx)
+        .await;
+    let list = recv_frame(&mut out_rx).await;
+    assert_eq!(shelf_names(&list), vec!["host.png".to_string()]);
+    bridge
+        .handle_text(&shelf_get_frame("s1g", &host_file), &out_tx)
+        .await;
+    let file = recv_frame(&mut out_rx).await;
+    assert_eq!(file["t"], "file", "{file}");
 
     // A file whose session is gone still serves for a full grant — the
     // owner is unchanged by grants.

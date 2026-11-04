@@ -475,9 +475,12 @@ client. The shelf rides the same channel: `shelf_list` and `shelf_get`
 answer `shelf` and `file` frames, and `shelf_added` / `shelf_removed` push
 arrivals and removals. Files from
 terminal sessions stay hidden from lists and pushes and answer
-`error{code:"forbidden"}` on fetch; host-shelf files are visible. A guest
-fetching a file from a session outside its grant hears
-`error{code:"not_found"}` instead, as if the file did not exist. `file`
+`error{code:"forbidden"}` on fetch. Host-shelf files (tied to no session)
+are visible to the owner and to guests with an all-sessions grant only. A
+guest fetching or deleting a file from a session outside its grant, or a
+host-shelf file while its grant names specific sessions, hears
+`error{code:"not_found"}` instead, as if the file did not exist, and such
+files never appear in its lists or pushes. `file`
 frames stay under 16 KiB, at most two downloads run at once — a third
 answers `error{code:"busy"}` — and their parts interleave with terminal
 output so a large image never stalls it. A host serves at most four device

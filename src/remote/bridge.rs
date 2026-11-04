@@ -126,6 +126,28 @@ impl RemoteBridge {
         let mut bridge = Self::new(state);
         bridge.scope = GrantScope::new(grant);
         bridge.scope.set_can_upload(can_upload);
+        // Files already on a shelf this peer may not see hide from the
+        // start, so their later `shelf_removed` stays hidden too.
+        if !bridge.scope.is_all() {
+            let shelves = std::iter::once(None).chain(
+                bridge
+                    .state
+                    .hub
+                    .list()
+                    .into_iter()
+                    .map(|session| Some(session.id.clone())),
+            );
+            for shelf in shelves {
+                if bridge
+                    .scope
+                    .hidden_file(&bridge.state.hub, shelf.as_deref())
+                {
+                    for item in bridge.state.shelf.list(shelf.as_deref()) {
+                        bridge.hidden_files.insert(item.file_id);
+                    }
+                }
+            }
+        }
         bridge
     }
 
@@ -527,18 +549,17 @@ impl RemoteBridge {
             send(out, shelf_frame(&req, id.as_deref(), &[]));
             return;
         }
-        if id
-            .as_deref()
-            .is_some_and(|id| !self.scope.allows_id(&self.state.hub, id))
-        {
+        // An ungranted session's shelf, or the host shelf for a peer whose
+        // grant is narrower than every session, lists empty.
+        if self.scope.hidden_file(&self.state.hub, id.as_deref()) {
             send(out, shelf_frame(&req, id.as_deref(), &[]));
             return;
         }
         let shelf = self.state.shelf.clone();
         let out = out.clone();
         let echo = id.clone();
-        // No grant filter here: `shelf.list(None)` is the host shelf only,
-        // and a `Some(id)` list was already allowed or emptied above.
+        // No per-item filter here: `shelf.list(id)` lists exactly one shelf,
+        // and that shelf was allowed or emptied above.
         tokio::spawn(async move {
             match tokio::task::spawn_blocking(move || shelf.list(id.as_deref())).await {
                 Ok(items) => send(&out, shelf_frame(&req, echo.as_deref(), &items)),
