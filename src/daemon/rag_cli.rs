@@ -760,6 +760,7 @@ fn format_ts(ts: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::test_stdout::lock_test_stdout;
     use clap::{CommandFactory, Parser};
     use std::io::{Read, Write};
     use std::os::unix::io::FromRawFd;
@@ -767,7 +768,9 @@ mod tests {
     /// Redirects fd 1 into a pipe for the lifetime of the guard, so a print
     /// section that writes straight to stdout can be asserted on. Safe
     /// because `cargo nextest` — this crate's mandated runner — gives each
-    /// test its own process.
+    /// test its own process; overlapping uses inside one process are
+    /// serialized by the shared test-stdout lock, so plain `cargo test`
+    /// is safe too.
     struct StdoutCapture {
         saved_fd: i32,
         read_end: std::fs::File,
@@ -1250,6 +1253,7 @@ mod tests {
     /// limit, exclusion summary, then the "nothing here yet" line.
     #[test]
     fn print_empty_rag_report_output_is_the_documented_four_lines() {
+        let _stdout_guard = lock_test_stdout();
         let cap = StdoutCapture::start();
         print_empty_rag_report(10 * 1024 * 1024);
         let out = cap.stop();
@@ -1366,6 +1370,7 @@ mod tests {
             store_error: None,
         };
 
+        let _stdout_guard = lock_test_stdout();
         let cap = StdoutCapture::start();
         print_rag_report_summary(&db, &report).expect("summary prints");
         print_rag_report_files(&report);
@@ -1499,6 +1504,7 @@ mod tests {
         )
         .unwrap();
 
+        let _stdout_guard = lock_test_stdout();
         let cap = StdoutCapture::start();
         print_rag_health(&db);
         let out = cap.stop();

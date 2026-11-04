@@ -108,6 +108,8 @@ pub mod handler;
 #[cfg(test)]
 mod test_missions;
 #[cfg(test)]
+pub(crate) mod test_stdout;
+#[cfg(test)]
 mod tests;
 
 pub use handler::TaskTriggerHandler;

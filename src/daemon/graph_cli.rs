@@ -52,6 +52,7 @@ mod crew;
 pub(crate) mod format;
 mod info;
 mod install;
+mod list;
 mod resolve;
 mod validate;
 
@@ -62,6 +63,16 @@ pub(crate) enum GraphAction {
         /// Only show graphs tagged with this workdir.
         #[arg(long)]
         workdir: Option<String>,
+        /// Print one JSON array on stdout (keys: `id`, `name`, `status`,
+        /// `workdir`, `current_spec`, `current_node`) instead of the table.
+        /// Goes through the daemon, like `--running`.
+        #[arg(long)]
+        json: bool,
+        /// Only show graphs whose status is `running`. Goes through the
+        /// daemon instead of the database, so scripts can ask whether a
+        /// graph is running without opening `background_agents.db`.
+        #[arg(long)]
+        running: bool,
     },
     /// Show detailed status for a single graph.
     Info {
@@ -242,12 +253,24 @@ pub(crate) async fn handle_graph_action(
     if let GraphAction::Validate { path, json } = &action {
         return handle_graph_validate(path, *json);
     }
+    // `--json`/`--running` list reads through the daemon's `graph` `list`
+    // MCP action instead of opening the database directly.
+    if let Some(result) = list::try_handle_daemon_list(&action, port_override) {
+        return result;
+    }
     let data_dir = crate::ensure_data_dir()?;
     let db = Database::new_safe(&database_path(&data_dir), &data_dir)?;
 
     match action {
         GraphAction::Validate { .. } => unreachable!("handled above"),
-        GraphAction::List { workdir } => handle_graph_list(&db, workdir.as_deref()),
+        GraphAction::List {
+            workdir,
+            json: false,
+            running: false,
+        } => handle_graph_list(&db, workdir.as_deref()),
+        GraphAction::List { .. } => {
+            unreachable!("--json/--running list returns before the database")
+        }
         GraphAction::Info { id_or_name } => handle_graph_info(&db, &id_or_name),
         GraphAction::Export { id_or_name, output } => {
             handle_graph_export(&db, &id_or_name, output.as_deref())
@@ -763,7 +786,12 @@ fn handle_graph_list(db: &Database, workdir: Option<&str>) -> Result<()> {
 }
 #[cfg(test)]
 mod tests {
+    use super::list::{
+        daemon_exit_code, handle_list_via_daemon, try_handle_daemon_list,
+        DAEMON_UNREACHABLE_MESSAGE,
+    };
     use super::*;
+    use crate::daemon::test_stdout::lock_test_stdout;
     use clap::Parser;
     use std::io::{Read, Write};
     use std::os::unix::io::FromRawFd;
@@ -828,12 +856,52 @@ mod tests {
     #[test]
     fn list_parses_with_and_without_workdir() {
         let cli = TestCli::try_parse_from(["test", "list"]).expect("list should parse");
-        assert!(matches!(cli.action, GraphAction::List { workdir: None }));
+        assert!(matches!(
+            cli.action,
+            GraphAction::List {
+                workdir: None,
+                json: false,
+                running: false
+            }
+        ));
 
         let cli = TestCli::try_parse_from(["test", "list", "--workdir", "/tmp/proj"])
             .expect("list --workdir should parse");
         match cli.action {
-            GraphAction::List { workdir } => assert_eq!(workdir.as_deref(), Some("/tmp/proj")),
+            GraphAction::List {
+                workdir,
+                json,
+                running,
+            } => {
+                assert_eq!(workdir.as_deref(), Some("/tmp/proj"));
+                assert!(!json);
+                assert!(!running);
+            }
+            other => panic!("expected List, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_parses_json_running_and_workdir_combo() {
+        let cli = TestCli::try_parse_from([
+            "test",
+            "list",
+            "--json",
+            "--running",
+            "--workdir",
+            "/tmp/proj",
+        ])
+        .expect("list --json --running --workdir should parse");
+        match cli.action {
+            GraphAction::List {
+                workdir,
+                json,
+                running,
+            } => {
+                assert_eq!(workdir.as_deref(), Some("/tmp/proj"));
+                assert!(json);
+                assert!(running);
+            }
             other => panic!("expected List, got {other:?}"),
         }
     }
@@ -1904,6 +1972,7 @@ mod tests {
     /// mirroring `list`/`info`, it reads the local database directly.
     #[test]
     fn handle_graph_export_writes_document_to_output_path_without_a_daemon() {
+        let _stdout_guard = lock_test_stdout();
         let (dir, db) = db_with_graph("graph-1", "my-graph", GraphStatus::Draft);
         db.insert_graph_node(&crate::domain::graphs::GraphNode {
             id: "n1".to_string(),
@@ -2132,8 +2201,267 @@ mod tests {
         panic!("port kept getting claimed by another test after 5 attempts");
     }
 
+    /// Spawn a fake daemon whose `graph` `list` text is `text`.
+    fn spawn_list_daemon(text: &str) -> crate::tui::mcp_client::test_support::FakeDaemon {
+        spawn_fake_daemon(serde_json::json!({
+            "content": [{"type": "text", "text": text}],
+            "isError": false
+        }))
+    }
+
+    /// `--json` prints one JSON array on stdout and nothing else: exactly
+    /// the six script-facing keys per item, `current_spec`/`current_node`
+    /// null when absent, every other MCP key dropped. Parsing the whole of
+    /// stdout proves nothing else was printed.
+    #[test]
+    fn list_json_projects_exact_keys_with_nulls() {
+        let _stdout_guard = lock_test_stdout();
+        let text = serde_json::to_string(&serde_json::json!([
+            {
+                "id": "graph-1",
+                "name": "alpha",
+                "status": "running",
+                "trigger": {"type": "manual"},
+                "current_spec": "spec-a",
+                "current_node": "node-1",
+                "blocked": false,
+                "spec_attempts": 1,
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "workdir": "/tmp/proj",
+                "archived": false
+            },
+            {
+                "id": "graph-2",
+                "name": "beta",
+                "status": "paused",
+                "trigger": {"type": "manual"},
+                "current_spec": null,
+                "current_node": null,
+                "blocked": false,
+                "spec_attempts": 0,
+                "created_at": "2026-01-02T00:00:00+00:00",
+                "workdir": "/tmp/other",
+                "archived": false
+            }
+        ]))
+        .unwrap();
+        let fake = spawn_list_daemon(&text);
+        let port: u16 = fake.port.parse().unwrap();
+
+        let cap = StdoutCapture::start();
+        handle_list_via_daemon(Some(port), None, false, true).expect("list --json should succeed");
+        let out = cap.stop();
+
+        let parsed: Vec<serde_json::Value> =
+            serde_json::from_str(&out).expect("stdout must be one JSON array and nothing else");
+        assert_eq!(parsed.len(), 2);
+        for item in &parsed {
+            let mut keys: Vec<&str> = item
+                .as_object()
+                .expect("each list entry must be an object")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort_unstable();
+            // A seventh key would silently re-couple scripts to the MCP
+            // shape this projection exists to hide behind.
+            assert_eq!(
+                keys,
+                vec![
+                    "current_node",
+                    "current_spec",
+                    "id",
+                    "name",
+                    "status",
+                    "workdir"
+                ]
+            );
+        }
+        assert_eq!(parsed[0]["id"], "graph-1");
+        assert_eq!(parsed[0]["current_spec"], "spec-a");
+        assert_eq!(parsed[0]["current_node"], "node-1");
+        assert!(parsed[1]["current_spec"].is_null());
+        assert!(parsed[1]["current_node"].is_null());
+    }
+
+    /// `--running` keeps only graphs whose status is exactly `running` —
+    /// including a hypothetical capitalised status, which must not match.
+    #[test]
+    fn list_running_filter_drops_non_running() {
+        let _stdout_guard = lock_test_stdout();
+        let text = serde_json::to_string(&serde_json::json!([
+            {"id": "graph-1", "name": "alpha", "status": "running",
+             "workdir": "/tmp/a", "current_spec": "s", "current_node": "n"},
+            {"id": "graph-2", "name": "beta", "status": "paused",
+             "workdir": "/tmp/b", "current_spec": null, "current_node": null},
+            {"id": "graph-3", "name": "gamma", "status": "completed",
+             "workdir": "/tmp/c", "current_spec": null, "current_node": null},
+            {"id": "graph-4", "name": "delta", "status": "Running",
+             "workdir": "/tmp/d", "current_spec": null, "current_node": null}
+        ]))
+        .unwrap();
+        let fake = spawn_list_daemon(&text);
+        let port: u16 = fake.port.parse().unwrap();
+
+        let cap = StdoutCapture::start();
+        handle_list_via_daemon(Some(port), None, true, false)
+            .expect("list --running should succeed");
+        let out = cap.stop();
+
+        let parsed: Vec<serde_json::Value> =
+            serde_json::from_str(&out).expect("stdout must be one JSON array");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0]["id"], "graph-1");
+    }
+
+    /// `--workdir` is forwarded to the daemon's `graph` `list` action, and
+    /// omitted entirely when not passed.
+    #[test]
+    fn list_forwards_workdir_to_daemon() {
+        // This test asserts on the daemon's recorded calls, but the handler
+        // still prints `[]` twice: capture and discard it under the stdout
+        // lock so it can never land in a sibling test's capture pipe.
+        let _stdout_guard = lock_test_stdout();
+        let with_workdir = spawn_list_daemon("[]");
+        let port: u16 = with_workdir.port.parse().unwrap();
+        let cap = StdoutCapture::start();
+        handle_list_via_daemon(Some(port), Some("/tmp/proj"), true, true)
+            .expect("list --workdir should succeed");
+        let _ = cap.stop();
+        let calls = with_workdir.recorded_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["name"], "graph");
+        assert_eq!(calls[0]["arguments"]["action"], "list");
+        assert_eq!(calls[0]["arguments"]["workdir"], "/tmp/proj");
+
+        let without_workdir = spawn_list_daemon("[]");
+        let port: u16 = without_workdir.port.parse().unwrap();
+        let cap = StdoutCapture::start();
+        handle_list_via_daemon(Some(port), None, true, true).expect("list should succeed");
+        let _ = cap.stop();
+        let calls = without_workdir.recorded_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["arguments"]["action"], "list");
+        assert!(
+            calls[0]["arguments"].get("workdir").is_none(),
+            "no --workdir must reach the daemon as no workdir filter"
+        );
+    }
+
+    /// An empty daemon result prints `[]` and exits 0 — the scripts' "is
+    /// anything running" check reads this as "no".
+    #[test]
+    fn list_empty_daemon_result_prints_empty_array() {
+        let _stdout_guard = lock_test_stdout();
+        let fake = spawn_list_daemon("[]");
+        let port: u16 = fake.port.parse().unwrap();
+
+        let cap = StdoutCapture::start();
+        handle_list_via_daemon(Some(port), None, false, true).expect("empty list should succeed");
+        let out = cap.stop();
+
+        assert_eq!(out.trim(), "[]");
+    }
+
+    /// The daemon is unreachable: the failure classifies as the exit-3
+    /// sentinel (the `exit()` itself cannot run inside a test) and the
+    /// stderr line scripts match on stays byte-stable.
+    #[test]
+    fn list_daemon_unreachable_maps_to_exit_3() {
+        for _ in 0..5 {
+            let port: u16 = unused_port().parse().unwrap();
+            match call_tool(Some(port), "graph", &serde_json::json!({"action": "list"})) {
+                Err(err) => {
+                    assert_eq!(daemon_exit_code(&err), Some(3));
+                    assert_eq!(DAEMON_UNREACHABLE_MESSAGE, "daemon not reachable");
+                    return;
+                }
+                Ok(_) => continue,
+            }
+        }
+        panic!("port kept getting claimed by another test after 5 attempts");
+    }
+
+    /// A tool-level rejection from the daemon is not "unreachable": the
+    /// classifier stays silent and the error propagates normally.
+    #[test]
+    fn list_tool_level_error_is_not_exit_3() {
+        let fake = spawn_fake_daemon(serde_json::json!({
+            "content": [{"type": "text", "text": "Graph 'missing' not found."}],
+            "isError": true
+        }));
+        let port: u16 = fake.port.parse().unwrap();
+
+        let err = handle_list_via_daemon(Some(port), None, false, true).unwrap_err();
+        assert!(err.to_string().contains("not found"));
+        assert_eq!(daemon_exit_code(&err), None);
+    }
+
+    /// A daemon response that is not JSON surfaces loudly instead of
+    /// reading as an empty (all-clear) list.
+    #[test]
+    fn list_malformed_response_is_an_error() {
+        let fake = spawn_list_daemon("not json");
+        let port: u16 = fake.port.parse().unwrap();
+
+        let err = handle_list_via_daemon(Some(port), None, false, true).unwrap_err();
+        assert!(err.to_string().contains("unexpected graph list response"));
+    }
+
+    /// Valid JSON that is not an array (e.g. a future object-shaped
+    /// response) is an error too — never `[]`, which scripts would read as
+    /// "nothing is running" — and it is not an exit-3 unreachable failure.
+    #[test]
+    fn list_non_array_response_is_an_error() {
+        let fake = spawn_list_daemon("{\"graphs\": []}");
+        let port: u16 = fake.port.parse().unwrap();
+
+        let err = handle_list_via_daemon(Some(port), None, true, true).unwrap_err();
+        assert!(err.to_string().contains("unexpected graph list response"));
+        assert_eq!(daemon_exit_code(&err), None);
+    }
+
+    /// Routing: plain `list` and non-list actions stay on the database
+    /// path (`None`); only a flagged `list` goes to the daemon.
+    #[test]
+    fn list_daemon_routing_returns_none_for_database_paths() {
+        let plain = GraphAction::List {
+            workdir: None,
+            json: false,
+            running: false,
+        };
+        assert!(try_handle_daemon_list(&plain, None).is_none());
+        let info = GraphAction::Info {
+            id_or_name: "my-graph".to_string(),
+        };
+        assert!(try_handle_daemon_list(&info, None).is_none());
+    }
+
+    /// Routing: a flagged `list` delegates to the daemon and prints the
+    /// array, without the caller ever opening the database.
+    #[test]
+    fn list_daemon_routing_delegates_flagged_list() {
+        let _stdout_guard = lock_test_stdout();
+        let fake = spawn_list_daemon("[]");
+        let port: u16 = fake.port.parse().unwrap();
+        let action = GraphAction::List {
+            workdir: None,
+            json: false,
+            running: true,
+        };
+
+        let cap = StdoutCapture::start();
+        let routed = try_handle_daemon_list(&action, Some(port));
+        assert!(routed.is_some());
+        routed.unwrap().expect("flagged list should succeed");
+        let out = cap.stop();
+
+        assert_eq!(out.trim(), "[]");
+    }
+
     #[test]
     fn handle_graph_info_covers_bound_specs_branch() {
+        let _stdout_guard = lock_test_stdout();
         let (_dir, db) = db_with_graph("graph-1", "bound-graph", GraphStatus::Draft);
         let mut spec = make_spec("graph-1", "spec-a", 0, GraphSpecStatus::Pending);
         spec.id = "graph-1-0".to_string();
@@ -2143,6 +2471,7 @@ mod tests {
 
     #[test]
     fn handle_graph_info_covers_idea_branch() {
+        let _stdout_guard = lock_test_stdout();
         let (_dir, db) = db_with_graph("graph-2", "idea-graph", GraphStatus::Draft);
         let mut placeholder = make_spec("graph-2", "", 0, GraphSpecStatus::Pending);
         placeholder.id = "graph-2-0".to_string();
@@ -2152,6 +2481,7 @@ mod tests {
 
     #[test]
     fn handle_graph_info_covers_queue_member_branch() {
+        let _stdout_guard = lock_test_stdout();
         use crate::domain::queues::Queue;
         let dir = tempfile::tempdir().unwrap();
         let db = Database::new(&dir.path().join("t.db")).unwrap();
@@ -2176,6 +2506,7 @@ mod tests {
     /// exact section order and the key lines of each mode it routes to.
     #[test]
     fn handle_graph_info_output_captures_bound_mode_sections_in_order() {
+        let _stdout_guard = lock_test_stdout();
         let (_dir, db) = db_with_graph("graph-c1", "cap-bound", GraphStatus::Draft);
         let mut spec = make_spec("graph-c1", "spec-a", 0, GraphSpecStatus::Pending);
         spec.id = "graph-c1-0".to_string();
@@ -2206,6 +2537,7 @@ mod tests {
     /// "no specs queued" queue-history fallback for a drained queue.
     #[test]
     fn handle_graph_info_output_captures_idea_and_queue_history_modes() {
+        let _stdout_guard = lock_test_stdout();
         let (_dir, db) = db_with_graph("graph-c2", "cap-idea", GraphStatus::Draft);
         let mut placeholder = make_spec("graph-c2", "", 0, GraphSpecStatus::Pending);
         placeholder.id = "graph-c2-0".to_string();
@@ -2259,6 +2591,7 @@ mod tests {
 
     #[test]
     fn print_graph_info_hook_runs_covers_empty_and_populated() {
+        let _stdout_guard = lock_test_stdout();
         print_graph_info_hook_runs(&[]);
         let run = crate::domain::graphs::GraphCompletionHookRun {
             id: "run-1".to_string(),
@@ -2281,6 +2614,7 @@ mod tests {
 
     #[test]
     fn print_graph_info_current_node_covers_idle_and_recent_runs_empty() {
+        let _stdout_guard = lock_test_stdout();
         let lp = make_graph("graph-9", "idle-graph", GraphStatus::Draft);
         let dir = tempfile::tempdir().unwrap();
         let db = Database::new(&dir.path().join("t.db")).unwrap();
