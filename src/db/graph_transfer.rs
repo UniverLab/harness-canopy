@@ -1206,6 +1206,7 @@ mod tests {
             vec![GraphCompletionHook {
                 platform: None,
                 crew: Some(crew.to_string()),
+                spec_ids: None,
                 model: None,
                 effort: None,
                 prompt: Some("hi".to_string()),

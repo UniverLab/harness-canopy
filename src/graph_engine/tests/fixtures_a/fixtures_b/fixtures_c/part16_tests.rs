@@ -434,6 +434,7 @@ async fn graph_hook_depth_cap_refuses_second_launch() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let mut b_hooks = std::collections::BTreeMap::new();
     b_hooks.insert(GraphHookEvent::OnCompleted, vec![b_hook]);
@@ -835,6 +836,7 @@ async fn graph_hook_runs_on_completion() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let mut hooks = std::collections::BTreeMap::new();
     hooks.insert(GraphHookEvent::OnCompleted, vec![hook]);

@@ -1039,6 +1039,7 @@ fn hook_kind_label_covers_all_four_kinds() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let mut interactive = base();
     interactive.target_session_id = Some("sess".to_string());

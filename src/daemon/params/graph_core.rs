@@ -126,6 +126,14 @@ pub struct GraphCompletionHookParams {
     /// exclusive with queue_id. Supports the same `{{...}}` placeholders as
     /// the hook's event.
     pub idea: Option<String>,
+    /// The specs this hook fires for, each a full spec id or an unambiguous
+    /// id prefix resolved against the graph's bound specs and its active
+    /// run's queue members. Only accepted on `on_spec_completed` and
+    /// `on_failed` — those fire once per spec, so a hook may name only the
+    /// specs it waits on. An empty value is refused. Omit for the default:
+    /// the hook fires for every spec of the event.
+    #[serde(default)]
+    pub spec_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -149,10 +157,13 @@ pub struct GraphUpdateParams {
     /// Event-keyed hooks. Replace the full hooks map with this map. Each key
     /// is an event name (`on_completed`, `on_failed`, `on_blocked`,
     /// `on_spec_completed`), and each value is an ordered array of hook
-    /// configs. Hooks are not retroactive — a hook registered after its
-    /// event has already happened does not fire. Omit to leave unchanged.
-    /// When `on_completed` is also provided, it is merged into this map
-    /// under the `on_completed` key.
+    /// configs. On `on_spec_completed` and `on_failed` each hook may set
+    /// `spec_ids` — the full spec ids (or unambiguous id prefixes resolved
+    /// against the graph's bound specs and its active run's queue members)
+    /// it fires for; other events refuse it. Hooks are not retroactive — a
+    /// hook registered after its event has already happened does not fire.
+    /// Omit to leave unchanged. When `on_completed` is also provided, it is
+    /// merged into this map under the `on_completed` key.
     pub hooks: Option<std::collections::BTreeMap<String, Vec<GraphCompletionHookParams>>>,
     /// New pre-wired target for infrastructure failures (`Error` edges), or
     /// null to clear. Omit to leave unchanged.

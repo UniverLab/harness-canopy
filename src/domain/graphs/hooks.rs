@@ -79,9 +79,26 @@ pub struct GraphCompletionHook {
     /// exclusive with queue_id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idea: Option<String>,
+    /// The specs this hook fires for (`on_spec_completed`/`on_failed` only).
+    /// `None` means every spec, so hooks stored before the field existed
+    /// behave as today. Store-time validation never stores an empty list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec_ids: Option<Vec<String>>,
 }
 
 impl GraphCompletionHook {
+    /// Whether this hook fires for the spec carried by the hook context.
+    /// `None` `spec_ids` (unbound hook) fires for every spec, including an
+    /// event with no current spec at all; a bound hook only fires when the
+    /// context names exactly one of its specs — so a run-level failure with
+    /// no current spec only ever fires unbound hooks.
+    pub fn fires_for_spec(&self, spec_id: Option<&str>) -> bool {
+        match &self.spec_ids {
+            None => true,
+            Some(ids) => spec_id.is_some_and(|id| ids.iter().any(|spec| spec == id)),
+        }
+    }
+
     /// Whether this is a command hook (runs a shell command directly).
     pub fn is_command(&self) -> bool {
         self.command.is_some()

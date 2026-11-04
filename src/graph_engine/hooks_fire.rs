@@ -39,6 +39,12 @@ impl GraphEngine {
             return;
         }
         for (idx, hook) in hooks.iter().enumerate() {
+            // A per-spec hook (`spec_ids`) fires only for the spec its
+            // event carries. The check runs before the run row is
+            // recorded, so a skipped hook leaves no run row.
+            if !hook.fires_for_spec(ctx.spec_id) {
+                continue;
+            }
             let Some(run_id) = self.record_hook_run_start(lp, &event, hook, idx) else {
                 continue;
             };
@@ -495,6 +501,7 @@ mod tests {
             idea: None,
 
             crew: None,
+            spec_ids: None,
         }
     }
 

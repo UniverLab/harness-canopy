@@ -60,6 +60,7 @@ async fn on_completed_hook_edit_mid_run_fires_the_new_hook() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let mut hooks = std::collections::BTreeMap::new();
     hooks.insert(GraphHookEvent::OnCompleted, vec![hook_v1]);
@@ -83,6 +84,7 @@ async fn on_completed_hook_edit_mid_run_fires_the_new_hook() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let mut hooks = std::collections::BTreeMap::new();
     hooks.insert(GraphHookEvent::OnCompleted, vec![hook_v2.clone()]);
@@ -136,6 +138,7 @@ async fn on_spec_completed_hook_edit_between_specs_fires_new_version() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let mut hooks = std::collections::BTreeMap::new();
     hooks.insert(GraphHookEvent::OnSpecCompleted, vec![v1]);
@@ -160,6 +163,7 @@ async fn on_spec_completed_hook_edit_between_specs_fires_new_version() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let mut hooks = std::collections::BTreeMap::new();
     hooks.insert(GraphHookEvent::OnSpecCompleted, vec![v2.clone()]);

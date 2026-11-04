@@ -476,6 +476,7 @@ fn setup_graph_hook_source(
         idea: idea.map(str::to_string),
 
         crew: None,
+        spec_ids: None,
     };
     let mut hooks = std::collections::BTreeMap::new();
     hooks.insert(GraphHookEvent::OnCompleted, vec![hook]);
@@ -812,3 +813,4 @@ mod part21_tests;
 mod part22_tests;
 mod part23_tests;
 mod part24_tests;
+mod part25_tests;

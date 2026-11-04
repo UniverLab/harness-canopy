@@ -463,6 +463,7 @@ async fn a_pending_bound_spec_is_never_reported_as_a_completed_graph() {
             workdir_override: None,
             idea: None,
             crew: None,
+            spec_ids: None,
         }],
     );
     db.update_graph_hooks(&graph_id, &hooks).unwrap();

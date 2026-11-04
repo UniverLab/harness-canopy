@@ -14,6 +14,88 @@ use crate::domain::models::Trigger;
 use rmcp::model::CallToolResult;
 use rmcp::ErrorData as McpError;
 
+/// `spec_ids` is a per-spec field: only the one-spec-per-fire events accept
+/// it. Every refusal names the event that was configured with it.
+pub(crate) fn spec_ids_event_error(event: GraphHookEvent) -> String {
+    format!(
+        "Hook event '{}' does not accept 'spec_ids'; only on_spec_completed/on_failed are per-spec.",
+        event.as_str()
+    )
+}
+
+/// The specs a hook's `spec_ids` entries resolve against for `graph_id`:
+/// the graph's bound spec ids plus the member spec ids of its active run's
+/// queue (`graph_specs` FK keeps a queue member's spec taking any id the
+/// graph itself could bind), deduplicated.
+fn hook_spec_id_candidates(db: &Database, graph_id: &str) -> Vec<String> {
+    let mut candidates: Vec<String> = db
+        .list_graph_specs(graph_id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|spec| spec.id)
+        .collect();
+    let queue_id = db
+        .get_graph(graph_id)
+        .ok()
+        .flatten()
+        .and_then(|graph| graph.active_run_queue_id);
+    if let Some(queue_id) = queue_id {
+        candidates.extend(db.list_queue_member_spec_ids(&queue_id).unwrap_or_default());
+    }
+    candidates.sort();
+    candidates.dedup();
+    candidates
+}
+
+/// Resolve one `spec_ids` entry against the graph's candidate spec ids:
+/// exact match wins, otherwise the single unambiguous prefix, otherwise a
+/// refusal naming the entry (and its matches when ambiguous).
+fn resolve_hook_spec_id(entry: &str, candidates: &[String]) -> Result<String, String> {
+    if let Some(full) = candidates.iter().find(|id| id.as_str() == entry) {
+        return Ok(full.clone());
+    }
+    let matches: Vec<&String> = candidates
+        .iter()
+        .filter(|id| id.starts_with(entry))
+        .collect();
+    match matches.len() {
+        1 => Ok(matches[0].clone()),
+        0 => Err(format!(
+            "Hook 'spec_ids' entry '{entry}' matches no spec of the graph bound to it or of its active run's queue."
+        )),
+        _ => {
+            let names: Vec<&str> = matches.iter().map(|id| id.as_str()).collect();
+            Err(format!(
+                "Hook 'spec_ids' entry '{entry}' is ambiguous: {}.",
+                names.join(", ")
+            ))
+        }
+    }
+}
+
+/// Trim and resolve one hook's `spec_ids` to full spec ids against
+/// `graph_id`'s bound specs and its active run's queue members — so the
+/// stored hook always carries full ids at write time.
+fn resolve_hook_spec_ids(
+    db: &Database,
+    graph_id: &str,
+    spec_ids: &[String],
+) -> Result<Vec<String>, String> {
+    if spec_ids.is_empty() {
+        return Err("Hook 'spec_ids' must name at least one spec.".to_string());
+    }
+    let candidates = hook_spec_id_candidates(db, graph_id);
+    let mut resolved = Vec::with_capacity(spec_ids.len());
+    for entry in spec_ids {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            return Err("Hook 'spec_ids' must name at least one spec.".to_string());
+        }
+        resolved.push(resolve_hook_spec_id(trimmed, &candidates)?);
+    }
+    Ok(resolved)
+}
+
 /// A validated `graph_edit` update: owned values plus params borrowed
 /// for the string fields.
 pub(crate) struct ParsedGraphUpdate<'a> {
@@ -61,13 +143,22 @@ pub(crate) fn parse_graph_update_fields(
     };
     // A provided `on_completed` param (even `null`, to clear it) counts
     // as an update — same `Option<Option<_>>` shape as `description`.
+    // `spec_ids` is per-spec: the legacy single-event param never carries
+    // it, refusing before build so the message names the event.
     let completion_hook = match &params.on_completed {
         None => None,
         Some(None) => Some(None),
-        Some(Some(hook_params)) => match build_graph_completion_hook(hook_params) {
-            Ok(hook) => Some(Some(hook)),
-            Err(e) => return Err(error_result(&e)),
-        },
+        Some(Some(hook_params)) => {
+            if hook_params.spec_ids.is_some() {
+                return Err(error_result(&spec_ids_event_error(
+                    GraphHookEvent::OnCompleted,
+                )));
+            }
+            match build_graph_completion_hook(hook_params) {
+                Ok(hook) => Some(Some(hook)),
+                Err(e) => return Err(error_result(&e)),
+            }
+        }
     };
     Ok(ParsedGraphUpdate {
         name,
@@ -82,7 +173,13 @@ pub(crate) fn parse_graph_update_fields(
 
 /// Parse the new event-keyed `hooks` parameter. Each key must be a
 /// valid event name; each value is an ordered array of hook configs.
+/// After a hook builds, its `spec_ids` (accepted only on
+/// `on_spec_completed`/`on_failed`) is trimmed and resolved to full spec
+/// ids against `graph_id`'s bound specs and its active run's queue
+/// members — so the stored hook always carries full ids at write time.
 pub(crate) fn parse_graph_hooks_param(
+    db: &Database,
+    graph_id: &str,
     hooks: &Option<std::collections::BTreeMap<String, Vec<GraphCompletionHookParams>>>,
 ) -> Result<
     Option<std::collections::BTreeMap<GraphHookEvent, Vec<GraphCompletionHook>>>,
@@ -101,10 +198,25 @@ pub(crate) fn parse_graph_hooks_param(
                 };
                 let mut hook_list = Vec::new();
                 for hook_params in hooks {
-                    match build_graph_completion_hook(hook_params) {
-                        Ok(hook) => hook_list.push(hook),
-                        Err(e) => return Err(error_result(&e)),
+                    if hook_params.spec_ids.is_some()
+                        && !matches!(
+                            event,
+                            GraphHookEvent::OnSpecCompleted | GraphHookEvent::OnFailed
+                        )
+                    {
+                        return Err(error_result(&spec_ids_event_error(event)));
                     }
+                    let mut hook = match build_graph_completion_hook(hook_params) {
+                        Ok(hook) => hook,
+                        Err(e) => return Err(error_result(&e)),
+                    };
+                    if let Some(spec_ids) = &hook_params.spec_ids {
+                        match resolve_hook_spec_ids(db, graph_id, spec_ids) {
+                            Ok(ids) => hook.spec_ids = Some(ids),
+                            Err(e) => return Err(error_result(&e)),
+                        }
+                    }
+                    hook_list.push(hook);
                 }
                 parsed.insert(event, hook_list);
             }

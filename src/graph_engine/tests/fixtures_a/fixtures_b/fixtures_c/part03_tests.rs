@@ -460,6 +460,7 @@ async fn activity_publishes_hook_failure_with_exit_code() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let mut hooks = std::collections::BTreeMap::new();
     hooks.insert(GraphHookEvent::OnCompleted, vec![hook]);
@@ -542,6 +543,7 @@ async fn graph_events_records_ordered_history_for_failing_spec() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let mut hooks = std::collections::BTreeMap::new();
     hooks.insert(GraphHookEvent::OnFailed, vec![hook]);

@@ -44,6 +44,7 @@ async fn graph_engine_queue_run_settles_completed_when_all_done() {
         workdir_override: None,
         idea: None,
         crew: None,
+        spec_ids: None,
     };
     let mut hooks = std::collections::BTreeMap::new();
     hooks.insert(

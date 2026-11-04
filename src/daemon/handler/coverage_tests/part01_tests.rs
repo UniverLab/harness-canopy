@@ -470,6 +470,7 @@ fn hook_json_full() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let json = super::graph_completion_hook_json(&hook);
     assert_eq!(json["platform"], "claude");
@@ -494,6 +495,7 @@ fn hook_json_no_model() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let json = super::graph_completion_hook_json(&hook);
     assert!(json["model"].is_null());

@@ -201,6 +201,7 @@ fn agent_hook(platform: &str, model: &str, prompt: &str) -> GraphCompletionHook 
     GraphCompletionHook {
         platform: Some(platform.to_string()),
         crew: None,
+        spec_ids: None,
         model: Some(model.to_string()),
         effort: None,
         prompt: Some(prompt.to_string()),

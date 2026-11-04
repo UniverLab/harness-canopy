@@ -1277,6 +1277,7 @@ async fn unavailable_agent_node_blocks_the_spec_without_an_attempt() {
             idea: None,
 
             crew: None,
+            spec_ids: None,
         }],
     );
     db.update_graph_hooks(&graph_id, &hooks).unwrap();

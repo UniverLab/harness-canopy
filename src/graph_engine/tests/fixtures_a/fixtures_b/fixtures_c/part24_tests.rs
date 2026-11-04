@@ -125,6 +125,7 @@ async fn blocked_hook_renders_run_workdir() {
             workdir_override: None,
             idea: None,
             crew: None,
+            spec_ids: None,
         }],
     );
     db.update_graph_hooks(&graph_id, &hooks).unwrap();

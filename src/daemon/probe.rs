@@ -1704,6 +1704,7 @@ mod tests {
             idea: None,
 
             crew: None,
+            spec_ids: None,
         };
         let details = GraphDetails {
             lp: sample_graph(Some(hook)),
@@ -1741,6 +1742,7 @@ mod tests {
                 idea: None,
 
                 crew: None,
+                spec_ids: None,
             }],
         );
         hooks.insert(
@@ -1760,6 +1762,7 @@ mod tests {
                 idea: None,
 
                 crew: None,
+                spec_ids: None,
             }],
         );
         hooks.insert(
@@ -1779,6 +1782,7 @@ mod tests {
                 idea: None,
 
                 crew: None,
+                spec_ids: None,
             }],
         );
         let mut lp = sample_graph(None);

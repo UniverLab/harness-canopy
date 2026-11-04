@@ -764,6 +764,7 @@ async fn graph_engine_normal_queue_run_still_completes_and_fires_hook_once() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     db.update_graph_completion_hook(&graph_id, Some(&hook))
         .unwrap();
@@ -826,6 +827,7 @@ async fn graph_engine_all_bound_specs_already_done_completes_without_firing_hook
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     db.update_graph_completion_hook(&graph_id, Some(&hook))
         .unwrap();
@@ -1189,6 +1191,7 @@ async fn graph_engine_hook_failure_does_not_alter_graph_status() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     db.update_graph_completion_hook(&graph_id, Some(&hook))
         .unwrap();
@@ -1251,6 +1254,7 @@ async fn graph_engine_on_spec_completed_fires_once_with_spec_name() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let mut hooks = std::collections::BTreeMap::new();
     hooks.insert(
@@ -1319,6 +1323,7 @@ async fn graph_engine_on_spec_completed_fires_for_queue_member() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let mut hooks = std::collections::BTreeMap::new();
     hooks.insert(

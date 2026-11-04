@@ -192,3 +192,57 @@ fn whitespace_only_preset_is_not_a_reference() {
     build_import_plan_with_prompts(&doc, "g", dir.path())
         .expect("a blank preset falls back to the default template at spawn");
 }
+
+/// `spec_ids` round-trips through the export document: the serialized form
+/// carries the field, parsing keeps it, and the import plan restores the
+/// hooks verbatim.
+#[test]
+fn export_import_round_trips_hook_spec_ids() {
+    use crate::domain::graphs::GraphCompletionHook;
+    let (mut graph, nodes, edges) = simple_graph();
+    let hook = GraphCompletionHook {
+        platform: None,
+        model: None,
+        effort: None,
+        prompt: None,
+        command: Some("true".to_string()),
+        target_session_id: None,
+        target_session_name: None,
+        timeout_minutes: None,
+        target_graph_id: None,
+        queue_id: None,
+        workdir_override: None,
+        idea: None,
+        crew: None,
+        spec_ids: Some(vec!["spec-a".to_string()]),
+    };
+    graph.hooks.insert(
+        crate::domain::graphs::GraphHookEvent::OnSpecCompleted,
+        vec![hook.clone()],
+    );
+
+    let doc = build_export_document(&graph, &nodes, &edges, &[]).unwrap();
+    let value = serde_json::to_value(&doc).unwrap();
+    assert_eq!(
+        value["hooks"]["on_spec_completed"][0]["spec_ids"],
+        serde_json::json!(["spec-a"]),
+        "the serialized document must carry spec_ids"
+    );
+
+    let parsed = parse_export_document_value(&value).unwrap();
+    assert_eq!(
+        parsed
+            .hooks
+            .get(&crate::domain::graphs::GraphHookEvent::OnSpecCompleted),
+        Some(&vec![hook.clone()]),
+        "parsing must keep the field"
+    );
+
+    let plan = build_import_plan(&parsed, "new-graph").unwrap();
+    assert_eq!(
+        plan.hooks
+            .get(&crate::domain::graphs::GraphHookEvent::OnSpecCompleted),
+        Some(&vec![hook]),
+        "import must restore the hooks verbatim"
+    );
+}

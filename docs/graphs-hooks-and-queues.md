@@ -38,6 +38,19 @@ already happened does not fire. A hook that fails is recorded and never
 changes the graph's own status, and never stops the remaining hooks of that
 event from running.
 
+On `on_spec_completed` and `on_failed` each hook may name `spec_ids`: the
+full spec ids (or unambiguous id prefixes, resolved against the graph's
+bound specs and its active run's queue members) it fires for. Omit it and
+the hook fires for every spec, as before:
+
+```json
+{ "on_spec_completed": [{ "command": "notify-done.sh", "spec_ids": ["spec-a"] }] }
+```
+
+`spec_ids` must name at least one spec, and each entry must match a spec of
+the graph or its queue — unknown entries are refused. `on_completed` and
+`on_blocked` refuse `spec_ids`: those events are not per-spec.
+
 Editing hooks on a running graph takes effect for that run: the engine reads
 the graph's stored hooks at the moment each event fires, so a `graph_edit` `update`
 landing before an event fires is the edit that fires on the current run's
@@ -58,8 +71,10 @@ Hooks accept the complete marker vocabulary `{{graph_name}}`, `{{workdir}}`,
 `{{node}}`. Event context determines which values are populated:
 `on_completed` provides `{{completed_specs}}` (name + one-line summary of
 each spec this run completed, one per line); `on_spec_completed` provides
-`{{spec_name}}` and `{{spec_id}}`; and `on_failed`/`on_blocked` provide
-`{{blocker}}` and `{{node}}` (the name of the node that ended the run).
+`{{spec_name}}` and `{{spec_id}}`; `on_failed` provides `{{blocker}}` and
+`{{node}}` (the name of the node that ended the run), plus `{{spec_id}}` when
+the failure belongs to a spec — the id a hook's `spec_ids` is matched
+against; and `on_blocked` provides `{{blocker}}` and `{{node}}`.
 Every known marker with no value for the event renders exactly `(none)` in
 command, agent, interactive, and graph-idea hooks. Unknown marker names are
 rejected by `graph_edit` `update` with the marker name and supported list; no hook

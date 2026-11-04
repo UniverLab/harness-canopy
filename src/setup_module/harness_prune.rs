@@ -441,6 +441,7 @@ mod tests {
             vec![crate::domain::graphs::GraphCompletionHook {
                 platform: Some("ghost".to_string()),
                 crew: None,
+                spec_ids: None,
                 model: None,
                 effort: None,
                 prompt: Some("done".to_string()),
