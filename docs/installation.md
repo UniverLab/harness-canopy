@@ -29,6 +29,8 @@ curl -fsSL https://raw.githubusercontent.com/UniverLab/harness-canopy/main/scrip
 cargo install harness-canopy
 ```
 
+This build leaves out two patched dependencies that the release binaries carry, because cargo ignores `[patch]` in published crates. Without them, remote control can drop over a relay, so prefer the install script.
+
 The crate is `harness-canopy`; the installed binary is **`canopy`**.
 Available on [crates.io](https://crates.io/crates/harness-canopy).
 

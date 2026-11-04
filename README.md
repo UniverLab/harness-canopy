@@ -87,7 +87,7 @@ re-run `canopy setup`.
 curl -fsSL https://raw.githubusercontent.com/UniverLab/harness-canopy/main/scripts/install.sh | sh
 ```
 
-Or via cargo: `cargo install harness-canopy` (the binary is `canopy`).
+Or via cargo: `cargo install harness-canopy` (the binary is `canopy`). Prefer the script: release binaries carry two patched dependencies that cargo leaves out of published crates, including the fix that keeps remote control connected over a relay.
 See [`docs/installation.md`](docs/installation.md) for all methods and first-time setup.
 
 ## Documentation
