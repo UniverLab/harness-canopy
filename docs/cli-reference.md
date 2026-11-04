@@ -20,7 +20,7 @@ to install)).
 |---|---|
 | `canopy daemon start` | Start the daemon (MCP server, scheduler, watchers) |
 | `canopy daemon stop` | Stop the daemon |
-| `canopy daemon status` | Show daemon status |
+| `canopy daemon status` | Show daemon status and version; warns when the running daemon is not this CLI's version |
 | `canopy daemon restart` | Restart the daemon |
 | `canopy daemon logs` | Show the daemon log |
 | `canopy daemon install-service` | Register as a system service |
