@@ -671,7 +671,7 @@ fn spawn_forwarder(
     tokio::spawn(async move {
         let mut rx = rx;
         let mut next = from_seq;
-        let mut coal = SessionCoal::new(false);
+        let mut coal = SessionCoal::local();
         loop {
             let deadline = coal.next_deadline();
             tokio::select! {

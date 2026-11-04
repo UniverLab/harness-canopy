@@ -455,13 +455,17 @@ the host can honor it. Output and snapshot frames are chunked to stay under
 16 KiB; a snapshot's first part carries `cols`/`rows`, the
 rest travels as `snapshot_more`, and the final `snapshot_more` carries
 `last: true` (an empty one when the snapshot fit the first part). The host
-coalesces terminal output into larger `out` frames — sent once 12 KiB has
-accumulated or 25 ms have passed — and the data channel sends that
-coalesced output at most 20 times per second per attached session. A
+coalesces terminal output into larger `out` frames: the first output
+after a quiet spell is sent at once (a keystroke echo never waits), and
+what follows within 25 ms of a sent frame is batched and sent once 12 KiB
+has accumulated or the 25 ms have passed. The data channel sends that
+coalesced output at most 20 times per second per attached session, and
+the first frame after a 50 ms lull still leaves immediately. A
 client that falls more than 512 KiB or half a second behind gets a fresh
 `snapshot` in place of the backlog, so it always catches up to the current
 screen; `/sessions/ws` clients (the TUI) obey the same 512 KiB and
-half-second rule without the 20-a-second cap, and control frames (`hello`,
+half-second rule with a 4 ms batching window and without the 20-a-second
+cap, and control frames (`hello`,
 `list`, `ok`, errors, `shelf`, `metrics`) are never dropped for a slow
 client. The shelf rides the same channel: `shelf_list` and `shelf_get`
 answer `shelf` and `file` frames, and `shelf_added` / `shelf_removed` push

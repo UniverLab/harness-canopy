@@ -407,7 +407,7 @@ fn spawn_cat(hub: &SessionHub, workdir: &str) -> Arc<HubSession> {
 #[tokio::test]
 async fn a_fifty_hertz_spinner_yields_at_most_twenty_out_frames_per_second() {
     let (tx, mut rx) = outbound::channel();
-    let mut coal = SessionCoal::new(true);
+    let mut coal = SessionCoal::remote();
     let chunk = vec![b'.'; 100];
     let mut seq = 0u64;
     let mut frames: Vec<String> = Vec::new();
@@ -463,7 +463,7 @@ async fn a_lagged_forwarder_resumes_live_output_after_the_snapshot_seq() {
     session.ingest_chunk(b"before\r\n");
 
     let (tx, mut rx) = outbound::channel();
-    let mut coal = SessionCoal::new(true);
+    let mut coal = SessionCoal::remote();
     let mut next = 0u64;
     assert!(pump(
         &session,

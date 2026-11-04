@@ -2,15 +2,20 @@
 //!
 //! A connection's writer drains [`ConnRx`]; producers push control frames
 //! (never dropped) or output chunks. Output is coalesced per attached session
-//! in a [`SessionCoal`] buffer and only sent when it reaches
-//! [`COALESCE_MAX`] bytes or [`COALESCE_MS`] milliseconds have passed. When a
-//! slow consumer lets the queue pass [`MAX_BYTES`], or the queue goes
-//! [`STALE_MS`] without draining while output is still arriving, the buffered
-//! output is dropped and replaced by one fresh snapshot, so the client always
-//! catches up to the current screen.
+//! in a [`SessionCoal`] buffer. Coalescing is leading-edge: the first chunk
+//! after the session has been quiet for a whole window is sent at once (a
+//! keystroke echo never waits), and whatever follows within the window is
+//! buffered and sent together when the window closes, or as soon as it
+//! reaches [`COALESCE_MAX`] bytes. The window is [`COALESCE_MS`] on the
+//! remote data channel and [`LOCAL_COALESCE_MS`] on the local `/sessions/ws`
+//! connection. When a slow consumer lets the queue pass [`MAX_BYTES`], or
+//! the queue goes [`STALE_MS`] without draining while output is still
+//! arriving, the buffered output is dropped and replaced by one fresh
+//! snapshot, so the client always catches up to the current screen.
 //!
 //! The remote data channel additionally caps output at
-//! `1 / REMOTE_MIN_INTERVAL` frames per second per session.
+//! `1 / REMOTE_MIN_INTERVAL` frames per second per session; the first frame
+//! after a quiet interval that long still leaves at once.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -20,8 +25,12 @@ use tokio::sync::mpsc;
 
 /// Per-connection byte budget for queued outbound frames.
 pub const MAX_BYTES: usize = 512 * 1024;
-/// Coalescing window: a buffered chunk is sent this long after it arrived.
+/// Remote coalescing window: output following a sent frame is buffered and
+/// sent this long after that frame.
 pub const COALESCE_MS: u64 = 25;
+/// The local connection's (much shorter) coalescing window: loopback has no
+/// per-frame cost worth trading latency for, so it only batches bursts.
+pub const LOCAL_COALESCE_MS: u64 = 4;
 /// Coalescing size: a buffered chunk is sent once it reaches this many bytes.
 pub const COALESCE_MAX: usize = 12 * 1024;
 /// A buffer that cannot be flushed for this long falls back to a snapshot.
@@ -32,6 +41,7 @@ pub const SHRINK_AT: usize = 1024 * 1024;
 pub const REMOTE_MIN_INTERVAL: Duration = Duration::from_millis(50);
 
 const COALESCE: Duration = Duration::from_millis(COALESCE_MS);
+const LOCAL_COALESCE: Duration = Duration::from_millis(LOCAL_COALESCE_MS);
 const STALE: Duration = Duration::from_millis(STALE_MS);
 
 /// Upper bound on the wire size of `raw` buffered bytes: base64 expansion
@@ -194,20 +204,34 @@ pub struct SessionCoal {
     hi_seq: u64,
     deadline: Option<Instant>,
     last_send: Option<Instant>,
+    window: Duration,
     min_interval: Option<Duration>,
     awaiting_drain: bool,
 }
 
 impl SessionCoal {
-    /// A coalescer for one attached session. `remote` enables the data
-    /// channel's per-session frame rate cap.
-    pub fn new(remote: bool) -> Self {
+    /// A coalescer for one session attached over the local `/sessions/ws`
+    /// connection: a [`LOCAL_COALESCE_MS`] window and no rate cap.
+    pub fn local() -> Self {
+        Self::with_window(LOCAL_COALESCE, None)
+    }
+
+    /// A coalescer for one session attached over a remote data channel: a
+    /// [`COALESCE_MS`] window and the [`REMOTE_MIN_INTERVAL`] rate cap.
+    pub fn remote() -> Self {
+        Self::with_window(COALESCE, Some(REMOTE_MIN_INTERVAL))
+    }
+
+    /// A coalescer with an explicit window and optional minimum gap between
+    /// two sends.
+    pub fn with_window(window: Duration, min_interval: Option<Duration>) -> Self {
         Self {
             buf: Vec::new(),
             hi_seq: 0,
             deadline: None,
             last_send: None,
-            min_interval: remote.then_some(REMOTE_MIN_INTERVAL),
+            window,
+            min_interval,
             awaiting_drain: false,
         }
     }
@@ -238,7 +262,13 @@ impl SessionCoal {
 
     fn append(&mut self, now: Instant, seq: u64, chunk: &[u8]) {
         if self.buf.is_empty() {
-            self.deadline = Some(now + COALESCE);
+            // Leading edge: quiet for a whole window since the last send (or
+            // never sent) means due now; otherwise the window that send
+            // opened closes the batch.
+            let due = self
+                .last_send
+                .map_or(now, |last| (last + self.window).max(now));
+            self.deadline = Some(due);
         }
         self.buf.extend_from_slice(chunk);
         self.hi_seq = seq;

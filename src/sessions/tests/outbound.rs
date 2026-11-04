@@ -16,7 +16,7 @@ fn json(frame: &str) -> serde_json::Value {
 fn a_slow_consumer_gets_the_bound_plus_one_snapshot_not_the_whole_burst() {
     const BURST: usize = 16 * 1024 * 1024;
     let (tx, mut rx) = outbound::channel();
-    let mut coal = SessionCoal::new(false);
+    let mut coal = SessionCoal::local();
     let chunk = vec![b'x'; 4096];
     let mut seq = 0u64;
     for _ in 0..(BURST / chunk.len()) {
@@ -73,7 +73,7 @@ fn a_slow_consumer_gets_the_bound_plus_one_snapshot_not_the_whole_burst() {
 #[tokio::test]
 async fn a_stalled_queue_falls_back_to_a_snapshot_after_half_a_second() {
     let (tx, _rx) = outbound::channel();
-    let mut coal = SessionCoal::new(false);
+    let mut coal = SessionCoal::local();
     let chunk = vec![b'x'; 12 * 1024];
     assert_eq!(coal.push_out(&tx, 1, &chunk), PushOut::Buffered);
     assert!(flush_coal("s", &tx, &mut coal));
@@ -91,7 +91,7 @@ async fn a_stalled_queue_falls_back_to_a_snapshot_after_half_a_second() {
 #[test]
 fn control_frames_survive_a_saturated_output_queue() {
     let (tx, mut rx) = outbound::channel();
-    let mut coal = SessionCoal::new(false);
+    let mut coal = SessionCoal::local();
     let chunk = vec![b'x'; 12 * 1024];
     let mut seq = 0u64;
     let mut saturated = false;
@@ -151,7 +151,7 @@ async fn the_tui_hub_path_applies_the_same_output_bound() {
     );
 
     let (tx, mut rx) = outbound::channel();
-    let mut coal = SessionCoal::new(false);
+    let mut coal = SessionCoal::local();
     let mut next = 0u64;
     let chunk = vec![b'y'; 4096];
     for _ in 0..400 {
@@ -206,4 +206,102 @@ async fn the_tui_hub_path_applies_the_same_output_bound() {
         snapshot_seq >= last_out_seq,
         "the snapshot ({snapshot_seq}) resumes at or after the last out ({last_out_seq})"
     );
+}
+
+/// Drain every `out` frame's decoded payload.
+fn out_payloads(rx: &mut outbound::ConnRx) -> Vec<Vec<u8>> {
+    use base64::Engine as _;
+    let mut payloads = Vec::new();
+    while let Ok(frame) = rx.try_recv() {
+        let value = json(&frame);
+        assert_eq!(value["t"], "out", "only out frames expected: {frame}");
+        let data = value["data"].as_str().expect("out data");
+        payloads.push(
+            base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .expect("base64 data"),
+        );
+    }
+    payloads
+}
+
+/// The first chunk after an idle spell is due at once: a keystroke echo is
+/// never held back by the coalescing window, on either transport.
+#[test]
+fn the_first_chunk_after_idle_flushes_immediately() {
+    for mut coal in [
+        SessionCoal::local(),
+        SessionCoal::remote(),
+        SessionCoal::with_window(std::time::Duration::from_secs(60), None),
+    ] {
+        let (tx, mut rx) = outbound::channel();
+        assert_eq!(coal.push_out(&tx, 1, b"k"), PushOut::Buffered);
+        assert!(
+            coal.next_deadline()
+                .is_some_and(|at| at <= std::time::Instant::now()),
+            "an idle coalescer's first chunk is due now"
+        );
+        assert!(flush_coal("s", &tx, &mut coal));
+        assert_eq!(out_payloads(&mut rx), vec![b"k".to_vec()]);
+    }
+}
+
+/// Output that follows a leading-edge send within the window is batched and
+/// leaves together when the window closes.
+#[tokio::test]
+async fn output_after_a_leading_send_is_coalesced_for_the_window() {
+    let window = std::time::Duration::from_millis(40);
+    let (tx, mut rx) = outbound::channel();
+    let mut coal = SessionCoal::with_window(window, None);
+    assert_eq!(coal.push_out(&tx, 1, b"a"), PushOut::Buffered);
+    assert!(flush_coal("s", &tx, &mut coal));
+    assert_eq!(coal.push_out(&tx, 2, b"b"), PushOut::Buffered);
+    assert_eq!(coal.push_out(&tx, 3, b"c"), PushOut::Buffered);
+    assert!(flush_coal("s", &tx, &mut coal));
+    assert_eq!(
+        out_payloads(&mut rx),
+        vec![b"a".to_vec()],
+        "trailing output waits for the window"
+    );
+
+    tokio::time::sleep(window + std::time::Duration::from_millis(5)).await;
+    assert!(flush_coal("s", &tx, &mut coal));
+    assert_eq!(out_payloads(&mut rx), vec![b"bc".to_vec()]);
+
+    // Quiet for a whole window again: the next chunk leads immediately.
+    tokio::time::sleep(window + std::time::Duration::from_millis(5)).await;
+    assert_eq!(coal.push_out(&tx, 4, b"d"), PushOut::Buffered);
+    assert!(flush_coal("s", &tx, &mut coal));
+    assert_eq!(out_payloads(&mut rx), vec![b"d".to_vec()]);
+}
+
+/// The remote rate cap still spaces frames, but the first frame after a lull
+/// longer than the cap goes out at once instead of waiting a window.
+#[tokio::test]
+async fn the_remote_rate_cap_lets_the_first_frame_after_a_lull_through() {
+    let (tx, mut rx) = outbound::channel();
+    let mut coal = SessionCoal::remote();
+    assert_eq!(coal.push_out(&tx, 1, b"x"), PushOut::Buffered);
+    assert!(flush_coal("s", &tx, &mut coal));
+    assert_eq!(coal.push_out(&tx, 2, b"y"), PushOut::Buffered);
+    assert!(flush_coal("s", &tx, &mut coal));
+    assert_eq!(
+        out_payloads(&mut rx),
+        vec![b"x".to_vec()],
+        "a second frame right away is held by the rate cap"
+    );
+    let deadline = coal.next_deadline().expect("buffered output");
+    assert!(
+        deadline >= std::time::Instant::now() + std::time::Duration::from_millis(20),
+        "the held frame waits for the rate cap"
+    );
+
+    tokio::time::sleep(outbound::REMOTE_MIN_INTERVAL + std::time::Duration::from_millis(5)).await;
+    assert!(flush_coal("s", &tx, &mut coal));
+    assert_eq!(out_payloads(&mut rx), vec![b"y".to_vec()]);
+
+    tokio::time::sleep(outbound::REMOTE_MIN_INTERVAL + std::time::Duration::from_millis(5)).await;
+    assert_eq!(coal.push_out(&tx, 3, b"z"), PushOut::Buffered);
+    assert!(flush_coal("s", &tx, &mut coal));
+    assert_eq!(out_payloads(&mut rx), vec![b"z".to_vec()]);
 }
