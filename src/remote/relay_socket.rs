@@ -152,13 +152,15 @@ async fn answer_text(
     let Ok(envelope) = serde_json::from_str::<Value>(text) else {
         return Ok(true);
     };
+    // The relay's login/uid siblings, not the client's bytes, are the
+    // identity a device or guest body carries from here on.
     let (Some(from), Some(body)) = (
         envelope.get("from").and_then(Value::as_str),
-        envelope.get("body"),
+        super::guest::attested_body(&envelope),
     ) else {
         return Ok(true);
     };
-    if let Some(reply) = runtime.route(body, chrono::Utc::now().timestamp(), from, signal) {
+    if let Some(reply) = runtime.route(&body, chrono::Utc::now().timestamp(), from, signal) {
         if !send_body(socket, from, &reply).await? {
             return Ok(false);
         }

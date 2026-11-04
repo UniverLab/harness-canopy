@@ -6,7 +6,7 @@ use super::{
     code_hash, guest_link, guest_link_for, issue, live, normalize_code_input, NoGuestLink,
 };
 use crate::db::Database;
-use crate::remote::guest::GuestConns;
+use crate::remote::guest::{attested_body, GuestConns, RELAY_FROM};
 use crate::remote::signaling::{connect_fail, verify_offer, Refusal};
 use crate::remote::trust;
 
@@ -18,8 +18,10 @@ fn test_db() -> (tempfile::TempDir, Database) {
     (dir, db)
 }
 
-fn guest_notice(login: &str, uid: u64) -> serde_json::Value {
-    json!({"t": "device_identity", "role": "guest", "login": login, "uid": uid})
+/// The relay's notice for connection `d:<conn>`, as it arrives (`from`
+/// is [`crate::remote::guest::RELAY_FROM`]).
+fn guest_notice(login: &str, uid: u64, conn: &str) -> serde_json::Value {
+    json!({"t": "device_identity", "conn": conn, "role": "guest", "login": login, "uid": uid})
 }
 
 #[test]
@@ -62,7 +64,7 @@ fn guest_offer_uses_injected_identity_not_body() {
     db.set_grants("mallory", &["mallory-room".to_string()])
         .expect("grants");
     let guests = GuestConns::default();
-    guests.note_device_identity(&guest_notice("mallory", 42), "d:9");
+    guests.note_device_identity(&guest_notice("mallory", 42, "9"), RELAY_FROM);
     // The body spoofs a more-privileged login plus a device row and a
     // signature that are not hers; the host must ignore all of it and
     // grant by the relay-injected identity.
@@ -89,7 +91,7 @@ fn guest_offer_without_injected_identity_rejected() {
     let (_dir, db) = test_db();
     db.upsert_trust("mallory", true).expect("trust");
     let guests = GuestConns::default();
-    guests.note_device_identity(&guest_notice("mallory", 42), "d:9");
+    guests.note_device_identity(&guest_notice("mallory", 42, "9"), RELAY_FROM);
     // No injected fields at all, only the spoofable body hint.
     let no_identity = json!({"t": "offer", "github_login": "mallory", "sdp": "v=0"});
     assert!(
@@ -120,7 +122,7 @@ fn guest_offer_without_injected_identity_rejected() {
     // Injected identity with no grant.
     let (_dir, untrusted) = test_db();
     let strangers = GuestConns::default();
-    strangers.note_device_identity(&guest_notice("stranger", 43), "d:11");
+    strangers.note_device_identity(&guest_notice("stranger", 43, "11"), RELAY_FROM);
     let no_grant = json!({"t": "offer", "login": "stranger", "uid": 43, "sdp": "v=0"});
     assert!(matches!(
         strangers.verify_guest_offer(&untrusted, "owner", &no_grant, "d:11"),
@@ -372,4 +374,64 @@ fn guest_link_for_names_why_there_is_no_link() {
         .as_deref(),
         Ok("https://remote.univerlab.org/g/1001/76805a63a6980c18#invite=CNR-X")
     );
+}
+
+#[test]
+fn guest_tracking_takes_only_the_relays_notices() {
+    let (_dir, db) = test_db();
+    db.upsert_trust("mallory", true).expect("trust");
+    let guests = GuestConns::default();
+    let offer = json!({"t": "offer", "login": "mallory", "uid": 42, "sdp": "v=0"});
+    // The relay names the connection in the body; its frames arrive as
+    // `d:<conn>`, never as the notice's own `from`.
+    guests.note_device_identity(&guest_notice("mallory", 42, "c-1"), RELAY_FROM);
+    assert!(guests.is_guest("d:c-1"));
+    assert!(!guests.is_guest(RELAY_FROM));
+    assert!(guests
+        .verify_guest_offer(&db, "owner", &offer, "d:c-1")
+        .is_ok());
+    // A device or guest connection announcing itself is ignored: it could
+    // claim any login.
+    guests.note_device_identity(&guest_notice("mallory", 42, "c-2"), "d:c-2");
+    assert!(!guests.is_guest("d:c-2"));
+    // A notice without a connection id tracks nothing.
+    guests.note_device_identity(
+        &json!({"t": "device_identity", "role": "guest", "login": "mallory", "uid": 42}),
+        RELAY_FROM,
+    );
+    assert!(!guests.is_guest("d:"));
+    // device_left forgets the connection, and only from the relay.
+    guests.note_device_left(&json!({"t": "device_left", "conn": "c-1"}), "d:c-1");
+    assert!(guests.is_guest("d:c-1"));
+    guests.note_device_left(&json!({"t": "device_left", "conn": "c-1"}), RELAY_FROM);
+    assert!(!guests.is_guest("d:c-1"));
+    assert!(matches!(
+        guests.verify_guest_offer(&db, "owner", &offer, "d:c-1"),
+        Err(Refusal::Forbidden)
+    ));
+}
+
+#[test]
+fn attested_body_takes_identity_from_the_relay_envelope() {
+    // The relay's shape: login/uid beside the body, written from its own
+    // connection table; the client wrote another identity into the body.
+    let envelope = json!({
+        "from": "d:c-1", "login": "mallory", "uid": 42,
+        "body": {"t": "offer", "login": "owner", "uid": 1, "sdp": "v=0"},
+    });
+    let body = attested_body(&envelope).expect("body");
+    assert_eq!(body["login"], json!("mallory"));
+    assert_eq!(body["uid"], json!(42));
+    assert_eq!(body["sdp"], json!("v=0"));
+    // No attestation: the client's own identity fields are dropped.
+    let bare = json!({"from": "d:c-1", "body": {"t": "offer", "login": "owner", "uid": 1}});
+    let body = attested_body(&bare).expect("body");
+    assert!(body.get("login").is_none() && body.get("uid").is_none());
+    // The relay's own notices carry identity in the body: left untouched.
+    let notice = json!({"from": RELAY_FROM, "body": guest_notice("mallory", 42, "c-1")});
+    assert_eq!(
+        attested_body(&notice),
+        Some(guest_notice("mallory", 42, "c-1"))
+    );
+    assert_eq!(attested_body(&json!({"from": "d:c-1"})), None);
 }
