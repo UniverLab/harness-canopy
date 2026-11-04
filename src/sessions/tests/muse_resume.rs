@@ -889,8 +889,9 @@ fn real_muse_interactive_spawn_records_its_conversation_id() {
     write_muse_config(db_dir.path());
     let hub = test_hub(&db);
 
-    // A fresh interactive spawn through the hub, then exactly what a fresh
-    // TUI launch runs after spawning.
+    // A fresh interactive spawn through the hub (which records on its own),
+    // plus an explicit recorder run: the no-overwrite setter makes the
+    // second recording of the same id a no-op.
     let since = std::time::SystemTime::now();
     let mut req = agent_spawn("muse", &scratch.work_str());
     req.interactive_args = Some("--provider echo".to_string());
@@ -983,6 +984,114 @@ fn real_muse_interactive_spawn_records_its_conversation_id() {
         "the harness's stderr tail is attached to the row: {detail:?}"
     );
     hub.kill("rec-1");
+}
+
+/// Restores `PATH` when dropped; the caller holds [`ENV_LOCK`].
+struct PathGuard(Option<OsString>);
+
+impl PathGuard {
+    fn prepend(dir: &std::path::Path) -> Self {
+        let old = std::env::var_os("PATH");
+        let mut paths = vec![dir.to_path_buf()];
+        paths.extend(std::env::split_paths(&old.clone().unwrap_or_default()));
+        std::env::set_var("PATH", std::env::join_paths(paths).expect("join PATH"));
+        Self(old)
+    }
+}
+
+impl Drop for PathGuard {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+    }
+}
+
+/// A hub spawn of a fresh muse session records its conversation id on its
+/// own — the path a remote or scheduled spawn takes, with no TUI launcher
+/// to do it — and finds it under the real `YYYY/MM/DD` layout even though
+/// the year and month partitions carry months-old mtimes.
+#[cfg(unix)]
+#[test]
+fn hub_spawn_records_a_fresh_muse_conversation() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let root = tempfile::tempdir().expect("scratch root");
+    let store = root.path().join("store");
+    let today = chrono::Utc::now().date_naive();
+    let month = store
+        .join(today.format("%Y").to_string())
+        .join(today.format("%m").to_string());
+    let day = month.join(today.format("%d").to_string());
+    std::fs::create_dir_all(&day).expect("day partition");
+    let work = root.path().join("work");
+    let shim = root.path().join("shim");
+    std::fs::create_dir_all(&work).expect("workdir");
+    std::fs::create_dir_all(&shim).expect("shim dir");
+    // A fake muse: write the live lock for its own pid, then idle.
+    let conv = day.join("uuid-hub-fresh");
+    std::fs::write(
+        shim.join("muse"),
+        format!(
+            "#!/bin/sh\nmkdir -p {dir}\nprintf 'pid=%s\\nhost=TEST\\n' \"$$\" > {dir}/.session.lock\nexec sleep 30\n",
+            dir = shell_quote(&conv),
+        ),
+    )
+    .expect("fake muse");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(shim.join("muse"), std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake muse");
+    }
+    let old = std::time::SystemTime::now() - Duration::from_secs(90 * 24 * 3600);
+    for dir in [&month, month.parent().expect("year")] {
+        std::fs::File::open(dir)
+            .and_then(|dir| dir.set_modified(old))
+            .expect("age partition");
+    }
+    let _path = PathGuard::prepend(&shim);
+
+    let (db, _db_dir) = test_db();
+    let hub = test_hub(&db);
+    hub.set_muse_store_dir(store.clone());
+    let mut req = agent_spawn("muse", &work.to_string_lossy());
+    req.interactive_args = Some("--provider echo".to_string());
+    req.id = Some("hub-fresh".to_string());
+    let (_session, _guard) = KillGuard::spawn(&hub, &req);
+
+    assert!(
+        poll_until(Duration::from_secs(10), || {
+            db.get_interactive_session("hub-fresh")
+                .ok()
+                .flatten()
+                .and_then(|row| row.harness_conversation_id)
+                .as_deref()
+                == Some("uuid-hub-fresh")
+        }),
+        "the hub must record the fresh muse session's conversation id"
+    );
+}
+
+#[test]
+fn hub_records_only_fresh_muse_agent_spawns() {
+    use crate::sessions::muse_conversation::hub_spawn_records_conversation;
+    let fresh = agent_spawn("muse", "/work");
+    assert!(hub_spawn_records_conversation(&fresh));
+
+    let mut resume = agent_spawn("muse", "/work");
+    resume.preserve_args = true;
+    assert!(!hub_spawn_records_conversation(&resume));
+
+    let mut known = agent_spawn("muse", "/work");
+    known.harness_conversation_id = Some("uuid-known".to_string());
+    assert!(!hub_spawn_records_conversation(&known));
+
+    assert!(!hub_spawn_records_conversation(&agent_spawn(
+        "claude", "/work"
+    )));
+    let mut terminal = agent_spawn("muse", "/work");
+    terminal.kind = SessionKind::Terminal;
+    assert!(!hub_spawn_records_conversation(&terminal));
 }
 
 #[test]

@@ -404,7 +404,6 @@ impl App {
         // harness id), and either adoption is a resume for the rename notice
         // and for args preservation.
         let is_resume = dialog.selected_resume_session.is_some() || known_session.is_some();
-        let spawn_since = std::time::SystemTime::now();
         let agent = InteractiveAgent::spawn(
             cli,
             &dir,
@@ -432,35 +431,12 @@ impl App {
             harness_conversation_id.as_deref(),
             is_resume,
         );
-        self.record_fresh_muse_launch(&agent, &dir, is_resume, spawn_since);
         // Don't register nursery temp dir as a project — it's ephemeral
         if !is_nursery && crate::domain::project::should_auto_register(Path::new(&dir)) {
             let _ = self.db.register_project_path(Path::new(&dir));
         }
         self.announce_spawned_agent(agent, is_resume, requested_name.as_deref());
         Ok(())
-    }
-
-    /// A fresh muse launch is a new conversation: discover the harness's own
-    /// id for it in the background so a later restart resumes this
-    /// conversation instead of the workspace's newest one.
-    fn record_fresh_muse_launch(
-        &self,
-        agent: &crate::tui::agent::InteractiveAgent,
-        dir: &str,
-        is_resume: bool,
-        spawn_since: std::time::SystemTime,
-    ) {
-        if agent.cli.as_str() == "muse" && !is_resume {
-            crate::sessions::muse_conversation::record_fresh_conversation(
-                self.db.clone(),
-                agent.id.clone(),
-                dir.to_string(),
-                spawn_since,
-                agent.pid(),
-                crate::sessions::muse_conversation::muse_store_dir(),
-            );
-        }
     }
 
     /// Track a freshly spawned agent and announce it in the header: always

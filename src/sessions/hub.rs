@@ -497,6 +497,10 @@ struct HubInner {
     bcast_capacity: usize,
     host_label: String,
     shelf: super::hub_shelf::ShelfLink,
+    /// Where fresh muse spawns look for their conversation id; unset means
+    /// the live store ([`super::muse_conversation::muse_store_dir`]). Tests
+    /// point it at a scratch store.
+    muse_store_override: std::sync::OnceLock<std::path::PathBuf>,
 }
 
 impl SessionHub {
@@ -518,6 +522,7 @@ impl SessionHub {
                 bcast_capacity: bcast_capacity.max(1),
                 host_label,
                 shelf: super::hub_shelf::ShelfLink::default(),
+                muse_store_override: std::sync::OnceLock::new(),
             }),
         }
     }
@@ -570,6 +575,8 @@ impl SessionHub {
         };
 
         let (cmd, args) = super::hub_command::build_spawn_command(req, &id, &name);
+        // Sampled before the child exists: its conversation lock is newer.
+        let spawn_since = std::time::SystemTime::now();
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
             rows: DEFAULT_ROWS,
@@ -621,6 +628,7 @@ impl SessionHub {
             map.insert(id.clone(), Arc::clone(&session));
         }
         self.insert_db_row(req, &session, args.as_deref());
+        self.record_muse_conversation(req, &session, spawn_since);
         spawn_reader_thread(self.clone(), Arc::clone(&session), reader);
         self.emit(HubEvent::SessionAdded(Box::new(session.item())));
 
@@ -663,6 +671,41 @@ impl SessionHub {
                 );
             }
         }
+    }
+
+    /// A fresh muse spawn is a new conversation: discover the harness's own
+    /// id for it on a background thread, so a later restart resumes this
+    /// conversation. Done here, not by each launcher, so every spawn path
+    /// (TUI, remote, scheduler) records it.
+    fn record_muse_conversation(
+        &self,
+        req: &SpawnRequest,
+        session: &HubSession,
+        since: std::time::SystemTime,
+    ) {
+        if !super::muse_conversation::hub_spawn_records_conversation(req) {
+            return;
+        }
+        let store = self
+            .inner
+            .muse_store_override
+            .get()
+            .cloned()
+            .or_else(super::muse_conversation::muse_store_dir);
+        super::muse_conversation::record_fresh_conversation(
+            Arc::clone(&self.inner.db),
+            session.id.clone(),
+            req.workdir.clone(),
+            since,
+            session.pid,
+            store,
+        );
+    }
+
+    /// Point fresh muse spawns at a scratch session store.
+    #[cfg(test)]
+    pub(crate) fn set_muse_store_dir(&self, dir: std::path::PathBuf) {
+        let _ = self.inner.muse_store_override.set(dir);
     }
 
     pub fn get(&self, id: &str) -> Option<Arc<HubSession>> {

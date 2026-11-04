@@ -43,8 +43,6 @@ const SCAN_HEAD_BYTES: u64 = 64 * 1024;
 /// Grace subtracted from `since` when comparing mtimes: a file created in
 /// the same timestamp tick the caller sampled can otherwise compare older.
 const MTIME_GRACE: Duration = Duration::from_secs(2);
-/// Same grace for pruning untouched directory subtrees (see [`discover_conversation`]).
-const DIR_PRUNE_GRACE: Duration = Duration::from_secs(5);
 
 /// The muse session store directory, or `None` when neither
 /// `XDG_DATA_HOME` nor the home directory resolves.
@@ -78,14 +76,13 @@ fn muse_store_dir_from(
 /// head records this `workdir` as their workspace root. Newest mtime wins.
 ///
 /// Skips hidden entries, `subagent/` subtrees (not top-level conversations)
-/// and directory subtrees untouched since well before `since` — creating a
-/// new session entry bumps its parents' mtimes, so a stale subtree cannot
-/// hold a fresh `session.jsonl`.
+/// and date partitions too old to hold a fresh conversation (see
+/// [`DateWindow`]).
 pub fn discover_conversation(store_dir: &Path, workdir: &str, since: SystemTime) -> Option<String> {
     let effective_since = since.checked_sub(MTIME_GRACE).unwrap_or(since);
-    let prune_before = since.checked_sub(MTIME_GRACE + DIR_PRUNE_GRACE);
+    let window = DateWindow::around(since);
     let mut best: Option<(SystemTime, String)> = None;
-    for path in session_files(store_dir, prune_before, "session.jsonl") {
+    for path in session_files(store_dir, &window, "session.jsonl") {
         let Ok(mtime) = path.metadata().and_then(|meta| meta.modified()) else {
             continue;
         };
@@ -120,9 +117,9 @@ pub fn discover_conversation_by_pid(
         return None;
     }
     let effective_since = since.checked_sub(MTIME_GRACE).unwrap_or(since);
-    let prune_before = since.checked_sub(MTIME_GRACE + DIR_PRUNE_GRACE);
+    let window = DateWindow::around(since);
     let mut best: Option<(SystemTime, String)> = None;
-    for path in session_files(store_dir, prune_before, ".session.lock") {
+    for path in session_files(store_dir, &window, ".session.lock") {
         let Ok(mtime) = path.metadata().and_then(|meta| meta.modified()) else {
             continue;
         };
@@ -140,15 +137,91 @@ pub fn discover_conversation_by_pid(
     best.map(|(_, id)| id)
 }
 
+/// The calendar days a fresh conversation's date partition can name.
+///
+/// Directory mtimes cannot prune the store: creating `<uuid>/` bumps only
+/// its `DD/` parent, never the `YYYY/` and `MM/` ancestors, so those look
+/// stale all month (all year) long and an mtime cut skipped every live
+/// session. The partition *names* are reliable instead: a conversation
+/// created at or after `since` lives under the day it was created, in
+/// whatever time zone muse dates it. The window runs from the UTC day
+/// before `since` to the UTC day after now, which covers every local time
+/// zone (offsets stay within a day of UTC) and a midnight rollover.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DateWindow {
+    from: chrono::NaiveDate,
+    to: chrono::NaiveDate,
+}
+
+impl DateWindow {
+    fn around(since: SystemTime) -> Self {
+        let since = chrono::DateTime::<chrono::Utc>::from(since).date_naive();
+        let today = chrono::Utc::now().date_naive();
+        Self::between(since, today.max(since))
+    }
+
+    fn between(since: chrono::NaiveDate, today: chrono::NaiveDate) -> Self {
+        Self {
+            from: since.pred_opt().unwrap_or(since),
+            to: today.succ_opt().unwrap_or(today),
+        }
+    }
+
+    /// Whether the store directory at `rel` (relative to the store root) is
+    /// a `YYYY`, `YYYY/MM` or `YYYY/MM/DD` partition entirely outside the
+    /// window. Anything that does not parse as a date partition — a
+    /// conversation dir, an unexpected layout — is never pruned.
+    fn excludes(&self, rel: &Path) -> bool {
+        let parts: Vec<&str> = rel
+            .components()
+            .take(3)
+            .filter_map(|part| part.as_os_str().to_str())
+            .collect();
+        let Some((first, last)) = partition_span(&parts) else {
+            return false;
+        };
+        last < self.from || first > self.to
+    }
+}
+
+/// The first and last day a date partition path covers: `["2026"]` is the
+/// whole year, `["2026", "11"]` the month, `["2026", "11", "03"]` the day.
+/// `None` when the components are not a date partition.
+fn partition_span(parts: &[&str]) -> Option<(chrono::NaiveDate, chrono::NaiveDate)> {
+    use chrono::NaiveDate;
+    fn number(part: &str, width: usize) -> Option<u32> {
+        (part.len() == width && part.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| part.parse().ok())
+            .flatten()
+    }
+    let year = i32::try_from(number(parts.first()?, 4)?).ok()?;
+    let Some(month) = parts.get(1) else {
+        return Some((
+            NaiveDate::from_ymd_opt(year, 1, 1)?,
+            NaiveDate::from_ymd_opt(year, 12, 31)?,
+        ));
+    };
+    let month = number(month, 2)?;
+    let Some(day) = parts.get(2) else {
+        let first = NaiveDate::from_ymd_opt(year, month, 1)?;
+        let next = if month == 12 {
+            NaiveDate::from_ymd_opt(year + 1, 1, 1)?
+        } else {
+            NaiveDate::from_ymd_opt(year, month + 1, 1)?
+        };
+        return Some((first, next.pred_opt()?));
+    };
+    let day = NaiveDate::from_ymd_opt(year, month, number(day, 2)?)?;
+    Some((day, day))
+}
+
 /// Every `file_name` file under `store_dir` (any nesting — the real layout
 /// is date-partitioned), skipping hidden directories, `subagent/` subtrees
-/// (not top-level conversations) and directory subtrees untouched since
-/// `prune_before`. The wanted file itself may be hidden (`.session.lock`).
-fn session_files(
-    store_dir: &Path,
-    prune_before: Option<SystemTime>,
-    file_name: &str,
-) -> Vec<PathBuf> {
+/// (not top-level conversations) and date partitions outside `window`.
+/// The wanted file itself may be hidden (`.session.lock`). Freshness of the
+/// file itself is the caller's mtime check: no directory is ever pruned by
+/// its mtime.
+fn session_files(store_dir: &Path, window: &DateWindow, file_name: &str) -> Vec<PathBuf> {
     let mut found = Vec::new();
     let mut stack = vec![store_dir.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -162,13 +235,14 @@ fn session_files(
                 continue;
             };
             if file_type.is_dir() {
-                if name.starts_with('.')
-                    || name == "subagent"
-                    || dir_prunable(&entry.path(), prune_before)
-                {
+                let path = entry.path();
+                let outside_window = path
+                    .strip_prefix(store_dir)
+                    .is_ok_and(|rel| window.excludes(rel));
+                if name.starts_with('.') || name == "subagent" || outside_window {
                     continue;
                 }
-                stack.push(entry.path());
+                stack.push(path);
                 continue;
             }
             if file_type.is_file() && name == file_name {
@@ -193,16 +267,6 @@ fn lock_pid(path: &Path) -> Option<i64> {
     let body = std::fs::read_to_string(path).ok()?;
     let first = body.lines().next()?.trim();
     first.strip_prefix("pid=")?.trim().parse().ok()
-}
-
-/// Whether `dir`'s whole subtree is too stale to hold a fresh session file.
-fn dir_prunable(dir: &Path, prune_before: Option<SystemTime>) -> bool {
-    let Some(prune_before) = prune_before else {
-        return false;
-    };
-    dir.metadata()
-        .and_then(|meta| meta.modified())
-        .is_ok_and(|mtime| mtime < prune_before)
 }
 
 /// Whether the head of `session.jsonl` records `workdir` as its workspace
@@ -295,6 +359,22 @@ fn trim_slashes(path: &str) -> &str {
     } else {
         trimmed
     }
+}
+
+/// Whether a hub spawn is a fresh muse conversation whose id the hub must
+/// discover and record. Not for terminals or other harnesses, and not for a
+/// resume: a resume relaunch (`preserve_args`) or a launch that already
+/// carries its harness conversation id keeps the id it has — a resume that
+/// falls back to a fresh conversation clears and records it itself (see
+/// `sessions::resume`).
+pub(crate) fn hub_spawn_records_conversation(req: &super::hub::SpawnRequest) -> bool {
+    req.kind == super::hub::SessionKind::Agent
+        && crate::domain::models::Cli::from_str(&req.cli).as_str() == "muse"
+        && !req.preserve_args
+        && req
+            .harness_conversation_id
+            .as_deref()
+            .is_none_or(str::is_empty)
 }
 
 /// Record the harness conversation id of a freshly spawned muse session:
@@ -437,6 +517,115 @@ mod tests {
             discover_conversation_by_pid(store.path(), 1111, since),
             None
         );
+    }
+
+    /// `<store>/YYYY/MM/DD` for `date`, the real muse partition layout.
+    fn day_dir(store: &Path, date: chrono::NaiveDate) -> PathBuf {
+        store
+            .join(date.format("%Y").to_string())
+            .join(date.format("%m").to_string())
+            .join(date.format("%d").to_string())
+    }
+
+    fn set_dir_mtime(dir: &Path, mtime: SystemTime) {
+        std::fs::File::open(dir)
+            .and_then(|dir| dir.set_modified(mtime))
+            .expect("set dir mtime");
+    }
+
+    #[test]
+    fn lock_discovery_survives_stale_partition_mtimes() {
+        // Creating `<uuid>/` never bumps the `YYYY/` and `MM/` mtimes, so
+        // on a live store they are days or months old: pruning ancestors by
+        // mtime skipped every fresh session.
+        let store = tempfile::tempdir().expect("store");
+        let since = SystemTime::now();
+        let today = chrono::Utc::now().date_naive();
+        let day = day_dir(store.path(), today);
+        let conv = day.join("uuid-live");
+        std::fs::create_dir_all(&conv).expect("conversation dir");
+        std::fs::write(conv.join(".session.lock"), "pid=4242\nhost=TEST\n").expect("lock");
+        let old = since - Duration::from_secs(90 * 24 * 3600);
+        for dir in [
+            &day,
+            day.parent().unwrap(),
+            day.parent().unwrap().parent().unwrap(),
+        ] {
+            set_dir_mtime(dir, old);
+        }
+
+        assert_eq!(
+            discover_conversation_by_pid(store.path(), 4242, since).as_deref(),
+            Some("uuid-live")
+        );
+    }
+
+    #[test]
+    fn session_scan_survives_stale_partition_mtimes() {
+        let store = tempfile::tempdir().expect("store");
+        let since = SystemTime::now();
+        let today = chrono::Utc::now().date_naive();
+        let day = day_dir(store.path(), today);
+        let conv = day.join("uuid-log");
+        std::fs::create_dir_all(&conv).expect("conversation dir");
+        std::fs::write(
+            conv.join("session.jsonl"),
+            "{\"payload\":{\"workspace_root\":\"/work/proj\"}}\n",
+        )
+        .expect("session log");
+        let old = since - Duration::from_secs(90 * 24 * 3600);
+        for dir in [
+            &day,
+            day.parent().unwrap(),
+            day.parent().unwrap().parent().unwrap(),
+        ] {
+            set_dir_mtime(dir, old);
+        }
+
+        assert_eq!(
+            discover_conversation(store.path(), "/work/proj", since).as_deref(),
+            Some("uuid-log")
+        );
+    }
+
+    #[test]
+    fn lock_discovery_skips_partitions_dated_before_the_window() {
+        let store = tempfile::tempdir().expect("store");
+        let since = SystemTime::now();
+        let long_ago = chrono::Utc::now().date_naive() - chrono::Days::new(7);
+        let conv = day_dir(store.path(), long_ago).join("uuid-old-day");
+        std::fs::create_dir_all(&conv).expect("conversation dir");
+        // A fresh lock naming the pid, but in a partition no conversation
+        // started after `since` can live in: never walked.
+        std::fs::write(conv.join(".session.lock"), "pid=4343\nhost=TEST\n").expect("lock");
+
+        assert_eq!(
+            discover_conversation_by_pid(store.path(), 4343, since),
+            None
+        );
+    }
+
+    #[test]
+    fn date_window_keeps_yesterday_today_and_tomorrow() {
+        let d = |y, m, day| chrono::NaiveDate::from_ymd_opt(y, m, day).unwrap();
+        let window = DateWindow::between(d(2026, 1, 1), d(2026, 1, 1));
+        let keeps = |rel: &str| !window.excludes(Path::new(rel));
+        assert!(keeps("2025"));
+        assert!(keeps("2025/12"));
+        assert!(keeps("2025/12/31"));
+        assert!(keeps("2026/01/01"));
+        assert!(keeps("2026/01/02"));
+        assert!(keeps("2026/01/02/uuid-x"));
+        assert!(!keeps("2025/12/30"));
+        assert!(!keeps("2025/11"));
+        assert!(!keeps("2024"));
+        assert!(!keeps("2026/01/03"));
+        assert!(!keeps("2026/02"));
+        // Not a date partition: never pruned.
+        assert!(keeps("day"));
+        assert!(keeps("day/uuid-x"));
+        assert!(keeps("2026/1"));
+        assert!(keeps("2026/13"));
     }
 
     #[test]
