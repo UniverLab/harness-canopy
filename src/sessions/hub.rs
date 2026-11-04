@@ -216,9 +216,9 @@ impl HubSession {
     /// everything at or below the snapshot's `seq` is in the snapshot,
     /// everything after it arrives on the receiver.
     pub fn attach(&self) -> Option<(Snapshot, OutputReceiver)> {
-        let out = self.state.lock().ok()?;
+        let mut out = self.state.lock().ok()?;
         let rx = self.bcast.subscribe();
-        let snapshot = snapshot_locked(&out);
+        let snapshot = snapshot_locked(&mut out);
         Some((snapshot, rx))
     }
 
@@ -226,7 +226,10 @@ impl HubSession {
     /// but no new subscription (the receiver keeps its position and the
     /// caller drops everything at or below the snapshot's `seq`).
     pub fn fresh_snapshot(&self) -> Option<Snapshot> {
-        self.state.lock().ok().map(|out| snapshot_locked(&out))
+        self.state
+            .lock()
+            .ok()
+            .map(|mut out| snapshot_locked(&mut out))
     }
 
     /// Send raw bytes to the session's PTY stdin.
@@ -429,11 +432,47 @@ impl HubSession {
     }
 }
 
+/// Render every scrollback row, oldest first, each with its attributes and
+/// followed by `\r\n`. A trailing home + Scroll Up parks exactly those rows
+/// back into a fresh parser's scrollback, so feeding the result to one
+/// reproduces this scrollback (a plain dump would leave a short scrollback on
+/// the visible screen, where the snapshot's visible part wipes it). Empty when
+/// there is none. Pages with `set_scrollback` and leaves the view at the live
+/// screen, using only vt100's public API so the published crate builds without
+/// the vendored patch.
+pub(crate) fn scrollback_formatted(screen: &mut vt100::Screen) -> Vec<u8> {
+    screen.set_scrollback(usize::MAX);
+    let total = screen.scrollback();
+    let mut contents = Vec::new();
+    if total == 0 {
+        return contents;
+    }
+    let (rows, cols) = screen.size();
+    let page = usize::from(rows).max(1);
+    let mut remaining = total;
+    while remaining > 0 {
+        screen.set_scrollback(remaining);
+        let take = remaining.min(page);
+        for row in screen.rows_formatted(0, cols).take(take) {
+            contents.extend(row);
+            // Each row is rendered from default attributes, so none may leak
+            // into the next.
+            contents.extend(b"\x1b[m\r\n");
+        }
+        remaining -= take;
+    }
+    screen.set_scrollback(0);
+    let parked = total.min(page.saturating_sub(1).max(1));
+    contents.extend(b"\x1b[H");
+    contents.extend(format!("\x1b[{parked}S").as_bytes());
+    contents
+}
+
 /// Render a snapshot from already-locked output state: the scrollback, the
 /// visible screen and the input modes, plus the `seq` they cover.
-fn snapshot_locked(out: &OutputState) -> Snapshot {
-    let screen = out.parser.screen();
-    let mut data = screen.scrollback_formatted();
+fn snapshot_locked(out: &mut OutputState) -> Snapshot {
+    let screen = out.parser.screen_mut();
+    let mut data = scrollback_formatted(screen);
     data.extend(screen.contents_formatted());
     data.extend(screen.input_mode_formatted());
     Snapshot {

@@ -116,3 +116,37 @@ async fn lagged_subscriber_gets_fresh_snapshot_and_continues() {
     assert_eq!(out["seq"], 6);
     server.abort();
 }
+
+/// The scrollback prefix rebuilds the same rows in a fresh parser, in order
+/// and with their attributes, across more than one page of paging, and leaves
+/// the source showing its live screen.
+#[test]
+fn scrollback_render_round_trips_rows_and_attributes() {
+    let mut source = vt100::Parser::new(5, 20, 100);
+    for i in 0..13 {
+        let line = if i == 3 {
+            "\x1b[31mline 3\x1b[m\r\n".to_string()
+        } else {
+            format!("line {i}\r\n")
+        };
+        source.process(line.as_bytes());
+    }
+
+    let bytes = crate::sessions::hub::scrollback_formatted(source.screen_mut());
+    assert_eq!(source.screen().scrollback(), 0, "the source stays live");
+
+    let mut client = vt100::Parser::new(5, 20, 100);
+    client.process(&bytes);
+    client.process(&source.screen().contents_formatted());
+    assert_eq!(client.screen().contents(), source.screen().contents());
+
+    for parser in [&mut source, &mut client] {
+        parser.screen_mut().set_scrollback(usize::MAX);
+        assert_eq!(parser.screen().scrollback(), 9);
+    }
+    assert_eq!(client.screen().contents(), source.screen().contents());
+    let red = client.screen().cell(3, 0).expect("cell in range").fgcolor();
+    assert_eq!(red, vt100::Color::Idx(1), "line 3 keeps its colour");
+    let plain = client.screen().cell(4, 0).expect("cell in range").fgcolor();
+    assert_eq!(plain, vt100::Color::Default, "the colour does not leak");
+}
