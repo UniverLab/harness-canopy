@@ -543,13 +543,7 @@ fn handle_resize(state: &Arc<SessionsState>, out_tx: &OutTx, id: &str, cols: u16
         let _ = out_tx.send(error_frame(None, ERR_NOT_FOUND, &no_such_session(id)));
         return;
     };
-    if session.resize(cols, rows) {
-        state.hub.emit(HubEvent::Resized {
-            id: session.id.clone(),
-            cols: cols.max(1),
-            rows: rows.max(1),
-        });
-    }
+    state.hub.resize_session(&session, cols, rows);
 }
 
 fn handle_spawn(state: &Arc<SessionsState>, out_tx: &OutTx, req: String, mut spawn: SpawnRequest) {

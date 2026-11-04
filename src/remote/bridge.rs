@@ -3,8 +3,11 @@
 //! A device peer is a remote client, not a local one: it speaks the same
 //! protocol v1 frames as `/sessions/ws`, with one extra rule —
 //!
-//! * `resize` always answers `forbidden`; a resize made elsewhere still
-//!   reaches attached peers as `resized{id,cols,rows}`.
+//! * `resize` sizes the PTY only for the host owner's own paired device
+//!   (clamped, at most one per 100 ms per session, latest wins); every
+//!   guest answers `forbidden` (`not_found` outside its grant). Any resize
+//!   reaches attached peers as `resized{id,cols,rows}` (see
+//!   `bridge_resize.rs`).
 //!
 //! Terminal sessions are first-class here, as on the local socket: they
 //! list, attach, and spawn (without `cli` they open the default shell).
@@ -78,6 +81,10 @@ pub struct RemoteBridge {
     metrics_watch: Option<MetricsWatch>,
     /// What this peer's login may see and touch.
     pub(crate) scope: GrantScope,
+    /// Per-session `resize` throttles for this device.
+    pub(crate) resize_gates: resize::ResizeGates,
+    /// Deferred (throttled) resizes, aborted when the peer goes away.
+    pub(crate) resize_tasks: Vec<JoinHandle<()>>,
 }
 
 /// The hub request a remote `spawn` frame describes. The kind is parsed
@@ -126,6 +133,7 @@ impl RemoteBridge {
         let mut bridge = Self::new(state);
         bridge.scope = GrantScope::new(grant);
         bridge.scope.set_can_upload(can_upload);
+        bridge.scope.set_owner(false);
         // Files already on a shelf this peer may not see hide from the
         // start, so their later `shelf_removed` stays hidden too.
         if !bridge.scope.is_all() {
@@ -151,6 +159,12 @@ impl RemoteBridge {
         bridge
     }
 
+    /// Mark this peer as the host owner's own paired device (the only remote
+    /// party allowed to `resize`).
+    pub fn set_owner(&mut self, owner: bool) {
+        self.scope.set_owner(owner);
+    }
+
     fn with_metrics(state: Arc<SessionsState>, metrics: MetricsSource) -> Self {
         let mut hidden_files = HashSet::new();
         for session in state.hub.list() {
@@ -172,6 +186,8 @@ impl RemoteBridge {
             metrics,
             metrics_watch: None,
             scope: GrantScope::all(),
+            resize_gates: resize::ResizeGates::new(),
+            resize_tasks: Vec::new(),
         }
     }
 
@@ -220,13 +236,7 @@ impl RemoteBridge {
                 }
                 handle_prompt_draft(&self.state, out, req, &id, draft);
             }
-            ClientFrame::Resize { id, .. } => {
-                let _ = out.send(error_frame(
-                    None,
-                    ERR_FORBIDDEN,
-                    &format!("resize is not available to remote devices ('{id}')"),
-                ));
-            }
+            ClientFrame::Resize { id, cols, rows } => self.handle_resize(&id, cols, rows, out),
             ClientFrame::Spawn {
                 req,
                 kind,
@@ -387,6 +397,9 @@ impl RemoteBridge {
             task.1.abort();
         }
         for task in self.shelf_tasks.drain(..) {
+            task.abort();
+        }
+        for task in self.resize_tasks.drain(..) {
             task.abort();
         }
         for file_id in self.upload_permits.keys().cloned().collect::<Vec<_>>() {
@@ -732,6 +745,9 @@ mod tests;
 
 #[path = "bridge_upload.rs"]
 mod upload;
+
+#[path = "bridge_resize.rs"]
+pub(crate) mod resize;
 
 fn spawn_forwarder(
     session: Arc<HubSession>,

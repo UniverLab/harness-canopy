@@ -321,6 +321,7 @@ async fn connect_loopback_device(
         max_frame,
         grant: crate::remote::trust::Grant::All,
         can_upload: true,
+        owner: false,
     });
 
     (device, events_rx, vec![demux, trickle], id)
@@ -568,7 +569,8 @@ async fn assert_restrictions(loopback: &mut Loopback) {
     assert_eq!(answer.json["t"], "ok", "got {}", answer.raw);
     assert_eq!(answer.json["req"], "p1");
 
-    // `resize` is still refused, even for the sessions a device may use.
+    // `resize` is refused for a device that is not the owner's, even for
+    // the sessions it may use (this loopback peer is not flagged owner).
     loopback
         .send(json!({"t": "resize", "id": loopback.cat.id, "cols": 120, "rows": 40}))
         .await;

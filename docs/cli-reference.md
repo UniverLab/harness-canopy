@@ -429,8 +429,11 @@ LAN. A body with no candidate — the key missing, `null`, or another
 shape — is logged and ignored, and the connection stays up.
 
 Once the data channel is open, the browser speaks the same protocol v2 as
-`/sessions/ws`, with one restriction: `resize`
-is always refused (the browser renders the host's size scaled). Terminal
+`/sessions/ws`, with one restriction: only the host owner's own paired
+device may `resize` a session (clamped to 20–500 columns and 5–200 rows,
+at most one resize per session every 100 ms, the latest winning); every
+guest's `resize` answers `forbidden`, and the browser otherwise renders
+the host's size scaled, following `resized`. Terminal
 sessions are first-class, as on the local socket: they list, attach, and
 spawn — a terminal `spawn` may omit `cli` (or send `null`) to open the
 host user's default shell. A browser paired as a trusted guest login

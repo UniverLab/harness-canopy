@@ -38,7 +38,7 @@ use crate::remote::signaling::{offer_message, verify_offer, Refusal};
 use sha2::{Digest as _, Sha256};
 
 use crate::sessions::protocol::{
-    attach_frame, list_frame, shelf_delete_frame, shelf_get_frame, shelf_list_frame,
+    attach_frame, list_frame, resize_frame, shelf_delete_frame, shelf_get_frame, shelf_list_frame,
     shelf_put_begin_frame, shelf_put_end_frame, shelf_put_part_frame, ERR_BUSY, ERR_FORBIDDEN,
     ERR_NOT_FOUND,
 };
@@ -475,6 +475,132 @@ async fn resized_reaches_attached_remote_peers_only() {
         json!({"t": "resized", "id": hub.beta.id, "cols": 132, "rows": 43})
     );
     bridge.abort();
+}
+
+/// The owner's paired device sizes a session: the size is clamped into
+/// bounds, applied to the PTY, and every other attached peer hears
+/// `resized`.
+#[tokio::test]
+async fn owner_device_resize_applies_clamped_and_reaches_other_peers() {
+    let hub = grant_hub();
+    let mut events = hub.state.hub.subscribe_events();
+    let (owner_tx, mut owner_rx) = crate::sessions::outbound::channel();
+    let mut owner = RemoteBridge::with_grant(Arc::clone(&hub.state), Grant::All, true);
+    owner.set_owner(true);
+    let (other_tx, mut other_rx) = crate::sessions::outbound::channel();
+    let mut other = RemoteBridge::with_grant(Arc::clone(&hub.state), Grant::All, false);
+    other
+        .handle_text(&attach_frame(&hub.alpha.id), &other_tx)
+        .await;
+    assert_eq!(recv_frame(&mut other_rx).await["t"], "snapshot");
+    loop {
+        if recv_frame(&mut other_rx).await["last"].as_bool() == Some(true) {
+            break;
+        }
+    }
+
+    owner
+        .handle_text(&resize_frame(&hub.alpha.id, 5000, 1), &owner_tx)
+        .await;
+    assert!(owner_rx.try_recv().is_err(), "a resize answers nothing");
+    let item = hub.alpha.item();
+    assert_eq!(
+        (item.cols, item.rows),
+        (500, 5),
+        "clamped to the upper/lower bounds"
+    );
+    let event = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(event @ HubEvent::Resized { .. }) = events.recv().await {
+                return event;
+            }
+        }
+    })
+    .await
+    .expect("the hub announces the resize");
+    other.handle_event(event, &other_tx);
+    assert_eq!(
+        recv_frame(&mut other_rx).await,
+        json!({"t": "resized", "id": hub.alpha.id, "cols": 500, "rows": 5})
+    );
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    owner
+        .handle_text(&resize_frame(&hub.alpha.id, 1, 9999), &owner_tx)
+        .await;
+    let item = hub.alpha.item();
+    assert_eq!((item.cols, item.rows), (20, 200), "clamped the other way");
+    owner.abort();
+    other.abort();
+}
+
+/// Resizes closer than the minimum gap coalesce: the first applies, the
+/// rest wait and only the latest lands once the gap has passed.
+#[tokio::test]
+async fn owner_device_resizes_are_throttled_latest_wins() {
+    let hub = grant_hub();
+    let (out_tx, _out_rx) = crate::sessions::outbound::channel();
+    let mut owner = RemoteBridge::with_grant(Arc::clone(&hub.state), Grant::All, true);
+    owner.set_owner(true);
+    for (cols, rows) in [(100, 30), (110, 31), (120, 32)] {
+        owner
+            .handle_text(&resize_frame(&hub.beta.id, cols, rows), &out_tx)
+            .await;
+    }
+    let item = hub.beta.item();
+    assert_eq!(
+        (item.cols, item.rows),
+        (100, 30),
+        "only the first applies at once"
+    );
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let item = hub.beta.item();
+    assert_eq!(
+        (item.cols, item.rows),
+        (120, 32),
+        "the latest lands after the gap"
+    );
+    owner.abort();
+}
+
+/// Every guest is refused: `forbidden` for a session it can see (narrow or
+/// full grant alike), `not_found` outside its grant, and the size is left
+/// alone.
+#[tokio::test]
+async fn guest_resize_is_refused() {
+    let hub = grant_hub();
+    let before = hub.alpha.item();
+
+    let narrow = Grant::Sessions(HashSet::from(["alpha".to_string()]));
+    let (out_tx, mut out_rx) = crate::sessions::outbound::channel();
+    let mut guest = RemoteBridge::with_grant(Arc::clone(&hub.state), narrow, true);
+    guest
+        .handle_text(&resize_frame(&hub.alpha.id, 120, 40), &out_tx)
+        .await;
+    assert_eq!(recv_frame(&mut out_rx).await["code"], ERR_FORBIDDEN);
+    guest
+        .handle_text(&resize_frame(&hub.beta.id, 120, 40), &out_tx)
+        .await;
+    assert_eq!(recv_frame(&mut out_rx).await["code"], ERR_NOT_FOUND);
+    guest.abort();
+
+    let (out_tx, mut out_rx) = crate::sessions::outbound::channel();
+    let mut full_guest = RemoteBridge::with_grant(Arc::clone(&hub.state), Grant::All, true);
+    full_guest
+        .handle_text(&resize_frame(&hub.alpha.id, 120, 40), &out_tx)
+        .await;
+    assert_eq!(recv_frame(&mut out_rx).await["code"], ERR_FORBIDDEN);
+    full_guest.abort();
+
+    let after = hub.alpha.item();
+    assert_eq!((after.cols, after.rows), (before.cols, before.rows));
+}
+
+#[test]
+fn owner_login_matches_trimmed_and_case_insensitively() {
+    assert!(super::is_owner_login(OWNER, " OctoCat "));
+    assert!(!super::is_owner_login(OWNER, GUEST));
+    assert!(!super::is_owner_login(OWNER, "  "));
 }
 
 #[test]

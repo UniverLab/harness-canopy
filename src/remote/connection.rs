@@ -204,6 +204,9 @@ pub struct PeerSession {
     pub grant: Grant,
     /// Whether this peer may upload files (the `upload` grant).
     pub can_upload: bool,
+    /// Whether this peer is the host owner's own paired device (its login
+    /// is the owner's, on the device path): the only peer that may resize.
+    pub owner: bool,
     /// Largest outbound frame for this peer, from its offer SDP (see
     /// [`peer_frame_cap`]): [`MAX_CHANNEL_FRAME`] for a desktop, less for a
     /// peer that advertised less.
@@ -335,6 +338,7 @@ async fn serve(session: &mut PeerSession, config: WatchdogConfig) {
         session.grant.clone(),
         session.can_upload,
     );
+    bridge.set_owner(session.owner);
     let mut events = session.state.hub.subscribe_events();
     // Like the local socket, the first frame the device sees is `hello`; any
     // hub event produced before the channel exists is dropped (the device

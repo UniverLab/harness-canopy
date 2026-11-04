@@ -742,6 +742,21 @@ impl SessionHub {
         );
     }
 
+    /// Resize `session` and, when its size really changed, tell every
+    /// connection attached to it (`resized`). The one resize path for the
+    /// local socket and the remote bridge alike.
+    pub fn resize_session(&self, session: &HubSession, cols: u16, rows: u16) -> bool {
+        if !session.resize(cols, rows) {
+            return false;
+        }
+        self.emit(HubEvent::Resized {
+            id: session.id.clone(),
+            cols: cols.max(1),
+            rows: rows.max(1),
+        });
+        true
+    }
+
     /// Point fresh muse spawns at a scratch session store.
     #[cfg(test)]
     pub(crate) fn set_muse_store_dir(&self, dir: std::path::PathBuf) {

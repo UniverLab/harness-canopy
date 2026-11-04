@@ -59,6 +59,13 @@ pub fn resolve(db: &Database, owner_login: &str, guest_login: &str) -> Option<Gr
     Some(Grant::Sessions(profile.sessions.into_iter().collect()))
 }
 
+/// Whether `login` is the host owner's login (trimmed, case-insensitive).
+/// Blank logins never are.
+pub fn is_owner_login(owner_login: &str, login: &str) -> bool {
+    let login = normalize_login(login);
+    !login.is_empty() && login == normalize_login(owner_login)
+}
+
 /// Resolve a party's upload permission: the owner may always upload, a
 /// trusted login gets exactly its stored `upload` flag (default deny), and
 /// anything else (unknown, blank, unreadable store) is refused.
@@ -135,6 +142,7 @@ pub struct GrantScope {
     grant: Grant,
     visible: HashSet<String>,
     can_upload: bool,
+    owner: bool,
 }
 
 impl GrantScope {
@@ -144,6 +152,7 @@ impl GrantScope {
             grant,
             visible: HashSet::new(),
             can_upload: false,
+            owner: false,
         }
     }
 
@@ -162,6 +171,17 @@ impl GrantScope {
     /// Whether this peer may upload files into its granted sessions.
     pub fn can_upload(&self) -> bool {
         self.can_upload
+    }
+
+    /// Record whether this peer is the host owner's own paired device.
+    pub fn set_owner(&mut self, owner: bool) {
+        self.owner = owner;
+    }
+
+    /// Whether this peer is the host owner's own paired device: the only
+    /// remote party that may size a session's PTY.
+    pub fn is_owner(&self) -> bool {
+        self.owner
     }
 
     /// Whether the grant covers every session (the owner, or a full grant).

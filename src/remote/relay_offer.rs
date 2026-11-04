@@ -44,6 +44,7 @@ impl RelayRuntime {
         };
         let can_upload =
             trust::resolve_upload(&self.db, &self.github_login, &offer.device.github_login);
+        let owner = trust::is_owner_login(&self.github_login, &offer.device.github_login);
         let Some(sessions) = self.sessions.clone() else {
             let _ = signal.send((from.to_string(), signaling::connect_fail(Refusal::Busy)));
             return;
@@ -91,6 +92,7 @@ impl RelayRuntime {
                 from,
                 grant,
                 can_upload,
+                owner,
                 max_frame: connection::peer_frame_cap(&offer.sdp),
             });
         });
@@ -159,6 +161,8 @@ impl RelayRuntime {
                 from,
                 grant: offer.grant,
                 can_upload: offer.upload,
+                // A guest offer is never the owner's paired device.
+                owner: false,
                 max_frame: connection::peer_frame_cap(&offer.sdp),
             });
         });

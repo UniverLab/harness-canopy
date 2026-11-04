@@ -207,6 +207,7 @@ async fn spawn_zombie(harness: &Harness, device_id: &str, from: &str, grace: Dur
             from: from.to_string(),
             grant: Grant::All,
             can_upload: true,
+            owner: false,
             max_frame: MAX_CHANNEL_FRAME,
         },
         WatchdogConfig {
