@@ -23,6 +23,9 @@ full platform list and how to check a platform is usable.
 curl -fsSL https://raw.githubusercontent.com/UniverLab/harness-canopy/main/scripts/install.sh | sh
 ```
 
+The Linux binary needs glibc 2.39 or newer: Ubuntu 24.04, Debian 13 or later.
+On an older system, use the cargo install below.
+
 ## Via cargo
 
 ```bash
