@@ -1053,7 +1053,7 @@ fn hub_spawn_records_a_fresh_muse_conversation() {
 
     let (db, _db_dir) = test_db();
     let hub = test_hub(&db);
-    hub.set_muse_store_dir(store.clone());
+    hub.set_muse_store_dir(store);
     let mut req = agent_spawn("muse", &work.to_string_lossy());
     req.interactive_args = Some("--provider echo".to_string());
     req.id = Some("hub-fresh".to_string());
