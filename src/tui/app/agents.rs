@@ -409,7 +409,12 @@ impl App {
         }
     }
 
-    pub(super) fn resize_interactive_agents(&mut self) {
+    pub(crate) fn resize_interactive_agents(&mut self) {
+        // While the panel border is dragged the PTYs wait for the release:
+        // resizing on every drag step would churn the child on each column.
+        if self.activity_panel_dragging {
+            return;
+        }
         let (cols, rows) = self.last_panel_inner;
         if cols == 0 || rows == 0 {
             return;
@@ -420,6 +425,10 @@ impl App {
         let split_sessions = self.active_split_sessions();
 
         for agent in &mut self.interactive_agents {
+            // A remote device owns this size: answering `resize` would fight it.
+            if agent.remote_size.is_some() {
+                continue;
+            }
             let dominated = split_sessions
                 .as_ref()
                 .is_some_and(|(a, b)| agent.name != *a && agent.name != *b);
@@ -431,6 +440,10 @@ impl App {
             }
         }
         for agent in &mut self.terminal_agents {
+            // A remote device owns this size: answering `resize` would fight it.
+            if agent.remote_size.is_some() {
+                continue;
+            }
             let dominated = split_sessions
                 .as_ref()
                 .is_some_and(|(a, b)| agent.name != *a && agent.name != *b);

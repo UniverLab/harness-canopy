@@ -29,9 +29,9 @@ use super::graphs::{handle_graph_unwatch, handle_graph_watch, handle_graphs};
 use super::protocol::{
     error_frame, exited_frame, file_frame, hello_frame, installed_harnesses, ok_frame, out_frame,
     parse_client_frame, resized_frame, session_added_frame, session_removed_frame, sessions_frame,
-    shelf_added_frame, shelf_frame, shelf_removed_frame, snapshot_frame, spawned_frame,
-    ClientFrame, SessionItem, ERR_BAD_REQUEST, ERR_DELIVERY_FAILED, ERR_FORBIDDEN, ERR_INTERNAL,
-    ERR_NOT_FOUND, ERR_SPAWN_FAILED,
+    shelf_added_frame, shelf_frame, shelf_removed_frame, size_released_frame, snapshot_frame,
+    spawned_frame, ClientFrame, SessionItem, ERR_BAD_REQUEST, ERR_DELIVERY_FAILED, ERR_FORBIDDEN,
+    ERR_INTERNAL, ERR_NOT_FOUND, ERR_SPAWN_FAILED,
 };
 use super::shelf::{ShelfStore, READ_CHUNK_BYTES};
 use super::{
@@ -267,6 +267,9 @@ async fn handle_client_text(
         | ClientFrame::ScheduledList { .. }
         | ClientFrame::ScheduledCancel { .. }) => handle_schedule_frame(state, out_tx, frame),
         ClientFrame::Resize { id, cols, rows } => handle_resize(state, out_tx, &id, cols, rows),
+        // The local socket never sizes: releases arrive as hub events, and
+        // the TUI re-asserts its own size on seeing one.
+        ClientFrame::ResizeRelease { .. } => {}
         ClientFrame::Spawn {
             req,
             kind,
@@ -656,6 +659,11 @@ fn handle_hub_event(out_tx: &OutTx, attached: &mut Attached, event: HubEvent) {
         HubEvent::Resized { id, cols, rows } => {
             if attached.contains_key(&id) {
                 let _ = out_tx.send(resized_frame(&id, cols, rows));
+            }
+        }
+        HubEvent::SizeReleased { id } => {
+            if attached.contains_key(&id) {
+                let _ = out_tx.send(size_released_frame(&id));
             }
         }
         HubEvent::ShelfAdded(item) => {

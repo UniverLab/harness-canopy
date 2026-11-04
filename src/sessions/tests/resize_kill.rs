@@ -187,6 +187,18 @@ fn resized_frame_parses_as_a_host_frame() {
     }
 }
 
+/// `size_released` parses as a host frame.
+#[test]
+fn size_released_frame_parses_as_a_host_frame() {
+    use crate::sessions::protocol::{parse_host_frame, size_released_frame, HostFrame};
+    match parse_host_frame(&size_released_frame("s1")) {
+        Ok(HostFrame::SizeReleased { id }) => {
+            assert_eq!(id.as_str(), "s1");
+        }
+        other => panic!("unexpected parse: {other:?}"),
+    }
+}
+
 /// `kill` ends the child, sends `exited` + `session_removed` to every
 /// connection, drops the session from `list`, and finishes its DB row.
 #[tokio::test]

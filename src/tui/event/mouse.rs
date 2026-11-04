@@ -16,6 +16,48 @@ use super::{cycle_sidebar_layer_and_normalize_focus, switch_sidebar_tab_and_norm
 use crate::tui::agent::InteractiveAgent;
 use crate::tui::app::types::{AgentEntry, App, Focus, ProjectTab, SidebarLayer, TerminalSelection};
 
+/// Drag the activity panel's left border to size it: a left press exactly on
+/// the panel's left border column starts the drag (ahead of panel focus and
+/// selection), `Drag` moves the width clamped between the panel minimum and
+/// the body minus 40 columns, and `Up` ends it with a single PTY resize —
+/// never one per drag step. A drag never starts while a remote device owns
+/// the selected session's size.
+pub(super) fn handle_panel_border_drag(app: &mut App, mouse: &MouseEvent) -> bool {
+    if app.activity_panel_dragging {
+        match mouse.kind {
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if let Some(sync) = app.last_sync_area {
+                    let edge = sync.x.saturating_add(sync.width);
+                    let width = edge.saturating_sub(mouse.column);
+                    app.activity_panel_user_width = Some(app.clamp_activity_panel_drag(width));
+                }
+                return true;
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                app.activity_panel_dragging = false;
+                app.apply_activity_panel_drag_size();
+                app.resize_interactive_agents();
+                return true;
+            }
+            _ => return false,
+        }
+    }
+    if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+        return false;
+    }
+    let Some(sync) = app.last_sync_area else {
+        return false;
+    };
+    if mouse.column != sync.x || !rect_contains_point(sync, mouse.column, mouse.row) {
+        return false;
+    }
+    if app.selected_remote_size().is_some() {
+        return false;
+    }
+    app.activity_panel_dragging = true;
+    true
+}
+
 /// A left-click inside the right panel claims its focus (automatic switches
 /// are dropped while focused); a left-click anywhere else releases it.
 fn handle_panel_mouse(app: &mut App, mouse: &MouseEvent) -> bool {
@@ -44,6 +86,13 @@ pub(super) fn handle_mouse(app: &mut App, mouse: MouseEvent) -> Result<()> {
     // swallowed so it doesn't leak to the panel/PTY underneath.
     if app.focus == Focus::PromptTemplateDialog {
         handle_prompt_dialog_mouse(app, &mouse);
+        return Ok(());
+    }
+
+    // The panel's border drag owns its column: it runs ahead of the panel
+    // focus click and selection below, so a border press sizes the panel
+    // instead of focusing it.
+    if handle_panel_border_drag(app, &mouse) {
         return Ok(());
     }
 

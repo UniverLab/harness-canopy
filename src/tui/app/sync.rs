@@ -87,9 +87,83 @@ impl App {
         (!self.hidden_activity_workdirs.contains(&state.workdir)).then_some(state)
     }
 
+    /// The remote size of the selected session, if a remote device owns it.
+    pub(crate) fn selected_remote_size(&self) -> Option<(u16, u16)> {
+        match self.selected_agent()? {
+            AgentEntry::Interactive(idx) => self.interactive_agents.get(*idx)?.remote_size,
+            AgentEntry::Terminal(idx) => self.terminal_agents.get(*idx)?.remote_size,
+            _ => None,
+        }
+    }
+
+    /// Width that fills the strip a remote device freed by sizing the
+    /// selected session narrower than the pane: the pane's inner width then
+    /// equals the remote's cols exactly. `None` when no fill applies — no
+    /// remote size, a split view (which keeps its own layout), a remote
+    /// wider than the pane, or a strip below the forced minimum.
+    pub(crate) fn remote_fill_width(&self, total_width: u16) -> Option<u16> {
+        if self.active_split_id.is_some() {
+            return None;
+        }
+        let (remote_cols, _) = self.selected_remote_size()?;
+        let panel_inner = self.last_panel_inner.0;
+        if panel_inner == 0 || remote_cols >= panel_inner {
+            return None;
+        }
+        let sync_w = self.last_sync_area.map(|area| area.width).unwrap_or(0);
+        let panel_w = total_width.saturating_sub(sync_w);
+        let chrome = panel_w.saturating_sub(panel_inner);
+        let fill = total_width.saturating_sub(remote_cols.saturating_add(chrome));
+        if fill < ACTIVITY_PANEL_FORCED_MIN_WIDTH {
+            return None;
+        }
+        Some(fill)
+    }
+
+    /// Clamp a dragged panel width between the panel minimum and the body
+    /// minus 40 columns, so the main pane keeps a usable width.
+    pub(crate) fn clamp_activity_panel_drag(&self, width: u16) -> u16 {
+        let hi = self
+            .last_body_width
+            .saturating_sub(40)
+            .max(ACTIVITY_PANEL_MIN_WIDTH);
+        width.clamp(ACTIVITY_PANEL_MIN_WIDTH, hi)
+    }
+
+    /// Recompute the pane size from a finished border drag, so the single
+    /// release resize targets the dragged width instead of the stale layout.
+    pub(crate) fn apply_activity_panel_drag_size(&mut self) {
+        let Some(user) = self.activity_panel_user_width else {
+            return;
+        };
+        let body = self.last_body_width;
+        if body == 0 {
+            return;
+        }
+        let sync_w = self.last_sync_area.map(|area| area.width).unwrap_or(0);
+        let chrome = body
+            .saturating_sub(sync_w)
+            .saturating_sub(self.last_panel_inner.0);
+        let inner = u32::from(body).saturating_sub(u32::from(user) + u32::from(chrome));
+        self.last_panel_inner.0 = u16::try_from(inner).unwrap_or(u16::MAX);
+    }
+
     pub(crate) fn activity_panel_layout_width(&self, total_width: u16, enabled: bool) -> u16 {
+        // A remote-owned strip fills first, whatever the visibility flag
+        // says — the fill is what keeps the strip from sitting empty.
+        if let Some(fill) = self.remote_fill_width(total_width) {
+            return fill;
+        }
         if !enabled {
             return 0;
+        }
+        // A drag outranks the proportional rule; the drag already clamped
+        // it, and this re-clamps it against a resized terminal.
+        if let Some(user) = self.activity_panel_user_width {
+            let hi = total_width.saturating_sub(40);
+            if hi >= ACTIVITY_PANEL_MIN_WIDTH {
+                return user.clamp(ACTIVITY_PANEL_MIN_WIDTH, hi);
+            }
         }
 
         let proportional_width = ((total_width as u32 * ACTIVITY_PANEL_PERCENT as u32 / 100)
@@ -629,5 +703,108 @@ mod tests {
         assert!(app.forced_activity_workdirs.contains("/tmp/project"));
 
         assert_eq!(app.activity_panel_layout_width(70, true), 16);
+    }
+
+    fn app_with_remote_terminal(remote: Option<(u16, u16)>) -> (App, tempfile::TempDir, String) {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        let mut agent = crate::tui::agent::InteractiveAgent::spawn_terminal(
+            "cat",
+            "/tmp",
+            80,
+            24,
+            Some("remote-fill"),
+            &[],
+            ratatui::style::Color::White,
+        )
+        .expect("spawn terminal");
+        agent.remote_size = remote;
+        let id = agent.id.clone();
+        app.terminal_agents.push(agent);
+        app.agents = vec![AgentEntry::Terminal(0)];
+        app.selected = 0;
+        (app, data_dir, id)
+    }
+
+    #[test]
+    fn remote_fill_makes_pane_inner_equal_remote_cols() {
+        let (mut app, _dir, _id) = app_with_remote_terminal(Some((60, 20)));
+        // Body 120, chrome 2: the fill leaves exactly the remote's 60.
+        app.last_panel_inner = (118, 24);
+        assert_eq!(app.remote_fill_width(120), Some(58));
+        assert_eq!(app.activity_panel_layout_width(120, true), 58);
+        assert_eq!(120 - 58 - 2, 60);
+        app.terminal_agents[0].kill();
+    }
+
+    #[test]
+    fn remote_fill_accounts_for_a_visible_sync_panel() {
+        let (mut app, _dir, _id) = app_with_remote_terminal(Some((60, 20)));
+        // The sync panel takes 30 of the 120 body columns; the pane keeps 90
+        // with a 2-column chrome, so the fill is still 58.
+        app.last_sync_area = Some(ratatui::layout::Rect::new(90, 0, 30, 24));
+        app.last_panel_inner = (88, 24);
+        assert_eq!(app.remote_fill_width(120), Some(58));
+        app.terminal_agents[0].kill();
+    }
+
+    #[test]
+    fn remote_fill_falls_through_when_nothing_to_fill() {
+        let (mut app, _dir, _id) = app_with_remote_terminal(Some((130, 20)));
+        app.last_panel_inner = (118, 24);
+        // A remote wider than the pane changes nothing here.
+        assert_eq!(app.remote_fill_width(120), None);
+        assert_eq!(app.activity_panel_layout_width(120, true), 36);
+
+        // A strip below the forced minimum leaves the layout as it is:
+        // 120 - (110 + 2) = 8 < 16.
+        app.terminal_agents[0].remote_size = Some((110, 20));
+        assert_eq!(app.remote_fill_width(120), None);
+        assert_eq!(app.activity_panel_layout_width(120, true), 36);
+
+        // A split view keeps its own layout.
+        app.terminal_agents[0].remote_size = Some((60, 20));
+        app.active_split_id = Some("split".to_string());
+        assert_eq!(app.remote_fill_width(120), None);
+        assert_eq!(app.activity_panel_layout_width(120, true), 36);
+        app.terminal_agents[0].kill();
+    }
+
+    #[test]
+    fn user_width_beats_proportional_but_loses_to_remote_fill() {
+        let (mut app, _dir, _id) = app_with_remote_terminal(None);
+        app.last_panel_inner = (118, 24);
+        app.activity_panel_user_width = Some(40);
+        assert_eq!(app.activity_panel_layout_width(120, true), 40);
+
+        // The remote fill outranks the drag.
+        app.terminal_agents[0].remote_size = Some((60, 20));
+        assert_eq!(app.activity_panel_layout_width(120, true), 58);
+
+        // Without a remote size the drag clamps at both ends: body - 40
+        // above, the panel minimum below.
+        app.terminal_agents[0].remote_size = None;
+        app.activity_panel_user_width = Some(200);
+        assert_eq!(app.activity_panel_layout_width(120, true), 80);
+        app.activity_panel_user_width = Some(10);
+        assert_eq!(app.activity_panel_layout_width(120, true), 24);
+        app.terminal_agents[0].kill();
+    }
+
+    #[test]
+    fn remote_fill_forces_the_panel_shown() {
+        let (mut app, _dir, _id) = app_with_remote_terminal(Some((60, 20)));
+        app.last_panel_inner = (118, 24);
+        assert_eq!(app.activity_panel_layout_width(120, false), 58);
+
+        app.terminal_agents[0].remote_size = None;
+        assert_eq!(app.activity_panel_layout_width(120, false), 0);
+        app.terminal_agents[0].kill();
     }
 }

@@ -67,6 +67,12 @@ step instead of launching straight away:
   the key-hint row shows `drag to copy`, so no keyboard modifier is needed.
   A `Ctrl+C` within 3 s of that copy is taken as the copy reflex and
   swallowed, and the pane shows `already copied`.
+- **Sizing the side panel** — drag the activity panel's left border to make
+  it wider or narrower (between 24 columns and the terminal width minus 40).
+  The border takes the accent colour while dragged, and the session resizes
+  once on release.
+  While a paired device sizes the session narrower, the panel fills the freed
+  strip on its own and cannot be dragged.
 - **Interrupting a session** — a platform whose registry entry sets
   `ctrl_c_exits = true` (opencode) exits on a *single* `Ctrl+C`. To protect
   the copy reflex, the first `Ctrl+C` of such a session is held back and the

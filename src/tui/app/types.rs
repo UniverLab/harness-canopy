@@ -590,6 +590,14 @@ pub struct App {
     pub(crate) sync_scroll_offset: u16,
     /// Last rendered area of the activity panel (used for mouse hit-testing).
     pub(crate) last_sync_area: Option<ratatui::layout::Rect>,
+    /// Width the user dragged the activity panel to (`None` = proportional).
+    /// Lasts for the TUI's lifetime; never persisted.
+    pub(crate) activity_panel_user_width: Option<u16>,
+    /// True while the user drags the panel's left border: PTY resizes wait
+    /// for the release, and the panel draws its border in the accent colour.
+    pub(crate) activity_panel_dragging: bool,
+    /// Body width from the last frame, for drag clamping and fill math.
+    pub(crate) last_body_width: u16,
     /// Last-rendered rect of the activity section — the full Activity face,
     /// or the activity sub-area inside the Knowledge face. Populated during
     /// draw, cleared to `None` for a frame where it isn't drawn.
