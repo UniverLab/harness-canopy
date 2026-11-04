@@ -257,7 +257,7 @@ async fn handle_invite(login: &str, days: i64) -> Result<()> {
     let Some(uid) = super::guest_allow::resolve_one_login(
         &login,
         &identity.token,
-        super::guest_allow::GITHUB_API,
+        &super::guest_allow::github_api(),
     )
     .await
     else {

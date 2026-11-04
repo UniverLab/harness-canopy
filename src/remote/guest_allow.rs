@@ -18,6 +18,59 @@ use crate::db::Database;
 /// GitHub API base for login-to-uid resolution.
 pub const GITHUB_API: &str = "https://api.github.com";
 
+/// Test hook: an environment variable naming a local stand-in for
+/// [`GITHUB_API`], so a sandbox with a mock GitHub can resolve logins.
+/// Honoured only for a loopback `http://` origin (see [`loopback_api`]);
+/// any other value is ignored with a warning, so it can never send the
+/// host's GitHub token anywhere but this machine.
+pub const GITHUB_API_ENV: &str = "CANOPY_GITHUB_API";
+
+/// The GitHub API base for login resolution: [`GITHUB_API`], or the
+/// loopback stand-in [`GITHUB_API_ENV`] names (a test hook).
+pub fn github_api() -> String {
+    github_api_from(std::env::var(GITHUB_API_ENV).ok().as_deref())
+}
+
+/// [`github_api`] over an explicit variable value, for the tests.
+fn github_api_from(value: Option<&str>) -> String {
+    let Some(value) = value.filter(|value| !value.is_empty()) else {
+        return GITHUB_API.to_string();
+    };
+    match loopback_api(value) {
+        Some(base) => {
+            tracing::warn!("remote: resolving GitHub logins via the {GITHUB_API_ENV} test hook");
+            base
+        }
+        None => {
+            tracing::warn!(
+                "remote: ignoring {GITHUB_API_ENV}: only a loopback http:// origin is honoured"
+            );
+            GITHUB_API.to_string()
+        }
+    }
+}
+
+/// `http://127.0.0.1[:port]` or `http://[::1][:port]` (an optional
+/// trailing `/`), normalised without the slash; `None` for anything else:
+/// another scheme or host, user info, a path, a query or a fragment.
+fn loopback_api(value: &str) -> Option<String> {
+    let authority = value.strip_prefix("http://")?;
+    let authority = authority.strip_suffix('/').unwrap_or(authority);
+    let (host, port) = ["[::1]", "127.0.0.1"]
+        .into_iter()
+        .find_map(|host| authority.strip_prefix(host).map(|rest| (host, rest)))?;
+    if !port.is_empty() {
+        let digits = port.strip_prefix(':')?;
+        let valid = !digits.is_empty()
+            && digits.bytes().all(|byte| byte.is_ascii_digit())
+            && digits.parse::<u16>().is_ok_and(|port| port != 0);
+        if !valid {
+            return None;
+        }
+    }
+    Some(format!("http://{host}{port}"))
+}
+
 /// How long one uid lookup may take.
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -150,4 +203,46 @@ async fn user_id(response: reqwest::Response, login: &str) -> Option<u64> {
         return None;
     }
     Some(user.id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{github_api_from, loopback_api, GITHUB_API};
+
+    #[test]
+    fn github_api_override_is_loopback_only() {
+        // Unset or blank: the real API.
+        assert_eq!(github_api_from(None), GITHUB_API);
+        assert_eq!(github_api_from(Some("")), GITHUB_API);
+        // A loopback http origin stands in, port and trailing slash allowed.
+        for (value, base) in [
+            ("http://127.0.0.1:9999", "http://127.0.0.1:9999"),
+            ("http://127.0.0.1:9999/", "http://127.0.0.1:9999"),
+            ("http://127.0.0.1", "http://127.0.0.1"),
+            ("http://[::1]:9999", "http://[::1]:9999"),
+        ] {
+            assert_eq!(loopback_api(value).as_deref(), Some(base), "{value}");
+            assert_eq!(github_api_from(Some(value)), base, "{value}");
+        }
+        // Anything else falls back to the real API: the host's token never
+        // leaves this machine through the hook.
+        for value in [
+            "https://127.0.0.1:9999",
+            "http://localhost:9999",
+            "http://127.0.0.1.evil.example",
+            "http://127.0.0.1@evil.example",
+            "http://127.0.0.1:9999@evil.example",
+            "http://evil.example/127.0.0.1",
+            "http://127.0.0.1:9999/api",
+            "http://127.0.0.1:9999?x=1",
+            "http://127.0.0.1:0",
+            "http://127.0.0.1:99999",
+            "http://127.0.0.1:",
+            "http://127.0.0.2:9999",
+            "https://api.github.com.evil.example",
+        ] {
+            assert_eq!(loopback_api(value), None, "{value}");
+            assert_eq!(github_api_from(Some(value)), GITHUB_API, "{value}");
+        }
+    }
 }

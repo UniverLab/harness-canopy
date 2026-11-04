@@ -292,7 +292,7 @@ impl RelayRuntime {
     /// never fatal: the next join or grant change republishes, and the
     /// owner flow stays untouched.
     pub async fn maybe_guest_allow(&self, force: bool) -> Option<Value> {
-        use super::guest_allow::{resolve_guest_uids, GITHUB_API};
+        use super::guest_allow::{github_api, resolve_guest_uids};
 
         let fingerprint = trust::allowlist_fingerprint(&self.db);
         if !force {
@@ -302,7 +302,7 @@ impl RelayRuntime {
                 }
             }
         }
-        let uids = resolve_guest_uids(&self.db, &self.uid_cache, &self.bearer, GITHUB_API).await;
+        let uids = resolve_guest_uids(&self.db, &self.uid_cache, &self.bearer, &github_api()).await;
         let invites = super::invite::live(&self.db, chrono::Utc::now().timestamp());
         if let Ok(mut last) = self.last_allowlist.lock() {
             *last = fingerprint;

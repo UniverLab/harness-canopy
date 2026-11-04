@@ -373,6 +373,14 @@ invite for a login, refusing with `no live invite for <target>` when there
 is nothing to revoke. A typed code ignores case, dashes and spaces, reads
 `I`/`L` as `1` and `O` as `0`, and may drop the `CNR-` prefix.
 
+Logins resolve to uids through `https://api.github.com/users/<login>`,
+both for `canopy remote invite` and for the daemon's guest allowlist. As a
+test hook for a local sandbox with a mock GitHub, `CANOPY_GITHUB_API`
+replaces that base, but only when it is a loopback `http://` origin
+(`http://127.0.0.1[:port]` or `http://[::1][:port]`, no path); any other
+value is ignored with a warning, so the host's GitHub token never leaves
+the machine through it. Set it for both the CLI and the daemon.
+
 ### The relay connection
 
 With `remote on` and a stored identity, the daemon keeps one WebSocket to
