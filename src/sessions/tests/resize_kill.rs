@@ -82,6 +82,11 @@ async fn ws_resize_roundtrip() {
         &serde_json::json!({"t": "resize", "id": id, "cols": 100, "rows": 30}),
     )
     .await;
+    // The attached resizer hears its own change too.
+    assert_eq!(
+        recv_json(&mut client, "resized").await,
+        serde_json::json!({"t": "resized", "id": id, "cols": 100, "rows": 30})
+    );
     // The server applies frames in order, so a re-attach sees the new size.
     send_json(&mut client, &serde_json::json!({"t": "attach", "id": id})).await;
     let after = recv_json(&mut client, "snapshot").await;
@@ -100,6 +105,86 @@ async fn ws_resize_roundtrip() {
         done |= frame["t"] == "ok";
     }
     server.abort();
+}
+
+/// A resize reaches every connection attached to the session as
+/// `resized{id,cols,rows}` — only when the size really changes — and never
+/// a connection that is not attached to it.
+#[tokio::test]
+async fn ws_resize_tells_every_attached_client() {
+    let (db, _db_dir) = test_db();
+    let workdir = tempfile::tempdir().expect("workdir");
+    let state = SessionsState::for_test(test_hub(&db), "token".to_string());
+    let (addr, server) = serve_state(state).await;
+    let mut resizer = connect_client(addr, Some("token")).await;
+    let mut watcher = connect_client(addr, Some("token")).await;
+    let mut bystander = connect_client(addr, Some("token")).await;
+    for client in [&mut resizer, &mut watcher, &mut bystander] {
+        assert_eq!(recv_json(client, "hello").await["t"], "hello");
+    }
+
+    send_json(
+        &mut resizer,
+        &serde_json::json!({
+            "t": "spawn", "req": "s1", "kind": "terminal",
+            "cli": "cat", "workdir": workdir.path().to_string_lossy(),
+        }),
+    )
+    .await;
+    let mut id = String::new();
+    for _ in 0..2 {
+        let frame = recv_json(&mut resizer, "spawned/added").await;
+        if frame["t"] == "spawned" {
+            id = frame["id"].as_str().expect("spawned id").to_string();
+        }
+    }
+    for client in [&mut resizer, &mut watcher] {
+        send_json(client, &serde_json::json!({"t": "attach", "id": id})).await;
+        loop {
+            if recv_json(client, "snapshot").await["t"] == "snapshot" {
+                break;
+            }
+        }
+    }
+
+    let resize = |cols: u16, rows: u16| serde_json::json!({"t": "resize", "id": id, "cols": cols, "rows": rows});
+    send_json(&mut resizer, &resize(100, 30)).await;
+    assert_eq!(
+        recv_json(&mut watcher, "resized").await,
+        serde_json::json!({"t": "resized", "id": id, "cols": 100, "rows": 30}),
+        "another attached client learns the new size"
+    );
+    // The same size again changes nothing and says nothing: the watcher's
+    // next frame is the following real change.
+    send_json(&mut resizer, &resize(100, 30)).await;
+    send_json(&mut resizer, &resize(90, 30)).await;
+    assert_eq!(
+        recv_json(&mut watcher, "resized").await,
+        serde_json::json!({"t": "resized", "id": id, "cols": 90, "rows": 30}),
+    );
+
+    while let Some(frame) =
+        super::try_recv_json(&mut bystander, std::time::Duration::from_millis(300)).await
+    {
+        assert_ne!(
+            frame["t"], "resized",
+            "a connection not attached to the session never gets its resize"
+        );
+    }
+    server.abort();
+}
+
+/// `resized` parses as a host frame, and a session stream ignores it
+/// without erroring.
+#[test]
+fn resized_frame_parses_as_a_host_frame() {
+    use crate::sessions::protocol::{parse_host_frame, resized_frame, HostFrame};
+    match parse_host_frame(&resized_frame("s1", 120, 40)) {
+        Ok(HostFrame::Resized { id, cols, rows }) => {
+            assert_eq!((id.as_str(), cols, rows), ("s1", 120, 40));
+        }
+        other => panic!("unexpected parse: {other:?}"),
+    }
 }
 
 /// `kill` ends the child, sends `exited` + `session_removed` to every

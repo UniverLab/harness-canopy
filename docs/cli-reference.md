@@ -454,7 +454,11 @@ row carries `yolo: true|false`, so the browser only offers the switch where
 the host can honor it. Output and snapshot frames are chunked to stay under
 16 KiB; a snapshot's first part carries `cols`/`rows`, the
 rest travels as `snapshot_more`, and the final `snapshot_more` carries
-`last: true` (an empty one when the snapshot fit the first part). The host
+`last: true` (an empty one when the snapshot fit the first part). A
+snapshot taken while a full-screen app runs switches the client to its
+alternate screen (`?1049h`) after the main buffer, and when any client
+resizes a session every connection attached to it receives
+`resized{id,cols,rows}` (only when the size actually changes). The host
 coalesces terminal output into larger `out` frames: the first output
 after a quiet spell is sent at once (a keystroke echo never waits), and
 what follows within 25 ms of a sent frame is batched and sent once 12 KiB

@@ -3,7 +3,8 @@
 //! A device peer is a remote client, not a local one: it speaks the same
 //! protocol v1 frames as `/sessions/ws`, with one extra rule —
 //!
-//! * `resize` always answers `forbidden`.
+//! * `resize` always answers `forbidden`; a resize made elsewhere still
+//!   reaches attached peers as `resized{id,cols,rows}`.
 //!
 //! Terminal sessions are first-class here, as on the local socket: they
 //! list, attach, and spawn (without `cli` they open the default shell).
@@ -31,7 +32,7 @@ use crate::sessions::catalog::{handle_catalog, handle_compose, handle_prompt_dra
 use crate::sessions::graphs::{handle_graph_unwatch, handle_graph_watch, handle_graphs};
 use crate::sessions::outbound::{self, PushOut, SessionCoal};
 use crate::sessions::protocol::{
-    error_frame, exited_frame, file_frame, ok_frame, out_frame, parse_client_frame,
+    error_frame, exited_frame, file_frame, ok_frame, out_frame, parse_client_frame, resized_frame,
     session_added_frame, session_removed_frame, sessions_frame, shelf_added_frame, shelf_frame,
     shelf_missing_frame, shelf_removed_frame, snapshot_frame, snapshot_more_frame, ClientFrame,
     SessionItem, SpawnExt, ERR_BAD_REQUEST, ERR_BUSY, ERR_DELIVERY_FAILED, ERR_FORBIDDEN,
@@ -322,6 +323,12 @@ impl RemoteBridge {
                     .exited_forwards(&id, to_all, self.attached.contains_key(&id))
                 {
                     send(out, exited_frame(&id, code));
+                }
+            }
+            HubEvent::Resized { id, cols, rows } => {
+                // Attach is grant-checked, so an attached session is granted.
+                if self.attached.contains_key(&id) {
+                    send(out, resized_frame(&id, cols, rows));
                 }
             }
             HubEvent::ShelfAdded(item) => {

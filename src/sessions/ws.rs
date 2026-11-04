@@ -28,7 +28,7 @@ use super::catalog::{handle_catalog, handle_compose, handle_prompt_draft};
 use super::graphs::{handle_graph_unwatch, handle_graph_watch, handle_graphs};
 use super::protocol::{
     error_frame, exited_frame, file_frame, hello_frame, installed_harnesses, ok_frame, out_frame,
-    parse_client_frame, session_added_frame, session_removed_frame, sessions_frame,
+    parse_client_frame, resized_frame, session_added_frame, session_removed_frame, sessions_frame,
     shelf_added_frame, shelf_frame, shelf_removed_frame, snapshot_frame, spawned_frame,
     ClientFrame, SessionItem, ERR_BAD_REQUEST, ERR_DELIVERY_FAILED, ERR_FORBIDDEN, ERR_INTERNAL,
     ERR_NOT_FOUND, ERR_SPAWN_FAILED,
@@ -543,7 +543,13 @@ fn handle_resize(state: &Arc<SessionsState>, out_tx: &OutTx, id: &str, cols: u16
         let _ = out_tx.send(error_frame(None, ERR_NOT_FOUND, &no_such_session(id)));
         return;
     };
-    session.resize(cols, rows);
+    if session.resize(cols, rows) {
+        state.hub.emit(HubEvent::Resized {
+            id: session.id.clone(),
+            cols: cols.max(1),
+            rows: rows.max(1),
+        });
+    }
 }
 
 fn handle_spawn(state: &Arc<SessionsState>, out_tx: &OutTx, req: String, mut spawn: SpawnRequest) {
@@ -648,6 +654,11 @@ fn handle_hub_event(out_tx: &OutTx, attached: &mut Attached, event: HubEvent) {
         HubEvent::Exited { id, code, to_all } => {
             if to_all || attached.contains_key(&id) {
                 let _ = out_tx.send(exited_frame(&id, code));
+            }
+        }
+        HubEvent::Resized { id, cols, rows } => {
+            if attached.contains_key(&id) {
+                let _ = out_tx.send(resized_frame(&id, cols, rows));
             }
         }
         HubEvent::ShelfAdded(item) => {

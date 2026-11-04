@@ -37,6 +37,17 @@ pub enum HostFrame {
         id: String,
         code: i32,
     },
+    /// `resized{id,cols,rows}`: another client changed the session's size.
+    /// Parsed so the frame is known; the TUI deliberately ignores it (see
+    /// `pump_session_text`), so its fields are only read by tests.
+    Resized {
+        #[allow(dead_code)]
+        id: String,
+        #[allow(dead_code)]
+        cols: u16,
+        #[allow(dead_code)]
+        rows: u16,
+    },
     SessionAdded {
         item: Box<SessionItem>,
     },
@@ -179,6 +190,11 @@ enum HostFrameWire {
         id: String,
         code: i32,
     },
+    Resized {
+        id: String,
+        cols: u16,
+        rows: u16,
+    },
     SessionAdded {
         item: SessionItem,
     },
@@ -279,6 +295,7 @@ pub fn parse_host_frame(text: &str) -> Result<HostFrame, String> {
         },
         HostFrameWire::Out { id, seq, data } => HostFrame::Out { id, seq, data },
         HostFrameWire::Exited { id, code } => HostFrame::Exited { id, code },
+        HostFrameWire::Resized { id, cols, rows } => HostFrame::Resized { id, cols, rows },
         HostFrameWire::SessionAdded { item } => HostFrame::SessionAdded {
             item: Box::new(item),
         },

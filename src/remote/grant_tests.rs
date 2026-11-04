@@ -427,6 +427,56 @@ async fn natural_exit_removal_reaches_holders_not_ungranted() {
     bridge.abort();
 }
 
+/// A hub resize reaches a remote peer as `resized{id,cols,rows}` for the
+/// session it is attached to, and never for one it is not attached to
+/// (granted or not).
+#[tokio::test]
+async fn resized_reaches_attached_remote_peers_only() {
+    let hub = grant_hub();
+    let grant = Grant::Sessions(HashSet::from(["beta".to_string()]));
+    let (out_tx, mut out_rx) = crate::sessions::outbound::channel();
+    let mut bridge = RemoteBridge::with_grant(Arc::clone(&hub.state), grant, false);
+    bridge
+        .handle_text(&attach_frame(&hub.beta.id), &out_tx)
+        .await;
+    assert_eq!(recv_frame(&mut out_rx).await["t"], "snapshot");
+    loop {
+        let more = recv_frame(&mut out_rx).await;
+        if more["last"].as_bool().expect("the last flag") {
+            break;
+        }
+    }
+
+    for id in [&hub.alpha.id, &hub.shell.id] {
+        bridge.handle_event(
+            HubEvent::Resized {
+                id: id.clone(),
+                cols: 132,
+                rows: 43,
+            },
+            &out_tx,
+        );
+    }
+    assert!(
+        out_rx.try_recv().is_err(),
+        "a resize of a session the peer is not attached to forwards nothing"
+    );
+
+    bridge.handle_event(
+        HubEvent::Resized {
+            id: hub.beta.id.clone(),
+            cols: 132,
+            rows: 43,
+        },
+        &out_tx,
+    );
+    assert_eq!(
+        recv_frame(&mut out_rx).await,
+        json!({"t": "resized", "id": hub.beta.id, "cols": 132, "rows": 43})
+    );
+    bridge.abort();
+}
+
 #[test]
 fn pairing_binds_the_claimed_login_and_refuses_untrusted_guests() {
     let dir = tempfile::tempdir().expect("tempdir");

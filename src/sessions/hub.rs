@@ -265,9 +265,20 @@ impl HubSession {
     /// Resize the PTY and the parser through the same shrink-safe path the
     /// TUI uses: rows that would fall off go to scrollback first, and both
     /// steps run under one lock acquisition.
-    pub fn resize(&self, cols: u16, rows: u16) {
+    ///
+    /// Returns `true` when the size actually changed, so the caller tells
+    /// attached connections with a `resized` frame. The check, the PTY resize
+    /// and the parser resize all run under the parser lock, so two racing
+    /// resizes cannot both report (or both miss) the same change.
+    pub fn resize(&self, cols: u16, rows: u16) -> bool {
         let cols = cols.max(1);
         let rows = rows.max(1);
+        let Ok(mut out) = self.state.lock() else {
+            return false;
+        };
+        if out.cols == cols && out.rows == rows {
+            return false;
+        }
         if let Ok(m) = self.master.lock() {
             let _ = m.resize(PtySize {
                 rows,
@@ -276,13 +287,12 @@ impl HubSession {
                 pixel_height: 0,
             });
         }
-        if let Ok(mut out) = self.state.lock() {
-            let old_rows = out.rows;
-            preserve_rows_on_shrink(&mut out.parser, old_rows, rows);
-            out.parser.screen_mut().set_size(rows, cols);
-            out.cols = cols;
-            out.rows = rows;
-        }
+        let old_rows = out.rows;
+        preserve_rows_on_shrink(&mut out.parser, old_rows, rows);
+        out.parser.screen_mut().set_size(rows, cols);
+        out.cols = cols;
+        out.rows = rows;
+        true
     }
 
     pub fn status(&self) -> SessionStatus {

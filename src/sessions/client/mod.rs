@@ -676,6 +676,12 @@ fn pump_session_text(
             let _ = inbound.send(SessionEvent::Closed);
             true
         }
+        // The TUI is the size authority for its own view: it resizes the
+        // hub to its panel and rebuilds its parser at every snapshot's size.
+        // Following `resized` echoes would make a fast window drag jitter
+        // (and shrink rows into scrollback) as late echoes of older sizes
+        // arrive, so they are dropped.
+        HostFrame::Resized { .. } => false,
         _ => false,
     }
 }

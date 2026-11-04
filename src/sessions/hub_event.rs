@@ -14,7 +14,19 @@ use super::protocol::{SessionItem, ShelfItem};
 pub enum HubEvent {
     SessionAdded(Box<SessionItem>),
     SessionRemoved(String),
-    Exited { id: String, code: i32, to_all: bool },
+    Exited {
+        id: String,
+        code: i32,
+        to_all: bool,
+    },
+    /// The session's PTY size changed; forwarded to attached connections.
+    Resized {
+        id: String,
+        cols: u16,
+        rows: u16,
+    },
     ShelfAdded(Box<ShelfItem>),
-    ShelfRemoved { file_id: String },
+    ShelfRemoved {
+        file_id: String,
+    },
 }

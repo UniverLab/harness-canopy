@@ -580,6 +580,13 @@ pub fn exited_frame(id: &str, code: i32) -> String {
     serde_json::json!({"t": "exited", "id": id, "code": code}).to_string()
 }
 
+/// `resized{id,cols,rows}`: the session's PTY size changed (some client
+/// resized it). Sent to every connection attached to the session, only when
+/// the size actually changes.
+pub fn resized_frame(id: &str, cols: u16, rows: u16) -> String {
+    serde_json::json!({"t": "resized", "id": id, "cols": cols, "rows": rows}).to_string()
+}
+
 /// `session_added{item}`, broadcast to every connection.
 pub fn session_added_frame(item: &SessionItem) -> String {
     serde_json::json!({"t": "session_added", "item": item}).to_string()
