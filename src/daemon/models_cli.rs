@@ -1,9 +1,9 @@
-//! `canopy models` — CLI-side control over the `agent_models` catalog cache.
+//! `canopy models` — CLI-side control over the `harness models` catalog cache.
 //!
-//! Mirrors the `agent_models` MCP tool's `refresh: true` path, but as a
+//! Mirrors the `harness models` action's `refresh: true` path, but as a
 //! standalone command: useful for a script, a cron job, or a user who wants
 //! to warm the cache before an agent needs it rather than eating the fetch
-//! latency on the first `agent_models` call.
+//! latency on the first `harness models` call.
 
 use anyhow::Result;
 use clap::Subcommand;

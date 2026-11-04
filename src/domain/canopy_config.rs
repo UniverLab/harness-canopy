@@ -3,7 +3,10 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+pub use super::animations_mode::AnimationsMode;
 use super::cli_config::CliConfig;
+use super::daemon_config::DaemonConfig;
+pub use super::remote_config::RemoteConfig;
 use super::settings;
 
 /// Top-level canopy configuration.
@@ -70,7 +73,7 @@ pub struct CanopyConfig {
     /// single spec may fail with a genuine verdict before the graph is marked
     /// blocked instead of being left to burn another quota window on a
     /// relaunch. Persisted per spec (`graph_specs.cross_run_attempts`) so it
-    /// survives `graph_reset`, a relaunch, and a daemon restart — unlike the
+    /// survives `graph_control`, a relaunch, and a daemon restart — unlike the
     /// per-node in-run iteration budget, which resets with every execution.
     /// Lower than that per-node budget by design: these are whole attempts,
     /// not node cycles.
@@ -85,7 +88,7 @@ pub struct CanopyConfig {
     #[serde(default)]
     pub skills: SkillsConfig,
 
-    /// `[models]` settings for the `agent_models` catalog cache.
+    /// `[models]` settings for the `harness models` catalog cache.
     #[serde(default)]
     pub models: ModelsConfig,
 
@@ -137,7 +140,7 @@ pub struct CanopyConfig {
     #[serde(default)]
     pub pinned_panel_face: Option<String>,
 
-    /// CM46: how long a graph's durable event log (`graph_events`) is kept
+    /// CM46: how long a graph durable event log is kept
     /// before `canopy clean` prunes it, in days. Separate from
     /// `clean.retention_days` (which governs sessions and files) so the two
     /// histories age independently.
@@ -173,6 +176,14 @@ pub struct CanopyConfig {
     /// `[tui]` settings for the terminal UI.
     #[serde(default)]
     pub tui: TuiConfig,
+
+    /// `[remote]` settings for owner-only remote control via the relay.
+    #[serde(default)]
+    pub remote: RemoteConfig,
+
+    /// `[daemon]` settings for the daemon's own resource footprint.
+    #[serde(default)]
+    pub daemon: DaemonConfig,
 }
 
 /// Retry policy of the cron scheduler, read from the `[scheduler]` table in
@@ -233,6 +244,8 @@ pub struct GraphsConfig {
     pub check_output_max_kib: u64,
     #[serde(default = "default_verdict_grace_seconds")]
     pub verdict_grace_seconds: u64,
+    #[serde(default = "default_catalogue_url")]
+    pub catalogue_url: String,
 }
 
 impl Default for GraphsConfig {
@@ -247,6 +260,7 @@ impl Default for GraphsConfig {
             ensemble_max_members_sequential: default_ensemble_max_members_sequential(),
             check_output_max_kib: default_check_output_max_kib(),
             verdict_grace_seconds: default_verdict_grace_seconds(),
+            catalogue_url: default_catalogue_url(),
         }
     }
 }
@@ -285,6 +299,10 @@ fn default_check_output_max_kib() -> u64 {
 
 fn default_verdict_grace_seconds() -> u64 {
     settings::default_int("graphs.verdict_grace_seconds") as u64
+}
+
+fn default_catalogue_url() -> String {
+    settings::default_string("graphs.catalogue_url")
 }
 
 /// Settings for agents and harnesses. Read from the `[agents]` table in
@@ -392,6 +410,8 @@ pub struct TuiConfig {
     pub scroll_step: usize,
     #[serde(default = "default_page_step")]
     pub page_step: usize,
+    #[serde(default = "default_animations")]
+    pub animations: AnimationsMode,
 }
 
 impl Default for TuiConfig {
@@ -404,6 +424,7 @@ impl Default for TuiConfig {
             atmosphere: default_atmosphere(),
             scroll_step: default_scroll_step(),
             page_step: default_page_step(),
+            animations: default_animations(),
         }
     }
 }
@@ -436,6 +457,12 @@ fn default_page_step() -> usize {
     settings::default_int("tui.page_step") as usize
 }
 
+fn default_animations() -> AnimationsMode {
+    settings::default_string("tui.animations")
+        .parse()
+        .unwrap_or_default()
+}
+
 /// Highest per-file indexing cap a user may configure, in MB. Text/PDF
 /// extraction loads the whole file into memory, so an unbounded (or merely
 /// very large) cap risks exhausting memory on a single oversized file —
@@ -448,7 +475,7 @@ fn default_rag_max_file_mb() -> u32 {
 
 /// Kept equal to `rag::vector_store::DEFAULT_INDEX_CACHE_ENTRIES` (see that
 /// constant for the measurement behind the value). Not referenced directly
-/// across the module boundary because `examples/rag_search.rs` mounts
+/// across the module boundary because the standalone RAG search example mounts
 /// `vector_store` at its own crate root via `#[path]`, without a `rag`
 /// module wrapping it — `crate::rag::vector_store` doesn't resolve there.
 fn default_rag_vector_cache_entries() -> u32 {
@@ -490,8 +517,8 @@ pub struct SkillSourceConfig {
 ///
 /// Sources are checked in list order for a skill; when two sources publish a
 /// skill with the same name, the *later* source in this list wins — both for
-/// `skill_list`'s merged catalog and for which source a not-yet-installed
-/// skill is fetched from by `skill_get`.
+/// `skill` `list`'s merged catalog and for which source a not-yet-installed
+/// skill is fetched from by `skill` `get`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillsConfig {
     #[serde(default = "default_skill_sources")]
@@ -550,7 +577,7 @@ fn default_reclaim_min_deleted_rows() -> usize {
     settings::default_int("clean.reclaim_min_deleted_rows") as usize
 }
 
-/// Settings for the `agent_models` catalog cache. Read from the `[models]`
+/// Settings for the `harness models` catalog cache. Read from the `[models]`
 /// table in `config.toml`.
 ///
 /// The two caches get independent TTLs rather than sharing one: the
@@ -560,7 +587,7 @@ fn default_reclaim_min_deleted_rows() -> usize {
 /// authenticates with a new provider through that CLI, so it defaults much
 /// shorter — a stale native cache is far more likely to hide a model the
 /// user just unlocked than the models.dev catalog is to miss a same-day
-/// release. Either can still be forced fresh early via `agent_models
+/// release. Either can still be forced fresh early via `harness models
 /// refresh: true` or `canopy models refresh`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelsConfig {
@@ -646,24 +673,10 @@ fn default_theme() -> String {
 }
 
 impl CanopyConfig {
-    /// Load config from `~/.canopy/config.toml`. Returns default if not found.
+    /// Load config from `~/.canopy/config.toml`. Returns default if not found;
+    /// keeps the last valid config (logged) while the file fails to parse.
     pub fn load(canopy_dir: &Path) -> Self {
-        let config_path = canopy_dir.join("config.toml");
-        let mut config: CanopyConfig = std::fs::read_to_string(&config_path)
-            .ok()
-            .and_then(|content| toml::from_str::<CanopyConfig>(&content).ok())
-            .unwrap_or_default();
-        // CM51 (D1): the `CANOPY_RETRY_*` variables overlay the `[scheduler]`
-        // table. Injected as a closure so tests never touch the process
-        // environment.
-        settings::apply_env_overrides(&mut config, &|key| std::env::var(key).ok());
-        // Migrate legacy single-root field to the new multi-dir vec.
-        if config.rag_personal_dirs.is_empty() && !config.rag_personal_root.is_empty() {
-            config
-                .rag_personal_dirs
-                .push(config.rag_personal_root.clone());
-        }
-        config
+        super::config_cache::load(canopy_dir)
     }
 
     /// Serialize this config to `~/.canopy/config.toml`.
@@ -747,6 +760,8 @@ impl Default for CanopyConfig {
             update: UpdateConfig::default(),
             notifications: NotificationsConfig::default(),
             tui: TuiConfig::default(),
+            remote: RemoteConfig::default(),
+            daemon: DaemonConfig::default(),
         }
     }
 }
@@ -1232,5 +1247,48 @@ mod tests {
         assert_eq!(names.len(), 2);
         assert!(names.contains(&"opencode"));
         assert!(names.contains(&"kiro"));
+    }
+
+    #[test]
+    fn remote_defaults_carry_device_flow_client_id() {
+        let remote = RemoteConfig::default();
+        assert!(!remote.enabled);
+        assert_eq!(remote.relay_url, "https://remote.univerlab.org");
+        assert_eq!(remote.github_client_id, "Ov23liVCfE58kUb3ssDy");
+        assert_eq!(remote.host_label, "");
+
+        // A config predating the `[remote]` table still gets these.
+        let dir = TempDir::new().unwrap();
+        let canopy_dir = dir.path().join(".canopy");
+        std::fs::create_dir_all(&canopy_dir).unwrap();
+        let toml = r#"embeddings_model = "intfloat/multilingual-e5-base""#;
+        std::fs::write(canopy_dir.join("config.toml"), toml).unwrap();
+        let loaded = CanopyConfig::load(&canopy_dir);
+        assert_eq!(loaded.remote.github_client_id, "Ov23liVCfE58kUb3ssDy");
+        assert!(!loaded.remote.enabled);
+    }
+
+    #[test]
+    fn remote_section_round_trips_via_config_toml() {
+        let dir = TempDir::new().unwrap();
+        let canopy_dir = dir.path().join(".canopy");
+
+        let config = CanopyConfig {
+            remote: RemoteConfig {
+                enabled: true,
+                relay_url: "https://relay.example".to_string(),
+                github_client_id: "custom-id".to_string(),
+                host_label: "home-server".to_string(),
+                shelf_max_file_mb: 20,
+            },
+            ..CanopyConfig::default()
+        };
+        config.save_for_tests(&canopy_dir).unwrap();
+
+        let loaded = CanopyConfig::load(&canopy_dir);
+        assert!(loaded.remote.enabled);
+        assert_eq!(loaded.remote.relay_url, "https://relay.example");
+        assert_eq!(loaded.remote.github_client_id, "custom-id");
+        assert_eq!(loaded.remote.host_label, "home-server");
     }
 }

@@ -3,6 +3,8 @@ use ratatui::crossterm::event::KeyCode;
 
 use crate::tui::app::types::App;
 
+use super::handler_errors::report_handler_error;
+
 pub fn handle_launchpad_key(app: &mut App, code: KeyCode) -> Result<()> {
     match code {
         KeyCode::Esc => app.close_launchpad_dialog(),
@@ -19,7 +21,12 @@ pub fn handle_launchpad_key(app: &mut App, code: KeyCode) -> Result<()> {
                 false
             };
             if can_confirm {
-                app.confirm_launchpad_dialog()?;
+                if let Err(e) = app.confirm_launchpad_dialog() {
+                    report_handler_error(app, "Could not open session", &e);
+                    // The failed confirm consumed both dialogs; without this
+                    // the focus would point at a dialog that is gone.
+                    app.close_launchpad_dialog();
+                }
             }
         }
         _ => {

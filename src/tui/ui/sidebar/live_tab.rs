@@ -177,9 +177,9 @@ pub(super) fn graph_status_icon(
 ) -> (&'static str, Color) {
     match lp.status {
         GraphStatus::Running => ("▶", STATUS_RUNNING),
-        GraphStatus::Pausing => ("⏸", theme.warning),
-        GraphStatus::Paused if meta.blocked => ("⛔", STATUS_FAIL),
-        GraphStatus::Paused => ("⏸", theme.warning),
+        GraphStatus::Pausing => ("‖", theme.warning),
+        GraphStatus::Paused if meta.blocked => ("⊘", STATUS_FAIL),
+        GraphStatus::Paused => ("‖", theme.warning),
         GraphStatus::Draft => ("○", theme.dim_text),
         GraphStatus::Completed => ("✓", STATUS_OK),
         GraphStatus::Failed => ("✗", STATUS_FAIL),
@@ -198,7 +198,7 @@ pub(super) fn draw_active_graph_card(
     let bg = if selected {
         theme.selected_bg
     } else {
-        Color::Reset
+        theme.sidebar_bg
     };
     let title_style = project_title_style(selected, panel_focused, theme);
     let meta_style = project_meta_style(selected, theme);
@@ -219,6 +219,8 @@ pub(super) fn draw_active_graph_card(
 
     let last_run_style = if lp.status == GraphStatus::Running {
         Style::default().fg(STATUS_RUNNING)
+    } else if lp.status == GraphStatus::Pausing {
+        Style::default().fg(theme.warning)
     } else {
         meta_style
     };

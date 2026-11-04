@@ -59,15 +59,6 @@ impl MissionImpact {
             Self::Breaking => "breaking",
         }
     }
-
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "low" => Some(Self::Low),
-            "high" => Some(Self::High),
-            "breaking" => Some(Self::Breaking),
-            _ => None,
-        }
-    }
 }
 
 /// Status reported by an agent for the shared workspace.
@@ -85,15 +76,6 @@ impl WorkspaceStatus {
             Self::Stable => "stable",
             Self::Unstable => "unstable",
             Self::Testing => "testing",
-        }
-    }
-
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "stable" => Some(Self::Stable),
-            "unstable" => Some(Self::Unstable),
-            "testing" => Some(Self::Testing),
-            _ => None,
         }
     }
 }
@@ -451,38 +433,10 @@ mod tests {
     }
 
     #[test]
-    fn mission_impact_from_str() {
-        assert_eq!(MissionImpact::from_str("low"), Some(MissionImpact::Low));
-        assert_eq!(MissionImpact::from_str("high"), Some(MissionImpact::High));
-        assert_eq!(
-            MissionImpact::from_str("breaking"),
-            Some(MissionImpact::Breaking)
-        );
-        assert!(MissionImpact::from_str("invalid").is_none());
-    }
-
-    #[test]
     fn workspace_status_as_str() {
         assert_eq!(WorkspaceStatus::Stable.as_str(), "stable");
         assert_eq!(WorkspaceStatus::Unstable.as_str(), "unstable");
         assert_eq!(WorkspaceStatus::Testing.as_str(), "testing");
-    }
-
-    #[test]
-    fn workspace_status_from_str() {
-        assert_eq!(
-            WorkspaceStatus::from_str("stable"),
-            Some(WorkspaceStatus::Stable)
-        );
-        assert_eq!(
-            WorkspaceStatus::from_str("unstable"),
-            Some(WorkspaceStatus::Unstable)
-        );
-        assert_eq!(
-            WorkspaceStatus::from_str("testing"),
-            Some(WorkspaceStatus::Testing)
-        );
-        assert!(WorkspaceStatus::from_str("invalid").is_none());
     }
 
     #[test]
@@ -895,18 +849,6 @@ mod tests {
     fn message_kind_from_str_case_sensitive() {
         assert!(MessageKind::from_str("Info").is_none());
         assert!(MessageKind::from_str("INFO").is_none());
-    }
-
-    #[test]
-    fn mission_impact_from_str_case_sensitive() {
-        assert!(MissionImpact::from_str("Low").is_none());
-        assert!(MissionImpact::from_str("HIGH").is_none());
-    }
-
-    #[test]
-    fn workspace_status_from_str_case_sensitive() {
-        assert!(WorkspaceStatus::from_str("Stable").is_none());
-        assert!(WorkspaceStatus::from_str("TESTING").is_none());
     }
 
     #[test]

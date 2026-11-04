@@ -44,26 +44,26 @@ pub async fn handle_settings_action(
 ) -> Result<()> {
     match action {
         SettingsAction::List { group } => {
-            let mut args = serde_json::json!({});
+            let mut args = serde_json::json!({ "action": "list" });
             if let Some(group) = group {
                 args["group"] = serde_json::json!(group);
             }
-            print_tool(port_override, "config_list", &args)
+            print_tool(port_override, "config", &args)
         }
         SettingsAction::Get { key } => print_tool(
             port_override,
-            "config_get",
-            &serde_json::json!({ "key": key }),
+            "config",
+            &serde_json::json!({ "action": "get", "key": key }),
         ),
         SettingsAction::Set { key, value } => print_tool(
             port_override,
-            "config_set",
-            &serde_json::json!({ "key": key, "value": value }),
+            "config",
+            &serde_json::json!({ "action": "set", "key": key, "value": value }),
         ),
         SettingsAction::Reset { key } => print_tool(
             port_override,
-            "config_reset",
-            &serde_json::json!({ "key": key }),
+            "config",
+            &serde_json::json!({ "action": "reset", "key": key }),
         ),
         SettingsAction::Path => {
             println!(

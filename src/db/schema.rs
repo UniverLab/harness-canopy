@@ -99,7 +99,7 @@ impl Database {
                 .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
 
-        // CM29: downgrades the dirty-start refusal (graph_run/autorun) to a
+        // CM29: downgrades the dirty-start refusal (graph_control/autorun) to a
         // warning instead of refusing to launch. `DEFAULT 0` — every
         // pre-existing graph keeps today's (implicit) refusal behavior.
         let has_allow_dirty_start: bool = conn
@@ -115,6 +115,45 @@ impl Database {
                 [],
             )
             .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// Add graph `active_run_idea`: the idea an idea-driven run last ran
+    /// with, persisted the moment that run starts so every resume path
+    /// (`graph_control run_from_node`, `retry_current_node`, plain resume)
+    /// can re-render `{{spec_content}}` from it. `NULL` on pre-existing rows
+    /// and on spec-driven graphs (never written for them).
+    pub(in crate::db) fn migrate_graph_active_run_idea(conn: &Connection) -> Result<()> {
+        let has_active_run_idea: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('graphs') WHERE name = 'active_run_idea'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if !has_active_run_idea {
+            conn.execute("ALTER TABLE graphs ADD COLUMN active_run_idea TEXT", [])
+                .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// Add graph `blocker`: the text a dirty-tree guard (or attempt-budget)
+    /// pause stores so `graph`, `graph list` and the TUI can show WHY the
+    /// graph paused. `NULL` on pre-existing rows and whenever the graph is
+    /// not paused-behind-a-blocker (cleared on resume and on terminal moves).
+    pub(in crate::db) fn migrate_graph_blocker(conn: &Connection) -> Result<()> {
+        let has_blocker: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('graphs') WHERE name = 'blocker'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if !has_blocker {
+            conn.execute("ALTER TABLE graphs ADD COLUMN blocker TEXT", [])
+                .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
         Ok(())
     }
@@ -184,7 +223,7 @@ impl Database {
     /// `graphs.require_spec_type` opt-in flag, and the `spec_code_counters`
     /// table (one counter row per (workdir, spec_type); never MAX+1). All
     /// pre-existing spec rows keep their columns NULL — legacy specs stay
-    /// untyped and get no code unless `spec_update` assigns one, per the
+    /// untyped and get no code unless `spec_edit update` assigns one, per the
     /// no-backfill guideline.
     pub(in crate::db) fn migrate_spec_type_columns(conn: &Connection) -> Result<()> {
         for column in ["spec_type", "spec_scope", "spec_code"] {
@@ -235,7 +274,7 @@ impl Database {
         // spec has failed with a genuine (non-infrastructure) verdict.
         // Unlike the per-node iteration budget `run_spec` tracks in memory
         // for the duration of one execution, this is persisted so it
-        // survives `graph_reset`, a relaunch, and a daemon restart — the
+        // survives `graph_control`, a relaunch, and a daemon restart — the
         // whole point being that an unsatisfiable spec doesn't get a fresh
         // budget every time an operator resets and relaunches after a quota
         // failure. `DEFAULT 0` means every pre-existing spec reads as never
@@ -361,20 +400,6 @@ impl Database {
             )
             .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
-        let has_bp_quorum_grace: bool = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('ensemble_blueprints') WHERE name = 'quorum_grace_minutes'",
-                [],
-                |row| Ok(row.get::<_, i32>(0)? > 0),
-            )
-            .unwrap_or(false);
-        if !has_bp_quorum_grace {
-            conn.execute(
-                "ALTER TABLE ensemble_blueprints ADD COLUMN quorum_grace_minutes INTEGER",
-                [],
-            )
-            .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
-        }
         Ok(())
     }
 
@@ -418,8 +443,8 @@ impl Database {
     /// CB31: add `graph_runs.paused_through`.
     pub(in crate::db) fn migrate_run_paused_through_column(conn: &Connection) -> Result<()> {
         // CB31: a node run finalized with its own verdict while a
-        // wait-for-completion `graph_pause` was pending is flagged here so
-        // `graph_continue` re-executing that node does not spend one of its
+        // wait-for-completion `graph_control` was pending is flagged here so
+        // `graph_control` re-executing that node does not spend one of its
         // `DEFAULT_MAX_ITERATIONS_PER_NODE` — an operator pause is not a node
         // attempt. Additive and idempotent; NOT NULL DEFAULT 0 backfills
         // every existing row as "not paused through".
@@ -737,6 +762,30 @@ impl Database {
                 .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
             }
         }
+        Ok(())
+    }
+
+    /// Drop the retired `blueprints` and `ensemble_blueprints` tables.
+    /// Guarded `DROP TABLE IF EXISTS` — a no-op on a fresh database (the
+    /// tables are gone from `BASE_SCHEMA_BATCHES`) and on an
+    /// already-migrated one, and the thing that removes them from a
+    /// database created before they were retired. Node configs are inline,
+    /// so nothing reads either table at run time.
+    pub(in crate::db) fn migrate_drop_blueprint_tables(conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS blueprints;
+             DROP TABLE IF EXISTS ensemble_blueprints;",
+        )
+        .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+        Ok(())
+    }
+
+    /// Create the `remote_devices` table on databases that predate it.
+    /// Guarded `CREATE TABLE IF NOT EXISTS` — a no-op on a fresh database
+    /// (already in `BASE_SCHEMA_BATCHES`) and on an already-migrated one.
+    pub(in crate::db) fn migrate_remote_devices(conn: &Connection) -> Result<()> {
+        conn.execute_batch(super::remote_devices::REMOTE_DEVICES_SCHEMA)
+            .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         Ok(())
     }
 }

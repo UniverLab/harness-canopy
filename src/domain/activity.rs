@@ -8,7 +8,9 @@
 
 use serde_json::Value;
 
+use crate::db::connection::with_busy_retry;
 use crate::db::Database;
+use crate::domain::graphs::GraphSpec;
 use crate::domain::sync::MessageKind;
 
 /// The kind of a durable graph event. The string values are the vocabulary
@@ -29,10 +31,20 @@ pub enum GraphEventKind {
     NodeFinished,
     HookFired,
     ConfigChanged,
-    /// CM47's `spec_note_write` constructs this; the CHECK constraint and this
+    /// CM47's `spec_edit note_write` constructs this; the CHECK constraint and this
     /// vocabulary are fixed now so the two never drift.
     #[allow(dead_code)]
     Note,
+    /// A node run started waiting for named mutexes.
+    MutexWaiting,
+    /// A node run was granted every mutex it waited for.
+    MutexAcquired,
+    /// A pause was requested while node(s) were still running; the graph
+    /// reaches `paused` once they finish.
+    PauseRequested,
+    /// A pending pause was cancelled by a resume while node(s) were still
+    /// running; the graph keeps running.
+    PauseCancelled,
 }
 
 impl GraphEventKind {
@@ -53,6 +65,10 @@ impl GraphEventKind {
             Self::HookFired => "hook_fired",
             Self::ConfigChanged => "config_changed",
             Self::Note => "note",
+            Self::MutexWaiting => "mutex_waiting",
+            Self::MutexAcquired => "mutex_acquired",
+            Self::PauseRequested => "pause_requested",
+            Self::PauseCancelled => "pause_cancelled",
         }
     }
 
@@ -65,7 +81,12 @@ impl GraphEventKind {
     pub fn emits_activity(self) -> bool {
         !matches!(
             self,
-            Self::NodeStarted | Self::SpecSkipped | Self::ConfigChanged | Self::Note
+            Self::NodeStarted
+                | Self::SpecSkipped
+                | Self::ConfigChanged
+                | Self::Note
+                | Self::MutexWaiting
+                | Self::MutexAcquired
         )
     }
 }
@@ -112,6 +133,16 @@ impl From<GraphEvent<'_>> for GraphEventRecord {
     }
 }
 
+/// Display label for a spec in engine-authored messages: `[CODE] 'name'`
+/// when the spec has a code, `'name'` alone when it does not — no
+/// placeholder. One helper so every call site formats the same way.
+pub fn spec_label(spec: &GraphSpec) -> String {
+    match spec.spec_code.as_deref() {
+        Some(code) => format!("[{code}] '{}'", spec.name),
+        None => format!("'{}'", spec.name),
+    }
+}
+
 /// Record one engine-authored event.
 ///
 /// Writes the durable `graph_events` row and the shared activity-stream line.
@@ -124,7 +155,8 @@ pub fn record(db: &Database, event: GraphEvent<'_>) {
     let workdir = event.workdir.to_string();
     let kind = event.kind;
 
-    if let Err(error) = db.insert_graph_event(&GraphEventRecord::from(event)) {
+    let record = GraphEventRecord::from(event);
+    if let Err(error) = with_busy_retry("insert_graph_event", || db.insert_graph_event(&record)) {
         tracing::warn!(
             graph_id,
             kind = kind.as_str(),
@@ -138,14 +170,16 @@ pub fn record(db: &Database, event: GraphEvent<'_>) {
     if !kind.emits_activity() {
         return;
     }
-    if let Err(error) = db.insert_activity_log_entry(
-        &workdir,
-        &format!("graph:{graph_name}"),
-        Some(&graph_id),
-        MessageKind::Info.as_str(),
-        &activity_msg,
-        None,
-    ) {
+    if let Err(error) = with_busy_retry("insert_activity_log_entry", || {
+        db.insert_activity_log_entry(
+            &workdir,
+            &format!("graph:{graph_name}"),
+            Some(&graph_id),
+            MessageKind::Info.as_str(),
+            &activity_msg,
+            None,
+        )
+    }) {
         tracing::warn!(graph_id, graph_name, "activity publish failed: {:#}", error);
     }
 }
@@ -153,10 +187,55 @@ pub fn record(db: &Database, event: GraphEvent<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::graphs::GraphSpecStatus;
 
     fn test_db() -> Database {
         let dir = tempfile::tempdir().unwrap();
         Database::new(&dir.path().join("test.db")).unwrap()
+    }
+
+    fn test_spec(name: &str, code: Option<&str>) -> GraphSpec {
+        GraphSpec {
+            id: "s1".to_string(),
+            graph_id: None,
+            name: name.to_string(),
+            description: None,
+            position: 0,
+            parallelizable: false,
+            status: GraphSpecStatus::Pending,
+            started_at: None,
+            completed_at: None,
+            spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
+            spec_committed_head: None,
+            workdir: None,
+            completed_via: None,
+            completed_via_reason: None,
+            completed_via_at: None,
+            spec_code: code.map(str::to_string),
+            spec_scope: None,
+            spec_type: None,
+        }
+    }
+
+    #[test]
+    fn spec_label_shows_code_before_name() {
+        assert_eq!(
+            spec_label(&test_spec("Add retry", Some("FIX-7"))),
+            "[FIX-7] 'Add retry'"
+        );
+    }
+
+    #[test]
+    fn spec_label_without_code_is_bare_name() {
+        let label = spec_label(&test_spec("Add retry", None));
+        assert_eq!(label, "'Add retry'");
+        assert!(
+            !label.contains('['),
+            "no placeholder for a codeless spec: {label}"
+        );
     }
 
     #[test]

@@ -92,12 +92,15 @@ impl AtPicker {
     }
 
     /// Run a pending search if the debounce window has elapsed. Call each tick.
-    pub fn tick_search(&mut self) {
+    /// True when a search ran (the entry list is new and must redraw).
+    pub fn tick_search(&mut self) -> bool {
         if let Some(since) = self.pending_since {
             if since.elapsed().as_millis() >= SEARCH_DEBOUNCE_MS {
                 self.refresh();
+                return true;
             }
         }
+        false
     }
 
     /// Rebuild `entries` from `current_dir` filtered by `query`.
@@ -411,5 +414,29 @@ mod tests {
         assert_eq!(dirs[0].name, "subdir");
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].name, "file.txt");
+    }
+
+    /// The debounced search reports whether it ran: quiet ticks return false,
+    /// a fired search returns true so the event loop redraws the new entries.
+    #[test]
+    fn tick_search_reports_whether_it_ran() {
+        let tmp = tempdir().unwrap();
+        let mut picker = AtPicker::new(tmp.path().to_path_buf(), 0);
+        assert!(!picker.tick_search(), "nothing pending must not run");
+
+        picker.query = "x".to_string();
+        picker.queue_search();
+        assert!(
+            !picker.tick_search(),
+            "a fresh debounce window must not fire yet"
+        );
+
+        picker.pending_since =
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(500));
+        assert!(picker.tick_search(), "an elapsed window must run");
+        assert!(
+            !picker.tick_search(),
+            "a second tick must not re-run the same search"
+        );
     }
 }

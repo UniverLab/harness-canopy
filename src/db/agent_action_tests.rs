@@ -119,8 +119,8 @@ fn row_with_unknown_action_is_listed_corrupt() {
 }
 
 #[test]
-fn schema_v11_migration_is_idempotent() {
-    assert_eq!(super::SCHEMA_VERSION, 11);
+fn schema_v12_migration_is_idempotent() {
+    assert_eq!(super::SCHEMA_VERSION, 12);
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test.db");
     let first = Database::new(&path).unwrap();

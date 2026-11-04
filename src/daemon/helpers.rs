@@ -19,6 +19,40 @@ pub(crate) fn error_result(message: &str) -> CallToolResult {
     CallToolResult::error(vec![rmcp::model::ContentBlock::text(message.to_string())])
 }
 
+/// Early exit from an `_impl` handler section: either the tool-level `Ok`
+/// response or the MCP `Err`, returned to the caller unchanged. Section
+/// helpers return `Result<T, EarlyReturn>` so both flavours propagate with
+/// `?` and `or_early_return!` instead of nesting match arms in the caller.
+pub(crate) struct EarlyReturn(pub Result<CallToolResult, McpError>);
+
+impl EarlyReturn {
+    pub(crate) fn ok(result: CallToolResult) -> Self {
+        Self(Ok(result))
+    }
+
+    pub(crate) fn tool_error(message: &str) -> Self {
+        Self(Ok(error_result(message)))
+    }
+}
+
+impl From<McpError> for EarlyReturn {
+    fn from(error: McpError) -> Self {
+        Self(Err(error))
+    }
+}
+
+/// Unwrap a section helper's `Result<T, EarlyReturn>`, returning the early
+/// exit from the calling handler when it fires.
+#[macro_export]
+macro_rules! or_early_return {
+    ($expr:expr) => {
+        match $expr {
+            Ok(value) => value,
+            Err($crate::daemon::helpers::EarlyReturn(out)) => return out,
+        }
+    };
+}
+
 /// CB68 FR1: shape a deprecated alias tool's *successful* response so it
 /// carries a `deprecated` marker alongside the original message, without
 /// duplicating the underlying handler's logic — callers run the real

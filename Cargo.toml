@@ -1,6 +1,6 @@
 [package]
 name = "harness-canopy"
-version = "3.1.1"
+version = "3.2.0"
 edition = "2021"
 rust-version = "1.91"
 description = "A self-contained MCP server for AI agent task scheduling and file watching"
@@ -25,7 +25,7 @@ path = "src/main.rs"
 rmcp = { version = "2.1", features = ["server", "transport-io", "transport-streamable-http-server"] }
 
 # Axum for Streamable HTTP transport
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 
 # Async runtime
 tokio = { version = "1.50", features = ["full"] }
@@ -104,8 +104,8 @@ portable-pty = "0.9"
 # Virtual terminal emulator for embedding agent output
 vt100 = "0.16"
 
-# HTTP client for registry fetch
-reqwest = { version = "0.13", features = ["blocking", "json"] }
+# HTTP client for registry fetch (`form` for the GitHub device flow)
+reqwest = { version = "0.13", features = ["blocking", "json", "form"] }
 
 # Interactive prompts for setup wizard
 inquire = "0.9"
@@ -118,6 +118,8 @@ rand = "0.10"
 
 # Clipboard for text copy from TUI
 arboard = "3.6"
+# PNG-encode clipboard RGBA for prompt-builder image attachments (png only)
+image = { version = "0.25", default-features = false, features = ["png"] }
 # Decode OSC 52 clipboard payloads emitted by PTY programs
 base64 = "0.22"
 toml = "1.1.2"
@@ -160,6 +162,12 @@ hf-hub = { version = "0.5", optional = true, default-features = false, features 
     "native-tls",
 ] }
 toml_edit = "0.25"
+p256 = { version = "0.14", features = ["ecdsa", "pkcs8"] }
+hmac = "0.13"
+pbkdf2 = "0.13"
+subtle = "2.6"
+qrcode = { version = "0.14", default-features = false }
+webrtc = "0.21.1"
 
 # Unix process management (kill, setsid)
 [target.'cfg(unix)'.dependencies]
@@ -207,9 +215,24 @@ fastembed = { version = "5", optional = true, default-features = false, features
 ] }
 
 
+[patch.crates-io]
+vt100 = { path = "vendor/vt100" }
+# rtc-turn 0.21.1 deletes a channel binding on any CHANNEL-BIND error, so a
+# stale-nonce retry picks a new number for a peer the server already bound,
+# which RFC 8656 §12 answers with 400 forever; incoming ChannelData on the
+# number the server still holds is then dropped. The vendored copy keeps the
+# number across errors and retries it (see vendor/rtc-turn/CANOPY-PATCH.md).
+# Remove this entry once rtc-turn ships the fix upstream.
+rtc-turn = { path = "vendor/rtc-turn" }
+
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3.8"
+# The TURN channel test runs a fake TURN server speaking the same codec as the
+# patched client (see vendor/rtc-turn/CANOPY-PATCH.md).
+crypto = { package = "rtc-crypto", version = "=0.21.1" }
+stun = { package = "rtc-stun", version = "=0.21.1" }
+rtc-turn = "0.21.1"
 
 [features]
 default = []

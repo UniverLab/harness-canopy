@@ -141,6 +141,42 @@ mod system {
     pub fn boot_id() -> Option<String> {
         None
     }
+    pub fn session_process_is_live(
+        _pid: Option<i64>,
+        _stored_boot_id: Option<&str>,
+        _current_boot_id: Option<&str>,
+    ) -> bool {
+        false
+    }
+}
+
+// Stubs for the skill sources `domain::prompt_catalog` reads: the example
+// never builds a prompt catalog, so these only need to typecheck.
+mod dynamic_skills {
+    pub struct SkillListEntry {
+        pub name: String,
+    }
+
+    pub struct SkillStore;
+
+    impl SkillStore {
+        pub fn from_config(
+            _data_dir: &std::path::Path,
+            _config: &crate::domain::canopy_config::SkillsConfig,
+        ) -> Self {
+            SkillStore
+        }
+
+        pub fn list_local(&self) -> Vec<SkillListEntry> {
+            Vec::new()
+        }
+    }
+}
+
+mod skills_module {
+    pub fn find_skill_instructions(_skill_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+        None
+    }
 }
 
 #[path = "../src/application/mod.rs"]

@@ -189,6 +189,8 @@ pub(crate) struct RagTransferModal {
     pub picker_selected: usize,
     pub query: String,
     pub context_payload: String,
+    /// Focus before the modal opened; the panel behind keeps drawing it.
+    pub prev_focus: Option<Focus>,
 }
 
 // ── App struct ──────────────────────────────────────────────────
@@ -207,12 +209,18 @@ pub struct App {
     pub(crate) terminal_agents: Vec<InteractiveAgent>,
     /// Sessions orphaned during auto-resume (can be revived or dismissed).
     pub(crate) orphaned_sessions: Vec<crate::db::session::InteractiveSession>,
-    /// Gate: pending scheduled sends are held (not delivered) until the
-    /// startup restore runs — auto-resume reassigns each schedule onto its
-    /// resumed session id and drops schedules whose session is gone. Without
-    /// this, the first refresh (before sessions resume) would see zero live
-    /// sessions and prematurely treat every due schedule as dead.
-    pub(crate) scheduled_sends_restored: bool,
+    /// The daemon session hub connection plus reconnect state.
+    pub(crate) session_hub: super::session_hub::SessionHubState,
+    /// Notice about the hub connection (e.g. protocol mismatch), if any.
+    pub(crate) hub_notice: Option<String>,
+    /// Blocking notice when the daemon's version disagrees with this TUI's.
+    pub(crate) version_notice: Option<super::version_check::VersionNotice>,
+    /// Streams of sessions closed but still inside their shadow-summary
+    /// linger, kept so quitting within that window can still send the
+    /// `kill` the linger thread would have sent — that thread dies with
+    /// this process, and a lost kill would let the closed session come
+    /// back on the next start.
+    pub(crate) pending_closes: Vec<crate::sessions::client::SessionSend>,
 
     // Split group state
     pub(crate) split_groups: Vec<crate::domain::models::SplitGroup>,
@@ -231,6 +239,9 @@ pub struct App {
     pub(crate) daemon_running: bool,
     pub(crate) daemon_pid: Option<u32>,
     pub(crate) daemon_version: String,
+    /// Recorded daemon port, from the snapshot in worker mode (the slow tick
+    /// never probes it — liveness comes from the hub connection).
+    pub(crate) daemon_port: u16,
     /// Latest stable release found by the background notice check.
     pub(crate) update_available: Option<String>,
 
@@ -260,6 +271,10 @@ pub struct App {
     pub(crate) project_last_activity: HashMap<String, i64>,
     pub(crate) log_content: String,
     pub(crate) log_scroll: u16,
+    /// Last live-session output sequence `refresh_log` copied. The log copy
+    /// is skipped while the sequence is unchanged; `None` forces the next
+    /// visible tick to re-resolve from scratch.
+    pub(crate) log_seq: Option<u64>,
     pub(crate) running: bool,
     pub(crate) new_agent_dialog: Option<NewAgentDialog>,
     pub(crate) launchpad_dialog: Option<LaunchpadDialog>,
@@ -272,7 +287,7 @@ pub struct App {
     /// Permanent-delete confirmation, reachable only from the archived
     /// view on an already-archived graph — see [`App::permanent_delete_selected_archived_graph`].
     pub(crate) permanent_delete_graph_confirm: bool,
-    /// Confirmation gate for `graph_reset` (mirrors `archive_graph_confirm`) —
+    /// Confirmation gate for `graph_control` (mirrors `archive_graph_confirm`) —
     /// reset clears progress on every non-completed spec, so it asks first,
     /// with the same wording the CLI's own prompt uses (see
     /// `daemon::graph_cli::confirm_reset`) so the two surfaces never teach
@@ -293,6 +308,14 @@ pub struct App {
     pub(crate) system_info: crate::system::SystemInfo,
     pub(crate) system_info_target: crate::system::SystemInfo,
     pub(crate) system_info_rx: std::sync::mpsc::Receiver<crate::system::SystemInfo>,
+    /// PowerShell clipboard-image results (WSL): the fetch runs off-thread
+    /// and `refresh_fast` attaches the bytes to the open builder. A `None`
+    /// payload means no image and is a no-op. The `tx` half is cloned for
+    /// each fetch; `pending` guards against stacking fetches while one is
+    /// already in flight.
+    pub(crate) clipboard_image_tx: std::sync::mpsc::Sender<Option<Vec<u8>>>,
+    pub(crate) clipboard_image_rx: std::sync::mpsc::Receiver<Option<Vec<u8>>>,
+    pub(crate) clipboard_image_pending: bool,
     /// Controls system monitor activity: true = poll, false = pause polling.
     pub(crate) system_monitor_active: Arc<AtomicBool>,
     pub(crate) last_system_update: std::time::Instant,
@@ -410,8 +433,8 @@ pub struct App {
     /// CT28: usable body height (rows) of the tail pane on the last frame —
     /// the layout sets it so key handlers can page by half-height.
     pub(crate) node_tail_pane_body_height: usize,
-    /// True while a graph-control dispatch (`graph_run`/`graph_pause`/
-    /// `graph_continue`/`graph_reset`/`graph_schedule_autorun`) is in flight on
+    /// True while a graph-control dispatch (`graph_control`/`graph_control`/
+    /// `graph_control`/`graph_control`/`graph_control`) is in flight on
     /// `graph_action_rx` — guards against a second dispatch racing the first.
     pub(crate) graph_action_pending: bool,
     /// Receiver for the background thread running the current graph-control
@@ -487,6 +510,9 @@ pub struct App {
     pub(crate) whimsg_graphs: Option<HashMap<String, crate::tui::whimsg::events::GraphSnapshot>>,
     /// Background run ids already announced by the header, so each fires once.
     pub(crate) whimsg_announced_runs: HashSet<String>,
+    /// Per-graph header inputs from the latest snapshot (worker mode), so the
+    /// header's graph events never query the database from the fast tick.
+    pub(crate) graph_whim_cache: HashMap<String, super::snapshot::GraphWhimInfo>,
     pub(crate) context_transfer_modal: Option<crate::tui::context_transfer::ContextTransferModal>,
     pub(crate) rag_transfer_modal: Option<RagTransferModal>,
     pub(crate) context_transfer_config: crate::tui::context_transfer::ContextTransferConfig,
@@ -518,6 +544,34 @@ pub struct App {
     pub(crate) prev_active_run_ids: std::collections::HashSet<String>,
     /// Tick counter for animation (increments every refresh)
     pub(crate) animation_tick: u32,
+    /// True while the terminal reports focus lost: background animations pause.
+    pub(crate) focus_lost: bool,
+    /// When the last key or mouse input arrived; animations pause after 45 s idle.
+    pub(crate) last_input_at: std::time::Instant,
+    /// When the throttled slow refresh last ran (FR2: at most once per second).
+    pub(crate) last_slow_refresh: std::time::Instant,
+    /// A pushed change (hub membership, reconnect) armed an immediate slow
+    /// refresh on the next tick, bypassing the one-second cadence.
+    pub(crate) slow_force: bool,
+    /// Background snapshot worker (FR1): owns its own database connection and
+    /// builds the slow-tick data off the UI thread. `None` in tests and as a
+    /// fallback when the worker dies, in which case `refresh_slow` reads
+    /// synchronously as before.
+    pub(crate) snapshot_worker: Option<super::snapshot::SnapshotWorker>,
+    /// Set when a fresh snapshot landed this slow tick, so the fast tick
+    /// redraws for it.
+    pub(crate) snapshot_dirty: bool,
+    /// Off-thread node-tail resolver (FR6). `None` resolves inline.
+    pub(crate) node_tail_worker: Option<super::dialog::NodeTailWorker>,
+    /// Digests of draw-time database reads, refreshed by [`App::refresh_slow`]
+    /// so [`SlowFingerprint`](crate::tui::app::SlowFingerprint) sees them:
+    /// the activity panel's log entries for the drawn workdirs,
+    /// the project overview's recent-session summaries, the hub legend's
+    /// session/run counts, and the simple prompt's pending scheduled sends.
+    pub(crate) activity_digest: u64,
+    pub(crate) overview_sessions_digest: u64,
+    pub(crate) hub_counts_digest: (i64, i64, i64, i64),
+    pub(crate) pending_sends_digest: u64,
     /// Preferred unit for sysinfo temperature labels.
     pub(crate) temperature_unit: crate::domain::canopy_config::TemperatureUnit,
     /// Resolved TUI color theme (T6), read from config once at startup.
@@ -578,7 +632,7 @@ pub struct App {
     /// unexplained. `None` after a manual pin/pick.
     pub(crate) panel_last_reason: Option<String>,
     /// CM51 (D4): the last `settings_revision` this session has applied. When
-    /// the daemon publishes a newer one (a `config_set`, or a hand edit seen
+    /// the daemon publishes a newer one (a `config set`, or a hand edit seen
     /// by the file watcher), the TUI reloads `CanopyConfig` so the values it
     /// renders — theme, temperature unit, the pinned face — are current
     /// without a restart.
@@ -677,11 +731,19 @@ pub struct App {
     // Gamification
     pub(crate) mission_manager: crate::tui::gamification::MissionManager,
     pub(crate) mission_pending_events: Vec<crate::tui::gamification::MissionEvent>,
+    /// Unlocks awarded on the UI that the snapshot worker still has to
+    /// persist (worker mode): sent with the next request, confirmed from the
+    /// snapshot's `confirmed_unlocks`.
+    pub(crate) mission_pending_persist: Vec<crate::domain::gamification::MissionId>,
     pub(crate) max_cpu_frequency_seen: Option<u64>,
     /// Whether a CPU temperature reading has ever been observed this session.
     /// Sticky: once seen it stays true, so WSL-style never-present sensors
     /// keep the Nuclear Winter mission marked as not measurable.
     pub(crate) cpu_temperature_seen: bool,
+    /// Cached result of the `has_parallel_graph_run` mission check. The
+    /// mission state is monotonic — once true it stays true — so the
+    /// three-table join runs at most once per TUI run.
+    pub(crate) has_parallel_graph: bool,
     /// Monotonic anchor for accumulating real Canopy uptime (persisted in state).
     pub(crate) uptime_anchor: Option<std::time::Instant>,
 }

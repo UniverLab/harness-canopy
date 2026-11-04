@@ -1,6 +1,8 @@
 //! Shell command execution for check nodes and command hooks.
 
 use super::*;
+use crate::daemon::cpu_quota;
+use crate::db::connection::with_busy_retry;
 use crate::db::Database;
 use crate::domain::graphs::GraphRunStatus;
 use anyhow::Context;
@@ -93,11 +95,15 @@ pub(crate) fn spawn_shell_command(
     for (key, value) in env_vars {
         process.env(key, value);
     }
+    // FR4: size the child's worker counts to the daemon's CPU budget.
+    cpu_quota::export_quota_env(&mut process, cpu_quota::loaded_quota_percent());
     let mut child = process
         .spawn()
         .with_context(|| format!("Failed to spawn command: {command}"))?;
     let pid = child.id();
     if let Some(pid) = pid {
+        // Single-shot best-effort: a cosmetic pid record must never stall
+        // the spawn path through a full retry budget under contention.
         let _ = db.set_graph_run_pid(run_id, pid as i64, crate::system::boot_id().as_deref());
     }
 
@@ -192,12 +198,14 @@ pub(crate) fn handle_timeout(
         "stdout": stdout_snap,
         "stderr": stderr_snap,
     });
-    let _ = db.update_graph_run_result(
-        run_id,
-        GraphRunStatus::Fail,
-        Some(&output),
-        Some(chrono::Utc::now()),
-    );
+    let _ = with_busy_retry("update_graph_run_result", || {
+        db.update_graph_run_result(
+            run_id,
+            GraphRunStatus::Fail,
+            Some(&output),
+            Some(chrono::Utc::now()),
+        )
+    });
     Ok(ShellCommandResult {
         status: GraphRunStatus::Fail,
         output,
@@ -252,4 +260,41 @@ pub(crate) fn handle_completion(
         full_stderr,
         timed_out: false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// FR4: every check/command-hook spawn sizes the child's worker counts to
+    /// the daemon's CPU budget. The expectation is derived from the same
+    /// loader the spawn uses, so this holds on any machine — and fails
+    /// with the export removed, since nothing else sets all three.
+    #[tokio::test]
+    async fn shell_spawn_exports_quota_worker_counts_to_the_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::new(&dir.path().join("test.db")).unwrap();
+        let workdir = dir.path().to_string_lossy().to_string();
+
+        let result = execute_shell_command(
+            &db,
+            "run-quota-env",
+            "printf '%s\\n%s\\n%s\\n' \"$CARGO_BUILD_JOBS\" \"$NEXTEST_TEST_THREADS\" \"$RUST_TEST_THREADS\"",
+            &workdir,
+            30,
+            &[],
+        )
+        .await
+        .unwrap();
+
+        assert!(!result.timed_out);
+        assert_eq!(result.status, GraphRunStatus::Pass);
+        let expected = cpu_quota::cores_from_quota(cpu_quota::loaded_quota_percent()).to_string();
+        assert_eq!(
+            result.full_stdout.lines().collect::<Vec<_>>(),
+            vec![expected.as_str(), expected.as_str(), expected.as_str()],
+            "child must see the quota worker counts: {}",
+            result.full_stdout
+        );
+    }
 }

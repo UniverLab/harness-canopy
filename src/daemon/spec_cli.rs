@@ -2,7 +2,7 @@
 //!
 //! Every subcommand here changes state (a spec's status, or the backlog
 //! itself), so each one delegates to the daemon's MCP tool of the same
-//! purpose (`spec_set_status`, `spec_create`, `queue_add_spec`) via
+//! purpose (`spec_edit` `set_status`/`create`, `queue` `add_spec`) via
 //! `daemon::cli_daemon::call_tool` rather than writing to the database
 //! directly — see `graph_cli.rs` for the same pattern applied to graph
 //! state.
@@ -69,8 +69,6 @@ pub enum SpecAction {
         #[arg(long)]
         group: Option<String>,
     },
-    /// Convert all legacy heading-format specs to the tagged `<spec>` format.
-    Convert,
     /// Print a spec's notes.
     Notes {
         /// Spec ID whose notes to print.
@@ -109,7 +107,6 @@ pub async fn handle_spec_action(action: SpecAction, port_override: Option<u16>) 
                 group: group.as_deref(),
             },
         ),
-        SpecAction::Convert => convert_specs(port_override),
         SpecAction::Notes { spec_id } => print_notes(port_override, &spec_id),
     }
 }
@@ -117,8 +114,8 @@ pub async fn handle_spec_action(action: SpecAction, port_override: Option<u16>) 
 fn set_status(port_override: Option<u16>, spec_id: &str, status: &str, reason: &str) -> Result<()> {
     let text = call_tool(
         port_override,
-        "spec_set_status",
-        &serde_json::json!({ "spec_id": spec_id, "status": status, "reason": reason }),
+        "spec_edit",
+        &serde_json::json!({ "action": "set_status", "spec_id": spec_id, "status": status, "reason": reason }),
     )?;
     println!("{text}");
     Ok(())
@@ -151,7 +148,8 @@ fn create_spec(port_override: Option<u16>, spec: &NewSpec<'_>) -> Result<()> {
         args["spec_scope"] = serde_json::json!(spec_scope);
     }
 
-    let text = call_tool(port_override, "spec_create", &args)?;
+    args["action"] = serde_json::json!("create");
+    let text = call_tool(port_override, "spec_edit", &args)?;
     let spec_id = serde_json::from_str::<serde_json::Value>(&text)
         .ok()
         .and_then(|value| {
@@ -160,7 +158,7 @@ fn create_spec(port_override: Option<u16>, spec: &NewSpec<'_>) -> Result<()> {
                 .and_then(|id| id.as_str())
                 .map(str::to_string)
         })
-        .ok_or_else(|| anyhow!("Unexpected response from spec_create: {text}"))?;
+        .ok_or_else(|| anyhow!("Unexpected response from spec_edit create: {text}"))?;
     println!("Spec '{spec_id}' created.");
 
     if let Some(queue_id) = spec.queue {
@@ -168,29 +166,24 @@ fn create_spec(port_override: Option<u16>, spec: &NewSpec<'_>) -> Result<()> {
         if let Some(group) = spec.group {
             queue_args["group"] = serde_json::json!(group);
         }
-        let queue_text = call_tool(port_override, "queue_add_spec", &queue_args)?;
+        queue_args["action"] = serde_json::json!("add_spec");
+        let queue_text = call_tool(port_override, "queue", &queue_args)?;
         println!("{queue_text}");
     }
 
     Ok(())
 }
 
-fn convert_specs(port_override: Option<u16>) -> Result<()> {
-    let text = call_tool(port_override, "spec_convert", &serde_json::json!({}))?;
-    println!("{text}");
-    Ok(())
-}
-
-/// CM47: read-only print of `spec_notes_get` — one `[kind] name (updated at)`
+/// CM47: read-only print of `spec notes` — one `[kind] name (updated at)`
 /// header plus the body per note, separated by `---`.
 fn print_notes(port_override: Option<u16>, spec_id: &str) -> Result<()> {
     let text = call_tool(
         port_override,
-        "spec_notes_get",
-        &serde_json::json!({ "spec_id": spec_id }),
+        "spec",
+        &serde_json::json!({ "action": "notes", "spec_id": spec_id }),
     )?;
     let notes: Vec<serde_json::Value> = serde_json::from_str(&text)
-        .map_err(|_| anyhow!("Unexpected response from spec_notes_get: {text}"))?;
+        .map_err(|_| anyhow!("Unexpected response from spec notes: {text}"))?;
     if notes.is_empty() {
         println!("No notes for spec '{spec_id}'.");
         return Ok(());
@@ -309,7 +302,7 @@ mod tests {
     }
 
     #[test]
-    fn set_status_calls_spec_set_status_with_expected_status_string() {
+    fn set_status_calls_spec_edit_set_status_with_expected_status_string() {
         let fake = spawn_fake_daemon(serde_json::json!({
             "content": [{"type": "text", "text": "Spec 'spec-1' set to 'completed' (admin): done"}],
             "isError": false
@@ -319,7 +312,8 @@ mod tests {
         set_status(Some(port), "spec-1", "completed", "done").expect("should succeed");
 
         let calls = fake.recorded_calls();
-        assert_eq!(calls[0]["name"], "spec_set_status");
+        assert_eq!(calls[0]["name"], "spec_edit");
+        assert_eq!(calls[0]["arguments"]["action"], "set_status");
         assert_eq!(calls[0]["arguments"]["spec_id"], "spec-1");
         assert_eq!(calls[0]["arguments"]["status"], "completed");
         assert_eq!(calls[0]["arguments"]["reason"], "done");
@@ -338,7 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn create_spec_without_queue_calls_only_spec_create() {
+    fn create_spec_without_queue_calls_only_spec_edit_create() {
         let fake = spawn_fake_daemon(serde_json::json!({
             "content": [{"type": "text", "text": "{\"spec_id\":\"new-spec-1\"}"}],
             "isError": false
@@ -361,16 +355,17 @@ mod tests {
 
         let calls = fake.recorded_calls();
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0]["name"], "spec_create");
+        assert_eq!(calls[0]["name"], "spec_edit");
+        assert_eq!(calls[0]["arguments"]["action"], "create");
         assert_eq!(calls[0]["arguments"]["name"], "My Spec");
         assert_eq!(calls[0]["arguments"]["description"], "Objective: x.");
     }
 
     #[test]
-    fn create_spec_with_queue_also_calls_queue_add_spec() {
+    fn create_spec_with_queue_also_calls_queue_add_spec_action() {
         // The fake daemon always answers every `tools/call` with the same
         // canned result, so a single fixture text that's valid for both
-        // `spec_create` (parsed for `spec_id`) and `queue_add_spec`
+        // `spec_edit create` (parsed for `spec_id`) and `queue add_spec`
         // (printed as-is) covers this round trip.
         let fake = spawn_fake_daemon(serde_json::json!({
             "content": [{"type": "text", "text": "{\"spec_id\":\"new-spec-1\"}"}],
@@ -394,16 +389,18 @@ mod tests {
 
         let calls = fake.recorded_calls();
         assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0]["name"], "spec_create");
+        assert_eq!(calls[0]["name"], "spec_edit");
+        assert_eq!(calls[0]["arguments"]["action"], "create");
         assert_eq!(calls[0]["arguments"]["workdir"], "/tmp/proj");
-        assert_eq!(calls[1]["name"], "queue_add_spec");
+        assert_eq!(calls[1]["name"], "queue");
+        assert_eq!(calls[1]["arguments"]["action"], "add_spec");
         assert_eq!(calls[1]["arguments"]["queue_id"], "queue-1");
         assert_eq!(calls[1]["arguments"]["spec_id"], "new-spec-1");
         assert_eq!(calls[1]["arguments"]["group"], "g1");
     }
 
     #[test]
-    fn create_spec_errors_on_unparseable_spec_create_response() {
+    fn create_spec_errors_on_unparseable_spec_edit_create_response() {
         let fake = spawn_fake_daemon(serde_json::json!({
             "content": [{"type": "text", "text": "not json"}],
             "isError": false
@@ -444,26 +441,5 @@ mod tests {
             }
         }
         panic!("port kept getting claimed by another test after 5 attempts");
-    }
-
-    #[test]
-    fn spec_action_convert_variant_parses() {
-        let cli = TestCli::try_parse_from(["test", "convert"]).expect("should parse");
-        assert!(matches!(cli.action, SpecAction::Convert));
-    }
-
-    #[test]
-    fn convert_specs_calls_spec_convert_and_prints_report() {
-        let fake = spawn_fake_daemon(serde_json::json!({
-            "content": [{"type": "text", "text": "{\"scanned\":3,\"converted\":1}"}],
-            "isError": false
-        }));
-        let port: u16 = fake.port.parse().unwrap();
-
-        convert_specs(Some(port)).expect("should succeed");
-
-        let calls = fake.recorded_calls();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0]["name"], "spec_convert");
     }
 }

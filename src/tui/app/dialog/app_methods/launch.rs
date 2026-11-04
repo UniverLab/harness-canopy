@@ -141,7 +141,11 @@ impl App {
     }
 
     pub(super) fn open_launchpad_dialog(&mut self, dialog: NewAgentDialog) -> Result<()> {
-        let launchpad = LaunchpadDialog::for_workdir(&self.db, &dialog.working_dir)?;
+        // The launchpad opens nested over the new-agent dialog, so the panel
+        // behind it must keep the focus from before that dialog opened.
+        let prev_focus = dialog.prev_focus.or(Some(self.focus));
+        let mut launchpad = LaunchpadDialog::for_workdir(&self.db, &dialog.working_dir)?;
+        launchpad.prev_focus = prev_focus;
         self.pending_launch_dialog = Some(dialog);
         self.launchpad_dialog = Some(launchpad);
         self.focus = crate::tui::app::types::Focus::LaunchpadDialog;
@@ -370,6 +374,7 @@ impl App {
             .get(dialog.cli_index)
             .and_then(|c| c.as_ref())
             .and_then(|c| c.model_flag.clone());
+        let (harness_conversation_id, known_session) = self.resolve_launch_identity(dialog);
         let (cols, rows) = pty_dimensions(self.last_panel_inner);
         let existing_refs: Vec<&str> = self
             .interactive_agents
@@ -383,6 +388,22 @@ impl App {
             dialog.selected_seed_id()
         };
         let agent_name = if is_nursery { Some("Gardener") } else { None };
+        let spawn_name = known_session
+            .as_ref()
+            .map(|session| session.name.clone())
+            .or_else(|| agent_name.map(str::to_string));
+        let spawn_id = known_session.as_ref().map(|session| session.id.clone());
+        // The name this launch asked the hub for: a resume whose source name
+        // is held by another live session lands under a fresh name instead
+        // (FR5), and the header must name both.
+        let requested_name = spawn_name.clone();
+        // A resume relaunches the source session's own id, so the persisted
+        // "protocol sent" flag stays on the reactivated row — nothing is
+        // inherited anymore. Either picker can adopt an existing session's
+        // identity (the Resume step by its row, the CLI list through its
+        // harness id), and either adoption is a resume for the rename notice
+        // and for args preservation.
+        let is_resume = dialog.selected_resume_session.is_some() || known_session.is_some();
         let agent = InteractiveAgent::spawn(
             cli,
             &dir,
@@ -391,43 +412,141 @@ impl App {
             args.as_deref(),
             fallback.as_deref(),
             accent,
-            agent_name,
+            spawn_name.as_deref(),
+            spawn_id.as_deref(),
             &existing_refs,
             model.as_deref(),
             model_flag.as_deref(),
             seed_id,
+            harness_conversation_id.as_deref(),
+            is_resume,
         )?;
         // Persist session in registry
         let session_type = if is_nursery { "nursery" } else { "interactive" };
-        let _ = self.db.insert_interactive_session(
-            &agent.id,
-            &agent.name,
-            agent.cli.as_str(),
+        self.persist_launched_session(
+            &agent,
             &dir,
             args.as_deref(),
-            agent.pid(),
             session_type,
-            crate::system::boot_id().as_deref(),
+            harness_conversation_id.as_deref(),
+            is_resume,
         );
         // Don't register nursery temp dir as a project — it's ephemeral
         if !is_nursery && crate::domain::project::should_auto_register(Path::new(&dir)) {
             let _ = self.db.register_project_path(Path::new(&dir));
         }
-        // The New Session Resume step relaunches a listed session under this
-        // fresh agent id: carry the source session's persisted "protocol
-        // sent" flag over, or the inherited conversation would receive the
-        // block a second time (FR3).
-        if let Some(source) = dialog.selected_resume_session.as_ref() {
-            self.inherit_protocol_flag(&source.id, &agent.id);
-        }
+        self.announce_spawned_agent(agent, is_resume, requested_name.as_deref());
+        Ok(())
+    }
+
+    /// Track a freshly spawned agent and announce it in the header: always
+    /// the spawn event, plus a rename event on the resume path when the hub
+    /// had to mint a fresh name for the kept id — the source name was held
+    /// by another live session (FR5).
+    fn announce_spawned_agent(
+        &mut self,
+        agent: crate::tui::agent::InteractiveAgent,
+        is_resume: bool,
+        requested_name: Option<&str>,
+    ) {
+        use crate::tui::whimsg::events::{EventKind, WhimEvent};
         let spawned_name = agent.name.clone();
+        let renamed_from = resume_rename_notice(is_resume, requested_name, &spawned_name);
         self.interactive_agents.push(agent);
-        self.whimsg
-            .notify_event(crate::tui::whimsg::events::WhimEvent::new(
-                crate::tui::whimsg::events::EventKind::AgentSpawned,
+        self.whimsg.notify_event(WhimEvent::new(
+            EventKind::AgentSpawned,
+            spawned_name.clone(),
+        ));
+        if let Some(old) = renamed_from {
+            self.whimsg.notify_event(WhimEvent::with_detail(
+                EventKind::SessionRenamed,
+                old,
                 spawned_name,
             ));
-        Ok(())
+        }
+    }
+
+    /// The harness conversation id a launch reports, paired with the canopy
+    /// session that conversation already belongs to (if any).
+    ///
+    /// A canopy session picked in the New Session Resume step IS the identity:
+    /// the launch adopts that source session's id and name straight from its
+    /// row — no recorded harness id needed — falling back to the harness-id
+    /// lookup only when the row itself is gone. A pick out of the CLI's own
+    /// session list resolves through the harness id it carries, as before.
+    /// Never inferred from workdir, model or timing.
+    fn resolve_launch_identity(
+        &self,
+        dialog: &NewAgentDialog,
+    ) -> (
+        Option<String>,
+        Option<crate::db::session::InteractiveSession>,
+    ) {
+        if let Some(source) = dialog.selected_resume_session.as_ref() {
+            let harness_conversation_id = source.harness_conversation_id.clone();
+            // The row is authoritative: fetch it, don't synthesize it from
+            // the picker's metadata-only copy.
+            let known_session = self
+                .db
+                .get_interactive_session(&source.id)
+                .ok()
+                .flatten()
+                .or_else(|| {
+                    harness_conversation_id.as_deref().and_then(|harness_id| {
+                        self.db
+                            .find_session_by_harness_id(harness_id)
+                            .ok()
+                            .flatten()
+                    })
+                });
+            return (harness_conversation_id, known_session);
+        }
+        if let Some((id, _label)) = dialog.selected_session.as_ref() {
+            let known_session = self.db.find_session_by_harness_id(id).ok().flatten();
+            return (Some(id.clone()), known_session);
+        }
+        (None, None)
+    }
+
+    /// Register the launched session in the registry, reactivating the source
+    /// row in place when the launch adopted an existing session's id, or when
+    /// the harness conversation id matches one canopy has seen (see
+    /// `Database::register_interactive_session`).
+    fn persist_launched_session(
+        &self,
+        agent: &crate::tui::agent::InteractiveAgent,
+        dir: &str,
+        args: Option<&str>,
+        session_type: &str,
+        harness_conversation_id: Option<&str>,
+        preserve_args: bool,
+    ) {
+        let boot_id = crate::system::boot_id();
+        let registration = crate::db::session::SessionRegistration {
+            id: &agent.id,
+            name: &agent.name,
+            cli: agent.cli.as_str(),
+            working_dir: dir,
+            args,
+            pid: agent.pid(),
+            session_type,
+            boot_id: boot_id.as_deref(),
+            harness_conversation_id,
+            preserve_args,
+        };
+        match self.db.register_interactive_session(&registration) {
+            Ok(crate::db::session::RegistrationOutcome::Reactivated { id, .. })
+                if id != agent.id =>
+            {
+                tracing::warn!(
+                    "Harness conversation matched session '{id}' but the launched process has \
+                     id '{}'; the registry keeps the matched session",
+                    agent.id
+                );
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("Failed to register interactive session: {e}"),
+        }
     }
 
     pub(super) fn launch_scheduled(
@@ -555,9 +674,9 @@ impl App {
         if crate::domain::project::should_auto_register(Path::new(&dir)) {
             let _ = self.db.register_project_path(Path::new(&dir));
         }
-        // Load command history into cache
+        // Load command history into cache. The pane itself always opens
+        // clean — no stored output is replayed into it.
         let hist = crate::tui::terminal_history::load_history(&self.data_dir, &agent.name);
-        agent.replay_scrollback_lines(&hist.scrollback);
         self.terminal_histories.insert(agent.name.clone(), hist);
         let spawned_name = agent.name.clone();
         self.terminal_agents.push(agent);
@@ -567,6 +686,21 @@ impl App {
                 spawned_name,
             ));
         Ok(())
+    }
+}
+
+/// The old name a resume must announce (FR5): the launch asked the hub for
+/// `requested_name`, but the spawn came back under `spawned_name` because
+/// another live session held the source name. `None` for a fresh launch and
+/// whenever the hub kept the requested name.
+fn resume_rename_notice<'a>(
+    is_resume: bool,
+    requested_name: Option<&'a str>,
+    spawned_name: &str,
+) -> Option<&'a str> {
+    match (is_resume, requested_name) {
+        (true, Some(requested)) if requested != spawned_name => Some(requested),
+        _ => None,
     }
 }
 
@@ -583,5 +717,173 @@ fn yolo_launch_args(dialog: &NewAgentDialog) -> Option<String> {
             None => flag,
         }),
         None => base_args,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::app::dialog::new_agent::NewAgentDialog;
+    use crate::tui::app::session_resume::ResumableSession;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    fn app_with_known_session() -> (App, Arc<crate::db::Database>, tempfile::TempDir) {
+        // Same file pattern as `tui::app::tests::test_db` (forget the named
+        // temp file so the path survives for the connection).
+        let tmp = tempfile::NamedTempFile::new().expect("create temp file");
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let db = Arc::new(crate::db::Database::new(&path).expect("create test db"));
+        db.insert_interactive_session(
+            "sess-orch",
+            "marasmius",
+            "claude",
+            "/tmp/proj",
+            None,
+            None,
+            "interactive",
+            None,
+        )
+        .unwrap();
+        db.set_session_harness_conversation_id("sess-orch", "ses_abc123")
+            .unwrap();
+        db.finish_interactive_session("sess-orch", 0).unwrap();
+
+        let data_dir = tempdir().unwrap();
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        (app, db, data_dir)
+    }
+
+    /// FR1: the entry the user picked out of the CLI's own session list is
+    /// the harness's conversation identifier — it must resolve to the canopy
+    /// session that reported it (id and name adopted at spawn, row
+    /// reactivated by `register_interactive_session`), never to a guess.
+    #[test]
+    fn picked_harness_entry_resolves_to_its_canopy_session() {
+        let (app, _db, _data_dir) = app_with_known_session();
+
+        let mut dialog = NewAgentDialog::new(None);
+        dialog.selected_session = Some(("ses_abc123".to_string(), "conversation".to_string()));
+
+        let (harness_id, known) = app.resolve_launch_identity(&dialog);
+        assert_eq!(harness_id.as_deref(), Some("ses_abc123"));
+        let known = known.expect("the picked conversation must resolve to its canopy session");
+        assert_eq!(known.id, "sess-orch");
+        assert_eq!(known.name, "marasmius");
+    }
+
+    /// FR1: the canopy-native resume picker resolves through the harness id
+    /// its source session recorded — same matched session, same id and name.
+    #[test]
+    fn canopy_resume_choice_resolves_through_its_recorded_harness_id() {
+        let (app, _db, _data_dir) = app_with_known_session();
+
+        let mut dialog = NewAgentDialog::new(None);
+        dialog.selected_resume_session = Some(ResumableSession {
+            id: "sess-orch".to_string(),
+            name: "marasmius".to_string(),
+            cli: "claude".to_string(),
+            last_active: "2026-10-27T10:00:00Z".to_string(),
+            working_dir: "/tmp/proj".to_string(),
+            args: None,
+            harness_conversation_id: Some("ses_abc123".to_string()),
+        });
+
+        let (harness_id, known) = app.resolve_launch_identity(&dialog);
+        assert_eq!(harness_id.as_deref(), Some("ses_abc123"));
+        let known = known.expect("the recorded harness id must resolve to its canopy session");
+        assert_eq!(known.id, "sess-orch");
+        assert_eq!(known.name, "marasmius");
+    }
+
+    /// FR1/FR2: a Resume-step pick of a source that recorded no harness id
+    /// still relaunches under that source session's id and name — the picked
+    /// session IS the identity, fetched from its row, never needing a
+    /// recorded `harness_conversation_id`.
+    #[test]
+    fn resume_choice_without_a_harness_id_keeps_the_source_id_and_name() {
+        let (app, db, _data_dir) = app_with_known_session();
+        db.insert_interactive_session(
+            "sess-bare",
+            "populus",
+            "claude",
+            "/tmp/proj",
+            None,
+            None,
+            "interactive",
+            None,
+        )
+        .unwrap();
+        db.finish_interactive_session("sess-bare", 0).unwrap();
+
+        let mut dialog = NewAgentDialog::new(None);
+        dialog.selected_resume_session = Some(ResumableSession {
+            id: "sess-bare".to_string(),
+            name: "populus".to_string(),
+            cli: "claude".to_string(),
+            last_active: "2026-10-28T10:00:00Z".to_string(),
+            working_dir: "/tmp/proj".to_string(),
+            args: None,
+            harness_conversation_id: None,
+        });
+
+        let (harness_id, known) = app.resolve_launch_identity(&dialog);
+        assert!(harness_id.is_none());
+        let known = known.expect("the picked source session must be adopted as-is");
+        assert_eq!(known.id, "sess-bare");
+        assert_eq!(known.name, "populus");
+    }
+
+    /// FR1/FR3: a conversation canopy has never seen still reports its
+    /// harness id (so the new row records it for the next resume) but has no
+    /// known session to adopt — the launch stays a fresh registration.
+    #[test]
+    fn unknown_harness_entry_reports_its_id_without_a_known_session() {
+        let (app, _db, _data_dir) = app_with_known_session();
+
+        let mut dialog = NewAgentDialog::new(None);
+        dialog.selected_session = Some(("ses_never_seen".to_string(), "conversation".to_string()));
+
+        let (harness_id, known) = app.resolve_launch_identity(&dialog);
+        assert_eq!(harness_id.as_deref(), Some("ses_never_seen"));
+        assert!(known.is_none());
+    }
+
+    /// FR3: with no harness conversation identifier at all, the launch keeps
+    /// today's behaviour — nothing to match, nothing to adopt.
+    #[test]
+    fn launch_without_a_harness_identifier_resolves_nothing() {
+        let (app, _db, _data_dir) = app_with_known_session();
+
+        let dialog = NewAgentDialog::new(None);
+        let (harness_id, known) = app.resolve_launch_identity(&dialog);
+        assert!(harness_id.is_none());
+        assert!(known.is_none());
+    }
+
+    /// FR5: the rename notice fires exactly when a resume asked for one name
+    /// and the hub landed it under another — never for a fresh launch, never
+    /// when the requested name was kept.
+    #[test]
+    fn rename_notice_fires_only_for_a_renamed_resume() {
+        assert_eq!(
+            resume_rename_notice(true, Some("paulownia"), "platanus"),
+            Some("paulownia")
+        );
+        assert_eq!(
+            resume_rename_notice(true, Some("marasmius"), "marasmius"),
+            None
+        );
+        assert_eq!(resume_rename_notice(true, None, "platanus"), None);
+        assert_eq!(
+            resume_rename_notice(false, Some("paulownia"), "platanus"),
+            None
+        );
     }
 }

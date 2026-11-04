@@ -153,8 +153,9 @@ impl App {
     }
 
     pub fn tick_banner_animation(&mut self) {
-        // CM52: `tui.brians_brain = false` keeps the banner static.
-        if self.tui_settings.brians_brain {
+        // CM52: `tui.brians_brain = false` keeps the banner static; the
+        // animations gate freezes it while paused or off (FR2/FR3).
+        if self.tui_settings.brians_brain && crate::tui::ui::animations_enabled(self) {
             if let Some(ref mut brain) = self.home_brain {
                 brain.step();
             }
@@ -196,8 +197,9 @@ impl App {
             self.sidebar_brain = Some(make_brain(rows, cols));
         }
 
-        // CM52: `tui.brians_brain = false` keeps the sidebar brain static too.
-        if self.tui_settings.brians_brain {
+        // CM52: `tui.brians_brain = false` keeps the sidebar brain static too;
+        // the animations gate freezes it while paused or off (FR2/FR3).
+        if self.tui_settings.brians_brain && crate::tui::ui::animations_enabled(self) {
             if let Some(ref mut brain) = self.sidebar_brain {
                 brain.step();
             }
@@ -210,10 +212,13 @@ impl App {
         }
     }
 
-    pub(super) fn dismiss_copied(&mut self) {
+    /// True when the badge cleared this tick (a visible change).
+    pub(super) fn dismiss_copied(&mut self) -> bool {
         if self.show_copied && self.copied_at.elapsed() > Duration::from_secs(2) {
             self.show_copied = false;
+            return true;
         }
+        false
     }
 
     fn move_interactive_selection(&mut self, forward: bool) {
@@ -517,12 +522,20 @@ impl App {
     }
 
     pub fn cleanup(&mut self) {
-        for agent in &mut self.interactive_agents {
-            agent.kill();
+        // A session closed but still inside its shadow-summary linger would
+        // die with this process before its thread sent `kill`, letting the
+        // closed session survive in the daemon and come back on the next
+        // start: send those kills now and give the frames a beat to reach
+        // the hub before the sockets close with the process.
+        if !self.pending_closes.is_empty() {
+            for stream in std::mem::take(&mut self.pending_closes) {
+                stream.kill();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
         }
-        for agent in &mut self.terminal_agents {
-            agent.kill();
-        }
+        // Quitting the TUI only closes the hub WebSocket; every session keeps
+        // running in the daemon and reattaches on the next start.
+        self.close_session_hub();
         // Clear any lingering toast notifications from the Windows Action Center
         crate::domain::notification::clear_notifications_on_exit();
     }
@@ -1170,7 +1183,7 @@ mod handle_interactive_exit_tests {
 mod close_terminal_session_tests {
     use super::*;
     use crate::db::Database;
-    use crate::tui::terminal_history::load_history;
+    use crate::tui::terminal_history::{load_history, save_history};
     use std::sync::Arc;
     use tempfile::{tempdir, NamedTempFile, TempDir};
 
@@ -1220,86 +1233,37 @@ mod close_terminal_session_tests {
     }
 
     #[test]
-    fn close_replaces_stored_scrollback_not_appends_across_repeated_closes() {
+    fn close_persists_no_scrollback() {
         let (mut app, data_dir) = app_with_history("caolinita");
+        // The warp path saves commands at capture time; seed one so the
+        // history file exists before the close.
+        let hist = app
+            .terminal_histories
+            .get_mut("caolinita")
+            .expect("cached history");
+        hist.record("cargo build", "/tmp");
+        save_history(data_dir.path(), "caolinita", hist);
 
         let agent = spawn_test_terminal("caolinita");
-        feed(&agent, b"first run output\r\n");
+        feed(&agent, b"session output that must not be stored\r\n");
         app.terminal_agents.push(agent);
         assert!(app.close_terminal_session_at(0));
 
-        let after_first = load_history(data_dir.path(), "caolinita");
-        assert!(after_first
-            .scrollback
-            .iter()
-            .any(|l| l.contains("first run output")));
-
-        // Reopen (mirrors a fresh session with the same name) and close again
-        // with different content.
-        let agent2 = spawn_test_terminal("caolinita");
-        feed(&agent2, b"second run output\r\n");
-        app.terminal_agents.push(agent2);
-        assert!(app.close_terminal_session_at(0));
-
-        let after_second = load_history(data_dir.path(), "caolinita");
-        assert!(after_second
-            .scrollback
-            .iter()
-            .any(|l| l.contains("second run output")));
+        let raw = std::fs::read_to_string(
+            data_dir
+                .path()
+                .join("terminals")
+                .join("caolinita")
+                .join("history.toml"),
+        )
+        .expect("read history file");
         assert!(
-            !after_second
-                .scrollback
-                .iter()
-                .any(|l| l.contains("first run output")),
-            "closing again must replace, not append, the stored snapshot: {:?}",
-            after_second.scrollback
+            !raw.contains("scrollback"),
+            "close must not persist terminal output as scrollback: {raw:?}"
         );
-    }
-
-    #[test]
-    fn close_excludes_full_screen_program_output() {
-        let (mut app, data_dir) = app_with_history("cuarzo");
-
-        let agent = spawn_test_terminal("cuarzo");
-        // Enter the alternate screen (DECSET 1049) and paint a frame, the way
-        // vim/htop/a nested canopy would.
-        feed(&agent, b"\x1b[?1049h");
-        feed(&agent, b"fake full-screen UI chrome\r\n");
-        assert!(agent.in_alternate_screen());
-        app.terminal_agents.push(agent);
-
-        assert!(app.close_terminal_session_at(0));
-
-        let after = load_history(data_dir.path(), "cuarzo");
         assert!(
-            after.scrollback.is_empty(),
-            "closing while a full-screen program is active must not persist its frame \
-             as scrollback text: {:?}",
-            after.scrollback
-        );
-    }
-
-    #[test]
-    fn close_captures_normally_once_full_screen_program_has_exited() {
-        let (mut app, data_dir) = app_with_history("session");
-
-        let agent = spawn_test_terminal("session");
-        feed(&agent, b"\x1b[?1049h");
-        feed(&agent, b"vim frame\r\n");
-        feed(&agent, b"\x1b[?1049l"); // back to the primary screen / shell
-        feed(&agent, b"shell prompt$\r\n");
-        assert!(!agent.in_alternate_screen());
-        app.terminal_agents.push(agent);
-
-        assert!(app.close_terminal_session_at(0));
-
-        let after = load_history(data_dir.path(), "session");
-        assert!(after.scrollback.iter().any(|l| l.contains("shell prompt$")));
-        assert!(
-            !after.scrollback.iter().any(|l| l.contains("vim frame")),
-            "content painted only in the alternate screen must never reach primary \
-             scrollback: {:?}",
-            after.scrollback
+            raw.contains("cargo build"),
+            "commands saved at capture must survive the close: {raw:?}"
         );
     }
 
@@ -1519,7 +1483,8 @@ mod ct16_warp_fullscreen_handover_tests {
 
     #[test]
     fn never_enters_alt_screen_unaffected() {
-        // T4/FR5: a child that never enters the alternate screen keeps warp
+        // T4/FR5 (pre-submit): no command was submitted here so no latch is
+        // set — a child that never enters the alternate screen keeps warp
         // sizing and never bypasses the input box.
         let agent = spawn_test_terminal("ct16-t4");
         let mut app = app_with_terminal(agent);
@@ -1535,5 +1500,70 @@ mod ct16_warp_fullscreen_handover_tests {
             assert!(warp_active, "warp input box stays for normal children");
         }
         app.terminal_agents[0].kill();
+    }
+}
+
+#[cfg(test)]
+mod cleanup_shadow_linger_tests {
+    use super::*;
+    use crate::db::Database;
+    use crate::tui::agent::InteractiveAgent;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use tempfile::tempdir;
+
+    /// FR5: closing a session sends `kill` — but only after the 7 s
+    /// shadow-summary linger, whose thread dies with the process. Quitting
+    /// inside that window must still deliver the kill from `cleanup`,
+    /// otherwise the closed session survives in the daemon and comes back
+    /// on the next start.
+    #[test]
+    fn cleanup_kills_a_session_closed_inside_its_shadow_linger() {
+        let hub = &crate::sessions::client::test_client().hub;
+        let tmp = tempfile::NamedTempFile::new().expect("create temp file");
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let db = Arc::new(Database::new(&path).expect("create test db"));
+        let data_dir = tempdir().expect("tempdir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+
+        let agent = InteractiveAgent::spawn_terminal(
+            "cat",
+            "/tmp",
+            80,
+            24,
+            Some("quit-during-linger"),
+            &[],
+            ratatui::style::Color::White,
+        )
+        .expect("spawn cat on the test hub");
+        let id = agent.id.clone();
+        app.interactive_agents.push(agent);
+
+        assert!(app.close_interactive_session_at(0, 0));
+        assert!(
+            hub.get(&id).is_some(),
+            "the hub still holds the session mid-linger"
+        );
+        assert!(
+            !app.pending_closes.is_empty(),
+            "the close kept no stream for the quit flush"
+        );
+
+        app.cleanup();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while hub.get(&id).is_some() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            hub.get(&id).is_none(),
+            "quitting during the shadow linger lost the kill"
+        );
     }
 }

@@ -40,8 +40,10 @@ pub(super) fn tab_cell_text(label: &str, width: usize) -> String {
 /// per tab, each an equal share of `area.width` (the last cell absorbs the
 /// rounding remainder so the three always cover the full row exactly — no
 /// gap for the background paint underneath to show through). The active
-/// tab's label renders in `theme.header_color` and bold, over the default
-/// background; inactive cells are dimmed text with no modifier. Registers
+/// tab's label renders in `theme.header_color` and bold, over the sidebar
+/// surface (`theme.sidebar_bg`) — like the rest of the sidebar, so the strip
+/// never shows the host terminal's own background; inactive cells are dimmed
+/// text with no modifier. Registers
 /// each cell's hit box in `sidebar_tab_click_map` for mouse clicks — the
 /// hit box always spans the full cell width, regardless of the label's
 /// centring.
@@ -73,7 +75,7 @@ pub(super) fn draw_sidebar_tab_bar(frame: &mut Frame, area: Rect, app: &mut App,
                 text,
                 Style::default().fg(fg).add_modifier(modifier),
             )))
-            .style(Style::default().bg(Color::Reset)),
+            .style(Style::default().bg(theme.sidebar_bg)),
             Rect::new(x, area.y, width, 1),
         );
         app.sidebar_tab_click_map

@@ -38,7 +38,7 @@ impl GraphStatus {
 }
 
 /// Result of [`crate::db::Database::reset_graph`] — the single state-transition
-/// path used by both the `graph_reset` MCP tool and the scheduler's
+/// path used by both the `graph_control` MCP tool and the scheduler's
 /// auto-reset-and-resume of a `failed` graph on autorun.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GraphResetOutcome {
@@ -81,7 +81,7 @@ pub enum ArchiveGraphOutcome {
 pub enum SpecAdminStatusOutcome {
     Success,
     NotFound,
-    /// Spec is bound to a graph (not standalone); spec_set_status only
+    /// Spec is bound to a graph (not standalone); spec_edit set_status only
     /// administers standalone specs.
     NotStandalone(String),
     /// Spec has an active run and cannot be administratively transitioned.
@@ -164,10 +164,14 @@ impl GraphSpecStatus {
 #[serde(rename_all = "snake_case")]
 pub enum GraphRunStatus {
     Running,
+    /// Queued for named mutexes (`mutex` on the node or its ensemble): the
+    /// run row exists but no work has started and the node's timeout has not
+    /// begun. Transitions to `Running` when every lease is granted.
+    Waiting,
     Pass,
     Fail,
     /// Operator-interrupted: the node was explicitly stopped by an operator
-    /// via `graph_pause(interrupt: true)`, not a failure of the node's work.
+    /// via `graph_control(interrupt: true)`, not a failure of the node's work.
     Interrupted,
     /// Quorum/ensemble settled with no filed verdict: every member ended as
     /// an infrastructure failure (crash, unreported, interrupted,
@@ -180,6 +184,7 @@ impl GraphRunStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Running => "running",
+            Self::Waiting => "waiting",
             Self::Pass => "pass",
             Self::Fail => "fail",
             Self::Interrupted => "interrupted",
@@ -189,6 +194,7 @@ impl GraphRunStatus {
 
     pub fn from_str(value: &str) -> Self {
         match value {
+            "waiting" => Self::Waiting,
             "pass" => Self::Pass,
             "fail" => Self::Fail,
             "interrupted" => Self::Interrupted,

@@ -1,4 +1,4 @@
-//! CM50: `canopy graph crew` — the read-only CLI over the `graph_crew`
+//! CM50: `canopy graph crew` — the read-only CLI over the `crew assignments`
 //! surface. Same code path as the MCP tool (both call
 //! [`Database::graph_crew`] / [`Database::graph_crew_summary`]): one table
 //! per graph, `--json` for the MCP shape, `--group-by-pair` for the

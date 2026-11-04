@@ -28,13 +28,13 @@ impl GraphEngine {
     /// Core of [`Self::run_graph`], plus the one bit `run_graph`'s public
     /// signature can't carry: whether this call is *resuming* an
     /// already-in-flight run ([`Self::resume_background`], the sole path
-    /// behind `graph_continue` and interrupted-queue/autorun resumption) or a
-    /// fresh dispatch (`graph_run`, including relaunching a `paused` graph
+    /// behind `graph_control` and interrupted-queue/autorun resumption) or a
+    /// fresh dispatch (`graph_control`, including relaunching a `paused` graph
     /// directly, and the graph's initial launch).
     ///
     /// That distinction is exactly what `{{spec_start_head}}` (B10) needs: a
     /// spec can be left `running` in the DB either because this exact run is
-    /// paused mid-node-graph (daemon restart, explicit `graph_pause`) — where
+    /// paused mid-node-graph (daemon restart, explicit `graph_control`) — where
     /// the previously captured baseline is still correct and must be kept —
     /// or because a *prior, distinct* run/launch died without ever being
     /// reset — where reusing that baseline would silently compare against a
@@ -82,13 +82,13 @@ impl GraphEngine {
     /// Core of [`Self::run_graph`], plus the one bit `run_graph`'s public
     /// signature can't carry: whether this call is *resuming* an
     /// already-in-flight run ([`Self::resume_background`], the sole path
-    /// behind `graph_continue` and interrupted-queue/autorun resumption) or a
-    /// fresh dispatch (`graph_run`, including relaunching a `paused` graph
+    /// behind `graph_control` and interrupted-queue/autorun resumption) or a
+    /// fresh dispatch (`graph_control`, including relaunching a `paused` graph
     /// directly, and the graph's initial launch).
     ///
     /// That distinction is exactly what `{{spec_start_head}}` (B10) needs: a
     /// spec can be left `running` in the DB either because this exact run is
-    /// paused mid-node-graph (daemon restart, explicit `graph_pause`) — where
+    /// paused mid-node-graph (daemon restart, explicit `graph_control`) — where
     /// the previously captured baseline is still correct and must be kept —
     /// or because a *prior, distinct* run/launch died without ever being
     /// reset — where reusing that baseline would silently compare against a
@@ -109,6 +109,11 @@ impl GraphEngine {
         let Some(lp) = self.db.get_graph(&graph_id)? else {
             bail!("Graph '{}' not found.", graph_id);
         };
+        // FR1/FR2: a resume (or directed start) of an idea graph resumes the
+        // idea it last ran with — before the emptiness guard below and before
+        // the placeholder is (re)created, so both see the stored idea exactly
+        // as they would an explicit one.
+        let idea = self.effective_idea(&lp, idea, is_resume || directed.is_some())?;
         if let Some(message) =
             self.empty_launch_check(&graph_id, queue_id.as_deref(), idea.as_deref())?
         {
@@ -126,7 +131,14 @@ impl GraphEngine {
         self.clear_directed_spec_limit(directed.map(|d| d.spec_id.as_str()))?;
         self.db
             .set_graph_active_run_queue(&graph_id, queue_id.as_deref())?;
-        let workdir = Self::resolve_dispatch_workdir(&lp, workdir_override, &sandbox);
+        self.persist_run_idea(&graph_id, idea.as_deref())?;
+        let workdir = self.resolve_and_persist_run_workdir(
+            &graph_id,
+            &lp,
+            workdir_override,
+            is_resume,
+            &sandbox,
+        )?;
         self.announce_dispatch_start(&lp, &graph_id, queue_id.as_deref(), &workdir, is_resume)?;
         let mut completed_specs: Vec<(String, String)> = Vec::new();
         let ctx = DispatchCtx {
@@ -163,12 +175,19 @@ impl GraphEngine {
                 }
             }
             None => {
-                self.purge_terminal_placeholder_specs(&graph_id)?;
-                let specs = self.ensure_placeholder_spec(&ctx, &graph_id, idea).await?;
-                if self
-                    .run_bound_spec_loop(&ctx, specs, &mut completed_specs)
-                    .await?
-                    == DispatchFlow::Stop
+                // FR4: a resumed (or directed) run of an IDEA graph keeps the
+                // failed idea placeholder — its spec id and node runs carry
+                // `{{previous_feedback}}`. Scoped to idea graphs so a stale
+                // blank bookkeeping row on a spec-driven graph keeps being
+                // purged exactly as before (FR5); a fresh, undirected launch
+                // always purges a prior attempt's terminal row.
+                let keep_idea_placeholder =
+                    (ctx.directed.is_some() || ctx.is_resume) && self.is_idea_graph(&lp)?;
+                if !keep_idea_placeholder {
+                    self.purge_terminal_placeholder_specs(&graph_id)?;
+                }
+                self.ensure_placeholder_spec(&ctx, &graph_id, idea).await?;
+                if self.run_bound_spec_loop(&ctx, &mut completed_specs).await? == DispatchFlow::Stop
                 {
                     return Ok(());
                 }
@@ -177,48 +196,15 @@ impl GraphEngine {
         if self.warn_incomplete_queue_members(&graph_id, queue_id.as_deref())? {
             return Ok(());
         }
-        if let Some(qid) = queue_id.as_deref() {
-            let failed = self.db.queue_failed_members(qid)?;
-            if !failed.is_empty() {
-                let blocker = failed
-                    .iter()
-                    .map(|(_, name, summary)| {
-                        format!(
-                            "{}: {}",
-                            name,
-                            summary.clone().unwrap_or_else(|| "failed".to_string())
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                let blocker = format!("Queue run failed: {}", blocker);
-                self.fail_graph(
-                    &graph_id,
-                    Some(ctx.claimed_at),
-                    None,
-                    None,
-                    &blocker,
-                    &completed_specs,
-                )
-                .await?;
-                return Ok(());
-            }
+        if self
+            .fail_dispatch_on_queue_failures(&ctx, queue_id.as_deref(), &completed_specs)
+            .await?
+        {
+            return Ok(());
         }
         self.finish_dispatch(&ctx, queue_id.as_deref(), sandbox, &completed_specs)
             .await?;
         Ok(())
-    }
-
-    pub(crate) fn resolve_dispatch_workdir(
-        lp: &Graph,
-        workdir_override: Option<String>,
-        sandbox: &Option<Sandbox>,
-    ) -> String {
-        sandbox
-            .as_ref()
-            .map(|s| s.worktree_path.to_string_lossy().to_string())
-            .or(workdir_override)
-            .unwrap_or_else(|| lp.workdir.clone())
     }
 
     pub(crate) fn announce_dispatch_start(
@@ -275,7 +261,7 @@ impl GraphEngine {
             tracing::warn!(
                 "Graph '{}' queue run against '{}': member spec '{}' is 'running' with no \
                  live node run in this daemon's lifetime; leaving it as-is. Reset it via \
-                 graph_reset to resume if it's genuinely stuck.",
+                 graph_control reset to resume if it's genuinely stuck.",
                 graph_id,
                 queue_id,
                 spec_id
@@ -430,6 +416,7 @@ impl GraphEngine {
                     continue;
                 };
                 if idx < d_pos {
+                    let label = activity::spec_label(&spec);
                     activity::record(
                         &self.db,
                         activity::GraphEvent {
@@ -440,10 +427,7 @@ impl GraphEngine {
                             node_id: None,
                             run_id: None,
                             kind: activity::GraphEventKind::SpecSkipped,
-                            message: format!(
-                                "Spec '{}' skipped (directed run starts later).",
-                                spec.name
-                            ),
+                            message: format!("Spec {label} skipped (directed run starts later)."),
                             payload: None,
                         },
                     );
@@ -547,15 +531,19 @@ impl GraphEngine {
         Ok(())
     }
 
+    /// FR1: make sure a graph launched with an idea has a spec row to run.
+    /// Hands back nothing: the bound-spec advance re-reads the graph's specs
+    /// from the DB every iteration ([`Self::run_bound_spec_loop`]), so
+    /// returning a captured list here would be the very snapshot this fix
+    /// removes.
     pub(crate) async fn ensure_placeholder_spec(
         &self,
         ctx: &DispatchCtx<'_>,
         graph_id: &str,
         idea: Option<String>,
-    ) -> Result<Vec<GraphSpec>> {
-        let specs = self.db.list_graph_specs(graph_id)?;
-        if !specs.is_empty() {
-            return Ok(specs);
+    ) -> Result<()> {
+        if !self.db.list_graph_specs(graph_id)?.is_empty() {
+            return Ok(());
         }
         let Some(idea_text) = idea.as_ref() else {
             let message = self.empty_spec_set_message(ctx.lp, None)?;
@@ -572,68 +560,44 @@ impl GraphEngine {
         let mut placeholder = no_spec_placeholder(graph_id);
         placeholder.description = Some(idea_text.clone());
         self.db.insert_graph_spec(&placeholder)?;
-        Ok(vec![placeholder])
+        Ok(())
     }
 
+    /// FR1/FR2: run the graph's bound specs to completion, deciding the next
+    /// one from a **live** read of the graph at every advance — never from a
+    /// list captured when the run started. A spec bound with `graph_edit`
+    /// while the run is in flight is therefore seen by the very next advance:
+    /// at its own position when it comes after the spec that just ran, and
+    /// right after it when it was bound at a lower position (the scan restarts
+    /// at position 0 and skips the finished ones). The 2026-10-26 loss — a
+    /// spec bound at position 6 while spec 4 ran, left `pending` forever as the
+    /// graph reported `Completed (5/6 specs).` — is exactly what the fresh read
+    /// rules out.
     pub(crate) async fn run_bound_spec_loop(
         &self,
         ctx: &DispatchCtx<'_>,
-        specs: Vec<GraphSpec>,
         completed_specs: &mut Vec<(String, String)>,
     ) -> Result<DispatchFlow> {
-        // A directed run makes its target spec the FIRST spec it
-        // executes — bound specs before it are skipped, and every spec after
-        // it runs normally from Start.
+        // A directed run makes its target spec the FIRST spec it executes —
+        // bound specs before it are skipped, and every spec after it runs
+        // normally from Start.
         let mut reached_directed = ctx.directed.is_none();
-        for spec in specs {
+        // Specs this dispatch has already dealt with: the live read shows a
+        // finished spec again on every later advance, and re-announcing it (or
+        // re-running it) on each one would flood the log and loop forever.
+        let mut settled: Vec<String> = Vec::new();
+        loop {
             if self.is_paused(ctx.graph_id)? {
                 return Ok(DispatchFlow::Stop);
             }
+            let specs = self.db.list_graph_specs(ctx.graph_id)?;
+            let Some(spec) =
+                self.pick_next_bound_spec(ctx, &specs, &mut reached_directed, &mut settled)?
+            else {
+                break;
+            };
             let directed_for_spec = ctx.directed.filter(|d| d.spec_id == spec.id);
-            if let Some(target) = ctx.directed {
-                if !reached_directed && spec.id != target.spec_id {
-                    activity::record(
-                        &self.db,
-                        activity::GraphEvent {
-                            graph_id: ctx.graph_id,
-                            graph_name: &ctx.lp.name,
-                            workdir: ctx.workdir,
-                            spec_id: Some(&spec.id),
-                            node_id: None,
-                            run_id: None,
-                            kind: activity::GraphEventKind::SpecSkipped,
-                            message: format!(
-                                "Spec '{}' skipped (directed run starts later).",
-                                spec.name
-                            ),
-                            payload: None,
-                        },
-                    );
-                    continue;
-                }
-                if !reached_directed {
-                    reached_directed = true;
-                }
-            } else if matches!(
-                spec.status,
-                GraphSpecStatus::Completed | GraphSpecStatus::Skipped
-            ) {
-                activity::record(
-                    &self.db,
-                    activity::GraphEvent {
-                        graph_id: ctx.graph_id,
-                        graph_name: &ctx.lp.name,
-                        workdir: ctx.workdir,
-                        spec_id: Some(&spec.id),
-                        node_id: None,
-                        run_id: None,
-                        kind: activity::GraphEventKind::SpecSkipped,
-                        message: format!("Spec '{}' already completed; skipping.", spec.name),
-                        payload: None,
-                    },
-                );
-                continue;
-            }
+            settled.push(spec.id.clone());
             let outcome = self
                 .run_spec(
                     ctx.lp,
@@ -662,79 +626,123 @@ impl GraphEngine {
         Ok(DispatchFlow::Continue)
     }
 
-    pub(crate) fn warn_incomplete_queue_members(
-        &self,
-        graph_id: &str,
-        queue_id: Option<&str>,
-    ) -> Result<bool> {
-        let Some(queue_id) = queue_id else {
-            return Ok(false);
-        };
-        if !self.db.queue_has_incomplete_members(queue_id)? {
-            return Ok(false);
-        }
-        tracing::warn!(
-            "Graph '{}' queue run against '{}' found no pending member to pick, but the \
-             queue still has incomplete (non completed/skipped) member(s); leaving the \
-             graph as-is rather than marking it completed. Reset the stuck member(s) via \
-             graph_reset to resume.",
-            graph_id,
-            queue_id
-        );
-        Ok(true)
-    }
-
-    pub(crate) async fn finish_dispatch(
+    /// FR1/FR2: the next spec to run out of a live read of the graph's bound
+    /// specs (position order) — the first one this dispatch has not settled
+    /// yet, skipping specs that are already terminal (announced once). A
+    /// directed run first deals with every spec before its target
+    /// ([`Self::skip_bound_spec_before_directed`]), so the target is the first
+    /// thing that runs — whatever its own status, unlike every other spec.
+    fn pick_next_bound_spec(
         &self,
         ctx: &DispatchCtx<'_>,
-        queue_id: Option<&str>,
-        sandbox: Option<Sandbox>,
-        completed_specs: &[(String, String)],
+        specs: &[GraphSpec],
+        reached_directed: &mut bool,
+        settled: &mut Vec<String>,
+    ) -> Result<Option<GraphSpec>> {
+        for spec in specs {
+            if let Some(target) = ctx.directed.filter(|_| !*reached_directed) {
+                if spec.id != target.spec_id {
+                    self.skip_bound_spec_before_directed(ctx, spec, settled)?;
+                    continue;
+                }
+                *reached_directed = true;
+                // The directed target runs whatever its status: a directed run
+                // accepts a `completed` spec (`graph_control run_from_node`,
+                // docs/graphs.md), and the queue path's resumed target runs
+                // unconditionally the same way. Falling through to the
+                // terminal skip would swallow the run the operator just asked
+                // for with an "already completed; skipping" line.
+                if settled.contains(&spec.id) {
+                    continue;
+                }
+                return Ok(Some(spec.clone()));
+            }
+            if settled.contains(&spec.id) {
+                continue;
+            }
+            if matches!(
+                spec.status,
+                GraphSpecStatus::Completed | GraphSpecStatus::Skipped
+            ) {
+                self.announce_settled_bound_spec(ctx, spec);
+                settled.push(spec.id.clone());
+                continue;
+            }
+            return Ok(Some(spec.clone()));
+        }
+        Ok(None)
+    }
+
+    /// FR2 (directed): a bound spec before the directed target does not run in
+    /// this dispatch. Announce it once and — for a spec still runnable —
+    /// materialize it `Skipped`, the same status the queue pick loop gives a
+    /// member before its directed target. A `pending` row left as-is would come
+    /// back at the head of this very dispatch's next live read and then leave a
+    /// pending spec behind at finish.
+    ///
+    /// A spec that already reached a verdict keeps it: rewriting
+    /// `completed`/`failed` to `skipped` erases the verdict and drops the spec
+    /// out of `spec_progress`'s done count, turning the completion line into
+    /// `Completed (n/m)` with n < m — the message FR4 exists to make
+    /// impossible. A stale `running` row is left alone too (the queue path
+    /// defers its strays rather than skipping them); the finish guard names it
+    /// instead of letting the graph report completion over in-flight work.
+    fn skip_bound_spec_before_directed(
+        &self,
+        ctx: &DispatchCtx<'_>,
+        spec: &GraphSpec,
+        settled: &mut Vec<String>,
     ) -> Result<()> {
-        self.db.update_graph_status(
-            ctx.graph_id,
-            GraphStatus::Completed,
-            None,
-            Some(chrono::Utc::now()),
-        )?;
-        let (done, total) = self.spec_progress(ctx.graph_id, queue_id)?;
+        let label = activity::spec_label(spec);
         activity::record(
             &self.db,
             activity::GraphEvent {
                 graph_id: ctx.graph_id,
                 graph_name: &ctx.lp.name,
                 workdir: ctx.workdir,
-                spec_id: None,
+                spec_id: Some(&spec.id),
                 node_id: None,
                 run_id: None,
-                kind: activity::GraphEventKind::GraphCompleted,
-                message: format!("Completed ({done}/{total} specs)."),
+                kind: activity::GraphEventKind::SpecSkipped,
+                message: format!("Spec {label} skipped (directed run starts later)."),
                 payload: None,
             },
         );
-        let executed_any_spec = !completed_specs.is_empty();
-        let hook_launched = executed_any_spec
-            && ctx
-                .lp
-                .hooks
-                .get(&GraphHookEvent::OnCompleted)
-                .is_some_and(|hooks| !hooks.is_empty());
-        self.notification_service.notify_graph_finished(
-            &ctx.lp.name,
-            GraphFinishOutcome::Completed {
-                done,
-                total,
-                hook_launched,
-            },
-        );
-        if executed_any_spec {
-            self.fire_completion_hook(ctx.lp, ctx.workdir, completed_specs)
-                .await;
+        if matches!(
+            spec.status,
+            GraphSpecStatus::Pending | GraphSpecStatus::Interrupted
+        ) {
+            self.db.update_graph_spec_status(
+                &spec.id,
+                GraphSpecStatus::Skipped,
+                None,
+                Some(chrono::Utc::now()),
+            )?;
         }
-        self.teardown_sandbox_after_final_status(sandbox, "completed".into())
-            .await;
+        settled.push(spec.id.clone());
         Ok(())
     }
+
+    /// Announce a spec that was already terminal when this dispatch's live read
+    /// saw it — once per dispatch, never for a spec this dispatch ran itself.
+    fn announce_settled_bound_spec(&self, ctx: &DispatchCtx<'_>, spec: &GraphSpec) {
+        let label = activity::spec_label(spec);
+        activity::record(
+            &self.db,
+            activity::GraphEvent {
+                graph_id: ctx.graph_id,
+                graph_name: &ctx.lp.name,
+                workdir: ctx.workdir,
+                spec_id: Some(&spec.id),
+                node_id: None,
+                run_id: None,
+                kind: activity::GraphEventKind::SpecSkipped,
+                message: format!("Spec {label} already completed; skipping."),
+                payload: None,
+            },
+        );
+    }
+
     /// Build the actionable error text for [`Self::empty_launch_check`].
     ///
     /// Queue membership doesn't record which graph(s) normally draw from it

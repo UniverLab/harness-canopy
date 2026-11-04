@@ -11,7 +11,7 @@ use crate::domain::graphs::GraphRunStatus;
 /// the engine validates this at creation time.
 ///
 /// An interactive hook is fire-and-forget: firing it enqueues one due-now
-/// row in `scheduled_sends` for the configured session (`target_session_id`
+/// row in `scheduled_prompts` for the configured session (`target_session_id`
 /// or `target_session_name`, resolved to a live id at fire time), delivered
 /// asynchronously by the TUI (which stays queued, not lost, while no TUI is
 /// running). It never reads or waits for a reply.
@@ -147,7 +147,7 @@ pub struct GraphCompletionHookRun {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executed_model: Option<String>,
     /// CM45: the hook config that actually fired, captured at fire time. A
-    /// later read sees what ran even after `graph_update` replaces the hook.
+    /// later read sees what ran even after `graph_edit` replaces the hook.
     /// `None` for pre-migration rows and for rows whose hook was never stored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hook_config: Option<GraphCompletionHook>,

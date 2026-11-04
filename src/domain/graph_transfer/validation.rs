@@ -1,9 +1,11 @@
+use std::collections::BTreeSet;
+
 use super::*;
 
 /// A missing/unsupported `format_version` is refused with its own clear
 /// message rather than falling through to a generic serde error (decision 6).
 pub(super) fn ensure_import_format_version(document: &GraphExportDocument) -> Result<(), String> {
-    if !matches!(document.format_version, 1..=5) {
+    if !matches!(document.format_version, 1..=6) {
         return Err(format!(
             "Graph export document has format_version {}, but this build only supports 1 through {}.",
             document.format_version, GRAPH_EXPORT_FORMAT_VERSION
@@ -45,7 +47,71 @@ pub(super) fn reject_unknown_output_references(
     Ok(())
 }
 
-/// Authoring-time shape rules `graph_add_ensemble` enforces: member-count
+/// Every `prompt_preset` an agent node names must be resolvable on this
+/// machine: a `<prompts_dir>/<name>.md` file (what
+/// `domain::prompts::resolve_prompt_preset` reads at spawn time), one of the
+/// builtins seeded on daemon start, or a preset the document itself bundles
+/// (v6). A document from an older version carries only the preset NAME, so a
+/// document written elsewhere would otherwise import cleanly and then run that
+/// node on an empty prompt — a hard refusal at import time is the safety net
+/// (this spec). Names are compared verbatim — the spawn path joins them
+/// verbatim too; only a whitespace-only name is skipped, exactly as the spawn
+/// path skips it (it then takes the default template).
+///
+/// Only plain agent nodes are inspected: an ensemble member carries no preset
+/// field — its prompt is the ensemble's own template — so there is nothing to
+/// check there.
+///
+/// The document's bundled `prompt_presets` (v6) count as known references:
+/// they are installed into the prompts dir by import before any node spawns.
+/// Each bundled entry is validated first (safe name, no overwrite of a
+/// differing local file), before the empty-reference early return — a
+/// document may bundle zero presets, but every preset it does bundle must be
+/// installable.
+pub(super) fn reject_unknown_prompt_presets(
+    document: &GraphExportDocument,
+    prompts_dir: &std::path::Path,
+) -> Result<(), String> {
+    validate(&document.prompt_presets, prompts_dir)?;
+    let bundled: BTreeSet<&str> = document
+        .prompt_presets
+        .iter()
+        .map(|preset| preset.name.as_str())
+        .collect();
+    let mut referenced: BTreeSet<&str> = document
+        .nodes
+        .iter()
+        .filter(|node| node.kind == GraphNodeKind::Agent)
+        .filter_map(|node| node.config.get("prompt_preset").and_then(Value::as_str))
+        .filter(|name| !name.trim().is_empty())
+        .collect();
+    if referenced.is_empty() {
+        return Ok(());
+    }
+    let builtin_names: Vec<&'static str> = crate::domain::prompts::builtin_prompt_preset_specs()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    let builtins: BTreeSet<&str> = builtin_names.iter().copied().collect();
+    referenced.retain(|name| {
+        !builtins.contains(name)
+            && !bundled.contains(name)
+            && !prompts_dir.join(format!("{name}.md")).is_file()
+    });
+    if referenced.is_empty() {
+        return Ok(());
+    }
+    // Named from the same list the check uses, in declaration order, so adding
+    // a builtin can never leave the hint behind.
+    Err(format!(
+        "Unknown prompt preset(s): {}. Add file(s) under {} or use a builtin ({}).",
+        referenced.into_iter().collect::<Vec<_>>().join(", "),
+        prompts_dir.display(),
+        builtin_names.join(", ")
+    ))
+}
+
+/// Authoring-time shape rules `graph_ensemble` enforces: member-count
 /// bounds, `min_pass` range, and non-negative timeout/grace fields (CM24).
 pub(super) fn validate_import_ensemble_shape(
     doc_ensemble: &GraphExportEnsemble,
@@ -123,12 +189,15 @@ pub(super) fn validate_import_ensemble_shape(
             ));
         }
     }
-    Ok(())
+    crate::domain::validation::validate_mutex_list(
+        &format!("Ensemble '{}'", doc_ensemble.name),
+        Some(doc_ensemble.mutex.as_slice()),
+    )
 }
 
 /// Names of every agent node (plain or ensemble member) left without a
 /// `platform`/`cli` after import — a v1 document (or a hand-written one)
-/// may legitimately arrive without one, so `graph_import`'s response calls
+/// may legitimately arrive without one, so `graph_edit`'s response calls
 /// out exactly which nodes need one filled in before the graph can run
 /// (requirement 4).
 pub fn agent_nodes_missing_platform(plan: &GraphImportPlan) -> Vec<String> {
@@ -147,7 +216,7 @@ pub fn agent_nodes_missing_platform(plan: &GraphImportPlan) -> Vec<String> {
 
 /// Mirrors `daemon::handler::config_has_agent_harness` by design: an agent
 /// node's config carries a non-empty `platform`, `cli`, or `crew` (CM49).
-pub(super) fn node_config_has_harness(config: &Value) -> bool {
+pub fn node_config_has_harness(config: &Value) -> bool {
     let has_non_empty_str = |field: &str| {
         config
             .get(field)

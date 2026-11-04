@@ -72,13 +72,21 @@ impl GraphControlAction {
 }
 
 /// Controls valid for a graph currently in `status` — a running graph offers
-/// only pause; a paused one offers both continue modes (retrying the
-/// in-flight node vs. abandoning the current spec are not interchangeable,
-/// so both are always presented together); a completed or failed one offers
-/// reset and run; a draft (never launched) graph offers only run.
+/// only pause; a pausing one offers pause (a no-op reporting the pending
+/// pause) plus both continue modes, either of which cancels the pending
+/// pause and keeps the graph running; a paused one offers both continue
+/// modes (retrying the in-flight node vs. abandoning the current spec are
+/// not interchangeable, so both are always presented together); a completed
+/// or failed one offers reset and run; a draft (never launched) graph
+/// offers only run.
 pub(crate) fn available_graph_actions(status: GraphStatus) -> Vec<GraphControlAction> {
     match status {
-        GraphStatus::Running | GraphStatus::Pausing => vec![GraphControlAction::Pause],
+        GraphStatus::Running => vec![GraphControlAction::Pause],
+        GraphStatus::Pausing => vec![
+            GraphControlAction::Pause,
+            GraphControlAction::ContinueRetry,
+            GraphControlAction::ContinueSkip,
+        ],
         GraphStatus::Paused => vec![
             GraphControlAction::ContinueRetry,
             GraphControlAction::ContinueSkip,
@@ -218,17 +226,18 @@ impl App {
 
     /// Apply a finished background graph-action dispatch, if any. Called from
     /// the tick graph; never blocks (mirrors `App::poll_playground_search`).
-    pub(crate) fn poll_graph_action(&mut self) {
+    /// True when an outcome landed this tick (a visible change).
+    pub(crate) fn poll_graph_action(&mut self) -> bool {
         let Some(rx) = &self.graph_action_rx else {
-            return;
+            return false;
         };
         let outcome = match rx.try_recv() {
             Ok(outcome) => outcome,
-            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.graph_action_pending = false;
                 self.graph_action_rx = None;
-                return;
+                return false;
             }
         };
         self.graph_action_pending = false;
@@ -242,29 +251,32 @@ impl App {
         if !is_error {
             let _ = self.refresh_graphs();
         }
+        true
     }
 
     /// Clear an old graph-action result banner once its TTL has elapsed
-    /// (mirrors `App::dismiss_copied`).
-    pub(crate) fn dismiss_graph_action_message(&mut self) {
+    /// (mirrors `App::dismiss_copied`). True when it cleared this tick.
+    pub(crate) fn dismiss_graph_action_message(&mut self) -> bool {
         if self.graph_action_message.is_some()
             && self.graph_action_message_at.elapsed() > GRAPH_ACTION_MESSAGE_TTL
         {
             self.graph_action_message = None;
+            return true;
         }
+        false
     }
 
     /// Run the selected graph (`r`) — valid for a `draft`, `completed`, or
     /// `failed` graph (see [`available_graph_actions`]); a no-op otherwise.
     ///
-    /// (CB22) Pure dispatch: sends `graph_run` with only `graph_id` — never a
-    /// `queue_id`, never an `idea`, and never a spec-creation request. A graph
-    /// with neither bound specs nor a selected queue is refused by the
-    /// daemon's launch validation (surfacing through
-    /// `dispatch_graph_action`'s error banner), not papered over with a blank
-    /// spec row. There is no MCP-dispatch seam to unit-test the payload
-    /// here, so the user-visible refusal is covered at the handler/engine
-    /// boundary instead.
+    /// (CB22) Pure dispatch: sends the `run` action with only `graph_id` —
+    /// never a `queue_id`, never an `idea`, and never a spec-creation
+    /// request. A graph with neither bound specs nor a selected queue is
+    /// refused by the daemon's launch validation (surfacing through
+    /// `dispatch_graph_action`'s error banner), not papered over with a
+    /// blank spec row. There is no MCP-dispatch seam to unit-test the
+    /// payload here, so the user-visible refusal is covered at the
+    /// handler/engine boundary instead.
     pub fn run_selected_graph(&mut self) {
         let Some(lp) = self.actionable_selected_graph() else {
             return;
@@ -273,10 +285,14 @@ impl App {
             return;
         }
         let graph_id = lp.id.clone();
-        self.dispatch_graph_action("graph_run", serde_json::json!({ "graph_id": graph_id }));
+        self.dispatch_graph_action(
+            "graph_control",
+            serde_json::json!({ "action": "run", "graph_id": graph_id }),
+        );
     }
 
-    /// Pause the selected graph (`p`) — valid only while it is `running`.
+    /// Pause the selected graph (`p`) — valid while it is `running`, and on
+    /// a `pausing` graph where it reports the already-pending pause.
     pub fn pause_selected_graph(&mut self) {
         let Some(lp) = self.actionable_selected_graph() else {
             return;
@@ -285,17 +301,22 @@ impl App {
             return;
         }
         let graph_id = lp.id.clone();
-        self.dispatch_graph_action("graph_pause", serde_json::json!({ "graph_id": graph_id }));
+        self.dispatch_graph_action(
+            "graph_control",
+            serde_json::json!({ "action": "pause", "graph_id": graph_id }),
+        );
     }
 
     /// Continue the selected paused graph, retrying the node that was
-    /// mid-flight when it paused (`c`).
+    /// mid-flight when it paused (`c`) — on a `pausing` graph this cancels
+    /// the pending pause and the graph keeps running instead.
     pub fn continue_selected_graph_retry(&mut self) {
         self.continue_selected_graph(GraphControlAction::ContinueRetry, "retry_current_node");
     }
 
     /// Continue the selected paused graph, abandoning the current spec and
-    /// moving on to the next one (`C`).
+    /// moving on to the next one (`C`) — on a `pausing` graph this cancels
+    /// the pending pause and the graph keeps running instead.
     pub fn continue_selected_graph_skip(&mut self) {
         self.continue_selected_graph(GraphControlAction::ContinueSkip, "skip_next_spec");
     }
@@ -309,8 +330,8 @@ impl App {
         }
         let graph_id = lp.id.clone();
         self.dispatch_graph_action(
-            "graph_continue",
-            serde_json::json!({ "graph_id": graph_id, "action": daemon_action }),
+            "graph_control",
+            serde_json::json!({ "action": "continue", "graph_id": graph_id, "mode": daemon_action }),
         );
     }
 
@@ -327,20 +348,23 @@ impl App {
         self.graph_reset_confirm = true;
     }
 
-    /// Dispatch `graph_reset` for the selected graph after the confirm modal's
-    /// `y`/Enter. Called only while `graph_reset_confirm` is set, so the
-    /// selected graph is whatever `open_graph_reset_confirm` validated.
+    /// Dispatch the `reset` action for the selected graph after the confirm
+    /// modal's `y`/Enter. Called only while `graph_reset_confirm` is set, so
+    /// the selected graph is whatever `open_graph_reset_confirm` validated.
     pub fn confirm_reset_selected_graph(&mut self) {
         let Some(lp) = self.actionable_selected_graph() else {
             return;
         };
         let graph_id = lp.id.clone();
-        self.dispatch_graph_action("graph_reset", serde_json::json!({ "graph_id": graph_id }));
+        self.dispatch_graph_action(
+            "graph_control",
+            serde_json::json!({ "action": "reset", "graph_id": graph_id }),
+        );
     }
 
     /// Open the autorun-scheduling input for the graph currently focused in
     /// the live view (`a`). Available regardless of the graph's status — the
-    /// underlying `graph_schedule_autorun` tool imposes no status guard
+    /// underlying `graph_control` tool imposes no status guard
     /// (cancelling in particular must work "regardless of the graph's current
     /// status", per its own description).
     pub fn open_graph_autorun_dialog(&mut self) {
@@ -372,7 +396,10 @@ impl App {
             return;
         };
         match autorun_dialog_arguments(&dialog, chrono::Utc::now()) {
-            Ok(arguments) => self.dispatch_graph_action("graph_schedule_autorun", arguments),
+            Ok(mut arguments) => {
+                arguments["action"] = serde_json::json!("schedule_autorun");
+                self.dispatch_graph_action("graph_control", arguments);
+            }
             Err(error) => {
                 dialog.error = Some(error);
                 self.graph_autorun_dialog = Some(dialog);
@@ -381,7 +408,7 @@ impl App {
     }
 }
 
-/// Compute the `graph_schedule_autorun` arguments for the dialog's current
+/// Compute the `graph_control` arguments for the dialog's current
 /// state, or the inline error to show instead of submitting. `now` is
 /// injected so the past/future boundary (requirement 7) is testable without
 /// depending on wall-clock time. Pure and `App`-free so the three submit
@@ -422,6 +449,21 @@ mod tests {
         assert_eq!(
             available_graph_actions(GraphStatus::Running),
             vec![GraphControlAction::Pause]
+        );
+    }
+
+    #[test]
+    fn available_actions_pausing_offers_pause_and_both_continue_modes() {
+        // A pending pause is cancellable from the TUI: either continue mode
+        // resolves to the daemon's cancel path, while pause stays offered
+        // so re-pressing it reports the already-pending pause.
+        assert_eq!(
+            available_graph_actions(GraphStatus::Pausing),
+            vec![
+                GraphControlAction::Pause,
+                GraphControlAction::ContinueRetry,
+                GraphControlAction::ContinueSkip,
+            ]
         );
     }
 

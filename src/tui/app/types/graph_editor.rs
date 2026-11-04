@@ -10,7 +10,7 @@ pub(crate) enum GraphEditorMode {
     /// A node's outgoing `pass`/`fail`/`always` edges — lets an ordinary
     /// edge be retargeted or deleted, through the same validated path
     /// (`daemon::handler::retarget_graph_edge`/`delete_graph_edge_checked`)
-    /// the `graph_update_edge`/`graph_delete_edge` MCP tools use, rather than
+    /// the `graph_edge`/`graph_edge` MCP tools use, rather than
     /// only a router's route edges (see [`GraphEditorMode::RouterRoutes`]).
     Edges,
 }

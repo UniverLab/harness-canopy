@@ -1,7 +1,7 @@
 ---
 title: CLI Reference
 description: Every canopy command and flag.
-order: 12
+order: 18
 ---
 
 # CLI Reference
@@ -20,7 +20,7 @@ to install)).
 |---|---|
 | `canopy daemon start` | Start the daemon (MCP server, scheduler, watchers) |
 | `canopy daemon stop` | Stop the daemon |
-| `canopy daemon status` | Show daemon status |
+| `canopy daemon status` | Show daemon status and version; warns when the running daemon is not this CLI's version |
 | `canopy daemon restart` | Restart the daemon |
 | `canopy daemon logs` | Show the daemon log |
 | `canopy daemon install-service` | Register as a system service |
@@ -49,7 +49,7 @@ Plain `canopy update` exits 2 on the same lookup errors.
 
 | Command | Description |
 |---|---|
-| `canopy setup` | Interactive setup wizard — detects AI CLIs, generates `~/.canopy/config.toml` |
+| `canopy setup` | Interactive setup wizard — detects AI CLIs, generates `~/.canopy/config.toml`. An uninstalled harness (binary no longer on PATH) is dropped from the config on its own; one still referenced by a crew, graph node, graph hook or scheduled agent is kept and `canopy doctor` warns about it once |
 | `canopy setup --local-registry <path>` | Use a local registry directory (for registry development) |
 | `canopy setup --force-skills` | Overwrite local skill files that diverge from the sync source, even when they were edited locally (default: skip them with a warning) |
 | `canopy mcp` | MCP wizard — sync/add/remove canopy's MCP entry across platforms |
@@ -57,7 +57,8 @@ Plain `canopy update` exits 2 on the same lookup errors.
 | `canopy mcp` → Add | Add a server via pasted README JSON, local stdio command (with args + env), or remote URL (with headers); previews entries, marks `(replaces existing)` overwrites, then asks `Install on N platform(s)?` |
 | `canopy uninstall --dry-run` | Preview removal: stop daemon, remove service unit + `canopy.service.d/` drop-ins, revert platform configs, remove skill symlinks (changes nothing) |
 | `canopy uninstall --keep-shared-servers` | Only remove canopy's own `canopy` server entry; leave shared `fetch`/`filesystem` entries in place |
-| `canopy doctor` | Full health diagnostics |
+| `canopy doctor` | Full health diagnostics (installed harnesses list with versions; an uninstalled harness stays silent unless something still references it) |
+| `canopy doctor --verbose` | Same, plus the searched PATH for missing harnesses (hidden otherwise) |
 
 ## Platform registry
 
@@ -74,7 +75,11 @@ refresh reports it as a local override, so a refresh never overwrites your
 choice. The command needs an existing `~/.canopy/config.toml` — on a machine
 that has not run setup it fails with ``run `canopy setup` first``. The refresh
 time is recorded where the TUI's background refresh records it, so a manual
-refresh also restarts that 24-hour window.
+refresh also restarts that 24-hour window. A harness whose binary is gone is
+pruned from the config on the same terms as setup, except on a grace window:
+the binary must be absent at two checks at least ten minutes apart, so a
+transient PATH problem never drops anything. The daemon runs the same
+grace-gated check on every startup (and reinstalls re-appear on their own).
 
 ## Graph inspection
 
@@ -87,15 +92,47 @@ refresh also restarts that 24-hour window.
 | `canopy graph crew --platform <p> --model <m>` | Filter by exact platform and case-insensitive model substring |
 | `canopy graph crew --all` | Include archived graphs |
 | `canopy graph crew --group-by-pair` | Summarise per platform/model pair: graph, ensemble, node and hook counts plus the graph names |
-| `canopy graph crew --json` | Print the MCP `graph_crew` JSON shape instead of tables |
+| `canopy graph crew --json` | Print the MCP `crew` `assignments` JSON shape instead of tables |
+| `canopy graph validate <path>` | Check a shared graph or node JSON document without importing it: every structural check `import` runs plus the sharing rules. Prints each problem with its JSON path; exits 0 when the document is valid, 1 when it is not |
+| `canopy graph validate <path> --json` | Print the machine-readable report instead: `ok` with the kind, name and counts, or `problems` |
+| `canopy graph install <ref>` | Install a graph from the catalogue in one command: `<slug>` or `<owner>/<repo>/<slug>`, each with an optional `@<ref>` suffix, or `draft:<id>` for an unreviewed editor draft ([graphs.univerlab.org/editor](https://graphs.univerlab.org/editor), 30 minutes, installs once). Prints a review of every shell command and agent prompt the document runs (with attention marks), asks `Install <name> from <source>? [y/N]`, then — after confirmation — validates the fetched document, installs its bundled presets, and imports it as a new graph |
+| `canopy graph install <ref> [--workdir <dir>] [--name <name>] [--as <prefix>] [--replace] [--overwrite-presets] [--yes] [--show-prompts] [--json]` | Install into another workdir (default: the current directory), under another name, renaming colliding bundled presets under a prefix (`--as alice` installs `review` as `alice-review`), overwriting differing local preset files instead of refusing (`--replace`, like `--overwrite-presets`), skipping the confirmation question (`--yes`, after printing the review), printing every prompt in full (`--show-prompts`), or printing the review and report as machine-readable JSON |
+
+A bare slug installs the official UniverLab entry; `owner/repo/slug`
+installs a community one. A bundled preset already owned by another
+source is refused before anything is written — rename it with
+`--as <prefix>` or overwrite it with `--replace`.
+
+`canopy graph validate` runs entirely locally — no daemon, no database,
+no workdir — so it works before anything is installed. The rules it
+enforces are in [Graphs](graphs-sharing.md#validate-before-you-share).
 
 Graph ids can be specified by exact id, exact name, or unambiguous id
 prefix. Ambiguous references list the candidates.
 
+## Nodes
+
+| Command | Description |
+|---|---|
+| `canopy node list [--json]` | List installed node documents and the builtins embedded in the binary, marking each `installed` or `builtin` and showing which catalogue entry installed it |
+| `canopy node install <ref>` | Install a node document from the catalogue: `<slug>` or `<owner>/<repo>/<slug>`, each with an optional `@<ref>` suffix, or `draft:<id>` for an unreviewed editor draft. Prints the same review as `graph install` and asks for confirmation first; after confirmation it validates the document, installs its bundled preset, and writes it to `~/.canopy/nodes` |
+| `canopy node install <ref> [--as <name>] [--replace] [--overwrite-presets] [--yes] [--show-prompts] [--json]` | Install under another local name (`--as`, renaming the bundled preset with it), overwrite an installed copy from another source (`--replace`), overwrite differing local preset files instead of refusing, skip the confirmation question (`--yes`, after printing the review), print every prompt in full (`--show-prompts`), or print the review and report as machine-readable JSON |
+| `canopy node remove <name> [--json]` | Remove an installed node document. A builtin with no installed copy cannot be removed; an installed override can |
+
+A bare slug is the official UniverLab entry and `owner/repo/slug` a
+community one. Installing a name already installed from a different
+source is refused, naming both sources — `--as <local-name>` installs
+it under another local name, `--replace` overwrites. Reinstalling from
+the same source updates in place, and an installed copy still overrides
+a builtin of the same name.
+
+`canopy node` runs entirely locally — no daemon needed. See
+[Graphs](graphs-nodes.md#nodes).
+
 ## Graph control
 
-Mirrors the `graph_run`/`graph_pause`/`graph_continue`/`graph_reset`/
-`graph_schedule_autorun` MCP tools — a second way to reach the same daemon
+Mirrors the `graph_control` actions `run`/`pause`/`continue`/`reset`/
+`schedule_autorun` — a second way to reach the same daemon
 operations when an MCP client can't. Every command resolves `<id-or-name>`
 locally (same rule as graph inspection above) and then delegates the actual
 state change to the daemon over its existing MCP endpoint; it never writes
@@ -107,12 +144,13 @@ missing.
 |---|---|
 | `canopy graph run <id-or-name>` | Run a graph in the background, spec by spec |
 | `canopy graph run <id-or-name> --queue <queue-id>` | Run the queue's pending specs through the graph instead |
-| `canopy graph run <id-or-name> --workdir <path>` | Override the graph's workdir for this run only |
+| `canopy graph run <id-or-name> --workdir <path>` | Override the graph's workdir for this run only (the stored workdir is unchanged; every continuation of the run keeps using the override) |
 | `canopy graph run <id-or-name> --from <node>` | Start the first spec this run executes at a chosen node (id, id prefix, node name, or ensemble name), reusing the recorded outputs of upstream nodes; refused, naming the node, if an upstream node's latest run failed, errored or was interrupted |
+| `canopy graph run <id-or-name> --idea <text>` | Run a spec-less idea graph: the text is fed to nodes as `{{spec_content}}` (mutually exclusive with `--queue`; the graph must have no bound specs and no queue) |
 | `canopy graph pause <id-or-name>` | Pause a running graph after the current node finishes |
-| `canopy graph continue <id-or-name> --retry-current-node` | Resume a paused or failed graph by retrying the current node (also resumes a paused graph whose current spec is pending with a recorded node; clears that spec's execution count and the reply says so) |
+| `canopy graph continue <id-or-name> --retry-current-node` | Resume a paused or failed graph by retrying the current node (also resumes a paused graph whose current spec is pending with a recorded node; clears that spec's execution count and the reply says so). On an idea-driven graph (one run with `--idea`), it resumes that idea run; an idea graph that has never run is refused, naming `graph run --idea` as the way to start one |
 | `canopy graph continue <id-or-name> --skip-next-spec` | Resume a paused or failed graph by skipping to the next spec |
-| `canopy graph continue <id-or-name> --from <node> [--spec <spec>]` | Start a spec at a chosen node, reusing the recorded outputs of upstream nodes (refused, naming the node, if one failed, errored or was interrupted; defaults to the graph's current spec: a running/interrupted member, else a failed one, else the next pending one) |
+| `canopy graph continue <id-or-name> --from <node> [--spec <spec>]` | Start a spec at a chosen node, reusing the recorded outputs of upstream nodes (refused, naming the node, if one failed, errored or was interrupted; defaults to the graph's current spec: a running/interrupted member, else a failed one, else the next pending one). On an idea-driven graph it resumes that idea run with the stored idea as `{{spec_content}}` and no `--spec` to give |
 | `canopy graph reset <id-or-name>` | Reset a completed/failed graph back to pending (prompts for confirmation) |
 | `canopy graph reset <id-or-name> --specs <id>...` | Reset specific spec ids, even if already completed |
 | `canopy graph reset <id-or-name> --yes` | Skip the confirmation prompt |
@@ -129,7 +167,18 @@ missing.
 
 `canopy graph log` prints `<created_at> <KIND> spec=<name> node=<name> <message>`
 and goes through the daemon like the other `graph` subcommands. See the
-[Event log](graphs.md#event-log) section.
+[Event log](graphs-operations.md#event-log) section.
+
+A `pause` requested while a node runs is recorded at once and the graph
+pauses at the next node boundary; meanwhile a second `pause` is a no-op
+answering `pause already pending`, and `continue`/`run` cancel the pending
+pause instead — see [Pending pauses](graphs-operations.md#pending-pauses).
+
+A `continue` on a sandboxed graph resumes inside that run's sandbox worktree;
+when the worktree is gone the continue is refused, naming the sandbox id,
+rather than running the graph against the original workdir. A failed
+sandboxed graph always keeps its worktree — see
+[Sandboxes](graphs-isolation.md#sandboxes).
 
 ## Agents
 
@@ -139,7 +188,7 @@ Read-only inspection of registered agents, served from the local database
 | Command | Description |
 |---|---|
 | `canopy agent show <id>` | Show one agent's full stored definition, prompt last and untruncated |
-| `canopy agent show <id> --json` | Print the same definition as JSON (identical to the `agent_get` MCP tool's output) |
+| `canopy agent show <id> --json` | Print the same definition as JSON (identical to the `agent` `get` action's output) |
 
 ## Missions
 
@@ -164,8 +213,7 @@ served from the local database — no daemon required.
 | `canopy spec complete <spec-id> --reason <text>` | Mark a standalone spec as completed |
 | `canopy spec skip <spec-id> --reason <text>` | Mark a standalone spec as skipped |
 | `canopy spec reopen <spec-id> --reason <text>` | Reopen a completed/skipped spec back to pending |
-| `canopy spec convert` | Migrate legacy heading-format spec bodies to the tagged `<spec>` format (skips tagged and running specs; prints a report) |
-| `canopy spec notes <spec-id>` | Print every spec note of a spec, newest first, with its owner, last update and body (see [Spec notes](graphs.md#spec-notes)) |
+| `canopy spec notes <spec-id>` | Print every spec note of a spec, newest first, with its owner, last update and body (see [Spec notes](graphs-execution.md#spec-notes)) |
 
 ## Availability roster
 
@@ -182,6 +230,12 @@ ending in `*` (e.g. `opencode-go/*`) addresses a prefix. The engine skips
 effectively-unavailable members at dispatch and blocks a single unavailable
 agent node or hook — it never edits a graph.
 
+## Named mutexes
+
+| Command | Description |
+|---|---|
+| `canopy mutex list [--json]` | List granted mutex leases and queued waiters (FIFO); `--json` prints the raw MCP shape |
+
 ## Crews
 
 | Command | Description |
@@ -194,6 +248,380 @@ agent node or hook — it never edits a graph.
 A crew is a named, ordered member list ensembles and agent nodes/hooks bind
 to; member editing is MCP/TUI only (see
 [MCP tools](mcp-tools.md)).
+
+## Shelf
+
+| Command | Description |
+|---|---|
+| `canopy shelf list [--json]` | List every shelf file (the host shelf plus every session's), newest first, through the daemon; `--json` prints the items with their file ids |
+| `canopy shelf open <file_id>` | Open one shelf file with the system viewer, via the daemon |
+
+Both subcommands go through the running daemon over the session-protocol
+WebSocket — the CLI never writes the shelf itself. `file_id` is the
+16-lowercase-hex id printed by `canopy shelf list --json`.
+
+## Remote
+
+| Command | Description |
+|---|---|
+| `canopy remote login` | Sign in to GitHub with the OAuth device flow (identity only, no scopes) |
+| `canopy remote logout` | Delete the stored GitHub identity |
+| `canopy remote status [--json]` | Show the sign-in state, whether remote is enabled, the relay URL, the last relay error and reconnect time, and a `config invalid, ...; config.toml: <reason>` line while `config.toml` fails to parse (the last valid config stays live, and `enabled`/`relay_url` show those effective values); `--json` prints `{signed_in, login, enabled, relay_url, last_error, last_reconnect}` plus `config_fault` when invalid (`last_error`/`last_reconnect` are `null` when unrecorded; `config_fault` is omitted while the file parses; a successful reconnect clears `last_error`) |
+| `canopy remote on` / `off` | Turn the relay connection on or off (`[remote] enabled`); the daemon picks the change up without a restart |
+| `canopy remote pair` | Create a one-time code, print it with its `<relay_url>/pair#<code>` link and expiry, and draw the link as a terminal QR code |
+| `canopy remote devices [--json]` | List paired browsers (`id`, `label`, `paired_at`, `last_seen`) |
+| `canopy remote revoke <device_id>` | Delete a paired browser and close its live connection at once |
+| `canopy remote disconnect <device_id>` | Close a paired browser's live connection at once, keeping the pairing so it may reconnect |
+| `canopy remote invite <login> [--days N]` | Issue a single-use guest invite code for a GitHub login, printed once with its guest link and expiry (default 7 days; stored as a hash only) |
+| `canopy remote invites [--json]` | List guest invites (`login`, expiry, `live`/`used`/`expired`) |
+| `canopy remote uninvite <code-or-login>` | Revoke one invite by code, or every live invite by login |
+
+The same actions live in the TUI: `F1`, then `5` opens the hub's **Remote**
+tab — GitHub sign-in with the device flow, the relay switch and phase,
+pairing with a QR overlay, and disconnecting and revoking devices ([TUI](tui.md)).
+
+### Pairing a browser
+
+Pairing turns a browser into a revocable device of this host. The code is
+ten Crockford base32 characters shown as `XXXXX-XXXXX`, works once for ten
+minutes, and is burned after one success or five failed code checks. One
+code is live per host: `canopy remote pair` replaces the previous one, and
+the old code stops working at once. Case, spaces and dashes do not matter
+when the code is typed, `I`/`L` are read as `1` and `O` as `0`.
+
+`canopy remote pair` prints the code, the link and the expiry time, then
+the link as a terminal QR code:
+
+```text
+Pairing code: 7K3QH-M9P2X
+Link: https://remote.univerlab.org/pair#7K3QH-M9P2X
+Expires: 2026-10-28 15:04:05 UTC
+<the link as a QR code, drawn with half blocks>
+```
+
+The browser opens that link and exchanges long-term P-256 public keys with
+this host, authenticated by the code, so later connections need no code
+and the relay never learns anything that lets it impersonate either side.
+The exchange rides the daemon's relay connection, so pairing completes
+only while the daemon is running, `remote status` shows a login, and
+remote is on. A failed exchange tells the browser only `no_code`,
+`expired` or `bad_code`: run `canopy remote pair` again for a fresh code.
+A guest browser — one signed in as a GitHub login other than the owner's —
+pairs only while that login holds a trust grant (add one from the TUI
+Remote tab with `t`, or with the `remote` tool's `trust_add`); without it
+the exchange fails as `bad_code`, so trust the profile before handing out
+the code.
+
+`canopy remote devices [--json]` prints `id`, `label`, `paired_at` and
+`last_seen` (`never` when the registry has no time), one line per device
+or as a JSON array; `no paired devices` when there are none. `canopy
+remote revoke <device_id>` deletes the device and closes its live
+connection within a second, printing `revoked <device_id>`, and refuses
+an unknown id with `no paired device with id <device_id>`. `canopy
+remote disconnect <device_id>` closes the live connection the same way
+but keeps the pairing, printing `disconnected <device_id>` and refusing
+an unknown id the same way. Re-pairing the
+same browser updates its label, `paired_at` and `last_seen` instead of
+adding a row.
+
+The host key lives in `~/.canopy/remote/host_key` (PKCS#8 DER, mode 0600)
+and `host_id` is the first 16 hex chars of SHA-256 over its public key;
+the live code and its derived key sit in `~/.canopy/remote/pairing.json`
+(mode 0600, removed once the code is used, refused as expired, or burned —
+deleting it cancels the code). Paired browsers are recorded in the
+`remote_devices` table and identified by the first 16 hex chars of SHA-256
+over their own key.
+
+### Inviting a guest
+
+A guest has no paired device, so it cannot pair: the host hands it an
+invite code instead. The code is `CNR-` plus 16 Crockford base32 characters
+(80-bit random), works once, and lives 7 days unless `--days N` says
+otherwise (at least 1 day). `canopy remote invite <login>` needs a signed-in
+host, resolves the login to its GitHub uid, stores only the code's SHA256
+hash, and prints the code once with the guest link and its expiry:
+
+```text
+Invite code for octocat: CNR-7K3Q-HM9P-2XAB-CDEF
+Guest link: https://remote.univerlab.org/g/1001/76805a63a6980c18#invite=CNR-7K3Q-HM9P-2XAB-CDEF
+Expires: 2026-11-11 15:04:05 UTC
+Send octocat the link: it works once, after octocat signs in with GitHub.
+```
+
+The link is `<relay_url>/g/<owner_uid>/<host_id>#invite=<code>`: the
+signed-in owner's GitHub uid names the room, this host's id names the
+host, and the code rides the fragment, which the browser never sends to
+the relay or in a `Referer`. Send it to the guest yourself (v1 has no
+delivery). The guest page signs the guest in with GitHub, keeps the code
+for that tab only, strips it from the address bar and opens the relay's
+guest door with it; a guest who got only the code opens
+`<relay_url>/g/<owner_uid>/<host_id>` and types it into the form there.
+A host with no host key yet (never paired or connected) prints the code
+with a hint instead of the link: turn remote on, let the daemon connect,
+and invite again. A note follows when remote is off, or when the login
+holds no trust grant: the code alone does not admit the guest, the login
+must also hold one (add it from the TUI Remote tab with `t`, or with the
+`remote` tool's `trust_add`), or its offer is refused. The host publishes
+only hashes to the room, and the first accepted guest offer burns every
+live invite for that login, so a shared code opens nothing afterwards —
+nor does it reopen the door for the same guest: once that guest's relay
+socket closes (a reload, a dropped connection), it needs a fresh invite.
+`canopy remote invites [--json]` lists each invite's login, expiry and
+`live`/`used`/`expired` state (`no invites` when there are none), and
+`canopy remote uninvite <code-or-login>` revokes one code or every live
+invite for a login, refusing with `no live invite for <target>` when there
+is nothing to revoke. A typed code ignores case, dashes and spaces, reads
+`I`/`L` as `1` and `O` as `0`, and may drop the `CNR-` prefix.
+
+Logins resolve to uids through `https://api.github.com/users/<login>`,
+both for `canopy remote invite` and for the daemon's guest allowlist. As a
+test hook for a local sandbox with a mock GitHub, `CANOPY_GITHUB_API`
+replaces that base, but only when it is a local `http://` origin
+(`http://127.0.0.1[:port]` or `http://[::1][:port]`, no path); any other
+value is ignored with a warning, so the host's GitHub token never leaves
+the machine through it. Set it for both the CLI and the daemon.
+
+### The relay connection
+
+With `remote on` and a stored identity, the daemon keeps one WebSocket to
+`<relay_url>/ws/host`, carrying the GitHub token and this host's id and
+label, and answers the pairing frames the relay forwards to it. The label
+is truncated to 64 characters and percent-encoded for the handshake header
+(`café-ß` travels as `caf%C3%A9-%C3%9F`), so a non-ASCII or long label can
+never wedge the connection; `config set remote.host_label` refuses labels
+with control characters and labels that are blank but non-empty. The host
+sends a protocol Ping every 20 seconds and declares the socket dead when
+nothing comes back — no Pong, no frame — for 45 seconds, so a dead relay
+link is noticed within a minute instead of leaving the relay listing the
+host as online. A dropped socket is retried after one second, doubling to
+thirty seconds, with jitter.
+`canopy remote off` closes the socket and `on` reconnects within a second
+— neither needs a daemon restart. If the relay answers HTTP 401, the
+daemon stops retrying that token and logs `github token rejected: run
+canopy remote login` (see `canopy daemon logs`); a fresh `canopy remote
+login` makes it connect again. If the relay answers HTTP 400, the daemon
+stops retrying that label, records `relay rejected the handshake: HTTP 400
+<reason>` for `remote status` (the Remote tab reads `relay rejected: see
+remote status`), and waits: fixing the label reconnects without a restart.
+Behind a corporate proxy the daemon tunnels the socket with an HTTP `CONNECT`:
+`ws://` relays read `HTTP_PROXY`, `wss://` relays read `HTTPS_PROXY`
+(uppercase wins over lowercase, empty counts as unset, `ALL_PROXY` is the
+fallback for both), and destinations matching `NO_PROXY`/`no_proxy` dial
+direct — an
+exact host, a domain suffix with or without a leading dot, an IP literal or
+CIDR range, or `*` for everything. It authenticates with the proxy URL's
+userinfo when present; without any of them the dial is direct. A proxy URL
+it cannot parse is a retryable relay error in `remote status`, never a
+silent direct dial.
+
+Remote control is owner-only: the relay admits only hosts signed in with
+the same GitHub account. `login` prints the device URL and the code to
+enter (`Open https://github.com/login/device and enter <user_code>`, plus
+the full verification URL when GitHub returns one), then polls GitHub at
+the interval it asks for — `slow_down` adds five seconds, an expired or
+denied code stops with a one-line message — and ends with `Signed in to
+GitHub as <login>.` It stores `{token, login, id}` in
+`~/.canopy/remote/github.json` (mode 0600, directory 0700); the token never
+appears in logs, errors, or status output. `logout` deletes that file and
+succeeds when it is already gone. `status` prints `login: <login>` (or
+`not signed in`), `enabled: …`, `relay_url: …`, and — once the daemon has
+recorded them — `last_reconnect: <RFC 3339>` and `last_error: <message>`,
+so a dropped relay link is visible without reading the daemon log; the
+next successful reconnect clears `last_error` again.
+
+### A paired browser's connection
+
+The relay only carries signaling. A paired browser sends a signed WebRTC
+offer through it; the host verifies the signature against
+`remote_devices` and refuses `unknown_device`, `stale` (over 120 seconds
+off), `bad_signature` or `forbidden` (paired, but its login holds no
+grant), then answers with a signature of its own. Both
+signatures cover the SDP, so the DTLS fingerprints are pinned end to end
+and neither the relay nor a TURN server can read or impersonate the
+session. Nothing but those signaling bodies reaches the relay.
+
+After the answer, each side trickles ICE candidates through the relay in
+the object form, and the host sends the minimal object because its local
+candidates carry no mids:
+
+```json
+{"t": "ice", "candidate": {"candidate": "candidate:1 1 UDP 1694498815 203.0.113.7 5000 typ host", "sdpMid": "0", "sdpMLineIndex": 0}}
+```
+
+`sdpMid` and `sdpMLineIndex` are present only when the sender knows them.
+The host still accepts the legacy bare string
+`{"t": "ice", "candidate": "<candidate-attribute>"}` from older browsers,
+and reads the mids into the peer connection when an object names them, so
+a browser behind NAT, TURN or a mobile network connects like one on the
+LAN. A body with no candidate — the key missing, `null`, or another
+shape — is logged and ignored, and the connection stays up.
+
+Once the data channel is open, the browser speaks the same protocol v2 as
+`/sessions/ws`, with one restriction: only the host owner's own paired
+device may `resize` a session (clamped to 20–500 columns and 5–200 rows,
+at most one resize per session every 100 ms, the latest winning); every
+guest's `resize` answers `forbidden`, and the browser otherwise renders
+the host's size scaled, following `resized`. Terminal
+sessions are first-class, as on the local socket: they list, attach, and
+spawn — a terminal `spawn` may omit `cli` (or send `null`) to open the
+host user's default shell. A browser paired as a trusted guest login
+sees only its granted sessions — every other session answers `not_found`,
+as if it did not exist — while the owner keeps the full view. A session
+whose process ends leaves the list for owner and guest alike, as if
+closed; attaching it afterwards answers `not_found`. A `spawn` names a directory (`workdir`)
+rather than a project. `workdir` may be absolute or start with `~/` (`~` and
+`~/` alone mean the host user's home), and the expanded path must be an
+existing directory; the browser's New dialog types that directory. A
+relative path is refused with `spawn: field 'workdir' must be an
+absolute path`, and a path that does not exist or is not a directory with
+`spawn: workdir '<expanded>' does not exist or is not a directory`; both are
+`error{code:"bad_request"}`. The `yolo` field (default `false`) launches the
+harness with its approval prompts off — the switch the TUI's New dialog
+offers — by appending that harness's registry `yolo_flag` after whatever
+interactive args the frame sent; a harness with no `yolo_flag` refuses it
+with `spawn: harness '<cli>' has no yolo mode`, and a `terminal` spawn with
+`spawn: field 'yolo' is not allowed for kind 'terminal'`. Each `catalog` CLI
+row carries `yolo: true|false`, so the browser only offers the switch where
+the host can honor it. Output and snapshot frames are chunked to stay under
+16 KiB; a snapshot's first part carries `cols`/`rows`, the
+rest travels as `snapshot_more`, and the final `snapshot_more` carries
+`last: true` (an empty one when the snapshot fit the first part). A
+snapshot taken while a full-screen app runs switches the client to its
+alternate screen (`?1049h`) after the main buffer, and when any client
+resizes a session every connection attached to it receives
+`resized{id,cols,rows}` (only when the size actually changes). The host
+coalesces terminal output into larger `out` frames: the first output
+after a quiet spell is sent at once (a keystroke echo never waits), and
+what follows within 25 ms of a sent frame is batched and sent once 12 KiB
+has accumulated or the 25 ms have passed. The data channel sends that
+coalesced output at most 20 times per second per attached session, and
+the first frame after a 50 ms lull still leaves immediately. A
+client that falls more than 512 KiB or half a second behind gets a fresh
+`snapshot` in place of the backlog, so it always catches up to the current
+screen; `/sessions/ws` clients (the TUI) obey the same 512 KiB and
+half-second rule with a 4 ms batching window and without the 20-a-second
+cap, and control frames (`hello`,
+`list`, `ok`, errors, `shelf`, `metrics`) are never dropped for a slow
+client. The shelf rides the same channel: `shelf_list` and `shelf_get`
+answer `shelf` and `file` frames, and `shelf_added` / `shelf_removed` push
+arrivals and removals. Files from
+terminal sessions stay hidden from lists and pushes and answer
+`error{code:"forbidden"}` on fetch. Host-shelf files (tied to no session)
+are visible to the owner and to guests with an all-sessions grant only. A
+guest fetching or deleting a file from a session outside its grant, or a
+host-shelf file while its grant names specific sessions, hears
+`error{code:"not_found"}` instead, as if the file did not exist, and such
+files never appear in its lists or pushes. `file`
+frames stay under 16 KiB, at most two downloads run at once — a third
+answers `error{code:"busy"}` — and their parts interleave with terminal
+output so a large image never stalls it. A host serves at most four device
+connections at once — a fifth is told `busy` — each success refreshes the
+device's `last_seen`, and `canopy remote revoke` (or `disconnect`, keeping
+the pairing) closes a live connection within a second. A revoked device hears `error{code:"revoked"}` before its
+channel closes, so its app can say the device was removed; answers larger
+than the peer's negotiated frame cap are refused with
+`error{code:"frame_too_large"}` instead of being sent halfway.
+
+Uploads travel the other way, and only for a trusted guest with the
+`upload` grant: `shelf_put_begin{req,id?,name,size,mime?,sha256}` answers
+`shelf_put_ready{req,file_id}`, then `shelf_put_part{file_id,part,data}`
+carries base64 chunks of at most 12 KiB numbered from 0 and the host
+replies `shelf_put_ack{file_id,part}` on every eighth part (the client
+keeps at most eight unacknowledged parts in flight), and
+`shelf_put_end{file_id}` commits it. `id` names the target session; absent
+or empty means the host shelf, which only the owner or a guest with
+every-session trust may write. Every refusal happens at `begin`, before
+any file data: `size` over `[remote] shelf_max_file_mb` (default 20)
+answers `error{code:"too_large"}`, a name with directories or control
+characters, an empty name, or a `sha256` that is not 64 lowercase hex
+characters answers `bad_request`, and a guest without the grant or a
+session outside its grant answers `forbidden`. Parts must arrive in order
+(`bad_request` otherwise) and may not exceed the declared size.
+`shelf_put_end` verifies the SHA-256 over the received bytes and sends no
+success frame at all — the shelf's `shelf_added` event is the completion
+signal; a mismatch answers `error{code:"checksum_mismatch"}` and drops the
+temp. `shelf_put_abort{file_id}` deletes the temp silently, a part or end
+whose grant vanished mid-flight answers `forbidden` and drops the temp,
+and at most three uploads run per device — a fourth `begin` answers
+`error{code:"busy"}`. Uploads are stored with origin `user`, and a live
+target session receives one automatic `📎 the user attached NAME (N.N MB) →
+SHELF_PATH` line. `hello` carries `proto: 2` and
+`features: ["shelf", "shelf_upload"]`; a client offers upload only when
+`shelf_upload` is listed, so an older host without it stays usable.
+
+Graphs ride the same channel, read-only. `graphs{req}` answers
+`graphs{req,graphs}` with the non-archived running, paused and failed
+graphs plus completed graphs active within the last 24 hours — running
+first, then paused, failed, completed, most recent activity first, at
+most 50 — each row carrying `id`, `name`, `status`, `workdir` as a
+basename (never the host's absolute path), `current_spec` (the current
+spec's name), `current_node` (the node's *name*, never its id),
+`done`/`total` over the graph's queue or specs, `blocked` and
+`updated_at`:
+
+```json
+{"t": "graphs", "req": "g1"}
+```
+
+A graph whose stored row cannot be read is skipped — the host logs the
+skip — instead of failing the whole list, so one corrupt row never
+blanks the answer.
+
+`graph_watch{req,id}` first answers `graph{req,id,document,state}` — the
+graph's export document, exactly what `canopy graph export` writes, plus
+its live `state` — and then pushes `graph_state{id,state}` only when
+that state differs from the last one sent on the connection, re-read
+every 2 seconds. `state` carries `status`, `blocked`/`blocker`,
+`current_spec_id`, the `current_node` name, the `nodes` map of the
+current spec's latest iteration (`"running"`, `"pass"` or `"fail"`, a
+node with no run absent), the queue-ordered `specs` (each `id`, `code`
+such as `FEAT-12` or null, `name`, `status`, `attempts`) and
+`updated_at`:
+
+```json
+{"t": "graph_watch", "req": "w1", "id": "7c1e4b2a-9d3f-4a6e-8b5c-2f0d1e3a4b6c"}
+```
+
+`graph_unwatch{id}` stops that watch and answers nothing:
+
+```json
+{"t": "graph_unwatch", "id": "7c1e4b2a-9d3f-4a6e-8b5c-2f0d1e3a4b6c"}
+```
+
+A connection holds at most four watches — a fifth answers
+`error{code:"busy"}` and starts nothing — an unknown or archived graph
+id answers `error{code:"not_found"}` and starts no watch either, and
+every watch ends with the connection — or as soon as its graph is
+deleted, which stops the pushes and frees the slot for another watch.
+None of these frames ever changes a graph, a spec or a queue: pausing
+and continuing stay local.
+
+Host metrics ride the same channel, read-only. `host.metrics{req}`
+answers `host.metrics{req,metrics}` with one sample — `cpu_usage`,
+`cpu_temperature_c`, `cpu_temp_source`, `memory_used_mb`,
+`memory_total_mb`, `gpu` (`name`, `usage`, `temperature_c`,
+`vram_used_mb`, `vram_total_mb`, or null), `power` (`watts`,
+`limit_watts`, `source` — `"battery"` or `"gpu"` — or null) and
+`sampled_at` (RFC 3339). Absent values are null, never omitted.
+`host.metrics.watch{interval_s?}` pushes the same frame without `req`
+every `interval_s` seconds (`interval_s` clamps to 5..60, default 10)
+until `host.metrics.unwatch` or the channel closes; one watcher per
+channel, so a second watch replaces the first:
+
+```json
+{"t": "host.metrics.watch", "interval_s": 10}
+```
+
+The `[remote]` table in `~/.canopy/config.toml` carries `enabled` (default
+`false`), `relay_url`, `github_client_id` (the public Client ID of
+UniverLab's "Canopy Remote" OAuth App — no configuration needed),
+`host_label` (empty means the hostname), and `shelf_max_file_mb` (default
+`20`, clamped to at least 1) — the largest file a remote upload may send
+onto a session shelf; the TUI- and MCP-side `session_send_file` cap stays
+at 20 MiB. The value is read when the daemon starts, so changing it takes
+a restart. Overriding `github_client_id`
+with an empty string makes `login` stop before any request:
+`remote.github_client_id is not set in ~/.canopy/config.toml`.
 
 ## Settings
 
@@ -220,7 +648,10 @@ being applied. `pending_restart` marks a restart-only setting whose value on
 disk differs from the one the running daemon loaded, including a key the file
 no longer holds, and a `config.toml` that will not parse at all is reported
 as a single `config.toml` row (and doctor warning) instead of being silently
-ignored. `skills.sources` (a list of tables) must still be edited by
+ignored. While the file stays broken the daemon logs the parse error once and
+keeps serving the last config that parsed (remote included) until a valid
+file appears — `canopy remote status` shows the fault meanwhile.
+`skills.sources` (a list of tables) must still be edited by
 hand.
 
 ## Spec queues
@@ -241,6 +672,26 @@ hand.
 | `canopy rag backfill` | Index every configured file that is not in the vector store yet |
 | `canopy rag purge [--yes]` | Delete the entire vector store and reset all RAG state; asks for confirmation unless `--yes` (`-y`) is given |
 | `canopy rag model retry` | Clear a failed local embedding-model download so the daemon retries it in the background, without re-running setup |
+
+## Sandboxes
+
+Sandboxed graph runs (`graph_control` `run` with `sandbox: true`) leave their worktree
+behind whenever it holds work; see [Sandboxes](graphs-isolation.md#sandboxes). These
+commands — or the [`sandbox` MCP tool](mcp-tools.md), which shares their
+implementation and refusals — are how you deal with them, and none of them
+guesses.
+
+| Command | Description |
+|---|---|
+| `canopy sandbox list` | Read-only: every sandbox worktree canopy created — id, path, graph/run that made it, branch, whether the branch holds commits that exist nowhere else, how far behind its base it is, and its status (`active`, `kept`, `cleaned`, `cleanup_failed`, `merged`, `discarded`). Directories under canopy's worktrees root with no sandbox row are listed as `untracked` and never touched |
+| `canopy sandbox list --json` | The same list as JSON |
+| `canopy sandbox land <id-or-prefix>` | Merge one sandbox's branch onto its base branch; refuses rather than forcing when the workdir is on another branch, has uncommitted changes, or the merge conflicts (naming the conflicting paths), and leaves the sandbox in place. On success it removes the worktree, deletes the branch and marks the sandbox `merged` |
+| `canopy sandbox discard <id-or-prefix>` | Remove one sandbox's worktree and delete its branch; refuses when the branch holds commits that exist nowhere else (or when that is uncertain) |
+| `canopy sandbox discard <id-or-prefix> --discard-unique-commits` | Explicit consent to delete commits that exist only in this sandbox, in that same call |
+
+`canopy clean` also reclaims sandboxes it considers finished once their branch
+holds no commits that exist nowhere else — it does not look at uncommitted
+files. Land or discard a `kept` sandbox you care about before running it.
 
 ## Clean
 
@@ -280,6 +731,7 @@ it came from. **Apply** says when a change takes effect: `applied` (at once),
 | `tui.atmosphere` | `true` | bool | applied | Fireflies and dandelions |
 | `tui.scroll_step` | 3 | 1–20 | applied | Lines per scroll event |
 | `tui.page_step` | 15 | 5–100 | applied | Lines per page-up/down |
+| `tui.animations` | `reduced` | `full`, `reduced`, `off` | applied | Animation budget: 20 fps, 8 fps with focus/idle pause, or static |
 | `notifications.enabled` | `true` | bool | applied | Desktop notifications |
 | `update.check_enabled` | `true` | bool | applied | Automatic update checks |
 | `update.check_interval_hours` | 24 | 1–720 | applied | Hours between automatic update checks |
@@ -300,11 +752,16 @@ it came from. **Apply** says when a change takes effect: `applied` (at once),
 | `scheduler.retry_max` | 3 | 0–20 | next run | Retries of a failed scheduled run |
 | `spec_attempt_limit` | 3 | 1–20 | restart the daemon | Separate graph executions a spec may fail with a verdict before it is blocked |
 | `ensemble_concurrency_cap` | 4 | 1–64 | restart the daemon | Ensemble members that run at once across every graph |
-| `graphs.*` | see [Tuning the engine](graphs.md#tuning-the-engine) | see there | see there | Graph engine retry budgets, ensemble member caps and check output |
+| `graphs.*` | see [Tuning the engine](graphs-operations.md#tuning-the-engine) | see there | see there | Graph engine retry budgets, ensemble member caps, check output, and the graph catalogue URL |
 | `clean.retention_days` | 7 | 1–3650 days | next run | Days kept before `canopy clean` removes sessions and files |
 | `graph_event_retention_days` | 90 | 1–3650 days | next run | Days a graph's event log is kept before `canopy clean` prunes it |
 | `clean.reclaim_min_deleted_rows` | 50 | 0–100000 | applied | Deleted rows that trigger VACUUM during `canopy clean` |
 | `activity.retention_per_workdir` | 500 | 50–100000 | applied | Activity-log entries kept per workdir |
+| `remote.enabled` | `false` | bool | applied | Whether this host accepts owner-only remote control via the relay |
+| `remote.relay_url` | `https://remote.univerlab.org` | — | next run | Relay URL for owner-only remote control |
+| `remote.github_client_id` | `Ov23liVCfE58kUb3ssDy` | — | next run | Public Client ID of UniverLab's "Canopy Remote" OAuth App (identity only; empty disables `remote login`) |
+| `remote.host_label` | empty | — | next run | Label shown for this host; empty means the hostname |
+| `daemon.cpu_quota_percent` | half the host's logical CPUs | 0–25600 | applied | CPU cap for every agent and gate the daemon spawns, in percent of one core (600 = 6 cores); `0` disables the cap ([CPU quota cap](graphs-isolation.md#cpu-quota-cap)) |
 
 `scheduler.retry_*` and `spec_attempt_limit` are not in `graphs.*`, which is
 why they are listed here.

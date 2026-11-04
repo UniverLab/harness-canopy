@@ -467,11 +467,21 @@ impl App {
         };
         let highlighted = self.graph_live_highlighted_node_id();
         if highlighted == state.current_node_id.as_deref() {
+            // The snapshot carries no queue entry, so a waiting current node
+            // resolves just its `waiting_for` the same way the general path
+            // below does.
+            let waiting_for = match (highlighted, state.current_spec_id.as_deref()) {
+                (Some(node_id), Some(spec_id)) => {
+                    graph_live_state::resolve_node_run_info(&self.db, spec_id, node_id).waiting_for
+                }
+                _ => Vec::new(),
+            };
             return graph_live_state::NodeRunInfo {
                 status: state.current_node_status,
                 started_at: state.current_node_started_at,
                 iteration: state.current_node_iteration,
                 chosen_route: highlighted.and_then(|id| state.router_taken_routes.get(id).cloned()),
+                waiting_for,
             };
         }
         let (Some(spec_id), Some(node_id)) = (state.current_spec_id.as_deref(), highlighted) else {

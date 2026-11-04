@@ -6,6 +6,9 @@
 
 use anyhow::Result;
 
+use crate::daemon::cpu_quota;
+use crate::daemon::process::{CommandRunner, RealRunner};
+
 /// Install the daemon as a system service that starts on boot.
 pub fn install_service(exe_path: &std::path::Path, port: u16) -> Result<()> {
     let exe = exe_path
@@ -87,9 +90,67 @@ pub(crate) fn write_systemd_unit(
     let path_value = reconcile_path(unit_path, &current_path);
     let current_browser_env = collect_browser_env_from_process();
     let extra_env = reconcile_browser_env(unit_path, &current_browser_env);
-    let unit_content = render_unit_content(&exe_str, port, &path_value, &extra_env);
+    let cpu_quota_percent = resolve_unit_quota();
+    let unit_content =
+        render_unit_content(&exe_str, port, &path_value, &extra_env, cpu_quota_percent);
     std::fs::write(unit_path, unit_content)?;
     Ok(())
+}
+
+/// The CPU quota a (re)written unit carries: the configured value, unless a
+/// user-owned drop-in already governs the quota (respected and reported,
+/// never overwritten) or systemd cannot be reached at all (reported once,
+/// existing behaviour kept). Never fails.
+fn resolve_unit_quota() -> u32 {
+    let configured = cpu_quota::loaded_quota_percent();
+    let drop_in_exists = cpu_quota::drop_in_path().is_some_and(|path| path.exists());
+    let (quota, note) = resolve_unit_quota_with(configured, drop_in_exists, &RealRunner);
+    match note {
+        Some(UnitQuotaNote::DropInRespected) => {
+            let path = cpu_quota::drop_in_path()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "the CPUQuota drop-in".to_string());
+            println!(
+                "  CPU quota: {path} exists and takes precedence — respecting it, unit written without CPUQuota."
+            );
+        }
+        Some(UnitQuotaNote::Unreachable(reason)) => {
+            println!(
+                "  CPU quota: {reason} — writing the unit without CPUQuota (existing behaviour)."
+            );
+        }
+        None => {}
+    }
+    quota
+}
+
+/// Why a (re)written unit carries no quota of its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum UnitQuotaNote {
+    DropInRespected,
+    Unreachable(String),
+}
+
+/// Pure form of [`resolve_unit_quota`] over an explicit configuration, so
+/// tests can pin the decision without touching the home directory. Returns
+/// the quota the unit carries (`0` renders no line) and why, when the
+/// configured value is not the one written.
+fn resolve_unit_quota_with(
+    configured: u32,
+    drop_in_exists: bool,
+    runner: &dyn CommandRunner,
+) -> (u32, Option<UnitQuotaNote>) {
+    if configured == 0 {
+        return (0, None);
+    }
+    if drop_in_exists {
+        return (0, Some(UnitQuotaNote::DropInRespected));
+    }
+    let probe = cpu_quota::probe_with(runner);
+    if !probe.reachable {
+        return (0, Some(UnitQuotaNote::Unreachable(probe.reason)));
+    }
+    (configured, None)
 }
 
 fn install_systemd_service(exe: &std::path::Path, port: u16) -> Result<()> {
@@ -110,6 +171,7 @@ fn render_unit_content(
     port: u16,
     path_value: &str,
     extra_env: &std::collections::BTreeMap<String, String>,
+    cpu_quota_percent: u32,
 ) -> String {
     let mut extra_lines = String::new();
     for key in BROWSER_ENV_KEYS {
@@ -120,6 +182,9 @@ fn render_unit_content(
             extra_lines.push_str(&format!("Environment={key}={}\n", systemd_quote_value(val)));
         }
     }
+    let quota_line = cpu_quota::quota_unit_line(cpu_quota_percent)
+        .map(|line| format!("{line}\n"))
+        .unwrap_or_default();
     format!(
         r#"[Unit]
 Description=canopy daemon
@@ -134,7 +199,7 @@ StartLimitIntervalSec=60
 StartLimitBurst=5
 OOMPolicy=continue
 MemoryMax=80%
-Environment=RUST_LOG=info
+{quota_line}Environment=RUST_LOG=info
 Environment=PATH={path_value}
 {extra_lines}
 [Install]
@@ -384,6 +449,7 @@ fn launchd_plist_path() -> Result<std::path::PathBuf> {
 }
 
 fn install_launchd_service(exe: &std::path::Path, port: u16) -> Result<()> {
+    println!("  CPU quota caps apply on Linux with systemd only — skipping (existing behaviour).");
     let plist_path = launchd_plist_path()?;
     if let Some(parent) = plist_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -490,6 +556,7 @@ mod tests {
             4177,
             "/usr/bin:/bin",
             &std::collections::BTreeMap::new(),
+            0,
         );
 
         let path_line = content
@@ -535,6 +602,7 @@ mod tests {
             7755,
             "/usr/bin:/bin",
             &std::collections::BTreeMap::new(),
+            0,
         );
         assert!(content.contains("/usr/bin/canopy"));
         assert!(content.contains("7755"));
@@ -552,6 +620,7 @@ mod tests {
             9999,
             "/usr/bin",
             &std::collections::BTreeMap::new(),
+            0,
         );
         assert!(content.contains("9999"));
         assert!(!content.contains("7755"));
@@ -564,6 +633,7 @@ mod tests {
             7755,
             "/custom/path:/another/path",
             &std::collections::BTreeMap::new(),
+            0,
         );
         assert!(content.contains("/custom/path:/another/path"));
     }
@@ -574,7 +644,7 @@ mod tests {
             ("BROWSER".to_string(), "/x/wsl-browser".to_string()),
             ("DISPLAY".to_string(), ":0".to_string()),
         ]);
-        let content = render_unit_content("/usr/bin/canopy", 7755, "/usr/bin:/bin", &map);
+        let content = render_unit_content("/usr/bin/canopy", 7755, "/usr/bin:/bin", &map, 0);
         assert!(content.contains("Environment=BROWSER=/x/wsl-browser"));
         assert!(content.contains("Environment=DISPLAY=:0"));
         assert!(!content.contains("WAYLAND_DISPLAY"));
@@ -597,7 +667,7 @@ mod tests {
             "BROWSER".to_string(),
             "/x/my browser".to_string(),
         )]);
-        let content = render_unit_content("/usr/bin/canopy", 7755, "/usr/bin:/bin", &map);
+        let content = render_unit_content("/usr/bin/canopy", 7755, "/usr/bin:/bin", &map, 0);
         assert!(content.contains("Environment=BROWSER=\"/x/my browser\""));
     }
 
@@ -643,6 +713,7 @@ mod tests {
             4177,
             "/usr/bin:/bin",
             &std::collections::BTreeMap::new(),
+            0,
         );
         let service = service_section(&content);
         assert_eq!(
@@ -676,6 +747,7 @@ mod tests {
             4177,
             &path,
             &std::collections::BTreeMap::new(),
+            0,
         );
 
         let service = service_section(&content);
@@ -714,5 +786,103 @@ mod tests {
     fn systemd_unit_path_ends_with_the_user_unit_name() {
         let path = systemd_unit_path().unwrap();
         assert!(path.ends_with(".config/systemd/user/canopy.service"));
+    }
+
+    /// FR1: a fresh unit carries the quota line exactly once, inside
+    /// `[Service]`.
+    #[test]
+    fn render_unit_includes_cpu_quota_once_in_service() {
+        let content = render_unit_content(
+            "/usr/bin/canopy",
+            4177,
+            "/usr/bin:/bin",
+            &std::collections::BTreeMap::new(),
+            600,
+        );
+        assert_eq!(content.matches("CPUQuota=600%").count(), 1);
+        let service = service_section(&content);
+        assert_eq!(service.matches("CPUQuota=600%").count(), 1);
+    }
+
+    /// FR1: a disabled cap renders no line at all.
+    #[test]
+    fn render_unit_omits_cpu_quota_when_disabled() {
+        let content = render_unit_content(
+            "/usr/bin/canopy",
+            4177,
+            "/usr/bin:/bin",
+            &std::collections::BTreeMap::new(),
+            0,
+        );
+        assert!(!content.contains("CPUQuota"));
+    }
+
+    /// In-memory [`CommandRunner`] for the quota decision: records probes
+    /// and replays one canned `show` answer.
+    struct ProbeRunner {
+        calls: std::cell::RefCell<Vec<(String, Vec<String>)>>,
+        capture: Option<String>,
+    }
+
+    impl ProbeRunner {
+        fn new(capture: Option<&str>) -> Self {
+            Self {
+                calls: std::cell::RefCell::new(Vec::new()),
+                capture: capture.map(str::to_string),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.borrow().len()
+        }
+    }
+
+    impl CommandRunner for ProbeRunner {
+        fn run(&self, _prog: &str, _args: &[&str]) -> bool {
+            false
+        }
+
+        fn run_capture(&self, prog: &str, args: &[&str]) -> Option<String> {
+            self.calls.borrow_mut().push((
+                prog.to_string(),
+                args.iter().map(|arg| (*arg).to_string()).collect(),
+            ));
+            self.capture.clone()
+        }
+    }
+
+    #[test]
+    fn unit_quota_is_the_configured_value_when_systemd_is_reachable() {
+        let runner = ProbeRunner::new(Some("CPUQuotaPerSecUSec=infinity\n"));
+        let (quota, note) = resolve_unit_quota_with(600, false, &runner);
+        assert_eq!(quota, 600);
+        assert_eq!(note, None);
+        assert_eq!(runner.call_count(), 1);
+    }
+
+    #[test]
+    fn unit_quota_yields_to_an_existing_drop_in_without_probing() {
+        let runner = ProbeRunner::new(Some("CPUQuotaPerSecUSec=6000000\n"));
+        let (quota, note) = resolve_unit_quota_with(600, true, &runner);
+        assert_eq!(quota, 0);
+        assert_eq!(note, Some(UnitQuotaNote::DropInRespected));
+        assert_eq!(runner.call_count(), 0);
+    }
+
+    #[test]
+    fn unit_quota_falls_back_when_systemd_is_unreachable() {
+        let runner = ProbeRunner::new(None);
+        let (quota, note) = resolve_unit_quota_with(600, false, &runner);
+        assert_eq!(quota, 0);
+        assert!(matches!(note, Some(UnitQuotaNote::Unreachable(_))));
+    }
+
+    #[test]
+    fn unit_quota_stays_silent_when_disabled() {
+        let runner = ProbeRunner::new(None);
+        let (quota, note) = resolve_unit_quota_with(0, false, &runner);
+        assert_eq!(quota, 0);
+        assert_eq!(note, None);
+        assert_eq!(runner.call_count(), 0);
     }
 }

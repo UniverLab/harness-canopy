@@ -313,6 +313,9 @@ fn handle_status(data_dir: &std::path::Path) -> Result<()> {
 
     println!("Daemon: RUNNING (PID: {pid})");
     println!("Version: {version}");
+    if let Some(warning) = version_mismatch_warning(&version, env!("CARGO_PKG_VERSION")) {
+        println!("{warning}");
+    }
     println!("Port: {port}");
     println!("Started: {last_start}");
     println!(
@@ -322,6 +325,19 @@ fn handle_status(data_dir: &std::path::Path) -> Result<()> {
         watch_count
     );
     Ok(())
+}
+
+/// The warning `daemon status` prints when the running daemon (the version
+/// it recorded at start) is not the version of this CLI; `None` when they
+/// match or the daemon's version is unknown.
+fn version_mismatch_warning(daemon: &str, cli: &str) -> Option<String> {
+    if daemon == cli || daemon == "unknown" {
+        return None;
+    }
+    Some(format!(
+        "Warning: the daemon runs {daemon} but this CLI is {cli}; \
+         restart it to run this version: canopy daemon restart"
+    ))
 }
 
 async fn handle_restart(port_override: Option<u16>) -> Result<()> {
@@ -502,5 +518,16 @@ mod tests {
         // Unit's MainPID alive but a *different* process holds the port →
         // the listener is an orphan, kill it.
         assert!(orphan_needs_kill(true, Some(7), Some(9)));
+    }
+
+    #[test]
+    fn status_warns_only_when_the_daemon_version_differs() {
+        assert_eq!(version_mismatch_warning("3.2.0", "3.2.0"), None);
+        assert_eq!(version_mismatch_warning("unknown", "3.2.0"), None);
+        let warning =
+            version_mismatch_warning("3.1.0", "3.2.0").expect("a mismatch raises the warning");
+        assert!(warning.contains("3.1.0"), "{warning}");
+        assert!(warning.contains("3.2.0"), "{warning}");
+        assert!(warning.contains("canopy daemon restart"), "{warning}");
     }
 }

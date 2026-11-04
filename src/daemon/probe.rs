@@ -1,6 +1,6 @@
 //! Headless liveness probing for configured platforms.
 //!
-//! `agent_models`/`doctor` answer "does the catalog list this platform" and
+//! `harness models`/`doctor` answer "does the catalog list this platform" and
 //! "is its binary present and its config well-formed" — neither one ever
 //! actually asks the harness to speak. A platform can be installed, listed,
 //! and configured while every real invocation answers with its own error
@@ -1887,7 +1887,7 @@ mod tests {
         assert_eq!(unknown_count(&reports), 0);
     }
 
-    /// `agent_probe` and `graph_preflight` (handler.rs) both build their JSON
+    /// `agent_probe` and `graph_control` (handler.rs) both build their JSON
     /// response exclusively from `ProbeReport::to_json()` and this module's
     /// `would_fail_count`/`unknown_count` — there is no second copy of the
     /// outcome vocabulary for either tool to drift from. This test pins the

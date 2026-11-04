@@ -7,7 +7,7 @@ pub enum GraphNodeKind {
     Check,
     Gate,
     /// Engine-managed quorum node for an ensemble (F1) — never created via
-    /// `graph_add_node` directly, only as part of `graph_add_ensemble`'s
+    /// `graph_node` directly, only as part of `graph_ensemble`'s
     /// one-call expansion. Waits for every member branch to terminate,
     /// consolidates their outputs, and routes onward. See
     /// [`crate::graph_engine::GraphEngine`]'s ensemble fan-out handling.
@@ -64,7 +64,7 @@ pub enum GraphEdgeCondition {
     /// Router-only: this edge is taken when the router selects the named
     /// route. The label must match one of the router node's declared
     /// [`RouterRoute`]s — validated at edge add/update time (see
-    /// `daemon::handler`'s `graph_add_edge`/`graph_update_edge`), never
+    /// `daemon::handler`'s `graph_edge`/`graph_edge`), never
     /// accepted free-form.
     Route(String),
     /// The node produced no verdict (infrastructure failure — crash,
@@ -108,7 +108,7 @@ impl GraphEdgeCondition {
     /// only round-trips through serde's `#[serde(alias = "break")]` on
     /// `Error`, scoped to reading a pre-existing exported document (see
     /// `graph_transfer.rs`), never as a freshly-typed value on
-    /// `graph_add_edge`/`graph_update_edge` or any other write path.
+    /// `graph_edge`/`graph_edge` or any other write path.
     pub fn from_str(value: &str) -> Option<Self> {
         match value {
             "pass" => Some(Self::Pass),

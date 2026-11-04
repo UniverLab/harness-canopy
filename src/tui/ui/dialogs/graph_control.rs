@@ -156,11 +156,16 @@ pub fn draw_graph_action_message(frame: &mut Frame, app: &App, theme: &Theme) {
     let area = centered_rect(50, height, frame.area());
     frame.render_widget(Clear, area);
 
+    let chrome_bg = if message.is_error {
+        theme.error_bg
+    } else {
+        theme.dialog_bg
+    };
     let block = Block::default()
         .title(title)
         .borders(crate::tui::ui::dialog_borders_for(theme))
         .border_style(Style::default().fg(color))
-        .style(Style::default().bg(theme.dialog_bg));
+        .style(Style::default().bg(chrome_bg));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -340,6 +345,41 @@ mod tests {
         }
         assert!(text.contains("is not paused"), "{text}");
         assert!(text.contains("failed"), "{text}");
+    }
+
+    #[test]
+    fn action_message_error_uses_error_bg_success_keeps_dialog_bg() {
+        for (is_error, expected_bg) in [
+            (true, Theme::classic().error_bg),
+            (false, Theme::classic().dialog_bg),
+        ] {
+            let (mut app, _dir) = test_app();
+            app.graph_action_message = Some(GraphActionMessage {
+                is_error,
+                text: "Graph 'lp1' probe.".to_string(),
+            });
+
+            let theme = Theme::classic();
+            let backend = TestBackend::new(80, 24);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| draw_graph_action_message(frame, &app, &theme))
+                .unwrap();
+
+            let buffer = terminal.backend().buffer().clone();
+            let mut tinted = 0;
+            for y in 0..buffer.area.height {
+                for x in 0..buffer.area.width {
+                    if buffer[(x, y)].bg == expected_bg {
+                        tinted += 1;
+                    }
+                }
+            }
+            assert!(
+                tinted >= 1,
+                "is_error={is_error} must paint on {expected_bg:?}, found none"
+            );
+        }
     }
 
     #[test]

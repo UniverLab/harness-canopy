@@ -1,4 +1,5 @@
 use super::*;
+use crate::db::connection::{is_busy_error, with_busy_retry};
 
 impl GraphEngine {
     #[expect(clippy::too_many_arguments)]
@@ -14,6 +15,7 @@ impl GraphEngine {
         workdir: &str,
         resume_session_id: Option<&str>,
         resume_crosses_spec: bool,
+        report_nudge: bool,
         node_outputs: &HashMap<String, Value>,
         all_node_names: &[String],
     ) -> Result<NodeExecution> {
@@ -43,6 +45,7 @@ impl GraphEngine {
                     workdir,
                     resume_session_id,
                     resume_crosses_spec,
+                    report_nudge,
                     self.dynamic_skills.as_ref(),
                     node_outputs,
                     all_node_names,
@@ -68,7 +71,7 @@ impl GraphEngine {
     /// one recorded, and finalization of its DB row as `Fail` so it stops
     /// showing up as `running`. Every abnormal end that abandons a node run
     /// without letting it finish on its own — a stale row from a crashed
-    /// prior attempt, `graph_pause`, `graph_reset` of a running spec, or this
+    /// prior attempt, `graph_control`, `graph_control` of a running spec, or this
     /// run failing elsewhere — goes through here. A no-op beyond the
     /// status/summary update if `run` never got a pid recorded (e.g. a gate
     /// node, or an agent/check node that hadn't finished spawning yet).
@@ -88,6 +91,21 @@ impl GraphEngine {
             .db
             .get_graph(graph_id)?
             .is_some_and(|lp| lp.status == GraphStatus::Paused))
+    }
+
+    /// Loop-top pause check with busy retry. An exhausted busy warns and
+    /// reports not-paused — the dispatch keeps going and the pause is
+    /// re-checked on the next step instead of failing the graph (same
+    /// rationale as [`Self::claim_pause`).
+    pub(crate) fn is_paused_busy_tolerant(&self, graph_id: &str) -> Result<bool> {
+        match with_busy_retry("get_graph", || self.is_paused(graph_id)) {
+            Ok(paused) => Ok(paused),
+            Err(error) if is_busy_error(&error) => {
+                tracing::warn!("{error:#}; pause check deferred to the next step");
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub(crate) fn is_pausing(&self, graph_id: &str) -> Result<bool> {
@@ -113,8 +131,9 @@ impl GraphEngine {
     /// `run_was_terminated_out_of_band` check is what keeps a stale run's
     /// completion from reaching either of those paths in the first place.
     /// CB42: tear down a sandboxed run's worktree/branch after its final
-    /// status is written. Takes `Option` so the completed and failed paths
-    /// share it; `None` is a no-op. A teardown failure never changes the
+    /// status is written. Only the completed path uses it — a failed graph
+    /// keeps its sandbox for the operator (see `fail_graph`). Takes
+    /// `Option`; `None` is a no-op. A teardown failure never changes the
     /// graph's status — it is recorded on the sandbox row by
     /// `teardown_sandbox_at_end`, never silent.
     pub(crate) async fn teardown_sandbox_after_final_status(
@@ -200,12 +219,19 @@ impl GraphEngine {
                 spec_name: spec_name.unwrap_or(summary),
             },
         );
-        // CB42: same teardown as the completed path, after the final status
-        // and after hooks/notifications. `Paused`/`blocked` runs keep their
-        // sandbox (a resumed graph reuses it).
-        if let Ok(sb) = self.db.get_active_sandbox_for_owner("graph", graph_id) {
-            self.teardown_sandbox_after_final_status(sb, format!("failed: {summary}"))
-                .await;
+        // A failed graph never tears down its sandbox automatically,
+        // whatever its contents: the operator lands, continues or discards
+        // it explicitly. Mark the row `kept` (the worktree and branch stay
+        // in place) so a later `graph_control` resumes inside it.
+        if let Ok(Some(sb)) = self.db.get_active_sandbox_for_owner("graph", graph_id) {
+            let _ = self.db.update_sandbox_run_status(&sb.id, "kept");
+            let _ = self.db.set_sandbox_cleanup_error(
+                &sb.id,
+                &format!(
+                    "{}: failed: {summary}: kept for the operator",
+                    sb.worktree_path.display()
+                ),
+            );
         }
         Ok(())
     }
@@ -253,6 +279,11 @@ impl GraphEngine {
             })
         });
         if let Some(spec_name) = spec_name {
+            let label = spec_id
+                .as_deref()
+                .and_then(|id| self.db.get_graph_spec(id).ok().flatten())
+                .map(|spec| activity::spec_label(&spec))
+                .unwrap_or_else(|| format!("'{spec_name}'"));
             activity::record(
                 &self.db,
                 activity::GraphEvent {
@@ -263,7 +294,7 @@ impl GraphEngine {
                     node_id: None,
                     run_id: None,
                     kind: activity::GraphEventKind::SpecFailed,
-                    message: format!("Spec '{spec_name}' failed: {summary}"),
+                    message: format!("Spec {label} failed: {summary}"),
                     payload: None,
                 },
             );
@@ -307,9 +338,10 @@ impl GraphEngine {
                 None => note,
             })
             .or_else(|| ending_node.clone());
+        let run_workdir = self.db.graph_run_workdir_or(&lp.id, &lp.workdir);
         let ctx = HookContext {
             graph_name: &lp.name,
-            workdir: &lp.workdir,
+            workdir: &run_workdir,
             completed_specs,
             spec_name: None,
             spec_id: None,
@@ -333,8 +365,8 @@ impl GraphEngine {
     /// `Failed`, `Paused` is not accepted by a pending autorun
     /// ([`crate::domain::graphs::Graph::is_autorun_due`] already excludes it
     /// unless `paused_by_reconciliation`, which `update_graph_status` always
-    /// clears) and is refused by `graph_run` once it carries a blocker (see
-    /// the daemon's `graph_run` tool) — exactly the "not started again until
+    /// clears) and is refused by `graph_control` once it carries a blocker (see
+    /// the daemon's `graph_control` tool) — exactly the "not started again until
     /// a human clears it" FR4 asks for, reusing the graph_report_blocker
     /// mechanism wholesale rather than inventing a parallel one.
     pub(crate) async fn block_graph(
@@ -365,6 +397,10 @@ impl GraphEngine {
         let ending_node = self.ending_node_name(graph_id, None);
         self.db
             .update_graph_status(graph_id, GraphStatus::Paused, None, None)?;
+        // Persist the blocker on the graph row so `graph`, `graph list` and
+        // the TUI show WHY the graph paused. Stored unprefixed — the
+        // `GraphBlocked` event below adds the "Blocked: " prefix itself.
+        self.db.set_graph_blocker(graph_id, Some(blocker))?;
         if let Ok(Some(lp)) = self.db.get_graph(graph_id) {
             activity::record(
                 &self.db,

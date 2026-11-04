@@ -56,7 +56,7 @@ impl Database {
     pub(in crate::db) fn migrate_intelligence_nodes_status_column(conn: &Connection) -> Result<()> {
         // CM10: knowledge-node status. All pre-existing nodes backfill to
         // 'noted' via the column default. Idempotent pragma guard, same
-        // pattern as the scheduled_sends.workdir migration below.
+        // pattern as the scheduled_prompts.workdir migration below.
         let has_intelligence_status: bool = conn
             .query_row(
                 "SELECT COUNT(*) FROM pragma_table_info('intelligence_nodes') WHERE name = 'status'",
@@ -74,32 +74,32 @@ impl Database {
         Ok(())
     }
 
-    /// Add `scheduled_sends.workdir`/`builder_state` and `provenance` on both send tables.
-    pub(in crate::db) fn migrate_scheduled_send_columns(conn: &Connection) -> Result<()> {
+    /// Add `scheduled_prompts.workdir`/`builder_state` and `provenance` on both prompt tables.
+    pub(in crate::db) fn migrate_scheduled_prompt_columns(conn: &Connection) -> Result<()> {
         // `workdir` records which project a scheduled send targeted so a
         // dead-target failure can be preserved per-project for U8's recall.
-        let has_scheduled_send_workdir: bool = conn
+        let has_scheduled_prompt_workdir: bool = conn
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('scheduled_sends') WHERE name = 'workdir'",
+                "SELECT COUNT(*) FROM pragma_table_info('scheduled_prompts') WHERE name = 'workdir'",
                 [],
                 |row| Ok(row.get::<_, i32>(0)? > 0),
             )
             .unwrap_or(false);
-        if !has_scheduled_send_workdir {
-            conn.execute("ALTER TABLE scheduled_sends ADD COLUMN workdir TEXT", [])
+        if !has_scheduled_prompt_workdir {
+            conn.execute("ALTER TABLE scheduled_prompts ADD COLUMN workdir TEXT", [])
                 .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
 
         let has_scheduled_builder_state: bool = conn
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('scheduled_sends') WHERE name = 'builder_state'",
+                "SELECT COUNT(*) FROM pragma_table_info('scheduled_prompts') WHERE name = 'builder_state'",
                 [],
                 |row| Ok(row.get::<_, i32>(0)? > 0),
             )
             .unwrap_or(false);
         if !has_scheduled_builder_state {
             conn.execute(
-                "ALTER TABLE scheduled_sends ADD COLUMN builder_state TEXT",
+                "ALTER TABLE scheduled_prompts ADD COLUMN builder_state TEXT",
                 [],
             )
             .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
@@ -109,7 +109,7 @@ impl Database {
         // structured JSON so the TUI can name the sender without that
         // metadata being buried in the prompt text. Nullable so legacy
         // prompt-builder sends keep reading as `None`.
-        for table in ["scheduled_sends", "failed_scheduled_sends"] {
+        for table in ["scheduled_prompts", "failed_scheduled_prompts"] {
             let has_column: bool = conn
                 .query_row(
                     &format!(
@@ -520,7 +520,7 @@ impl Database {
         // `active_run_queue_id` persists which queue (if any) a graph's current/
         // last run drew from, so an interrupted run (quota failure, daemon
         // crash) can be resumed against the same queue by every resume path
-        // (scheduled autorun, `graph_reset`) instead of falling back to the
+        // (scheduled autorun, `graph_control`) instead of falling back to the
         // graph's own bound specs. Older databases predate the column.
         let has_active_run_queue_id: bool = conn
             .query_row(
@@ -758,6 +758,29 @@ impl Database {
                 conn.execute(&format!("ALTER TABLE agents ADD COLUMN {col} TEXT"), [])
                     .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
             }
+        }
+        Ok(())
+    }
+
+    /// Add graph `active_run_workdir`: the workdir a run was launched with
+    /// (the override, or the stored workdir when none was given), persisted
+    /// the moment that run starts so every continuation of the run
+    /// (`graph_control` in every mode, scheduled resumes, quota auto-resume)
+    /// re-dispatches in it instead of silently expiring back to the stored
+    /// workdir. `NULL` on pre-existing rows (legacy runs fall back to the
+    /// stored workdir) and on graphs that never ran. Lives here rather than
+    /// in `schema.rs` so that file stays under the 800-line gate.
+    pub(in crate::db) fn migrate_graph_active_run_workdir(conn: &Connection) -> Result<()> {
+        let has_active_run_workdir: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('graphs') WHERE name = 'active_run_workdir'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if !has_active_run_workdir {
+            conn.execute("ALTER TABLE graphs ADD COLUMN active_run_workdir TEXT", [])
+                .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
         Ok(())
     }

@@ -31,7 +31,7 @@ pub(super) fn warn_blocked_operator_paused_autorun(
         tracing::warn!(
             "Graph '{}' autorun_at is due but the graph is paused (not by \
              reconciliation); it will not fire until resumed manually via \
-             graph_continue or graph_run — the schedule remains pending.",
+             graph_control continue or graph_control run — the schedule remains pending.",
             lp.id
         );
     }
@@ -89,12 +89,12 @@ pub(super) async fn launch_due_autorun(
 
 /// WARN that a due autorun landed on an already-completed graph — the
 /// schedule is cleared by the caller, and re-running a finished graph stays
-/// a human decision via graph_reset + graph_run.
+/// a human decision via graph_control reset + graph_control run.
 fn warn_autorun_completed(lp: &crate::domain::graphs::Graph) {
     tracing::warn!(
         "Graph '{}' autorun fired but the graph is already completed; clearing the \
          schedule without re-running it (re-running a finished graph is a human \
-         decision via graph_reset + graph_run)",
+         decision via graph_control reset + graph_control run)",
         lp.id
     );
 }
@@ -167,7 +167,7 @@ async fn autorun_dirty_start_verdict(
 fn warn_autorun_refused(lp: &crate::domain::graphs::Graph, message: &str) {
     tracing::warn!(
         "Graph '{}' autorun refused: {}. The schedule was one-shot and is \
-         already cleared — relaunch manually via graph_run (or graph_continue) \
+         already cleared — relaunch manually via graph_control run (or graph_control continue) \
          once resolved.",
         lp.id,
         message

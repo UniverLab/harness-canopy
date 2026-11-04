@@ -79,6 +79,12 @@ pub(crate) const EVENT_AGENT_FAILED: &[&str] = &[
     "{agent} stopped; its log has the story",
 ];
 
+/// `{agent}` is the resumed session's old name, `{node}` the fresh one.
+pub(crate) const EVENT_SESSION_RENAMED: &[&str] = &[
+    "{agent} is back as {node}",
+    "{node} carries on where {agent} left off",
+];
+
 pub(crate) const EVENT_SPEC_COMPLETED: &[&str] =
     &["{graph}: {spec} is in the trunk", "{graph} grew {spec}"];
 

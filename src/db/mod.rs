@@ -1,6 +1,7 @@
 use anyhow::Result;
-use rusqlite::Connection;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+pub(crate) use connection::ConnLock;
 
 /// Bumped whenever a migration changes table/column names in a way that an
 /// older binary's `CREATE TABLE IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS`
@@ -21,22 +22,29 @@ use std::sync::{Arc, Mutex};
 /// binding columns — see `migrate_crews_tables` (CM49).
 /// Version 11 adds the `action`/`target_session_id`/`target_session_name`
 /// columns to `agents` for `send_to_session` delivery (CM53).
-const SCHEMA_VERSION: i64 = 11;
+/// Version 12 drops the retired `blueprints` and `ensemble_blueprints`
+/// tables — see `migrate_drop_blueprint_tables`.
+const SCHEMA_VERSION: i64 = 12;
 
 /// CM40: how long every daemon SQLite connection waits for a concurrent writer
 /// before failing with `SQLITE_BUSY`. Applied once, at open, in
-/// `db::connection`; the `graph_import` busy message renders this same value so
+/// `db::connection`; the `graph_edit` busy message renders this same value so
 /// the timeout and the message can never disagree.
 pub(crate) const DB_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Thread-safe `SQLite` database wrapper.
 ///
-/// Uses an `Arc<Mutex<Connection>>` so the handle can be cheaply cloned and
-/// shared across threads (e.g. for background file-scanning tasks) while still
-/// serialising all SQLite writes through a single connection.
+/// Uses a `ConnLock` (an `Arc<Mutex<Connection>>`) so the handle can be
+/// cheaply cloned and shared across threads (e.g. for background file-scanning
+/// tasks) while still serialising all SQLite writes through a single
+/// connection.
 #[derive(Clone)]
 pub struct Database {
-    conn: Arc<Mutex<Connection>>,
+    conn: ConnLock,
+    /// Wakes node runs waiting for named mutexes whenever leases or the
+    /// waiter queue change (grant path re-checks under the connection lock,
+    /// so a notify that lands before the wait is harmless).
+    mutex_notify: Arc<tokio::sync::Notify>,
 }
 
 /// Base schema: every table and index created on a fresh database. Kept out of
@@ -96,7 +104,9 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
                 status TEXT NOT NULL DEFAULT 'active',
                 session_type TEXT NOT NULL DEFAULT 'interactive',
                 pid INTEGER,
-                boot_id TEXT
+                boot_id TEXT,
+                harness_conversation_id TEXT,
+                exit_detail TEXT
             );
 
             CREATE TABLE IF NOT EXISTS terminal_sessions (
@@ -254,6 +264,9 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
                 autorun_at INTEGER,
                 spec_queue TEXT,
                 active_run_queue_id TEXT,
+                active_run_idea TEXT,
+                active_run_workdir TEXT,
+                blocker TEXT,
                 require_spec_type INTEGER NOT NULL DEFAULT 0,
                 on_completed TEXT,
                 auto_continue_at INTEGER,
@@ -393,7 +406,7 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
 
             -- F1: an ensemble unit -- the members and join are ordinary
             -- graph_nodes/graph_edges rows (the engine's graph-walking code is
-            -- reused as-is); this row is what lets graph_get/graph_update_ensemble
+            -- reused as-is); this row is what lets graph/graph_ensemble
             -- address the whole ensemble as one thing instead of N+1 nodes.
             CREATE TABLE IF NOT EXISTS ensembles (
                 id TEXT PRIMARY KEY,
@@ -415,6 +428,7 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
                 on_fail_to TEXT REFERENCES graph_nodes(id) ON DELETE RESTRICT,
                 commit_rights INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL,
+                mutex TEXT,
                 CHECK ((spec_id IS NULL) <> (graph_id IS NULL))
             );
 
@@ -440,20 +454,6 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
 
             CREATE INDEX IF NOT EXISTS idx_ensembles_join_node
                 ON ensembles(join_node_id);
-
-            -- F1: ensemble blueprints -- a whole ensemble's shared prompt +
-            -- member list (unlike `blueprints`, which templates a single
-            -- node), seeded with the builtin ensemble-proposers pattern.
-            CREATE TABLE IF NOT EXISTS ensemble_blueprints (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL UNIQUE,
-                prompt_template TEXT NOT NULL,
-                members TEXT NOT NULL,
-                min_pass INTEGER,
-                quorum_grace_minutes INTEGER,
-                builtin INTEGER NOT NULL DEFAULT 0,
-                created_at INTEGER NOT NULL
-            );
 
             CREATE TABLE IF NOT EXISTS queues (
                 id TEXT PRIMARY KEY,
@@ -482,16 +482,7 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
             CREATE INDEX IF NOT EXISTS idx_seed_sessions_seed
                 ON seed_sessions(seed_id);
 
-            CREATE TABLE IF NOT EXISTS blueprints (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL UNIQUE,
-                kind TEXT NOT NULL,
-                config TEXT NOT NULL,
-                builtin INTEGER NOT NULL DEFAULT 0,
-                created_at INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS scheduled_sends (
+            CREATE TABLE IF NOT EXISTS scheduled_prompts (
                 id TEXT PRIMARY KEY,
                 prompt TEXT NOT NULL,
                 target_session_id TEXT NOT NULL,
@@ -500,7 +491,7 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
                 provenance TEXT
             );
 
-            CREATE TABLE IF NOT EXISTS failed_scheduled_sends (
+            CREATE TABLE IF NOT EXISTS failed_scheduled_prompts (
                 id TEXT PRIMARY KEY,
                 prompt TEXT NOT NULL,
                 target_session_id TEXT NOT NULL,
@@ -552,9 +543,9 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
             );",
     "
 
-            -- CM18: tombstones for blocking `subagent_spawn` deliveries. A
+            -- CM18: tombstones for blocking `subagent` `spawn` deliveries. A
             -- blocking spawn returns its result inline and deletes the
-            -- `subagent_runs` row immediately, so a later `subagent_collect`
+            -- `subagent_runs` row immediately, so a later `subagent` `collect`
             -- would otherwise be indistinguishable from never-existed.
             -- A tombstone records the delivered id until the original
             -- `expires_at`, letting `collect` answer already-delivered.
@@ -638,6 +629,14 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
                 condition TEXT NOT NULL,
                 PRIMARY KEY (ensemble_id, from_node, condition)
             );",
+    // The session shelf: one row per file (`shelf::SHELF_FILES_SCHEMA`).
+    // No FK on `session_id` — files outlive the session by design.
+    shelf::SHELF_FILES_SCHEMA,
+    mutex_store::MUTEX_TABLES_SCHEMA,
+    // Browsers paired as revocable devices (remote control).
+    remote_devices::REMOTE_DEVICES_SCHEMA,
+    // Trusted GitHub profiles and their session grants (remote guests).
+    remote_trust::REMOTE_TRUST_SCHEMA,
 ];
 
 impl Database {
@@ -652,13 +651,16 @@ impl Database {
         Self::migrate_loop_to_graph_schema(&conn)?;
         Self::migrate_cb52_ensemble_fk(&conn)?;
         Self::migrate_activity_attribution_prefix(&conn)?;
+        Self::migrate_scheduled_prompt_table_names(&conn)?;
 
         Self::create_base_schema(&conn)?;
         Self::migrate_sandbox_cleanup_error_column(&conn)?;
         Self::migrate_operational_sessions_from_intelligence(&conn)?;
         Self::migrate_intelligence_nodes_status_column(&conn)?;
-        Self::migrate_scheduled_send_columns(&conn)?;
+        Self::migrate_scheduled_prompt_columns(&conn)?;
         Self::migrate_interactive_session_columns(&conn)?;
+        Self::migrate_interactive_harness_column(&conn)?;
+        Self::migrate_interactive_exit_detail_column(&conn)?;
         Self::migrate_agent_optin_columns(&conn)?;
         Self::migrate_graph_trigger_columns(&conn)?;
         Self::migrate_graph_schedule_columns(&conn)?;
@@ -674,6 +676,9 @@ impl Database {
         Self::migrate_edge_route_column(&conn)?;
         Self::migrate_ensemble_member_columns(&conn)?;
         Self::migrate_graph_roster_columns(&conn)?;
+        Self::migrate_graph_active_run_idea(&conn)?;
+        Self::migrate_graph_active_run_workdir(&conn)?;
+        Self::migrate_graph_blocker(&conn)?;
         Self::migrate_spec_commit_evidence_columns(&conn)?;
         Self::migrate_spec_cross_run_attempts_column(&conn)?;
         Self::migrate_spec_type_columns(&conn)?;
@@ -690,7 +695,15 @@ impl Database {
         Self::migrate_spec_notes_table(&conn)?;
         Self::migrate_roster_entries_table(&conn)?;
         Self::migrate_crews_tables(&conn)?;
+        Self::migrate_remote_devices(&conn)?;
+        Self::migrate_remote_trust(&conn)?;
         Self::migrate_agent_action_columns(&conn)?;
+        Self::migrate_ensemble_mutex_column(&conn)?;
+        Self::migrate_graph_events_mutex_kinds(&conn)?;
+        Self::migrate_graph_events_pause_kinds(&conn)?;
+        Self::migrate_drop_blueprint_tables(&conn)?;
+        Self::migrate_sandbox_intelligence_attribution(&conn)?;
+        Self::migrate_shelf_files(&conn)?;
 
         Self::set_schema_version(&conn)?;
 
@@ -733,7 +746,6 @@ pub struct NewSubagentRun<'a> {
 pub mod achievements;
 pub mod activity_log;
 pub mod agent;
-pub mod blueprints;
 pub mod clean;
 pub(crate) mod connection;
 pub mod crew_binding;
@@ -746,21 +758,26 @@ pub mod graph_crew;
 pub mod graph_transfer;
 pub mod graphs;
 pub mod group;
+pub mod harness_refs;
 pub mod health;
 pub mod intelligence;
 pub mod last_prompts;
 mod migration;
+pub mod mutex_store;
 pub mod project;
 pub mod queues;
+pub mod remote_devices;
+pub mod remote_trust;
 pub(crate) mod roster_entries;
 pub mod run;
 pub mod sandbox;
-pub mod scheduled_sends;
-pub mod scheduled_sends_agent;
+pub mod scheduled_prompts;
+pub mod scheduled_prompts_agent;
 mod schema;
 pub mod seeds;
 pub mod session;
 pub mod session_target;
+pub mod shelf;
 pub mod state;
 mod subagent_runs;
 pub mod sync;

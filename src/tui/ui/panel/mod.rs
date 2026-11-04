@@ -232,15 +232,25 @@ fn panel_focus_colors(focus: Focus, agent_accent: Option<Color>, theme: &Theme) 
 }
 
 fn log_panel_border_color(app: &App, theme: &Theme) -> Color {
-    panel_focus_colors(app.focus, selected_agent_accent(app, theme), theme).0
+    panel_focus_colors(
+        panel_background_focus(app),
+        selected_agent_accent(app, theme),
+        theme,
+    )
+    .0
 }
 
 fn panel_mode_label_color(app: &App, theme: &Theme) -> Color {
-    panel_focus_colors(app.focus, selected_agent_accent(app, theme), theme).1
+    panel_focus_colors(
+        panel_background_focus(app),
+        selected_agent_accent(app, theme),
+        theme,
+    )
+    .1
 }
 
 fn panel_mode_label(app: &App) -> Option<&'static str> {
-    match app.focus {
+    match panel_background_focus(app) {
         Focus::Preview => Some(" Preview "),
         Focus::Agent => Some(" Focus "),
         _ => None,
@@ -262,6 +272,41 @@ fn graph_live_mode_label(app: &App) -> Option<&'static str> {
     }
 }
 
+const PILL_MARGIN: u16 = 1;
+
+/// Right-aligned area for the Focus pill on the panel's first row, or `None`
+/// when the pill would overlap the `reserved` leading columns (session name)
+/// or does not fit at all. The pill is dropped, never the name.
+fn focus_pill_area(inner: Rect, reserved: u16, pill_width: u16) -> Option<Rect> {
+    if inner.width == 0 || pill_width == 0 {
+        return None;
+    }
+    let right_edge = inner.right().saturating_sub(PILL_MARGIN);
+    let x = right_edge.checked_sub(pill_width)?;
+    let left_limit = inner
+        .x
+        .saturating_add(1)
+        .saturating_add(reserved)
+        .saturating_add(PILL_MARGIN);
+    (x >= left_limit).then(|| Rect::new(x, inner.y, pill_width, 1))
+}
+
+/// Width of the first-row text the pill must not cover: the graph name (plus
+/// its status icon) in graph live mode, else the selected session id (plus
+/// its leading space in the title).
+fn first_row_reserved_width(app: &App) -> u16 {
+    let name_len = if graph_live_mode_label(app).is_some() {
+        app.graph_live_state
+            .as_ref()
+            .map_or(0, |state| state.graph_name.chars().count())
+    } else {
+        app.selected_id().chars().count()
+    };
+    u16::try_from(name_len)
+        .unwrap_or(u16::MAX)
+        .saturating_add(2)
+}
+
 fn render_focus_indicator(
     frame: &mut Frame,
     area: Rect,
@@ -274,7 +319,7 @@ fn render_focus_indicator(
         return;
     }
 
-    let rail_color = match app.focus {
+    let rail_color = match panel_background_focus(app) {
         Focus::Agent => theme.header_color,
         Focus::Preview => theme.dim_text,
         _ => return,
@@ -286,21 +331,25 @@ fn render_focus_indicator(
         rail,
     );
 
-    if let Some(label) = label.filter(|_| inner.height > 0 && inner.width > 4) {
-        let text = label.trim();
-        let width = text.chars().count() as u16;
-        if width + 2 <= inner.width {
-            let pill_area = Rect::new(inner.x + 1, inner.y, width + 2, 1);
-            let pill = Span::styled(
-                format!(" {text} "),
-                Style::default()
-                    .fg(theme.accent_fg)
-                    .bg(theme.header_color)
-                    .add_modifier(Modifier::BOLD),
-            );
-            frame.render_widget(Paragraph::new(Line::from(pill)), pill_area);
-        }
+    let Some(label) = label else { return };
+    let text = label.trim();
+    if text.is_empty() || inner.height == 0 {
+        return;
     }
+    let pill_width = u16::try_from(text.chars().count())
+        .unwrap_or(u16::MAX)
+        .saturating_add(2);
+    let Some(pill_area) = focus_pill_area(inner, first_row_reserved_width(app), pill_width) else {
+        return;
+    };
+    let pill = Span::styled(
+        format!(" {text} "),
+        Style::default()
+            .fg(theme.accent_fg)
+            .bg(theme.header_color)
+            .add_modifier(Modifier::BOLD),
+    );
+    frame.render_widget(Paragraph::new(Line::from(pill)), pill_area);
 }
 
 fn show_home_fallback(app: &App) -> bool {
@@ -1082,6 +1131,95 @@ mod tests {
     }
 
     #[test]
+    fn focus_pill_area_right_aligns() {
+        assert_eq!(
+            focus_pill_area(Rect::new(0, 0, 40, 1), 10, 7),
+            Some(Rect::new(32, 0, 7, 1))
+        );
+    }
+
+    #[test]
+    fn focus_pill_area_drops_when_narrow() {
+        assert_eq!(focus_pill_area(Rect::new(0, 0, 16, 1), 10, 7), None);
+        assert_eq!(focus_pill_area(Rect::new(0, 0, 0, 0), 10, 7), None);
+    }
+
+    fn focus_pill_test_app() -> App {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let db = Arc::new(crate::db::Database::new(&path).unwrap());
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
+        app.focus = Focus::Agent;
+        app.projects
+            .push(crate::domain::project::Project::new("/tmp/proj"));
+        let agent = crate::tui::agent::InteractiveAgent::spawn_terminal(
+            "cat",
+            "/tmp",
+            80,
+            24,
+            Some("sess-abc"),
+            &[],
+            Color::White,
+        )
+        .unwrap();
+        app.interactive_agents.push(agent);
+        app.agents
+            .push(crate::tui::app::types::AgentEntry::Interactive(0));
+        app.selected = 0;
+        app.log_content = String::new();
+        std::mem::forget(data_dir);
+        app
+    }
+
+    fn focus_pill_first_row(width: u16) -> String {
+        let app = focus_pill_test_app();
+        let theme = Theme::modern();
+        let area = Rect::new(0, 0, width, 8);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_log_text(frame, area, area, &app);
+                render_focus_indicator(frame, area, area, &app, &theme, panel_mode_label(&app));
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..width).map(|x| buffer[(x, 0)].symbol()).collect()
+    }
+
+    #[test]
+    fn focus_pill_keeps_session_name_modern() {
+        let row0 = focus_pill_first_row(40);
+        // Skip the rail cell (a 3-byte `█`, so byte slicing would panic).
+        let after_rail: String = row0.chars().skip(1).collect();
+        assert!(
+            after_rail.starts_with("sess-abc"),
+            "session name must be intact, row was {row0:?}"
+        );
+        assert!(row0.contains(" Focus "), "pill must show, row was {row0:?}");
+        assert!(
+            row0.find("sess-abc").unwrap() + 8 < row0.find("Focus").unwrap(),
+            "pill must sit right of the name, row was {row0:?}"
+        );
+    }
+
+    #[test]
+    fn focus_pill_dropped_when_narrow_modern() {
+        let row0 = focus_pill_first_row(14);
+        assert!(
+            row0.contains("sess-abc") && !row0.contains("Foc"),
+            "name stays, pill is dropped, row was {row0:?}"
+        );
+    }
+
+    #[test]
     fn panel_mode_label_home() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let path = tmp.path().to_path_buf();
@@ -1564,7 +1702,7 @@ mod tests {
             Some(crate::rag::status::AcquisitionState::Downloading { started_at: 0 });
         let theme = Theme::classic();
         let (text, color) = rag_status(&app, &theme);
-        assert_eq!(text, "⬇ downloading");
+        assert_eq!(text, "▼ downloading");
         assert_eq!(color, Color::Yellow);
     }
 
@@ -1586,7 +1724,7 @@ mod tests {
             Some(crate::rag::status::AcquisitionState::Preparing { started_at: 0 });
         let theme = Theme::classic();
         let (text, color) = rag_status(&app, &theme);
-        assert_eq!(text, "⚙ preparing");
+        assert_eq!(text, "◉ preparing");
         assert_eq!(color, Color::Yellow);
     }
 
@@ -1623,6 +1761,7 @@ mod tests {
             schedule_expr: None,
             watch_path: None,
             autorun_at: None,
+            pause_waiting_for: Vec::new(),
             spec_queue: vec![],
             done_count: 0,
             total_count: 0,
@@ -1753,5 +1892,248 @@ mod tests {
         let mut app = graph_app(true);
         app.graph_live_state = None;
         assert_eq!(graph_live_mode_label(&app), None);
+    }
+
+    #[test]
+    fn prompt_builder_keeps_session_pty_colours_behind_dialog() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let db = Arc::new(crate::db::Database::new(&path).unwrap());
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
+        let agent = crate::tui::agent::InteractiveAgent::spawn_terminal(
+            "cat",
+            "/tmp",
+            80,
+            24,
+            Some("prompt-bg-red"),
+            &[],
+            ratatui::style::Color::White,
+        )
+        .expect("spawn cat");
+        app.interactive_agents.push(agent);
+        app.agents
+            .push(crate::tui::app::types::AgentEntry::Interactive(0));
+        app.selected = 0;
+        app.sidebar_layer = SidebarLayer::Live;
+        app.focus = Focus::Agent;
+        app.log_content = "FALLBACK_MARKER_SHOULD_NOT_APPEAR".to_string();
+        app.interactive_agents[0]
+            .vt
+            .lock()
+            .expect("lock vt")
+            .process(b"\x1b[31;41mX\x1b[0m");
+
+        app.open_simple_prompt_dialog(None);
+        assert!(
+            matches!(app.focus, Focus::PromptTemplateDialog),
+            "prompt builder must be open"
+        );
+
+        let theme = Theme::classic();
+        let area = Rect::new(0, 0, 40, 12);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| draw_log_panel(frame, area, &mut app, &theme))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let cell = &buffer[(1, 1)];
+        assert_eq!(
+            cell.symbol(),
+            "X",
+            "PTY cell must show through behind the dialog"
+        );
+        assert_eq!(
+            cell.fg,
+            Color::Indexed(1),
+            "red fg must survive behind the dialog"
+        );
+        assert_eq!(
+            cell.bg,
+            Color::Indexed(1),
+            "red bg must survive behind the dialog"
+        );
+        let mut text = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+        }
+        assert!(
+            !text.contains("FALLBACK_MARKER_SHOULD_NOT_APPEAR"),
+            "plain-text log fallback must not be drawn behind the dialog:\n{text}"
+        );
+        for agent in app.interactive_agents.iter_mut() {
+            agent.kill();
+        }
+    }
+
+    #[test]
+    fn knowledge_viewer_keeps_project_card_behind_dialog() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let db = Arc::new(crate::db::Database::new(&path).unwrap());
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
+        app.projects.push(crate::domain::project::Project::new(
+            "/tmp/knowledge-card-proj",
+        ));
+        app.selected_project = 0;
+        app.sidebar_layer = SidebarLayer::Knowledge;
+        app.focus = Focus::Preview;
+        app.project_focus = None;
+        app.log_content = "FALLBACK_MARKER_SHOULD_NOT_APPEAR".to_string();
+
+        let mut dialog = crate::tui::app::dialog::KnowledgeViewerDialog::new(
+            "Entry 1".to_string(),
+            "fact".to_string(),
+            "body".to_string(),
+        );
+        dialog.prev_focus = Some(app.focus);
+        app.knowledge_viewer = Some(dialog);
+        app.focus = Focus::KnowledgeViewer;
+
+        let text = render_to_text(60, 14, |frame, area| {
+            draw_log_panel(frame, area, &mut app, &Theme::classic());
+        });
+        assert!(
+            text.contains("knowledge-card-proj"),
+            "project card must show behind the viewer:\n{text}"
+        );
+        assert!(
+            !text.contains("FALLBACK_MARKER_SHOULD_NOT_APPEAR"),
+            "plain-text log fallback must not replace the card:\n{text}"
+        );
+    }
+
+    #[test]
+    fn panel_background_focus_follows_prev_focus_and_defaults_to_preview() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let db = Arc::new(crate::db::Database::new(&path).unwrap());
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
+
+        for focus in [Focus::Home, Focus::Preview, Focus::Agent] {
+            app.focus = focus;
+            assert!(
+                panel_background_focus(&app) == focus,
+                "plain focus must pass through"
+            );
+        }
+        app.focus = Focus::ProjectRelationDialog;
+        assert!(
+            panel_background_focus(&app) == Focus::ProjectRelationDialog,
+            "project relation dialog keeps its own background"
+        );
+        app.focus = Focus::GraphEditorDialog;
+        assert!(
+            panel_background_focus(&app) == Focus::Preview,
+            "graph editor always sits over the graph view"
+        );
+
+        app.focus = Focus::PromptTemplateDialog;
+        let mut prompt = crate::tui::app::dialog::SimplePromptDialog::new();
+        prompt.prev_focus = Some(Focus::Agent);
+        app.simple_prompt_dialog = Some(prompt);
+        assert!(panel_background_focus(&app) == Focus::Agent);
+        app.simple_prompt_dialog.as_mut().unwrap().prev_focus = None;
+        assert!(panel_background_focus(&app) == Focus::Preview);
+        app.simple_prompt_dialog = None;
+        assert!(panel_background_focus(&app) == Focus::Preview);
+
+        app.focus = Focus::KnowledgeDialog;
+        let mut knowledge = crate::tui::app::dialog::KnowledgeDialog::new(None);
+        knowledge.prev_focus = Some(Focus::Home);
+        app.knowledge_dialog = Some(knowledge);
+        assert!(panel_background_focus(&app) == Focus::Home);
+        app.knowledge_dialog.as_mut().unwrap().prev_focus = None;
+        assert!(panel_background_focus(&app) == Focus::Preview);
+
+        app.focus = Focus::KnowledgeViewer;
+        let mut viewer = crate::tui::app::dialog::KnowledgeViewerDialog::new(
+            "t".to_string(),
+            "fact".to_string(),
+            "b".to_string(),
+        );
+        viewer.prev_focus = Some(Focus::Preview);
+        app.knowledge_viewer = Some(viewer);
+        assert!(panel_background_focus(&app) == Focus::Preview);
+
+        app.focus = Focus::GraphFormDialog;
+        let mut form = crate::tui::app::dialog::GraphFormDialog::new(None);
+        form.prev_focus = Some(Focus::Agent);
+        app.graph_form_dialog = Some(form);
+        assert!(panel_background_focus(&app) == Focus::Agent);
+
+        app.focus = Focus::ContextTransfer;
+        let mut transfer = crate::tui::context_transfer::ContextTransferModal::new(
+            0,
+            crate::tui::context_transfer::ContextCaptureKind::Prompts,
+            1,
+        );
+        transfer.prev_focus = Some(Focus::Agent);
+        app.context_transfer_modal = Some(transfer);
+        assert!(panel_background_focus(&app) == Focus::Agent);
+        app.context_transfer_modal.as_mut().unwrap().prev_focus = None;
+        assert!(panel_background_focus(&app) == Focus::Preview);
+
+        app.focus = Focus::RagTransfer;
+        app.rag_transfer_modal = Some(crate::tui::app::types::RagTransferModal {
+            picker_selected: 0,
+            query: String::new(),
+            context_payload: String::new(),
+            prev_focus: Some(Focus::Preview),
+        });
+        assert!(panel_background_focus(&app) == Focus::Preview);
+
+        app.focus = Focus::LaunchpadDialog;
+        app.launchpad_dialog = Some(crate::tui::app::dialog::LaunchpadDialog {
+            workdir: "/tmp".to_string(),
+            recent_missions: Vec::new(),
+            selected_index: 0,
+            new_mission: String::new(),
+            cursor: 0,
+            submit_blocked: false,
+            active_missions: Vec::new(),
+            prev_focus: Some(Focus::Agent),
+        });
+        assert!(panel_background_focus(&app) == Focus::Agent);
+
+        app.focus = Focus::NewAgentDialog;
+        let mut new_agent = crate::tui::app::dialog::NewAgentDialog::new(None);
+        new_agent.prev_focus = Some(Focus::Home);
+        app.new_agent_dialog = Some(new_agent);
+        assert!(panel_background_focus(&app) == Focus::Home);
+
+        // Nested dialogs (Ctrl+N is global and opens the new-agent dialog
+        // over the prompt builder): the chain of prev_focus values must be
+        // walked down to the panel-bearing focus, never to the log
+        // fallback.
+        app.new_agent_dialog.as_mut().unwrap().prev_focus = Some(Focus::PromptTemplateDialog);
+        app.focus = Focus::NewAgentDialog;
+        let mut prompt = crate::tui::app::dialog::SimplePromptDialog::new();
+        prompt.prev_focus = Some(Focus::Agent);
+        app.simple_prompt_dialog = Some(prompt);
+        assert!(panel_background_focus(&app) == Focus::Agent);
     }
 }

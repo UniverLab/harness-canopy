@@ -27,16 +27,24 @@ fn call(port: &str, tool: &str, arguments: &Value) -> Result<Value> {
         .map_err(|error| anyhow!("{tool}: response is not JSON: {error}"))
 }
 
-/// One refresh's worth of data: `roster_list`, then the pair summaries,
-/// then the crews (D8: exactly one `roster_list`, no per-pair checks).
+/// One refresh's worth of data: `harness roster_list`, then the pair summaries,
+/// then the crews (D8: exactly one `harness roster_list`, no per-pair checks).
 pub(crate) fn fetch_snapshot(port: &str) -> Result<CrewsSnapshot> {
-    let roster = parse_roster(&call(port, "roster_list", &serde_json::json!({}))?)?;
+    let roster = parse_roster(&call(
+        port,
+        "harness",
+        &serde_json::json!({ "action": "roster_list" }),
+    )?)?;
     let pairs = parse_pair_summaries(&call(
         port,
-        "graph_crew",
-        &serde_json::json!({ "group_by": "pair" }),
+        "crew",
+        &serde_json::json!({ "action": "assignments", "group_by": "pair" }),
     )?)?;
-    let crews = parse_crews(&call(port, "crew_list", &serde_json::json!({}))?)?;
+    let crews = parse_crews(&call(
+        port,
+        "crew",
+        &serde_json::json!({ "action": "list" }),
+    )?)?;
     Ok(CrewsSnapshot {
         roster,
         pairs,
@@ -44,14 +52,18 @@ pub(crate) fn fetch_snapshot(port: &str) -> Result<CrewsSnapshot> {
     })
 }
 
-/// The real bindings of one crew (D16): `crew_get` returns the `bindings`
-/// array the `crew_list` snapshot only counts.
+/// The real bindings of one crew (D16): `crew get` returns the `bindings`
+/// array the `crew list` snapshot only counts.
 pub(crate) fn fetch_crew_bindings(port: &str, name: &str) -> Result<Vec<CrewBindingView>> {
-    let value = call(port, "crew_get", &serde_json::json!({ "name": name }))?;
+    let value = call(
+        port,
+        "crew",
+        &serde_json::json!({ "action": "get", "name": name }),
+    )?;
     let items = value
         .get("bindings")
         .and_then(Value::as_array)
-        .ok_or_else(|| anyhow!("crew_get: 'bindings' array missing"))?;
+        .ok_or_else(|| anyhow!("crew get: 'bindings' array missing"))?;
     let mut out = Vec::with_capacity(items.len());
     for item in items {
         out.push(CrewBindingView {
@@ -88,7 +100,7 @@ pub(crate) fn run_roster_writes(port: &str, writes: &[RosterWrite]) -> Result<St
 }
 
 /// The result of a successful crew member edit: the new version plus the
-/// graph names any binding lives in (D15's running-note input; `crew_get`'s
+/// graph names any binding lives in (D15's running-note input; `crew get`'s
 /// `bindings[].graph` carries the graph NAME — verified against
 /// `graph_name_for_scope`).
 #[derive(Debug, Clone)]
@@ -98,16 +110,16 @@ pub(crate) struct CrewWriteOutcome {
 }
 
 /// Apply one member edit to a crew (D6): re-read the FRESH member list
-/// from `crew_list`, mutate it, then `crew_update` replaces the whole list.
+/// from `crew list`, mutate it, then `crew update` replaces the whole list.
 pub(crate) fn run_member_edit(
     port: &str,
     crew: &str,
     edit: &MemberEdit,
 ) -> Result<CrewWriteOutcome> {
-    let list = call(port, "crew_list", &serde_json::json!({}))?;
+    let list = call(port, "crew", &serde_json::json!({ "action": "list" }))?;
     let items = list
         .as_array()
-        .ok_or_else(|| anyhow!("crew_list: expected a JSON array"))?;
+        .ok_or_else(|| anyhow!("crew list: expected a JSON array"))?;
     let fresh = items
         .iter()
         .find(|item| item.get("name").and_then(Value::as_str) == Some(crew))
@@ -121,13 +133,13 @@ pub(crate) fn run_member_edit(
 
     let updated = call(
         port,
-        "crew_update",
-        &serde_json::json!({ "name": crew, "members": members }),
+        "crew",
+        &serde_json::json!({ "action": "update", "name": crew, "members": members }),
     )?;
     let version = updated
         .get("version")
         .and_then(Value::as_i64)
-        .ok_or_else(|| anyhow!("crew_update: 'version' missing"))?;
+        .ok_or_else(|| anyhow!("crew update: 'version' missing"))?;
 
     let bindings = fetch_crew_bindings(port, crew)?;
     let bound_graph_ids: Vec<String> = bindings

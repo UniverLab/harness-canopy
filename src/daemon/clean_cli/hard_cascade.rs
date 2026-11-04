@@ -107,8 +107,8 @@ fn direct_count(c: &clean::HardCascadeCounts) -> i64 {
         + c.interactive_sessions
         + c.terminal_sessions
         + c.last_prompts
-        + c.scheduled_sends
-        + c.failed_scheduled_sends
+        + c.scheduled_prompts
+        + c.failed_scheduled_prompts
         + c.sync_messages
         + c.sync_locks
         + c.intelligence_nodes
@@ -160,7 +160,7 @@ fn print_hard_cascade_plan(plan: &HardCascadePlan, dry_run: bool) {
         for t in &plan.targets {
             let c = &t.counts;
             println!(
-                "   {} ({})  missing: {}\n     [{} graph(s), {} interactive session(s), {} terminal session(s),\n      {} last prompt(s), {} scheduled send(s), {} failed send(s),\n      {} sync message(s), {} sync lock(s), {} intelligence node(s), {} operational session(s)]\n     + cascade: [{} graph_spec(s), {} graph_node(s), {} graph_edge(s),\n                 {} graph_run(s), {} completion_hook_run(s),\n                 {} ensemble(s), {} ensemble_member(s), {} queue_member(s),\n                 {} seed_session(s), {} intelligence_edge(s)]",
+                "   {} ({})  missing: {}\n     [{} graph(s), {} interactive session(s), {} terminal session(s),\n      {} last prompt(s), {} scheduled send(s), {} failed send(s),\n      {} sync message(s), {} sync lock(s), {} intelligence node(s), {} operational session(s)]\n     + cascade: [{} graph_spec(s), {} graph_node(s), {} graph_edge(s),\n                 {} graph_control(s), {} completion_hook_run(s),\n                 {} ensemble(s), {} ensemble_member(s), {} queue_member(s),\n                 {} seed_session(s), {} intelligence_edge(s)]",
                 t.name,
                 t.hash,
                 t.missing_path,
@@ -168,8 +168,8 @@ fn print_hard_cascade_plan(plan: &HardCascadePlan, dry_run: bool) {
                 c.interactive_sessions,
                 c.terminal_sessions,
                 c.last_prompts,
-                c.scheduled_sends,
-                c.failed_scheduled_sends,
+                c.scheduled_prompts,
+                c.failed_scheduled_prompts,
                 c.sync_messages,
                 c.sync_locks,
                 c.intelligence_nodes,

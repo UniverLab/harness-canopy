@@ -128,6 +128,7 @@ pub(crate) fn blend_system_info(
     current.cpu_cores = target.cpu_cores;
     current.cpu_temperature =
         blend_optional_f32(current.cpu_temperature, target.cpu_temperature, t);
+    current.cpu_temp_source.clone_from(&target.cpu_temp_source);
     current.cpu_frequency_mhz = target.cpu_frequency_mhz;
     current.memory_used = lerp_u64(current.memory_used, target.memory_used, t);
     current.memory_total = target.memory_total;
@@ -140,6 +141,68 @@ pub(crate) fn blend_system_info(
     current.power_watts = blend_optional_f32(current.power_watts, target.power_watts, t);
     current.power_limit_watts = target.power_limit_watts;
     current.power_source = target.power_source;
+}
+
+/// True while the displayed system snapshot is still blending toward its
+/// target — i.e. the dashboard would visibly move on the next draw.
+/// Integers snap in [`blend_system_info`], so only the lerped floats need an
+/// epsilon (invisible below it); everything else compares exactly.
+pub(crate) fn system_settling(
+    current: &crate::system::SystemInfo,
+    target: &crate::system::SystemInfo,
+) -> bool {
+    (current.cpu_usage - target.cpu_usage).abs() > 0.05
+        || current.cpu_cores != target.cpu_cores
+        || opt_f32_settling(current.cpu_temperature, target.cpu_temperature)
+        || current.cpu_temp_source != target.cpu_temp_source
+        || current.cpu_frequency_mhz != target.cpu_frequency_mhz
+        || current.memory_used != target.memory_used
+        || current.memory_total != target.memory_total
+        || current.system_uptime != target.system_uptime
+        || current.process_count != target.process_count
+        || current.swap_used != target.swap_used
+        || current.swap_total != target.swap_total
+        || opt_f64_settling(current.load_average, target.load_average)
+        || gpu_settling(current.gpu_info.as_ref(), target.gpu_info.as_ref())
+        || opt_f32_settling(current.power_watts, target.power_watts)
+        || current.power_limit_watts != target.power_limit_watts
+        || current.power_source != target.power_source
+}
+
+fn opt_f32_settling(current: Option<f32>, target: Option<f32>) -> bool {
+    match (current, target) {
+        (Some(a), Some(b)) => (a - b).abs() > 0.05,
+        (None, None) => false,
+        _ => true,
+    }
+}
+
+fn opt_f64_settling(current: Option<f64>, target: Option<f64>) -> bool {
+    match (current, target) {
+        (Some(a), Some(b)) => (a - b).abs() > 0.01,
+        (None, None) => false,
+        _ => true,
+    }
+}
+
+fn gpu_settling(
+    current: Option<&crate::system::GpuInfo>,
+    target: Option<&crate::system::GpuInfo>,
+) -> bool {
+    match (current, target) {
+        (Some(a), Some(b)) => {
+            a.name != b.name
+                || a.vendor != b.vendor
+                || opt_f32_settling(a.usage, b.usage)
+                || opt_f32_settling(a.temperature, b.temperature)
+                || a.vram_used != b.vram_used
+                || a.vram_total != b.vram_total
+                || opt_f32_settling(a.power_watts, b.power_watts)
+                || a.power_limit_watts != b.power_limit_watts
+        }
+        (None, None) => false,
+        _ => true,
+    }
 }
 
 // ── Playground vector search (worker-thread body) ─────────────
@@ -288,4 +351,48 @@ pub(crate) fn log_contains_spawn(log_up: &str) -> bool {
     ["SPAWNING", "STARTING UP", "BOOTSTRAPPING", "INITIALIZING"]
         .iter()
         .any(|kw| log_up.contains(kw))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::system::SystemInfo;
+
+    #[test]
+    fn blend_system_info_snaps_cpu_temp_source() {
+        let mut current = SystemInfo {
+            cpu_temp_source: Some("msacpi".to_string()),
+            ..SystemInfo::default()
+        };
+        let target = SystemInfo {
+            cpu_temp_source: Some("librehardwaremonitor".to_string()),
+            ..SystemInfo::default()
+        };
+        // Source slugs snap like integers: no lerp, even at t=0.
+        blend_system_info(&mut current, &target, 0.0);
+        assert_eq!(
+            current.cpu_temp_source.as_deref(),
+            Some("librehardwaremonitor")
+        );
+    }
+
+    #[test]
+    fn blend_system_info_clears_source_when_target_has_none() {
+        let mut current = SystemInfo {
+            cpu_temp_source: Some("msacpi".to_string()),
+            ..SystemInfo::default()
+        };
+        let target = SystemInfo::default();
+        blend_system_info(&mut current, &target, 1.0);
+        assert!(current.cpu_temp_source.is_none());
+    }
+
+    #[test]
+    fn system_settling_detects_source_change() {
+        let current = SystemInfo::default();
+        let mut target = SystemInfo::default();
+        assert!(!system_settling(&current, &target));
+        target.cpu_temp_source = Some("librehardwaremonitor".to_string());
+        assert!(system_settling(&current, &target));
+    }
 }

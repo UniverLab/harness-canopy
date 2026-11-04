@@ -11,8 +11,11 @@ use ratatui::Frame;
 
 use super::lines::graph_lines;
 use super::{LiveViewContext, LiveViewRenderResult};
+use crate::db::mutex_store::MutexWaitDetail;
 use crate::domain::graphs::{GraphRunStatus, GraphSpecStatus, GraphStatus};
-use crate::tui::app::graph_live_state::{GraphLiveState, NodeRunInfo, SpecQueueEntry};
+use crate::tui::app::graph_live_state::{
+    pausing_label, GraphLiveState, NodeRunInfo, SpecQueueEntry,
+};
 use crate::tui::ui::panel::compact_cwd;
 use crate::tui::ui::sidebar::draw_scroll_indicators;
 use crate::tui::ui::theme::Theme;
@@ -74,7 +77,8 @@ pub(super) fn render_graph_live_view(
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
-            .scroll((clamped_scroll, 0)),
+            .scroll((clamped_scroll, 0))
+            .style(Style::default().bg(ctx.theme.info_bg)),
         area,
     );
 
@@ -222,18 +226,18 @@ fn status_icon_and_label(
     if let Some(at) = state.autorun_at {
         let local = at.with_timezone(&Local);
         return (
-            "⏰",
+            "◷",
             format!("autorun {}", local.format(time_format)),
             Color::Cyan,
         );
     }
     if blocked {
-        return ("⛔", "blocked".to_string(), theme.status_fail);
+        return ("⊘", "blocked".to_string(), theme.status_fail);
     }
     match state.graph_status {
         GraphStatus::Running => ("▶", "running".to_string(), theme.status_running),
-        GraphStatus::Pausing => ("⏸", "pausing".to_string(), Color::Yellow),
-        GraphStatus::Paused => ("⏸", "paused".to_string(), Color::Yellow),
+        GraphStatus::Pausing => ("‖", pausing_label(&state.pause_waiting_for), Color::Yellow),
+        GraphStatus::Paused => ("‖", "paused".to_string(), Color::Yellow),
         GraphStatus::Completed => ("✓", "completed".to_string(), theme.status_ok),
         GraphStatus::Failed => ("✗", "failed".to_string(), theme.status_fail),
         GraphStatus::Draft => ("·", "draft".to_string(), theme.dim_text),
@@ -517,6 +521,9 @@ fn run_status_span(status: Option<GraphRunStatus>, theme: &Theme) -> Span<'stati
         Some(GraphRunStatus::Running) => {
             Span::styled("running", Style::default().fg(theme.status_running))
         }
+        Some(GraphRunStatus::Waiting) => {
+            Span::styled("waiting", Style::default().fg(theme.status_running))
+        }
         Some(GraphRunStatus::Pass) => Span::styled("pass", Style::default().fg(theme.status_ok)),
         Some(GraphRunStatus::Fail) => Span::styled("fail", Style::default().fg(theme.status_fail)),
         Some(GraphRunStatus::Error) => Span::styled(
@@ -621,8 +628,30 @@ fn footer_lines(
         }
     }
     lines.push(Line::from(meta));
+    if !node_info.waiting_for.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("waiting for: {}", waiting_for_text(&node_info.waiting_for)),
+            Style::default().fg(theme.dim_text),
+        )));
+    }
 
     lines
+}
+
+/// One-line holder summary for a mutex-waiting run: each resource with who
+/// holds it (`cpu (held by graph/node)`), or bare while the resource is free
+/// but an earlier waiter is ahead in FIFO order.
+fn waiting_for_text(waiting_for: &[MutexWaitDetail]) -> String {
+    waiting_for
+        .iter()
+        .map(|detail| match (&detail.holder_graph, &detail.holder_node) {
+            (Some(graph), Some(holder)) => {
+                format!("{} (held by {graph}/{holder})", detail.resource)
+            }
+            _ => detail.resource.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(test)]
@@ -642,6 +671,7 @@ mod tests {
             schedule_expr: None,
             watch_path: None,
             autorun_at: None,
+            pause_waiting_for: Vec::new(),
             spec_queue: Vec::new(),
             done_count: 0,
             total_count: 0,

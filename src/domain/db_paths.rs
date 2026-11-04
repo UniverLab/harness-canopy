@@ -13,7 +13,7 @@
 //! than everyone else without anything noticing.
 //!
 //! Lives in `domain` rather than `db` because `domain` is compiled
-//! standalone by `examples/rag_search.rs` without the `db` module present;
+//! standalone by the standalone RAG search example without the `db` module present;
 //! `db` and `daemon` can depend on this, not the other way around.
 
 use std::path::{Path, PathBuf};

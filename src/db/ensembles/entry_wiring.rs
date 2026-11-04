@@ -3,7 +3,7 @@ use super::*;
 impl Database {
     /// Update the join's exit routing (`on_pass_to`/`on_fail_to`) on the
     /// `ensembles` row. Recreating the underlying `graph_edges` rows is the
-    /// caller's job (`graph_update_ensemble`) — this only updates the
+    /// caller's job (`graph_ensemble`) — this only updates the
     /// source-of-truth columns.
     pub fn update_ensemble_exit_wiring(
         &self,
@@ -36,7 +36,7 @@ impl Database {
     /// inserted, and the `ensembles` row's `entry_from_node`/`entry_condition`
     /// follows — all in one transaction, so a failure leaves the previous
     /// edges intact rather than an ensemble with no entry. The caller
-    /// (`graph_update_ensemble`) owns validation: `new_from_node` exists in
+    /// (`graph_ensemble`) owns validation: `new_from_node` exists in
     /// the ensemble's graph and is not ensemble-owned.
     pub fn rewire_ensemble_entry(
         &self,
@@ -141,7 +141,7 @@ impl Database {
         }
         if sources.len() < 2 {
             anyhow::bail!(
-                "Cannot detach '{from_node}': it is the last entry source of ensemble '{ensemble_id}'. Rewire it with from_node instead, or delete the whole unit with graph_delete_ensemble."
+                "Cannot detach '{from_node}': it is the last entry source of ensemble '{ensemble_id}'. Rewire it with from_node instead, or delete the whole unit with graph_ensemble delete."
             );
         }
 
@@ -329,7 +329,7 @@ pub(super) fn tx_entry_sources(
     }
 
     // Pending entry sources: the ensemble's extra entry sources and any
-    // chained exit that lands on it, recorded by `graph_import` because the
+    // chained exit that lands on it, recorded by `graph_edit` because the
     // member nodes (and so the fan-out edges) did not exist yet.
     let mut pending_stmt = tx.prepare(
         "SELECT from_node, condition FROM ensemble_pending_entry_sources WHERE ensemble_id = ?1",

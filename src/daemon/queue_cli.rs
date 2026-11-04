@@ -1,7 +1,7 @@
 //! CLI handlers for `canopy queue` subcommands.
 //!
 //! Like `spec_cli`, every state-changing subcommand delegates to the daemon's
-//! MCP tool of the same purpose (`queue_set_group`) via
+//! MCP tool of the same purpose (`queue` `set_group`) via
 //! `daemon::cli_daemon::call_tool` rather than writing to the database
 //! directly, so the CLI and MCP paths are one code path.
 
@@ -58,8 +58,9 @@ fn set_group(
     };
     let text = call_tool(
         port_override,
-        "queue_set_group",
+        "queue",
         &serde_json::json!({
+            "action": "set_group",
             "queue_id": queue_id,
             "spec_id": spec_id,
             "group": group_value,
@@ -130,7 +131,8 @@ mod tests {
 
         let calls = fake.recorded_calls();
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0]["name"], "queue_set_group");
+        assert_eq!(calls[0]["name"], "queue");
+        assert_eq!(calls[0]["arguments"]["action"], "set_group");
         assert_eq!(calls[0]["arguments"]["queue_id"], "q1");
         assert_eq!(calls[0]["arguments"]["spec_id"], "s1");
         assert_eq!(calls[0]["arguments"]["group"], "g1");
@@ -148,7 +150,8 @@ mod tests {
 
         let calls = fake.recorded_calls();
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0]["name"], "queue_set_group");
+        assert_eq!(calls[0]["name"], "queue");
+        assert_eq!(calls[0]["arguments"]["action"], "set_group");
         assert_eq!(calls[0]["arguments"]["group"], serde_json::Value::Null);
     }
 

@@ -141,6 +141,106 @@ impl App {
         Ok(())
     }
 
+    /// Worker-mode missions (FR1/FR4): the same snapshot the sync path builds,
+    /// but every database counter comes from `counters` (built off-thread)
+    /// instead of fresh queries. Newly awarded missions queue into
+    /// `mission_pending_persist` for the worker to persist; the worker's
+    /// `confirmed_unlocks` complete them in `apply_snapshot`. No database call
+    /// on the calling thread.
+    pub(super) fn tick_missions_from_snapshot(
+        &mut self,
+        counters: &super::snapshot::MissionDbCounters,
+    ) -> Result<()> {
+        let events = std::mem::take(&mut self.mission_pending_events);
+        let snapshot = self.build_mission_snapshot_from_counters(counters);
+        let pending = MissionManager::pending_for_snapshot(&snapshot, &events);
+        for id in pending {
+            if self.mission_manager.is_unlocked(id) || self.mission_pending_persist.contains(&id) {
+                continue;
+            }
+            self.mission_pending_persist.push(id);
+        }
+        Ok(())
+    }
+
+    /// Mission snapshot from worker-built counters plus in-memory state —
+    /// mirrors [`Self::build_mission_snapshot`] without any database call.
+    /// Daemon one-shot flags are absent on purpose: the worker consumed them
+    /// and their events already sit in `mission_pending_events`.
+    fn build_mission_snapshot_from_counters(
+        &mut self,
+        counters: &super::snapshot::MissionDbCounters,
+    ) -> MissionSnapshot {
+        let canopy_dir = dirs::home_dir()
+            .map(|h| h.join(".canopy"))
+            .unwrap_or_default();
+        let config = CanopyConfig::load(&canopy_dir);
+        let registered_harnesses = registered_harness_names(&config);
+        let harnesses_used_count = harnesses_used_count(&self.cli_usage, &registered_harnesses);
+
+        let mut languages = std::collections::HashSet::new();
+        for project in &self.projects {
+            if let Some(lang) = detect_project_language(Path::new(&project.path)) {
+                languages.insert(lang);
+            }
+        }
+
+        // The worker observed the current frequency (sent with the request)
+        // and persisted the max; the UI only adopts it.
+        self.max_cpu_frequency_seen = counters.max_cpu_frequency_seen;
+        if self.system_info.cpu_temperature.is_some() {
+            self.cpu_temperature_seen = true;
+        }
+        let gpu = self.system_info.gpu_info.as_ref();
+        let agent_running = self.has_active_agent_work();
+        let concurrent_sessions = self
+            .interactive_agents
+            .iter()
+            .filter(|a| a.status == AgentStatus::Running)
+            .count() as i64;
+
+        // FR4: monotonic — once true it stays true for the rest of the run.
+        let has_parallel_graph = if self.has_parallel_graph {
+            true
+        } else if counters.has_parallel_graph {
+            self.has_parallel_graph = true;
+            true
+        } else {
+            false
+        };
+
+        MissionSnapshot {
+            canopy_uptime_secs: counters.canopy_uptime_secs,
+            interactive_sessions: concurrent_sessions,
+            registered_harness_count: registered_harnesses.len(),
+            harnesses_used_count,
+            intelligence_nodes: counters.intelligence_nodes,
+            cross_project_links: counters.cross_project_links,
+            indexed_files: self.rag_info.indexed_files,
+            rag_chunks: self.rag_info.total_chunks,
+            project_count: self.projects.len() as i64,
+            distinct_project_languages: languages.len(),
+            gardener_edits: counters.gardener_edits,
+            graph_node_count_max: counters.graph_node_count_max,
+            completed_graph_runs: counters.completed_graph_runs,
+            total_graph_node_runs: counters.total_graph_node_runs,
+            has_parallel_graph,
+            seed_count: crate::domain::seeds::list_seeds()
+                .map(|s| s.len())
+                .unwrap_or(0),
+            max_seed_session_bindings: counters.max_seed_session_bindings,
+            agent_running,
+            cpu_usage: self.system_info.cpu_usage,
+            cpu_temperature_c: self.system_info.cpu_temperature,
+            cpu_frequency_mhz: self.system_info.cpu_frequency_mhz,
+            max_cpu_frequency_seen: self.max_cpu_frequency_seen,
+            process_count: self.system_info.process_count,
+            swap_used_bytes: self.system_info.swap_used,
+            gpu_vram_used: gpu.and_then(|g| g.vram_used),
+            gpu_vram_total: gpu.and_then(|g| g.vram_total),
+        }
+    }
+
     fn build_mission_snapshot(&mut self) -> Result<MissionSnapshot> {
         let canopy_dir = dirs::home_dir()
             .map(|h| h.join(".canopy"))
@@ -157,7 +257,7 @@ impl App {
         }
 
         // The Gardener counts distinct projects whose description or tags
-        // changed (recorded by the daemon's `project_update`); the legacy
+        // changed (recorded by the daemon's `project` `update`); the legacy
         // knowledge-dialog counter is gone.
         let gardener_edits = self.db.count_gardener_projects().unwrap_or(0);
 
@@ -212,6 +312,7 @@ impl App {
         if self.system_info.cpu_temperature.is_some() {
             self.cpu_temperature_seen = true;
         }
+        let has_parallel_graph = self.mission_has_parallel_graph();
         let gpu = self.system_info.gpu_info.as_ref();
         let agent_running = self.has_active_agent_work();
 
@@ -241,7 +342,7 @@ impl App {
             graph_node_count_max: self.db.max_graph_nodes_in_any_graph().unwrap_or(0),
             completed_graph_runs: self.db.count_completed_graphs().unwrap_or(0),
             total_graph_node_runs: self.db.count_graph_node_runs().unwrap_or(0),
-            has_parallel_graph: self.db.has_parallel_graph_run().unwrap_or(false),
+            has_parallel_graph,
             seed_count: crate::domain::seeds::list_seeds()
                 .map(|s| s.len())
                 .unwrap_or(0),
@@ -256,6 +357,19 @@ impl App {
             gpu_vram_used: gpu.and_then(|g| g.vram_used),
             gpu_vram_total: gpu.and_then(|g| g.vram_total),
         })
+    }
+
+    /// Cached `has_parallel_graph_run` (FR4): the mission state is monotonic,
+    /// so the three-table join runs at most once per TUI run.
+    fn mission_has_parallel_graph(&mut self) -> bool {
+        if self.has_parallel_graph {
+            return true;
+        }
+        if self.db.has_parallel_graph_run().unwrap_or(false) {
+            self.has_parallel_graph = true;
+            return true;
+        }
+        false
     }
 
     fn has_active_agent_work(&self) -> bool {

@@ -5,7 +5,7 @@ use super::*;
 /// nodes skipped between Start and it, the outputs reused (by node and run
 /// id), and the counter restart.
 fn directed_start_message(
-    spec_name: &str,
+    spec_label: &str,
     target: &super::directed::DirectedTarget,
     nodes: &[GraphNode],
     edges: &[GraphEdge],
@@ -27,9 +27,9 @@ fn directed_start_message(
             .join(", ")
     };
     format!(
-        "Directed run: spec '{}' starts at {}; skipped {} node(s){}; \
+        "Directed run: spec {} starts at {}; skipped {} node(s){}; \
          reused outputs: {reused}; iteration counters restarted at 1.",
-        spec_name,
+        spec_label,
         target.label,
         target.skipped_nodes.len(),
         skipped
@@ -62,7 +62,13 @@ fn record_directed_start(
             node_id: None,
             run_id: None,
             kind: activity::GraphEventKind::SpecStarted,
-            message: directed_start_message(&spec.name, &target, nodes, edges, existing_runs),
+            message: directed_start_message(
+                &activity::spec_label(spec),
+                &target,
+                nodes,
+                edges,
+                existing_runs,
+            ),
             payload: None,
         },
     );
@@ -86,20 +92,6 @@ impl GraphEngine {
         queue_id: Option<&str>,
         directed: Option<&DirectedStart>,
     ) -> Result<SpecExecutionOutcome> {
-        activity::record(
-            &self.db,
-            activity::GraphEvent {
-                graph_id: &lp.id,
-                graph_name: &lp.name,
-                workdir,
-                spec_id: Some(&spec.id),
-                node_id: None,
-                run_id: None,
-                kind: activity::GraphEventKind::SpecStarted,
-                message: format!("Spec '{}' started.", spec.name),
-                payload: None,
-            },
-        );
         let spec_details = self
             .db
             .get_graph_spec_details(&spec.id)?
@@ -135,16 +127,26 @@ impl GraphEngine {
             is_resume,
             directed,
         )?;
-        let (spec_start_head, spec_committed_head) = self
-            .resolve_spec_baseline(spec, &spec_details, workdir, is_resume, directed.is_some())
+        let is_directed = directed.is_some();
+        let (spec_start_head, spec_start_dirty, spec_committed_head) = self
+            .resolve_spec_baseline(&lp.id, spec, &spec_details, workdir, is_resume, is_directed)
             .await?;
+        self.record_spec_started(
+            lp,
+            spec,
+            workdir,
+            spec_start_head.as_deref(),
+            spec_start_dirty,
+        );
 
-        self.db.update_graph_spec_status(
-            &spec.id,
-            GraphSpecStatus::Running,
-            Some(chrono::Utc::now()),
-            None,
-        )?;
+        let _ = persist_bookkeeping("update_graph_spec_status", || {
+            self.db.update_graph_spec_status(
+                &spec.id,
+                GraphSpecStatus::Running,
+                Some(chrono::Utc::now()),
+                None,
+            )
+        })?;
 
         // record the directed start on the run's activity feed —
         // the start node, the nodes skipped between Start and it, the
@@ -213,7 +215,7 @@ impl GraphEngine {
         state: &mut SpecRunState,
     ) -> Result<SpecExecutionOutcome> {
         loop {
-            if self.is_paused(&ctx.lp.id)? {
+            if self.is_paused_busy_tolerant(&ctx.lp.id)? {
                 return Ok(SpecExecutionOutcome::Paused);
             }
 
@@ -240,7 +242,7 @@ impl GraphEngine {
 
             let stepped_cursor = state.cursor.clone();
             let flow = match stepped_cursor {
-                SpecCursor::Node(node_id) => {
+                SpecCursor::Node(node_id) => busy_backstop_flow(
                     self.run_spec_node_step(
                         ctx,
                         state,
@@ -248,17 +250,26 @@ impl GraphEngine {
                         previous_output.as_ref(),
                         iteration_value,
                     )
-                    .await?
-                }
+                    .await,
+                    &node_id,
+                )?,
                 SpecCursor::Ensemble(ensemble_id) => {
-                    self.run_spec_ensemble_step(
-                        ctx,
-                        state,
-                        &ensemble_id,
-                        previous_output.as_ref(),
-                        iteration_value,
-                    )
-                    .await?
+                    let flow = self
+                        .run_spec_ensemble_step(
+                            ctx,
+                            state,
+                            &ensemble_id,
+                            previous_output.as_ref(),
+                            iteration_value,
+                        )
+                        .await;
+                    let from = ctx
+                        .ensembles
+                        .iter()
+                        .find(|details| details.ensemble.id == ensemble_id)
+                        .map(|details| details.ensemble.join_node_id.clone())
+                        .unwrap_or(ensemble_id);
+                    busy_backstop_flow(flow, &from)?
                 }
             };
             let step = match flow {
@@ -346,7 +357,7 @@ impl GraphEngine {
 
         // B42/2026-08-05: something terminated this run out from
         // under us — a newer attempt at this node, a concurrent
-        // `graph_reset`, `graph_pause`, or budget/`fail_graph`
+        // `graph_control`, `graph_control`, or budget/`fail_graph`
         // sweep (see `run_was_terminated_out_of_band`). That is
         // engine bookkeeping, not a node failure — so this
         // dispatch stops here: it evaluates NO edge (never the
@@ -403,7 +414,7 @@ impl GraphEngine {
         // CB31: a wait-for-completion pause was requested while this
         // node was running. It ran to its own completion and its
         // verdict is now recorded normally; flag that run so
-        // `graph_continue` re-executing this node does not spend one
+        // `graph_control` re-executing this node does not spend one
         // of its iterations (the pause is not an attempt), then
         // transition to paused and stop before the next node.
         if let Some(outcome) = self
@@ -438,11 +449,11 @@ impl GraphEngine {
         // CM15: the ensemble's MEMBER SET and shared prompt are read
         // from the database HERE, once per dispatch of this ensemble
         // step (NFR3: the whole set in one read, never member-by-member
-        // across an await), so a graph_update_ensemble applied between
+        // across an await), so a graph_ensemble applied between
         // two dispatches lands on the second (FR2). The launch-time
         // `ensembles` snapshot stays authoritative for the ensemble's
         // WIRING (entry/exit edges, used by cursor_node_ids /
-        // select_next_step) and its `kind`, which graph_update_ensemble
+        // select_next_step) and its `kind`, which graph_ensemble
         // refuses to change while the graph is `running` (FR5).
         let details_fresh = self
             .db
@@ -510,7 +521,7 @@ impl GraphEngine {
         // CB31: as in the single-node step — a wait-for-completion
         // pause landed on this ensemble step. Its members ran to
         // completion; flag every run of this iteration so a
-        // `graph_continue` re-run of the step costs no iteration.
+        // `graph_control` re-run of the step costs no iteration.
         if let Some(outcome) = self
             .pause_after_step_if_requested(ctx, state, iteration_value)
             .await?
@@ -536,14 +547,14 @@ impl GraphEngine {
         execution: NodeExecution,
         run: &GraphNodeRun,
     ) -> Result<NodeExecution> {
-        if run.status == GraphRunStatus::Running {
-            self.db.update_graph_run_result(
-                run_id,
-                execution.status,
-                Some(&execution.output),
-                Some(chrono::Utc::now()),
-            )?;
-            return Ok(execution);
+        // `Waiting` finalizes like `Running`: the gate settles a refused wait
+        // itself, so reaching here still waiting means its write failed — the
+        // execution in hand (a refused-wait Fail) is still the right verdict.
+        if matches!(
+            run.status,
+            GraphRunStatus::Running | GraphRunStatus::Waiting
+        ) {
+            return settle_node_verdict(&self.db, run_id, execution, "update_graph_run_result");
         }
         // A self-reported run keeps its own output; only the process record
         // (ended_after_verdict / session_end) is merged onto it, never the verdict.
@@ -584,13 +595,7 @@ impl GraphEngine {
             head_after = %head_after,
             "node without commit rights: HEAD moved during its run"
         );
-        self.db.update_graph_run_result(
-            run_id,
-            GraphRunStatus::Fail,
-            Some(&violation.output),
-            Some(chrono::Utc::now()),
-        )?;
-        Ok(violation)
+        settle_node_verdict(&self.db, run_id, violation, "update_graph_run_result")
     }
 
     pub(crate) async fn enforce_commit_ancestry(
@@ -621,8 +626,10 @@ impl GraphEngine {
         if head_after == head_before {
             return Ok((execution, had_infra_crash));
         }
-        self.db
-            .set_graph_spec_committed_head(&ctx.spec.id, Some(&head_after))?;
+        let _ = persist_bookkeeping("set_graph_spec_committed_head", || {
+            self.db
+                .set_graph_spec_committed_head(&ctx.spec.id, Some(&head_after))
+        })?;
         state.spec_committed_head = Some(head_after);
         Ok((execution, had_infra_crash))
     }
@@ -658,13 +665,13 @@ impl GraphEngine {
                     current_head = %current_head,
                     "spec_start_head is no longer an ancestor of HEAD"
                 );
-                self.db.update_graph_run_result(
+                let execution = settle_node_verdict(
+                    &self.db,
                     run_id,
-                    GraphRunStatus::Fail,
-                    Some(&ancestry_fail.output),
-                    Some(chrono::Utc::now()),
+                    ancestry_fail,
+                    "update_graph_run_result",
                 )?;
-                Ok((ancestry_fail, true, true))
+                Ok((execution, true, true))
             }
         }
     }
@@ -778,6 +785,151 @@ impl GraphEngine {
                 },
                 payload: Some(self.node_finished_payload(node, execution, run_id)),
             },
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two-node chain (`first` -> `second`) with a directed start at
+    /// `second`, so the recorded line names one skipped node and no reused
+    /// outputs.
+    fn directed_label_fixture(
+        code: Option<&str>,
+    ) -> (
+        tempfile::TempDir,
+        Database,
+        Graph,
+        GraphSpec,
+        Vec<GraphNode>,
+        Vec<GraphEdge>,
+        DirectedStart,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::new(&dir.path().join("test.db")).unwrap();
+        let lp = Graph {
+            id: "g1".to_string(),
+            name: "Graph".to_string(),
+            description: None,
+            workdir: "/tmp/directed-label".to_string(),
+            status: GraphStatus::Draft,
+            trigger: None,
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            completed_at: None,
+            autorun_at: None,
+            auto_continue_at: None,
+            auto_continue_action: None,
+            active_run_queue_id: None,
+            hooks: std::collections::BTreeMap::new(),
+            archived: false,
+            paused_by_reconciliation: false,
+            infra_node_id: None,
+            allow_dirty_start: false,
+            require_spec_type: false,
+        };
+        let spec = GraphSpec {
+            id: "s1".to_string(),
+            graph_id: Some(lp.id.clone()),
+            name: "Add retry".to_string(),
+            description: None,
+            position: 1,
+            parallelizable: false,
+            status: GraphSpecStatus::Pending,
+            started_at: None,
+            completed_at: None,
+            spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
+            spec_committed_head: None,
+            workdir: None,
+            completed_via: None,
+            completed_via_reason: None,
+            completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: code.map(str::to_string),
+        };
+        let nodes = vec![
+            GraphNode {
+                id: "n-a".to_string(),
+                spec_id: None,
+                graph_id: Some(lp.id.clone()),
+                name: "first".to_string(),
+                kind: GraphNodeKind::Check,
+                config: serde_json::json!({}),
+                position: 1,
+                created_at: chrono::Utc::now(),
+            },
+            GraphNode {
+                id: "n-b".to_string(),
+                spec_id: None,
+                graph_id: Some(lp.id.clone()),
+                name: "second".to_string(),
+                kind: GraphNodeKind::Check,
+                config: serde_json::json!({}),
+                position: 2,
+                created_at: chrono::Utc::now(),
+            },
+        ];
+        let edges = vec![GraphEdge {
+            id: "e1".to_string(),
+            spec_id: None,
+            graph_id: Some(lp.id.clone()),
+            from_node: "n-a".to_string(),
+            to_node: "n-b".to_string(),
+            condition: GraphEdgeCondition::Pass,
+        }];
+        let start = DirectedStart {
+            spec_id: spec.id.clone(),
+            node_arg: "n-b".to_string(),
+        };
+        (dir, db, lp, spec, nodes, edges, start)
+    }
+
+    fn directed_activity_message(code: Option<&str>) -> String {
+        let (_dir, db, lp, spec, nodes, edges, start) = directed_label_fixture(code);
+        let ensembles: Vec<EnsembleDetails> = Vec::new();
+        let runs: Vec<GraphNodeRun> = Vec::new();
+        record_directed_start(
+            &db,
+            &lp,
+            "/tmp/directed-label",
+            &spec,
+            (&nodes, &edges, &ensembles),
+            &runs,
+            &start,
+        );
+        let activity = db
+            .list_activity_log_entries("/tmp/directed-label", 10)
+            .unwrap();
+        assert_eq!(activity.len(), 1);
+        activity.into_iter().next().unwrap().message
+    }
+
+    #[test]
+    fn directed_start_activity_shows_code_before_name() {
+        let message = directed_activity_message(Some("FIX-7"));
+        assert!(
+            message.contains("[FIX-7] 'Add retry'"),
+            "code before name: {message}"
+        );
+        assert!(
+            !message.contains("''"),
+            "the label carries its own quotes: {message}"
+        );
+    }
+
+    #[test]
+    fn directed_start_activity_keeps_legacy_text_without_code() {
+        assert_eq!(
+            directed_activity_message(None),
+            "Directed run: spec 'Add retry' starts at node 'second'; \
+             skipped 1 node(s) [first]; reused outputs: none; \
+             iteration counters restarted at 1."
         );
     }
 }

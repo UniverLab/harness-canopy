@@ -19,11 +19,12 @@ mod executor;
 mod graph_engine;
 mod mcp_wizard_module;
 mod rag;
+mod remote;
 mod scheduler;
+mod sessions;
 mod setup_module;
 mod shared;
 mod skills_module;
-mod sync_manager;
 mod system;
 mod tui;
 mod watchers;
@@ -39,6 +40,8 @@ use daemon::doctor::run_doctor;
 use daemon::graph_cli::{handle_graph_action, GraphAction};
 use daemon::missions_cli::handle_missions_action;
 use daemon::models_cli::{handle_models_action, ModelsAction};
+use daemon::mutex_cli::{handle_mutex_action, MutexAction};
+use daemon::node_cli::{handle_node_action, NodeAction};
 use daemon::project_cli::{handle_project_action, ProjectAction};
 use daemon::prompts_cli::{handle_prompts_action, PromptsAction};
 use daemon::queue_cli::{handle_queue_action, QueueAction};
@@ -47,8 +50,10 @@ use daemon::roster_cli::{handle_roster_action, RosterAction};
 use daemon::sandbox_cli::{handle_sandbox_action, SandboxAction};
 use daemon::server::{run_http_server, run_stdio_server};
 use daemon::settings_cli::{handle_settings_action, SettingsAction};
+use daemon::shelf_cli::{handle_shelf_action, ShelfAction};
 use daemon::spec_cli::{handle_spec_action, SpecAction};
 use daemon::subagent_cli::{handle_subagent_action, SubagentAction};
+use remote::cli::{handle_remote_action, RemoteAction};
 use setup_module::registry_cli::{handle_registry_action, RegistryAction};
 use std::path::PathBuf;
 
@@ -79,7 +84,11 @@ enum Commands {
         yes: bool,
     },
     /// Run a health check diagnosing common issues.
-    Doctor,
+    Doctor {
+        /// Show the searched PATH for missing harnesses.
+        #[arg(long)]
+        verbose: bool,
+    },
     /// Run the MCP server over stdio transport.
     Stdio,
     /// First-run setup wizard to configure agents and directories.
@@ -134,6 +143,12 @@ enum Commands {
         #[command(subcommand)]
         action: GraphAction,
     },
+    /// Install, list, and remove shareable node documents (a single node or
+    /// an ensemble) and add them to graphs by name.
+    Node {
+        #[command(subcommand)]
+        action: NodeAction,
+    },
     /// Inspect registered agents (read-only, served from the local database).
     Agent {
         #[command(subcommand)]
@@ -154,6 +169,11 @@ enum Commands {
         #[command(subcommand)]
         action: CrewAction,
     },
+    /// Inspect named mutexes nodes hold while they run.
+    Mutex {
+        #[command(subcommand)]
+        action: MutexAction,
+    },
     /// Inspect and change settings in config.toml.
     Config {
         #[command(subcommand)]
@@ -164,7 +184,7 @@ enum Commands {
         #[command(subcommand)]
         action: QueueAction,
     },
-    /// Inspect or refresh the `agent_models` catalog cache.
+    /// Inspect or refresh the `harness models` catalog cache.
     Models {
         #[command(subcommand)]
         action: ModelsAction,
@@ -229,6 +249,16 @@ enum Commands {
         #[command(subcommand)]
         action: SandboxAction,
     },
+    /// List or open session-shelf files through the daemon.
+    Shelf {
+        #[command(subcommand)]
+        action: ShelfAction,
+    },
+    /// Owner-only remote control: sign in, pair browsers, manage the relay.
+    Remote {
+        #[command(subcommand)]
+        action: RemoteAction,
+    },
     /// Run a stdio sidecar proxy that injects canopy identity headers.
     Bridge {
         /// Agent session ID to bind this bridge process.
@@ -259,7 +289,13 @@ async fn main() -> Result<()> {
             let code = autoupdate::run_update(check, yes)?;
             std::process::exit(code);
         }
-        Some(Commands::Doctor) => run_doctor().await,
+        Some(Commands::Doctor { verbose }) => {
+            if verbose {
+                crate::daemon::doctor::run_doctor_verbose().await
+            } else {
+                run_doctor().await
+            }
+        }
         Some(Commands::Stdio) => run_stdio_server().await,
         Some(Commands::Serve) => run_http_server(cli.port).await,
         Some(Commands::Setup {
@@ -296,10 +332,12 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Rag { action }) => handle_rag_action(action).await,
         Some(Commands::Graph { action }) => handle_graph_action(action, cli.port).await,
+        Some(Commands::Node { action }) => handle_node_action(action),
         Some(Commands::Agent { action }) => handle_agent_action(action).await,
         Some(Commands::Spec { action }) => handle_spec_action(action, cli.port).await,
         Some(Commands::Roster { action }) => handle_roster_action(action, cli.port).await,
         Some(Commands::Crew { action }) => handle_crew_action(action, cli.port).await,
+        Some(Commands::Mutex { action }) => handle_mutex_action(action).await,
         Some(Commands::Config { action }) => handle_settings_action(action, cli.port).await,
         Some(Commands::Queue { action }) => handle_queue_action(action, cli.port).await,
         Some(Commands::Models { action }) => handle_models_action(action).await,
@@ -316,6 +354,8 @@ async fn main() -> Result<()> {
         Some(Commands::Prompts { action }) => handle_prompts_action(action).await,
         Some(Commands::Subagent { action }) => handle_subagent_action(action, cli.port).await,
         Some(Commands::Sandbox { action }) => handle_sandbox_action(action).await,
+        Some(Commands::Shelf { action }) => handle_shelf_action(action, cli.port).await,
+        Some(Commands::Remote { action }) => handle_remote_action(action).await,
         Some(Commands::Bridge {
             agent_id,
             port,

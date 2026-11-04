@@ -1,0 +1,15 @@
+{
+  "format_version": 1,
+  "name": "ensemble-proposers",
+  "kind": "ensemble",
+  "description": "Three proposers draft a complete solution for the same spec in parallel.",
+  "config": {
+    "kind": "parallel",
+    "prompt_template": "Draft a complete solution for this spec. Be concrete and specific — an implementer downstream may build directly from your draft without ever seeing this spec itself, so leave nothing implicit:\n\n{{spec_content}}\n\nPrevious feedback (if any): {{previous_feedback}}",
+    "members": [
+      {},
+      {},
+      {}
+    ]
+  }
+}

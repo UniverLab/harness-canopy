@@ -29,23 +29,72 @@ const SWEEP_REST_MS: u128 = 2000;
 // THEME-EXEMPT: the banner gradient is its own authored animation palette
 // (`BANNER_GRADIENT`), independent of classic/modern — not a theme role.
 fn sweep_color(char_idx: usize, len: usize, millis: u128) -> Color {
-    let sweep = (len as u128 + 4) * SWEEP_STEP_MS;
-    let t = millis % (sweep + SWEEP_REST_MS);
-    let gradient_idx = if t < sweep {
-        // Head runs from -2 to len+1 so the falloff enters and leaves off-name.
-        let head = -2i128 + (t / SWEEP_STEP_MS) as i128;
-        match (char_idx as i128 - head).abs() {
-            0 => 4,
-            1 => 3,
-            2 => 2,
-            _ => 1,
+    let gradient_idx = match sweep_head(millis, len) {
+        Some(step) => {
+            // Head runs from -2 to len+1 so the falloff enters and leaves off-name.
+            let head = -2i128 + step as i128;
+            match (char_idx as i128 - head).abs() {
+                0 => 4,
+                1 => 3,
+                2 => 2,
+                _ => 1,
+            }
         }
-    } else {
-        1
+        None => 1,
     };
     let (r, g, b) = BANNER_GRADIENT[gradient_idx];
     // THEME-EXEMPT: see function doc above.
     Color::Rgb(r, g, b)
+}
+
+/// Sweep-head step for `millis`: `Some(step)` while the sweep travels,
+/// `None` during the rest phase (fully idle).
+pub(crate) fn sweep_head(millis: u128, len: usize) -> Option<u64> {
+    let sweep = (len as u128 + 4) * SWEEP_STEP_MS;
+    let t = millis % (sweep + SWEEP_REST_MS);
+    if t < sweep {
+        Some((t / SWEEP_STEP_MS) as u64)
+    } else {
+        None
+    }
+}
+
+/// Spinner frame index for `millis` (the daemon-running indicator).
+pub(crate) fn spinner_index(millis: u128) -> usize {
+    ((millis / 125) % 8) as usize
+}
+
+/// Whether the stopped-daemon block shows lit (vs. dim) at `millis`.
+pub(crate) fn blink_on(millis: u128) -> bool {
+    (millis / 500).is_multiple_of(2)
+}
+
+/// Discrete animation frame the header renders: spinner index, sweep-head
+/// step (`None` while resting) and blink phase. The event loop compares it
+/// across ticks so an idle header doesn't redraw every tick.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct HeaderFrameId {
+    pub spinner: u8,
+    pub sweep: Option<u64>,
+    pub blink: bool,
+}
+
+/// The header frame `millis` renders. The sweep period uses the full title
+/// length: exact while the title shows (the idle case); during whimsg
+/// messages the whimsg check dirties the tick anyway.
+pub(crate) fn header_frame_id(millis: u128, daemon_running: bool) -> HeaderFrameId {
+    HeaderFrameId {
+        // The spinner only renders while the daemon runs; the blink only
+        // while it is stopped. Gating each on its visible side keeps a
+        // hidden animation from dirtying the tick.
+        spinner: if daemon_running {
+            u8::try_from(spinner_index(millis)).unwrap_or(0)
+        } else {
+            0
+        },
+        sweep: sweep_head(millis, TITLE.chars().count()),
+        blink: !daemon_running && blink_on(millis),
+    }
 }
 
 fn push_animated_gradient_text(spans: &mut Vec<Span>, visible: &str, millis: u128) {
@@ -62,19 +111,18 @@ fn push_animated_gradient_text(spans: &mut Vec<Span>, visible: &str, millis: u12
 }
 
 pub(super) fn draw_header(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
-    let millis = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
+    // Both animation toggles off freezes the header: spinner[0], sweep t=0,
+    // solid block (see `header_millis`).
+    let millis = super::header_millis(app);
 
     let (status_char, status_color) = if app.daemon_running {
         // Smooth spinner in green, no blink
-        let frame_idx = ((millis / 125) % 8) as usize;
+        let frame_idx = spinner_index(millis);
         (SPINNER[frame_idx], theme.header_color)
     } else {
         // Blinking █ in red when stopped.
-        let blink_on = (millis / 500).is_multiple_of(2);
-        let color = if blink_on {
+        let lit = blink_on(millis);
+        let color = if lit {
             ERROR_COLOR
         } else {
             // THEME-EXEMPT: single-use dim variant of the error red — not a recurring role.

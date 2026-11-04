@@ -18,7 +18,6 @@ use crate::executor::Executor;
 use crate::graph_engine::GraphEngine;
 use crate::rag::ingestion::IngestionManager;
 use crate::scheduler::cron_scheduler::CronScheduler;
-use crate::sync_manager::SyncManager;
 use crate::watchers::WatcherEngine;
 
 mod personal_rag;
@@ -44,6 +43,7 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
     let data_dir = crate::ensure_data_dir()?;
     let _daemon_lock = acquire_daemon_lock(&data_dir)?;
     let db = Arc::new(Database::new(&database_path(&data_dir))?);
+    crate::setup_module::harness_prune::prune_on_startup(&data_dir, &db);
     if let Err(e) = crate::domain::prompts::seed_builtin_prompt_presets(&data_dir) {
         tracing::warn!("Could not seed builtin prompt presets: {e}");
     }
@@ -52,7 +52,6 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
         Arc::clone(&db),
         Arc::clone(&notification_service),
     ));
-    let sync_manager = Arc::new(SyncManager::new(Arc::clone(&db)));
     let canopy_config = crate::domain::canopy_config::CanopyConfig::load(&data_dir);
     // CM51 (D12): remember what the running daemon loaded, so `config_list`
     // can report `pending_restart`, and watch the file so a hand edit takes
@@ -89,6 +88,7 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
 
     reconcile_orphaned_graphs_on_startup(&db, &data_dir);
     reconcile_stranded_queue_specs_on_startup(&db);
+    reconcile_mutex_leases_on_startup(&db);
     // CT28: drop live-output chunks whose run is finished — leftovers from a
     // crash, since completion paths delete their own chunks.
     if let Err(e) = db.delete_graph_run_output_for_non_running() {
@@ -101,6 +101,21 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
     // `startup_personal_rag` runs; the periodic tick continues from `start()`.
     ingestion.run_rag_maintenance().await;
 
+    // The session endpoint's state comes up before anything serves: the hub
+    // owns every PTY, so reconciliation has to respawn the previous daemon's
+    // sessions before the first client can connect, and the scheduler gets
+    // the hub to deliver scheduled sends through.
+    let sessions_state = crate::sessions::ws::SessionsState::ensure(&data_dir, Arc::clone(&db))?;
+    // The relay answers offers by bridging into the hub, so the hub exists
+    // first.
+    crate::remote::relay::spawn(
+        data_dir.clone(),
+        Database::clone(&db),
+        Arc::clone(&sessions_state),
+    );
+    crate::sessions::resume::reconcile_at_startup(&sessions_state.hub, &data_dir);
+    reconcile_stale_sessions_on_startup(&db);
+
     let background = start_background_tasks(
         &db,
         &executor,
@@ -108,6 +123,7 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
         &notification_service,
         &data_dir,
         canopy_config.announcements_enabled,
+        &sessions_state.hub,
     );
 
     let ct = tokio_util::sync::CancellationToken::new();
@@ -119,13 +135,14 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
             scheduler_notify: Arc::clone(&background.scheduler_notify),
             graph_engine: Arc::clone(&graph_engine),
             notification_service: Arc::clone(&notification_service),
-            sync_manager: Arc::clone(&sync_manager),
             ingestion: Arc::clone(&ingestion),
             dynamic_skills: Arc::clone(&dynamic_skills),
+            shelf: sessions_state.shelf.clone(),
             start_time: daemon_start,
             port,
         },
         &ct,
+        Arc::clone(&sessions_state),
     );
 
     bind_and_serve(router, port, ct).await?;
@@ -152,6 +169,21 @@ fn write_startup_state(db: &Database, port: u16) -> Result<()> {
     db.set_state("version", env!("CARGO_PKG_VERSION"))?;
     db.set_state("last_start", &chrono::Utc::now().to_rfc3339())?;
     Ok(())
+}
+
+/// Close interactive-session rows whose process is already gone. Called
+/// AFTER the resume above, on purpose: rows the resume relaunched carry a
+/// fresh live pid again, so whatever is still stale here belongs to a
+/// process that is really gone. Reconciling first would close the rows the
+/// resume needs and kill auto-resume.
+fn reconcile_stale_sessions_on_startup(db: &Database) {
+    match db.reconcile_stale_interactive_sessions() {
+        Ok(closed) if closed > 0 => {
+            tracing::info!("Closed {closed} stale interactive session(s) on startup");
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!("Failed to reconcile stale interactive sessions: {e}"),
+    }
 }
 
 /// Startup reconciliation 1/2: graphs a previous daemon left `Running`.
@@ -195,6 +227,23 @@ fn reconcile_stranded_queue_specs_on_startup(db: &Database) {
     }
 }
 
+/// Startup reconciliation 3/3: mutex leases a previous daemon left behind.
+/// Runs after the graph reconciliations above (which finalize the dangling
+/// runs whose leases this then frees).
+fn reconcile_mutex_leases_on_startup(db: &Database) {
+    match db.reconcile_mutex_leases() {
+        Ok((leases, waiters)) if leases > 0 || waiters > 0 => {
+            tracing::warn!(
+                "Reconciled {} stale mutex lease(s) and {} orphaned waiter(s) left by a previous daemon",
+                leases,
+                waiters
+            );
+        }
+        Ok(_) => {}
+        Err(e) => tracing::error!("Failed to reconcile mutex leases: {}", e),
+    }
+}
+
 /// The two awaited startup reads, in order: capture the dirty-tree state of
 /// interrupted specs, then reload the watcher set from the database.
 async fn capture_interrupted_state(graph_engine: &GraphEngine, watcher_engine: &WatcherEngine) {
@@ -227,6 +276,7 @@ fn start_background_tasks(
     notification_service: &Arc<dyn NotificationService>,
     data_dir: &std::path::Path,
     announcements_enabled: bool,
+    sessions: &crate::sessions::SessionHub,
 ) -> HttpBackgroundTasks {
     let cron_scheduler = Arc::new(
         CronScheduler::with_graphs(
@@ -234,6 +284,7 @@ fn start_background_tasks(
             Arc::clone(executor),
             Arc::clone(graph_engine),
         )
+        .with_hub(sessions.clone())
         .with_retry(crate::scheduler::cron_scheduler::RetryPolicy::from_config(
             &crate::domain::canopy_config::CanopyConfig::load(data_dir).scheduler,
         )),
@@ -268,8 +319,13 @@ fn start_background_tasks(
 /// Builds the `/mcp` router: the streamable-HTTP service (one
 /// `TaskTriggerHandler` per session), the session manager, and the server
 /// config wired to the shutdown cancellation token, layered with the
-/// error-status logger.
-fn build_mcp_router(deps: HandlerDeps, ct: &tokio_util::sync::CancellationToken) -> axum::Router {
+/// error-status logger. Also serves the daemon session hub at
+/// `/sessions/ws` (see `crate::sessions::ws`).
+fn build_mcp_router(
+    deps: HandlerDeps,
+    ct: &tokio_util::sync::CancellationToken,
+    sessions: Arc<crate::sessions::ws::SessionsState>,
+) -> axum::Router {
     let HandlerDeps {
         db: handler_db,
         executor: handler_executor,
@@ -277,9 +333,9 @@ fn build_mcp_router(deps: HandlerDeps, ct: &tokio_util::sync::CancellationToken)
         scheduler_notify: handler_scheduler_notify,
         graph_engine: handler_graph_engine,
         notification_service,
-        sync_manager: handler_sync_manager,
         ingestion: handler_ingestion,
         dynamic_skills: handler_dynamic_skills,
+        shelf: handler_shelf,
         start_time,
         port,
     } = deps;
@@ -293,9 +349,9 @@ fn build_mcp_router(deps: HandlerDeps, ct: &tokio_util::sync::CancellationToken)
                 scheduler_notify: Arc::clone(&handler_scheduler_notify),
                 graph_engine: Arc::clone(&handler_graph_engine),
                 notification_service: Arc::clone(&notification_service),
-                sync_manager: Arc::clone(&handler_sync_manager),
                 ingestion: Arc::clone(&handler_ingestion),
                 dynamic_skills: Arc::clone(&handler_dynamic_skills),
+                shelf: Arc::clone(&handler_shelf),
                 start_time,
                 port,
             }))
@@ -319,7 +375,12 @@ fn build_mcp_router(deps: HandlerDeps, ct: &tokio_util::sync::CancellationToken)
 
     axum::Router::new()
         .nest_service("/mcp", service)
+        .route(
+            "/sessions/ws",
+            axum::routing::get(crate::sessions::ws::sessions_ws_handler),
+        )
         .layer(axum::middleware::from_fn(log_mcp_error_responses))
+        .with_state(sessions)
 }
 
 /// Frees the port (a stale occupant from a previous daemon), binds, logs the
@@ -390,13 +451,15 @@ async fn log_mcp_error_responses(
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     let session_id_present = request.headers().contains_key("mcp-session-id");
+    let path = request.uri().path().to_string();
     let response = next.run(request).await;
     let status = response.status();
     if status.as_u16() >= 400 {
         tracing::warn!(
             status = %status,
             session_id_present,
-            "/mcp request failed"
+            path = %path,
+            "request failed"
         );
     }
     response
@@ -497,27 +560,35 @@ pub(crate) async fn run_stdio_server() -> Result<()> {
 
 /// The MCP handler over the startup dependencies — port 0, because stdio
 /// has no port of its own to report.
-fn build_stdio_handler(db: &Arc<Database>, startup: &StdioServerStartup) -> TaskTriggerHandler {
-    TaskTriggerHandler::with_deps(HandlerDeps {
+fn build_stdio_handler(
+    db: &Arc<Database>,
+    startup: &StdioServerStartup,
+) -> anyhow::Result<TaskTriggerHandler> {
+    let shelf = crate::sessions::shelf::ShelfStore::new(
+        Arc::clone(db),
+        crate::sessions::shelf::default_shelf_dir(),
+    )?;
+    shelf.maintenance();
+    Ok(TaskTriggerHandler::with_deps(HandlerDeps {
         db: Arc::clone(db),
         executor: Arc::clone(&startup.executor),
         watcher_engine: Arc::clone(&startup.watcher_engine),
         scheduler_notify: Arc::clone(&startup.scheduler_notify),
         graph_engine: Arc::clone(&startup.graph_engine),
         notification_service: Arc::clone(&startup.notification_service),
-        sync_manager: Arc::clone(&startup.sync_manager),
         ingestion: Arc::clone(&startup.ingestion),
         dynamic_skills: Arc::clone(&startup.dynamic_skills),
+        shelf,
         start_time: startup.start_time,
         port: 0,
-    })
+    }))
 }
 
 /// Serves JSON-RPC over the stdio transport until the client closes it:
 /// build the handler, serve, log the started line, then wait for the
 /// transport to end.
 async fn serve_stdio_transport(db: &Arc<Database>, startup: &StdioServerStartup) -> Result<()> {
-    let handler = build_stdio_handler(db, startup);
+    let handler = build_stdio_handler(db, startup)?;
 
     let transport = rmcp::transport::stdio();
     let server = handler.serve(transport).await?;
@@ -551,7 +622,6 @@ struct StdioServerStartup {
     executor: Arc<Executor>,
     watcher_engine: Arc<WatcherEngine>,
     notification_service: Arc<dyn NotificationService>,
-    sync_manager: Arc<SyncManager>,
     graph_engine: Arc<GraphEngine>,
     ingestion: Arc<IngestionManager>,
     dynamic_skills: Arc<crate::dynamic_skills::SkillStore>,
@@ -575,7 +645,6 @@ async fn stdio_server_startup(db: Arc<Database>, data_dir: &std::path::Path) -> 
         Arc::clone(&db),
         Arc::clone(&notification_service),
     ));
-    let sync_manager = Arc::new(SyncManager::new(Arc::clone(&db)));
     let canopy_config = crate::domain::canopy_config::CanopyConfig::load(data_dir);
     let dynamic_skills = Arc::new(crate::dynamic_skills::SkillStore::from_config(
         data_dir,
@@ -634,7 +703,6 @@ async fn stdio_server_startup(db: Arc<Database>, data_dir: &std::path::Path) -> 
         executor,
         watcher_engine,
         notification_service,
-        sync_manager,
         graph_engine,
         ingestion,
         dynamic_skills,
@@ -700,7 +768,6 @@ mod hang_repro {
     use crate::executor::Executor;
     use crate::graph_engine::GraphEngine;
     use crate::rag::ingestion::IngestionManager;
-    use crate::sync_manager::SyncManager;
     use crate::watchers::WatcherEngine;
     use std::os::unix::fs::PermissionsExt;
 
@@ -756,7 +823,6 @@ mod hang_repro {
     async fn spawn_test_server(db: Arc<Database>) -> (u16, Arc<GraphEngine>) {
         let notif: Arc<dyn NotificationService> = Arc::new(DefaultNotificationService);
         let executor = Arc::new(Executor::new(Arc::clone(&db), Arc::clone(&notif)));
-        let sync_manager = Arc::new(SyncManager::new(Arc::clone(&db)));
         let graph_engine = Arc::new(GraphEngine::new(Arc::clone(&db), Arc::clone(&notif)));
         let watcher_engine = Arc::new(WatcherEngine::new(
             Arc::clone(&db),
@@ -787,7 +853,6 @@ mod hang_repro {
         let handler_executor = Arc::clone(&executor);
         let handler_watcher_engine = Arc::clone(&watcher_engine);
         let handler_scheduler_notify = Arc::clone(&scheduler_notify);
-        let handler_sync_manager = Arc::clone(&sync_manager);
         let handler_graph_engine = Arc::clone(&graph_engine);
         let handler_notif = Arc::clone(&notif);
         let handler_ingestion = Arc::clone(&ingestion);
@@ -802,9 +867,9 @@ mod hang_repro {
                     scheduler_notify: Arc::clone(&handler_scheduler_notify),
                     graph_engine: Arc::clone(&handler_graph_engine),
                     notification_service: Arc::clone(&handler_notif),
-                    sync_manager: Arc::clone(&handler_sync_manager),
                     ingestion: Arc::clone(&handler_ingestion),
                     dynamic_skills: Arc::clone(&handler_dynamic_skills),
+                    shelf: crate::sessions::shelf::ShelfStore::for_test(&handler_db),
                     start_time: std::time::Instant::now(),
                     port: 0,
                 }))
@@ -973,13 +1038,13 @@ mod hang_repro {
     /// Regression (a): while a node is mid-dispatch on graph L (agent process
     /// running, graph status == `Running`), a *second*, independent MCP
     /// session — standing in for that node's own bridge connection calling
-    /// back into the daemon — calls `graph_schedule_autorun` for the SAME
+    /// back into the daemon — calls `graph_control` for the SAME
     /// graph L over real Streamable HTTP, exactly as a resilience node
     /// scheduling its own graph's resume does in production. The response
     /// must arrive promptly (well under any node timeout) and the schedule
     /// must be durably persisted.
     ///
-    /// Also covers requirement 3 (fast-fail): `graph_run` and `graph_reset`
+    /// Also covers requirement 3 (fast-fail): `graph_control` and `graph_control`
     /// against the SAME graph, mid-dispatch, must reject immediately with an
     /// explanatory error rather than blocking — proven here under a real
     /// concurrent dispatch, not just against a synthetic `GraphStatus::Running`
@@ -1037,16 +1102,16 @@ mod hang_repro {
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(10),
             client.call_tool(
-                "graph_schedule_autorun",
-                serde_json::json!({"graph_id": graph_id, "at": at}),
+                "graph_control",
+                serde_json::json!({"action": "schedule_autorun", "graph_id": graph_id, "at": at}),
             ),
         )
         .await;
         let elapsed = start.elapsed();
 
         let schedule_response = result
-            .expect("node-initiated graph_schedule_autorun must respond promptly mid-dispatch")
-            .expect("graph_schedule_autorun call must succeed");
+            .expect("node-initiated graph_control must respond promptly mid-dispatch")
+            .expect("graph_control call must succeed");
         assert!(
             schedule_response.contains("scheduled to autorun"),
             "{schedule_response}"
@@ -1063,14 +1128,17 @@ mod hang_repro {
             "schedule must be durably persisted at the requested instant"
         );
 
-        // Requirement 3: graph_run / graph_reset against the SAME graph, still
+        // Requirement 3: graph_control / graph_control against the SAME graph, still
         // mid-dispatch, must fail fast (not hang, not queue).
         let run_result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            client.call_tool("graph_run", serde_json::json!({"graph_id": graph_id})),
+            client.call_tool(
+                "graph_control",
+                serde_json::json!({"action": "run", "graph_id": graph_id}),
+            ),
         )
         .await
-        .expect("graph_run must respond promptly against a running graph")
+        .expect("graph_control must respond promptly against a running graph")
         .unwrap();
         assert!(
             run_result.contains("already running"),
@@ -1079,15 +1147,18 @@ mod hang_repro {
 
         let reset_result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            client.call_tool("graph_reset", serde_json::json!({"graph_id": graph_id})),
+            client.call_tool(
+                "graph_control",
+                serde_json::json!({"action": "reset", "graph_id": graph_id}),
+            ),
         )
         .await
-        .expect("graph_reset must respond promptly against a running graph")
+        .expect("graph_control must respond promptly against a running graph")
         .unwrap();
         // The ground truth is the `graph_runs` table, not graph status (see
         // `Database::reset_graph`'s `InFlight` guard) — the refusal now names
         // the node and run still executing rather than just pointing at
-        // `graph_pause`.
+        // `graph_control`.
         assert!(
             reset_result.contains("sleep") && reset_result.contains("still executing"),
             "expected fast-fail error, got: {reset_result}"
@@ -1128,8 +1199,9 @@ mod hang_repro {
         let before = chrono::Utc::now();
         let result = client
             .call_tool(
-                "graph_schedule_autorun",
+                "graph_control",
                 serde_json::json!({
+                    "action": "schedule_autorun",
                     "graph_id": graph_id,
                     "quota_reset_message":
                         "You've hit your session limit · resets 1pm (America/Bogota)"
@@ -1179,8 +1251,9 @@ mod hang_repro {
 
         let result = client
             .call_tool(
-                "graph_schedule_autorun",
+                "graph_control",
                 serde_json::json!({
+                    "action": "schedule_autorun",
                     "graph_id": graph_id,
                     "at": chrono::Utc::now().to_rfc3339(),
                     "quota_reset_message": "resets 1pm (America/Bogota)",
@@ -1199,7 +1272,7 @@ mod hang_repro {
         );
     }
 
-    /// Requirement 4: a retried `graph_schedule_autorun` (simulating a lost
+    /// Requirement 4: a retried `graph_control` (simulating a lost
     /// ack whose write already committed) must not double-schedule — the
     /// second call with the same graph id + target instant leaves exactly one
     /// pending schedule, at that instant, not a queued second one.
@@ -1218,8 +1291,8 @@ mod hang_repro {
         for _ in 0..2 {
             let result = client
                 .call_tool(
-                    "graph_schedule_autorun",
-                    serde_json::json!({"graph_id": graph_id, "at": at.to_rfc3339()}),
+                    "graph_control",
+                    serde_json::json!({"action": "schedule_autorun", "graph_id": graph_id, "at": at.to_rfc3339()}),
                 )
                 .await
                 .unwrap();

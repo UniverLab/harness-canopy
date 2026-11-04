@@ -8,14 +8,11 @@ use crate::daemon::handler::TaskTriggerHandler;
 use crate::daemon::handler_formatting::internal_error;
 use crate::daemon::helpers::{error_result, success_result};
 use crate::daemon::params::*;
-use crate::daemon::params_extract::Parameters;
 use crate::db::roster_entries::{NewRosterEntry, RosterEntry, RosterState};
 use crate::db::Database;
 use crate::domain::roster::{effective_state, entry_expired, parse_until};
 use chrono::{DateTime, Utc};
 use rmcp::model::CallToolResult;
-use rmcp::tool;
-use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
 
 fn entry_json(entry: &RosterEntry, now: &DateTime<Utc>) -> serde_json::Value {
@@ -33,7 +30,7 @@ fn entry_json(entry: &RosterEntry, now: &DateTime<Utc>) -> serde_json::Value {
     })
 }
 
-/// Validate one `roster_set` request and upsert it. Free function so it is
+/// Validate one `harness roster_set` action and upsert it. Free function so it is
 /// unit-testable with a bare `&Database` and an injected `now`.
 pub(crate) fn roster_set_entry(
     db: &Database,
@@ -83,26 +80,17 @@ pub(crate) fn roster_set_entry(
     )))
 }
 
-#[tool_router(router = tool_router_roster, vis = "pub(crate)")]
 impl TaskTriggerHandler {
-    #[tool(
-        name = "roster_set",
-        description = "Declare one platform/model pair available or unavailable. `model_pattern` is omitted for every model of the platform, or an exact model id, or a prefix ending in `*` (e.g. opencode-go/*). `until` (RFC 3339 UTC) is accepted only with state=unavailable and must be in the future."
-    )]
-    pub(crate) async fn roster_set(
+    pub(crate) async fn harness_roster_set_impl(
         &self,
-        Parameters(params): Parameters<RosterSetParams>,
+        params: RosterSetParams,
     ) -> Result<CallToolResult, McpError> {
         roster_set_entry(&self.db, &params, &Utc::now()).map_err(internal_error)
     }
 
-    #[tool(
-        name = "roster_clear",
-        description = "Delete one roster entry (idempotent). Omit `model_pattern` to delete the platform-wide entry."
-    )]
-    pub(crate) async fn roster_clear(
+    pub(crate) async fn harness_roster_clear_impl(
         &self,
-        Parameters(params): Parameters<RosterClearParams>,
+        params: RosterClearParams,
     ) -> Result<CallToolResult, McpError> {
         self.db
             .roster_delete(&params.platform, params.model_pattern.as_deref())
@@ -114,13 +102,9 @@ impl TaskTriggerHandler {
         )))
     }
 
-    #[tool(
-        name = "roster_list",
-        description = "List every roster entry, optionally filtered to one platform, each with its effective state now (available, and whether an unavailable entry has expired)."
-    )]
-    pub(crate) async fn roster_list(
+    pub(crate) async fn harness_roster_list_impl(
         &self,
-        Parameters(params): Parameters<RosterListParams>,
+        params: RosterListParams,
     ) -> Result<CallToolResult, McpError> {
         let entries = self
             .db
@@ -133,13 +117,9 @@ impl TaskTriggerHandler {
         ))
     }
 
-    #[tool(
-        name = "roster_check",
-        description = "Return the effective availability of one platform/model pair and name the roster entry that decided it."
-    )]
-    pub(crate) async fn roster_check(
+    pub(crate) async fn harness_roster_check_impl(
         &self,
-        Parameters(params): Parameters<RosterCheckParams>,
+        params: RosterCheckParams,
     ) -> Result<CallToolResult, McpError> {
         let entries = self
             .db

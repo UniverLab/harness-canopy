@@ -1,4 +1,5 @@
 use super::*;
+use crate::db::connection::{is_busy_error, with_busy_retry};
 
 /// Owned setup for one node dispatch attempt.
 pub(crate) struct NodeAttemptSetup {
@@ -87,7 +88,7 @@ impl GraphEngine {
         // prompt, timeout, commit_rights, resume — everything read by
         // execute_agent_node / execute_check_node / execute_router_node)
         // is read from the database HERE, at the moment of dispatch —
-        // not from the per-run `nodes` snapshot. So a graph_update_node
+        // not from the per-run `nodes` snapshot. So a graph_node
         // applied between two dispatches of this node lands on the
         // second dispatch (FR1). This read happens exactly once, before
         // the run row below is created, and the same `node` value is
@@ -97,7 +98,7 @@ impl GraphEngine {
         // execute_agent_node derives them from this same `node` (FR4).
         // `nodes_by_id` (the launch snapshot) stays authoritative for
         // graph TOPOLOGY — kind, position, edges, router routes — which
-        // graph_update_node / graph_update_ensemble refuse to change while
+        // graph_node / graph_ensemble refuse to change while
         // the graph is `running` (FR5).
         let node_fresh = self
             .db
@@ -131,12 +132,19 @@ impl GraphEngine {
         // CB43: record the pair resolved at dispatch, on the row
         // itself — never re-derived from the node config later.
         let (executed_platform, executed_model) = executed_pair_for_node(&node);
-        self.db.insert_graph_run(&GraphNodeRun {
+        // A node that declares mutexes starts `waiting` — `run_node_with_infra_retries`
+        // flips it to `running` at the grant, which is also when its timeout starts.
+        let initial_status = if node_mutex_resources(&node).is_empty() {
+            GraphRunStatus::Running
+        } else {
+            GraphRunStatus::Waiting
+        };
+        let run_row = GraphNodeRun {
             id: run_id.clone(),
             graph_id: ctx.lp.id.clone(),
             spec_id: ctx.spec.id.clone(),
             node_id: node.id.clone(),
-            status: GraphRunStatus::Running,
+            status: initial_status,
             input: previous_output.cloned(),
             output: None,
             started_at: chrono::Utc::now(),
@@ -147,7 +155,8 @@ impl GraphEngine {
             session_id: None,
             executed_platform,
             executed_model,
-        })?;
+        };
+        with_busy_retry("insert_graph_run", || self.db.insert_graph_run(&run_row))?;
 
         {
             let node_platform = node
@@ -227,8 +236,7 @@ impl GraphEngine {
         state: &SpecRunState,
         retry: &mut NodeRetryCtx<'_>,
     ) -> Result<(NodeExecution, GraphNodeRun, bool)> {
-        let (retry_limit, crash_max_secs, backoff_secs) = read_infra_config(retry.node);
-        let mut attempt: u32 = 0;
+        let mut chain = AttemptChain::from_node(retry.node);
         // CM49: for a crew-bound node the pair for the NEXT attempt is chosen
         // as soon as the current attempt infra-fails, so the retry run row
         // records the member it will actually run. Cached here and consumed at
@@ -237,13 +245,18 @@ impl GraphEngine {
         let mut pending: Option<GraphNode> = None;
         loop {
             let node_owned: GraphNode = match retry.crew.clone() {
-                Some(crew) => match self.crew_attempt_node(&crew, retry, &mut pending, attempt)? {
-                    Some(next) => next,
-                    None => return self.crew_exhausted_return(retry, &crew),
-                },
+                Some(crew) => {
+                    match self.crew_attempt_node(&crew, retry, &mut pending, chain.attempt)? {
+                        Some(next) => next,
+                        None => return self.crew_exhausted_return(retry, &crew),
+                    }
+                }
                 None => retry.node.clone(),
             };
             let node: &GraphNode = &node_owned;
+            if let Some(stopped) = self.acquire_run_mutexes(ctx, node, &retry.run_id).await? {
+                return Ok(stopped);
+            }
             let execution = self
                 .execute_node(
                     ctx.lp,
@@ -256,6 +269,7 @@ impl GraphEngine {
                     ctx.workdir,
                     retry.resume_candidate.as_deref(),
                     retry.resume_crosses_spec,
+                    chain.nudged,
                     &state.node_outputs,
                     ctx.all_node_names,
                 )
@@ -264,71 +278,83 @@ impl GraphEngine {
                 anyhow!("Graph run '{}' not found after execution.", retry.run_id)
             })?;
 
-            if is_infra_crash(node, &execution, &run, attempt, retry_limit, crash_max_secs) {
-                // CB82: a shutdown kill must take no edge at all (via the
-                // run_spec/spec_step guards) — never the `Error` edge. Settle
-                // the attempt as interrupted without inserting a new retry row.
-                if self.is_shutting_down() {
-                    return self.settle_interrupted_attempt(&retry.run_id, node);
+            match chain.decide(node, &execution, &run) {
+                AttemptRetry::Settle => {
+                    // CM2: the graph is settling on this attempt (no more
+                    // retries). Route `Error` only if this final attempt is
+                    // itself a no-verdict infra crash — a retry that
+                    // recovered (Pass) or a genuine negative verdict (Fail)
+                    // must NOT take the `Error` edge.
+                    let mut execution = execution;
+                    let mut run = run;
+                    let had_infra_crash = finalize_infra_crash_shape(
+                        &self.db,
+                        &retry.run_id,
+                        node,
+                        &mut execution,
+                        &mut run,
+                        chain.attempt,
+                        chain.retry_limit,
+                        chain.crash_max_secs,
+                    )
+                    .await?;
+
+                    return Ok((execution, run, had_infra_crash));
                 }
-                // B19: retry resuming the crashed attempt's own
-                // session if it managed to create one before dying;
-                // an infra crash at spawn usually created none, so
-                // this is normally `None` → the retry cold-starts.
-                // If the crashed attempt was itself a cross-spec
-                // (RS3) resume and it continued the SAME foreign
-                // session before dying, the retry is still that
-                // same cross-spec resume; any other outcome (a
-                // fresh session captured on cold fallback, or none
-                // at all) means the retry is not, and the next
-                // `execute_node` call renders normally for
-                // whichever case it's in.
-                let new_candidate = run.session_id.clone();
-                retry.resume_crosses_spec = retry.resume_crosses_spec
-                    && new_candidate.is_some()
-                    && new_candidate == retry.resume_candidate;
-                retry.resume_candidate = new_candidate;
-                // CM49: pick the next crew member for the retry now, so the
-                // retry run row records the pair it will run.
-                self.pick_next_crew_member(retry, &mut pending)?;
-                let retry_node = pending.as_ref().unwrap_or(node);
-                retry.run_id = begin_infra_retry(
-                    &self.db,
-                    ctx.lp,
-                    ctx.spec,
-                    retry_node,
-                    retry.previous_output,
-                    retry.iteration_value as i64,
-                    &retry.run_id,
-                    &execution.output,
-                    attempt,
-                    backoff_secs,
-                )
-                .await?;
-                attempt += 1;
-                continue;
+                kind => {
+                    // CB82: a shutdown kill must take no edge at all (via the
+                    // run_spec/spec_step guards) — never the `Error` edge. Settle
+                    // the attempt as interrupted without inserting a new retry row.
+                    if self.is_shutting_down() {
+                        return self.settle_interrupted_attempt(&retry.run_id, node);
+                    }
+                    // B19: retry resuming the crashed attempt's own
+                    // session if it managed to create one before dying;
+                    // an infra crash at spawn usually created none, so
+                    // this is normally `None` → the retry cold-starts.
+                    // If the crashed attempt was itself a cross-spec
+                    // (RS3) resume and it continued the SAME foreign
+                    // session before dying, the retry is still that
+                    // same cross-spec resume; any other outcome (a
+                    // fresh session captured on cold fallback, or none
+                    // at all) means the retry is not, and the next
+                    // `execute_node` call renders normally for
+                    // whichever case it's in.
+                    let new_candidate = run.session_id.clone();
+                    retry.resume_crosses_spec = retry.resume_crosses_spec
+                        && new_candidate.is_some()
+                        && new_candidate == retry.resume_candidate;
+                    retry.resume_candidate = new_candidate;
+                    // CM49: pick the next crew member for an infra retry
+                    // now, so the retry run row records the pair it will
+                    // run. A reporting nudge never rotates: it re-runs
+                    // the same member (and resumes its session), so the
+                    // current node is cached as-is for the next attempt.
+                    if kind == AttemptRetry::InfraCrash {
+                        self.pick_next_crew_member(retry, &mut pending)?;
+                    } else if retry.crew.is_some() {
+                        pending = Some(node.clone());
+                    }
+                    let retry_node = pending.as_ref().unwrap_or(node);
+                    let retry_mutex = node_mutex_resources(retry_node);
+                    retry.run_id = begin_infra_retry(
+                        &self.db,
+                        ctx.lp,
+                        ctx.spec,
+                        retry_node,
+                        retry.previous_output,
+                        retry.iteration_value as i64,
+                        &retry.run_id,
+                        &execution.output,
+                        chain.attempt,
+                        chain.backoff_secs,
+                        &retry_mutex,
+                    )
+                    .await?;
+                    chain.advance(kind);
+                    continue;
+                }
             }
-
-            // CM2: the graph is settling on this attempt (no more
-            // retries). Route `Error` only if this final attempt is
-            // itself a no-verdict infra crash — a retry that
-            // recovered (Pass) or a genuine negative verdict (Fail)
-            // must NOT take the `Error` edge.
-            let mut execution = execution;
-            let mut run = run;
-            let had_infra_crash = finalize_infra_crash_shape(
-                &self.db,
-                &retry.run_id,
-                node,
-                &mut execution,
-                &mut run,
-                attempt,
-                retry_limit,
-                crash_max_secs,
-            )
-            .await?;
-
-            return Ok((execution, run, had_infra_crash));
         }
     }
 
@@ -395,6 +421,60 @@ impl GraphEngine {
         ))
     }
 
+    /// The mutex gate ahead of one execution (initial attempt or infra
+    /// retry): the run waits in `waiting` until its full set is granted, and
+    /// only then starts its timeout. Returns `None` once granted (the caller
+    /// executes), or `Some` early-return triple when the wait was refused
+    /// (interrupt, pause, shutdown, dead run) — ending the dispatch the way a
+    /// shutdown kill does. The settled row underneath tells `run_spec`
+    /// whether this was bookkeeping or a verdict.
+    async fn acquire_run_mutexes(
+        &self,
+        ctx: &SpecStepCtx<'_>,
+        node: &GraphNode,
+        run_id: &str,
+    ) -> Result<Option<(NodeExecution, GraphNodeRun, bool)>> {
+        let mutex_resources = node_mutex_resources(node);
+        if acquire_mutexes_before_run(
+            &self.db,
+            &self.shutdown,
+            ctx.lp,
+            &ctx.spec.id,
+            node,
+            run_id,
+            &mutex_resources,
+        )
+        .await?
+        {
+            return Ok(None);
+        }
+        let run = match with_busy_retry("get_graph_run", || self.db.get_graph_run(run_id)) {
+            Ok(run) => run.ok_or_else(|| {
+                anyhow!("Graph run '{run_id}' was deleted while waiting for its mutex.")
+            })?,
+            Err(error) if is_busy_error(&error) => {
+                return Ok(Some(busy_stopped_execution(
+                    &self.db, ctx, node, run_id, &error,
+                )));
+            }
+            Err(error) => return Err(error),
+        };
+        // A gate busy-settle narrates its own message as the verdict summary
+        // instead of the generic stopped-while-waiting text.
+        let execution = match busy_fail_message(&run) {
+            Some(summary) => NodeExecution {
+                status: GraphRunStatus::Fail,
+                output: run.output.clone().unwrap_or_else(|| serde_json::json!({})),
+                summary,
+            },
+            None => interrupted_execution(format!(
+                "Node '{}' stopped while waiting for its mutex.",
+                node.name
+            )),
+        };
+        Ok(Some((execution, run, false)))
+    }
+
     /// CB82: settle an attempt killed by daemon shutdown — record it as
     /// interrupted without inserting a new retry row, and return the run row
     /// with `false` (no infra crash shape).
@@ -403,12 +483,14 @@ impl GraphEngine {
         run_id: &str,
         node: &GraphNode,
     ) -> Result<(NodeExecution, GraphNodeRun, bool)> {
-        let _ = self.db.update_graph_run_result(
-            run_id,
-            GraphRunStatus::Fail,
-            Some(&shutdown_interrupted_output()),
-            Some(chrono::Utc::now()),
-        );
+        let _ = with_busy_retry("update_graph_run_result", || {
+            self.db.update_graph_run_result(
+                run_id,
+                GraphRunStatus::Fail,
+                Some(&shutdown_interrupted_output()),
+                Some(chrono::Utc::now()),
+            )
+        });
         let run = self
             .db
             .get_graph_run(run_id)?
@@ -456,12 +538,14 @@ impl GraphEngine {
                 "Spec '{}' has no nodes of its own and graph '{}' has no top-level graph to fall back to.",
                 spec.name, lp.name
             );
-            self.db.update_graph_spec_status(
-                &spec.id,
-                GraphSpecStatus::Failed,
-                Some(chrono::Utc::now()),
-                Some(chrono::Utc::now()),
-            )?;
+            let _ = persist_bookkeeping("update_graph_spec_status", || {
+                self.db.update_graph_spec_status(
+                    &spec.id,
+                    GraphSpecStatus::Failed,
+                    Some(chrono::Utc::now()),
+                    Some(chrono::Utc::now()),
+                )
+            })?;
             let (dirty, paths) = self.record_spec_end_dirty(&spec.id, workdir).await;
             let summary = match dirty_tree_note(dirty, &paths) {
                 Some(note) => format!("{summary} ({note})"),
@@ -475,12 +559,13 @@ impl GraphEngine {
 
     pub(crate) async fn resolve_spec_baseline(
         &self,
+        graph_id: &str,
         spec: &GraphSpec,
         spec_details: &GraphSpecDetails,
         workdir: &str,
         is_resume: bool,
         directed: bool,
-    ) -> Result<(Option<String>, Option<String>)> {
+    ) -> Result<(Option<String>, Option<i64>, Option<String>)> {
         // B10: capture the workdir's git HEAD once, at the moment the engine
         // starts executing this spec in the *current run attempt*. The
         // persisted value is only ever reused, never re-derived, and only
@@ -490,17 +575,15 @@ impl GraphEngine {
         //
         // A directed run is a third case. It reuses the spec's recorded
         // start head when one exists — the earlier nodes it skipped already
-        // established the baseline — and otherwise captures a fresh one, which
-        // the response reports.
-        let (spec_start_head, _spec_start_dirty) = if directed {
+        // established the baseline — and otherwise reuses the head this run's
+        // first `spec_started` recorded when one exists (FR4), capturing a
+        // fresh one only when none does. The response reports which.
+        let (spec_start_head, spec_start_dirty) = if directed {
             match spec_details.spec.spec_start_head.clone() {
                 Some(head) => (Some(head), spec_details.spec.spec_start_dirty),
                 None => {
-                    let head = capture_workdir_head(workdir).await;
-                    let dirty = capture_workdir_dirty(workdir).await;
-                    self.db
-                        .set_graph_spec_start_state(&spec.id, head.as_deref(), dirty)?;
-                    (head, dirty)
+                    self.directed_fallback_baseline(graph_id, &spec.id, workdir)
+                        .await?
                 }
             }
         } else if is_resume && spec.status == GraphSpecStatus::Running {
@@ -511,8 +594,10 @@ impl GraphEngine {
         } else {
             let head = capture_workdir_head(workdir).await;
             let dirty = capture_workdir_dirty(workdir).await;
-            self.db
-                .set_graph_spec_start_state(&spec.id, head.as_deref(), dirty)?;
+            let _ = persist_bookkeeping("set_graph_spec_start_state", || {
+                self.db
+                    .set_graph_spec_start_state(&spec.id, head.as_deref(), dirty)
+            })?;
             (head, dirty)
         };
         // C15: `spec_committed_head` follows the exact same
@@ -523,10 +608,70 @@ impl GraphEngine {
             if directed || (is_resume && spec.status == GraphSpecStatus::Running) {
                 spec_details.spec.spec_committed_head.clone()
             } else {
-                self.db.set_graph_spec_committed_head(&spec.id, None)?;
+                let _ = persist_bookkeeping("set_graph_spec_committed_head", || {
+                    self.db.set_graph_spec_committed_head(&spec.id, None)
+                })?;
                 None
             };
-        Ok((spec_start_head, spec_committed_head))
+        Ok((spec_start_head, spec_start_dirty, spec_committed_head))
+    }
+
+    /// FR4: the baseline for a directed start with no recorded head — the
+    /// baseline this run's first `spec_started` recorded when one exists
+    /// (persisted, so later starts reuse the column), else a fresh capture.
+    /// A failed event lookup captures fresh; it never fails the start.
+    async fn directed_fallback_baseline(
+        &self,
+        graph_id: &str,
+        spec_id: &str,
+        workdir: &str,
+    ) -> Result<(Option<String>, Option<i64>)> {
+        let recorded = self.db.spec_started_head(graph_id, spec_id).ok().flatten();
+        let (head, dirty) = match recorded {
+            Some(baseline) => baseline,
+            None => (
+                capture_workdir_head(workdir).await,
+                capture_workdir_dirty(workdir).await,
+            ),
+        };
+        let _ = persist_bookkeeping("set_graph_spec_start_state", || {
+            self.db
+                .set_graph_spec_start_state(spec_id, head.as_deref(), dirty)
+        })?;
+        Ok((head, dirty))
+    }
+
+    /// Record the spec's `spec_started` event carrying its resolved baseline
+    /// (`spec_start_head`/`spec_start_dirty`), so a directed start after a
+    /// pause — where reconcile cleared the columns — reuses this run's first
+    /// baseline instead of capturing a fresh one. Called after
+    /// [`Self::resolve_spec_baseline`], still before any node runs or the
+    /// status update.
+    pub(crate) fn record_spec_started(
+        &self,
+        lp: &Graph,
+        spec: &GraphSpec,
+        workdir: &str,
+        head: Option<&str>,
+        dirty: Option<i64>,
+    ) {
+        activity::record(
+            &self.db,
+            activity::GraphEvent {
+                graph_id: &lp.id,
+                graph_name: &lp.name,
+                workdir,
+                spec_id: Some(&spec.id),
+                node_id: None,
+                run_id: None,
+                kind: activity::GraphEventKind::SpecStarted,
+                message: format!("Spec {} started.", activity::spec_label(spec)),
+                payload: Some(serde_json::json!({
+                    "spec_start_head": head,
+                    "spec_start_dirty": dirty,
+                })),
+            },
+        );
     }
 
     pub(crate) async fn record_spec_end_dirty(
@@ -535,7 +680,9 @@ impl GraphEngine {
         workdir: &str,
     ) -> (Option<i64>, Vec<String>) {
         let (dirty, paths) = capture_workdir_dirty_with_paths(workdir).await;
-        if let Err(e) = self.db.set_graph_spec_end_state(spec_id, dirty, &paths) {
+        if let Err(e) = with_busy_retry("set_graph_spec_end_state", || {
+            self.db.set_graph_spec_end_state(spec_id, dirty, &paths)
+        }) {
             tracing::warn!(
                 "Failed to record spec end dirty state for '{}': {}",
                 spec_id,
@@ -543,69 +690,6 @@ impl GraphEngine {
             );
         }
         (dirty, paths)
-    }
-
-    /// A spec that terminates because a FAILING node had no outgoing edge
-    /// leaves no blocker anywhere a human can see unless something writes
-    /// one — see the module-level defect this closes. Writes a derived
-    /// blocker onto the terminating run's `output.blocker`, the exact key
-    /// `graph_run_blocker` (daemon/handler.rs) already reads for `graph_list`
-    /// and `graph_get`'s `blocked`/`blocker` fields, so no reader needs to
-    /// change. Never invoked for a PASSING termination (the normal, correct
-    /// end of a spec — see `Check committed`) and never overwrites a
-    /// blocker `graph_report_blocker` already recorded, since that text is
-    /// more specific than anything derived here.
-    pub(crate) fn record_terminal_blocker(
-        &self,
-        run_id: &str,
-        node_name: &str,
-        final_execution: &NodeExecution,
-    ) -> anyhow::Result<()> {
-        if final_execution.output.get("blocker").is_some() {
-            return Ok(());
-        }
-        let blocker = format!(
-            "Spec terminated: node '{}' ended '{}' with no outgoing edge for that status. {}",
-            node_name,
-            final_execution.status.as_str(),
-            final_execution.summary,
-        );
-        let mut output = final_execution.output.clone();
-        match output.as_object_mut() {
-            Some(map) => {
-                map.insert("blocker".to_string(), Value::String(blocker));
-            }
-            None => output = serde_json::json!({ "blocker": blocker }),
-        }
-        self.db
-            .update_graph_run_result(run_id, final_execution.status, Some(&output), None)?;
-        Ok(())
-    }
-
-    /// Overwrite (not merge-and-preserve, unlike [`Self::record_terminal_blocker`])
-    /// `run_id`'s `output.blocker` with C19's cross-run budget text. Called
-    /// only once [`Self::record_spec_attempt`] has confirmed the budget is
-    /// actually exceeded, at which point this attempt's blocker is strictly
-    /// more informative than whatever dead-end text (if any) is already
-    /// there — naming the spec, the attempt count, and the last failure
-    /// rather than just this one node.
-    pub(crate) fn set_run_blocker(
-        &self,
-        run_id: &str,
-        status: GraphRunStatus,
-        output: &Value,
-        blocker: &str,
-    ) -> Result<()> {
-        let mut merged = output.clone();
-        match merged.as_object_mut() {
-            Some(map) => {
-                map.insert("blocker".to_string(), Value::String(blocker.to_string()));
-            }
-            None => merged = serde_json::json!({ "blocker": blocker }),
-        }
-        self.db
-            .update_graph_run_result(run_id, status, Some(&merged), None)?;
-        Ok(())
     }
 
     /// C19: called from [`Self::run_spec`] every time a spec is about to end
@@ -618,7 +702,7 @@ impl GraphEngine {
     /// A genuine failure increments the spec's own persisted
     /// `cross_run_attempts` counter (`graph_specs.cross_run_attempts`) —
     /// unlike the per-node `iterations` map `run_spec` builds fresh on every
-    /// call, this survives `graph_reset`, a relaunch, and a daemon restart,
+    /// call, this survives `graph_control`, a relaunch, and a daemon restart,
     /// which is the entire point: an unsatisfiable spec must not get a
     /// fresh budget every time an operator resets and relaunches after a
     /// quota failure. Once the count reaches `self.spec_attempt_limit`,
@@ -635,15 +719,24 @@ impl GraphEngine {
         if is_infra_failure {
             return Ok(None);
         }
-        let attempts = self.db.increment_graph_spec_cross_run_attempts(&spec.id)?;
+        let attempts = match with_busy_retry("increment_graph_spec_cross_run_attempts", || {
+            self.db.increment_graph_spec_cross_run_attempts(&spec.id)
+        }) {
+            Ok(attempts) => attempts,
+            Err(error) if is_busy_error(&error) => {
+                tracing::warn!("{error:#}; skipping the cross-run budget this attempt");
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
         if (attempts as usize) < self.spec_attempt_limit {
             return Ok(None);
         }
         Ok(Some(format!(
             "Spec '{}' failed {} time(s) across separate graph executions (limit {}); last \
-             failure: {}. To clear the limit: `graph_reset` with `specs: [{}]` clears this \
-             spec's execution count (the worktree is not touched); then `graph_run` or \
-             `run_from_node`.",
+             failure: {}. To clear the limit: `graph_control reset` with `specs: [{}]` clears this \
+             spec's execution count (the worktree is not touched); then `graph_control run` or \
+             `graph_control continue` with mode `run_from_node`.",
             spec.name, attempts, self.spec_attempt_limit, summary, spec.id
         )))
     }

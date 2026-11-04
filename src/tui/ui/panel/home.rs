@@ -1,6 +1,7 @@
 use crate::shared::banner::BANNER_GRADIENT;
 use crate::tui::app::types::App;
 use crate::tui::brians_brain::{BriansBrain, CellState};
+use crate::tui::ui::animations_enabled;
 use crate::tui::ui::brand::{rgb, ESSENCE};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
@@ -28,7 +29,12 @@ pub(super) fn draw_canopy_banner_animation(frame: &mut Frame, area: Rect, app: &
         0
     };
 
-    let wave_offset = (app.animation_tick as f32 * 0.02) % 1.0;
+    // Both animation toggles off freezes the banner wave at phase 0.
+    let wave_offset = if animations_enabled(app) {
+        (app.animation_tick as f32 * 0.02) % 1.0
+    } else {
+        0.0
+    };
 
     for (i, line) in banner_lines.iter().enumerate() {
         let row_pos = if total > 1 {

@@ -31,8 +31,10 @@ use crate::application::ports::StateRepository;
 use crate::db::Database;
 use crate::domain::db_paths::database_path;
 use crate::shared::sync_identity::{
-    CANOPY_AGENT_ID_ENV, CANOPY_AGENT_ID_HEADER, CANOPY_MCP_PROFILE_ENV, CANOPY_MCP_PROFILE_HEADER,
-    CANOPY_SEED_ID_ENV, CANOPY_SEED_ID_HEADER, CANOPY_WORKDIR_ENV,
+    CANOPY_AGENT_ID_ENV, CANOPY_AGENT_ID_HEADER, CANOPY_GRAPH_ID_ENV, CANOPY_GRAPH_ID_HEADER,
+    CANOPY_MCP_PROFILE_ENV, CANOPY_MCP_PROFILE_HEADER, CANOPY_NODE_ID_ENV, CANOPY_NODE_ID_HEADER,
+    CANOPY_NODE_RUN_ID_ENV, CANOPY_NODE_RUN_ID_HEADER, CANOPY_SEED_ID_ENV, CANOPY_SEED_ID_HEADER,
+    CANOPY_WORKDIR_ENV,
 };
 
 const MCP_SESSION_HEADER: &str = "mcp-session-id";
@@ -415,6 +417,17 @@ async fn forward_request(
     if let Some(profile) = non_empty_env(CANOPY_MCP_PROFILE_ENV) {
         request = request.header(CANOPY_MCP_PROFILE_HEADER, profile);
     }
+    // The agent's run identity rides along as headers so the daemon resolves
+    // id-less verdicts even though the MCP server never sees this env.
+    if let Some(graph_id) = non_empty_env(CANOPY_GRAPH_ID_ENV) {
+        request = request.header(CANOPY_GRAPH_ID_HEADER, graph_id);
+    }
+    if let Some(node_id) = non_empty_env(CANOPY_NODE_ID_ENV) {
+        request = request.header(CANOPY_NODE_ID_HEADER, node_id);
+    }
+    if let Some(run_id) = non_empty_env(CANOPY_NODE_RUN_ID_ENV) {
+        request = request.header(CANOPY_NODE_RUN_ID_HEADER, run_id);
+    }
     if let Some(sid) = session_id {
         request = request.header(MCP_SESSION_HEADER, sid);
     }
@@ -778,12 +791,31 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    /// A port that nothing is listening on: bind then drop, so a connect is refused.
-    async fn free_port() -> u16 {
+    /// A port that refuses connections for the test's whole duration.
+    ///
+    /// A bind-then-drop "free port" is racy under parallel tests: another test's
+    /// fake daemon can bind the same port between our drop and our connect, and a
+    /// request that then gets an HTTP answer exits the reconnect loop early
+    /// without backing off. Holding the listener prevents the steal, and dropping
+    /// each accepted connection without a response makes `request.send()` fail,
+    /// so the bridge still classifies every attempt as daemon-unreachable.
+    struct RefusedPort {
+        port: u16,
+        _handle: tokio::task::JoinHandle<()>,
+    }
+
+    async fn refused_port() -> RefusedPort {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        port
+        let handle = tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                drop(socket);
+            }
+        });
+        RefusedPort {
+            port,
+            _handle: handle,
+        }
     }
 
     struct FakeInner {
@@ -1071,12 +1103,11 @@ mod tests {
 
     /// Regression guard for the identity-shadowing bug (T39): every platform
     /// is funneled through this sidecar, so a hardcoded `x-canopy-client-name:
-    /// bridge` header would shadow a real session's name at the daemon (see
-    /// `TaskTriggerHandler::resolve_sync_client_name`), turning "boletus ·
-    /// claude" into "boletus · claude · bridge" — two spellings of one
-    /// identity. The daemon already resolves the transport (bridge vs.
-    /// direct) from the session's own `cli` column, so this header must stay
-    /// absent.
+    /// bridge` header would shadow a real session's name at the daemon,
+    /// turning "boletus · claude" into "boletus · claude · bridge" — two
+    /// spellings of one identity. The daemon already resolves the transport
+    /// (bridge vs. direct) from the session's own `cli` column, so this
+    /// header must stay absent.
     #[tokio::test]
     async fn forward_request_omits_client_name_header() {
         use axum::extract::Request;
@@ -1091,10 +1122,7 @@ mod tests {
             axum::extract::State(flag): axum::extract::State<Arc<AtomicBool>>,
             request: Request,
         ) -> axum::response::Response {
-            if request
-                .headers()
-                .contains_key(crate::shared::sync_identity::CANOPY_CLIENT_NAME_HEADER)
-            {
+            if request.headers().contains_key("x-canopy-client-name") {
                 flag.store(true, Ordering::SeqCst);
             }
             (
@@ -1133,6 +1161,91 @@ mod tests {
             "forward_request must not send x-canopy-client-name; the daemon \
              resolves the display name from the session itself"
         );
+
+        server.abort();
+    }
+
+    /// The bridge forwards the agent's run identity env vars as headers so
+    /// the daemon resolves id-less verdicts on the proxied path: a fake
+    /// daemon records the three headers it receives.
+    #[tokio::test]
+    async fn forward_request_forwards_graph_identity_headers() {
+        use axum::extract::Request;
+        use axum::response::IntoResponse;
+        use std::sync::Arc;
+
+        /// (name, value) pairs a fake daemon recorded.
+        type RecordedHeaders = Arc<Mutex<Vec<(String, String)>>>;
+
+        let seen: RecordedHeaders = Arc::new(Mutex::new(Vec::new()));
+        let flag = Arc::clone(&seen);
+
+        async fn handle_mcp(
+            axum::extract::State(flag): axum::extract::State<RecordedHeaders>,
+            request: Request,
+        ) -> axum::response::Response {
+            for name in [
+                crate::shared::sync_identity::CANOPY_GRAPH_ID_HEADER,
+                crate::shared::sync_identity::CANOPY_NODE_ID_HEADER,
+                crate::shared::sync_identity::CANOPY_NODE_RUN_ID_HEADER,
+            ] {
+                if let Some(value) = request.headers().get(name).and_then(|v| v.to_str().ok()) {
+                    flag.lock()
+                        .unwrap()
+                        .push((name.to_string(), value.to_string()));
+                }
+            }
+            (
+                axum::http::StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                r#"{"jsonrpc":"2.0","id":1,"result":{}}"#,
+            )
+                .into_response()
+        }
+
+        let router = axum::Router::new()
+            .route("/mcp", axum::routing::post(handle_mcp))
+            .with_state(flag);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        std::env::set_var(CANOPY_GRAPH_ID_ENV, "graph-1");
+        std::env::set_var(CANOPY_NODE_ID_ENV, "node-1");
+        std::env::set_var(CANOPY_NODE_RUN_ID_ENV, "run-1");
+
+        let endpoint = format!("http://127.0.0.1:{port}/mcp");
+        let client = Client::new();
+        let outcome = forward_request(
+            &client,
+            &endpoint,
+            "sess-boletus",
+            None,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+            None,
+        )
+        .await;
+
+        std::env::remove_var(CANOPY_GRAPH_ID_ENV);
+        std::env::remove_var(CANOPY_NODE_ID_ENV);
+        std::env::remove_var(CANOPY_NODE_RUN_ID_ENV);
+
+        outcome.expect("forward_request should succeed against the fake daemon");
+
+        let seen = seen.lock().unwrap();
+        for (header, value) in [
+            (CANOPY_GRAPH_ID_HEADER, "graph-1"),
+            (CANOPY_NODE_ID_HEADER, "node-1"),
+            (CANOPY_NODE_RUN_ID_HEADER, "run-1"),
+        ] {
+            assert!(
+                seen.contains(&(header.to_string(), value.to_string())),
+                "forward_request must forward {header}={value}; got {seen:?}"
+            );
+        }
 
         server.abort();
     }
@@ -1816,7 +1929,8 @@ mod tests {
     /// Covers spec guideline test #2.
     #[tokio::test]
     async fn bridge_error_while_daemon_down_names_daemon_and_retry() {
-        let port = free_port().await;
+        let refused = refused_port().await;
+        let port = refused.port;
         let endpoint = format!("http://127.0.0.1:{port}/mcp");
         let policy = ReconnectPolicy {
             max_attempts: 3,
@@ -1865,7 +1979,8 @@ mod tests {
     /// Covers spec guideline test #4.
     #[tokio::test]
     async fn bridge_reports_bounded_failure_when_daemon_never_returns() {
-        let port = free_port().await;
+        let refused = refused_port().await;
+        let port = refused.port;
         let endpoint = format!("http://127.0.0.1:{port}/mcp");
         let policy = ReconnectPolicy {
             max_attempts: 3,
@@ -1937,7 +2052,8 @@ mod tests {
     /// Covers spec guideline test #5.
     #[tokio::test]
     async fn bridge_backs_off_between_reconnect_attempts() {
-        let port = free_port().await;
+        let refused = refused_port().await;
+        let port = refused.port;
         let endpoint = format!("http://127.0.0.1:{port}/mcp");
         let policy = ReconnectPolicy {
             max_attempts: 4,
@@ -1946,7 +2062,7 @@ mod tests {
         };
 
         let start = Instant::now();
-        let _ = serve_one_request(
+        let result = serve_one_request(
             &Client::new(),
             &endpoint,
             port,
@@ -1960,6 +2076,10 @@ mod tests {
         .await;
         let elapsed = start.elapsed();
 
+        assert!(
+            matches!(result, Err(ServeError::DaemonUnreachable(_))),
+            "all attempts must fail as daemon-unreachable, got {result:?}"
+        );
         // Sleeps after attempts 1, 2, 3 (not after 4th): 50ms + 100ms + 200ms = 350ms
         assert!(
             elapsed >= Duration::from_millis(300),

@@ -115,10 +115,33 @@ fn require_enum(
 }
 
 fn require_string(key: &str, value: &toml_edit::Value) -> Result<(), String> {
-    if value.as_str().is_some() {
-        return Ok(());
+    let Some(text) = value.as_str() else {
+        return Err(format!("{key}: {} is not a string", shown(value)));
+    };
+    if key == "remote.host_label" {
+        return require_host_label(key, text);
     }
-    Err(format!("{key}: {} is not a string", shown(value)))
+    Ok(())
+}
+
+/// A host label must carry no control characters, and a non-empty label
+/// must carry more than whitespace. `""` stays legal — the registry
+/// default means the hostname — and length is not capped here: an overlong
+/// label truncates at send time.
+fn require_host_label(key: &str, label: &str) -> Result<(), String> {
+    // Debug-format the label: a control-character rejection would otherwise
+    // echo raw control bytes (newline, escape) into the message.
+    if label.chars().any(|c| c.is_control()) {
+        return Err(format!(
+            "{key}: {label:?} is not valid; a host label must not contain control characters"
+        ));
+    }
+    if !label.is_empty() && label.trim().is_empty() {
+        return Err(format!(
+            "{key}: {label:?} is not valid; a host label must not be blank (empty means the hostname)"
+        ));
+    }
+    Ok(())
 }
 
 fn require_chrono_format(key: &str, value: &toml_edit::Value) -> Result<(), String> {
@@ -241,6 +264,24 @@ mod tests {
         assert!(error.contains("rag_personal_dirs"), "{error}");
         assert!(error.contains("/does/not/exist"), "{error}");
         assert!(validate_value(dirs, &value("[\"/\"]")).is_ok());
+    }
+
+    #[test]
+    fn host_label_rejects_control_characters_and_blank_labels() {
+        let def = find("remote.host_label").unwrap();
+        assert!(validate_value(def, &value("\"\"")).is_ok());
+        assert!(validate_value(def, &value("\"home-server\"")).is_ok());
+        // An overlong label is legal at save time: it truncates at send.
+        assert!(validate_value(def, &value(&format!("\"{}\"", "a".repeat(100)))).is_ok());
+        let control = validate_value(def, &value("\"bad\\nlabel\"")).unwrap_err();
+        assert!(control.contains("remote.host_label"), "{control}");
+        assert!(control.contains("control characters"), "{control}");
+        // The rejected label is Debug-escaped: no raw newline reaches the message.
+        assert!(!control.contains('\n'), "{control:?}");
+        assert!(control.contains("bad\\nlabel"), "{control}");
+        let blank = validate_value(def, &value("\"   \"")).unwrap_err();
+        assert!(blank.contains("remote.host_label"), "{blank}");
+        assert!(blank.contains("blank"), "{blank}");
     }
 
     #[test]

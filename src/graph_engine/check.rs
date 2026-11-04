@@ -1,4 +1,5 @@
 use super::*;
+use crate::db::connection::with_busy_retry;
 use crate::db::Database;
 use crate::domain::graphs::GraphRunStatus;
 use check_command::{execute_shell_command, ShellCommandResult};
@@ -124,12 +125,14 @@ fn check_marker_violation(
         "spec_id": spec.id,
         "node_id": node.id,
     });
-    let _ = db.update_graph_run_result(
-        run_id,
-        GraphRunStatus::Fail,
-        Some(&output_json),
-        Some(chrono::Utc::now()),
-    );
+    let _ = with_busy_retry("update_graph_run_result", || {
+        db.update_graph_run_result(
+            run_id,
+            GraphRunStatus::Fail,
+            Some(&output_json),
+            Some(chrono::Utc::now()),
+        )
+    });
     NodeExecution {
         status: GraphRunStatus::Fail,
         output: output_json,

@@ -82,11 +82,38 @@ impl MissionManager {
         events: &[MissionEvent],
         whimsg: &mut Whimsg,
     ) -> Result<Vec<String>> {
+        let pending = Self::pending_for_snapshot(snapshot, events);
+        self.unlock_pending(pending, whimsg)
+    }
+
+    /// Missions the current snapshot and events award, without unlocking:
+    /// worker mode collects here on the UI and persists through the worker.
+    pub fn pending_for_snapshot(
+        snapshot: &MissionSnapshot,
+        events: &[MissionEvent],
+    ) -> Vec<MissionId> {
         let mut pending = Vec::new();
         Self::collect_event_missions(events, &mut pending);
         Self::collect_snapshot_missions(snapshot, &mut pending);
         Self::collect_agent_missions(snapshot, &mut pending);
-        self.unlock_pending(pending, whimsg)
+        pending
+    }
+
+    /// Record a worker-persisted unlock (worker mode): marks the store without
+    /// touching the database and fires the whimsg. Returns the title when
+    /// newly marked.
+    pub fn mark_confirmed(
+        &mut self,
+        id: MissionId,
+        timestamp: i64,
+        whimsg: &mut Whimsg,
+    ) -> Option<String> {
+        if !self.store.mark_unlocked(id, timestamp) {
+            return None;
+        }
+        let title = mission_def(id).title;
+        whimsg.notify_mission_unlocked(title);
+        Some(title.to_string())
     }
 
     /// Map discrete events to the mission each one awards.

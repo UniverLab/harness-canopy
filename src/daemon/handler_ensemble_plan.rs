@@ -44,6 +44,7 @@ pub(crate) struct EnsembleUnitSpec<'a> {
     pub(crate) start_position: i64,
     pub(crate) kind: EnsembleKind,
     pub(crate) commit_rights: bool,
+    pub(crate) mutex: Vec<String>,
 }
 
 /// The concrete graph pieces of one ensemble unit, all with fresh ids: the
@@ -59,7 +60,7 @@ pub(crate) struct BuiltEnsembleUnit {
 }
 
 /// Assemble an ensemble unit from validated inputs. Shared by
-/// `graph_add_ensemble` and `graph_copy_ensemble` so the two can never drift in
+/// `graph_ensemble` and `graph_ensemble` so the two can never drift in
 /// how members, the join, and the wiring are laid out. Purely constructs
 /// in-memory values (fresh ids, no runtime state) — persistence is the
 /// caller's `insert_ensemble_unit`.
@@ -138,6 +139,7 @@ pub(crate) fn build_ensemble_unit(spec: &EnsembleUnitSpec) -> BuiltEnsembleUnit 
             None
         },
         commit_rights: spec.commit_rights,
+        mutex: spec.mutex.clone(),
         created_at: now,
 
         crew_id: None,
@@ -376,10 +378,10 @@ pub(crate) fn resolve_chained_exit_ensemble(
     }))
 }
 
-/// Every update field `graph_update_ensemble` accepts, as presence flags —
+/// Every update field `graph_ensemble` accepts, as presence flags —
 /// one list shared by the empty-update refusal and the crew-combination
 /// refusal, so the two can never drift apart.
-fn ensemble_update_field_flags(params: &GraphUpdateEnsembleParams) -> [bool; 19] {
+fn ensemble_update_field_flags(params: &GraphUpdateEnsembleParams) -> [bool; 20] {
     [
         params.kind.is_some(),
         params.prompt_template.is_some(),
@@ -400,16 +402,14 @@ fn ensemble_update_field_flags(params: &GraphUpdateEnsembleParams) -> [bool; 19]
         params.remove_entry_from.is_some(),
         params.commit_rights.is_some(),
         params.crew.is_some(),
+        params.mutex.is_some(),
     ]
 }
 
 pub(crate) fn reject_empty_ensemble_update(
     params: &GraphUpdateEnsembleParams,
 ) -> Result<(), String> {
-    validate_at_least_one_bool(
-        &ensemble_update_field_flags(params),
-        "graph_update_ensemble",
-    )
+    validate_at_least_one_bool(&ensemble_update_field_flags(params), "graph_ensemble")
 }
 
 /// CM49: binding or unbinding a crew is its own operation. The crew arm
@@ -459,10 +459,10 @@ pub(crate) fn check_resulting_min_pass(
     details: &crate::domain::graphs::EnsembleDetails,
 ) -> Result<(), String> {
     // ── CB40 / FR1–FR4: refuse a write whose RESULTING (min_pass, member count)
-    // pair is one `graph_import` would reject. Pure arithmetic on values already in
+    // pair is one `graph_edit` would reject. Pure arithmetic on values already in
     // hand; runs before any row is written, so a refusal changes nothing (FR4).
     // Only guards calls that actually touch `members` or `min_pass` (FR2) — an
-    // unrelated edit to a legacy-invalid ensemble is left for `graph_preflight`.
+    // unrelated edit to a legacy-invalid ensemble is left for `graph_control`.
     if params.members.is_some() || params.min_pass.is_some() {
         let resulting_member_count = params
             .members

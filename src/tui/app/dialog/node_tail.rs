@@ -42,6 +42,8 @@ pub(crate) struct NodeTailDialog {
     pub member_count: usize,
     /// Set when resolution produced no run; the body shows this spec name.
     pub no_run_spec_name: Option<String>,
+    /// The waiting line's spec code (`[CODE]`), `None` for a codeless spec.
+    pub no_run_spec_code: Option<String>,
     /// The `(run_id, member_cursor)` last poll resolved to — lets the poll
     /// distinguish a genuine node transition (reset scroll) from a member
     /// cursor step (keep scroll).
@@ -65,6 +67,7 @@ impl NodeTailDialog {
             member_cursor: 0,
             member_count: 0,
             no_run_spec_name: None,
+            no_run_spec_code: None,
             last_resolved: None,
         }
     }
@@ -122,19 +125,100 @@ impl App {
         }
     }
 
-    /// Refresh the pane from the DB every tick: resolve the run, reset
-    /// scroll/cursor on a genuine transition, then fetch the tail.
+    /// Refresh the pane every tick: resolve the run, reset scroll/cursor on
+    /// a genuine transition, then fetch the tail. With a tail worker (FR6)
+    /// the database resolve runs off-thread and only the finished response
+    /// is applied here; without one it resolves inline as before.
     pub(crate) fn poll_node_tail_dialog(&mut self) {
         // CT28: the pane adds reads to the refresh tick ONLY while it is open.
         // Guard before resolving so a closed pane costs no `list_graph_runs_for_spec`.
         if self.node_tail_dialog.is_none() {
             return;
         }
+        if self.node_tail_worker.is_some() {
+            self.poll_node_tail_dialog_with_worker();
+            return;
+        }
         // Phase 1 (immutable &self): resolve the highlighted node, fetch the
         // full run + tail into owned locals.
         let resolved = self.resolve_for_poll();
-
         // Phase 2 (&mut self): apply to the dialog.
+        self.apply_node_tail_poll_data(resolved);
+    }
+
+    /// Worker-mode poll (FR6): apply the latest finished resolve, then kick
+    /// the next one. No database call on the calling thread. A dead worker
+    /// retires itself and the poll falls back to the inline resolve.
+    fn poll_node_tail_dialog_with_worker(&mut self) {
+        let (response, dead) = self
+            .node_tail_worker
+            .as_mut()
+            .map(super::node_tail_worker::NodeTailWorker::poll)
+            .unwrap_or((None, true));
+        if dead {
+            self.node_tail_worker = None;
+            let resolved = self.resolve_for_poll();
+            self.apply_node_tail_poll_data(resolved);
+            return;
+        }
+        if let Some(response) = response {
+            let resolved = node_tail_response_to_poll_data(response);
+            self.apply_node_tail_poll_data(resolved);
+        }
+        match self.build_node_tail_request() {
+            Some(request) => {
+                if let Some(worker) = self.node_tail_worker.as_mut() {
+                    worker.kick(request);
+                }
+            }
+            // No highlight/state/spec: same clear the inline path applies.
+            None => self.apply_node_tail_poll_data(PollData::None),
+        }
+    }
+
+    /// Live-state inputs for one worker resolve — the same guards
+    /// `resolve_for_poll` applies, without the database calls.
+    fn build_node_tail_request(&self) -> Option<super::node_tail_worker::NodeTailRequest> {
+        let highlighted = self.graph_live_highlighted_node_id()?.to_string();
+        let state = self.graph_live_state.as_ref()?;
+        let spec_id = state.current_spec_id.clone()?;
+        let node_names = state
+            .effective_nodes
+            .iter()
+            .map(|n| (n.id.clone(), n.name.clone()))
+            .collect();
+        let (spec_name, spec_code) = state
+            .spec_queue
+            .iter()
+            .find(|q| q.spec_id == spec_id)
+            .map(|q| (q.spec_name.clone(), q.spec_code.clone()))
+            .unwrap_or_else(|| (spec_id.clone(), None));
+        let ensembles = state
+            .ensembles
+            .iter()
+            .map(|e| super::node_tail_worker::NodeTailEnsemble {
+                join_node_id: e.join_node_id.clone(),
+                member_ids: e.members.iter().map(|m| m.node_id.clone()).collect(),
+            })
+            .collect();
+        let member_cursor = self
+            .node_tail_dialog
+            .as_ref()
+            .map(|d| d.member_cursor)
+            .unwrap_or(0);
+        Some(super::node_tail_worker::NodeTailRequest {
+            spec_id,
+            highlighted,
+            member_cursor,
+            ensembles,
+            node_names,
+            spec_name,
+            spec_code,
+        })
+    }
+
+    /// Phase 2 (&mut self): apply resolved display data to the dialog.
+    fn apply_node_tail_poll_data(&mut self, resolved: PollData) {
         let Some(dialog) = self.node_tail_dialog.as_mut() else {
             return;
         };
@@ -146,10 +230,12 @@ impl App {
                 dialog.stderr_lines.clear();
                 dialog.member_pos = None;
                 dialog.no_run_spec_name = None;
+                dialog.no_run_spec_code = None;
             }
             PollData::NoRun {
                 node_name,
                 spec_name,
+                spec_code,
             } => {
                 dialog.node_name = node_name;
                 dialog.run_id = None;
@@ -168,6 +254,7 @@ impl App {
                 dialog.scroll = 0;
                 dialog.last_resolved = None;
                 dialog.no_run_spec_name = Some(spec_name);
+                dialog.no_run_spec_code = spec_code;
             }
             PollData::Show(s) => {
                 apply_resolved_run(dialog, &s);
@@ -202,6 +289,13 @@ impl App {
                 .map(|q| q.spec_name.clone())
                 .unwrap_or_else(|| spec_id.to_string())
         };
+        let spec_code_of = || -> Option<String> {
+            state
+                .spec_queue
+                .iter()
+                .find(|q| Some(q.spec_id.as_str()) == Some(spec_id))
+                .and_then(|q| q.spec_code.clone())
+        };
 
         let ensemble = state.ensembles.iter().find(|e| {
             e.join_node_id == highlighted || e.members.iter().any(|m| m.node_id == highlighted)
@@ -232,6 +326,7 @@ impl App {
                     return PollData::NoRun {
                         node_name: node_name_of(highlighted),
                         spec_name: spec_name_of(),
+                        spec_code: spec_code_of(),
                     };
                 }
                 let cursor = self
@@ -260,6 +355,7 @@ impl App {
                     None => PollData::NoRun {
                         node_name: node_name_of(highlighted),
                         spec_name: spec_name_of(),
+                        spec_code: spec_code_of(),
                     },
                 }
             }
@@ -327,8 +423,39 @@ enum PollData {
     NoRun {
         node_name: String,
         spec_name: String,
+        spec_code: Option<String>,
     },
     Show(ShowData),
+}
+
+/// Convert a worker resolve into poll data: the worker's owned output has the
+/// same shape as the inline resolve, so both share the apply phase.
+fn node_tail_response_to_poll_data(
+    response: super::node_tail_worker::NodeTailResponse,
+) -> PollData {
+    match response {
+        super::node_tail_worker::NodeTailResponse::NoRun {
+            node_name,
+            spec_name,
+            spec_code,
+        } => PollData::NoRun {
+            node_name,
+            spec_name,
+            spec_code,
+        },
+        super::node_tail_worker::NodeTailResponse::Show(show) => PollData::Show(ShowData {
+            run_id: show.run_id,
+            executed_platform: show.executed_platform,
+            executed_model: show.executed_model,
+            stdout_lines: show.stdout_lines,
+            stderr_lines: show.stderr_lines,
+            status: show.status,
+            started_at: show.started_at,
+            timed_out: show.timed_out,
+            node_name: show.node_name,
+            member_pos: show.member_pos,
+        }),
+    }
 }
 
 /// Apply resolved display data to the dialog: detect transitions, fill fields.
@@ -637,6 +764,7 @@ mod tests {
             schedule_expr: None,
             watch_path: None,
             autorun_at: None,
+            pause_waiting_for: Vec::new(),
             spec_queue: vec![crate::tui::app::graph_live_state::SpecQueueEntry {
                 spec_id: spec_id.to_string(),
                 spec_name: "Pane spec".to_string(),
@@ -909,6 +1037,29 @@ mod tests {
             dialog.no_run_spec_name.as_deref(),
             Some("Pane spec"),
             "an empty ensemble member must name the spec too"
+        );
+    }
+
+    /// SPECCODE: a highlighted node with no run in the current spec carries
+    /// the spec's code (from the live queue) into the waiting line's dialog.
+    #[test]
+    fn waiting_line_carries_the_current_spec_code() {
+        let db = test_db();
+        seed_pane_graph(&db, "spec-pane", &["n1"]);
+        let mut app = test_app(Arc::clone(&db));
+        let mut state = pane_state("spec-pane", "n1");
+        state.spec_queue[0].spec_code = Some("FIX-7".to_string());
+        app.graph_live_state = Some(state);
+        app.graph_live_follow = true;
+
+        app.open_node_tail_pane();
+        let dialog = app.node_tail_dialog.as_ref().unwrap();
+        assert_eq!(dialog.run_id, None);
+        assert_eq!(dialog.no_run_spec_name.as_deref(), Some("Pane spec"));
+        assert_eq!(
+            dialog.no_run_spec_code.as_deref(),
+            Some("FIX-7"),
+            "the waiting line must carry the queue entry's code"
         );
     }
 }

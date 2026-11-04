@@ -70,6 +70,31 @@ impl Database {
         Ok(())
     }
 
+    /// Map a workdir inside a sandbox worktree back to the original project
+    /// workdir the sandbox was cut from: the newest `sandbox_runs` row whose
+    /// `worktree_path` equals `workdir` or is a path-prefix of it (a
+    /// subdirectory of the worktree) decides. Any other path — and any
+    /// lookup failure — returns `workdir` unchanged, so callers can map
+    /// unconditionally. Deliberately never calls `worktrees_base_dir()`
+    /// (which panics outside a real home, e.g. in tests).
+    pub fn map_workdir_out_of_sandbox(&self, workdir: &str) -> Result<String> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let escaped = workdir
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let original: Option<String> = conn
+            .query_row(
+                "SELECT original_workdir FROM sandbox_runs
+                  WHERE worktree_path = ?1 OR ?1 LIKE worktree_path || '/%' ESCAPE '\\'
+                  ORDER BY created_at DESC LIMIT 1",
+                params![escaped],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(original.unwrap_or_else(|| workdir.to_string()))
+    }
+
     pub fn update_sandbox_run_status(&self, id: &str, status: &str) -> Result<()> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         conn.execute(
@@ -90,9 +115,10 @@ impl Database {
         Ok(result)
     }
 
-    /// Reconstruct the live [`Sandbox`] for a still-`active` run, so a
-    /// resumed graph (or a reopened session) keeps operating in its worktree
-    /// instead of silently falling back to the user's real checkout.
+    /// Reconstruct the live [`Sandbox`] for a still-`active` — or
+    /// operator-`kept` — run, so a resumed graph (or a reopened session)
+    /// keeps operating in its worktree instead of silently falling back
+    /// to the user's real checkout.
     pub fn get_active_sandbox_for_owner(
         &self,
         owner_type: &str,
@@ -103,7 +129,7 @@ impl Database {
             .query_row(
                 "SELECT id, project_hash, base_branch, sandbox_branch, worktree_path, cli_name, original_workdir, created_at
                  FROM sandbox_runs
-                 WHERE owner_type = ?1 AND owner_id = ?2 AND status = 'active'
+                 WHERE owner_type = ?1 AND owner_id = ?2 AND status IN ('active','kept')
                  ORDER BY created_at DESC LIMIT 1",
                 params![owner_type, owner_id],
                 |row| {
@@ -121,6 +147,29 @@ impl Database {
                             .unwrap_or_else(|_| chrono::Utc::now()),
                     })
                 },
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    /// The newest sandbox run of one owner, whatever its status — what the
+    /// graph detail view reports so a graph whose last run was sandboxed
+    /// names that sandbox (and whether it is `kept`, `merged`, …).
+    pub fn latest_sandbox_run_for_owner(
+        &self,
+        owner_type: &str,
+        owner_id: &str,
+    ) -> Result<Option<SandboxRun>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let row = conn
+            .query_row(
+                &format!(
+                    "SELECT {SANDBOX_RUN_COLUMNS} FROM sandbox_runs \
+                     WHERE owner_type = ?1 AND owner_id = ?2 \
+                     ORDER BY created_at DESC LIMIT 1",
+                ),
+                params![owner_type, owner_id],
+                sandbox_run_from_row,
             )
             .optional()?;
         Ok(row)
@@ -303,6 +352,42 @@ mod tests {
     }
 
     #[test]
+    fn test_active_lookup_returns_kept_row() {
+        let db = test_db();
+        let sandbox = test_sandbox();
+        db.insert_sandbox_run(&sandbox, "graph", "graph-123")
+            .unwrap();
+
+        let found = db
+            .get_active_sandbox_for_owner("graph", "graph-123")
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.id, "test-sandbox-id");
+
+        // A failed graph's sandbox is `kept` for the operator — a resume
+        // must still find it, never silently fall back to the real checkout.
+        db.update_sandbox_run_status("test-sandbox-id", "kept")
+            .unwrap();
+        let found = db
+            .get_active_sandbox_for_owner("graph", "graph-123")
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.id, "test-sandbox-id");
+        assert_eq!(
+            found.worktree_path,
+            std::path::PathBuf::from("/tmp/test-worktree")
+        );
+
+        // Terminal non-kept rows stay invisible to the resume lookup.
+        db.update_sandbox_run_status("test-sandbox-id", "cleaned")
+            .unwrap();
+        assert!(db
+            .get_active_sandbox_for_owner("graph", "graph-123")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
     fn test_cleanup_error_roundtrip_and_finished_list() {
         let db = test_db();
         let sandbox = test_sandbox();
@@ -329,6 +414,134 @@ mod tests {
         assert_eq!(
             finished[0].cleanup_error,
             Some("/tmp/wt: failed: boom".to_string())
+        );
+    }
+
+    #[test]
+    fn test_latest_sandbox_run_for_owner_returns_newest_of_that_owner() {
+        let db = test_db();
+
+        let mut older = test_sandbox();
+        older.id = "older-run".to_string();
+        older.created_at = Utc::now() - chrono::Duration::hours(2);
+        let mut newer = test_sandbox();
+        newer.id = "newer-run".to_string();
+        newer.created_at = Utc::now();
+        let mut other = test_sandbox();
+        other.id = "other-owner-run".to_string();
+        other.created_at = Utc::now() + chrono::Duration::hours(1);
+
+        // Insert out of order so the answer can only come from the ORDER BY.
+        db.insert_sandbox_run(&newer, "graph", "graph-123").unwrap();
+        db.insert_sandbox_run(&older, "graph", "graph-123").unwrap();
+        db.insert_sandbox_run(&other, "graph", "graph-456").unwrap();
+
+        let latest = db
+            .latest_sandbox_run_for_owner("graph", "graph-123")
+            .unwrap()
+            .expect("graph-123 has sandbox rows");
+        assert_eq!(latest.id, "newer-run");
+
+        // The status is whatever the row holds — a `kept` run still counts.
+        db.update_sandbox_run_status("newer-run", "kept").unwrap();
+        let latest = db
+            .latest_sandbox_run_for_owner("graph", "graph-123")
+            .unwrap()
+            .expect("kept rows are still the newest");
+        assert_eq!(latest.id, "newer-run");
+        assert_eq!(latest.status, "kept");
+
+        // Another owner's newer row is never returned.
+        assert_eq!(
+            db.latest_sandbox_run_for_owner("graph", "graph-456")
+                .unwrap()
+                .unwrap()
+                .id,
+            "other-owner-run"
+        );
+
+        // An owner with no sandbox gets None, not an error.
+        assert!(db
+            .latest_sandbox_run_for_owner("graph", "graph-none")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_map_workdir_out_of_sandbox_exact_subdir_and_unknown() {
+        let db = test_db();
+        let sandbox = test_sandbox();
+        db.insert_sandbox_run(&sandbox, "graph", "graph-123")
+            .unwrap();
+
+        // Exact worktree path resolves to the original workdir.
+        assert_eq!(
+            db.map_workdir_out_of_sandbox("/tmp/test-worktree").unwrap(),
+            "/home/user/project"
+        );
+        // A subdirectory of the worktree resolves too (the agent's cwd may be
+        // anywhere inside the worktree).
+        assert_eq!(
+            db.map_workdir_out_of_sandbox("/tmp/test-worktree/src/db")
+                .unwrap(),
+            "/home/user/project"
+        );
+        // A sibling path sharing the worktree prefix is NOT inside it.
+        assert_eq!(
+            db.map_workdir_out_of_sandbox("/tmp/test-worktree-sibling")
+                .unwrap(),
+            "/tmp/test-worktree-sibling"
+        );
+        // An unrelated path passes through unchanged.
+        assert_eq!(
+            db.map_workdir_out_of_sandbox("/home/user/other").unwrap(),
+            "/home/user/other"
+        );
+        // The original workdir itself passes through unchanged.
+        assert_eq!(
+            db.map_workdir_out_of_sandbox("/home/user/project").unwrap(),
+            "/home/user/project"
+        );
+    }
+
+    #[test]
+    fn test_map_workdir_out_of_sandbox_prefers_newest_run() {
+        let db = test_db();
+        let mut older = test_sandbox();
+        older.id = "older-sbx".to_string();
+        older.created_at = Utc::now() - chrono::Duration::hours(2);
+        older.original_workdir = "/home/user/old-project".to_string();
+        let mut newer = test_sandbox();
+        newer.id = "newer-sbx".to_string();
+        newer.created_at = Utc::now();
+        newer.original_workdir = "/home/user/new-project".to_string();
+
+        db.insert_sandbox_run(&newer, "graph", "graph-123").unwrap();
+        db.insert_sandbox_run(&older, "graph", "graph-123").unwrap();
+
+        assert_eq!(
+            db.map_workdir_out_of_sandbox("/tmp/test-worktree").unwrap(),
+            "/home/user/new-project"
+        );
+    }
+
+    #[test]
+    fn test_latest_sandbox_run_for_owner_respects_owner_type() {
+        let db = test_db();
+        let sandbox = test_sandbox();
+        db.insert_sandbox_run(&sandbox, "graph", "shared-id")
+            .unwrap();
+
+        assert!(db
+            .latest_sandbox_run_for_owner("agent", "shared-id")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            db.latest_sandbox_run_for_owner("graph", "shared-id")
+                .unwrap()
+                .unwrap()
+                .id,
+            "test-sandbox-id"
         );
     }
 }

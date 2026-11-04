@@ -11,6 +11,8 @@ mod misc;
 pub use misc::*;
 mod graph_core;
 pub use graph_core::*;
+mod nodes;
+pub use nodes::*;
 mod graph_access;
 pub use graph_access::*;
 mod graph_crew;
@@ -21,6 +23,14 @@ mod crew;
 pub use crew::*;
 mod settings;
 pub use settings::*;
+mod sandbox;
+pub use sandbox::*;
+mod shelf;
+pub use shelf::*;
+mod remote;
+pub use remote::*;
+mod catalogue;
+pub use catalogue::*;
 
 #[cfg(test)]
 mod tests {
@@ -63,7 +73,7 @@ mod tests {
         let schema = schemars::schema_for!(GraphAddNodeParams);
         let value = serde_json::to_value(&schema).expect("schema should serialize");
         let config_schema = &value["properties"]["config"];
-        // `config` is now optional (an alternative to `blueprint`), so the
+        // `config` is now optional (an alternative to `node`), so the
         // "object" type may appear directly or nested under a $ref/anyOf
         // produced for `Option<..>`.
         let type_str = config_schema["type"].as_str();

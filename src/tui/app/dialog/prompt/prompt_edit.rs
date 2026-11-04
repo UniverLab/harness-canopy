@@ -422,9 +422,61 @@ impl SimplePromptDialog {
         self.focused_section == 0 && !self.enabled_sections.is_empty()
     }
 
-    /// Total focusable items: send_at (1) + enabled_sections.
+    /// Total focusable items: send_at (1) + enabled_sections + the chips row
+    /// when attachments are showing.
     pub fn total_focusable(&self) -> usize {
-        1 + self.enabled_sections.len()
+        1 + self.enabled_sections.len() + usize::from(!self.attachments.is_empty())
+    }
+
+    /// The chips row's focus stop (`enabled_sections.len() + 1`), or `None`
+    /// when there are no attachments to focus.
+    pub fn chips_stop(&self) -> Option<usize> {
+        (!self.attachments.is_empty()).then(|| self.enabled_sections.len() + 1)
+    }
+
+    /// Whether the attachment chips row currently holds focus.
+    pub fn is_chips_focused(&self) -> bool {
+        self.chips_stop()
+            .is_some_and(|stop| self.focused_section == stop)
+    }
+
+    /// Move the chip highlight laterally, clamping to the row.
+    pub fn chips_move(&mut self, delta: isize) {
+        if self.attachments.is_empty() {
+            self.attachment_focus = None;
+            return;
+        }
+        let current = self.attachment_focus.unwrap_or(0) as isize;
+        let next = (current + delta).clamp(0, self.attachments.len() as isize - 1);
+        self.attachment_focus = Some(next as usize);
+    }
+
+    /// Remove the focused chip (Backspace/Delete on the chips row). The shelf
+    /// row and bytes stay — removal only detaches from this draft. Focus
+    /// stays on the row while chips remain, else returns to the last section.
+    pub fn remove_focused_chip(&mut self) {
+        let Some(index) = self.attachment_focus else {
+            return;
+        };
+        if !remove_attachment(&mut self.attachments, index) {
+            return;
+        }
+        if self.attachments.is_empty() {
+            self.attachment_focus = None;
+            self.focused_section = self.enabled_sections.len();
+        } else {
+            self.attachment_focus = Some(index.min(self.attachments.len() - 1));
+        }
+    }
+
+    /// Park the chip highlight after a focus move lands on (or leaves) the
+    /// chips row: a valid chip when focused, untouched otherwise.
+    fn sync_chips_focus(&mut self) {
+        if self.is_chips_focused() {
+            let last = self.attachments.len().saturating_sub(1);
+            let current = self.attachment_focus.unwrap_or(0).min(last);
+            self.attachment_focus = Some(current);
+        }
     }
 
     /// Focus the first enabled section, ready to type. The send control lives
@@ -436,28 +488,33 @@ impl SimplePromptDialog {
     }
 
     /// Move focus to the next field in VISUAL order (U11): sections top to
-    /// bottom, then the send control at the bottom, then wrap to the first
-    /// section. The send control keeps focus index 0 internally.
+    /// bottom, then the attachment chips row when attachments are showing,
+    /// then the send control at the bottom, then wrap to the first section.
+    /// The send control keeps focus index 0 internally.
     pub fn focus_next(&mut self) {
         let sections = self.enabled_sections.len();
+        let top = self.total_focusable() - 1;
         self.focused_section = match self.focused_section {
             0 if sections > 0 => 1,
             0 => 0,
-            i if i >= sections => 0,
+            i if i >= top => 0,
             i => i + 1,
         };
+        self.sync_chips_focus();
     }
 
     /// Move focus to the previous field in VISUAL order (see
-    /// [`Self::focus_next`]): from the send control up to the last section,
-    /// from the first section wrap down to the send control.
+    /// [`Self::focus_next`]): from the send control up to the last section
+    /// (or the chips row above it), from the first section wrap down to the
+    /// send control.
     pub fn focus_prev(&mut self) {
-        let sections = self.enabled_sections.len();
+        let top = self.total_focusable() - 1;
         self.focused_section = match self.focused_section {
-            0 => sections,
+            0 => top,
             1 => 0,
             i => i - 1,
         };
+        self.sync_chips_focus();
     }
 
     /// Map the focus index to an `enabled_sections` index.

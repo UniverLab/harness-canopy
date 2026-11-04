@@ -91,7 +91,7 @@ pub(crate) fn resolve_node_prompt_template(
 /// set), `"preset"` (`prompt_preset` set), or `"default_fallback"` (neither,
 /// so the node silently runs on the bare fallback template nobody chose).
 /// Read-only mirror of that function's own precedence check — never the
-/// other way around, so the two can't drift. Surfaced in `graph_get`'s node
+/// other way around, so the two can't drift. Surfaced in `graph`'s node
 /// JSON (`daemon::handler::graph_node_json`) and recorded on every agent run's
 /// output, so a node running on the default is distinguishable from one
 /// running its author's prompt without having to inspect its raw config.
@@ -111,9 +111,34 @@ pub(crate) fn agent_prompt_source(config: &Value) -> &'static str {
     }
 }
 
-/// Refuse to render `template` when it carries a `{{name}}` marker not in
-/// `supported` — the CP1 contract: a prompt builder must never emit a
-/// template presented as an instruction. Mirrors
+/// The `{{...}}` markers in `template` that neither `supported` nor
+/// `{{output:<name>}}` for a name in `node_names` can bind. This is the one
+/// binding check shared by the spawn path ([`refuse_unbindable_template`]),
+/// the write-time validators (`daemon::handler_templates`) and the preflight
+/// warnings, so the three can never disagree on what is bindable — a template
+/// refused here is exactly one the spawn path would refuse member by member.
+/// Escaped `\{{...}}` markers are literal text, never hits.
+pub(crate) fn unbindable_placeholders_in(
+    template: &str,
+    supported: &[&str],
+    node_names: Option<&[String]>,
+) -> Vec<String> {
+    let mut extended: Vec<&str> = supported.to_vec();
+    let mut owned: Vec<String> = Vec::new();
+    if let Some(node_names) = node_names {
+        for name in node_names {
+            owned.push(format!("output:{name}"));
+        }
+        for s in &owned {
+            extended.push(s.as_str());
+        }
+    }
+    crate::domain::prompts::unbindable_placeholders(template, &extended)
+}
+
+/// Refuse to render `template` when [`unbindable_placeholders_in`] finds a
+/// marker no binding covers — the CP1 contract: a prompt builder must never
+/// emit a template presented as an instruction. Mirrors
 /// [`crate::domain::prompts::render_preset`]'s refusal, but for the engine's
 /// own `.replace()`-based renderers, and checks the *template* (not the
 /// rendered output) so a `{{...}}` sequence inside a bound value — a spec
@@ -124,17 +149,7 @@ pub(crate) fn refuse_unbindable_template(
     supported: &[&str],
     available_node_names: Option<&[String]>,
 ) -> Result<()> {
-    let mut extended: Vec<&str> = supported.to_vec();
-    let mut owned: Vec<String> = Vec::new();
-    if let Some(node_names) = available_node_names {
-        for name in node_names {
-            owned.push(format!("output:{name}"));
-        }
-        for s in &owned {
-            extended.push(s.as_str());
-        }
-    }
-    let unbindable = crate::domain::prompts::unbindable_placeholders(template, &extended);
+    let unbindable = unbindable_placeholders_in(template, supported, available_node_names);
     if unbindable.is_empty() {
         return Ok(());
     }
@@ -212,7 +227,7 @@ pub(crate) fn render_agent_prompt(
     prompt_template: &str,
     previous_output: Option<&Value>,
     workdir: &str,
-    run_id: &str,
+    _run_id: &str,
     node_outputs: &HashMap<String, Value>,
     all_node_names: &[String],
     spec_notes_section: &str,
@@ -275,13 +290,10 @@ pub(crate) fn render_agent_prompt(
         String::new()
     };
 
-    // `run_id` (not just `node_id`) must round-trip through the report tools
-    // (B12): a node can be retried, so more than one run can exist for the
-    // same `node_id` over a spec's lifetime. Without the exact run_id, a
-    // report arriving late from a killed/superseded attempt (e.g. a timed-out
-    // agent that ignores its own termination and calls the tool anyway) would
-    // otherwise be matched to "whatever's currently active for this node_id"
-    // and silently corrupt a newer, unrelated run.
+    // A verdict still binds to an exact run (B12), but the ids travel via
+    // the environment (CANOPY_NODE_RUN_ID/CANOPY_NODE_ID, exported at spawn),
+    // not the prompt: a model retyping two UUIDs invents tails (2026-10-27),
+    // while the engine-owned identity cannot be mistyped.
     // CM47: engine-owned `[SPEC NOTES]` travels with every cold-start prompt,
     // like `[REPORTING]` — no template placeholder needed. Pre-built by the
     // caller (which has DB access); `""` for previews that skip notes.
@@ -291,7 +303,7 @@ pub(crate) fn render_agent_prompt(
         format!("{}\n\n", spec_notes_section.trim_end())
     };
     Ok(format!(
-        "# [GRAPH CONTEXT]\n<graph>\n  <name>{}</name>\n  <spec>{}</spec>\n  <node>{}</node>\n  <workdir>{}</workdir>\n</graph>\n{}\n# [SPEC]\n{}\n\n# [PREVIOUS FEEDBACK]\n{}\n\n{}# [REPORTING]\nWhen you finish this node, call graph_complete_node with run_id=\"{}\", node_id=\"{}\", status=\"pass\"|\"fail\", a concise summary, and your output.\nIf you are blocked and need human intervention, call graph_report_blocker with run_id=\"{}\", node_id=\"{}\" and the blocker description.\n",
+        "# [GRAPH CONTEXT]\n<graph>\n  <name>{}</name>\n  <spec>{}</spec>\n  <node>{}</node>\n  <workdir>{}</workdir>\n</graph>\n{}\n# [SPEC]\n{}\n\n# [PREVIOUS FEEDBACK]\n{}\n\n{}# [REPORTING]\nWhen you finish this node, call graph_complete_node({{status, summary, output}}) with status=\"pass\"|\"fail\", a concise summary, and your output. Do not pass run_id or node_id: the ids come from the environment (CANOPY_NODE_RUN_ID, CANOPY_NODE_ID).\nIf you are blocked and need human intervention, call graph_report_blocker({{description}}) with the blocker description. The ids come from the environment (CANOPY_NODE_RUN_ID, CANOPY_NODE_ID).\n",
         lp.name,
         spec.name,
         node.name,
@@ -300,10 +312,6 @@ pub(crate) fn render_agent_prompt(
         prompt,
         previous_feedback,
         spec_notes_block,
-        run_id,
-        node.id,
-        run_id,
-        node.id
     ))
 }
 
@@ -317,7 +325,7 @@ pub(crate) fn render_agent_prompt(
 /// contract are sent. Overridable per node via the `resume_prompt` config
 /// key — but only for this same-spec case; see
 /// [`RESUME_PROMPT_CROSS_SPEC_DEFAULT`] for the other one.
-pub(crate) const RESUME_PROMPT_DEFAULT: &str = "# [CONTINUE]\nYou are resuming your existing session for this task. The full task context is already in your session history — only the new feedback is included below. Address it, then report.\n\n# [PREVIOUS FEEDBACK]\n{{previous_feedback}}\n\n# [REPORTING]\nWhen you finish, call graph_complete_node with run_id=\"{{run_id}}\", node_id=\"{{node_id}}\", status=\"pass\"|\"fail\", a concise summary, and your output.\nIf you are blocked and need human intervention, call graph_report_blocker with run_id=\"{{run_id}}\", node_id=\"{{node_id}}\" and the blocker description.\n";
+pub(crate) const RESUME_PROMPT_DEFAULT: &str = "# [CONTINUE]\nYou are resuming your existing session for this task. The full task context is already in your session history — only the new feedback is included below. Address it, then report.\n\n# [PREVIOUS FEEDBACK]\n{{previous_feedback}}\n\n# [REPORTING]\nWhen you finish, call graph_complete_node({status, summary, output}) with status=\"pass\"|\"fail\", a concise summary, and your output. Do not pass run_id or node_id: the ids come from the environment (CANOPY_NODE_RUN_ID, CANOPY_NODE_ID).\nIf you are blocked and need human intervention, call graph_report_blocker({description}) with the blocker description. The ids come from the environment (CANOPY_NODE_RUN_ID, CANOPY_NODE_ID).\n";
 
 /// Default incremental prompt for a CROSS-SPEC resumed agent run (RS3): a
 /// context-group handoff, where the session being resumed was captured by a
@@ -331,7 +339,7 @@ pub(crate) const RESUME_PROMPT_DEFAULT: &str = "# [CONTINUE]\nYou are resuming y
 /// spec captured the session being resumed) — never overridable via the
 /// node's `resume_prompt` config key, since that choice depends on runtime
 /// state a static per-node template cannot know.
-pub(crate) const RESUME_PROMPT_CROSS_SPEC_DEFAULT: &str = "# [CONTINUE: NEW SPEC]\nYou are resuming your existing session, but for a NEW spec. The previous spec you were working on is finished and already committed — do not restate its conclusions or describe its prior work as this spec's output. Only the spec below is outstanding; address it, then report.\n\n# [SPEC]\n{{spec_content}}\n\n# [PREVIOUS FEEDBACK]\n{{previous_feedback}}\n\n# [REPORTING]\nWhen you finish, call graph_complete_node with run_id=\"{{run_id}}\", node_id=\"{{node_id}}\", status=\"pass\"|\"fail\", a concise summary, and your output.\nIf you are blocked and need human intervention, call graph_report_blocker with run_id=\"{{run_id}}\", node_id=\"{{node_id}}\" and the blocker description.\n";
+pub(crate) const RESUME_PROMPT_CROSS_SPEC_DEFAULT: &str = "# [CONTINUE: NEW SPEC]\nYou are resuming your existing session, but for a NEW spec. The previous spec you were working on is finished and already committed — do not restate its conclusions or describe its prior work as this spec's output. Only the spec below is outstanding; address it, then report.\n\n# [SPEC]\n{{spec_content}}\n\n# [PREVIOUS FEEDBACK]\n{{previous_feedback}}\n\n# [REPORTING]\nWhen you finish, call graph_complete_node({status, summary, output}) with status=\"pass\"|\"fail\", a concise summary, and your output. Do not pass run_id or node_id: the ids come from the environment (CANOPY_NODE_RUN_ID, CANOPY_NODE_ID).\nIf you are blocked and need human intervention, call graph_report_blocker({description}) with the blocker description. The ids come from the environment (CANOPY_NODE_RUN_ID, CANOPY_NODE_ID).\n";
 
 /// Render a resumed run's incremental prompt (RS2/RS3) from `template` — the
 /// node's `resume_prompt` override or [`RESUME_PROMPT_DEFAULT`] for a
@@ -391,6 +399,31 @@ pub(crate) fn render_resume_prompt(
             }),
         },
     ))
+}
+
+/// Tag heading the reporting-nudge section: an agent attempt that exited
+/// without filing a verdict is re-dispatched once with this appended, so a
+/// test (or a human reading the prompt) can tell a nudged retry apart from
+/// an ordinary attempt.
+pub(crate) const REPORT_NUDGE_TAG: &str = "# [REPORT REQUIRED]";
+
+/// The reporting-nudge section: the previous attempt exited without a
+/// verdict, printed text is never a verdict, and the agent must call
+/// `graph_complete_node` exactly once now. Appended by
+/// [`with_report_nudge`] to the retry's prompt (cold or resumed).
+pub(crate) fn report_nudge_section(run_id: &str, node_id: &str) -> String {
+    format!(
+        "{REPORT_NUDGE_TAG}\nYour previous attempt exited without reporting a verdict: no verdict was recorded for that run. Printed text is never a verdict — only a graph_complete_node call counts. Call graph_complete_node exactly once now with run_id=\"{run_id}\", node_id=\"{node_id}\", your verdict (status=\"pass\"|\"fail\"), a concise summary, and your output.\n"
+    )
+}
+
+/// Append the [`report_nudge_section`] to `prompt` when `on` (a spent
+/// reporting nudge), else return the prompt unchanged.
+pub(crate) fn with_report_nudge(prompt: String, on: bool, run_id: &str, node_id: &str) -> String {
+    if !on {
+        return prompt;
+    }
+    format!("{prompt}\n\n{}", report_nudge_section(run_id, node_id))
 }
 
 /// The only `{{...}}` markers [`render_resume_prompt`] can bind — the
@@ -466,7 +499,7 @@ pub(crate) const COMPLETION_HOOK_BINDINGS: &[&str] = &["graph_name", "workdir", 
 pub(crate) const SPEC_NOTES_CHAR_BUDGET: usize = 5_000;
 
 /// CM47: fixed instructions closing every `[SPEC NOTES]` section.
-pub(crate) const SPEC_NOTES_FOOTER: &str = "Write your note with spec_note_write(run_id, body); it replaces your previous note; keep it at most 2 500 characters; write it as you go (what you did, what is left, decisions a successor must not redo), not only at the end.";
+pub(crate) const SPEC_NOTES_FOOTER: &str = "Write your note with `spec_edit note_write`(run_id, body); it replaces your previous note; keep it at most 2 500 characters; write it as you go (what you did, what is left, decisions a successor must not redo), not only at the end.";
 
 /// CM47: one note's already-fetched fields for [`compose_spec_notes_section`].
 /// A view (not the DB row) so the composer never touches the DB and the
@@ -482,7 +515,7 @@ pub(crate) struct SpecNoteView<'a> {
 
 fn spec_note_stub(note: &SpecNoteView<'_>) -> String {
     format!(
-        "{}: {} chars, updated {} — read with spec_notes_get\n",
+        "{}: {} chars, updated {} — read with `spec notes`\n",
         note.owner_name,
         note.body.chars().count(),
         note.updated_at
@@ -679,7 +712,7 @@ mod spec_notes_tests {
             section.contains("Other: 900 chars, updated"),
             "overflow becomes a stub naming owner, size and time"
         );
-        assert!(section.contains("read with spec_notes_get"));
+        assert!(section.contains("read with `spec notes`"));
     }
 
     fn topo_node(id: &str, name: &str, kind: GraphNodeKind) -> GraphNode {

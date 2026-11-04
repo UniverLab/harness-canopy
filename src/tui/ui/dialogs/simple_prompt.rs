@@ -5,11 +5,12 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
 
 use super::{draw_dialog_left_wave, truncate_str};
-use crate::db::scheduled_sends::ScheduledSend;
+use crate::db::scheduled_prompts::ScheduledPrompt;
 use crate::tui::app::dialog::{PromptTab, SimplePromptDialog};
 use crate::tui::app::types::{AgentEntry, App};
 use crate::tui::ui::dialogs::at_picker::draw_at_picker_dropdown;
 use crate::tui::ui::dialogs::section_picker::draw_section_picker_modal;
+use crate::tui::ui::effective_animation_tick;
 use crate::tui::ui::theme::Theme;
 
 mod content;
@@ -59,29 +60,24 @@ struct NormalContentCtx<'a> {
 
 /// Pending scheduled sends targeting the currently selected session —
 /// shown next to the Schedule field and cancelable with Ctrl+K there.
-fn pending_scheduled_for_selection(app: &App) -> Vec<ScheduledSend> {
+fn pending_scheduled_for_selection(app: &App) -> Vec<ScheduledPrompt> {
     let selected_session_id = app.selected_agent().and_then(|a| match a {
         AgentEntry::Interactive(idx) => app.interactive_agents.get(*idx).map(|ia| ia.id.clone()),
         _ => None,
     });
     selected_session_id
         .as_deref()
-        .and_then(|id| app.db.list_pending_scheduled_sends_for_session(id).ok())
+        .and_then(|id| app.db.list_pending_scheduled_prompts_for_session(id).ok())
         .unwrap_or_default()
 }
 
 /// Render the clickable Normal / Raw tab bar.
 ///
-/// The active tab is drawn in accent (reversed for a clear "selected"
-/// block); the inactive one is dim. Hit-boxes come from the same pure
-/// geometry the mouse handler uses, so clicks land exactly on the labels.
-fn draw_prompt_tab_bar(
-    frame: &mut Frame,
-    inner: Rect,
-    dialog: &SimplePromptDialog,
-    accent: Color,
-    theme: &Theme,
-) {
+/// The active tab uses the pill pair (`accent_fg` on `header_color`, the
+/// emphatic style the rest of the TUI uses for a selected tab); the
+/// inactive one is dim. Hit-boxes come from the same pure geometry the
+/// mouse handler uses, so clicks land exactly on the labels.
+fn draw_prompt_tab_bar(frame: &mut Frame, inner: Rect, dialog: &SimplePromptDialog, theme: &Theme) {
     let tab_boxes = SimplePromptDialog::tab_hitboxes(inner.x, inner.y);
     let tab_spans: Vec<Span> = tab_boxes
         .iter()
@@ -94,8 +90,9 @@ fn draw_prompt_tab_bar(
                 Span::styled(
                     label,
                     Style::default()
-                        .fg(accent)
-                        .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+                        .fg(theme.accent_fg)
+                        .bg(theme.header_color)
+                        .add_modifier(Modifier::BOLD),
                 )
             } else {
                 Span::styled(label, Style::default().fg(theme.dim_text))
@@ -221,19 +218,19 @@ pub fn draw_simple_prompt_dialog(
 
     let area = centered_rect_fixed(geo.dialog_width, geo.height, frame.area());
     frame.render_widget(Clear, area);
-    draw_dialog_left_wave(frame, area, app.animation_tick.into());
+    draw_dialog_left_wave(frame, area, effective_animation_tick(app).into());
 
     let block = Block::default()
         .title(" Prompt Builder ")
         .borders(crate::tui::ui::dialog_borders_for(theme))
         .border_style(Style::default().fg(accent))
-        .style(Style::default().bg(theme.dialog_bg));
+        .style(Style::default().bg(theme.info_bg));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     // ── Tab bar (row 0) ───────────────────────────────────────────────────
-    draw_prompt_tab_bar(frame, inner, dialog, accent, theme);
+    draw_prompt_tab_bar(frame, inner, dialog, theme);
 
     // Draw hint line (row 1).
     let instructions = prompt_hint_line(
@@ -1008,6 +1005,109 @@ mod tests {
         assert!(
             border_cells >= 1,
             "dialog border must use the canopy header color"
+        );
+    }
+
+    #[test]
+    fn prompt_builder_chrome_sits_on_info_bg_with_sections_on_stage() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut app = app_for_prompt(Color::Rgb(255, 0, 0));
+        // A fresh dialog has a single focused section; add a second one with
+        // content so an unfocused section row actually renders.
+        let dialog = app.simple_prompt_dialog.as_mut().unwrap();
+        dialog
+            .sections
+            .insert("context_1".to_string(), "some context".to_string());
+        dialog.enabled_sections.push("context_1".to_string());
+        let theme = Theme::classic();
+        let backend = TestBackend::new(200, 50);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_simple_prompt_dialog(frame, &app, &theme);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        const BOX_GLYPHS: [char; 11] = ['┌', '┐', '└', '┘', '─', '│', '├', '┤', '┬', '┴', '┼'];
+        let mut chrome_cells = 0;
+        let mut section_cells = 0;
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                let cell = &buffer[(x, y)];
+                if cell.symbol().chars().any(|c| BOX_GLYPHS.contains(&c))
+                    && cell.fg == theme.header_color
+                    && cell.bg == theme.info_bg
+                {
+                    chrome_cells += 1;
+                }
+                if cell.bg == theme.stage_bg {
+                    section_cells += 1;
+                }
+            }
+        }
+        assert!(
+            chrome_cells >= 1,
+            "dialog chrome must sit on info_bg, found none"
+        );
+        assert!(
+            section_cells >= 1,
+            "unfocused sections must sit on stage_bg, found none"
+        );
+    }
+
+    #[test]
+    fn prompt_builder_focused_section_sits_on_selected_bg() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        // The modern theme is the only one that can pin this branch: in
+        // classic, `selected_bg` equals the old `field_bg_focused`, so a
+        // classic render would pass even with the focused mapping reverted.
+        let mut app = app_for_prompt(Color::Rgb(255, 0, 0));
+        let dialog = app.simple_prompt_dialog.as_mut().unwrap();
+        // The fresh dialog focuses its first section but leaves it empty —
+        // fill it so the focused row actually paints cells, and add an
+        // unfocused second section with content.
+        dialog
+            .sections
+            .insert("instruction_1".to_string(), "do the thing".to_string());
+        dialog
+            .sections
+            .insert("context_1".to_string(), "some context".to_string());
+        dialog.enabled_sections.push("context_1".to_string());
+        let theme = Theme::modern();
+        assert_ne!(
+            theme.selected_bg, theme.field_bg_focused,
+            "test needs the modern theme to tell selected_bg apart"
+        );
+        let backend = TestBackend::new(200, 50);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_simple_prompt_dialog(frame, &app, &theme);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let mut focused_cells = 0;
+        let mut unfocused_cells = 0;
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                let cell = &buffer[(x, y)];
+                if cell.bg == theme.selected_bg {
+                    focused_cells += 1;
+                }
+                if cell.bg == theme.stage_bg {
+                    unfocused_cells += 1;
+                }
+            }
+        }
+        assert!(
+            focused_cells >= 1,
+            "focused section must sit on selected_bg, found none"
+        );
+        assert!(
+            unfocused_cells >= 1,
+            "unfocused sections must sit on stage_bg, found none"
         );
     }
 }

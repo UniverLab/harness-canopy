@@ -76,6 +76,7 @@ mod tests {
             session_type: "interactive".to_string(),
             pid: None,
             boot_id: None,
+            harness_conversation_id: None,
         }
     }
 

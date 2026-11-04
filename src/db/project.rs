@@ -141,7 +141,11 @@ impl Database {
     }
 
     pub fn register_project_path(&self, path: &Path) -> Result<Project> {
-        let canonical = std::fs::canonicalize(path)?;
+        // A path inside a sandbox worktree registers the project the sandbox
+        // was cut from — a sandbox never registers itself as a project.
+        // `register_project_explicit` inherits this mapping.
+        let mapped = self.map_workdir_out_of_sandbox(&path.to_string_lossy())?;
+        let canonical = std::fs::canonicalize(&mapped)?;
         let canonical_str = canonical.to_string_lossy().to_string();
         let mut project = Project::new(&canonical_str);
 
@@ -585,7 +589,7 @@ mod tests {
             chrono::Utc::now(),
         )
         .unwrap();
-        db.insert_scheduled_send(
+        db.insert_scheduled_prompt(
             "send-1",
             "ping",
             "sess-1",
@@ -595,7 +599,7 @@ mod tests {
             None,
         )
         .unwrap();
-        db.insert_failed_scheduled_send(
+        db.insert_failed_scheduled_prompt(
             "failed-1",
             "ping",
             "sess-1",
@@ -665,8 +669,8 @@ mod tests {
         assert_eq!(outcome.counts.sync_messages, 1);
         assert_eq!(outcome.counts.sync_locks, 1);
         assert_eq!(outcome.counts.last_prompts, 1);
-        assert_eq!(outcome.counts.scheduled_sends, 1);
-        assert_eq!(outcome.counts.failed_scheduled_sends, 1);
+        assert_eq!(outcome.counts.scheduled_prompts, 1);
+        assert_eq!(outcome.counts.failed_scheduled_prompts, 1);
         assert_eq!(outcome.counts.agents, 1);
         // The project-root node `upsert_project` auto-creates, plus the fact
         // node `seed_full_dependents` inserts.

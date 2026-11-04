@@ -19,6 +19,35 @@ fn parse_rfc3339_ts(value: &str) -> i64 {
         .unwrap_or(0)
 }
 
+/// How many `active`/`resumed` rows refer to a process that is really alive
+/// right now, per [`crate::system::session_process_is_live`]. Rows whose
+/// process is already gone are stale and do not count.
+fn live_interactive_session_count(conn: &rusqlite::Connection) -> Result<i64> {
+    let current_boot_id = crate::system::boot_id();
+    let mut stmt = conn.prepare(
+        "SELECT pid, boot_id FROM interactive_sessions
+         WHERE status IN ('active', 'resumed')",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, Option<i64>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows
+        .into_iter()
+        .filter(|(pid, boot_id)| {
+            crate::system::session_process_is_live(
+                *pid,
+                boot_id.as_deref(),
+                current_boot_id.as_deref(),
+            )
+        })
+        .count() as i64)
+}
+
 impl Database {
     /// `interactive_sessions` rows in the only statuses `canopy clean` (soft
     /// mode) is ever allowed to remove. `active` and `resumed` rows are
@@ -72,7 +101,7 @@ impl Database {
 
     /// All registered background-agent ids — cross-referenced against
     /// `logs/<id>.log` filenames to detect orphaned log files (an agent
-    /// removed via `agent_remove` leaves its log file behind).
+    /// removed via `agent_edit remove` leaves its log file behind).
     pub fn list_agent_ids(&self) -> Result<HashSet<String>> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         let mut stmt = conn.prepare("SELECT id FROM agents")?;
@@ -193,11 +222,11 @@ impl Database {
             params![workdir],
         )?;
         tx.execute(
-            "DELETE FROM scheduled_sends WHERE workdir = ?1",
+            "DELETE FROM scheduled_prompts WHERE workdir = ?1",
             params![workdir],
         )?;
         tx.execute(
-            "DELETE FROM failed_scheduled_sends WHERE workdir = ?1",
+            "DELETE FROM failed_scheduled_prompts WHERE workdir = ?1",
             params![workdir],
         )?;
         tx.execute(
@@ -291,6 +320,14 @@ impl Database {
     /// [`Self::project_hard_cascade_skip_reason`] already uses for "a human
     /// or TUI is looking at this right now", just scoped to the whole
     /// install instead of one project.
+    ///
+    /// A session counts only when it is really alive, per
+    /// [`crate::system::session_process_is_live`] (stored boot id matches
+    /// the current boot AND the stored PID is still alive; when either boot
+    /// id is unknown the PID alone decides, fail-closed). Rows left
+    /// `active`/`resumed` by crashed or killed processes — the common case
+    /// after a crash — are stale and must neither block maintenance nor
+    /// count here; the stale-session reconciliation closes them.
     pub fn busy_reasons(&self) -> Result<Vec<String>> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         let mut reasons = Vec::new();
@@ -304,11 +341,7 @@ impl Database {
             reasons.push(format!("{running_graphs} graph(s) currently running"));
         }
 
-        let active_sessions: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM interactive_sessions WHERE status IN ('active', 'resumed')",
-            [],
-            |row| row.get(0),
-        )?;
+        let active_sessions = live_interactive_session_count(&conn)?;
         if active_sessions > 0 {
             reasons.push(format!(
                 "{active_sessions} interactive session(s) attached (a TUI is in use)"
@@ -385,8 +418,8 @@ fn count_hard_cascade(
         interactive_sessions: direct.interactive_sessions,
         terminal_sessions: direct.terminal_sessions,
         last_prompts: direct.last_prompts,
-        scheduled_sends: direct.scheduled_sends,
-        failed_scheduled_sends: direct.failed_scheduled_sends,
+        scheduled_prompts: direct.scheduled_prompts,
+        failed_scheduled_prompts: direct.failed_scheduled_prompts,
         sync_messages: direct.sync_messages,
         sync_locks: direct.sync_locks,
         intelligence_nodes: direct.intelligence_nodes,
@@ -430,13 +463,13 @@ fn count_direct_cascade_targets(
         params![workdir],
         |row| row.get(0),
     )?;
-    let scheduled_sends: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM scheduled_sends WHERE workdir = ?1",
+    let scheduled_prompts: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM scheduled_prompts WHERE workdir = ?1",
         params![workdir],
         |row| row.get(0),
     )?;
-    let failed_scheduled_sends: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM failed_scheduled_sends WHERE workdir = ?1",
+    let failed_scheduled_prompts: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM failed_scheduled_prompts WHERE workdir = ?1",
         params![workdir],
         |row| row.get(0),
     )?;
@@ -466,8 +499,8 @@ fn count_direct_cascade_targets(
         interactive_sessions,
         terminal_sessions,
         last_prompts,
-        scheduled_sends,
-        failed_scheduled_sends,
+        scheduled_prompts,
+        failed_scheduled_prompts,
         sync_messages,
         sync_locks,
         intelligence_nodes,
@@ -594,8 +627,8 @@ struct DirectCascadeTargets {
     interactive_sessions: i64,
     terminal_sessions: i64,
     last_prompts: i64,
-    scheduled_sends: i64,
-    failed_scheduled_sends: i64,
+    scheduled_prompts: i64,
+    failed_scheduled_prompts: i64,
     sync_messages: i64,
     sync_locks: i64,
     intelligence_nodes: i64,
@@ -1196,8 +1229,8 @@ mod tests {
             "interactive_sessions",
             "terminal_sessions",
             "last_prompts",
-            "scheduled_sends",
-            "failed_scheduled_sends",
+            "scheduled_prompts",
+            "failed_scheduled_prompts",
             "sync_messages",
             "sync_locks",
             "intelligence_nodes",
@@ -1220,8 +1253,8 @@ mod tests {
                 "interactive_sessions" => counts.interactive_sessions = 1,
                 "terminal_sessions" => counts.terminal_sessions = 1,
                 "last_prompts" => counts.last_prompts = 1,
-                "scheduled_sends" => counts.scheduled_sends = 1,
-                "failed_scheduled_sends" => counts.failed_scheduled_sends = 1,
+                "scheduled_prompts" => counts.scheduled_prompts = 1,
+                "failed_scheduled_prompts" => counts.failed_scheduled_prompts = 1,
                 "sync_messages" => counts.sync_messages = 1,
                 "sync_locks" => counts.sync_locks = 1,
                 "intelligence_nodes" => counts.intelligence_nodes = 1,
@@ -1570,21 +1603,43 @@ mod tests {
     #[test]
     fn busy_reasons_reports_an_active_interactive_session() {
         let db = test_db();
+        // Live row: this test process's own pid on the current boot.
+        let current_boot_id = crate::system::boot_id().expect("test host has a boot id");
         db.insert_interactive_session(
             "s-active",
             "s-active",
             "opencode",
             "/tmp",
             None,
-            None,
+            Some(std::process::id() as i64),
             "interactive",
-            None,
+            Some(&current_boot_id),
         )
         .unwrap();
 
         let reasons = db.busy_reasons().unwrap();
         assert_eq!(reasons.len(), 1);
         assert!(reasons[0].contains("interactive session"), "{reasons:?}");
+    }
+
+    #[test]
+    fn busy_reasons_ignores_a_stale_interactive_session() {
+        let db = test_db();
+        // Stale row: a pid that can never be alive (above any real pid_max).
+        let current_boot_id = crate::system::boot_id().expect("test host has a boot id");
+        db.insert_interactive_session(
+            "s-stale",
+            "s-stale",
+            "opencode",
+            "/tmp",
+            None,
+            Some(987_654_321),
+            "interactive",
+            Some(&current_boot_id),
+        )
+        .unwrap();
+
+        assert!(db.busy_reasons().unwrap().is_empty());
     }
 
     #[test]

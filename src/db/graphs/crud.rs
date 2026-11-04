@@ -91,7 +91,7 @@ impl Database {
 
     /// List graphs, optionally narrowed to one `workdir`. `include_archived`
     /// controls whether archived graphs are included: `false` is the
-    /// "browsing" view (sidebar, `canopy graph list`, MCP `graph_list`) — an
+    /// "browsing" view (sidebar, `canopy graph list`, MCP `graph`) — an
     /// archived graph is excluded by the query itself (not filtered in
     /// memory), never by loading every row and discarding some. Pass `true`
     /// for a lookup that must still resolve an archived graph (e.g. `canopy
@@ -319,7 +319,7 @@ impl Database {
         Ok(rows > 0)
     }
 
-    /// Replace the full hooks map for a graph. Used by MCP graph_update with
+    /// Replace the full hooks map for a graph. Used by MCP graph_edit with
     /// the new event-keyed `hooks` parameter.
     pub fn update_graph_hooks(
         &self,

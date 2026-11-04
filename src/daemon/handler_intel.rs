@@ -31,6 +31,7 @@ impl TaskTriggerHandler {
         OptionalExtension(parts): OptionalExtension<Parts>,
     ) -> Result<CallToolResult, McpError> {
         self.reject_if_nursery(parts.as_ref())?;
+        self.record_harness_id(parts.as_ref());
         let scope = params.scope.trim().to_lowercase();
         let (session_limit, _knowledge_limit, sync_limit, dependency_limit) = match scope.as_str() {
             "light" => (2, 5, 8, 0),
@@ -171,6 +172,7 @@ impl TaskTriggerHandler {
         OptionalExtension(parts): OptionalExtension<Parts>,
     ) -> Result<CallToolResult, McpError> {
         self.reject_if_nursery(parts.as_ref())?;
+        self.record_harness_id(parts.as_ref());
         // Track an explicit id that resolved to nothing: the caller almost
         // certainly mistyped or truncated the id of a node they meant to
         // update, so a bare `created: true` (which also fires for the normal
@@ -208,7 +210,16 @@ impl TaskTriggerHandler {
                     .ok()
                     .and_then(|agent_id| self.db.get_session_workdir(&agent_id).ok())
                     .flatten()
-                    .map(|workdir| crate::domain::project::workdir_hash(&workdir));
+                    .map(|workdir| {
+                        // A sandboxed workdir maps to the original project, so
+                        // the node lands in the project the sandbox was cut
+                        // from instead of a hash of the worktree path.
+                        let mapped = self
+                            .db
+                            .map_workdir_out_of_sandbox(&workdir)
+                            .unwrap_or(workdir);
+                        crate::domain::project::workdir_hash(&mapped)
+                    });
                 Some(detected)
             }
         };
@@ -311,6 +322,7 @@ impl TaskTriggerHandler {
         OptionalExtension(parts): OptionalExtension<Parts>,
     ) -> Result<CallToolResult, McpError> {
         self.reject_if_nursery(parts.as_ref())?;
+        self.record_harness_id(parts.as_ref());
         let limit = params.limit.unwrap_or(10).min(50);
         let depth = params
             .depth
@@ -403,15 +415,9 @@ impl TaskTriggerHandler {
         )]))
     }
 
-    #[tool(
-        name = "intelligence_graph_walk",
-        description = "Walk the project-context graph from a node up to the requested depth. \
-         Default is compact mode (nodes omit body/metadata; pass compact: false for full bodies). \
-         The root is returned in `root` only, never duplicated in `nodes`."
-    )]
-    pub(crate) async fn intelligence_graph_walk(
+    pub(crate) async fn intelligence_admin_walk_impl(
         &self,
-        Parameters(params): Parameters<IntelligenceGraphWalkParams>,
+        params: IntelligenceGraphWalkParams,
     ) -> Result<CallToolResult, McpError> {
         let depth = params.depth.unwrap_or(2).min(8);
         let compact = params.compact.unwrap_or(true);
@@ -477,26 +483,19 @@ impl TaskTriggerHandler {
         )]))
     }
 
-    #[tool(
-        name = "intelligence_delete_node",
-        description = "Delete an intelligence node and every relation touching it, in one \
-         transaction (hard delete — the graph is meant to be able to forget). project_hash is \
-         auto-detected from the session workdir like the read tools; pass it explicitly to \
-         delete a node belonging to a different project. Returns a clear error, not a silent \
-         success, if the node does not exist."
-    )]
-    pub(crate) async fn intelligence_delete_node(
+    pub(crate) async fn intelligence_admin_delete_node_impl(
         &self,
-        Parameters(params): Parameters<IntelligenceDeleteNodeParams>,
-        OptionalExtension(parts): OptionalExtension<Parts>,
+        params: IntelligenceDeleteNodeParams,
+        parts: Option<&Parts>,
     ) -> Result<CallToolResult, McpError> {
-        self.reject_if_nursery(parts.as_ref())?;
+        self.reject_if_nursery(parts)?;
+        self.record_harness_id(parts);
         if let Err(e) = validate_non_empty(&params.node_id, "node_id") {
             return Ok(error_result(&e));
         }
 
         let effective_project_hash =
-            self.effective_project_hash_for_delete(parts.as_ref(), params.project_hash.as_deref());
+            self.effective_project_hash_for_delete(parts, params.project_hash.as_deref());
 
         let effective_id = match self.db.resolve_node_id_by_prefix(&params.node_id) {
             Ok(Some(full)) => full,
@@ -546,22 +545,16 @@ impl TaskTriggerHandler {
         )]))
     }
 
-    #[tool(
-        name = "intelligence_delete_relation",
-        description = "Delete a single relation (edge) by ID, leaving both endpoint nodes \
-         intact. project_hash is auto-detected from the session workdir like the read tools; \
-         pass it explicitly to delete a relation touching a different project's nodes. Returns \
-         a clear error, not a silent success, if the relation does not exist."
-    )]
-    pub(crate) async fn intelligence_delete_relation(
+    pub(crate) async fn intelligence_admin_delete_relation_impl(
         &self,
-        Parameters(params): Parameters<IntelligenceDeleteRelationParams>,
-        OptionalExtension(parts): OptionalExtension<Parts>,
+        params: IntelligenceDeleteRelationParams,
+        parts: Option<&Parts>,
     ) -> Result<CallToolResult, McpError> {
-        self.reject_if_nursery(parts.as_ref())?;
+        self.reject_if_nursery(parts)?;
+        self.record_harness_id(parts);
 
         let effective_project_hash =
-            self.effective_project_hash_for_delete(parts.as_ref(), params.project_hash.as_deref());
+            self.effective_project_hash_for_delete(parts, params.project_hash.as_deref());
 
         let edge = match self.db.get_intelligence_edge(params.edge_id) {
             Ok(Some(edge)) => edge,
@@ -622,7 +615,7 @@ pub(crate) fn intelligence_node_json(
     })
 }
 
-/// Compact projection of an intelligence node for `intelligence_graph_walk`:
+/// Compact projection of an intelligence node for `intelligence_admin` `walk`:
 /// `id`, `kind`, `title`, `created_at`, `updated_at` and `project_hash`,
 /// omitting `body` and `metadata`. Uses the same field names as the rows
 /// `intelligence_search` emits where the fields overlap — no second compact

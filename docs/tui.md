@@ -35,6 +35,24 @@ step instead of launching straight away:
   skipping the mission step; a harness with nothing to resume shows
   `No sessions to resume for <harness> in <dir>` and `New session` stays
   usable.
+  - Picking a finished canopy session relaunches that same session: it keeps
+    its id and its name — even when canopy never recorded the harness's own
+    conversation id — so hooks and scheduled sends addressed to it still
+    reach it afterwards, and `session_list` shows one row, never the old one
+    plus a newly-named one. Only when another live session already holds the
+    name does the resumed session take a fresh name (keeping its id); the
+    header then names both. A conversation picked out of the harness's own
+    list that canopy has never seen starts a fresh session with a new id and
+    a new generated name, as before.
+  - When canopy recorded the harness's own conversation id, the relaunch
+    resumes that exact conversation (`muse resume <id>`); otherwise it
+    falls back to the harness's most-recent resume, and only one session
+    per harness and directory may take that fallback at a restart — the
+    rest fail with an explanation instead of colliding on one
+    conversation. A resume whose harness exits immediately keeps its
+    session row as an error card with the harness's output tail attached
+    until dismissed, so the failure is never silent. Closing a session
+    yourself never leaves such a card.
   - `↑↓` selects, `Enter` confirms, and `Esc` returns to the form with every
   value kept. **Background** and **Terminal** launch from the form as
   before — the Mode step is Interactive-only.
@@ -55,23 +73,95 @@ step instead of launching straight away:
   pane shows `Ctrl+C again within 1 s to send it to <platform>`; press it
   twice within that second to forward the interrupt. Every other platform
   (claude, …) keeps forwarding `Ctrl+C` unchanged.
+- **Scrolling up** — the scrollback keeps everything the session wrote,
+  including output an inline TUI scrolled off the top of the screen, so
+  scrolling up shows the transcript instead of stale rows.
+- **Overlays keep the panel live behind them** — opening the prompt
+  builder, the knowledge list or viewer, context transfer, RAG transfer, the
+  launchpad or the new-agent form never replaces the panel behind it: a
+  focused session keeps its live PTY with its own colours (no accent tint,
+  no plain-text log), home and the graph view keep what they were showing,
+  and the focus rail with the `Focus`/`Preview` pill keep naming the focus
+  underneath — including when one overlay opens on top of another.
+- **Surviving TUI restarts** — sessions live in the daemon, not the TUI:
+  quitting (`F10`, closing the window) leaves every running session running,
+  and reopening the TUI reattaches to them live, with screen and scrollback
+  intact; a session that ended while the TUI was closed is not reopened.
+  Only closing a session explicitly ends it. Restarting the daemon itself
+  (`canopy daemon restart`) does end its sessions — they are its children —
+  but the new daemon respawns every session the database still lists as
+  active as soon as it starts, under the same id and name, resuming the
+  harness conversation where the platform supports it. A terminal comes back
+  in its working directory with a clean pane and a fresh prompt — no stored
+  output is replayed into it.
+  While the TUI runs, a dropped daemon connection is retried on its own
+  (0.5 s doubling up to 5 s) and the sidebar re-lists what the daemon still
+  has; sessions started or closed from another TUI appear in, or leave, the
+  sidebar live. When the daemon speaks an incompatible session protocol the
+  footer shows `canopy daemon speaks session protocol <n>; restart the
+  daemon (canopy daemon restart)` and nothing attaches until the restarted
+  daemon matches.
+- **Failed launches stay in the TUI** — when opening a session fails (the
+  daemon is down or restarting, the hub is unreachable, the mission write
+  fails), the footer shows `Could not open session: <cause>` and the TUI
+  keeps running instead of exiting; the same error is appended to
+  `~/.canopy/logs/tui.log`. Fix the cause and reopen the dialog to try
+  again.
+
+## Startup checks and diagnostics
+
+- **Daemon version check** — at startup the TUI compares its own version
+  with the one the daemon recorded (the same version `canopy daemon status`
+  prints). On a mismatch a blocking notice names both versions; when the
+  daemon's version cannot be read at all the notice says so and names the
+  TUI's version. `R` restarts the daemon and re-checks, `Esc` dismisses the
+  notice for this run.
+- **Panic log** — if the TUI itself panics, the terminal is restored (raw
+  mode off, alternate screen left, mouse capture and bracketed paste
+  disabled) and the panic, with its backtrace, is appended to
+  `~/.canopy/logs/tui-panic.log`.
+
+## Terminal sessions
+
+- **Warp-like input** — keystrokes accumulate in the input box and are
+  sent to the shell on `Enter`, with per-session history (`↑↓`) and
+  cross-session autocomplete.
+- **While a command runs the box withdraws** — from `Enter` until the
+  shell is back at an idle prompt, every keystroke (and paste) goes
+  straight to the running program, so wizards, `y/n` questions, and
+  long commands just work. The box returns empty at the next prompt.
+- **`Ctrl+W` toggles native mode** as a manual override in both
+  directions; the next submit or prompt return re-asserts the automatic
+  rule.
 
 ## Monitoring
 
 - **Agent status colors** — teal for working (recent output), blue for
-  idle, red for failed, gray for exited. The sidebar shows a colored
-  gutter bar per agent.
+  idle, red for failed, gray for exited. A running session whose daemon
+  connection dropped shows dim gray until it reconnects. The sidebar shows
+  a colored gutter bar per agent.
+- **Focus pill placement** — the `Focus`/`Preview` pill (the `Auto-follow`/
+  `Manual` label in graph view) sits right-aligned on the panel's first row,
+  after the session name (or the graph name in graph view), so it never
+  covers the text there. When the panel is too narrow for both, the pill is
+  dropped and the name stays. The `classic` (bordered) theme is unchanged:
+  the label keeps its place in the border title.
 - **Split groups** — side-by-side horizontal/vertical views to watch
   multiple agents simultaneously.
 - **System dashboard** — CPU, memory, disk, GPU (NVIDIA/Linux/macOS) and
   temperatures with amber/red alert thresholds. Under WSL, metrics come
-  from the Windows host via PowerShell.
+  from the Windows host via PowerShell. With no reading the CPU row
+  omits the temperature span; `agent` `status` reports the reading and its
+  `cpu_temp_source`. Where ACPI thermal zones report nothing on
+  Windows/WSL, `canopy doctor` notes (informational): run
+  LibreHardwareMonitor (WMI on) to expose CPU temperature.
 - **Live graph view** — real-time graph rendering of the running graph's
   current spec, auto-following the active node. When the engine moves to a
   new node, the view centres that node's whole box (a tall collapsed
   ensemble included) in the panel; your own scroll is left alone until the
   next node change. Manual node inspection shows per-node run info (status,
-  elapsed time, iteration).
+  elapsed time, iteration; a node parked on a named mutex shows `waiting`
+  with a `waiting for:` line naming each resource and who holds it).
   `Esc` toggles between auto-follow and manual mode.
 - **Output pane** — `t` opens a read-only viewer beside the live graph that
   streams the highlighted node's stdout/stderr as the engine writes it (agent
@@ -131,16 +221,18 @@ lists the same missions read-only from the command line (see
 
 Two missions to know by their exact challenge: **The Gardener** —
 update descriptions or tags for 5+ different projects (via the
-`project_update` tool); **Parallel Vision** — run a graph with a
+`project` tool's `update` action); **Parallel Vision** — run a graph with a
 parallel ensemble. On systems with no CPU temperature sensor (such as
 WSL), **Nuclear Winter** shows as `not measurable on this system`.
 
 Press **F1** to open the **Canopy hub**, a centered tabbed dialog:
 **Settings** edits every registry setting in place (with the value's apply
 mode and status), **Keys** is a grouped reference of every shortcut the TUI
-handles, and **Missions & stats** lists all the missions above — unlocked
-ones in full colour, locked ones dimmed. `Shift+←`/`Shift+→`
-switch tabs, as everywhere else in Canopy; `Tab`/`Shift+Tab` and `1`/`2`/`3`
+handles, **Missions & stats** lists all the missions above — unlocked
+ones in full colour, locked ones dimmed — **Shelf** lists the files
+agents have sent (see below), and **Remote** is everything `canopy remote`
+does (see below). `Shift+←`/`Shift+→`
+switch tabs, as everywhere else in Canopy; `Tab`/`Shift+Tab` and `1`/`2`/`3`/`4`/`5`
 also switch. `F1` closes the hub from any state; `Esc` closes it from the top
 level of every tab. `F1` works everywhere — including inside a focused
 interactive session whose harness has claimed the keyboard (alternate screen
@@ -156,6 +248,61 @@ with `a` (add a folder), `d` (delete) and `Shift+↑`/`Shift+↓` (reorder). `/`
 filters every group by key or description. Each change goes through the daemon;
 a refused value keeps the old one and the daemon's message shows in the status
 line. `←`/`→` never change a value.
+
+In **Remote** (`F1`, then `5`), `↑`/`↓` (or `j`/`k`) move over the GitHub,
+Remote control, Relay and Pair rows plus one row per paired device and one
+row per trusted GitHub profile. `Enter`
+on GitHub starts the device flow while signed out (the row shows the user
+code and `https://github.com/login/device` until it completes or expires);
+`Enter` on Remote control flips the relay switch (disabled while signed
+out); Relay only reports the phase (`connected`, `connecting`,
+`token rejected: sign in again`, `relay rejected: see remote status`,
+`off`); `Enter` on Pair a device shows the
+fresh code with its link, QR and countdown in an overlay (`Esc` hides it,
+the code stays valid). Each device row shows its label, id, paired time,
+last seen time and `live` while a peer is open; `d` disconnects its live peer at once
+(the pairing stays), `r` revokes it behind a `y`/`n`
+confirmation (`Enter` also confirms, `Esc` cancels); both report success
+or the exact error inline. Each trusted row shows a guest login with its
+grant (`all sessions` or the named sessions) and whether it may upload;
+`t` trusts a new profile through a form (username, comma-separated sessions,
+an all-sessions toggle flipped with `a`, an upload toggle flipped with `u`;
+`Tab` moves, `Enter` saves, `Esc` cancels), `Enter` on a
+trusted row edits its grant, and `r` forgets it behind a `y`/`n`
+confirmation — removing or narrowing a grant kicks the login's live guest
+peers at once. While any device is
+live the sidebar header shows `⇄ n`.
+
+### Session shelf
+
+- **Sending** — an agent delivers files to its session with the MCP tool
+  `session_send_file`: 1..10 absolute paths per call, up to 20 MiB each.
+  Any type is accepted; PNG, JPEG, WebP, GIF and SVG are recognised from the
+  file's content (never its extension) for display. A trusted remote guest
+  with the `upload` grant sends files into its granted sessions through the
+  `shelf_put_*` protocol frames; the session gets one `📎 the user
+  attached …` line and the file lands with origin `user`.
+- **Reading** — an agent lists a shelf with `session_list_files` and reads
+  one file with `session_read_file` (text as UTF-8, binary as base64 capped
+  at 1 MiB).
+- **Listing** — the hub's **Shelf** tab (`F1`, then `4`) lists the files
+  agents have sent — the host shelf plus one per session, merged newest
+  first — with arrival time, sender, name, size and caption per row.
+- **Opening** — `Enter` (or `Space`) opens the selected file with the
+  system viewer — `open` on macOS, `xdg-open` on Linux, `wslview` (or
+  `explorer.exe` with the path translated by `wslpath`) under WSL. `c`
+  copies its absolute path, and `d` deletes it after a `y`/`n`
+  confirmation. A viewer that fails or is missing raises a toast naming the
+  file and the error — which carries the path — instead of crashing the TUI.
+- **Confirming** — while the `y`/`n` prompt is armed every key answers it:
+  `y` or `Enter` deletes, `n` or `Esc` cancels, and nothing else moves — not
+  even a tab switch.
+- **Arrivals** — a file sent while the TUI runs joins the list live and
+  shows a `📎 <name> — <from>` toast for five seconds, wherever you are in
+  the TUI.
+- **Lifetime** — a session's files are kept until 7 days after the session
+  is removed, and the whole shelf is capped at 1 GiB: when a new file
+  would exceed it, the oldest files are pruned first.
 
 ## Projects sidebar
 
@@ -206,7 +353,7 @@ row: `/` filters, `n` creates, `e` edits and `F4` deletes.
 - **Scheduled delivery** — `Shift+Enter` (requires Kitty keyboard
   enhancement protocol support) opens a time picker to send the prompt
   at a chosen hour instead of immediately. Falls back to `Ctrl+S` on
-  terminals without Kitty protocol.
+  terminals without Kitty protocol. Schedules can also be made from the remote.
 - **Context transfer** — a two-step modal (preview → agent picker)
   transfers conversation context, prompts and output between agents while
   preserving session state and scrollback.
@@ -222,16 +369,27 @@ row: `/` filters, `n` creates, `e` edits and `F4` deletes.
   cache only — no network). A name present both on disk and in canopy's
   store appears under both prefixes, so you pick which one to reference.
   Selecting a `[canopy]:` entry renders
-  `canopy skill <name> — load it with skill_get(name="<name>")` in the
+  `canopy skill <name> — load it with the skill tool's get action (name="<name>")` in the
   built prompt's tools block, so the agent fetches it over MCP; on-disk
-  skills keep their plain `skill:<name>` entry.
+  skills keep their plain `skill:<name>` entry. `Ctrl+V` (or `Alt+V`, for
+  terminals that bind `Ctrl+V` to text paste) attaches the clipboard image,
+  and pasting or dropping image-file paths attaches those files instead of
+  inserting text; attachments ride along as `<image path="…"/>` lines in a
+  trailing attachments block every harness CLI can open. Attached images are
+  stored on the target session's shelf as `prompt-<timestamp>-<n>.<ext>`
+  (so they also show in the hub Shelf tab), at most 10 per prompt and
+  20 MiB each — past either limit an inline error appears and nothing
+  attaches. They render as `[img 1 · 120 KB]` chips under the sections:
+  `Tab` reaches the row, `←`/`→` move along it and `Backspace`/`Delete`
+  removes the focused chip (the shelf copy stays). Attachments persist with
+  the draft across close/reopen, recall and scheduled sends.
 - **Canopy protocol — once per session** — the builder prepends the
   `[CANOPY]` session-start protocol to the *first* prompt of an
   interactive session, never to the ones that follow. That fact is stored
   with the session id in the database, so it survives restarting canopy
   and resuming the session: a conversation that already carries the
-  protocol does not receive it again, and a session resumed under a new
-  id inherits the flag from the one it continues. When the protocol is
+  protocol does not receive it again, and a resumed conversation keeps its
+  session id, so the flag travels with it. When the protocol is
   *not* due, the builder shows nothing extra about it — to resend the
   block on purpose, add the **Canopy protocol** section from the section
   picker (`Ctrl+A`): it inserts a locked, read-only section holding the
@@ -246,6 +404,11 @@ row: `/` filters, `n` creates, `e` edits and `F4` deletes.
 
 The graph editor allows inline editing of node config JSON with
 validation. See [Graphs](graphs.md) for the engine itself.
+
+Wherever a spec is named — the live graph view, the sync panel's graph
+face, Activity lines and the node-tail waiting line — a spec with a type
+shows its code first (`[FIX-7] name`), like the Backlog badge above.
+Legacy specs without a type show the name alone.
 
 ## Notifications
 
@@ -265,6 +428,44 @@ delivered` reads `<agent id> (<trigger>): message delivered to this
 session`. When the graph or agent no longer exists, the first 8
 characters of its id stand in for the name.
 
+## Colour and tinting
+
+The TUI speaks the same palette as the web surfaces. Both themes — `classic`
+(bordered, Canopy green) and `modern` (borderless) — paint the big views and
+the alert dialogs on meaning-tinted grounds instead of one flat green slab.
+In `classic` those grounds are the operator's dark palette: tints of the same
+lightness, differing only in hue, plus a neutral stage that big views stand
+on.
+
+- **Prompt Builder** — the window sits on the info tint, its section fields
+  on the near-black stage ground, and the focused section on the selection
+  colour. Borders and the title keep the theme's own colours, and the text
+  on the new grounds stays at 4.5:1 contrast or better. The Normal / Raw
+  tab strip paints the selected tab as the accent pill (dark ink on the
+  theme's accent colour, bold) with the other tab dimmed.
+- **Graph view** — the canvas sits on the same info tint. Nodes and edges
+  keep their status colours, which stay at 3:1 or better against it.
+- **Alert dialogs** — confirmations of destructive actions are tinted for
+  warning: deleting a project, permanently deleting a graph, and resetting a
+  graph. A failed graph action is reported on the error tint. Every dialog
+  still spells out what it does in words, so the tint is never the only
+  signal; the quit and archive confirmations keep the neutral dialog ground.
+- **Sidebar** — the sidebar is painted on its own theme surface, not on the
+  terminal's default background: the Live / Automation / Knowledge tab strip,
+  the agent and group rows, and the project graph cards all sit on the
+  theme's sidebar background. On a terminal whose own background differs
+  (a light or purple one, say), no part of the sidebar shows that foreign
+  colour. The active tab keeps its accent colour and inactive tabs stay
+  dimmed, both at readable contrast against that surface.
+- **Hub** — the `F1` hub's tab strip paints the active tab as the accent pill
+  (dark ink on the theme's accent colour) and the remaining tabs dimmed, so
+  the selected tab never reads as dark text on the dark selection raise.
+  The selected row of a hub list is the same accent pill: the Settings path
+  lists and directory picker, a Shelf file, a Remote row or paired device,
+  and the pairing code in the Remote overlay.
+
+The header, footer and session panes are unchanged.
+
 ## Appearance and behaviour settings
 
 The `[tui]` settings (see `canopy config list`) tune the interface without a
@@ -282,3 +483,11 @@ value's apply mode.
 | `tui.atmosphere` | true | false disables fireflies and dandelions. |
 | `tui.scroll_step` | 3 | Terminal scroll step, in lines. |
 | `tui.page_step` | 15 | Terminal page step, in lines. |
+| `tui.animations` | `reduced` | Animation budget: `full` (20 fps), `reduced` (8 fps, pauses on focus loss or 45 s idle), `off` (static frame). |
+
+Both animation toggles off is the master switch: the header spinner, sweep,
+dialog waves and pulse indicators freeze, and an idle TUI performs no
+redraws at all (near-zero CPU when nothing changes). `tui.animations = "off"`
+freezes them the same way; `"reduced"` (the default) additionally pauses all
+background animation while the terminal reports focus lost or after 45 s
+without key or mouse input, resuming on focus gain or the next input.

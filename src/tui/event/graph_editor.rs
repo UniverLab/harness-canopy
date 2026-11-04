@@ -168,7 +168,7 @@ fn handle_router_routes_key(app: &mut App, code: KeyCode, modifiers: KeyModifier
 /// place. Every mutation applies immediately through
 /// [`crate::tui::app::App::retarget_focused_graph_edge`]/
 /// [`crate::tui::app::App::delete_focused_graph_edge`] — the same validated
-/// path the `graph_update_edge`/`graph_delete_edge` MCP tools use — so there
+/// path the `graph_edge`/`graph_edge` MCP tools use — so there
 /// is no separate Ctrl+S save step, unlike the buffered `RouterRoutes` form.
 fn handle_edges_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
     match code {

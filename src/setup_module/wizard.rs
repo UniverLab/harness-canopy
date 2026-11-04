@@ -1,3 +1,4 @@
+use crate::db::Database;
 use crate::setup_module::daemon_service::{
     install_service_if_needed, start_daemon_if_needed, stop_daemon,
 };
@@ -165,7 +166,7 @@ fn explain_no_platforms_detected(registry: &crate::setup_module::models::Registr
     println!("  installed one is failing to respond. If a platform IS installed");
     println!("  but setup still can't see it, its binary isn't on PATH; to check");
     println!("  whether an installed platform actually answers, run");
-    println!("  \x1b[1mcanopy doctor\x1b[0m or use \x1b[1magent_probe\x1b[0m.");
+    println!("  \x1b[1mcanopy doctor\x1b[0m or use \x1b[1mharness probe\x1b[0m.");
     println!();
     println!("  \"CLI\" here means the platform's command-line tool — the binary");
     println!("  canopy runs to drive it. canopy needs at least one platform's");
@@ -338,11 +339,32 @@ fn record_config_and_summary(
     let mut config = crate::domain::canopy_config::CanopyConfig::load(canopy_dir);
     config.mark_configured();
     let baseline = crate::domain::registry_baseline::RegistryBaseline::load(canopy_dir);
+    // An explicit setup run prunes on one sighting (no grace gate), except
+    // harnesses something still references. When the database opens, prune
+    // through the shared self-healing pass; otherwise keep every entry —
+    // an empty reference set would drop known missing harnesses in the merge
+    // below and strand references we cannot see.
+    let mut referenced = crate::setup_module::harness_prune::harness_references(canopy_dir);
+    if let Ok(db) = Database::new_safe(
+        &crate::domain::db_paths::database_path(canopy_dir),
+        canopy_dir,
+    ) {
+        let now = std::time::SystemTime::now();
+        crate::setup_module::harness_prune::prune_absent(
+            &mut config,
+            &db,
+            crate::setup_module::harness_prune::PruneTrigger::Explicit,
+            now,
+        );
+    } else {
+        referenced = config.clis.iter().map(|c| c.name.clone()).collect();
+    }
     let changed_fields = merge_cli_registry_into_config(
         &mut config,
         cli_registry,
         platforms_with_cli,
         baseline.as_ref(),
+        &referenced,
     );
     let (embeddings_model, similarity_threshold, rag_personal_dirs, rag_max_file_mb) = rag;
     config.temperature_unit = temperature_unit;
@@ -442,6 +464,7 @@ fn merge_cli_registry_into_config(
     cli_registry: &crate::domain::cli_config::CliRegistry,
     platforms_with_cli: &[PlatformWithCli],
     baseline: Option<&crate::domain::registry_baseline::RegistryBaseline>,
+    referenced: &std::collections::HashSet<String>,
 ) -> Vec<String> {
     let registry_by_name: std::collections::HashMap<String, crate::domain::cli_config::CliConfig> =
         cli_registry
@@ -487,15 +510,17 @@ fn merge_cli_registry_into_config(
     // Remove CLIs only when the registry explicitly knows the platform AND
     // the binary is confirmed missing -- same rule `apply_registry_refresh`
     // uses, so a manually-added CLI the registry has never heard of is kept.
+    // An explicit setup run prunes on one sighting (no grace gate), except
+    // harnesses something still references.
     let known_names: std::collections::HashSet<String> = platforms_with_cli
         .iter()
         .filter_map(|p| p.cli.as_ref().map(|c| c.name.clone()))
         .collect();
     config.clis.retain(|c| {
-        if !known_names.contains(&c.name) {
+        if !known_names.contains(&c.name) || referenced.contains(c.name.as_str()) {
             return true;
         }
-        c.is_available()
+        c.is_installed()
     });
 
     // Add newly detected CLIs that aren't already in config.
@@ -1001,6 +1026,7 @@ mod tests {
             &cli_registry,
             &platforms_with_cli,
             Some(&baseline),
+            &std::collections::HashSet::new(),
         );
         let mistral = config.get_cli("mistral").unwrap();
         assert_eq!(mistral.provider.as_deref(), Some("Mistral AI"));
@@ -1089,6 +1115,7 @@ mod tests {
             &cli_registry,
             &platforms_with_cli,
             Some(&baseline),
+            &std::collections::HashSet::new(),
         );
 
         let opencode = config.get_cli("opencode").unwrap();
@@ -1148,7 +1175,13 @@ mod tests {
         };
         let platforms_with_cli = vec![cb58_platform_with_cli("opencode", registry)];
 
-        merge_cli_registry_into_config(&mut config, &cli_registry, &platforms_with_cli, None);
+        merge_cli_registry_into_config(
+            &mut config,
+            &cli_registry,
+            &platforms_with_cli,
+            None,
+            &std::collections::HashSet::new(),
+        );
 
         let opencode = config.get_cli("opencode").unwrap();
         assert_eq!(opencode.infra_retry_limit, Some(0));
@@ -1169,7 +1202,13 @@ mod tests {
         };
         let platforms_with_cli = vec![cb58_platform_with_cli("brandnew", registry_cli)];
 
-        merge_cli_registry_into_config(&mut config, &cli_registry, &platforms_with_cli, None);
+        merge_cli_registry_into_config(
+            &mut config,
+            &cli_registry,
+            &platforms_with_cli,
+            None,
+            &std::collections::HashSet::new(),
+        );
 
         assert!(config.get_cli("brandnew").is_some());
     }
@@ -1185,9 +1224,9 @@ mod tests {
         };
 
         // Registry still knows about "ghost" (it's in platforms_with_cli),
-        // but its binary can never resolve, so `cli_registry.available_clis`
-        // does not include it (CliRegistry::detect_available filters on
-        // is_available()).
+        // but its binary can never resolve to an executable file, so
+        // `cli_registry.available_clis` does not include it
+        // (CliRegistry::detect_available filters on is_installed()).
         let ghost_registry_entry = cb58_cli("ghost", "canopy-test-fixture-cli-missing-xyz");
         let cli_registry = crate::domain::cli_config::CliRegistry {
             version: 2,
@@ -1195,9 +1234,47 @@ mod tests {
         };
         let platforms_with_cli = vec![cb58_platform_with_cli("ghost", ghost_registry_entry)];
 
-        merge_cli_registry_into_config(&mut config, &cli_registry, &platforms_with_cli, None);
+        merge_cli_registry_into_config(
+            &mut config,
+            &cli_registry,
+            &platforms_with_cli,
+            None,
+            &std::collections::HashSet::new(),
+        );
 
         assert!(config.get_cli("ghost").is_none());
+    }
+
+    #[test]
+    fn merge_keeps_missing_binary_the_db_still_references() {
+        use crate::domain::canopy_config::CanopyConfig;
+
+        // A harness whose binary is gone but that something still names is
+        // kept: pruning it would strand the reference.
+        let ghost_local = cb58_cli("ghost", "canopy-test-fixture-cli-missing-xyz");
+        let mut config = CanopyConfig {
+            clis: vec![ghost_local],
+            ..Default::default()
+        };
+
+        let ghost_registry_entry = cb58_cli("ghost", "canopy-test-fixture-cli-missing-xyz");
+        let cli_registry = crate::domain::cli_config::CliRegistry {
+            version: 2,
+            available_clis: vec![],
+        };
+        let platforms_with_cli = vec![cb58_platform_with_cli("ghost", ghost_registry_entry)];
+        let referenced: std::collections::HashSet<String> =
+            ["ghost".to_string()].into_iter().collect();
+
+        merge_cli_registry_into_config(
+            &mut config,
+            &cli_registry,
+            &platforms_with_cli,
+            None,
+            &referenced,
+        );
+
+        assert!(config.get_cli("ghost").is_some());
     }
 
     #[test]
@@ -1216,7 +1293,13 @@ mod tests {
         };
         let platforms_with_cli: Vec<PlatformWithCli> = vec![];
 
-        merge_cli_registry_into_config(&mut config, &cli_registry, &platforms_with_cli, None);
+        merge_cli_registry_into_config(
+            &mut config,
+            &cli_registry,
+            &platforms_with_cli,
+            None,
+            &std::collections::HashSet::new(),
+        );
 
         assert!(
             config.get_cli("manual-only").is_some(),

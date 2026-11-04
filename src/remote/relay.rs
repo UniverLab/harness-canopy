@@ -1,0 +1,747 @@
+//! The daemon's WebSocket client to the relay.
+//!
+//! When `[remote] enabled = true` and an identity is stored, the supervisor
+//! keeps a socket to `<relay_url>/ws/host` with the GitHub bearer token and
+//! this host's id and label. Frames are JSON envelopes: relay → host
+//! `{from: "d:<conn>", body}` and host → relay `{to: "d:<conn>", body}`.
+//! Reconnects back off from one second to thirty seconds with ±20% jitter;
+//! an HTTP 401 stops and records `github token rejected: run canopy remote
+//! login` instead of retrying.
+
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use anyhow::{Context as _, Result};
+use serde_json::{json, Value};
+use tokio::net::TcpStream;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+use tokio_tungstenite::tungstenite::http::HeaderValue;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
+
+use crate::application::ports::StateRepository as _;
+use crate::db::Database;
+use crate::domain::canopy_config::CanopyConfig;
+use crate::remote::auth;
+use crate::remote::connection::{Control, DevicePeers};
+use crate::remote::devices::RemoteDevices;
+use crate::remote::guest::GuestConns;
+use crate::remote::hostkey::HostKey;
+use crate::remote::label::{encode_label, host_label};
+use crate::remote::live::{RelayPhase, RemoteLive};
+use crate::remote::pairing::PairingState;
+use crate::remote::signaling;
+use crate::remote::trust;
+use crate::sessions::ws::SessionsState;
+
+/// `daemon_state` key carrying the last terminal relay error.
+pub const REMOTE_ERROR_KEY: &str = "remote_error";
+/// `daemon_state` key holding device ids revoked by another process.
+pub const REMOTE_REVOKE_KEY: &str = "remote_revoke";
+/// `daemon_state` key holding device ids disconnected by another process.
+pub const REMOTE_DISCONNECT_KEY: &str = "remote_disconnect";
+/// `daemon_state` key holding guest logins whose trust narrowed or ended.
+pub const REMOTE_TRUST_REVOKE_KEY: &str = "remote_trust_revoke";
+/// `daemon_state` key holding the instant of the last successful reconnect.
+pub const REMOTE_RECONNECT_KEY: &str = "remote_reconnect";
+/// Shortest reconnect delay; attempts double from here.
+pub const MIN_BACKOFF: Duration = Duration::from_secs(1);
+/// Longest reconnect delay.
+pub const MAX_BACKOFF: Duration = Duration::from_secs(30);
+
+/// A connected relay socket.
+pub type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+/// Outbound relay bodies: `(to, body)`. One connection's task pushes answers
+/// and trickled candidates here; the socket loop writes them.
+pub type SignalTx = tokio::sync::mpsc::UnboundedSender<(String, Value)>;
+
+/// Serve one connected socket; see [`super::relay_socket`].
+pub use super::relay_socket::serve_socket;
+/// Serve one socket with an explicit idle timeout, for the reconnect tests.
+#[cfg(test)]
+pub use super::relay_socket::serve_socket_with_idle_timeout;
+
+/// Headers every host socket carries.
+#[derive(Debug, Clone)]
+pub struct HostHeaders {
+    /// GitHub OAuth token (never logged).
+    pub token: String,
+    /// This host's `host_id`.
+    pub host_id: String,
+    /// Human label or hostname.
+    pub label: String,
+}
+
+/// Why a connection attempt ended.
+#[derive(Debug)]
+pub enum ConnectError {
+    /// HTTP 401: the GitHub token was rejected; do not retry it.
+    Unauthorized,
+    /// HTTP 400: the relay rejected the handshake (e.g. `bad_label`); the
+    /// message already reads for `remote status`.
+    BadRequest(String),
+    /// Anything else that may succeed on a later attempt.
+    Transient(String),
+}
+
+/// `<relay_url>/pair#<code>`.
+pub fn pair_link(relay_url: &str, code: &str) -> String {
+    format!("{}/pair#{}", relay_url.trim_end_matches('/'), code)
+}
+
+/// Turn the configured HTTP relay URL into the host WebSocket URL.
+pub fn websocket_url(relay_url: &str) -> String {
+    let base = relay_url.trim_end_matches('/');
+    if let Some(rest) = base.strip_prefix("https://") {
+        format!("wss://{rest}/ws/host")
+    } else if let Some(rest) = base.strip_prefix("http://") {
+        format!("ws://{rest}/ws/host")
+    } else {
+        format!("{base}/ws/host")
+    }
+}
+
+/// Reconnect delay for `attempt` (0-based): 1 s doubling to 30 s, ±20%.
+pub fn backoff_delay(attempt: u32) -> Duration {
+    let exponent = attempt.min(6);
+    let base = (MIN_BACKOFF.as_secs() << exponent).min(MAX_BACKOFF.as_secs());
+    let millis = base * 1000;
+    let low = millis * 80 / 100;
+    let spread = millis * 40 / 100;
+    let jitter = if spread == 0 {
+        0
+    } else {
+        use rand::RngExt as _;
+        rand::rng().random_range(0..=spread)
+    };
+    Duration::from_millis(low + jitter)
+}
+
+/// Build the handshake request with the identity and host headers.
+pub fn request_for(
+    url: &str,
+    headers: &HostHeaders,
+) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request> {
+    let mut request = url
+        .into_client_request()
+        .with_context(|| "invalid relay websocket URL")?;
+    let values = request.headers_mut();
+    values.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {}", headers.token))
+            .context("invalid GitHub token header")?,
+    );
+    values.insert(
+        "X-Canopy-Host-Id",
+        HeaderValue::from_str(&headers.host_id).context("invalid host id header")?,
+    );
+    values.insert(
+        "X-Canopy-Host-Label",
+        HeaderValue::from_str(&encode_label(&headers.label))
+            .context("invalid host label header")?,
+    );
+    Ok(request)
+}
+
+/// Connect once, classifying an HTTP 401 apart from a transient failure.
+/// An HTTP 400 is terminal too: the handshake itself was refused, so no
+/// retry of the same headers can succeed. Honors HTTP(S)_PROXY/ALL_PROXY
+/// +NO_PROXY via a `CONNECT` tunnel; without one the dial is direct.
+pub async fn connect_ws(url: &str, headers: &HostHeaders) -> Result<WsStream, ConnectError> {
+    connect_ws_with_proxy(
+        url,
+        headers,
+        super::proxy::proxy_url_for_dest(url).as_deref(),
+    )
+    .await
+}
+
+/// Connect once, via `proxy` when set, `None` for the direct dial. An
+/// unparseable proxy URL is transient, never a silent direct bypass: the
+/// bypass would leak traffic past the proxy.
+pub async fn connect_ws_with_proxy(
+    url: &str,
+    headers: &HostHeaders,
+    proxy: Option<&str>,
+) -> Result<WsStream, ConnectError> {
+    let request = request_for(url, headers).map_err(|e| ConnectError::Transient(e.to_string()))?;
+    if let Some(proxy) = proxy {
+        return super::proxy::connect_via_proxy(request, url, proxy).await;
+    }
+    match tokio_tungstenite::connect_async(request).await {
+        Ok((stream, _response)) => Ok(stream),
+        Err(error) => Err(super::proxy::classify_handshake_error(error)),
+    }
+}
+
+pub use super::connection_registry::ConnectionRegistry;
+
+/// Everything one relay connection needs to answer frames.
+pub struct RelayRuntime {
+    pub(crate) host: Arc<HostKey>,
+    pairing: PairingState,
+    pub(crate) devices: RemoteDevices,
+    pub(crate) connections: ConnectionRegistry,
+    pub(crate) github_login: String,
+    pub(crate) db: Database,
+    pub(crate) sessions: Option<Arc<SessionsState>>,
+    pub(crate) relay_url: String,
+    pub(crate) bearer: String,
+    pub(crate) peers: DevicePeers,
+    pub(crate) guests: GuestConns,
+    pub(crate) seen_offers: Mutex<signaling::SeenOffers>,
+    uid_cache: Mutex<HashMap<String, u64>>,
+    last_allowlist: Mutex<String>,
+}
+
+impl RelayRuntime {
+    /// Build the runtime with the pairing state the CLI wrote. The live
+    /// connections stay with the supervisor across reconnects, so every
+    /// runtime of one daemon shares the one registry it is given.
+    pub fn new(
+        host: HostKey,
+        db: Database,
+        github_login: String,
+        pairing: PairingState,
+        connections: ConnectionRegistry,
+    ) -> Self {
+        Self {
+            host: Arc::new(host),
+            pairing,
+            devices: RemoteDevices::new(db.clone()),
+            connections,
+            github_login,
+            db,
+            sessions: None,
+            relay_url: String::new(),
+            bearer: String::new(),
+            peers: DevicePeers::default(),
+            guests: GuestConns::default(),
+            seen_offers: Mutex::new(signaling::SeenOffers::new()),
+            uid_cache: Mutex::new(HashMap::new()),
+            last_allowlist: Mutex::new(String::new()),
+        }
+    }
+
+    /// Route one body: `pair_init` answers inline, signalling bodies spawn or
+    /// reach a live peer, `device_identity` tracks guest connections, anything
+    /// else is `unknown_type`. Guest connections never reach the device path:
+    /// their `pair_init` fails like a wrong code and their offers verify
+    /// against relay-injected identity instead of a device row.
+    pub fn route(&self, body: &Value, now: i64, from: &str, signal: &SignalTx) -> Option<Value> {
+        match body.get("t").and_then(Value::as_str) {
+            Some("pair_init") => {
+                if self.guests.is_guest(from) {
+                    Some(pair_fail("bad_code"))
+                } else {
+                    Some(self.answer(body, now))
+                }
+            }
+            Some("device_identity") => {
+                self.guests.note_device_identity(body, from);
+                None
+            }
+            Some("offer") => {
+                if self.guests.is_guest(from) {
+                    self.start_guest_offer(body, now, from, signal);
+                } else {
+                    self.start_offer(body, now, from, signal);
+                }
+                None
+            }
+            Some("ice") => {
+                match signaling::ice_candidate(body) {
+                    Some(candidate) => {
+                        // The contract's `ice{candidate}` carries no device id;
+                        // the relay envelope's `from` is the connection.
+                        self.peers.route(from, Control::Ice(candidate));
+                    }
+                    None => {
+                        tracing::warn!("remote: ignoring an ice body without a candidate");
+                    }
+                }
+                None
+            }
+            Some("bye") => {
+                // The contract's `bye` carries no fields: it closes the
+                // sender's own peer. A body `device_id` is never honored —
+                // otherwise any paired device could close another one.
+                self.peers.close_from(from);
+                None
+            }
+            _ => Some(json!({"t": "error", "reason": "unknown_type"})),
+        }
+    }
+
+    /// One protocol reply for one relay body.
+    pub fn answer(&self, body: &Value, now: i64) -> Value {
+        match body.get("t").and_then(Value::as_str) {
+            Some("pair_init") => self
+                .pairing
+                .respond(body, &self.host, &self.devices, &self.github_login, now)
+                .unwrap_or_else(|_| pair_fail("bad_code")),
+            _ => json!({"t": "error", "reason": "unknown_type"}),
+        }
+    }
+
+    /// The `guest_allow` room body when the allowlist changed since the last
+    /// publish (`force` publishes always, for the join); `None` means nothing
+    /// to send. Unresolvable logins are skipped with a warning — fail closed,
+    /// never fatal: the next join or grant change republishes, and the
+    /// owner flow stays untouched.
+    pub async fn maybe_guest_allow(&self, force: bool) -> Option<Value> {
+        use super::guest_allow::{github_api, resolve_guest_uids};
+
+        let fingerprint = trust::allowlist_fingerprint(&self.db);
+        if !force {
+            if let Ok(last) = self.last_allowlist.lock() {
+                if fingerprint == *last {
+                    return None;
+                }
+            }
+        }
+        let uids = resolve_guest_uids(&self.db, &self.uid_cache, &self.bearer, &github_api()).await;
+        let invites = super::invite::live(&self.db, chrono::Utc::now().timestamp());
+        if let Ok(mut last) = self.last_allowlist.lock() {
+            *last = fingerprint;
+        }
+        Some(trust::guest_allow_body(&uids, &invites))
+    }
+
+    /// Test harness: pretend `login` already resolved to `uid`.
+    #[cfg(test)]
+    pub fn seed_uid_cache(&self, login: &str, uid: u64) {
+        if let Ok(mut cache) = self.uid_cache.lock() {
+            cache.insert(trust::normalize_login(login), uid);
+        }
+    }
+
+    /// Revoke a device: delete the row and close its live connection at once.
+    #[allow(dead_code)]
+    pub fn revoke(&self, device_id: &str) -> Result<bool> {
+        let removed = self.devices.revoke(device_id)?;
+        // Marked before the registry forgets it: the mark must land before
+        // any cancel wakes the serve loop.
+        self.peers.close_revoked(device_id);
+        self.connections.close(device_id);
+        Ok(removed)
+    }
+
+    /// Live connections, for tests and status surfaces.
+    #[cfg(test)]
+    pub fn connections(&self) -> &ConnectionRegistry {
+        &self.connections
+    }
+
+    /// Live peers, for the grant-matrix tests.
+    #[cfg(test)]
+    pub fn peers_handle(&self) -> &DevicePeers {
+        &self.peers
+    }
+
+    /// Test harness: attach live sessions and a shared peer table, the two
+    /// pieces `supervise` wires per connection in production.
+    #[cfg(test)]
+    pub fn set_test_harness(&mut self, sessions: Arc<SessionsState>, peers: DevicePeers) {
+        self.sessions = Some(sessions);
+        self.peers = peers;
+    }
+
+    /// Close every connection whose device was revoked or disconnected by
+    /// another process (the CLI queues ids to `remote_revoke` /
+    /// `remote_disconnect`), plus every guest peer whose login lost trust
+    /// (`remote_trust_revoke`). A revoked peer hears `error{code:"revoked"}`
+    /// before its close; a disconnected one just closes and may reconnect.
+    pub fn drain_remote_revocations(&self) {
+        self.drain_queue(REMOTE_REVOKE_KEY, |runtime, id| {
+            runtime.peers.close_revoked(id);
+            runtime.connections.close(id);
+        });
+        self.drain_queue(REMOTE_DISCONNECT_KEY, |runtime, id| {
+            runtime.connections.close(id);
+            runtime.peers.close(id);
+        });
+        self.drain_queue(REMOTE_TRUST_REVOKE_KEY, |runtime, login| {
+            runtime.close_login_peers(login);
+        });
+    }
+
+    /// Close every live peer paired under one login. A narrowed grant closes
+    /// the whole peer — there is no live-push channel for a smaller grant,
+    /// so the guest reconnects and re-resolves it.
+    fn close_login_peers(&self, login: &str) {
+        let login = trust::normalize_login(login);
+        let Ok(devices) = self.devices.list() else {
+            return;
+        };
+        for device in devices {
+            if trust::normalize_login(&device.github_login) == login {
+                self.peers.close_revoked(&device.id);
+                self.connections.close(&device.id);
+            }
+        }
+    }
+
+    /// Close every id queued under `key`, leaving ids that landed while
+    /// closing for the next tick.
+    fn drain_queue(&self, key: &str, close: impl Fn(&Self, &str)) {
+        let Ok(Some(value)) = self.db.get_state(key) else {
+            return;
+        };
+        let drained: Vec<&str> = value.split(',').filter(|id| !id.is_empty()).collect();
+        for id in &drained {
+            close(self, id);
+        }
+        // An id that lands while we close must survive: keep whatever we
+        // did not just drain instead of blanking the key.
+        let current = self.db.get_state(key).ok().flatten().unwrap_or_default();
+        let remaining: Vec<&str> = current
+            .split(',')
+            .filter(|id| !id.is_empty() && !drained.contains(id))
+            .collect();
+        let _ = self.db.set_state(key, &remaining.join(","));
+    }
+}
+
+fn pair_fail(reason: &str) -> Value {
+    json!({"t": "pair_fail", "reason": reason})
+}
+
+/// Record the terminal 401 message and stop retrying that token.
+pub fn record_token_rejected(db: &Database) {
+    let message = "github token rejected: run canopy remote login";
+    let _ = db.set_state(REMOTE_ERROR_KEY, message);
+    tracing::error!("{message}");
+}
+
+/// Record a successful reconnect and clear the last relay error, so `remote
+/// status` shows the reconnect instant without a stale error.
+pub fn record_reconnect(db: &Database) {
+    let _ = db.set_state(REMOTE_RECONNECT_KEY, &chrono::Utc::now().to_rfc3339());
+    let _ = db.set_state(REMOTE_ERROR_KEY, "");
+}
+
+/// Append a revoked device id for the daemon to pick up.
+pub fn queue_revocation(db: &Database, device_id: &str) {
+    queue_device_id(db, REMOTE_REVOKE_KEY, device_id);
+}
+
+/// Append a disconnected device id for the daemon to pick up.
+pub fn queue_disconnect(db: &Database, device_id: &str) {
+    queue_device_id(db, REMOTE_DISCONNECT_KEY, device_id);
+}
+
+/// Append a guest login for the daemon to kick out of its live peers.
+pub fn queue_trust_revocation(db: &Database, login: &str) {
+    queue_device_id(db, REMOTE_TRUST_REVOKE_KEY, &trust::normalize_login(login));
+}
+
+/// Append a device id to one daemon queue, once.
+fn queue_device_id(db: &Database, key: &str, device_id: &str) {
+    let existing = db.get_state(key).ok().flatten();
+    let mut ids: Vec<&str> = existing
+        .as_deref()
+        .unwrap_or_default()
+        .split(',')
+        .filter(|id| !id.is_empty())
+        .collect();
+    if !ids.contains(&device_id) {
+        ids.push(device_id);
+    }
+    let _ = db.set_state(key, &ids.join(","));
+}
+
+/// Spawn the relay supervisor for the life of the daemon. It re-reads
+/// config and identity on every iteration, so `canopy remote on|off` takes
+/// effect without a restart.
+pub fn spawn(data_dir: std::path::PathBuf, db: Database, sessions: Arc<SessionsState>) {
+    let live = crate::remote::live::shared();
+    tokio::spawn(async move { supervise(data_dir, db, sessions, live).await });
+}
+
+/// What keeps the relay from connecting this second.
+enum Wait {
+    /// No GitHub identity stored: forget any rejected token or label.
+    SignedOut,
+    /// `[remote] enabled = false`.
+    Disabled,
+    /// This token already got a 401; never retry it.
+    Rejected,
+    /// This label already got a 400; never retry it.
+    LabelRejected,
+}
+
+/// One supervisor iteration's decision.
+enum Next {
+    /// Not ready to connect; check again in a second.
+    Wait(Wait),
+    /// The host key could not be loaded: back off, then retry.
+    HostKeyError(String),
+    /// Connect with these headers and serve the socket.
+    Connect {
+        /// The WebSocket URL built from `relay_url`.
+        ws_url: String,
+        /// Identity and host headers for the handshake.
+        headers: HostHeaders,
+        /// Everything one connection needs to answer frames.
+        runtime: Arc<RelayRuntime>,
+        /// The token this connection authenticates with.
+        token: String,
+    },
+}
+
+/// The cheap pre-connect checks — sign-in state, `remote.enabled`, the
+/// rejected token and the host key — as one synchronous decision.
+fn next_action(
+    data_dir: &Path,
+    db: &Database,
+    rejected_token: Option<&str>,
+    rejected_label: Option<&str>,
+    connections: &ConnectionRegistry,
+    sessions: &Arc<SessionsState>,
+    peers: &DevicePeers,
+) -> Next {
+    let Some(identity) = auth::load_identity(data_dir) else {
+        return Next::Wait(Wait::SignedOut);
+    };
+    let config = CanopyConfig::load(data_dir);
+    if !config.remote.enabled {
+        return Next::Wait(Wait::Disabled);
+    }
+    let label = host_label(&config);
+    if rejected_label == Some(label.as_str()) {
+        return Next::Wait(Wait::LabelRejected);
+    }
+    if rejected_token == Some(identity.token.as_str()) {
+        return Next::Wait(Wait::Rejected);
+    }
+    let host = match HostKey::load_or_create(data_dir) {
+        Ok(host) => host,
+        Err(error) => return Next::HostKeyError(error.to_string()),
+    };
+    let headers = HostHeaders {
+        token: identity.token.clone(),
+        host_id: host.host_id(),
+        label,
+    };
+    let mut runtime = RelayRuntime::new(
+        host,
+        db.clone(),
+        identity.login.clone(),
+        PairingState::new(data_dir),
+        connections.clone(),
+    );
+    runtime.github_login = identity.login.clone();
+    runtime.sessions = Some(Arc::clone(sessions));
+    runtime.relay_url = config.remote.relay_url.clone();
+    runtime.bearer = identity.token.clone();
+    runtime.peers = peers.clone();
+    let runtime = Arc::new(runtime);
+    Next::Connect {
+        ws_url: websocket_url(&config.remote.relay_url),
+        headers,
+        runtime,
+        token: identity.token,
+    }
+}
+
+/// How one connection attempt ended, for the supervisor loop.
+enum After {
+    /// The socket served and closed: pause a second, then connect again.
+    Served,
+    /// HTTP 401: record it and never retry this token.
+    Rejected(String),
+    /// HTTP 400: record it and never retry this label.
+    RejectedLabel(String),
+    /// Any other failure: wait, then count an attempt.
+    Retry(Duration),
+}
+
+/// Connect once and serve the socket until it closes, classifying the
+/// outcome for the supervisor loop. The socket comes up inside this call,
+/// so `live` records `Connected` the moment the dial succeeds — the status
+/// surfaces must not read `connecting` for the whole life of a healthy
+/// connection.
+async fn connect_and_serve(
+    ws_url: &str,
+    headers: &HostHeaders,
+    runtime: Arc<RelayRuntime>,
+    token: String,
+    attempt: &mut u32,
+    data_dir: &Path,
+    live: &RemoteLive,
+) -> After {
+    match connect_ws(ws_url, headers).await {
+        Ok(socket) => {
+            live.set_phase(RelayPhase::Connected);
+            record_reconnect(&runtime.db);
+            let started = Instant::now();
+            let rec = Arc::clone(&runtime);
+            match serve_socket(socket, runtime, data_dir.to_path_buf()).await {
+                Ok(()) => After::Served,
+                Err(error) => serve_dropped(&rec.db, &error, started.elapsed(), attempt),
+            }
+        }
+        Err(ConnectError::Unauthorized) => After::Rejected(token),
+        Err(ConnectError::BadRequest(message)) => {
+            let _ = runtime.db.set_state(REMOTE_ERROR_KEY, &message);
+            tracing::warn!("remote: {message}");
+            After::RejectedLabel(headers.label.clone())
+        }
+        Err(ConnectError::Transient(reason)) => {
+            let _ = runtime.db.set_state(REMOTE_ERROR_KEY, &reason);
+            tracing::warn!("remote: relay connection failed: {reason}");
+            After::Retry(backoff_delay(*attempt))
+        }
+    }
+}
+
+/// Record a dropped socket for `remote status` instead of leaving it only
+/// in the daemon log. A socket that served a while was healthy: the drop
+/// is news, not a flapping relay, so redial from the floor.
+fn serve_dropped(
+    db: &Database,
+    error: &anyhow::Error,
+    served: Duration,
+    attempt: &mut u32,
+) -> After {
+    let _ = db.set_state(REMOTE_ERROR_KEY, &format!("{error:#}"));
+    tracing::warn!("remote: relay connection ended: {error:#}");
+    if served >= crate::remote::relay_socket::RELAY_IDLE_TIMEOUT {
+        *attempt = 0;
+    }
+    After::Retry(backoff_delay(*attempt))
+}
+
+/// Fold one "wait" decision into the loop counters.
+fn apply_wait(
+    wait: &Wait,
+    rejected_token: &mut Option<String>,
+    rejected_label: &mut Option<String>,
+    attempt: &mut u32,
+) {
+    match wait {
+        Wait::SignedOut => {
+            *rejected_token = None;
+            *rejected_label = None;
+            *attempt = 0;
+        }
+        Wait::Disabled => *attempt = 0,
+        Wait::Rejected | Wait::LabelRejected => {}
+    }
+}
+
+/// The phase one wait decision leaves behind: a rejected token or label
+/// stays rejected, anything else is off.
+fn wait_phase(wait: &Wait) -> RelayPhase {
+    match wait {
+        Wait::Rejected => RelayPhase::TokenRejected,
+        Wait::LabelRejected => RelayPhase::RelayRejected,
+        Wait::SignedOut | Wait::Disabled => RelayPhase::Off,
+    }
+}
+
+/// The phase one connection attempt leaves behind: a served socket was
+/// connected, a 401 rejects the token, a 400 rejects the label, anything
+/// else keeps connecting.
+fn after_phase(after: &After) -> RelayPhase {
+    match after {
+        After::Served => RelayPhase::Connected,
+        After::Rejected(_) => RelayPhase::TokenRejected,
+        After::RejectedLabel(_) => RelayPhase::RelayRejected,
+        After::Retry(_) => RelayPhase::Connecting,
+    }
+}
+
+/// The supervisor loop. It re-reads config and identity on every
+/// iteration, so `canopy remote on|off` takes effect without a restart;
+/// the live-connection registry outlives any one socket, so a revoke
+/// still closes connections that were registered before a reconnect.
+/// Every iteration records its phase on `live`, and the peers it serves
+/// are `live`'s, so `remote_status` reads the same state.
+pub async fn supervise(
+    data_dir: std::path::PathBuf,
+    db: Database,
+    sessions: Arc<SessionsState>,
+    live: Arc<RemoteLive>,
+) {
+    let mut attempt = 0u32;
+    let mut rejected_token: Option<String> = None;
+    let mut rejected_label: Option<String> = None;
+    let connections = ConnectionRegistry::default();
+    let peers = live.peers().clone();
+    loop {
+        match next_action(
+            &data_dir,
+            &db,
+            rejected_token.as_deref(),
+            rejected_label.as_deref(),
+            &connections,
+            &sessions,
+            &peers,
+        ) {
+            Next::Wait(wait) => {
+                apply_wait(
+                    &wait,
+                    &mut rejected_token,
+                    &mut rejected_label,
+                    &mut attempt,
+                );
+                live.set_phase(wait_phase(&wait));
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            Next::HostKeyError(error) => {
+                tracing::warn!("remote: could not load the host key: {error}");
+                tokio::time::sleep(backoff_delay(attempt)).await;
+                attempt += 1;
+            }
+            Next::Connect {
+                ws_url,
+                headers,
+                runtime,
+                token,
+            } => {
+                live.set_phase(RelayPhase::Connecting);
+                let after = connect_and_serve(
+                    &ws_url,
+                    &headers,
+                    runtime,
+                    token,
+                    &mut attempt,
+                    &data_dir,
+                    &live,
+                )
+                .await;
+                live.set_phase(after_phase(&after));
+                match after {
+                    After::Served => {
+                        let _ = db.set_state(REMOTE_ERROR_KEY, "");
+                        attempt = 0;
+                        // Bound the reconnect rate: a relay that accepts and
+                        // instantly drops must not spin this loop.
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                    After::Rejected(token) => {
+                        record_token_rejected(&db);
+                        rejected_token = Some(token);
+                    }
+                    After::RejectedLabel(label) => rejected_label = Some(label),
+                    After::Retry(delay) => {
+                        tokio::time::sleep(delay).await;
+                        attempt += 1;
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "relay_tests.rs"]
+mod tests;
+
+#[cfg(test)]
+#[path = "relay_guest_tests.rs"]
+mod guest_tests;

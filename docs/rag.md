@@ -1,7 +1,7 @@
 ---
 title: RAG Pipeline
 description: Local-first semantic search over your own documents.
-order: 10
+order: 16
 ---
 
 # RAG Pipeline
@@ -63,7 +63,7 @@ and directories from indexing.
 
 ## Searching
 
-Agents call the `rag_search` MCP tool (rate-limited to 10 calls/minute
+Agents call the `rag` MCP tool's `search` action (rate-limited to 10 calls/minute
 per agent with a sliding window). From the TUI, the **RAG transfer
 modal** sends search results to any agent as injected context.
 

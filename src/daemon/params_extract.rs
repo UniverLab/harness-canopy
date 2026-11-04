@@ -66,7 +66,7 @@ where
 /// the received value, and a minimal example. Split out from
 /// [`FromContextPart::from_context_part`] so it can be exercised directly in
 /// tests without constructing a `ToolCallContext`.
-fn deserialize_params<P>(value: &Value) -> Result<P, ErrorData>
+pub(crate) fn deserialize_params<P>(value: &Value) -> Result<P, ErrorData>
 where
     P: DeserializeOwned + JsonSchema,
 {
@@ -508,16 +508,6 @@ mod tests {
         assert!(
             node_data_metadata.get("type").is_some(),
             "IntelligenceNodeParams.metadata should declare a type: {node_data_metadata}"
-        );
-
-        let broadcast_root = root_schema_value::<crate::daemon::params::SyncBroadcastParams>();
-        let broadcast_metadata = broadcast_root
-            .get("properties")
-            .and_then(|p| p.get("metadata"))
-            .expect("metadata property present");
-        assert!(
-            broadcast_metadata.get("type").is_some(),
-            "SyncBroadcastParams.metadata should declare a type: {broadcast_metadata}"
         );
     }
 

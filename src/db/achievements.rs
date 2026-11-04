@@ -63,6 +63,17 @@ impl AchievementStore {
         self.unlock_timestamps.insert(id, now);
         Ok(true)
     }
+
+    /// Record an unlock the snapshot worker persisted (worker mode): the
+    /// `achievement:*` row already exists, so this only updates the in-memory
+    /// set. Returns `true` when newly marked.
+    pub fn mark_unlocked(&mut self, id: MissionId, timestamp: i64) -> bool {
+        if !self.unlocked.insert(id) {
+            return false;
+        }
+        self.unlock_timestamps.insert(id, timestamp);
+        true
+    }
 }
 
 fn achievement_key(id: MissionId) -> String {

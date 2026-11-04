@@ -10,7 +10,7 @@ pub(super) fn is_rag_focused(app: &App) -> bool {
 
 pub(super) fn rag_info_title(app: &App) -> &'static str {
     if app.rag_paused {
-        " ragInfo ⏸ "
+        " ragInfo ‖ "
     } else {
         " ragInfo "
     }
@@ -141,15 +141,15 @@ pub(super) fn rag_status_line(app: &App, theme: &Theme) -> Line<'static> {
             Style::default().fg(theme.error),
         )),
         RagModelStatus::Downloading { .. } => Line::from(Span::styled(
-            " ⬇ downloading ",
+            " ▼ downloading ",
             Style::default().fg(theme.warning),
         )),
         RagModelStatus::Preparing { .. } => Line::from(Span::styled(
-            " ⚙ preparing ",
+            " ◉ preparing ",
             Style::default().fg(theme.warning),
         )),
         RagModelStatus::Paused => Line::from(Span::styled(
-            " ⏸ paused ",
+            " ‖ paused ",
             Style::default().fg(theme.warning),
         )),
         RagModelStatus::Ready if app.rag_info.processing_items > 0 => Line::from(Span::styled(

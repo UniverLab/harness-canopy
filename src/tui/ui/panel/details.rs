@@ -116,7 +116,7 @@ pub fn draw_group_details(
 /// Status label/color for a background agent, given whether it currently
 /// has an active run (from `App::active_runs`). Pure over `Agent` so it can
 /// be reused (and tested) without touching the DB or a live `App`.
-pub(crate) fn agent_status(agent: &Agent, has_active_run: bool) -> (&'static str, Color) {
+pub(crate) fn agent_status_display(agent: &Agent, has_active_run: bool) -> (&'static str, Color) {
     if !agent.enabled {
         ("DISABLED", STATUS_DISABLED)
     } else if has_active_run {
@@ -132,7 +132,7 @@ pub(crate) fn agent_status(agent: &Agent, has_active_run: bool) -> (&'static str
 
 pub fn draw_agent_details(frame: &mut Frame, area: Rect, agent: &Agent, app: &App, theme: &Theme) {
     let has_active = app.active_runs.contains_key(&agent.id);
-    let (status_text, status_color) = agent_status(agent, has_active);
+    let (status_text, status_color) = agent_status_display(agent, has_active);
 
     let mut lines = vec![
         Line::from(vec![

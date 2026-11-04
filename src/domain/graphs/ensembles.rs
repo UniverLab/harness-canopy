@@ -9,7 +9,7 @@ use crate::domain::graphs::GraphEdgeCondition;
 /// their own `prompt_override` (see [`EnsembleMember::prompt_override`]) so a
 /// panel can review the same input from several angles at once instead of
 /// just several models. Persisted as
-/// its own row so `graph_get`/`graph_update_ensemble` can address the whole
+/// its own row so `graph`/`graph_ensemble` can address the whole
 /// unit — the members and join themselves are ordinary [`GraphNode`] rows
 /// (see [`EnsembleMember`]), wired with ordinary [`GraphEdge`] rows, so the
 /// engine's existing graph-walking code needs only the ensemble-aware
@@ -179,6 +179,11 @@ pub struct Ensemble {
     /// per-member flag is deliberately never stored: the right belongs to
     /// the role (the ensemble), not to whichever CLI happens to fill it.
     pub commit_rights: bool,
+    /// Named mutexes (e.g. `["cpu"]`) held per member run: every member run
+    /// acquires the union of these and its node's own `mutex` before it
+    /// executes. Empty means none.
+    #[serde(default)]
+    pub mutex: Vec<String>,
     pub created_at: DateTime<Utc>,
     /// CM49: the crew this ensemble is bound to, by id — the join key every
     /// binding query uses. `None` means literal members (or a pending import
@@ -206,16 +211,13 @@ impl Ensemble {
 
 /// `(platform, model, prompt_override, timeout_minutes, infra_retry_limit,
 /// infra_crash_max_seconds, infra_backoff_seconds)` — the normalized shape
-/// of one ensemble member's identity, shared by `graph_add_ensemble`/
-/// `graph_update_ensemble`'s validated input, [`EnsembleBlueprint`]'s stored
-/// members, and [`EnsembleMember`] itself. `timeout_minutes` is this
+/// of one ensemble member's identity, shared by `graph_ensemble`'s
+/// validated input and [`EnsembleMember`] itself. `timeout_minutes` is this
 /// member's own timeout override, or `None` to use the ensemble's shared
 /// `timeout_minutes`. `infra_retry_limit`, `infra_crash_max_seconds` and
 /// `infra_backoff_seconds` are this member's own infra-retry overrides, or
 /// `None` to use the ensemble's own default (which may itself defer to the
 /// platform's config.toml value, then the engine default).
-///
-/// [`EnsembleBlueprint`]: crate::domain::blueprints::EnsembleBlueprint
 pub type EnsembleMemberSpec = (
     String,
     Option<String>,
@@ -235,7 +237,7 @@ pub struct EnsembleMember {
     pub node_id: String,
     /// Position within the ensemble (0-based) — the deterministic order used
     /// for consolidation and for keying resize diffs in
-    /// `graph_update_ensemble`.
+    /// `graph_ensemble`.
     pub position: i64,
     pub platform: String,
     pub model: Option<String>,
@@ -264,7 +266,7 @@ pub struct EnsembleMember {
 pub struct EnsembleDetails {
     pub ensemble: Ensemble,
     /// Members in `position` order — the order consolidation and
-    /// `graph_update_ensemble` resize diffs rely on.
+    /// `graph_ensemble` resize diffs rely on.
     pub members: Vec<EnsembleMember>,
 }
 

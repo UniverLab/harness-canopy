@@ -162,6 +162,57 @@ impl Database {
         .map_err(Into::into)
     }
 
+    /// FR4: the baseline (`spec_start_head`, `spec_start_dirty`) the spec's
+    /// first `spec_started` of the current run recorded — the head a directed
+    /// start after a pause reuses instead of capturing a fresh one. Only
+    /// payload-carrying starts past the latest `graph_started` qualify, so an
+    /// older run's head (or a payload-less directed-start marker) never wins.
+    /// A missing or unparseable payload reads `None`, never an error.
+    pub fn spec_started_head(
+        &self,
+        graph_id: &str,
+        spec_id: &str,
+    ) -> Result<Option<(Option<String>, Option<i64>)>> {
+        use crate::domain::activity::GraphEventKind;
+
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+        let payload: Option<String> = conn
+            .query_row(
+                "SELECT payload FROM graph_events
+                 WHERE graph_id = ?1 AND spec_id = ?2 AND kind = ?3 AND payload IS NOT NULL
+                   AND id > COALESCE(
+                       (SELECT MAX(id) FROM graph_events WHERE graph_id = ?1 AND kind = ?4), 0)
+                 ORDER BY id ASC LIMIT 1",
+                params![
+                    graph_id,
+                    spec_id,
+                    GraphEventKind::SpecStarted.as_str(),
+                    GraphEventKind::GraphStarted.as_str(),
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(payload) = payload else {
+            return Ok(None);
+        };
+        let value: serde_json::Value = match serde_json::from_str(&payload) {
+            Ok(value) => value,
+            Err(_) => return Ok(None),
+        };
+        Ok(Some((
+            value
+                .get("spec_start_head")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            value
+                .get("spec_start_dirty")
+                .and_then(serde_json::Value::as_i64),
+        )))
+    }
+
     /// How many events [`Self::prune_graph_events`] would delete — the
     /// dry-run projection for `canopy clean`.
     pub fn count_pruneable_graph_events(
@@ -215,6 +266,26 @@ mod tests {
             message: message.to_string(),
             payload: None,
         }
+    }
+
+    fn started(graph_id: &str, spec_id: &str, head: &str) -> GraphEventRecord {
+        GraphEventRecord {
+            graph_id: graph_id.to_string(),
+            spec_id: Some(spec_id.to_string()),
+            node_id: None,
+            run_id: None,
+            kind: "spec_started".to_string(),
+            message: "Spec started.".to_string(),
+            payload: Some(
+                serde_json::json!({"spec_start_head": head, "spec_start_dirty": 0}).to_string(),
+            ),
+        }
+    }
+
+    fn payload_less_started(graph_id: &str, spec_id: &str) -> GraphEventRecord {
+        let mut event = record(graph_id, "spec_started", "directed start");
+        event.spec_id = Some(spec_id.to_string());
+        event
     }
 
     #[test]
@@ -307,6 +378,43 @@ mod tests {
             .map(|r| r.id)
             .collect();
         assert_eq!(all, ids, "paging must be contiguous with no repeats");
+    }
+
+    /// FR4: the head recorded at the spec's first `spec_started` of the
+    /// current run — bounded by the latest `graph_started` so an older run's
+    /// head never wins. Payload-less starts are skipped, and unknown
+    /// specs/graphs read `None`.
+    #[test]
+    fn spec_started_head_reads_first_payload_of_current_run() {
+        let db = test_db();
+        db.insert_graph_event(&record("g", "graph_started", "run 1"))
+            .unwrap();
+        db.insert_graph_event(&started("g", "spec-1", "h-old"))
+            .unwrap();
+        db.insert_graph_event(&record("g", "graph_started", "run 2"))
+            .unwrap();
+        db.insert_graph_event(&payload_less_started("g", "spec-1"))
+            .unwrap();
+        db.insert_graph_event(&started("g", "spec-1", "h-new"))
+            .unwrap();
+        db.insert_graph_event(&payload_less_started("g", "spec-2"))
+            .unwrap();
+
+        assert_eq!(
+            db.spec_started_head("g", "spec-1").unwrap(),
+            Some((Some("h-new".to_string()), Some(0))),
+            "the older run's head must not win, and the payload-less start is skipped"
+        );
+        assert_eq!(
+            db.spec_started_head("g", "spec-2").unwrap(),
+            None,
+            "a payload-less start alone is not a baseline"
+        );
+        assert_eq!(db.spec_started_head("g", "unknown-spec").unwrap(), None);
+        assert_eq!(
+            db.spec_started_head("unknown-graph", "spec-1").unwrap(),
+            None
+        );
     }
 
     #[test]

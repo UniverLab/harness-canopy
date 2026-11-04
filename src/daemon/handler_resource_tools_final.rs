@@ -1,0 +1,555 @@
+//! The nine final-wave resource tools: one `#[tool]` method per resource,
+//! each dispatching on `action` through the shared [`ToolSpec`] contract in
+//! [`crate::daemon::actions`]. Every action validates first (one refusal
+//! listing the whole action table), then deserializes the same JSON — minus
+//! the dispatch key — into the existing per-operation params struct and
+//! calls the `<tool>_<action>` `_impl` method. No behaviour lives here; the
+//! logic is the old tools' own.
+
+use crate::daemon::actions::{action_params, resource_action_object, ActionSpec, ToolSpec};
+use crate::daemon::handler::{OptionalExtension, TaskTriggerHandler};
+use crate::daemon::params::*;
+use crate::daemon::params_extract::Parameters;
+use axum::http::request::Parts;
+use rmcp::model::CallToolResult;
+use rmcp::tool;
+use rmcp::tool_router;
+use rmcp::ErrorData as McpError;
+
+// ── Action tables ────────────────────────────────────────────────────
+
+pub(crate) static NODE: ToolSpec = ToolSpec {
+    name: "node",
+    actions: &[
+        ActionSpec {
+            name: "list",
+            required: &[],
+            optional: &[],
+        },
+        ActionSpec {
+            name: "get",
+            required: &["name"],
+            optional: &[],
+        },
+        ActionSpec {
+            name: "install",
+            required: &["ref"],
+            optional: &["as", "replace", "overwrite_presets", "accept"],
+        },
+        ActionSpec {
+            name: "remove",
+            required: &["name"],
+            optional: &[],
+        },
+    ],
+};
+
+pub(crate) static INTELLIGENCE_ADMIN: ToolSpec = ToolSpec {
+    name: "intelligence_admin",
+    actions: &[
+        ActionSpec {
+            name: "delete_node",
+            required: &["node_id"],
+            optional: &["project_hash"],
+        },
+        ActionSpec {
+            name: "delete_relation",
+            required: &["edge_id"],
+            optional: &["project_hash"],
+        },
+        ActionSpec {
+            name: "walk",
+            required: &["node_id"],
+            optional: &["depth", "compact"],
+        },
+        ActionSpec {
+            name: "list_projects",
+            required: &[],
+            optional: &["query", "limit"],
+        },
+        ActionSpec {
+            name: "link_projects",
+            required: &["from_project_hash", "to_project_hash"],
+            optional: &["relation", "weight"],
+        },
+    ],
+};
+
+pub(crate) static PROJECT: ToolSpec = ToolSpec {
+    name: "project",
+    actions: &[
+        ActionSpec {
+            name: "register",
+            required: &["path"],
+            optional: &[],
+        },
+        ActionSpec {
+            name: "remap",
+            required: &["project_hash", "new_path"],
+            optional: &["dry_run", "force"],
+        },
+        ActionSpec {
+            name: "search",
+            required: &["query"],
+            optional: &[],
+        },
+        ActionSpec {
+            name: "update",
+            required: &["project_hash"],
+            optional: &["description", "tags"],
+        },
+    ],
+};
+
+pub(crate) static SCHEDULED_PROMPTS: ToolSpec = ToolSpec {
+    name: "scheduled_prompts",
+    actions: &[
+        ActionSpec {
+            name: "create",
+            required: &["prompt"],
+            optional: &["at", "in_seconds", "target_session_id"],
+        },
+        ActionSpec {
+            name: "list",
+            required: &[],
+            optional: &["session_id"],
+        },
+        ActionSpec {
+            name: "cancel",
+            required: &["id"],
+            optional: &[],
+        },
+    ],
+};
+
+pub(crate) static SKILL: ToolSpec = ToolSpec {
+    name: "skill",
+    actions: &[
+        ActionSpec {
+            name: "list",
+            required: &[],
+            optional: &[],
+        },
+        ActionSpec {
+            name: "get",
+            required: &["name"],
+            optional: &[],
+        },
+    ],
+};
+
+pub(crate) static SUBAGENT: ToolSpec = ToolSpec {
+    name: "subagent",
+    actions: &[
+        ActionSpec {
+            name: "spawn",
+            required: &["prompt"],
+            optional: &[
+                "cli",
+                "workdir",
+                "model",
+                "effort",
+                "mcp_servers",
+                "timeout_minutes",
+                "ttl_minutes",
+                "blocking",
+            ],
+        },
+        ActionSpec {
+            name: "collect",
+            required: &["id"],
+            optional: &[],
+        },
+    ],
+};
+
+pub(crate) static RAG: ToolSpec = ToolSpec {
+    name: "rag",
+    actions: &[
+        ActionSpec {
+            name: "search",
+            required: &["query"],
+            optional: &["agent_id", "limit"],
+        },
+        ActionSpec {
+            name: "compact",
+            required: &[],
+            optional: &[],
+        },
+    ],
+};
+
+pub(crate) static CATALOGUE: ToolSpec = ToolSpec {
+    name: "catalogue",
+    actions: &[ActionSpec {
+        name: "search",
+        required: &["q"],
+        optional: &["sort", "page", "limit"],
+    }],
+};
+
+pub(crate) static IDENTITY: ToolSpec = ToolSpec {
+    name: "identity",
+    actions: &[
+        ActionSpec {
+            name: "get",
+            required: &[],
+            optional: &[],
+        },
+        ActionSpec {
+            name: "evolve",
+            required: &[],
+            optional: &["new_directives", "new_traits"],
+        },
+        ActionSpec {
+            name: "list_seeds",
+            required: &[],
+            optional: &[],
+        },
+        ActionSpec {
+            name: "create_seed",
+            required: &["name"],
+            optional: &["directives", "traits"],
+        },
+        ActionSpec {
+            name: "remove_seed",
+            required: &["seed_id"],
+            optional: &[],
+        },
+    ],
+};
+
+// ── Typed input schemas, one newtype per tool (FR1) ─────────────────
+
+resource_action_object!(
+    NodeObject,
+    NODE,
+    [
+        ("get", NodeGetParams),
+        ("install", NodeInstallParams),
+        ("remove", NodeRemoveParams),
+    ]
+);
+
+resource_action_object!(
+    IntelligenceAdminObject,
+    INTELLIGENCE_ADMIN,
+    [
+        ("delete_node", IntelligenceDeleteNodeParams),
+        ("delete_relation", IntelligenceDeleteRelationParams),
+        ("walk", IntelligenceGraphWalkParams),
+        ("list_projects", IntelligenceListProjectsParams),
+        ("link_projects", IntelligenceLinkProjectsParams),
+    ]
+);
+
+resource_action_object!(
+    ProjectObject,
+    PROJECT,
+    [
+        ("register", ProjectRegisterParams),
+        ("remap", ProjectRemapParams),
+        ("search", ProjectSearchParams),
+        ("update", ProjectUpdateParams),
+    ]
+);
+
+resource_action_object!(
+    ScheduledPromptObject,
+    SCHEDULED_PROMPTS,
+    [
+        ("create", ScheduledPromptCreateParams),
+        ("list", ScheduledPromptListParams),
+        ("cancel", ScheduledPromptCancelParams),
+    ]
+);
+
+resource_action_object!(SkillObject, SKILL, [("get", SkillGetParams)]);
+
+resource_action_object!(
+    SubagentObject,
+    SUBAGENT,
+    [
+        ("spawn", SubagentSpawnParams),
+        ("collect", SubagentCollectParams),
+    ]
+);
+
+resource_action_object!(RagObject, RAG, [("search", RagSearchParams)]);
+
+resource_action_object!(
+    IdentityObject,
+    IDENTITY,
+    [
+        ("evolve", EvolveIdentityParams),
+        ("create_seed", CreateSeedParams),
+        ("remove_seed", RemoveSeedParams),
+    ]
+);
+
+resource_action_object!(
+    CatalogueObject,
+    CATALOGUE,
+    [("search", CatalogueSearchParams)]
+);
+
+// ── The nine resource tools ──────────────────────────────────────────
+
+#[tool_router(router = tool_router_resource_tools_final, vis = "pub(crate)")]
+impl TaskTriggerHandler {
+    #[tool(
+        name = "node",
+        description = "List, inspect, install, and remove shareable node documents. Pass `action` plus the parameters listed for it. \
+        Actions (required params; optional params): \
+        `list` (required: none; optional: none) — list every node document available to graph_node add and graph_ensemble add, installed and builtin. \
+        `get` (required: name; optional: none) — return one node document with its kind, source, and full config. \
+        `install` (required: ref; optional: as, replace, overwrite_presets, accept) — install a node document from the catalogue by ref (`<slug>`, `<owner>/<repo>/<slug>`, each with an optional `@<ref>`, or `draft:<id>` for a one-use editor draft); without accept: true it writes nothing and returns {needs_review: true, review} for the agent to show its user first, with accept: true it installs and echoes the review. A name already installed from another source is refused: pass `as` to install under another local name, or `replace: true` to overwrite. \
+        `remove` (required: name; optional: none) — remove an installed node document; a builtin with no installed copy is refused."
+    )]
+    pub(crate) async fn node(
+        &self,
+        Parameters(params): Parameters<NodeObject>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut params = params.into_value();
+        NodeObject::coerce(&mut params);
+        let action = NODE.validate(&params)?;
+        match action {
+            "list" => self.node_list_impl().await,
+            "get" => self.node_get_impl(action_params(&params)?).await,
+            "install" => self.node_install_impl(action_params(&params)?).await,
+            "remove" => self.node_remove_impl(action_params(&params)?).await,
+            _ => unreachable!("validated action"),
+        }
+    }
+
+    #[tool(
+        name = "intelligence_admin",
+        description = "Delete intelligence nodes and relations, walk the knowledge graph, and manage project links. Pass `action` plus the parameters listed for it. \
+        Actions (required params; optional params): \
+        `delete_node` (required: node_id; optional: project_hash) — delete an intelligence node and every relation touching it, in one transaction (hard delete); errors if the node does not exist. \
+        `delete_relation` (required: edge_id; optional: project_hash) — delete a single relation by ID, leaving both endpoint nodes intact; errors if it does not exist. \
+        `walk` (required: node_id; optional: depth, compact) — walk the project-context graph from a node up to depth; compact mode (default) omits bodies, and the root is returned in `root` only. \
+        `list_projects` (required: none; optional: query, limit) — list all indexed projects for the project picker. \
+        `link_projects` (required: from_project_hash, to_project_hash; optional: relation, weight) — create a typed relationship between two indexed projects."
+    )]
+    pub(crate) async fn intelligence_admin(
+        &self,
+        Parameters(params): Parameters<IntelligenceAdminObject>,
+        OptionalExtension(parts): OptionalExtension<Parts>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut params = params.into_value();
+        IntelligenceAdminObject::coerce(&mut params);
+        let action = INTELLIGENCE_ADMIN.validate(&params)?;
+        match action {
+            "delete_node" => {
+                self.intelligence_admin_delete_node_impl(action_params(&params)?, parts.as_ref())
+                    .await
+            }
+            "delete_relation" => {
+                self.intelligence_admin_delete_relation_impl(
+                    action_params(&params)?,
+                    parts.as_ref(),
+                )
+                .await
+            }
+            "walk" => {
+                self.intelligence_admin_walk_impl(action_params(&params)?)
+                    .await
+            }
+            "list_projects" => {
+                self.intelligence_admin_list_projects_impl(action_params(&params)?)
+                    .await
+            }
+            "link_projects" => {
+                self.intelligence_admin_link_projects_impl(action_params(&params)?)
+                    .await
+            }
+            _ => unreachable!("validated action"),
+        }
+    }
+
+    #[tool(
+        name = "project",
+        description = "Register, remap, search, and update project registry entries. Pass `action` plus the parameters listed for it. \
+        Actions (required params; optional params): \
+        `register` (required: path; optional: none) — explicitly register a project directory in the registry (no marker file required). \
+        `remap` (required: project_hash, new_path; optional: dry_run, force) — remap a renamed or moved project to its new path, re-keying its sessions and history instead of losing them; dry_run previews without changing anything. \
+        `search` (required: query; optional: none) — search projects by name/description. \
+        `update` (required: project_hash; optional: description, tags) — update project metadata."
+    )]
+    pub(crate) async fn project(
+        &self,
+        Parameters(params): Parameters<ProjectObject>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut params = params.into_value();
+        ProjectObject::coerce(&mut params);
+        let action = PROJECT.validate(&params)?;
+        match action {
+            "register" => self.project_register_impl(action_params(&params)?).await,
+            "remap" => self.project_remap_impl(action_params(&params)?).await,
+            "search" => self.project_search_impl(action_params(&params)?).await,
+            "update" => self.project_update_impl(action_params(&params)?).await,
+            _ => unreachable!("validated action"),
+        }
+    }
+
+    #[tool(
+        name = "scheduled_prompts",
+        description = "Schedule prompts for future delivery to a session, and list and cancel pending ones. Pass `action` plus the parameters listed for it. \
+        Actions (required params; optional params): \
+        `create` (required: prompt; optional: at, in_seconds, target_session_id) — schedule a prompt for delivery to an interactive session at a future time — the way to have an agent wake itself (or another session) later instead of polling on a cron. Omit `target_session_id` to target your own session. Give exactly one of `at` (ISO 8601, e.g. \"2026-07-10T09:00:00Z\") or `in_seconds` (relative delay, e.g. 2400 for \"in 40 minutes\"). Delivery happens on the target's next TUI refresh tick — if no TUI is attached when the time arrives, the send waits rather than being lost. Refused immediately if the target session does not exist. Returns the new scheduled send's id. \
+        `list` (required: none; optional: session_id) — list pending (not yet fired) scheduled sends for a session, soonest first; omit session_id for your own session. \
+        `cancel` (required: id; optional: none) — cancel a pending scheduled send by id before it fires."
+    )]
+    pub(crate) async fn scheduled_prompts(
+        &self,
+        Parameters(params): Parameters<ScheduledPromptObject>,
+        OptionalExtension(parts): OptionalExtension<Parts>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut params = params.into_value();
+        ScheduledPromptObject::coerce(&mut params);
+        let action = SCHEDULED_PROMPTS.validate(&params)?;
+        match action {
+            "create" => {
+                self.scheduled_prompt_create_impl(action_params(&params)?, parts.as_ref())
+                    .await
+            }
+            "list" => {
+                self.scheduled_prompt_list_impl(action_params(&params)?, parts.as_ref())
+                    .await
+            }
+            "cancel" => {
+                self.scheduled_prompt_cancel_impl(action_params(&params)?)
+                    .await
+            }
+            _ => unreachable!("validated action"),
+        }
+    }
+
+    #[tool(
+        name = "skill",
+        description = "Discover and fetch skills from the dynamic skill store. Pass `action` plus the parameters listed for it. \
+        Actions (required params; optional params): \
+        `list` (required: none; optional: none) — list skills available to this agent, each with name, description, source, and whether it is installed or merely available. \
+        `get` (required: name; optional: none) — fetch a skill's full instructions by name, cloning or refreshing it on demand."
+    )]
+    pub(crate) async fn skill(
+        &self,
+        Parameters(params): Parameters<SkillObject>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut params = params.into_value();
+        SkillObject::coerce(&mut params);
+        let action = SKILL.validate(&params)?;
+        match action {
+            "list" => self.skill_list_impl().await,
+            "get" => self.skill_get_impl(action_params(&params)?).await,
+            _ => unreachable!("validated action"),
+        }
+    }
+
+    #[tool(
+        name = "subagent",
+        description = "Launch ephemeral subagents and collect their results. Pass `action` plus the parameters listed for it. \
+        Actions (required params; optional params): \
+        `spawn` (required: prompt; optional: cli, workdir, model, effort, mcp_servers, timeout_minutes, ttl_minutes, blocking) — launch an ephemeral subagent; async by default (poll `collect`), or pass blocking: true to wait and return the result directly. \
+        `collect` (required: id; optional: none) — collect a subagent result and mark it for cleanup; status is 'running' if unfinished."
+    )]
+    pub(crate) async fn subagent(
+        &self,
+        Parameters(params): Parameters<SubagentObject>,
+        OptionalExtension(parts): OptionalExtension<Parts>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut params = params.into_value();
+        SubagentObject::coerce(&mut params);
+        let action = SUBAGENT.validate(&params)?;
+        match action {
+            "spawn" => {
+                self.subagent_spawn_impl(action_params(&params)?, parts.as_ref())
+                    .await
+            }
+            "collect" => self.subagent_collect_impl(action_params(&params)?).await,
+            _ => unreachable!("validated action"),
+        }
+    }
+
+    #[tool(
+        name = "rag",
+        description = "Search indexed personal content and maintain the vector store. Pass `action` plus the parameters listed for it. \
+        Actions (required params; optional params): \
+        `search` (required: query; optional: agent_id, limit) — semantic vector search over indexed personal content; rate-limited to 10 calls/min per agent. \
+        `compact` (required: none; optional: none) — compact the vector store and prune old versions."
+    )]
+    pub(crate) async fn rag(
+        &self,
+        Parameters(params): Parameters<RagObject>,
+        OptionalExtension(parts): OptionalExtension<Parts>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut params = params.into_value();
+        RagObject::coerce(&mut params);
+        let action = RAG.validate(&params)?;
+        match action {
+            "search" => {
+                self.rag_search_impl(action_params(&params)?, parts.as_ref())
+                    .await
+            }
+            "compact" => self.rag_compact_impl().await,
+            _ => unreachable!("validated action"),
+        }
+    }
+
+    #[tool(
+        name = "identity",
+        description = "Read and evolve the agent's identity, and manage seed identities. Pass `action` plus the parameters listed for it. \
+        Actions (required params; optional params): \
+        `get` (required: none; optional: none) — read the agent's own structured identity contract. \
+        `evolve` (required: none; optional: new_directives, new_traits) — suggest refinements to directives or traits from the current session's learnings. \
+        `list_seeds` (required: none; optional: none) — list all seed identities. \
+        `create_seed` (required: name; optional: directives, traits) — create a new seed identity. \
+        `remove_seed` (required: seed_id; optional: none) — remove a seed identity by ID."
+    )]
+    pub(crate) async fn identity(
+        &self,
+        Parameters(params): Parameters<IdentityObject>,
+        OptionalExtension(parts): OptionalExtension<Parts>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut params = params.into_value();
+        IdentityObject::coerce(&mut params);
+        let action = IDENTITY.validate(&params)?;
+        match action {
+            "get" => self.identity_get_impl(parts.as_ref()).await,
+            "evolve" => {
+                self.identity_evolve_impl(action_params(&params)?, parts.as_ref())
+                    .await
+            }
+            "list_seeds" => self.identity_list_seeds_impl().await,
+            "create_seed" => {
+                self.identity_create_seed_impl(action_params(&params)?, parts.as_ref())
+                    .await
+            }
+            "remove_seed" => {
+                self.identity_remove_seed_impl(action_params(&params)?)
+                    .await
+            }
+            _ => unreachable!("validated action"),
+        }
+    }
+
+    #[tool(
+        name = "catalogue",
+        description = "Search the community graphs catalogue before building your own. Pass `action` plus the parameters listed for it. \
+        Actions (required params; optional params): \
+        `search` (required: q; optional: sort, page, limit) — search community graphs and nodes by free text (`topic:canopy-graph` plus description and name); `sort` is `top` (default) or `new`, `page` starts at 1, and `limit` (default 10, max 50) truncates the returned page client-side — deeper access uses `page`. Each item carries everything needed to install and judge it: kind (graph/node), slug, `repo` (owner/repo), `official`, stars, and description. The install ref is the bare slug when `official` is true, else `repo/slug`; pass it to the `graph install` / `node install` commands. Items also carry the model verdict (label, model, scan date) when the catalogue exposes it."
+    )]
+    pub(crate) async fn catalogue(
+        &self,
+        Parameters(params): Parameters<CatalogueObject>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut params = params.into_value();
+        CatalogueObject::coerce(&mut params);
+        let action = CATALOGUE.validate(&params)?;
+        match action {
+            "search" => self.catalogue_search_impl(action_params(&params)?).await,
+            _ => unreachable!("validated action"),
+        }
+    }
+}

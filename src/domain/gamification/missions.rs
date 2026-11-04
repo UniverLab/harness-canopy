@@ -269,7 +269,7 @@ pub const MISSIONS: &[MissionDef] = &[
         title: "Identity Evolved",
         icon: "◱",
         category: MissionCategory::Seeds,
-        challenge: "Use evolve_identity to refine a Seed's traits or directives",
+        challenge: "Use identity evolve to refine a Seed's traits or directives",
     },
     MissionDef {
         id: MissionId::TheOrchard,

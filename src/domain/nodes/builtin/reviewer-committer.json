@@ -1,0 +1,9 @@
+{
+  "format_version": 1,
+  "name": "reviewer-committer",
+  "kind": "agent",
+  "description": "Review the change and commit it when it passes.",
+  "config": {
+    "prompt_preset": "reviewer"
+  }
+}

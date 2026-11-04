@@ -6,6 +6,7 @@ use ratatui::Frame;
 use super::{centered_rect, draw_dialog_left_wave, truncate_str};
 use crate::tui::app::types::App;
 use crate::tui::context_transfer::ContextTransferStep;
+use crate::tui::ui::effective_animation_tick;
 use crate::tui::ui::theme::Theme;
 
 pub fn draw_context_transfer_modal(frame: &mut Frame, app: &App, theme: &Theme) {
@@ -54,7 +55,7 @@ fn draw_ctx_preview(frame: &mut Frame, app: &App, theme: &Theme) {
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    draw_dialog_left_wave(frame, area, app.animation_tick.into());
+    draw_dialog_left_wave(frame, area, effective_animation_tick(app).into());
 
     let active_style = Style::default()
         .fg(Color::Black)
@@ -138,7 +139,7 @@ fn draw_ctx_picker(frame: &mut Frame, app: &App, theme: &Theme) {
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    draw_dialog_left_wave(frame, area, app.animation_tick.into());
+    draw_dialog_left_wave(frame, area, effective_animation_tick(app).into());
 
     let mut lines = vec![Line::from("")];
 

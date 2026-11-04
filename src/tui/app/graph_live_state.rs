@@ -52,6 +52,11 @@ pub(crate) struct GraphLiveState {
     /// which of a router's N edges a run actually took, not just list them.
     pub router_taken_routes: HashMap<String, String>,
 
+    // ── Pending pause ───────────────────────────────────────────
+    /// Node names the pending pause is waiting for — non-empty only while
+    /// `graph_status` is `Pausing`.
+    pub pause_waiting_for: Vec<String>,
+
     // ── Current node ────────────────────────────────────────────
     /// Id of the node currently executing, or the most recent completed node.
     pub current_node_id: Option<String>,
@@ -70,8 +75,8 @@ pub(crate) struct SpecQueueEntry {
     pub spec_name: String,
     pub status: GraphSpecStatus,
     /// Why this spec ended up `Failed`/`Skipped`: the admin-recorded reason
-    /// if it was administratively transitioned, else the output tail of its
-    /// last run. `None` for every other status.
+    /// (`completed_via_reason`) when present, else `None` — the queue path
+    /// never loads run outputs. `None` for every other status.
     pub failure_reason: Option<String>,
     /// SPECCODE: engine-generated quick reference (`FIX-7`).
     pub spec_code: Option<String>,
@@ -171,6 +176,13 @@ pub(crate) fn assemble_graph_live_state(
     // ── Current node + output tail ──────────────────────────────
     let (current_node_id, current_node_info) = resolve_current_node(db, current_spec_id.as_deref());
 
+    // ── Pending pause ───────────────────────────────────────────
+    let pause_waiting_for = if lp.status == GraphStatus::Pausing {
+        db.pause_waiting_node_names(&lp.id).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
     Some(GraphLiveState {
         graph_id: lp.id.clone(),
         graph_name: lp.name.clone(),
@@ -180,6 +192,7 @@ pub(crate) fn assemble_graph_live_state(
         schedule_expr: lp.schedule_expr().map(String::from),
         watch_path: lp.watch_path().map(String::from),
         autorun_at: lp.autorun_at,
+        pause_waiting_for,
         spec_queue,
         done_count,
         total_count,
@@ -193,6 +206,17 @@ pub(crate) fn assemble_graph_live_state(
         current_node_started_at: current_node_info.started_at,
         current_node_iteration: current_node_info.iteration,
     })
+}
+
+/// The pending-pause label shared by the graph detail header and the sidebar
+/// row: `pausing — waiting for A, B`, or bare `pausing` when the waited-for
+/// runs are already gone.
+pub(crate) fn pausing_label(waiting_for: &[String]) -> String {
+    if waiting_for.is_empty() {
+        "pausing".to_string()
+    } else {
+        format!("pausing — waiting for {}", waiting_for.join(", "))
+    }
 }
 
 /// Resolve every ensemble (F1) whose join node appears in `effective_nodes`,
@@ -286,15 +310,24 @@ pub(crate) struct NodeRunInfo {
     /// router's (see `graph_engine::execute_router_node`'s `"route"` output
     /// field). `None` for every other node kind.
     pub chosen_route: Option<String>,
+    /// What the run waits for, when its status is `waiting` — one entry per
+    /// requested mutex with its current holder. Empty otherwise.
+    pub waiting_for: Vec<crate::db::mutex_store::MutexWaitDetail>,
 }
 
 impl NodeRunInfo {
-    fn from_run(run: &crate::domain::graphs::GraphNodeRun) -> Self {
+    fn from_run(db: &Database, run: &crate::domain::graphs::GraphNodeRun) -> Self {
+        let waiting_for = if run.status == GraphRunStatus::Waiting {
+            db.get_graph_run_waiting_for(&run.id).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         NodeRunInfo {
             status: Some(run.status),
             started_at: Some(run.started_at),
             iteration: Some(run.iteration),
             chosen_route: extract_chosen_route(&run.output),
+            waiting_for,
         }
     }
 }
@@ -320,7 +353,7 @@ fn extract_chosen_route(output: &Option<Value>) -> Option<String> {
 pub(crate) fn resolve_node_run_info(db: &Database, spec_id: &str, node_id: &str) -> NodeRunInfo {
     if let Ok(Some(run)) = db.get_active_graph_run_for_node(node_id) {
         if run.spec_id == spec_id {
-            return NodeRunInfo::from_run(&run);
+            return NodeRunInfo::from_run(db, &run);
         }
     }
     db.list_graph_runs_for_spec(spec_id)
@@ -328,90 +361,64 @@ pub(crate) fn resolve_node_run_info(db: &Database, spec_id: &str, node_id: &str)
         .iter()
         .rev()
         .find(|run| run.node_id == node_id)
-        .map(NodeRunInfo::from_run)
+        .map(|run| NodeRunInfo::from_run(db, run))
         .unwrap_or_default()
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────
 
 /// Build the ordered spec queue from either the active queue's members or
-/// the graph's bound specs.
+/// the graph's bound specs. One `graph_queue_spec_states` query replaces the
+/// per-member `get_graph_spec` + `list_graph_runs_for_spec` fan-out, and never
+/// reads `graph_runs.output`.
 fn build_spec_queue(db: &Database, lp: &crate::domain::graphs::Graph) -> Vec<SpecQueueEntry> {
-    let spec_ids = if let Some(ref queue_id) = lp.active_run_queue_id {
-        db.list_queue_member_spec_ids(queue_id).unwrap_or_default()
-    } else {
-        db.list_graph_specs(&lp.id)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|s| s.id)
-            .collect()
-    };
-
-    spec_ids
+    db.graph_queue_spec_states(&lp.id, lp.active_run_queue_id.as_deref())
+        .unwrap_or_default()
         .into_iter()
-        .filter_map(|spec_id| {
-            let spec = db.get_graph_spec(&spec_id).ok().flatten()?;
-            let failure_reason = spec_failure_reason(db, &spec);
-            Some(SpecQueueEntry {
-                spec_id: spec.id,
-                spec_name: spec.name,
-                status: spec.status,
-                failure_reason,
-                spec_code: spec.spec_code,
-                spec_type: spec.spec_type,
-                spec_scope: spec.spec_scope,
-            })
-        })
+        .map(queue_state_entry)
         .collect()
 }
 
-/// Completed spec names for the header's graph events — queue members
+/// One [`SpecQueueEntry`] from a [`GraphSpecQueueState`] row: the admin
+/// reason when present, else the latest run's `summary`/`error`/`blocker` is
+/// NOT available (outputs are never loaded on this path), so a failed/skipped
+/// spec without an admin reason carries no reason text.
+fn queue_state_entry(state: crate::db::graphs::GraphSpecQueueState) -> SpecQueueEntry {
+    let failure_reason = if matches!(
+        state.status,
+        GraphSpecStatus::Failed | GraphSpecStatus::Skipped
+    ) {
+        state.completed_via_reason.clone()
+    } else {
+        None
+    };
+    SpecQueueEntry {
+        spec_id: state.spec_id,
+        spec_name: state.spec_name,
+        status: state.status,
+        failure_reason,
+        spec_code: state.spec_code,
+        spec_type: state.spec_type,
+        spec_scope: state.spec_scope,
+    }
+}
+
+/// Completed spec labels for the header's graph events — `[CODE] name`
+/// when the spec has a code, the bare name when it does not. Queue members
 /// included, since it reads the same source `build_spec_queue` does. Callers
 /// bound this to running graphs so the per-tick query stays small.
-pub(crate) fn completed_spec_names(
+pub(crate) fn completed_spec_labels(
     db: &Database,
     lp: &crate::domain::graphs::Graph,
 ) -> Vec<String> {
     build_spec_queue(db, lp)
         .into_iter()
         .filter(|e| e.status == GraphSpecStatus::Completed)
-        .map(|e| e.spec_name)
-        .collect()
-}
-
-/// Reason a spec ended up `Failed`/`Skipped`, for the marker strip's detail
-/// view: the admin-recorded reason (`completed_via_reason`, set only for
-/// administrative transitions) if present, else the last run's self-reported
-/// `summary`/`error`/`blocker` — the best available proxy for an
-/// engine-driven failure, which doesn't persist a reason on the spec row
-/// itself. `None` for every other status, and when neither source has
-/// anything.
-fn spec_failure_reason(db: &Database, spec: &crate::domain::graphs::GraphSpec) -> Option<String> {
-    if !matches!(
-        spec.status,
-        GraphSpecStatus::Failed | GraphSpecStatus::Skipped
-    ) {
-        return None;
-    }
-    if let Some(reason) = spec.completed_via_reason.clone() {
-        return Some(reason);
-    }
-    // CT28: the live footer tail is gone; fall back to the run's own
-    // `summary` field (self-reported by the engine) as the best proxy for a
-    // failure reason, then the raw error text.
-    db.list_graph_runs_for_spec(&spec.id)
-        .unwrap_or_default()
-        .iter()
-        .rev()
-        .find_map(|run| {
-            run.output.as_ref().and_then(|o| {
-                o.get("summary")
-                    .or_else(|| o.get("error"))
-                    .or_else(|| o.get("blocker"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            })
+        .map(|e| match e.spec_code {
+            Some(code) => format!("[{code}] {}", e.spec_name),
+            None => e.spec_name,
         })
+        .collect()
 }
 
 /// Resolve the effective graph: spec's own graph if it has nodes, else the
@@ -455,13 +462,13 @@ fn resolve_current_node(
     // Try active (running) run first.
     if let Ok(Some(run)) = db.get_active_graph_run_for_spec(spec_id) {
         let node_id = run.node_id.clone();
-        return (Some(node_id), NodeRunInfo::from_run(&run));
+        return (Some(node_id), NodeRunInfo::from_run(db, &run));
     }
 
     // Fall back to most recent run for this spec.
     let runs = db.list_graph_runs_for_spec(spec_id).unwrap_or_default();
     if let Some(run) = runs.last() {
-        return (Some(run.node_id.clone()), NodeRunInfo::from_run(run));
+        return (Some(run.node_id.clone()), NodeRunInfo::from_run(db, run));
     }
 
     (None, NodeRunInfo::default())
@@ -841,6 +848,29 @@ mod tests {
         assert_eq!(state.total_count, 0);
         assert!(state.current_spec_id.is_none());
         assert!(state.current_node_id.is_none());
+    }
+
+    /// SPECCODE: the header's completed-spec labels carry the code before
+    /// the name; a codeless spec yields its bare name with no placeholder.
+    #[test]
+    fn completed_spec_labels_prefix_code_before_name() {
+        let db = test_db();
+        let lp = make_graph("lp1", GraphStatus::Running);
+        db.insert_graph(&lp).unwrap();
+
+        let mut coded = make_spec("s1", "lp1", GraphSpecStatus::Completed, 1);
+        coded.name = "Alpha".to_string();
+        coded.spec_code = Some("FIX-7".to_string());
+        db.insert_graph_spec(&coded).unwrap();
+        let mut codeless = make_spec("s2", "lp1", GraphSpecStatus::Completed, 2);
+        codeless.name = "Beta".to_string();
+        db.insert_graph_spec(&codeless).unwrap();
+
+        let labels = completed_spec_labels(&db, &lp);
+        assert_eq!(
+            labels,
+            vec!["[FIX-7] Alpha".to_string(), "Beta".to_string()]
+        );
     }
 
     #[test]
@@ -1260,6 +1290,7 @@ mod tests {
             });
         }
         let ensemble = Ensemble {
+            mutex: Vec::new(),
             commit_rights: false,
             id: "ens1".to_string(),
             spec_id: Some(spec_id.to_string()),
@@ -1318,6 +1349,7 @@ mod tests {
 
     #[test]
     fn node_run_info_from_run_captures_all_fields() {
+        let db = test_db();
         let run = make_run(
             "lp1",
             "s1",
@@ -1326,7 +1358,7 @@ mod tests {
             3,
             Some(json!({"summary": "all good"})),
         );
-        let info = NodeRunInfo::from_run(&run);
+        let info = NodeRunInfo::from_run(&db, &run);
         assert_eq!(info.status, Some(GraphRunStatus::Pass));
         assert!(info.started_at.is_some());
         assert_eq!(info.iteration, Some(3));
@@ -1334,8 +1366,9 @@ mod tests {
 
     #[test]
     fn node_run_info_from_run_with_none_output() {
+        let db = test_db();
         let run = make_run("lp1", "s1", "n1", GraphRunStatus::Running, 1, None);
-        let info = NodeRunInfo::from_run(&run);
+        let info = NodeRunInfo::from_run(&db, &run);
         assert_eq!(info.status, Some(GraphRunStatus::Running));
     }
 

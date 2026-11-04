@@ -1,0 +1,37 @@
+//! Sessions owned by the daemon: PTY spawning, the session hub, and the
+//! WebSocket protocol that serves hub sessions to clients.
+//!
+//! The TUI still spawns its own PTYs in this spec; only the shared spawn and
+//! parser helpers live here (see [`spawn`]), so both sides build identical
+//! children and handle their parsers identically.
+
+pub mod auth;
+pub mod catalog;
+pub mod client;
+pub mod graphs;
+pub mod host_frame;
+pub mod hub;
+pub mod hub_command;
+pub mod hub_event;
+pub mod hub_shelf;
+pub mod muse_conversation;
+pub mod outbound;
+pub mod protocol;
+pub mod resume;
+pub mod shelf;
+pub mod shelf_upload;
+pub mod spawn;
+pub mod ws;
+
+pub use hub::{
+    HubEvent, HubSession, OutputReceiver, SessionHub, SessionKind, SessionStatus, SpawnRequest,
+};
+pub use spawn::{
+    agent_args_string, build_agent_cmd, build_terminal_cmd, default_terminal_shell,
+    format_accent_rgb, parse_accent_rgb, preserve_rows_on_shrink, resolve_spawn_workdir,
+    spawn_identity, with_yolo, write_submitted_prompt, yolo_flag_for, AgentSpawnSpec,
+    TerminalSpawnSpec, VT_SCROLLBACK_LINES,
+};
+
+#[cfg(test)]
+mod tests;

@@ -21,6 +21,7 @@ pub mod notes;
 mod queue;
 mod reconcile;
 mod runs;
+pub use runs::GraphSpecQueueState;
 mod spec_codes;
 mod specs;
 mod telemetry;
@@ -343,7 +344,7 @@ fn active_graph_run_for_spec_locked(
     let mut stmt = conn.prepare(
         "SELECT id, graph_id, spec_id, node_id, status, input, output, started_at, completed_at, iteration, pid, boot_id, session_id, executed_platform, executed_model
          FROM graph_runs
-         WHERE spec_id = ?1 AND status = 'running'
+         WHERE spec_id = ?1 AND status IN ('running', 'waiting')
          ORDER BY started_at DESC
          LIMIT 1",
     )?;
@@ -875,62 +876,116 @@ mod tests {
     }
 
     #[test]
-    fn find_dirty_predecessor_spec_excludes_given_id_and_completed_status() {
+    fn find_dirty_predecessor_specs_excludes_given_id_and_completed_status() {
         let db = test_db();
         let workdir = "/tmp/dirty-predecessor-test";
-        let mk = |id: &str, status: GraphSpecStatus, workdir: Option<&str>| GraphSpec {
-            id: id.to_string(),
-            graph_id: None,
-            name: id.to_string(),
-            description: None,
-            position: 1,
-            parallelizable: false,
-            status,
-            started_at: None,
-            completed_at: None,
-            spec_start_head: None,
-            spec_start_dirty: None,
-            spec_end_dirty: None,
-            spec_end_dirty_paths: None,
-            spec_committed_head: None,
-            workdir: workdir.map(str::to_string),
-            completed_via: None,
-            completed_via_reason: None,
-            completed_via_at: None,
-            spec_type: None,
-            spec_scope: None,
-            spec_code: None,
+        for graph_id in ["g1", "g2"] {
+            let mut graph = sample_graph(graph_id);
+            graph.workdir = workdir.to_string();
+            db.insert_graph(&graph).unwrap();
+        }
+        let mk = |id: &str,
+                  graph_id: Option<&str>,
+                  status: GraphSpecStatus,
+                  position: i64,
+                  workdir: Option<&str>|
+         -> GraphSpec {
+            GraphSpec {
+                id: id.to_string(),
+                graph_id: graph_id.map(str::to_string),
+                name: id.to_string(),
+                description: None,
+                position,
+                parallelizable: false,
+                status,
+                started_at: None,
+                completed_at: None,
+                spec_start_head: None,
+                spec_start_dirty: None,
+                spec_end_dirty: None,
+                spec_end_dirty_paths: None,
+                spec_committed_head: None,
+                workdir: workdir.map(str::to_string),
+                completed_via: None,
+                completed_via_reason: None,
+                completed_via_at: None,
+                spec_type: None,
+                spec_scope: None,
+                spec_code: None,
+            }
         };
-        // Completed shares the workdir but is never a candidate; Interrupted
-        // sits on an unrelated workdir so it can never be mistaken for this
-        // workdir's predecessor either — leaving exactly one qualifying spec.
+        // Completed shares the workdir but is never a candidate; the
+        // interrupted spec sits on an unrelated workdir so it can never be
+        // mistaken for this workdir's predecessor either; the other graph's
+        // failed spec and the standalone backlog row match the workdir but
+        // are out of g1's scope — leaving exactly one qualifying spec.
         db.insert_graph_spec(&mk(
             "spec-completed",
+            Some("g1"),
             GraphSpecStatus::Completed,
+            1,
+            None,
+        ))
+        .unwrap();
+        db.insert_graph_spec(&mk(
+            "spec-failed",
+            Some("g1"),
+            GraphSpecStatus::Failed,
+            2,
+            None,
+        ))
+        .unwrap();
+        db.insert_graph_spec(&mk(
+            "spec-interrupted",
+            None,
+            GraphSpecStatus::Interrupted,
+            1,
+            Some("/tmp/unrelated-workdir"),
+        ))
+        .unwrap();
+        db.insert_graph_spec(&mk(
+            "spec-other-graph",
+            Some("g2"),
+            GraphSpecStatus::Failed,
+            1,
+            None,
+        ))
+        .unwrap();
+        db.insert_graph_spec(&mk(
+            "spec-standalone",
+            None,
+            GraphSpecStatus::Failed,
+            2,
             Some(workdir),
         ))
         .unwrap();
-        db.insert_graph_spec(&mk("spec-failed", GraphSpecStatus::Failed, Some(workdir)))
-            .unwrap();
+        // Inserted last, so the most recently touched row on this workdir:
+        // a skipped spec never ran, so it must never be a candidate (FR1).
         db.insert_graph_spec(&mk(
-            "spec-interrupted",
-            GraphSpecStatus::Interrupted,
-            Some("/tmp/unrelated-workdir"),
+            "spec-skipped",
+            Some("g1"),
+            GraphSpecStatus::Skipped,
+            3,
+            None,
         ))
         .unwrap();
 
         let found = db
-            .find_dirty_predecessor_spec(workdir, None)
-            .unwrap()
-            .expect("the failed spec on this workdir should be found");
-        assert_eq!(found.id, "spec-failed");
+            .find_dirty_predecessor_specs(workdir, None, "g1")
+            .unwrap();
+        assert_eq!(
+            found.first().map(|spec| spec.id.as_str()),
+            Some("spec-failed"),
+            "the failed spec is the only candidate; the skipped one is not: {found:?}"
+        );
+        assert_eq!(found.len(), 1, "only the failed spec qualifies: {found:?}");
 
         let excluded = db
-            .find_dirty_predecessor_spec(workdir, Some("spec-failed"))
+            .find_dirty_predecessor_specs(workdir, Some("spec-failed"), "g1")
             .unwrap();
         assert!(
-            excluded.is_none(),
-            "excluding the only qualifying spec must fall through to None"
+            excluded.is_empty(),
+            "excluding the only qualifying spec must fall through to none"
         );
     }
 

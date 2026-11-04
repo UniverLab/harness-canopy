@@ -512,6 +512,8 @@ mod tests {
             rendered.len(),
             "height count must equal the rows actually rendered"
         );
+        // The CPU-temp hint row is gone (it moved to `canopy doctor`),
+        // so the base count is exactly the three always-present rows.
         assert_eq!(
             count, 3,
             "no gpu/pwr/swap → only cpu/mem/load rows, got {count}"
@@ -602,5 +604,190 @@ mod tests {
             !gpu_line.trim_end().ends_with("·"),
             "trailing separator when no watts, got: {gpu_line}"
         );
+    }
+
+    #[test]
+    fn cpu_line_omits_temp_without_reading() {
+        let info = SystemInfo::default();
+        let line = cpu_line(&info, TemperatureUnit::Celsius, &Theme::classic()).to_string();
+        assert_eq!(line, "cpu: 0%", "no reading → bare usage, got: {line}");
+        assert!(!line.contains("n/a"), "no placeholder, got: {line}");
+        assert!(!line.contains("  "), "no double space, got: {line}");
+    }
+
+    #[test]
+    fn cpu_line_shows_temp_with_reading() {
+        let info = SystemInfo {
+            cpu_temperature: Some(45.0),
+            ..SystemInfo::default()
+        };
+        let line = cpu_line(&info, TemperatureUnit::Celsius, &Theme::classic()).to_string();
+        assert!(line.contains("45°C"), "got: {line}");
+        assert!(!line.contains("n/a"), "got: {line}");
+    }
+
+    #[test]
+    fn gpu_line_omits_temp_without_gpu_reading() {
+        let info = SystemInfo {
+            gpu_info: Some(crate::system::GpuInfo {
+                name: "Test GPU".to_string(),
+                vendor: "NVIDIA".to_string(),
+                usage: Some(6.0),
+                temperature: None,
+                vram_used: None,
+                vram_total: None,
+                power_watts: None,
+                power_limit_watts: None,
+            }),
+            ..SystemInfo::default()
+        };
+        let line = gpu_line(&info, TemperatureUnit::Celsius, &Theme::classic())
+            .expect("usage alone is enough for a gpu row")
+            .to_string();
+        // Exact: a restored placeholder ("n/a", a dash) or stray separator fails.
+        assert_eq!(line, "gpu: 6%", "temp absent → bare usage, got: {line}");
+    }
+
+    #[test]
+    fn gpu_line_omits_usage_without_gpu_reading() {
+        let info = SystemInfo {
+            gpu_info: Some(crate::system::GpuInfo {
+                name: "Test GPU".to_string(),
+                vendor: "NVIDIA".to_string(),
+                usage: None,
+                temperature: Some(41.0),
+                vram_used: None,
+                vram_total: None,
+                power_watts: None,
+                power_limit_watts: None,
+            }),
+            ..SystemInfo::default()
+        };
+        let line = gpu_line(&info, TemperatureUnit::Celsius, &Theme::classic())
+            .expect("temp alone is enough for a gpu row")
+            .to_string();
+        assert_eq!(line, "gpu: 41°C", "usage absent → bare temp, got: {line}");
+    }
+
+    #[test]
+    fn gpu_line_omits_vram_without_vram_data() {
+        let info = SystemInfo {
+            gpu_info: Some(crate::system::GpuInfo {
+                name: "Test GPU".to_string(),
+                vendor: "NVIDIA".to_string(),
+                usage: Some(6.0),
+                temperature: Some(41.0),
+                vram_used: None,
+                vram_total: None,
+                power_watts: None,
+                power_limit_watts: None,
+            }),
+            ..SystemInfo::default()
+        };
+        let line = gpu_line(&info, TemperatureUnit::Celsius, &Theme::classic())
+            .expect("usage+temp are enough for a gpu row")
+            .to_string();
+        assert_eq!(
+            line, "gpu: 6% 41°C",
+            "vram absent → usage+temp only, got: {line}"
+        );
+    }
+
+    #[test]
+    fn cpu_line_omits_frequency_without_reading() {
+        let info = SystemInfo {
+            cpu_temperature: Some(45.0),
+            cpu_frequency_mhz: None,
+            ..SystemInfo::default()
+        };
+        let line = cpu_line(&info, TemperatureUnit::Celsius, &Theme::classic()).to_string();
+        assert_eq!(
+            line, "cpu: 0% 45°C",
+            "freq absent → usage+temp only, got: {line}"
+        );
+    }
+
+    #[test]
+    fn gpu_line_is_none_when_every_gpu_value_is_absent() {
+        let info = SystemInfo {
+            gpu_info: Some(crate::system::GpuInfo {
+                name: "Test GPU".to_string(),
+                vendor: "NVIDIA".to_string(),
+                usage: None,
+                temperature: None,
+                vram_used: None,
+                vram_total: None,
+                power_watts: None,
+                power_limit_watts: None,
+            }),
+            ..SystemInfo::default()
+        };
+        assert!(
+            gpu_line(&info, TemperatureUnit::Celsius, &Theme::classic()).is_none(),
+            "a row of nothing must not be drawn"
+        );
+    }
+
+    #[test]
+    fn pwr_row_is_absent_without_a_battery_watts_reading() {
+        for info in [
+            SystemInfo::default(),
+            // The battery source alone is not a value: without a watts
+            // reading the row stays absent too.
+            SystemInfo {
+                power_source: Some(PowerSource::Battery),
+                power_watts: None,
+                ..SystemInfo::default()
+            },
+        ] {
+            let lines = create_system_dashboard_lines(
+                &info,
+                TemperatureUnit::Celsius,
+                usize::MAX,
+                &Theme::classic(),
+            );
+            assert!(
+                !lines.iter().any(|l| l.to_string().starts_with("pwr:")),
+                "no watts reading → no pwr row, got: {lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cpu_line_respects_fahrenheit_unit() {
+        let info = SystemInfo {
+            cpu_temperature: Some(40.0),
+            ..SystemInfo::default()
+        };
+        let line = cpu_line(&info, TemperatureUnit::Fahrenheit, &Theme::classic()).to_string();
+        assert!(line.contains("104°F"), "got: {line}");
+    }
+
+    #[test]
+    fn dashboard_never_renders_cpu_temp_hint() {
+        // The LibreHardwareMonitor hint moved to `canopy doctor`: the
+        // dashboard must never render it, on any host, with or without a
+        // reading. `default()` carries no reading, so on a Windows/WSL host
+        // the old hint row would have appeared here.
+        for info in [
+            SystemInfo::default(),
+            SystemInfo {
+                cpu_temperature: Some(45.0),
+                ..SystemInfo::default()
+            },
+        ] {
+            let lines = create_system_dashboard_lines(
+                &info,
+                TemperatureUnit::Celsius,
+                usize::MAX,
+                &Theme::classic(),
+            );
+            assert!(
+                !lines
+                    .iter()
+                    .any(|l| l.to_string().contains("LibreHardwareMonitor")),
+                "dashboard must never render the CPU-temp hint"
+            );
+        }
     }
 }

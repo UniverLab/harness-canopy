@@ -1297,17 +1297,20 @@ mod focus_shortcuts_keyboard_claim_tests {
     fn spawn_cat_agent(name: &str) -> InteractiveAgent {
         InteractiveAgent::spawn(
             Cli::new("cat"),
-            ".",
+            env!("CARGO_MANIFEST_DIR"),
             80,
             24,
             None,
             None,
             Color::Reset,
             Some(name),
+            None,
             &[],
             None,
             None,
             None,
+            None,
+            false,
         )
         .expect("spawn cat as a stand-in interactive child")
     }

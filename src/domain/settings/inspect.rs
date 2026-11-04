@@ -42,7 +42,7 @@ impl Serialize for Status {
     }
 }
 
-/// One setting as reported by `config_list`.
+/// One setting as reported by `config list`.
 #[derive(Debug, Clone, Serialize)]
 pub struct Row {
     pub key: String,
@@ -132,7 +132,7 @@ pub fn list_with_env(
 
     if group.is_none() {
         // A file that will not parse has no per-key statuses to show, so it
-        // gets one row of its own — `config_list` and `canopy doctor` would
+        // gets one row of its own — `config list` and `canopy doctor` would
         // otherwise report the previous values as if nothing were wrong.
         if let Some(problem) = problems.iter().find(|problem| problem.key == "*") {
             rows.insert(
@@ -329,6 +329,7 @@ pub fn config_value(config: &CanopyConfig, key: &str) -> Value {
         }
         "graphs.check_output_max_kib" => Value::from(config.graphs.check_output_max_kib as i64),
         "graphs.verdict_grace_seconds" => Value::from(config.graphs.verdict_grace_seconds as i64),
+        "graphs.catalogue_url" => Value::from(config.graphs.catalogue_url.clone()),
         "agents.probe_timeout_seconds" => Value::from(config.agents.probe_timeout_seconds as i64),
         "clean.reclaim_min_deleted_rows" => {
             Value::from(config.clean.reclaim_min_deleted_rows as i64)
@@ -346,6 +347,13 @@ pub fn config_value(config: &CanopyConfig, key: &str) -> Value {
         "tui.atmosphere" => Value::from(config.tui.atmosphere),
         "tui.scroll_step" => Value::from(config.tui.scroll_step as i64),
         "tui.page_step" => Value::from(config.tui.page_step as i64),
+        "tui.animations" => Value::from(config.tui.animations.as_str()),
+        "remote.enabled" => Value::from(config.remote.enabled),
+        "remote.relay_url" => Value::from(config.remote.relay_url.clone()),
+        "remote.github_client_id" => Value::from(config.remote.github_client_id.clone()),
+        "remote.host_label" => Value::from(config.remote.host_label.clone()),
+        "remote.shelf_max_file_mb" => Value::from(config.remote.shelf_max_file_mb as i64),
+        "daemon.cpu_quota_percent" => Value::from(config.daemon.cpu_quota_percent as i64),
         _ => Value::from(String::new()),
     }
 }

@@ -2,13 +2,13 @@ use super::*;
 
 // ── RAG tool parameter types ───────────────────────────────────────────
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProjectSearchParams {
     /// Search query matched against project name and description.
     pub query: String,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProjectUpdateParams {
     /// Project hash (workdir_hash).
     pub project_hash: String,
@@ -18,9 +18,9 @@ pub struct ProjectUpdateParams {
     pub tags: Option<Vec<String>>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProjectRemapParams {
-    /// The project's current workdir_hash (see `project_search` or
+    /// The project's current workdir_hash (see `project` `search` or
     /// `canopy clean`'s orphan report).
     pub project_hash: String,
     /// The project's new absolute path on disk (where the directory was
@@ -32,13 +32,13 @@ pub struct ProjectRemapParams {
     pub force: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProjectRegisterParams {
     /// Absolute path of the project directory to register explicitly.
     pub path: String,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RagSearchParams {
     /// Natural-language search query.
     pub query: String,

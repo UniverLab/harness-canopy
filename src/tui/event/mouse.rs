@@ -572,13 +572,20 @@ fn handle_mouse_scroll(app: &mut App, mouse: &MouseEvent) {
     app.terminal_selection = None;
 
     if app.hub_open {
-        if app.hub.tab == crate::tui::app::hub::HubTab::Missions {
-            let mission_count = crate::domain::gamification::MISSIONS.len();
-            if mission_count != 0 {
-                let forward = dir < 0;
-                app.legend_selected =
-                    crate::tui::selection::move_index(app.legend_selected, mission_count, forward);
+        match app.hub.tab {
+            crate::tui::app::hub::HubTab::Missions => {
+                let mission_count = crate::domain::gamification::MISSIONS.len();
+                if mission_count != 0 {
+                    let forward = dir < 0;
+                    app.legend_selected = crate::tui::selection::move_index(
+                        app.legend_selected,
+                        mission_count,
+                        forward,
+                    );
+                }
             }
+            crate::tui::app::hub::HubTab::Shelf => app.move_shelf_selection(dir < 0),
+            _ => {}
         }
         return;
     }

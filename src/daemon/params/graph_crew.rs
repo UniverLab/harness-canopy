@@ -1,9 +1,9 @@
 use super::*;
 
-/// CM50: `graph_crew` — every graph's harness/model assignments, without
+/// CM50: `crew assignments` — every graph's harness/model assignments, without
 /// the prompts. All filters are optional: with none, the answer covers
 /// every non-archived graph (or every graph with `include_archived`).
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphCrewParams {
     /// Full id of the one graph to report on. Omit for every graph; an
     /// unknown id is an error rather than an empty answer.

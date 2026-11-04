@@ -16,9 +16,9 @@ use crate::domain::models::Agent;
 pub(crate) enum AgentAction {
     /// Show one agent's full stored definition, prompt last and untruncated.
     Show {
-        /// Agent ID (exact, as listed by agent_list or the TUI).
+        /// Agent ID (exact, as listed by `agent list` or the TUI).
         id: String,
-        /// Print the definition as JSON — byte-identical to the `agent_get`
+        /// Print the definition as JSON — byte-identical to the `agent get`
         /// MCP tool's output.
         #[arg(long)]
         json: bool,

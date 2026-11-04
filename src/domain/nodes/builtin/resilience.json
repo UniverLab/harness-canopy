@@ -1,0 +1,9 @@
+{
+  "format_version": 1,
+  "name": "resilience",
+  "kind": "agent",
+  "description": "Unblock a stalled spec instead of failing it.",
+  "config": {
+    "prompt_preset": "resilience"
+  }
+}

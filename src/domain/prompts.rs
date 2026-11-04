@@ -1,12 +1,12 @@
 //! Prompt presets (P1) — file-backed, user-editable prompt text for builtin
-//! agent blueprints. Seeded under `~/.canopy/prompts/` at daemon startup
+//! agent node documents. Seeded under `~/.canopy/prompts/` at daemon startup
 //! (never overwriting an existing file — user edits are sacred) and resolved
 //! at agent SPAWN time, so an edit takes effect on the very next run without
 //! a recompile.
 //!
 //! The engine never special-cases a preset name — "implementer"/"reviewer"/
-//! "resilience" are seed data here, exactly like `builtin_blueprint_specs()`
-//! in `blueprints.rs`. The hardcoded constants below are both the seed
+//! "resilience" are seed data here, exactly like the embedded node documents
+//! in `nodes.rs`. The hardcoded constants below are both the seed
 //! content written to disk *and* the fallback used when a preset file goes
 //! missing or unreadable, so the two can never drift apart.
 
@@ -15,9 +15,9 @@ use std::path::{Path, PathBuf};
 
 /// The tag vocabulary every builtin preset below is built from, mirroring
 /// the `# [NAME]: Description` header + XML-tag convention Canopy's own
-/// prompt builder emits (see `tui::app::dialog::prompt`'s
-/// `append_instruction_section` and its `push_xml_item`/`build_xml_block`
-/// helpers) — a header line, an outer tag, and one indented `<item_tag>`
+/// prompt builder emits (see `domain::prompt_draft`'s instruction group and
+/// its `push_xml_item` helper) — a header line, an outer tag, and one
+/// indented `<item_tag>`
 /// block per item. Defined once here, and referenced by all three presets
 /// below, so the four sections every preset shares — role, procedure, what
 /// it may use, what it must never do — can't drift into three
@@ -62,8 +62,8 @@ fn wrapped_section(section: &Section, content: &str) -> String {
 
 /// Render a list section: a header line, an outer `section.tag`, and one
 /// `section.item_tag` block per entry in `items` — the same
-/// header-then-indented-items shape [`push_xml_item`]/[`build_xml_block`] in
-/// `tui::app::dialog::prompt` produce. Used for every preset section except
+/// header-then-indented-items shape [`push_xml_item`](super::prompt_draft::push_xml_item)
+/// in `domain::prompt_draft` produces. Used for every preset section except
 /// [`ROLE`].
 fn itemized_section(section: &Section, items: &[&str]) -> String {
     let mut out = String::new();
@@ -135,7 +135,7 @@ fn resilience_preset() -> String {
     );
     out.push_str(&itemized_section(&PROCEDURE, &[
         "Read the failure/blocker context below (`{{previous_feedback}}`) and pick exactly ONE diagnosis: QUOTA, GLITCH, or OTHER.",
-        "QUOTA — the failure is a rate limit, quota exhaustion, or \"try again later\" from the platform/API itself. Action: call `graph_schedule_autorun` with `graph_id` set to this graph's ID and `quota_reset_message` set to the ENTIRE failure text below, copied verbatim — do NOT extract, truncate, reformat, or translate any part of it; the engine parses the raw text itself. Then report FAIL.",
+        "QUOTA — the failure is a rate limit, quota exhaustion, or \"try again later\" from the platform/API itself. Action: call `graph_control` with `action` set to `schedule_autorun`, `graph_id` set to this graph's ID and `quota_reset_message` set to the ENTIRE failure text below, copied verbatim — do NOT extract, truncate, reformat, or translate any part of it; the engine parses the raw text itself. Then report FAIL.",
         "GLITCH — the failure is a transient infrastructure hiccup (network blip, spurious timeout, a flaky check unrelated to the spec) with no sign of a real defect. Action: report GLITCH and recommend a plain retry of the same node.",
         "OTHER — the failure reflects a genuine problem with the work itself (wrong code, an unmet spec, a missing dependency, a decision only a human can make). Action: report OTHER with a precise, actionable explanation of what's wrong so a human or the next agent can address it.",
         "State your diagnosis and its one action clearly in your report; do not hedge between diagnoses.",
@@ -189,8 +189,7 @@ pub fn canopy_dir() -> PathBuf {
 }
 
 /// Seed the builtin prompt presets under `<canopy_dir>/prompts/` if missing.
-/// Idempotent and reseed-if-missing, mirroring
-/// `Database::seed_builtin_blueprints`: a file already present (by name) is
+/// Idempotent and reseed-if-missing: a file already present (by name) is
 /// left completely untouched — user edits are never overwritten — so this is
 /// safe to call on every daemon startup and every `canopy prompts` CLI
 /// invocation.
@@ -870,8 +869,12 @@ mod tests {
         let specs = builtin_prompt_preset_specs();
         let (_, content) = specs.iter().find(|(n, _)| *n == "resilience").unwrap();
         assert!(
-            content.contains("graph_schedule_autorun"),
-            "resilience preset must instruct calling graph_schedule_autorun for quota failures"
+            content.contains("graph_control"),
+            "resilience preset must instruct calling graph_control for quota failures"
+        );
+        assert!(
+            content.contains("schedule_autorun"),
+            "resilience preset must name the schedule_autorun action — the dispatch refuses a graph_control call without it"
         );
         assert!(
             content.contains("quota_reset_message"),

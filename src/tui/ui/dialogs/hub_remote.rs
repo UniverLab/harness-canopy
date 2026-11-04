@@ -1,0 +1,1053 @@
+//! The hub's Remote tab — GitHub sign-in, the relay switch, relay status,
+//! pairing and the device list — plus the pairing-code overlay.
+//!
+//! The four fixed rows render first, then a `Devices (n)` header and one row
+//! per paired device; the selected row carries the `▸` marker on
+//! `selected_bg` like the Shelf tab. The overlay shows the last fetched
+//! code with its link, QR and countdown.
+
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Clear, Paragraph};
+use ratatui::Frame;
+
+use crate::tui::app::hub_remote::{remote_rows, LoginFlow, RemoteRow};
+use crate::tui::app::hub_remote_trust::TrustField;
+use crate::tui::app::types::App;
+use crate::tui::ui::theme::Theme;
+
+/// Fixed rows before the devices header.
+const FIXED_ROWS: usize = 4;
+
+pub(super) fn draw_remote_tab(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
+    let remote = &app.hub.remote;
+    let foot_rows = usize::from(remote.revoke_confirm.is_some())
+        + usize::from(remote.trust_remove_confirm.is_some())
+        + usize::from(remote.message.is_some());
+    let [main_area, foot_area] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(foot_rows as u16)]).areas(area);
+
+    let width = main_area.width as usize;
+    let mut lines: Vec<Line> = Vec::new();
+    for (index, row) in remote_rows(&remote.view)
+        .iter()
+        .enumerate()
+        .take(FIXED_ROWS)
+    {
+        lines.push(remote_row_line(
+            app,
+            theme,
+            *row,
+            remote.row_idx == index,
+            width,
+        ));
+    }
+    lines.push(devices_header_line(app, theme, width));
+    lines.extend(device_lines(app, theme, main_area, width));
+    lines.push(trusted_header_line(app, theme, width));
+    lines.extend(trusted_lines(app, theme, width));
+
+    frame.render_widget(Paragraph::new(lines), main_area);
+
+    let mut foot_y = foot_area.y;
+    if let Some(device_id) = &remote.revoke_confirm {
+        draw_revoke_confirm(
+            frame,
+            app,
+            theme,
+            Rect::new(foot_area.x, foot_y, foot_area.width, 1),
+            device_id,
+        );
+        foot_y += 1;
+    }
+    if let Some(login) = &remote.trust_remove_confirm {
+        draw_trust_remove_confirm(
+            frame,
+            theme,
+            Rect::new(foot_area.x, foot_y, foot_area.width, 1),
+            login,
+        );
+        foot_y += 1;
+    }
+    if let Some(message) = &remote.message {
+        let style = if message.is_error {
+            Style::default().fg(theme.error)
+        } else {
+            Style::default().fg(theme.success)
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(" {}", truncate(&message.text, width)),
+                style,
+            ))),
+            Rect::new(foot_area.x, foot_y, foot_area.width, 1),
+        );
+    }
+}
+
+/// The visible device rows, scrolled so the selected device shows.
+fn device_lines(app: &App, theme: &Theme, main_area: Rect, width: usize) -> Vec<Line<'static>> {
+    let remote = &app.hub.remote;
+    let count = remote.view.devices.len();
+    if count == 0 {
+        return Vec::new();
+    }
+    let visible = (main_area.height as usize).saturating_sub(FIXED_ROWS + 1);
+    let selected = remote.row_idx.saturating_sub(FIXED_ROWS).min(count - 1);
+    let start = crate::tui::selection::clamp_scroll(selected, 0, count, visible.max(1));
+    let end = (start + visible.max(1)).min(count);
+    remote.view.devices[start..end]
+        .iter()
+        .enumerate()
+        .map(|(offset, device)| {
+            device_line(
+                device,
+                theme,
+                remote.row_idx == FIXED_ROWS + start + offset,
+                width,
+            )
+        })
+        .collect()
+}
+
+/// One fixed row: the `▸` marker, a padded label and its value.
+fn remote_row_line(
+    app: &App,
+    theme: &Theme,
+    row: RemoteRow,
+    selected: bool,
+    width: usize,
+) -> Line<'static> {
+    let (label, value, dimmed) = remote_row_text(app, row);
+    let mut spans = vec![Span::styled(
+        if selected { "▸" } else { " " },
+        marker_style(theme, selected),
+    )];
+    let label_style = if selected {
+        // The pill pair (`accent_fg` on `header_color`): ink on the
+        // accent; the row's `selected_bg` raise covers the rest of the
+        // line, so the label never sits dark on dark.
+        Style::default()
+            .fg(theme.accent_fg)
+            .bg(theme.header_color)
+            .add_modifier(Modifier::BOLD)
+    } else if dimmed {
+        Style::default().fg(theme.dim_text)
+    } else {
+        Style::default().fg(theme.text_primary)
+    };
+    let value_style = if dimmed {
+        Style::default().fg(theme.dim_text)
+    } else {
+        Style::default().fg(theme.text_primary)
+    };
+    let mut rest = width.saturating_sub(1);
+    let head = truncate(&format!(" {label:<14} "), rest);
+    rest -= head.chars().count();
+    spans.push(Span::styled(head, label_style));
+    spans.push(Span::styled(truncate(&value, rest), value_style));
+    let line = Line::from(spans);
+    if selected {
+        line.style(Style::default().bg(theme.selected_bg))
+    } else {
+        line
+    }
+}
+
+fn marker_style(theme: &Theme, selected: bool) -> Style {
+    if selected {
+        Style::default()
+            .fg(theme.header_color)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.dim_text)
+    }
+}
+
+/// The label, value and dim flag of one fixed row.
+fn remote_row_text(app: &App, row: RemoteRow) -> (&'static str, String, bool) {
+    let remote = &app.hub.remote;
+    let view = &remote.view;
+    match row {
+        RemoteRow::GitHub => ("GitHub", github_value(remote), false),
+        RemoteRow::Control => {
+            let value = if view.enabled { "on" } else { "off" }.to_string();
+            ("Remote control", value, !view.signed_in)
+        }
+        RemoteRow::Relay => ("Relay", view.relay.clone(), false),
+        RemoteRow::Pair => ("Pair a device", "Enter for a new code".to_string(), false),
+        // Device and trusted rows render through their own line builders;
+        // this match only feeds the four fixed rows above.
+        RemoteRow::Device(_) | RemoteRow::Trusted(_) => ("", String::new(), false),
+    }
+}
+
+/// The GitHub row's value: the login, the waiting code and URL, or the
+/// signed-out prompt.
+fn github_value(remote: &crate::tui::app::hub_remote::RemoteState) -> String {
+    match &remote.login {
+        LoginFlow::Waiting {
+            code: Some(code), ..
+        } => {
+            // Compact: the code and the URL must both fit the 80-column hub.
+            format!("{} @ https://github.com/login/device", code.user_code)
+        }
+        LoginFlow::Waiting { code: None, .. } => "waiting for GitHub…".to_string(),
+        LoginFlow::Idle => match &remote.view.login {
+            Some(login) => format!("signed in as {login}"),
+            None => "not signed in — Enter to sign in".to_string(),
+        },
+    }
+}
+
+fn devices_header_line(app: &App, theme: &Theme, width: usize) -> Line<'static> {
+    let count = app.hub.remote.view.devices.len();
+    Line::from(Span::styled(
+        truncate(&format!("  Devices ({count})"), width),
+        Style::default()
+            .fg(theme.header_color)
+            .add_modifier(Modifier::BOLD),
+    ))
+}
+
+/// One `label  id  paired …  last seen …  live` device row.
+fn device_line(
+    device: &crate::remote::panel::DeviceView,
+    theme: &Theme,
+    selected: bool,
+    width: usize,
+) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        if selected { "▸" } else { " " },
+        marker_style(theme, selected),
+    )];
+    let name_style = if selected {
+        // The pill pair (`accent_fg` on `header_color`): ink on the
+        // accent; the row's `selected_bg` raise covers the rest of the
+        // line, so the name never sits dark on dark.
+        Style::default()
+            .fg(theme.accent_fg)
+            .bg(theme.header_color)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.text_primary)
+    };
+    let dim = Style::default().fg(theme.dim_text);
+    let mut rest = width.saturating_sub(1);
+    let mut push = |text: String, style: Style| {
+        if rest == 0 {
+            return;
+        }
+        let text = truncate(&text, rest);
+        rest -= text.chars().count();
+        spans.push(Span::styled(text, style));
+    };
+    push(" ".to_string(), Style::default());
+    push(device.label.clone(), name_style);
+    push("  ".to_string(), Style::default());
+    push(device.id.clone(), dim);
+    push("  paired ".to_string(), Style::default());
+    // An old daemon's status JSON has no `paired_at` (serde default `""`):
+    // `?` keeps the row aligned instead of a blank gap.
+    push(
+        if device.paired_at.is_empty() {
+            "?".to_string()
+        } else {
+            super::hub_shelf::shelf_time(&device.paired_at)
+        },
+        dim,
+    );
+    push("  last seen ".to_string(), Style::default());
+    push(
+        device
+            .last_seen
+            .as_deref()
+            .map(super::hub_shelf::shelf_time)
+            .unwrap_or_else(|| "never".to_string()),
+        dim,
+    );
+    if device.live {
+        // A single space: the paired time widened the row past 80 columns,
+        // and this one cell keeps the `live` badge visible there.
+        push(" ".to_string(), Style::default());
+        push("live".to_string(), Style::default().fg(theme.success));
+    }
+    let line = Line::from(spans);
+    if selected {
+        line.style(Style::default().bg(theme.selected_bg))
+    } else {
+        line
+    }
+}
+
+fn trusted_header_line(app: &App, theme: &Theme, width: usize) -> Line<'static> {
+    let count = app.hub.remote.view.trusted.len();
+    Line::from(Span::styled(
+        truncate(&format!("  Trusted ({count})"), width),
+        Style::default()
+            .fg(theme.header_color)
+            .add_modifier(Modifier::BOLD),
+    ))
+}
+
+/// Every trusted row, unscrollable: trust lists stay short, and the device
+/// list above owns the scroll math.
+fn trusted_lines(app: &App, theme: &Theme, width: usize) -> Vec<Line<'static>> {
+    let remote = &app.hub.remote;
+    let base = FIXED_ROWS + remote.view.devices.len();
+    remote
+        .view
+        .trusted
+        .iter()
+        .enumerate()
+        .map(|(index, profile)| trusted_line(profile, theme, remote.row_idx == base + index, width))
+        .collect()
+}
+
+/// One `login  all sessions|name, …` trusted row.
+fn trusted_line(
+    profile: &crate::remote::panel::TrustedView,
+    theme: &Theme,
+    selected: bool,
+    width: usize,
+) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        if selected { "▸" } else { " " },
+        marker_style(theme, selected),
+    )];
+    let name_style = if selected {
+        // The pill pair (`accent_fg` on `header_color`): ink on the
+        // accent; the row's `selected_bg` raise covers the rest of the
+        // line, so the name never sits dark on dark.
+        Style::default()
+            .fg(theme.accent_fg)
+            .bg(theme.header_color)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.text_primary)
+    };
+    let dim = Style::default().fg(theme.dim_text);
+    let mut rest = width.saturating_sub(1);
+    let mut push = |text: String, style: Style| {
+        if rest == 0 {
+            return;
+        }
+        let text = truncate(&text, rest);
+        rest -= text.chars().count();
+        spans.push(Span::styled(text, style));
+    };
+    push(" ".to_string(), Style::default());
+    push(profile.login.clone(), name_style);
+    push("  ".to_string(), Style::default());
+    if profile.all_sessions {
+        push("all sessions".to_string(), dim);
+    } else if profile.sessions.is_empty() {
+        push("no sessions".to_string(), dim);
+    } else {
+        push(profile.sessions.join(", "), Style::default());
+    }
+    if profile.upload {
+        push(" · upload".to_string(), dim);
+    }
+    let line = Line::from(spans);
+    if selected {
+        line.style(Style::default().bg(theme.selected_bg))
+    } else {
+        line
+    }
+}
+
+/// The trust-remove confirmation pinned above the message line.
+fn draw_trust_remove_confirm(frame: &mut Frame, theme: &Theme, area: Rect, login: &str) {
+    let text = format!("Forget {login} and kick its guests?  y = confirm  n = cancel");
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            truncate(&text, area.width as usize),
+            Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD),
+        ))),
+        area,
+    );
+}
+
+/// The revoke confirmation pinned above the message line.
+fn draw_revoke_confirm(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, device_id: &str) {
+    let label = app
+        .hub
+        .remote
+        .view
+        .devices
+        .iter()
+        .find(|device| device.id == device_id)
+        .map(|device| device.label.as_str())
+        .unwrap_or(device_id);
+    let text = format!("Revoke {label}?  y = confirm  n = cancel");
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            truncate(&text, area.width as usize),
+            Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD),
+        ))),
+        area,
+    );
+}
+
+/// The pairing overlay: code, link, QR, countdown and the Esc hint,
+/// centered on the frame over the hub.
+pub(super) fn draw_pair_overlay(frame: &mut Frame, app: &App, theme: &Theme) {
+    let remote = &app.hub.remote;
+    let (Some(pair), true) = (remote.pair.as_ref(), remote.pair_open) else {
+        return;
+    };
+    let qr_lines: Vec<&str> = pair.qr.lines().collect();
+    let code_line = format!("Pairing code: {}", pair.code);
+    let countdown = pair_countdown(pair.expires_at, chrono::Utc::now().timestamp());
+    let content_width = code_line
+        .chars()
+        .count()
+        .max(pair.link.chars().count())
+        .max(qr_width(&qr_lines))
+        .max(countdown.chars().count());
+    let frame_area = frame.area();
+    let width = ((content_width + 4) as u16).min(frame_area.width.saturating_sub(2));
+    let height = (qr_lines.len() as u16 + 6).min(frame_area.height);
+    if width < 10 || height < 8 {
+        return;
+    }
+    let area = centered_box(width, height, frame_area);
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .title(" Pair a device ")
+        .borders(crate::tui::ui::dialog_borders_for(theme))
+        .border_style(Style::default().fg(theme.header_color))
+        .style(Style::default().bg(theme.dialog_bg));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(qr_lines.len() as u16),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+    let inner_width = inner.width as usize;
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            truncate(&code_line, inner_width),
+            // The pill pair (`accent_fg` on `header_color`): the code is
+            // ink on the accent, never dark on the overlay's `dialog_bg`.
+            Style::default()
+                .fg(theme.accent_fg)
+                .bg(theme.header_color)
+                .add_modifier(Modifier::BOLD),
+        )))
+        .alignment(Alignment::Center),
+        rows[0],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            truncate(&pair.link, inner_width),
+            Style::default().fg(theme.text_primary),
+        )))
+        .alignment(Alignment::Center),
+        rows[1],
+    );
+    let qr: Vec<Line> = qr_lines
+        .iter()
+        .map(|line| {
+            Line::from(Span::styled(
+                line.to_string(),
+                Style::default().fg(theme.text_primary),
+            ))
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(qr).alignment(Alignment::Center), rows[2]);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            truncate(&countdown, inner_width),
+            Style::default().fg(theme.dim_text),
+        )))
+        .alignment(Alignment::Center),
+        rows[3],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "Esc hide — the code stays valid",
+            Style::default().fg(theme.dim_text),
+        )))
+        .alignment(Alignment::Center),
+        rows[4],
+    );
+}
+
+/// The trust overlay: username, comma-separated sessions, the
+/// all-sessions toggle and the key hints, centered on the frame.
+pub(super) fn draw_trust_overlay(frame: &mut Frame, app: &App, theme: &Theme) {
+    let form = &app.hub.remote.trust;
+    if !form.open {
+        return;
+    }
+    let login = if form.login.is_empty() {
+        "(username)".to_string()
+    } else {
+        form.login.clone()
+    };
+    let sessions = if form.sessions.is_empty() {
+        "(comma, separated, names)".to_string()
+    } else {
+        form.sessions.clone()
+    };
+    let toggle = if form.all { "[x]" } else { "[ ]" };
+    let upload_toggle = if form.upload { "[x]" } else { "[ ]" };
+    let rows = [
+        (TrustField::Login, "User", login),
+        (TrustField::Sessions, "Sessions", sessions),
+        (
+            TrustField::All,
+            "All sessions",
+            format!("{toggle} (a toggles)"),
+        ),
+        (
+            TrustField::Upload,
+            "Upload",
+            format!("{upload_toggle} (u toggles)"),
+        ),
+    ];
+    let content_width = rows
+        .iter()
+        .map(|(_, label, value)| label.len() + value.chars().count() + 3)
+        .max()
+        .unwrap_or(0)
+        .max("Tab move · Enter save · Esc cancel".len());
+    let frame_area = frame.area();
+    let width = ((content_width + 4) as u16).min(frame_area.width.saturating_sub(2));
+    let height = 7u16.min(frame_area.height);
+    if width < 10 || height < 7 {
+        return;
+    }
+    let area = centered_box(width, height, frame_area);
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .title(" Trust a GitHub profile ")
+        .borders(crate::tui::ui::dialog_borders_for(theme))
+        .border_style(Style::default().fg(theme.header_color))
+        .style(Style::default().bg(theme.dialog_bg));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let layout = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+    let inner_width = inner.width as usize;
+    for (index, (field, label, value)) in rows.iter().enumerate() {
+        let focused = *field == form.focus;
+        let style = if focused {
+            Style::default()
+                .fg(theme.accent_fg)
+                .bg(theme.header_color)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.text_primary)
+        };
+        let text = format!("{label}: {value}");
+        let line = Line::from(Span::styled(truncate(&text, inner_width), style));
+        let line = if focused {
+            line.style(Style::default().bg(theme.selected_bg))
+        } else {
+            line
+        };
+        frame.render_widget(Paragraph::new(line), layout[index]);
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "Tab move · Enter save · Esc cancel",
+            Style::default().fg(theme.dim_text),
+        ))),
+        layout[4],
+    );
+}
+
+fn qr_width(lines: &[&str]) -> usize {
+    lines
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0)
+}
+
+/// A `width`×`height` box centered on `area` (absolute cells, unlike
+/// `centered_rect`'s horizontal percentage).
+fn centered_box(width: u16, height: u16, area: Rect) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    )
+}
+
+/// `Expires in M:SS`, or the expired hint.
+fn pair_countdown(expires_at: i64, now: i64) -> String {
+    let remaining = expires_at.saturating_sub(now);
+    if remaining <= 0 {
+        return "Expired — Enter on Pair a device for a new code".to_string();
+    }
+    format!("Expires in {}:{:02}", remaining / 60, remaining % 60)
+}
+
+fn truncate(text: &str, width: usize) -> String {
+    crate::tui::ui::truncate_str(text, width)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::Database;
+    use crate::remote::auth::DeviceCodeInfo;
+    use crate::remote::panel::{DeviceView, PairView, RemoteView, TrustedView};
+    use crate::tui::app::hub::HubTab;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use std::sync::mpsc;
+    use std::sync::Arc;
+
+    fn test_app() -> App {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let db = Arc::new(Database::new(&path).unwrap());
+        let data_dir = tempfile::tempdir().unwrap();
+        App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap()
+    }
+
+    fn remote_app() -> App {
+        let mut app = test_app();
+        app.hub_open = true;
+        app.hub.tab = HubTab::Remote;
+        app
+    }
+
+    fn device(id: &str, label: &str, live: bool) -> DeviceView {
+        DeviceView {
+            id: id.to_string(),
+            label: label.to_string(),
+            paired_at: "2026-09-30T09:05:00Z".to_string(),
+            last_seen: Some("2026-10-01T10:00:00Z".to_string()),
+            live,
+        }
+    }
+
+    fn unseen_device(id: &str, label: &str) -> DeviceView {
+        DeviceView {
+            id: id.to_string(),
+            label: label.to_string(),
+            paired_at: "2026-09-15T08:30:00Z".to_string(),
+            last_seen: None,
+            live: false,
+        }
+    }
+
+    #[test]
+    fn device_line_shows_a_placeholder_for_a_missing_paired_at() {
+        let theme = Theme::classic();
+        let view = DeviceView {
+            id: "bfcba2b742a807bb".to_string(),
+            label: "laptop".to_string(),
+            paired_at: String::new(),
+            last_seen: None,
+            live: false,
+        };
+        let line = device_line(&view, &theme, false, 120);
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(text.contains("paired ?"), "{text}");
+    }
+
+    fn draw(app: &mut App, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = Theme::classic();
+        terminal
+            .draw(|frame| {
+                super::super::hub::draw_hub(frame, app, &theme);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let mut text = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        text
+    }
+
+    /// The rendered buffer as rows of cell symbols, for geometry assertions.
+    fn draw_grid(app: &mut App, width: u16, height: u16) -> Vec<Vec<String>> {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = Theme::classic();
+        terminal
+            .draw(|frame| {
+                super::super::hub::draw_hub(frame, app, &theme);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let mut grid = Vec::new();
+        for y in 0..buffer.area.height {
+            let mut row = Vec::new();
+            for x in 0..buffer.area.width {
+                row.push(buffer[(x, y)].symbol().to_string());
+            }
+            grid.push(row);
+        }
+        grid
+    }
+
+    /// Recompute the pair overlay's inner rect the way `draw_pair_overlay`
+    /// does, so centering asserts measure against centered geometry.
+    fn pair_overlay_inner(pair: &PairView, width: u16, height: u16) -> Rect {
+        let qr_lines: Vec<&str> = pair.qr.lines().collect();
+        let code_line = format!("Pairing code: {}", pair.code);
+        let countdown = pair_countdown(pair.expires_at, chrono::Utc::now().timestamp());
+        let content_width = code_line
+            .chars()
+            .count()
+            .max(pair.link.chars().count())
+            .max(qr_width(&qr_lines))
+            .max(countdown.chars().count());
+        let frame_area = Rect::new(0, 0, width, height);
+        let box_width = ((content_width + 4) as u16).min(frame_area.width.saturating_sub(2));
+        let box_height = (qr_lines.len() as u16 + 6).min(frame_area.height);
+        let area = centered_box(box_width, box_height, frame_area);
+        Block::default()
+            .borders(crate::tui::ui::dialog_borders_for(&Theme::classic()))
+            .inner(area)
+    }
+
+    /// The x of the first non-blank cell of `row` within `inner`'s columns.
+    fn content_x(row: &[String], inner: Rect) -> u16 {
+        (inner.x..inner.x + inner.width)
+            .find(|x| !row[*x as usize].trim().is_empty())
+            .expect("row has content")
+    }
+
+    /// Every row state renders at both sizes.
+    #[test]
+    fn remote_tab_renders_each_row_state_at_both_sizes() {
+        for (width, height) in [(80u16, 24u16), (120u16, 40u16)] {
+            // Signed out, off.
+            let mut app = remote_app();
+            let text = draw(&mut app, width, height);
+            assert!(text.contains("Remote"), "tab bar: {text}");
+            assert!(text.contains("not signed in"), "{width}x{height}: {text}");
+            assert!(text.contains("Remote control"), "{width}x{height}: {text}");
+            assert!(text.contains("Relay"), "{width}x{height}: {text}");
+            assert!(text.contains("Pair a device"), "{width}x{height}: {text}");
+            assert!(text.contains("Devices (0)"), "{width}x{height}: {text}");
+            assert!(text.contains('▸'), "cursor marker: {text}");
+
+            // Signed in, on, connected.
+            let mut app = remote_app();
+            app.hub.remote.view = RemoteView {
+                signed_in: true,
+                login: Some("octocat".to_string()),
+                enabled: true,
+                relay_url: "https://remote.univerlab.org".to_string(),
+                relay: "connected".to_string(),
+                live_devices: vec!["bfcba2b742a807bb".to_string()],
+                devices: vec![
+                    device("bfcba2b742a807bb", "laptop", true),
+                    unseen_device("aabbccddeeff0011", "tablet"),
+                ],
+                trusted: Vec::new(),
+            };
+            let text = draw(&mut app, width, height);
+            assert!(
+                text.contains("signed in as octocat"),
+                "{width}x{height}: {text}"
+            );
+            assert!(text.contains("connected"), "{width}x{height}: {text}");
+            assert!(text.contains("laptop"), "{width}x{height}: {text}");
+            assert!(
+                text.contains("bfcba2b742a807bb"),
+                "{width}x{height}: {text}"
+            );
+            assert!(text.contains("live"), "{width}x{height}: {text}");
+            assert!(text.contains("last seen 10:00"), "{width}x{height}: {text}");
+            assert!(text.contains("paired 09:05"), "{width}x{height}: {text}");
+            assert!(text.contains("tablet"), "{width}x{height}: {text}");
+            assert!(text.contains("paired 08:30"), "{width}x{height}: {text}");
+            assert!(text.contains("never"), "{width}x{height}: {text}");
+
+            // Token rejected.
+            let mut app = remote_app();
+            app.hub.remote.view.signed_in = true;
+            app.hub.remote.view.login = Some("octocat".to_string());
+            app.hub.remote.view.relay = "token rejected: sign in again".to_string();
+            let text = draw(&mut app, width, height);
+            assert!(
+                text.contains("token rejected: sign in again"),
+                "{width}x{height}: {text}"
+            );
+
+            // Connecting.
+            let mut app = remote_app();
+            app.hub.remote.view.signed_in = true;
+            app.hub.remote.view.enabled = true;
+            app.hub.remote.view.relay = "connecting".to_string();
+            let text = draw(&mut app, width, height);
+            assert!(text.contains("connecting"), "{width}x{height}: {text}");
+        }
+    }
+
+    #[test]
+    fn github_row_shows_the_waiting_code_and_url() {
+        let mut app = remote_app();
+        let (_tx, rx) = mpsc::channel();
+        app.hub.remote.login = LoginFlow::Waiting {
+            code: Some(DeviceCodeInfo {
+                user_code: "ABCD-1234".to_string(),
+                verification_uri_complete: None,
+            }),
+            rx,
+        };
+        for (width, height) in [(80u16, 24u16), (120u16, 40u16)] {
+            let text = draw(&mut app, width, height);
+            assert!(text.contains("ABCD-1234"), "{width}x{height}: {text}");
+            assert!(
+                text.contains("https://github.com/login/device"),
+                "{width}x{height}: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn revoke_confirm_and_footer_hint_render() {
+        let mut app = remote_app();
+        app.hub.remote.view.devices = vec![device("bfcba2b742a807bb", "laptop", false)];
+        app.hub.remote.revoke_confirm = Some("bfcba2b742a807bb".to_string());
+        let text = draw(&mut app, 120, 40);
+        assert!(
+            text.contains("Revoke laptop?  y = confirm  n = cancel"),
+            "{text}"
+        );
+        assert!(
+            text.contains("d disconnect") && text.contains("r revoke"),
+            "footer names both keys: {text}"
+        );
+    }
+
+    #[test]
+    fn pair_overlay_shows_code_link_qr_and_countdown_at_both_sizes() {
+        let qr = crate::remote::qr::render_level(
+            "https://remote.univerlab.org/pair#7K3QH-M9P2X",
+            qrcode::EcLevel::L,
+        )
+        .expect("qr");
+        let qr_line_count = qr.lines().count();
+        assert_eq!(qr_line_count, 17);
+        for (width, height) in [(80u16, 24u16), (120u16, 40u16)] {
+            let mut app = remote_app();
+            app.hub.remote.pair = Some(PairView {
+                code: "7K3QH-M9P2X".to_string(),
+                link: "https://remote.univerlab.org/pair#7K3QH-M9P2X".to_string(),
+                expires_at: chrono::Utc::now().timestamp() + 570,
+                qr: qr.clone(),
+            });
+            app.hub.remote.pair_open = true;
+            let text = draw(&mut app, width, height);
+            assert!(text.contains("7K3QH-M9P2X"), "{width}x{height}: {text}");
+            assert!(
+                text.contains("https://remote.univerlab.org/pair#7K3QH-M9P2X"),
+                "{width}x{height}: {text}"
+            );
+            assert!(
+                text.contains("Expires in 9:"),
+                "{width}x{height}: countdown: {text}"
+            );
+            assert!(text.contains("Esc hide"), "{width}x{height}: {text}");
+            // The whole QR fits: every symbol line renders unclipped.
+            let qr_rendered = qr
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .filter(|line| text.contains(line.trim_end()))
+                .count();
+            let qr_symbols = qr.lines().filter(|line| !line.trim().is_empty()).count();
+            assert_eq!(
+                qr_rendered, qr_symbols,
+                "{width}x{height}: the QR fits unclipped: {text}"
+            );
+
+            // Every row is centered in the dialog's inner area.
+            let grid = draw_grid(&mut app, width, height);
+            let pair = app.hub.remote.pair.as_ref().expect("pair");
+            let inner = pair_overlay_inner(pair, width, height);
+            let inner_w = usize::from(inner.width);
+            let qr_lines: Vec<&str> = pair.qr.lines().collect();
+            let qr_line_w = qr_lines[0].chars().count();
+            assert!(
+                qr_lines
+                    .iter()
+                    .all(|line| line.chars().count() == qr_line_w),
+                "{width}x{height}: the QR block has one width"
+            );
+            let code_row = truncate(&format!("Pairing code: {}", pair.code), inner_w);
+            let link_row = truncate(&pair.link, inner_w);
+            let countdown_row = truncate(
+                &pair_countdown(pair.expires_at, chrono::Utc::now().timestamp()),
+                inner_w,
+            );
+            for (name, y, expected) in [
+                ("code", inner.y, code_row.as_str()),
+                ("link", inner.y + 1, link_row.as_str()),
+                (
+                    "countdown",
+                    inner.y + 2 + qr_lines.len() as u16,
+                    countdown_row.as_str(),
+                ),
+                (
+                    "hint",
+                    inner.y + 3 + qr_lines.len() as u16,
+                    "Esc hide — the code stays valid",
+                ),
+            ] {
+                let row_w = expected.chars().count() as u16;
+                let pad = content_x(&grid[usize::from(y)], inner) - inner.x;
+                assert_eq!(
+                    pad,
+                    (inner.width - row_w) / 2,
+                    "{width}x{height}: the {name} row is centered"
+                );
+                let start = usize::from(inner.x + pad);
+                let rendered: String =
+                    grid[usize::from(y)][start..start + usize::from(row_w)].concat();
+                if name == "countdown" {
+                    // A second may tick between the draw and this recompute.
+                    assert_eq!(
+                        rendered.chars().count(),
+                        usize::from(row_w),
+                        "{width}x{height}: the countdown keeps its width"
+                    );
+                    assert!(
+                        rendered.starts_with("Expires in 9:"),
+                        "{width}x{height}: the countdown text: {rendered}"
+                    );
+                } else {
+                    assert_eq!(
+                        rendered, expected,
+                        "{width}x{height}: the {name} row text: {rendered}"
+                    );
+                }
+            }
+            for (index, line) in qr_lines.iter().enumerate() {
+                let y = inner.y + 2 + index as u16;
+                if line.trim().is_empty() {
+                    // All-quiet-zone lines render as background: centering is
+                    // vacuous, so the row must simply be blank.
+                    let start = usize::from(inner.x);
+                    assert!(
+                        grid[usize::from(y)][start..start + inner_w]
+                            .iter()
+                            .all(|cell| cell.trim().is_empty()),
+                        "{width}x{height}: QR line {index} is blank"
+                    );
+                    continue;
+                }
+                // The quiet zone pads the line; the pad below is the line's
+                // start, recovered past its leading blanks.
+                let leading = line.chars().take_while(|c| *c == ' ').count() as u16;
+                let pad = content_x(&grid[usize::from(y)], inner) - inner.x - leading;
+                assert_eq!(
+                    pad,
+                    (inner.width - qr_line_w as u16) / 2,
+                    "{width}x{height}: QR line {index} is centered as a unit"
+                );
+                let start = usize::from(inner.x + pad);
+                let rendered: String = grid[usize::from(y)][start..start + qr_line_w].concat();
+                assert_eq!(
+                    rendered, *line,
+                    "{width}x{height}: QR line {index} sits exactly at its pad"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn trusted_section_lists_grants_and_the_form_overlay_edits_one() {
+        let mut app = remote_app();
+        app.hub.remote.view.trusted = vec![
+            TrustedView {
+                login: "guest".to_string(),
+                all_sessions: false,
+                sessions: vec!["alpha".to_string(), "beta".to_string()],
+                upload: true,
+            },
+            TrustedView {
+                login: "auditor".to_string(),
+                all_sessions: true,
+                sessions: Vec::new(),
+                upload: false,
+            },
+        ];
+        let text = draw(&mut app, 120, 40);
+        assert!(text.contains("Trusted (2)"), "{text}");
+        assert!(text.contains("guest"), "{text}");
+        assert!(text.contains("alpha, beta"), "{text}");
+        assert!(text.contains("auditor"), "{text}");
+        assert!(text.contains("all sessions"), "{text}");
+        assert!(text.contains("upload"), "{text}");
+
+        // The form overlay floats over the tab with its four stops.
+        app.hub.remote.trust.open_new();
+        app.hub.remote.trust.login = "guest".to_string();
+        let text = draw(&mut app, 120, 40);
+        assert!(text.contains("Trust a GitHub profile"), "{text}");
+        assert!(text.contains("User: guest"), "{text}");
+        assert!(text.contains("Sessions:"), "{text}");
+        assert!(text.contains("All sessions:"), "{text}");
+        assert!(text.contains("Upload:"), "{text}");
+        assert!(text.contains("Enter save"), "{text}");
+
+        // The remove confirmation pins above the message line.
+        app.hub.remote.trust.close();
+        app.hub.remote.trust_remove_confirm = Some("guest".to_string());
+        let text = draw(&mut app, 120, 40);
+        assert!(text.contains("Forget guest and kick its guests?"), "{text}");
+    }
+
+    #[test]
+    fn pair_countdown_spells_expiry() {
+        assert_eq!(pair_countdown(1000, 430), "Expires in 9:30");
+        assert_eq!(pair_countdown(1000, 999), "Expires in 0:01");
+        assert_eq!(
+            pair_countdown(1000, 1000),
+            "Expired — Enter on Pair a device for a new code"
+        );
+        assert_eq!(
+            pair_countdown(1000, 2000),
+            "Expired — Enter on Pair a device for a new code"
+        );
+    }
+}

@@ -39,6 +39,29 @@ pub fn build_export_document_with_pending(
     ensembles: &[EnsembleDetails],
     pending_entry_sources: &HashMap<String, Vec<(String, GraphEdgeCondition)>>,
 ) -> Result<GraphExportDocument, String> {
+    build_export_document_with_pending_and_prompts(
+        lp,
+        graph_nodes,
+        graph_edges,
+        ensembles,
+        pending_entry_sources,
+        &crate::domain::prompts::prompts_dir(&crate::domain::prompts::canopy_dir()),
+    )
+}
+
+/// [`build_export_document_with_pending`] with the prompts directory
+/// injected: the document bundles the full content of every custom
+/// `prompt_preset` its agent nodes reference, read from `<prompts_dir>
+/// /<name>.md`. Production uses the wrapper (the daemon's real prompts
+/// dir); tests inject a temp dir.
+pub fn build_export_document_with_pending_and_prompts(
+    lp: &Graph,
+    graph_nodes: &[GraphNode],
+    graph_edges: &[GraphEdge],
+    ensembles: &[EnsembleDetails],
+    pending_entry_sources: &HashMap<String, Vec<(String, GraphEdgeCondition)>>,
+    prompts_dir: &std::path::Path,
+) -> Result<GraphExportDocument, String> {
     let owned_ids: std::collections::HashSet<&str> = ensembles
         .iter()
         .flat_map(|details| {
@@ -59,7 +82,7 @@ pub fn build_export_document_with_pending(
     reject_duplicate_export_names(lp, &plain_nodes, ensembles)?;
     let name_map = ExportNameMap::new(lp, &plain_nodes, ensembles);
 
-    let export_nodes = plain_nodes
+    let export_nodes: Vec<GraphExportNode> = plain_nodes
         .iter()
         .map(|node| GraphExportNode {
             name: node.name.clone(),
@@ -100,6 +123,8 @@ pub fn build_export_document_with_pending(
         .map(|id| name_map.node_name(id))
         .transpose()?;
 
+    let prompt_presets = collect(&export_nodes, prompts_dir);
+
     Ok(GraphExportDocument {
         format_version: GRAPH_EXPORT_FORMAT_VERSION,
         name: lp.name.clone(),
@@ -109,6 +134,7 @@ pub fn build_export_document_with_pending(
         ensembles: export_ensembles,
         infra_node,
         hooks: lp.hooks.clone(),
+        prompt_presets,
     })
 }
 
@@ -290,6 +316,7 @@ pub(super) fn export_one_ensemble(
         quorum_grace_minutes: ensemble.quorum_grace_minutes,
         crew,
         members,
+        mutex: ensemble.mutex.clone(),
     })
 }
 
@@ -322,7 +349,7 @@ pub(super) fn export_ensemble_members(details: &EnsembleDetails) -> Vec<GraphExp
 ///
 /// CM49: a crew-bound ensemble whose members are not materialized yet has no
 /// fan-out edges; its extra entry sources come from `pending_entry_sources`
-/// instead (the rows `graph_import` recorded), with owned sources skipped
+/// instead (the rows `graph_edit` recorded), with owned sources skipped
 /// exactly as the edge-derived path skips them.
 pub(super) fn export_ensemble_entry_sources(
     details: &EnsembleDetails,
@@ -381,7 +408,7 @@ pub(super) fn export_ensemble_entry_sources(
 
 /// An agent node's config passes through untouched, except that a missing
 /// `model` key is injected as `null` so the export states "platform
-/// default" explicitly, field-for-field with `graph_get`. Every other kind's
+/// default" explicitly, field-for-field with `graph`. Every other kind's
 /// config passes through verbatim.
 pub(super) fn export_node_config(kind: GraphNodeKind, config: &Value) -> Value {
     if kind != GraphNodeKind::Agent {
@@ -431,7 +458,7 @@ pub(super) fn edge_sort_key(edge: &GraphExportEdge) -> String {
 /// (decision 6).
 pub fn parse_export_document_value(value: &Value) -> Result<GraphExportDocument, String> {
     match value.get("format_version").and_then(Value::as_i64) {
-        Some(version) if (1..=5).contains(&version) => {}
+        Some(version) if (1..=6).contains(&version) => {}
         Some(other) => {
             return Err(format!(
                 "Graph export document has format_version {other}, but this build only supports 1 through {GRAPH_EXPORT_FORMAT_VERSION}."

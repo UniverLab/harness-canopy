@@ -132,13 +132,13 @@ pub(super) fn report_configured_embeddings(
             match acquisition {
                 Some(crate::rag::status::AcquisitionState::Downloading { started_at }) => {
                     println!(
-                        " \x1b[33m⬇\x1b[0m Local model downloading ({}s so far)",
+                        " \x1b[33m▼\x1b[0m Local model downloading ({}s so far)",
                         crate::rag::status::elapsed_secs(started_at)
                     );
                 }
                 Some(crate::rag::status::AcquisitionState::Preparing { started_at }) => {
                     println!(
-                        " \x1b[33m⚙\x1b[0m Local model preparing ({}s so far)",
+                        " \x1b[33m◉\x1b[0m Local model preparing ({}s so far)",
                         crate::rag::status::elapsed_secs(started_at)
                     );
                 }

@@ -4,7 +4,7 @@
 //! concurrent readers) and displays background_agents, watchers, and their logs
 //! in a card-based sidebar with a live log panel.
 
-mod agent;
+pub(crate) mod agent;
 mod app;
 mod atmosphere;
 mod brians_brain;
@@ -13,7 +13,11 @@ pub(crate) mod context_transfer;
 mod event;
 mod gamification;
 pub mod keymap_reference;
+mod logging;
 pub(crate) mod mcp_client;
+#[cfg(unix)]
+mod orphan_watchdog;
+mod panic_hook;
 pub(crate) mod prompt_templates;
 pub(crate) mod selection;
 pub(crate) mod terminal_history;
@@ -21,18 +25,26 @@ pub(crate) mod ui;
 mod whimsg;
 
 pub(crate) use ui::truncate_str_keep_tail;
+// The daemon resumes sessions on its own (see `crate::sessions::resume`), so
+// the resume-args builder is re-exported for that one non-TUI consumer.
+pub(crate) use app::session_resume::build_resumed_session_args;
 // CH3: the graph engine enqueues interactive hook messages with a canonical
 // promptbuilder-equivalent state — the builder types live here, so they are
 // re-exported for that one non-TUI consumer rather than making `app` public.
 pub(crate) use app::dialog::PersistedBuilderState;
 #[cfg(test)]
 pub(crate) use app::dialog::SimplePromptDialog;
+// The hub catalog lists the New dialog's CLIs, so the dialog's CLI list and
+// label helpers are re-exported for that one non-TUI consumer rather than
+// making `app` public.
+pub(crate) use app::dialog::new_agent::{available_clis_for_catalog, cli_label};
 
 use anyhow::{Context, Result};
 use ratatui::crossterm::{
     event::{
-        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+        EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{
@@ -51,6 +63,7 @@ use event::run_event_graph;
 
 /// Entry point for `canopy tui`.
 pub fn run_tui() -> Result<()> {
+    panic_hook::install_panic_hook();
     crate::domain::notification::register_aumid();
     crate::domain::notification::clear_stale_notifications();
     let data_dir = crate::ensure_data_dir()?;
@@ -78,20 +91,31 @@ pub fn run_tui() -> Result<()> {
     let home = dirs::home_dir().unwrap_or_default();
     let canopy_config = crate::domain::canopy_config::CanopyConfig::load(&home.join(".canopy"));
     let mut app = App::new(Arc::clone(&db), &data_dir, &canopy_config)?;
+    // FR1/FR6: the slow-tick snapshot and the node-tail resolver each own a
+    // database connection on their own thread from here on; the initial
+    // `App::new` refresh above ran synchronously without them.
+    app.snapshot_worker = Some(crate::tui::app::snapshot::SnapshotWorker::spawn(
+        &db_path, &data_dir,
+    ));
+    app.node_tail_worker = Some(crate::tui::app::dialog::NodeTailWorker::spawn(
+        &db_path, &data_dir,
+    ));
+    app.version_notice = crate::tui::app::version_check::check_daemon_version(&db);
 
+    // The hub owns every session now: closing the TUI only closes the
+    // WebSocket (see `App::cleanup`), so install the SIGHUP handler here —
+    // spawns no longer do it — and attach the live sessions.
+    #[cfg(unix)]
+    crate::tui::agent::pty::install_signal_handlers();
     // Reap bridge sidecars whose owning process died without cleaning up
     app.reconcile_bridge_sessions();
-    // Auto-resume previously active interactive sessions
-    app.auto_resume_sessions();
+    // Attach the daemon hub's live sessions: the daemon resumes them and
+    // delivers scheduled sends, the TUI only shows what the hub runs.
+    app.connect_session_hub();
     // Load orphaned sessions for TUI visibility
     if let Ok(orphaned) = app.db.get_orphaned_sessions() {
         app.orphaned_sessions = orphaned;
     }
-    // Auto-resume previously active terminal sessions
-    app.auto_resume_terminal_sessions();
-    // Now that sessions are resumed (and their schedules reassigned), open the
-    // scheduled-send delivery gate and drop schedules whose session is gone.
-    app.restore_scheduled_sends();
 
     // Setup terminal
     enable_raw_mode()?;
@@ -100,7 +124,8 @@ pub fn run_tui() -> Result<()> {
         stdout,
         EnterAlternateScreen,
         EnableMouseCapture,
-        EnableBracketedPaste
+        EnableBracketedPaste,
+        EnableFocusChange
     )?;
 
     // Enable Kitty keyboard enhancement if supported — allows Shift+Enter
@@ -117,6 +142,11 @@ pub fn run_tui() -> Result<()> {
     let backend = ratatui::backend::CrosstermBackend::new(stdout);
     let mut terminal = ratatui::Terminal::new(backend)?;
 
+    // A closed terminal can leave the main thread stuck in crossterm's
+    // poll/read, never reaching the SIGHUP check: watch for it from outside.
+    #[cfg(unix)]
+    orphan_watchdog::spawn();
+
     // Run
     let result = run_event_graph(&mut terminal, &mut app);
 
@@ -129,7 +159,8 @@ pub fn run_tui() -> Result<()> {
         terminal.backend_mut(),
         LeaveAlternateScreen,
         DisableMouseCapture,
-        DisableBracketedPaste
+        DisableBracketedPaste,
+        DisableFocusChange
     )?;
     terminal.show_cursor()?;
 

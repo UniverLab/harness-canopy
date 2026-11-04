@@ -89,7 +89,28 @@ impl App {
             .max_backlog_updated_at(project.as_ref().map(|(_, path)| path.as_str()))
             .ok()
             .flatten();
+        self.tick_panel_face_with_inputs(graph_running, knowledge_updated, backlog_updated);
+    }
 
+    /// Worker-mode panel tick (FR1): the same switching rule fed by the
+    /// snapshot's MAX values instead of fresh queries. No database call.
+    pub(crate) fn tick_panel_face_from_snapshot(
+        &mut self,
+        knowledge_updated: Option<i64>,
+        backlog_updated: Option<i64>,
+    ) {
+        let graph_running = self.panel_graph_running();
+        self.tick_panel_face_with_inputs(graph_running, knowledge_updated, backlog_updated);
+    }
+
+    /// The switching rule over already-read inputs: baselines, events, dwell,
+    /// pin and interaction. Shared by the sync tick and the worker-mode tick.
+    fn tick_panel_face_with_inputs(
+        &mut self,
+        graph_running: bool,
+        knowledge_updated: Option<i64>,
+        backlog_updated: Option<i64>,
+    ) {
         if !self.panel_baselines_init {
             self.panel_last_knowledge_updated = knowledge_updated;
             self.panel_last_backlog_updated = backlog_updated;
@@ -232,7 +253,7 @@ impl App {
 
     /// Pin a face (`None` = back to automatic) and persist the choice so it
     /// survives restarts. Applies immediately. Production pins go through
-    /// the daemon's `config_set` and the config reload (`refresh.rs`); this
+    /// the daemon's `config set` and the config reload (`refresh.rs`); this
     /// direct-apply path is exercised by the persistence tests.
     #[allow(dead_code)]
     pub(crate) fn pin_panel_face(&mut self, pin: Option<PanelFace>) {
@@ -252,12 +273,12 @@ impl App {
         self.save_panel_pinned_face();
     }
 
-    /// CM51 (D5): persist the pin through the daemon's `config_set`, the one
+    /// CM51 (D5): persist the pin through the daemon's `config set`, the one
     /// writer of `config.toml` — the TUI never writes the file itself, so a
     /// pin can no longer drop the user's comments or race another writer.
     /// With the daemon down the pin still applies in memory for this session
     /// and the status banner says so. CT31 keeps this path unchanged: the
-    /// hub's Settings tab writes through the same `config_set`.
+    /// hub's Settings tab writes through the same `config set`.
     #[allow(dead_code)]
     fn save_panel_pinned_face(&mut self) {
         let value = self
@@ -272,8 +293,8 @@ impl App {
             .unwrap_or_else(|| crate::resolve_port(None).to_string());
         let outcome = crate::tui::mcp_client::call_daemon_tool(
             &port,
-            "config_set",
-            &serde_json::json!({ "key": "pinned_panel_face", "value": value }),
+            "config",
+            &serde_json::json!({ "action": "set", "key": "pinned_panel_face", "value": value }),
         );
         match outcome {
             Ok(outcome) if !outcome.is_error => {}
@@ -837,11 +858,11 @@ mod tests {
         assert_eq!(PanelFace::Crews.label(), "crews");
     }
 
-    /// CT31 requirement 5: the pin must go through the daemon's `config_set`,
+    /// CT31 requirement 5: the pin must go through the daemon's `config set`,
     /// never a direct `CanopyConfig::save` — the TUI must not write
     /// `config.toml` itself.
     #[test]
-    fn save_panel_pinned_face_calls_config_set() {
+    fn save_panel_pinned_face_calls_config_set_action() {
         use crate::application::ports::StateRepository;
         use crate::tui::mcp_client::test_support::spawn_fake_daemon;
 
@@ -856,10 +877,10 @@ mod tests {
 
         let calls = fake.recorded_calls();
         assert_eq!(calls.len(), 1, "exactly one daemon call: {calls:?}");
-        assert_eq!(calls[0]["name"], "config_set");
+        assert_eq!(calls[0]["name"], "config");
         assert_eq!(
             calls[0]["arguments"],
-            serde_json::json!({ "key": "pinned_panel_face", "value": "knowledge" })
+            serde_json::json!({ "action": "set", "key": "pinned_panel_face", "value": "knowledge" })
         );
     }
 }

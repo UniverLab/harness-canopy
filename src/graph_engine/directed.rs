@@ -199,10 +199,25 @@ pub(crate) fn skipped_node_names(
             }
         }
     }
+    // Forward reachability FROM the start: anything the run reaches after the
+    // start is downstream, never skipped. Cycles and bypass edges would
+    // otherwise leak downstream nodes in — reachable from the entry AND able
+    // to reach a start node via a back edge. DAGs are unaffected (nothing is
+    // both strictly upstream and downstream there).
+    let mut downstream: HashSet<String> = HashSet::new();
+    let mut forward: VecDeque<String> = start_node_ids.iter().cloned().collect();
+    while let Some(id) = forward.pop_front() {
+        for edge in edges.iter().filter(|e| e.from_node == id) {
+            if downstream.insert(edge.to_node.clone()) {
+                forward.push_back(edge.to_node.clone());
+            }
+        }
+    }
     nodes
         .iter()
         .filter(|n| {
             !start.contains(n.id.as_str())
+                && !downstream.contains(&n.id)
                 && can_reach_start.contains(&n.id)
                 && from_entry.contains(&n.id)
         })
@@ -386,7 +401,8 @@ impl GraphEngine {
             .map_err(|e| e.to_string())?;
         // Validate unsafe upstream prerequisites synchronously, before dispatch.
         let upstream_ids = directed_upstream_node_ids(&edges, &target.start_node_ids);
-        check_upstream_prerequisites(&nodes, &upstream_ids, &runs).map_err(|e| e.to_string())?;
+        check_upstream_prerequisites(&nodes, &upstream_ids, &runs, &ensembles)
+            .map_err(|e| e.to_string())?;
         let node_outputs = upstream_node_outputs(&nodes, &upstream_ids, &runs);
         // The same prompts dir the agent spawn path resolves presets from, so
         // a preset body's `{{output:X}}` is validated exactly as it will bind.
@@ -401,12 +417,23 @@ impl GraphEngine {
             &prompts_dir,
         )
         .map_err(|e| e.to_string())?;
+        // FR4: when the column was cleared (a pause reconciles it away), the
+        // plan reports the head this run's first `spec_started` recorded —
+        // the same baseline the dispatch will reuse. A failed lookup reports
+        // none, exactly as before.
+        let start_head = spec.spec_start_head.clone().or_else(|| {
+            self.db
+                .spec_started_head(graph_id, spec_id)
+                .ok()
+                .flatten()
+                .and_then(|(head, _)| head)
+        });
         Ok(DirectedPlan {
             spec_name: spec.name,
             start_label: target.label,
             skipped_nodes: target.skipped_nodes,
             reused_outputs: reused_output_records(&nodes, &edges, &target.start_node_ids, &runs),
-            start_head: spec.spec_start_head,
+            start_head,
         })
     }
 }
@@ -500,6 +527,7 @@ mod tests {
     ) -> EnsembleDetails {
         EnsembleDetails {
             ensemble: Ensemble {
+                mutex: Vec::new(),
                 id: id.to_string(),
                 spec_id: None,
                 graph_id: Some("g".to_string()),
@@ -624,6 +652,40 @@ mod tests {
         assert!(err.to_string().contains("fail"), "{err}");
     }
 
+    /// A directed run at an ensemble lists only the nodes upstream of it as
+    /// skipped — never nodes downstream, even when a bypass edge plus a back
+    /// edge make a downstream node look both reachable-from-entry and
+    /// able-to-reach-the-start (the 3f087a76 incident listed Tail and the
+    /// Implementer as skipped).
+    #[test]
+    fn skipped_excludes_nodes_downstream_of_start() {
+        let nodes = vec![
+            node("s", "Start", 0, Value::Null),
+            node("l", "Lock", 1, Value::Null),
+            node("m1", "M1", 2, Value::Null),
+            node("m2", "M2", 3, Value::Null),
+            node("j", "Join", 4, Value::Null),
+            node("t", "Tail", 5, Value::Null),
+        ];
+        let edges = vec![
+            edge("s", "l", GraphEdgeCondition::Pass),
+            edge("l", "m1", GraphEdgeCondition::Pass),
+            edge("l", "m2", GraphEdgeCondition::Pass),
+            edge("m1", "j", GraphEdgeCondition::Pass),
+            edge("m2", "j", GraphEdgeCondition::Pass),
+            edge("j", "t", GraphEdgeCondition::Pass),
+            edge("l", "t", GraphEdgeCondition::Pass),
+            edge("t", "m1", GraphEdgeCondition::Pass),
+        ];
+        let skipped = skipped_node_names(
+            &nodes,
+            &edges,
+            &["m1".to_string(), "m2".to_string(), "j".to_string()],
+            "s",
+        );
+        assert_eq!(skipped, vec!["Start".to_string(), "Lock".to_string()]);
+    }
+
     #[test]
     fn directed_start_refuses_error_and_interrupted_upstream_prerequisites() {
         for status in [GraphRunStatus::Error, GraphRunStatus::Interrupted] {
@@ -640,6 +702,261 @@ mod tests {
                 .unwrap_err();
             assert!(err.to_string().contains("prerequisite node 'A'"), "{err}");
         }
+    }
+
+    /// The node/edge shape of a round-robin ensemble sitting between A and B:
+    /// A → m1/m2/m3 → j → B.
+    fn round_robin_between_a_and_b() -> (Vec<GraphNode>, Vec<GraphEdge>, Vec<EnsembleDetails>) {
+        let nodes = vec![
+            node("A", "A", 0, Value::Null),
+            node("m1", "M1", 1, Value::Null),
+            node("m2", "M2", 2, Value::Null),
+            node("m3", "M3", 3, Value::Null),
+            node("j", "Join", 4, Value::Null),
+            node("B", "B", 5, Value::Null),
+        ];
+        let edges = vec![
+            edge("A", "m1", GraphEdgeCondition::Always),
+            edge("A", "m2", GraphEdgeCondition::Always),
+            edge("A", "m3", GraphEdgeCondition::Always),
+            edge("m1", "j", GraphEdgeCondition::Always),
+            edge("m2", "j", GraphEdgeCondition::Always),
+            edge("m3", "j", GraphEdgeCondition::Always),
+            edge("j", "B", GraphEdgeCondition::Pass),
+        ];
+        let mut details = ensemble_details("ens", "rr", "A", &["m1", "m2", "m3"], "j");
+        details.ensemble.kind = EnsembleKind::RoundRobin;
+        details.ensemble.min_pass = 1;
+        (nodes, edges, vec![details])
+    }
+
+    /// FR2: a round-robin ensemble passes through whichever member carried the
+    /// vote. Member 1 failing under a passed quorum is not an unmet
+    /// prerequisite for a directed start past the ensemble.
+    #[test]
+    fn directed_start_past_a_passed_round_robin_ensemble_ignores_a_failed_member() {
+        let s = spec("spec-1");
+        let (nodes, edges, ensembles) = round_robin_between_a_and_b();
+        let runs = vec![
+            run("m1", GraphRunStatus::Fail, Some(serde_json::json!(1)), None),
+            run("m3", GraphRunStatus::Pass, Some(serde_json::json!(3)), None),
+            run(
+                "j",
+                GraphRunStatus::Pass,
+                Some(serde_json::json!(true)),
+                None,
+            ),
+        ];
+        let directed = DirectedStart {
+            spec_id: s.id.clone(),
+            node_arg: "B".to_string(),
+        };
+        resolve_spec_start(
+            &nodes,
+            &edges,
+            &s,
+            &runs,
+            &ensembles,
+            false,
+            Some(&directed),
+        )
+        .expect("a passed quorum satisfies the ensemble prerequisite");
+    }
+
+    /// FR1: the reported incident shape — a round-robin rotation where member 1
+    /// failed (pass 1, quorum failed with it) and member 2 then passed (pass 2,
+    /// quorum passed). The ensemble's latest verdict is a pass, so a directed
+    /// start downstream is accepted: member 1 is judged by that latest verdict,
+    /// not by its own failure nor by the failed intermediate quorum. Breaks if
+    /// members are judged by their own runs, or by a same-iteration join.
+    #[test]
+    fn directed_start_past_passed_two_member_ensemble_accepts_failed_member() {
+        let s = spec("spec-1");
+        let nodes = vec![
+            node("A", "A", 0, Value::Null),
+            node("m1", "M1", 1, Value::Null),
+            node("m2", "M2", 2, Value::Null),
+            node("j", "Join", 3, Value::Null),
+            node("B", "B", 4, Value::Null),
+        ];
+        let edges = vec![
+            edge("A", "m1", GraphEdgeCondition::Always),
+            edge("A", "m2", GraphEdgeCondition::Always),
+            edge("m1", "j", GraphEdgeCondition::Always),
+            edge("m2", "j", GraphEdgeCondition::Always),
+            edge("j", "B", GraphEdgeCondition::Pass),
+        ];
+        let mut details = ensemble_details("ens", "rr", "A", &["m1", "m2"], "j");
+        details.ensemble.kind = EnsembleKind::RoundRobin;
+        details.ensemble.min_pass = 1;
+        let ensembles = vec![details];
+        let mut m1 = run("m1", GraphRunStatus::Fail, Some(serde_json::json!(1)), None);
+        m1.iteration = 1;
+        let mut j1 = run(
+            "j",
+            GraphRunStatus::Fail,
+            Some(serde_json::json!(false)),
+            None,
+        );
+        j1.iteration = 1;
+        j1.id = "run-j-1".to_string();
+        let mut m2 = run("m2", GraphRunStatus::Pass, Some(serde_json::json!(2)), None);
+        m2.iteration = 2;
+        let mut j2 = run(
+            "j",
+            GraphRunStatus::Pass,
+            Some(serde_json::json!(true)),
+            None,
+        );
+        j2.iteration = 2;
+        j2.id = "run-j-2".to_string();
+        let runs = vec![m1, j1, m2, j2];
+        let directed = DirectedStart {
+            spec_id: s.id.clone(),
+            node_arg: "B".to_string(),
+        };
+        resolve_spec_start(
+            &nodes,
+            &edges,
+            &s,
+            &runs,
+            &ensembles,
+            false,
+            Some(&directed),
+        )
+        .expect("a passed ensemble satisfies every node downstream of it");
+    }
+
+    /// FR2: when the ensemble's own quorum result failed, the prerequisite
+    /// is unmet and the refusal names the ensemble — not a member or the
+    /// join node.
+    #[test]
+    fn directed_start_past_a_failed_round_robin_quorum_is_refused() {
+        let s = spec("spec-1");
+        let (nodes, edges, ensembles) = round_robin_between_a_and_b();
+        let runs = vec![
+            run("m1", GraphRunStatus::Fail, Some(serde_json::json!(1)), None),
+            run("m3", GraphRunStatus::Pass, Some(serde_json::json!(3)), None),
+            run(
+                "j",
+                GraphRunStatus::Fail,
+                Some(serde_json::json!(false)),
+                None,
+            ),
+        ];
+        let directed = DirectedStart {
+            spec_id: s.id.clone(),
+            node_arg: "B".to_string(),
+        };
+        let err = resolve_spec_start(
+            &nodes,
+            &edges,
+            &s,
+            &runs,
+            &ensembles,
+            false,
+            Some(&directed),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("prerequisite ensemble 'rr' last run was fail"),
+            "{err}"
+        );
+        assert!(
+            !err.to_string().contains("'M1'"),
+            "the ensemble verdict, not a member, is the prerequisite: {err}"
+        );
+        assert!(
+            !err.to_string().contains("'Join'"),
+            "the refusal names the ensemble, not its join node: {err}"
+        );
+    }
+
+    /// FR2: a quorum only judges the pass it settled. Here the member ran
+    /// again after the last join — a shutdown between a member and its join —
+    /// so that attempt has no verdict: it still refuses the start, naming the
+    /// ensemble and the missing verdict instead of hiding behind an older
+    /// passed quorum.
+    #[test]
+    fn directed_start_refuses_a_failed_member_of_an_unsettled_ensemble_pass() {
+        let s = spec("spec-1");
+        let (nodes, edges, ensembles) = round_robin_between_a_and_b();
+        let mut settled = run(
+            "j",
+            GraphRunStatus::Pass,
+            Some(serde_json::json!(true)),
+            None,
+        );
+        settled.iteration = 1;
+        let mut newer_attempt = run("m1", GraphRunStatus::Fail, Some(serde_json::json!(1)), None);
+        newer_attempt.iteration = 2;
+        let runs = vec![settled, newer_attempt];
+        let directed = DirectedStart {
+            spec_id: s.id.clone(),
+            node_arg: "B".to_string(),
+        };
+        let err = resolve_spec_start(
+            &nodes,
+            &edges,
+            &s,
+            &runs,
+            &ensembles,
+            false,
+            Some(&directed),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("prerequisite ensemble 'rr'"),
+            "the unsettled attempt refuses against the ensemble: {err}"
+        );
+        assert!(
+            err.to_string().contains("no recorded verdict"),
+            "with no covering join the attempt has no verdict: {err}"
+        );
+    }
+
+    /// FR2: the unsettled pass refuses too. The member passed after the last
+    /// join — a shutdown between the member and its join — so the ensemble has
+    /// no verdict for this attempt: accepting would seed the stale join output
+    /// the previous pass left behind. Breaks if an unsettled member falls back
+    /// to its own run instead of refusing against the ensemble.
+    #[test]
+    fn directed_start_refuses_a_passed_member_of_an_unsettled_ensemble_pass() {
+        let s = spec("spec-1");
+        let (nodes, edges, ensembles) = round_robin_between_a_and_b();
+        let mut settled = run(
+            "j",
+            GraphRunStatus::Pass,
+            Some(serde_json::json!(true)),
+            None,
+        );
+        settled.iteration = 1;
+        let mut newer_attempt = run("m1", GraphRunStatus::Pass, Some(serde_json::json!(1)), None);
+        newer_attempt.iteration = 2;
+        let runs = vec![settled, newer_attempt];
+        let directed = DirectedStart {
+            spec_id: s.id.clone(),
+            node_arg: "B".to_string(),
+        };
+        let err = resolve_spec_start(
+            &nodes,
+            &edges,
+            &s,
+            &runs,
+            &ensembles,
+            false,
+            Some(&directed),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("prerequisite ensemble 'rr'"),
+            "the unsettled attempt refuses against the ensemble: {err}"
+        );
+        assert!(
+            err.to_string().contains("no recorded verdict"),
+            "with no covering join the attempt has no verdict: {err}"
+        );
     }
 
     #[test]

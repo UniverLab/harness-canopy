@@ -11,6 +11,8 @@ use prompt_text::handle_prompt_field;
 
 use crate::tui::app::dialog::new_agent::mode_step;
 
+use super::handler_errors::report_handler_error;
+
 pub(crate) use prompt_text::insert_prompt_text;
 #[cfg(test)]
 pub(crate) use prompt_text::prompt_field_width_for;
@@ -279,7 +281,12 @@ fn handle_dialog_enter(app: &mut App) {
         return;
     }
 
-    let _ = app.launch_new_agent();
+    if let Err(e) = app.launch_new_agent() {
+        report_handler_error(app, "Could not open session", &e);
+        // The failed launch consumed the dialog; without this the focus
+        // would point at a dialog that is gone.
+        app.close_new_agent_dialog();
+    }
 }
 
 fn handle_dialog_field_key(
@@ -1037,6 +1044,7 @@ mod tests {
             session_type: "interactive".to_string(),
             pid: None,
             boot_id: None,
+            harness_conversation_id: None,
         }
     }
 

@@ -145,6 +145,7 @@ mod ensemble_graph {
     /// A well-formed ensemble: kickoff -> {m1, m2} -> join -> arbiter (pass).
     fn valid_fixture() -> (Vec<EnsembleDetails>, Vec<GraphNode>, Vec<GraphEdge>) {
         let ensemble = Ensemble {
+            mutex: Vec::new(),
             commit_rights: false,
             id: "ens1".to_string(),
             spec_id: Some("spec".to_string()),
@@ -257,6 +258,7 @@ mod ensemble_graph {
         kind: crate::domain::graphs::EnsembleKind,
     ) -> (Vec<EnsembleDetails>, Vec<GraphNode>, Vec<GraphEdge>) {
         let ensemble = Ensemble {
+            mutex: Vec::new(),
             commit_rights: false,
             id: "ens1".to_string(),
             spec_id: Some("spec".to_string()),
@@ -336,6 +338,7 @@ mod ensemble_graph {
         // Second ensemble: gate -> {r1} -> join2 -> arbiter. Single member is
         // fine for a cascade unit.
         let target = Ensemble {
+            mutex: Vec::new(),
             commit_rights: false,
             id: "ens2".to_string(),
             spec_id: Some("spec".to_string()),
@@ -396,6 +399,7 @@ mod ensemble_graph {
     fn chained_exit_missing_a_member_edge_is_rejected() {
         let (mut details, mut nodes, mut edges) = valid_fixture();
         let target = Ensemble {
+            mutex: Vec::new(),
             commit_rights: false,
             id: "ens2".to_string(),
             spec_id: Some("spec".to_string()),
@@ -977,7 +981,7 @@ mod graph_validation {
         assert_eq!(hits.len(), 3);
         assert!(hits.contains(&StaleNameHit {
             old: "loop_schedule_autorun".to_string(),
-            new: "graph_schedule_autorun".to_string(),
+            new: "graph_control schedule_autorun".to_string(),
         }));
         assert!(hits.contains(&StaleNameHit {
             old: "loop_complete_node".to_string(),
@@ -987,5 +991,25 @@ mod graph_validation {
             old: "canopy loop".to_string(),
             new: "canopy graph".to_string(),
         }));
+    }
+
+    #[test]
+    fn stale_2x_replacements_name_tool_and_action() {
+        // FR7: every replacement names the resource tool AND the action —
+        // a bare tool name is not a callable instruction under dispatch.
+        // The two reporting tools kept their single-tool shape (no action).
+        for (old, new) in super::stale_names::STALE_2X_REPLACEMENTS {
+            if *old == "loop_complete_node" || *old == "loop_report_blocker" {
+                assert!(
+                    !new.contains(' '),
+                    "{old} kept its tool, so its replacement stays bare: {new}"
+                );
+            } else {
+                assert!(
+                    new.contains(' '),
+                    "{old} must map to '<tool> <action>', not a bare tool: {new}"
+                );
+            }
+        }
     }
 }

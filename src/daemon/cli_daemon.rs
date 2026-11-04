@@ -55,14 +55,14 @@ mod tests {
 
         let text = call_tool(
             Some(port),
-            "graph_run",
+            "graph_control",
             &serde_json::json!({"graph_id": "x"}),
         )
         .unwrap();
 
         assert_eq!(text, "Graph 'x' launched in background.");
         let calls = fake.recorded_calls();
-        assert_eq!(calls[0]["name"], "graph_run");
+        assert_eq!(calls[0]["name"], "graph_control");
     }
 
     #[test]
@@ -75,7 +75,7 @@ mod tests {
 
         let err = call_tool(
             Some(port),
-            "graph_run",
+            "graph_control",
             &serde_json::json!({"graph_id": "x"}),
         )
         .unwrap_err();
@@ -95,7 +95,7 @@ mod tests {
             let port: u16 = unused_port().parse().unwrap();
             match call_tool(
                 Some(port),
-                "graph_run",
+                "graph_control",
                 &serde_json::json!({"graph_id": "x"}),
             ) {
                 Err(err) => {

@@ -70,8 +70,8 @@ pub struct HardCascadeCounts {
     pub interactive_sessions: i64,
     pub terminal_sessions: i64,
     pub last_prompts: i64,
-    pub scheduled_sends: i64,
-    pub failed_scheduled_sends: i64,
+    pub scheduled_prompts: i64,
+    pub failed_scheduled_prompts: i64,
     pub sync_messages: i64,
     pub sync_locks: i64,
     pub intelligence_nodes: i64,
@@ -96,8 +96,8 @@ impl HardCascadeCounts {
             && self.interactive_sessions == 0
             && self.terminal_sessions == 0
             && self.last_prompts == 0
-            && self.scheduled_sends == 0
-            && self.failed_scheduled_sends == 0
+            && self.scheduled_prompts == 0
+            && self.failed_scheduled_prompts == 0
             && self.sync_messages == 0
             && self.sync_locks == 0
             && self.intelligence_nodes == 0
@@ -294,7 +294,7 @@ pub struct CleanPlan {
     /// Anonymous leaked dirs proven safe: dangling gitdir + older than 2 h —
     /// deleted in soft mode.
     pub untracked_leaks: Vec<PathBuf>,
-    /// CM46: `graph_events` rows older than the graph-event retention window,
+    /// CM46: the graph event-log rows older than the graph-event retention window,
     /// for graphs that are not running.
     pub graph_event_deletions: usize,
     /// CM46: the RFC3339 cutoff the `graph_event_deletions` count was computed
@@ -319,7 +319,7 @@ impl CleanPlan {
     }
 
     /// Database rows this plan removes: `interactive_sessions` (soft mode's
-    /// original row-level deletion) plus CM46's aged-out `graph_events`.
+    /// original row-level deletion) plus CM46's aged-out graph event-log rows.
     /// `--hard`'s cascade counts are tracked separately in
     /// [`HardCascadeTarget::counts`].
     pub fn deleted_row_count(&self) -> usize {
@@ -952,8 +952,8 @@ mod tests {
             interactive_sessions: 0,
             terminal_sessions: 0,
             last_prompts: 0,
-            scheduled_sends: 0,
-            failed_scheduled_sends: 0,
+            scheduled_prompts: 0,
+            failed_scheduled_prompts: 0,
             sync_messages: 0,
             sync_locks: 0,
             intelligence_nodes: 0,

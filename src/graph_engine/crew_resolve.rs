@@ -11,7 +11,7 @@ use super::NodeExecution;
 /// A crew-bound node/hook/ensemble whose crew does not exist locally (a
 /// pending import). Names the crew so the operator can create it.
 pub(crate) fn crew_missing_blocker(owner: &str, crew: &str) -> String {
-    format!("{owner}: crew '{crew}' does not exist — create it with crew_create, or unbind it.")
+    format!("{owner}: crew '{crew}' does not exist — create it with `crew create`, or unbind it.")
 }
 
 /// A crew-bound node/hook whose crew exists but has no member the roster

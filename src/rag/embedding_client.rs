@@ -295,7 +295,7 @@ impl LocalEmbeddingClient {
         #[cfg(target_os = "linux")]
         {
             // `super` rather than `crate::rag` so this also resolves when
-            // `examples/rag_search.rs` pulls this file in as a flat module.
+            // the standalone RAG search example pulls this file in as a flat module.
             let ort_path = super::ort_runtime::ensure_ort_runtime()
                 .context("ONNX Runtime not available for local embeddings")?;
             std::env::set_var("ORT_DYLIB_PATH", &ort_path);

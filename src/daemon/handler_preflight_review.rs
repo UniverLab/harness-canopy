@@ -1,4 +1,4 @@
-//! `graph_preflight`'s design-reviewer helpers (CB25), split out of
+//! `graph_control`'s design-reviewer helpers (CB25), split out of
 //! `handler_preflight.rs` to keep every production file within the size gate.
 //! Moved verbatim; behaviour unchanged.
 
@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::daemon::handler::TaskTriggerHandler;
 
-/// (CB25) Build the design-review prompt for a `graph_preflight` reviewer.
+/// (CB25) Build the design-review prompt for a `graph_control` reviewer.
 /// The full audit checklist lives in the `graph-reviewer` skill — never
 /// duplicated here. The fallback checklist below is used ONLY when the
 /// skill cannot be resolved, and names the areas, not the checks.
@@ -25,10 +25,10 @@ pub(crate) fn build_preflight_reviewer_prompt(
         prompt.push('.');
     }
     prompt.push_str(
-        " Read the graph with graph_get (and queue_list for the queue) through the MCP surface.",
+        " Read the graph with graph get (and `queue list` for the queue) through the MCP surface.",
     );
     prompt.push_str(
-        " Load the 'graph-reviewer' skill with skill_get; if the skill text is appended below under '## Skill: graph-reviewer', that IS its content — do not fetch again.",
+        " Load the 'graph-reviewer' skill with the `skill` tool's `get` action; if the skill text is appended below under '## Skill: graph-reviewer', that IS its content — do not fetch again.",
     );
     prompt.push_str(skill_section);
     prompt.push_str(
@@ -53,7 +53,7 @@ pub(crate) fn resolve_reviewer_skill_section(store: &crate::dynamic_skills::Skil
     }
 }
 
-/// (CB25) Spawn the `graph_preflight` design reviewer. NEVER returns Err:
+/// (CB25) Spawn the `graph_control` design reviewer. NEVER returns Err:
 /// every failure degrades to a `not_spawned` note so the reviewer can
 /// never fail the preflight itself.
 pub(crate) async fn spawn_preflight_reviewer(
@@ -128,7 +128,7 @@ pub(crate) async fn spawn_preflight_reviewer(
             "platform": platform,
             "model": model,
             "pair": pair,
-            "collect_with": "subagent_collect",
+            "collect_with": "subagent collect",
             "note": format!("Cost: ran on '{pair}'. Advisory only — does not affect probe results."),
         }),
         Ok(Err(e)) => serde_json::json!({

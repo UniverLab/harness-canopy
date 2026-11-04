@@ -3,31 +3,26 @@
 
 use crate::daemon::handler::TaskTriggerHandler;
 use crate::daemon::handler_formatting::internal_error;
+use crate::daemon::handler_read_pause::{set_pause_pending_json, visible_graph_status};
 use crate::daemon::handler_run_exec::{graph_run_blocker, graph_run_json};
 use crate::daemon::handler_specs_helpers::build_spec_run_info;
 use crate::daemon::handler_validate::{parse_router_routes, resolve_prefix_or_error};
 use crate::daemon::helpers::error_result;
 use crate::daemon::params::*;
-use crate::daemon::params_extract::Parameters;
 use crate::db::Database;
 use crate::domain::graphs::{
     Graph, GraphDetails, GraphEdge, GraphNode, GraphNodeKind, GraphRunStatus, GraphSpec,
     GraphSpecStatus, GraphStatus,
 };
 use rmcp::model::{CallToolResult, ContentBlock};
-use rmcp::tool;
 use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
 
 #[tool_router(router = tool_router_read, vis = "pub(crate)")]
 impl TaskTriggerHandler {
-    #[tool(
-        name = "graph_get",
-        description = "Return a graph with its ordered specs, nodes, and edges. Hooks are not retroactive — a hook registered after its event has already happened does not fire."
-    )]
-    pub(crate) async fn graph_get(
+    pub(crate) async fn graph_get_impl(
         &self,
-        Parameters(params): Parameters<GraphGetParams>,
+        params: GraphGetParams,
     ) -> Result<CallToolResult, McpError> {
         let graph_id = match resolve_prefix_or_error(
             &self.db,
@@ -52,13 +47,9 @@ impl TaskTriggerHandler {
         )]))
     }
 
-    #[tool(
-        name = "graph_list",
-        description = "List graphs, optionally filtered by workdir."
-    )]
-    pub(crate) async fn graph_list(
+    pub(crate) async fn graph_list_impl(
         &self,
-        Parameters(params): Parameters<GraphListParams>,
+        params: GraphListParams,
     ) -> Result<CallToolResult, McpError> {
         let graphs = self
             .db
@@ -89,20 +80,31 @@ pub(crate) fn build_graph_summary_json(
     .map(|spec| build_spec_run_info(db, &spec))
     .transpose()?;
 
+    // A guard pause stores its blocker on the graph row — that wins over the
+    // spec-derived blocker (a node run's `graph_report_blocker` output), so a
+    // paused-behind-a-guard graph reports WHY it paused instead of `blocked: false`.
+    // `graph_details_json` mirrors this row-first decision.
+    let blocker = db
+        .graph_blocker(&lp.id)
+        .map_err(internal_error)?
+        .or_else(|| current_spec.as_ref().and_then(|v| v.blocker.clone()));
+
     let mut out = serde_json::json!({
         "id": lp.id,
         "name": lp.name,
-        "status": lp.status.as_str(),
+        "status": visible_graph_status(lp.status),
         "trigger": graph_trigger_json(lp),
         "current_spec": current_spec.as_ref().map(|v| &v.name),
         "current_node": current_spec.as_ref().and_then(|v| v.current_node.as_ref()),
-        "blocked": current_spec.as_ref().is_some_and(|v| v.blocker.is_some()),
-        "blocker": current_spec.as_ref().and_then(|v| v.blocker.clone()),
+        "blocked": blocker.is_some(),
+        "blocker": blocker,
         "spec_attempts": current_spec.as_ref().map(|v| v.cross_run_attempts),
         "created_at": lp.created_at.to_rfc3339(),
         "workdir": lp.workdir,
         "archived": lp.archived,
     });
+    set_pause_pending_json(db, &mut out, lp).map_err(internal_error)?;
+    set_run_workdir_json(db, &mut out, &lp.id, &lp.workdir).map_err(internal_error)?;
     // CB30: when the graph draws from a queue, say so and name it, so the
     // reader knows where the sequence comes from.
     if let Some(queue_id) = lp.active_run_queue_id.as_deref() {
@@ -110,7 +112,31 @@ pub(crate) fn build_graph_summary_json(
             out["queue"] = serde_json::json!({ "id": queue.id, "name": queue.name });
         }
     }
+    // A mutex-waiting current run names what it waits for and who holds it.
+    if let Some(current) = current_spec.as_ref() {
+        if !current.waiting_for.is_empty() {
+            out["waiting_for"] = serde_json::json!(current.waiting_for);
+        }
+    }
     Ok(out)
+}
+
+/// Set `out["run_workdir"]` to the active run's workdir — but only when it
+/// differs from the stored one, so a run without an override reads exactly
+/// as before. Shared by `graph get` ([`graph_details_json`]) and `graph
+/// list` ([`build_graph_summary_json`]).
+fn set_run_workdir_json(
+    db: &Database,
+    out: &mut serde_json::Value,
+    graph_id: &str,
+    stored: &str,
+) -> anyhow::Result<()> {
+    if let Some(run_workdir) = db.graph_active_run_workdir(graph_id)? {
+        if run_workdir != stored {
+            out["run_workdir"] = serde_json::json!(run_workdir);
+        }
+    }
+    Ok(())
 }
 
 /// Serialize a graph's trigger for MCP responses: always a `type` label, plus
@@ -146,7 +172,7 @@ pub(crate) fn build_graph_list_json(
 /// idea run is the blank-name placeholder row the engine inserts as
 /// `graph_runs.spec_id` bookkeeping — never the work itself. Every display
 /// surface must go through [`active_graph_spec_context`] instead of reading
-/// the bound list directly, so `graph_get`, `graph list` and `canopy graph
+/// the bound list directly, so `graph`, `graph list` and `canopy graph
 /// info` agree on the answer.
 #[derive(Debug)]
 pub(crate) enum ActiveGraphSpec {
@@ -164,7 +190,7 @@ pub(crate) enum ActiveGraphSpec {
     None,
 }
 
-/// The single answer to "what spec is this graph on", shared by `graph_get`
+/// The single answer to "what spec is this graph on", shared by `graph`
 /// ([`graph_details_json`]), `graph list` ([`build_graph_summary_json`]) and
 /// `canopy graph info` (`handle_graph_info` in `daemon/graph_cli.rs`).
 ///
@@ -278,12 +304,12 @@ pub(crate) fn bound_active_graph_spec(
 }
 
 /// CB52 FR4: one `orphan_join_warnings` entry for a join node with no
-/// ensemble row. Shared by `graph_get` (advisory, always reported) and
-/// `graph_preflight` (refusal — a graph in this state would die with
+/// ensemble row. Shared by `graph` (advisory, always reported) and
+/// `graph_control` (refusal — a graph in this state would die with
 /// "ambiguous outgoing edges", so no probe quota is spent on it).
 pub(crate) fn orphan_join_warning_text(node: &GraphNode) -> String {
     format!(
-        "join node '{}' ({}) belongs to no ensemble — it was orphaned when an ensemble that owned or referenced its entry/exit was deleted. Delete this orphan node with graph_delete_node or wire it into a repaired graph; do not re-create an ensemble around it automatically. (canopy doctor also lists orphaned joins per graph.)",
+        "join node '{}' ({}) belongs to no ensemble — it was orphaned when an ensemble that owned or referenced its entry/exit was deleted. Delete this orphan node with graph_node delete or wire it into a repaired graph; do not re-create an ensemble around it automatically. (canopy doctor also lists orphaned joins per graph.)",
         node.name, node.id
     )
 }
@@ -314,6 +340,42 @@ fn running_graph_consistency_warning(db: &Database, graph: &Graph) -> Option<&'s
         .then_some("graph is running but has no node run in progress and no scheduled resume")
 }
 
+/// CB52 FR4: join nodes that belong to no ensemble — the state left behind
+/// when an ensemble row was deleted (pre-fix: silently, via `ON DELETE
+/// CASCADE` from a referenced node) while its member/join nodes survived.
+/// Never an error here: the graph must stay inspectable so the operator can
+/// repair it. Never auto-repaired (C1).
+fn orphan_join_warnings_json(
+    db: &Database,
+    lp: &GraphDetails,
+) -> anyhow::Result<Vec<serde_json::Value>> {
+    let mut warnings = Vec::new();
+    for node in db.list_orphan_join_nodes_for_graph(&lp.lp.id)? {
+        warnings.push(orphan_join_warning_json(&node));
+    }
+    for spec in &lp.specs {
+        for node in db.list_orphan_join_nodes_for_spec(&spec.spec.id)? {
+            warnings.push(orphan_join_warning_json(&node));
+        }
+    }
+    Ok(warnings)
+}
+
+/// The current spec's run-reported blocker (`graph_report_blocker`), if any —
+/// the fallback behind the graph row's guard-pause text on both read
+/// surfaces (`build_graph_summary_json` inlines the same decision over the
+/// `SpecRunInfo` it already computed).
+fn current_spec_blocker(db: &Database, ctx: &ActiveGraphSpec) -> anyhow::Result<Option<String>> {
+    match ctx {
+        ActiveGraphSpec::Bound(spec) | ActiveGraphSpec::QueueMember { spec, .. } => {
+            Ok(build_spec_run_info(db, spec)
+                .map_err(|error| anyhow::anyhow!("spec run info failed: {error}"))?
+                .blocker)
+        }
+        ActiveGraphSpec::Idea { .. } | ActiveGraphSpec::None => Ok(None),
+    }
+}
+
 pub(crate) fn graph_details_json(
     db: &Database,
     lp: &GraphDetails,
@@ -330,7 +392,7 @@ pub(crate) fn graph_details_json(
         .collect::<anyhow::Result<Vec<_>>>()?;
     // CB30: while the graph draws from a queue, the bound list above is just
     // the placeholder — name the queue spec actually running instead, so
-    // this surface agrees with `graph_node_runs_list`.
+    // this surface agrees with `graph`.
     let ctx = active_graph_spec_context(db, &lp.lp)?;
     match &ctx {
         ActiveGraphSpec::QueueMember { spec, .. } => {
@@ -360,27 +422,22 @@ pub(crate) fn graph_details_json(
         .map(|details| ensemble_details_json(details, &lp.graph_edges))
         .collect::<Vec<_>>();
 
-    // CB52 FR4: join nodes that belong to no ensemble — the state left
-    // behind when an ensemble row was deleted (pre-fix: silently, via `ON
-    // DELETE CASCADE` from a referenced node) while its member/join nodes
-    // survived. Never an error here: the graph must stay inspectable so the
-    // operator can repair it. Never auto-repaired (C1).
-    let mut orphan_join_warnings = Vec::new();
-    for node in db.list_orphan_join_nodes_for_graph(&lp.lp.id)? {
-        orphan_join_warnings.push(orphan_join_warning_json(&node));
-    }
-    for spec in &lp.specs {
-        for node in db.list_orphan_join_nodes_for_spec(&spec.spec.id)? {
-            orphan_join_warnings.push(orphan_join_warning_json(&node));
-        }
-    }
+    let orphan_join_warnings = orphan_join_warnings_json(db, lp)?;
 
+    // Row first, current-spec run output second — the same decision
+    // `build_graph_summary_json` makes, so `graph get` and `graph list`
+    // agree on both pause flavors.
+    let blocker = db
+        .graph_blocker(&lp.lp.id)?
+        .or(current_spec_blocker(db, &ctx)?);
     let mut out = serde_json::json!({
         "id": lp.lp.id,
         "name": lp.lp.name,
         "description": lp.lp.description,
         "workdir": lp.lp.workdir,
-        "status": lp.lp.status.as_str(),
+        "status": visible_graph_status(lp.lp.status),
+        "blocked": blocker.is_some(),
+        "blocker": blocker,
         "trigger": graph_trigger_json(&lp.lp),
         "created_at": lp.lp.created_at.to_rfc3339(),
         "started_at": lp.lp.started_at.map(|value| value.to_rfc3339()),
@@ -410,6 +467,8 @@ pub(crate) fn graph_details_json(
             .collect::<Vec<_>>(),
         "orphan_join_warnings": orphan_join_warnings,
     });
+    set_pause_pending_json(db, &mut out, &lp.lp)?;
+    set_run_workdir_json(db, &mut out, &lp.lp.id, &lp.lp.workdir)?;
     // CB30: when the graph draws from a queue, say so and name it; when it
     // runs a loose idea, say that instead of leaving an empty `specs` to be
     // misread as "nothing running".
@@ -432,13 +491,28 @@ pub(crate) fn graph_details_json(
     let consistency_warning = running_graph_consistency_warning(db, &lp.lp);
     out["consistency_warning"] = serde_json::json!(consistency_warning);
     out["consistency_warnings"] = serde_json::json!(consistency_warning.iter().collect::<Vec<_>>());
+    // CB42 follow-up: a sandboxed last run must say which sandbox holds its
+    // work and what became of it (`kept`, `merged`, `discarded`, …), so an
+    // agent can land or discard it through the `sandbox` tool without
+    // guessing an id from `canopy sandbox list`.
+    out["sandbox"] = graph_sandbox_json(db, &lp.lp.id)?;
     if matches!(ctx, ActiveGraphSpec::Idea { .. }) && out.get("queue").is_none() {
         out["mode"] = serde_json::json!("idea");
     }
     Ok(out)
 }
 
-/// Serialize an ensemble (F1) as the one unit `graph_get`/`graph_update_ensemble`
+/// The sandbox holding this graph's newest run's work: `{id, status}` as the
+/// row records it, or `null` when the graph never ran sandboxed. Kept out of
+/// [`graph_details_json`] so that function stays within the size limit.
+fn graph_sandbox_json(db: &Database, graph_id: &str) -> anyhow::Result<serde_json::Value> {
+    Ok(match db.latest_sandbox_run_for_owner("graph", graph_id)? {
+        Some(row) => serde_json::json!({ "id": row.id, "status": row.status }),
+        None => serde_json::Value::Null,
+    })
+}
+
+/// Serialize an ensemble (F1) as the one unit `graph`/`graph_ensemble`
 /// address — members in position order alongside the join's own config, so a
 /// client can render/edit it without reconstructing it from the underlying
 /// nodes/edges itself. `edges` is the owning graph's full edge list, from
@@ -459,6 +533,7 @@ pub(crate) fn ensemble_details_json(
         "name": ensemble.name,
         "kind": ensemble.kind.as_str(),
         "commit_rights": ensemble.commit_rights,
+        "mutex": ensemble.mutex,
         "prompt_template": ensemble.prompt_template,
         "join_node_id": ensemble.join_node_id,
         "entry_from_node": ensemble.entry_from_node,
@@ -545,8 +620,19 @@ pub(crate) fn graph_spec_details_json(
     let current_run = runs
         .iter()
         .rev()
-        .find(|run| run.status == GraphRunStatus::Running)
+        .find(|run| {
+            matches!(
+                run.status,
+                GraphRunStatus::Running | GraphRunStatus::Waiting
+            )
+        })
         .or_else(|| runs.last());
+    let waiting_for = match current_run {
+        Some(run) if run.status == GraphRunStatus::Waiting => {
+            db.get_graph_run_waiting_for(&run.id)?
+        }
+        _ => Vec::new(),
+    };
     let blocker = runs.last().and_then(graph_run_blocker);
     let resume_actions = if graph_status == GraphStatus::Paused
         && matches!(
@@ -564,7 +650,7 @@ pub(crate) fn graph_spec_details_json(
         .map(|details| ensemble_details_json(details, &spec.edges))
         .collect::<Vec<_>>();
 
-    Ok(serde_json::json!({
+    let mut out = serde_json::json!({
         "id": spec.spec.id,
         "graph_id": spec.spec.graph_id,
         "name": spec.spec.name,
@@ -601,7 +687,11 @@ pub(crate) fn graph_spec_details_json(
         "edges": spec.edges.iter().map(graph_edge_json).collect::<Vec<_>>(),
         "ensembles": ensembles,
         "runs": runs,
-    }))
+    });
+    if !waiting_for.is_empty() {
+        out["waiting_for"] = serde_json::json!(waiting_for);
+    }
+    Ok(out)
 }
 
 pub(crate) fn graph_node_json(node: &GraphNode, edges: &[GraphEdge]) -> serde_json::Value {
@@ -650,7 +740,7 @@ pub(crate) fn infra_config_json(node: &GraphNode) -> Option<serde_json::Value> {
 /// For an agent node, which branch of `resolve_node_prompt_template`'s
 /// precedence it will actually run on — `"explicit"`, `"preset"`, or
 /// `"default_fallback"` (see `graph_engine::agent_prompt_source`) — so
-/// `graph_get` makes a node quietly running on the bare fallback template
+/// `graph` makes a node quietly running on the bare fallback template
 /// (no `prompt_template`, no `prompt_preset`) visible without requiring a
 /// run first. `None` for every other node kind, same convention as
 /// [`router_routes_json`].
@@ -662,9 +752,9 @@ pub(crate) fn agent_prompt_source_json(node: &GraphNode) -> Option<&'static str>
 }
 
 /// For a router node, every declared route alongside the edge (if any) that
-/// currently serves it — `graph_get`'s view into "which edge serves each
+/// currently serves it — `graph`'s view into "which edge serves each
 /// route". `None` for every other node kind (or if the router's `config`
-/// somehow fails to parse — `graph_get` should never fail outright over a
+/// somehow fails to parse — `graph` should never fail outright over a
 /// display concern).
 pub(crate) fn router_routes_json(
     node: &GraphNode,

@@ -1,126 +1,9 @@
 use super::*;
 
-/// Doctor's CLI-resolution section (B40): per-CLI report of resolved or
-/// not, by which step, absolute path. Also warns when a CLI is reachable
-/// from the current process's PATH but not from the daemon's captured PATH
-/// (different environments).
-pub(super) fn report_cli_resolution(
-    config: &crate::domain::canopy_config::CanopyConfig,
-    issues: &mut Vec<String>,
-) {
-    let daemon_path = crate::domain::cli_strategy::daemon_path();
-
-    if config.clis.is_empty() {
-        println!(" \x1b[33m⚠\x1b[0m No harnesses configured (run 'canopy setup')");
-        issues.push("Run 'canopy setup' to detect and configure harnesses".to_string());
-        return;
-    }
-
-    for cli_config in &config.clis {
-        let label = doctor_cli_label(cli_config);
-        match cli_config.resolve() {
-            // declaration, partially: `resolve()`'s PATH-search step
-            // (`which`) does confirm a real file, but its absolute-path
-            // step accepts the string as-is without checking the file
-            // exists — so a stale absolute path in config.toml would
-            // otherwise resolve "Ok" and print a green tick for a
-            // binary that isn't there. `binary_is_executable` (the
-            // probe the service-unit check already uses) closes that
-            // gap instead of duplicating a second existence check.
-            Ok((resolved, step)) if !binary_is_executable(&resolved) => {
-                println!(
-                    " \x1b[31m✗\x1b[0m {} → {} (via {} — file missing or not executable)",
-                    label,
-                    resolved.display(),
-                    step.label()
-                );
-                issues.push(format!(
-                    "'{}' resolved to {} but that file is missing or not executable.",
-                    cli_config.name,
-                    resolved.display()
-                ));
-            }
-            Ok((resolved, step)) => {
-                // CB44: identity check — the resolved binary may be a
-                // different program answering to the same bare name
-                // (e.g. `/usr/bin/blackbox` is the Blackbox X11 window
-                // manager, not the Blackbox CLI). Runs once per doctor
-                // invocation, never on dispatch. Platforms with no
-                // declared check behave exactly as today.
-                if let Some(wb) = diagnose_cli_identity(cli_config, &resolved) {
-                    let check = cli_config
-                        .identity_check
-                        .as_ref()
-                        .map_or("", |c| c.contains.as_str());
-                    println!(
-                        " \x1b[31m✗\x1b[0m {} → {} (via {} — wrong binary: expected '{}' in output; saw: {})",
-                        label,
-                        resolved.display(),
-                        step.label(),
-                        check,
-                        wb.output,
-                    );
-                    let check_cmd = cli_config
-                        .identity_check
-                        .as_ref()
-                        .map_or("", |c| c.cmd.as_str());
-                    issues.push(wb.report(&cli_config.binary, check_cmd));
-                    continue;
-                }
-                // CB85: identity_args/identity_pattern — the same verdict the
-                // probe and dispatch paths produce, cached per path+mtime so
-                // a doctor run checks each binary once. A mismatch is reported
-                // as not-installed rather than a skew warning.
-                if let Some(error) = diagnose_binary_identity(cli_config, &resolved) {
-                    println!(
-                        " \x1b[31m✗\x1b[0m {} → {} (via {} — {})",
-                        label,
-                        resolved.display(),
-                        step.label(),
-                        error.message()
-                    );
-                    issues.push(error.message());
-                    continue;
-                }
-                // Check daemon reachability: does the binary also
-                // resolve under the daemon's captured PATH?
-                let daemon_reachable = match &daemon_path {
-                    Some(dp) => cli_config.resolve_against(dp).is_ok(),
-                    // No daemon PATH (macOS/launchd) → no mismatch possible
-                    None => true,
-                };
-                if daemon_reachable {
-                    success(format!(
-                        "{} → {} (via {})",
-                        label,
-                        resolved.display(),
-                        step.label()
-                    ));
-                } else {
-                    println!(
-                        " \x1b[33m⚠\x1b[0m {} → {} (via {} — reachable now but NOT from the daemon)",
-                        label,
-                        resolved.display(),
-                        step.label()
-                    );
-                    issues.push(format!(
-                        "'{}' is on your interactive PATH but not the daemon's. \
-                         Re-run `canopy daemon install` to update the daemon's PATH, \
-                         or add the directory to the systemd unit's Environment=PATH=.",
-                        cli_config.name
-                    ));
-                }
-            }
-            Err(e) => {
-                println!(" \x1b[31m✗\x1b[0m {} — not found ({})", label, e);
-                issues.push(format!(
-                    "'{}' binary '{}' not found. {}",
-                    cli_config.name, e.binary, e.path
-                ));
-            }
-        }
-    }
-}
+// Doctor's CLI-resolution section lives in
+// [`super::harnesses::report_cli_resolution`]: per-CLI report of resolved
+// or not, by which step, absolute path, with reference-aware warnings for
+// removed harnesses something still names.
 
 /// Where this platform's service unit lives, and which manager owns it.
 /// `None` on platforms with no supported service manager (doctor's
@@ -346,20 +229,17 @@ pub(super) fn diagnose_service_unit_binary(
     }
 }
 
-/// Does `path` exist and carry an execute bit? Doctor only ever reads unit
-/// files and stats binaries — this never shells out to `systemctl`, so it
-/// works the same in a CI container as on a developer's machine.
+/// Does `path` exist and carry an execute bit? Delegates to
+/// [`crate::domain::cli_config::is_executable_file`] so doctor and the
+/// prune path can never disagree about what counts as installed.
 #[cfg(unix)]
 pub(super) fn binary_is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path)
-        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
+    crate::domain::cli_config::is_executable_file(path)
 }
 
 #[cfg(not(unix))]
 pub(super) fn binary_is_executable(path: &Path) -> bool {
-    path.is_file()
+    crate::domain::cli_config::is_executable_file(path)
 }
 
 /// Human label for a platform in doctor output: the product display name
@@ -764,7 +644,7 @@ pub(super) fn report_orphan_joins(canopy_dir: &Path, issues: &mut Vec<String>) {
         );
     }
     issues.push(
-        "Orphaned join nodes belong to no ensemble — run 'graph_get' to see orphan_join_warnings and delete them with graph_delete_node or repair via graph_update_ensemble (see CB52)."
+        "Orphaned join nodes belong to no ensemble — run 'graph get' to see orphan_join_warnings and delete them with graph_node delete or repair via graph_ensemble update (see CB52)."
             .to_string(),
     );
 }

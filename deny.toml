@@ -15,6 +15,9 @@ unmaintained = "all"
 ignore = [
   { id = "RUSTSEC-2024-0436", reason = "paste (proc-macro) via lancedb/lance/datafusion, no maintained release upstream; revisit when datafusion moves off it" },
   { id = "RUSTSEC-2026-0192", reason = "ttf-parser via pdf-extract/lopdf, no maintained release upstream; revisit when lopdf moves off it" },
+  { id = "RUSTSEC-2026-0391", reason = "zstd 0.13.3 via arrow-ipc 57 <- lance/lancedb; fixed in zstd >=0.14.3, which needs arrow-ipc >=60 and a lance/lancedb/datafusion major upgrade; revisit with that upgrade" },
+  { id = "RUSTSEC-2026-0398", reason = "zstd-safe 7.x via zstd 0.13 <- arrow-ipc 57; fixed in >=8.2.0, same upgrade path as RUSTSEC-2026-0391; revisit with that upgrade" },
+  { id = "RUSTSEC-2026-0403", reason = "zstd-safe 7.x via zstd 0.13 <- arrow-ipc 57; fixed in >=8.2.0, same upgrade path as RUSTSEC-2026-0391; revisit with that upgrade" },
 ]
 
 [licenses]

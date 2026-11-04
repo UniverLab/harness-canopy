@@ -331,6 +331,15 @@ pub static REGISTRY: &[SettingDef] = &[
         wizard: false,
     },
     SettingDef {
+        key: "graphs.catalogue_url",
+        kind: Kind::String,
+        default: DefaultValue::Literal("\"https://graphs.univerlab.org\""),
+        group: Group::GraphsEngine,
+        description: "Base URL of the graph catalogue `canopy graph install` fetches from.",
+        apply: Apply::NextRun,
+        wizard: false,
+    },
+    SettingDef {
         key: "agents.probe_timeout_seconds",
         kind: Kind::Int { min: 5, max: 300 },
         default: DefaultValue::Literal("30"),
@@ -447,6 +456,72 @@ pub static REGISTRY: &[SettingDef] = &[
         apply: Apply::Hot,
         wizard: false,
     },
+    SettingDef {
+        key: "tui.animations",
+        kind: Kind::Enum {
+            options: &["full", "reduced", "off"],
+        },
+        default: DefaultValue::Literal("\"reduced\""),
+        group: Group::TuiAppearance,
+        description:
+            "Background-animation budget: full (20 fps), reduced (8 fps, pauses on focus loss or 45 s idle), or off (static frame).",
+        apply: Apply::Hot,
+        wizard: false,
+    },
+    SettingDef {
+        key: "remote.enabled",
+        kind: Kind::Bool,
+        default: DefaultValue::Literal("false"),
+        group: Group::General,
+        description: "Whether this host accepts owner-only remote control via the relay.",
+        apply: Apply::Hot,
+        wizard: false,
+    },
+    SettingDef {
+        key: "remote.relay_url",
+        kind: Kind::String,
+        default: DefaultValue::Literal("\"https://remote.univerlab.org\""),
+        group: Group::General,
+        description: "Relay URL for owner-only remote control.",
+        apply: Apply::NextRun,
+        wizard: false,
+    },
+    SettingDef {
+        key: "remote.github_client_id",
+        kind: Kind::String,
+        default: DefaultValue::Literal("\"Ov23liVCfE58kUb3ssDy\""),
+        group: Group::General,
+        description: "Public Client ID of UniverLab's \"Canopy Remote\" OAuth App (device flow, identity only).",
+        apply: Apply::NextRun,
+        wizard: false,
+    },
+    SettingDef {
+        key: "remote.host_label",
+        kind: Kind::String,
+        default: DefaultValue::Literal("\"\""),
+        description: "Label shown for this host; empty means the hostname.",
+        group: Group::General,
+        apply: Apply::NextRun,
+        wizard: false,
+    },
+    SettingDef {
+        key: "remote.shelf_max_file_mb",
+        kind: Kind::Int { min: 1, max: 1024 },
+        default: DefaultValue::Literal("20"),
+        description: "Largest file a remote upload may send onto a session shelf, in MiB.",
+        group: Group::General,
+        apply: Apply::NextRun,
+        wizard: false,
+    },
+    SettingDef {
+        key: "daemon.cpu_quota_percent",
+        kind: Kind::Int { min: 0, max: 25600 },
+        default: DefaultValue::Computed(crate::domain::daemon_config::default_quota_percent),
+        group: Group::DaemonStorage,
+        description: "CPU cap for every agent and gate the daemon spawns, in percent of one core (600 = 6 cores). Half the host's CPUs by default; 0 disables the cap. Applies live, no daemon restart.",
+        apply: Apply::Hot,
+        wizard: false,
+    },
 ];
 
 #[cfg(test)]
@@ -456,7 +531,7 @@ mod tests {
 
     #[test]
     fn registry_has_one_entry_per_setting_and_they_are_unique() {
-        assert_eq!(REGISTRY.len(), 45);
+        assert_eq!(REGISTRY.len(), 53);
         for def in REGISTRY {
             assert_eq!(find(def.key).map(|d| d.key), Some(def.key));
         }

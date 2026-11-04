@@ -1,9 +1,11 @@
 use anyhow::Result;
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use super::{Database, SCHEMA_VERSION};
 
 mod late;
+mod mutex_schema;
+mod pause_kinds_schema;
 
 impl Database {
     /// Refuses to open a database stamped with a schema version newer than
@@ -130,6 +132,50 @@ impl Database {
         Ok(())
     }
     // RETIRED-SCHEMA-NAME-END
+
+    /// Rename the retired scheduled-send tables to their merged-tool names
+    /// (`scheduled_prompts`/`failed_scheduled_prompts`). Must run before
+    /// `create_base_schema` (same reason as `migrate_legacy_queue_schema`):
+    /// the base batch would otherwise create empty new tables first and the
+    /// rename would fail with "table already exists". Renames only when the
+    /// old table exists and the new one is missing, so it is a no-op on
+    /// fresh and already-migrated databases alike; when both exist (a
+    /// downgraded binary recreated the old names) the old rows are left
+    /// intact, like the loop migration.
+    pub(super) fn migrate_scheduled_prompt_table_names(conn: &Connection) -> Result<()> {
+        // Retired names built with `concat!` so no retired literal survives
+        // in the repo: renaming requires naming what's renamed.
+        const OLD_SENDS: &str = concat!("scheduled", "_sends");
+        const OLD_FAILED: &str = concat!("failed_scheduled", "_sends");
+        for (old, new) in [
+            (OLD_SENDS, "scheduled_prompts"),
+            (OLD_FAILED, "failed_scheduled_prompts"),
+        ] {
+            let old_exists: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [old],
+                    |row| Ok(row.get::<_, i32>(0)? > 0),
+                )
+                .unwrap_or(false);
+            if !old_exists {
+                continue;
+            }
+            let new_exists: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [new],
+                    |row| Ok(row.get::<_, i32>(0)? > 0),
+                )
+                .unwrap_or(false);
+            if new_exists {
+                continue;
+            }
+            conn.execute(&format!("ALTER TABLE {old} RENAME TO {new}"), [])
+                .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+        }
+        Ok(())
+    }
 
     // RETIRED-SCHEMA-NAME-BEGIN (CC3 loop → graph migration)
     pub(super) fn migrate_loop_to_graph_schema(conn: &Connection) -> Result<()> {
@@ -447,7 +493,9 @@ impl Database {
                         'node_started','node_finished',
                         'hook_fired',
                         'config_changed',
-                        'note'
+                        'note',
+                        'mutex_waiting','mutex_acquired',
+                        'pause_requested','pause_cancelled'
                     )),
                 message TEXT NOT NULL,
                 payload TEXT,
@@ -486,6 +534,84 @@ impl Database {
         Ok(())
     }
 
+    /// Adds `interactive_sessions.harness_conversation_id`: the harness's own
+    /// conversation identifier (Claude Code session/transcript id, opencode
+    /// session id, muse resume id). A resume of the same harness conversation
+    /// is matched on this column, so the session keeps its canopy id and name
+    /// instead of appearing as a second, newly-named row. Guarded on
+    /// `pragma_table_info` and `CREATE INDEX IF NOT EXISTS`, so it is safe on
+    /// both a fresh database (the `CREATE TABLE` batch already has the column)
+    /// and an already-migrated one.
+    pub(super) fn migrate_interactive_harness_column(conn: &Connection) -> Result<()> {
+        let has_harness_id: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('interactive_sessions') WHERE name = 'harness_conversation_id'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if !has_harness_id {
+            conn.execute(
+                "ALTER TABLE interactive_sessions ADD COLUMN harness_conversation_id TEXT",
+                [],
+            )
+            .map_err(|e| anyhow::anyhow!("interactive harness column migration failed: {e}"))?;
+        }
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_interactive_sessions_harness
+                ON interactive_sessions(harness_conversation_id)",
+            [],
+        )
+        .map_err(|e| anyhow::anyhow!("interactive harness column migration failed: {e}"))?;
+        Ok(())
+    }
+
+    /// Adds `interactive_sessions.exit_detail`: the harness's stderr tail
+    /// (or the resume guard's explanation) attached to a failed session so
+    /// the TUI row shows *why* without opening logs. Same pragma guard as
+    /// the harness column above; fresh databases already have it in the
+    /// base schema.
+    pub(super) fn migrate_interactive_exit_detail_column(conn: &Connection) -> Result<()> {
+        let has_exit_detail: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('interactive_sessions') WHERE name = 'exit_detail'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if !has_exit_detail {
+            conn.execute(
+                "ALTER TABLE interactive_sessions ADD COLUMN exit_detail TEXT",
+                [],
+            )
+            .map_err(|e| anyhow::anyhow!("interactive exit detail migration failed: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// The session shelf table on databases created before it existed:
+    /// the same batch as the base schema, a no-op once applied.
+    pub(super) fn migrate_shelf_files(conn: &Connection) -> Result<()> {
+        conn.execute_batch(super::shelf::SHELF_FILES_SCHEMA)
+            .map_err(|e| anyhow::anyhow!("shelf_files schema migration failed: {e}"))?;
+        // Bidirectional transfer: every pre-existing file was agent-sent.
+        let has_origin: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('shelf_files') WHERE name = 'origin'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if !has_origin {
+            conn.execute(
+                "ALTER TABLE shelf_files ADD COLUMN origin TEXT NOT NULL DEFAULT 'agent'",
+                [],
+            )
+            .map_err(|e| anyhow::anyhow!("shelf origin migration failed: {e}"))?;
+        }
+        Ok(())
+    }
+
     /// Fail the migration when any foreign-key violation remains, naming the
     /// step in the message (observable via `canopy doctor`).
     fn assert_no_foreign_key_violations(conn: &Connection, migration_label: &str) -> Result<()> {
@@ -500,4 +626,51 @@ impl Database {
         Ok(())
     }
     // RETIRED-SCHEMA-NAME-END
+
+    /// One-off re-attribution: Intelligence written from inside a sandbox
+    /// worktree used to be hashed from the (ephemeral) worktree path instead
+    /// of the project the sandbox was cut from, orphaning it from that
+    /// project's context. For every sandbox run whose worktree path hashes
+    /// to a different project than its `original_workdir`, move the stray
+    /// attribution to the original project — the same re-keying
+    /// `remap_project_tx` (the transaction body of `remap_project`) does when a stray
+    /// project row exists at the worktree hash (which also rehomes its
+    /// sessions and drops the stray row and its `project:{hash}` root);
+    /// otherwise just re-point the nodes. Idempotent: after the first pass
+    /// nothing hashes to a worktree path any more, so every later startup
+    /// is a no-op for already-migrated rows.
+    pub(super) fn migrate_sandbox_intelligence_attribution(conn: &Connection) -> Result<()> {
+        let runs: Vec<(String, String)> = {
+            let mut stmt =
+                conn.prepare("SELECT worktree_path, original_workdir FROM sandbox_runs")?;
+            let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        if runs.is_empty() {
+            return Ok(());
+        }
+        let tx = conn.unchecked_transaction()?;
+        for (worktree_path, original_workdir) in runs {
+            let stray = crate::domain::project::workdir_hash(&worktree_path);
+            let target = crate::domain::project::workdir_hash(&original_workdir);
+            if stray == target {
+                continue;
+            }
+            let stray_row_exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM projects WHERE hash = ?1)",
+                params![stray],
+                |row| row.get::<_, i64>(0),
+            )? != 0;
+            if stray_row_exists {
+                Database::remap_project_tx(&tx, &stray, &original_workdir)?;
+            } else {
+                tx.execute(
+                    "UPDATE intelligence_nodes SET project_hash = ?2 WHERE project_hash = ?1",
+                    params![stray, target],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
 }

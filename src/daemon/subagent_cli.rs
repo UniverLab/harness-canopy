@@ -79,12 +79,13 @@ pub(crate) async fn handle_subagent_action(
                     args["workdir"] = serde_json::json!(cwd);
                 }
             }
-            println!("{}", call_tool(port_override, "subagent_spawn", &args)?);
+            args["action"] = serde_json::json!("spawn");
+            println!("{}", call_tool(port_override, "subagent", &args)?);
             Ok(())
         }
         SubagentAction::Collect { id } => {
-            let args = serde_json::json!({ "id": id });
-            println!("{}", call_tool(port_override, "subagent_collect", &args)?);
+            let args = serde_json::json!({ "action": "collect", "id": id });
+            println!("{}", call_tool(port_override, "subagent", &args)?);
             Ok(())
         }
     }

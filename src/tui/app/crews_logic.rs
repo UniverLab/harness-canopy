@@ -14,7 +14,7 @@ use crate::domain::roster::effective_state;
 use crate::tui::app::dialog::datetime_picker::local_naive_to_utc;
 
 /// One refresh's worth of Crews-face data, straight from the daemon tools
-/// (`roster_list`, `graph_crew {group_by:"pair"}`, `crew_list`).
+/// (`harness roster_list`, `crew assignments {group_by:"pair"}`, `crew list`).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CrewsSnapshot {
     pub roster: Vec<RosterEntry>,
@@ -22,7 +22,7 @@ pub(crate) struct CrewsSnapshot {
     pub crews: Vec<CrewView>,
 }
 
-/// One `graph_crew {group_by:"pair"}` summary row: every graph that uses
+/// One `crew assignments {group_by:"pair"}` summary row: every graph that uses
 /// one distinct `platform/model` pair. The wire JSON also carries
 /// `ensemble_count`/`node_count`/`hook_count`, which the face does not show.
 #[derive(Debug, Clone)]
@@ -34,8 +34,8 @@ pub(crate) struct PairSummary {
 }
 
 /// One crew as shown in the Crews section. `members` keeps the raw JSON
-/// values from `crew_list` (with `timeout_minutes`/`infra_*` intact) so a
-/// member edit can send them back through `crew_update` verbatim (D6);
+/// values from `crew list` (with `timeout_minutes`/`infra_*` intact) so a
+/// member edit can send them back through `crew update` verbatim (D6);
 /// `member_pairs` is the parallel `(platform, model)` view used for
 /// availability lookups (`model: null` maps to the empty string).
 #[derive(Debug, Clone)]
@@ -45,14 +45,14 @@ pub(crate) struct CrewView {
     pub version: i64,
     pub members: Vec<Value>,
     pub member_pairs: Vec<(String, String)>,
-    /// Bindings loaded on demand by `crew_get` when the crew is expanded.
+    /// Bindings loaded on demand by `crew get` when the crew is expanded.
     pub bindings: Vec<CrewBindingView>,
-    /// Ensembles + nodes + hooks from the `crew_list` counts object — the
-    /// row's binding count before a `crew_get` has filled `bindings`.
+    /// Ensembles + nodes + hooks from the `crew list` counts object — the
+    /// row's binding count before a `crew get` has filled `bindings`.
     pub binding_total: usize,
 }
 
-/// One `crew_get` binding: the graph it lives in, the binding kind and the
+/// One `crew get` binding: the graph it lives in, the binding kind and the
 /// binding's own name (ensemble name, node name, or hook event).
 #[derive(Debug, Clone)]
 pub(crate) struct CrewBindingView {
@@ -69,12 +69,12 @@ fn string_field(value: &Value, key: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("field '{key}' missing or not a string"))
 }
 
-/// Parse the `roster_list` JSON array into `RosterEntry` rows the client
-/// can feed to `effective_state` (D8 — no per-pair `roster_check`).
+/// Parse the `harness roster_list` JSON array into `RosterEntry` rows the client
+/// can feed to `effective_state` (D8 — no per-pair `harness roster_check`).
 pub(crate) fn parse_roster(value: &Value) -> Result<Vec<RosterEntry>> {
     let items = value
         .as_array()
-        .ok_or_else(|| anyhow!("roster_list: expected a JSON array"))?;
+        .ok_or_else(|| anyhow!("roster list: expected a JSON array"))?;
     let mut out = Vec::with_capacity(items.len());
     for item in items {
         let id = item
@@ -113,11 +113,11 @@ pub(crate) fn parse_roster(value: &Value) -> Result<Vec<RosterEntry>> {
     Ok(out)
 }
 
-/// Parse the `graph_crew {group_by:"pair"}` JSON array of pair summaries.
+/// Parse the `crew assignments {group_by:"pair"}` JSON array of pair summaries.
 pub(crate) fn parse_pair_summaries(value: &Value) -> Result<Vec<PairSummary>> {
     let items = value
         .as_array()
-        .ok_or_else(|| anyhow!("graph_crew pair summary: expected a JSON array"))?;
+        .ok_or_else(|| anyhow!("crew assignments pair summary: expected a JSON array"))?;
     let mut out = Vec::with_capacity(items.len());
     for item in items {
         out.push(PairSummary {
@@ -139,12 +139,12 @@ pub(crate) fn parse_pair_summaries(value: &Value) -> Result<Vec<PairSummary>> {
     Ok(out)
 }
 
-/// Parse the `crew_list` JSON array. The `bindings` object here carries
-/// only counts; the expanded rows load real bindings via `crew_get`.
+/// Parse the `crew list` JSON array. The `bindings` object here carries
+/// only counts; the expanded rows load real bindings via `crew get`.
 pub(crate) fn parse_crews(value: &Value) -> Result<Vec<CrewView>> {
     let items = value
         .as_array()
-        .ok_or_else(|| anyhow!("crew_list: expected a JSON array"))?;
+        .ok_or_else(|| anyhow!("crew list: expected a JSON array"))?;
     let mut out = Vec::with_capacity(items.len());
     for item in items {
         let members = item
@@ -325,8 +325,9 @@ impl RosterWrite {
                 reason,
                 until,
             } => (
-                "roster_set",
+                "harness",
                 serde_json::json!({
+                    "action": "roster_set",
                     "platform": platform,
                     "model_pattern": model_pattern,
                     "state": state,
@@ -338,8 +339,9 @@ impl RosterWrite {
                 platform,
                 model_pattern,
             } => (
-                "roster_clear",
+                "harness",
                 serde_json::json!({
+                    "action": "roster_clear",
                     "platform": platform,
                     "model_pattern": model_pattern,
                 }),
@@ -466,7 +468,7 @@ pub(crate) enum MemberEdit {
 }
 
 /// Apply a member edit to a raw member list (the JSON values from
-/// `crew_list`/`crew_get`). Refuses to empty a crew and refuses moves
+/// `crew list`/`crew get`). Refuses to empty a crew and refuses moves
 /// past either end.
 pub(crate) fn apply_member_edit(members: &mut Vec<Value>, edit: &MemberEdit) -> Result<(), String> {
     match edit {
@@ -736,10 +738,11 @@ mod tests {
             }]
         );
         let (tool, args) = writes[0].to_call();
-        assert_eq!(tool, "roster_set");
+        assert_eq!(tool, "harness");
         assert_eq!(
             args,
             serde_json::json!({
+                "action": "roster_set",
                 "platform": "opencode-go",
                 "model_pattern": "opencode-go/kimi-k2",
                 "state": "unavailable",
@@ -770,10 +773,10 @@ mod tests {
             }]
         );
         let (tool, args) = writes[0].to_call();
-        assert_eq!(tool, "roster_clear");
+        assert_eq!(tool, "harness");
         assert_eq!(
             args,
-            serde_json::json!({"platform": "opencode-go", "model_pattern": "kimi-k2"})
+            serde_json::json!({"action": "roster_clear", "platform": "opencode-go", "model_pattern": "kimi-k2"})
         );
     }
 

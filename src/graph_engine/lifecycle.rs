@@ -9,10 +9,10 @@ impl GraphEngine {
     /// pending queue specs (see [`Self::run_graph`]) and/or overrides the
     /// workdir for this run only.
     ///
-    /// This is a fresh dispatch, not a resume — it backs `graph_run`, the tool
+    /// This is a fresh dispatch, not a resume — it backs `graph_control`, the tool
     /// a human/scheduler calls to launch or *relaunch* a graph (including
     /// directly relaunching a `paused` graph instead of going through
-    /// `graph_continue`). Every spec it reaches is treated as newly entered
+    /// `graph_control`). Every spec it reaches is treated as newly entered
     /// for `{{spec_start_head}}` purposes (B10): even a spec left `running`
     /// from a stale, never-reset prior attempt gets a fresh baseline here,
     /// rather than silently inheriting one captured under a previous
@@ -76,25 +76,11 @@ impl GraphEngine {
             GraphStatus::Running => {
                 if interrupt {
                     // Immediate termination mode: mark paused and interrupt running nodes
-                    let result =
+                    let result = self.record_paused_if_accepted(
                         self.db
-                            .update_graph_status(graph_id, GraphStatus::Paused, None, None);
-                    if matches!(result, Ok(true)) {
-                        activity::record(
-                            &self.db,
-                            activity::GraphEvent {
-                                graph_id,
-                                graph_name: &lp.name,
-                                workdir: &lp.workdir,
-                                spec_id: None,
-                                node_id: None,
-                                run_id: None,
-                                kind: activity::GraphEventKind::GraphPaused,
-                                message: "Paused.".to_string(),
-                                payload: None,
-                            },
-                        );
-                    }
+                            .update_graph_status(graph_id, GraphStatus::Paused, None, None),
+                        &lp,
+                    );
                     for run in self
                         .db
                         .list_running_graph_runs(graph_id)
@@ -111,31 +97,16 @@ impl GraphEngine {
                 {
                     // Req 6: nothing is in flight, so there is nothing to wait
                     // for — pause immediately, exactly as before this change.
-                    let result =
+                    self.record_paused_if_accepted(
                         self.db
-                            .update_graph_status(graph_id, GraphStatus::Paused, None, None);
-                    if matches!(result, Ok(true)) {
-                        activity::record(
-                            &self.db,
-                            activity::GraphEvent {
-                                graph_id,
-                                graph_name: &lp.name,
-                                workdir: &lp.workdir,
-                                spec_id: None,
-                                node_id: None,
-                                run_id: None,
-                                kind: activity::GraphEventKind::GraphPaused,
-                                message: "Paused.".to_string(),
-                                payload: None,
-                            },
-                        );
-                    }
-                    result
+                            .update_graph_status(graph_id, GraphStatus::Paused, None, None),
+                        &lp,
+                    )
                 } else {
                     // Wait-for-completion mode: a node is running. Record the
                     // pending pause; the engine transitions the graph to
                     // `Paused` once that node finishes on its own.
-                    self.db.request_pause_pending(graph_id)
+                    self.request_pause_wait_for_completion(&lp)
                 }
             }
             GraphStatus::Pausing => {
@@ -148,26 +119,11 @@ impl GraphEngine {
                     {
                         self.interrupt_run(&run, "operator requested interrupt");
                     }
-                    let result =
+                    self.record_paused_if_accepted(
                         self.db
-                            .update_graph_status(graph_id, GraphStatus::Paused, None, None);
-                    if matches!(result, Ok(true)) {
-                        activity::record(
-                            &self.db,
-                            activity::GraphEvent {
-                                graph_id,
-                                graph_name: &lp.name,
-                                workdir: &lp.workdir,
-                                spec_id: None,
-                                node_id: None,
-                                run_id: None,
-                                kind: activity::GraphEventKind::GraphPaused,
-                                message: "Paused.".to_string(),
-                                payload: None,
-                            },
-                        );
-                    }
-                    result
+                            .update_graph_status(graph_id, GraphStatus::Paused, None, None),
+                        &lp,
+                    )
                 } else {
                     Ok(true) // Already pausing, nothing to do
                 }
@@ -175,6 +131,80 @@ impl GraphEngine {
             GraphStatus::Paused => Ok(true), // Already paused
             _ => Ok(false),                  // Not running
         }
+    }
+
+    /// Record `graph_paused` for an accepted immediate pause, passing the
+    /// status-write result through — one helper so the three immediate-pause
+    /// branches narrate identically.
+    fn record_paused_if_accepted(&self, result: Result<bool>, lp: &Graph) -> Result<bool> {
+        if matches!(result, Ok(true)) {
+            activity::record(
+                &self.db,
+                activity::GraphEvent {
+                    graph_id: &lp.id,
+                    graph_name: &lp.name,
+                    workdir: &lp.workdir,
+                    spec_id: None,
+                    node_id: None,
+                    run_id: None,
+                    kind: activity::GraphEventKind::GraphPaused,
+                    message: "Paused.".to_string(),
+                    payload: None,
+                },
+            );
+        }
+        result
+    }
+
+    /// The wait-for-completion leg of [`Self::request_pause`]: record the
+    /// pending pause and narrate it, once the caller has established a node
+    /// is running.
+    fn request_pause_wait_for_completion(&self, lp: &Graph) -> Result<bool> {
+        match self.db.request_pause_pending(&lp.id) {
+            Ok(true) => {
+                self.record_pause_requested(lp);
+                Ok(true)
+            }
+            // A lost compare-and-set raced a concurrent transition — the
+            // winner narrated already, so report from the status left
+            // behind rather than refusing a live pause as "not running".
+            Ok(false) => Ok(lost_pause_race_accepted(
+                self.db.get_graph(&lp.id)?.map(|lp| lp.status),
+            )),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Narrate an accepted wait-for-completion pause: a `pause_requested`
+    /// event naming every node run the pause is waiting for, so the request
+    /// is visible from the moment it is made instead of only as `graph_paused`
+    /// minutes later.
+    fn record_pause_requested(&self, lp: &Graph) {
+        let names = self.db.pause_waiting_node_names(&lp.id).unwrap_or_default();
+        let quoted = names
+            .iter()
+            .map(|name| format!("'{name}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let message = if quoted.is_empty() {
+            "Pause requested.".to_string()
+        } else {
+            format!("Pause requested; waiting for {quoted} to finish.")
+        };
+        activity::record(
+            &self.db,
+            activity::GraphEvent {
+                graph_id: &lp.id,
+                graph_name: &lp.name,
+                workdir: &lp.workdir,
+                spec_id: None,
+                node_id: None,
+                run_id: None,
+                kind: activity::GraphEventKind::PauseRequested,
+                message,
+                payload: None,
+            },
+        );
     }
 
     /// Interrupt a running node, marking it as `Interrupted` (not `Fail`).
@@ -192,7 +222,7 @@ impl GraphEngine {
         // Mark as interrupted (not fail)
         let _ = self.db.interrupt_graph_run(&run.id, reason);
         // CB84: end the harness session too, same as `terminate_run_row` —
-        // `graph_pause(interrupt: true)` kills a live node run for reason
+        // `graph_control(interrupt: true)` kills a live node run for reason
         // "graph pause", which the objective names explicitly; without this
         // the opencode v2 service-side session keeps ticking beside the
         // resumed attempt. Best-effort, detached, never fails the caller.
@@ -216,7 +246,7 @@ impl GraphEngine {
     /// A queue run is *live* (R6): the "next pending" spec is re-queried from
     /// the queue at every spec boundary via
     /// [`Database::queue_next_pending_spec_id`], never off a list captured at
-    /// launch. That's what lets `queue_add_spec`/`queue_reorder` calls made
+    /// launch. That's what lets `queue add_spec`/`queue reorder` calls made
     /// while the run is in flight actually change what runs next — the run
     /// ends only when a pick finds no pending member left. A bound run (no
     /// `queue_id`) keeps the pre-queue behavior below: its spec list is fixed
@@ -260,6 +290,45 @@ impl GraphEngine {
         let _ = self.db.clear_graph_hook_launched(&graph_id);
         result
     }
+
+    /// Resolve the workdir this dispatch runs in and persist it with the run.
+    /// A resume without an explicit override keeps the workdir the run was
+    /// launched with — without that fallback the override would silently
+    /// expire and the resumed nodes would run against the stored workdir
+    /// instead. A fresh run never reads the persisted value; it overwrites
+    /// it right after resolving. Lives here rather than in `dispatch.rs` so
+    /// that file stays under the 800-line gate.
+    pub(crate) fn resolve_and_persist_run_workdir(
+        &self,
+        graph_id: &str,
+        lp: &Graph,
+        workdir_override: Option<String>,
+        is_resume: bool,
+        sandbox: &Option<Sandbox>,
+    ) -> Result<String> {
+        let workdir_override = if is_resume && workdir_override.is_none() {
+            self.db.graph_active_run_workdir(graph_id)?
+        } else {
+            workdir_override
+        };
+        let workdir = Self::resolve_dispatch_workdir(lp, workdir_override, sandbox);
+        self.db
+            .set_graph_active_run_workdir(graph_id, Some(&workdir))?;
+        Ok(workdir)
+    }
+
+    pub(crate) fn resolve_dispatch_workdir(
+        lp: &Graph,
+        workdir_override: Option<String>,
+        sandbox: &Option<Sandbox>,
+    ) -> String {
+        sandbox
+            .as_ref()
+            .map(|s| s.worktree_path.to_string_lossy().to_string())
+            .or(workdir_override)
+            .unwrap_or_else(|| lp.workdir.clone())
+    }
+
     pub fn resume_background(self: Arc<Self>, graph_id: String, directed: Option<DirectedStart>) {
         let queue_id = self
             .db
@@ -267,15 +336,23 @@ impl GraphEngine {
             .ok()
             .flatten()
             .and_then(|lp| lp.active_run_queue_id);
-        // A sandboxed graph that was paused (daemon restart, `graph_pause`) must
-        // resume inside its worktree and still merge back on completion —
-        // otherwise the remaining nodes run against the user's real repo and
-        // the sandbox is stranded.
-        let sandbox = self
-            .db
-            .get_active_sandbox_for_owner("graph", &graph_id)
-            .ok()
-            .flatten();
+        // A sandboxed graph that was paused (daemon restart, `graph_control`)
+        // or failed must resume inside its worktree and still merge back on
+        // completion — otherwise the remaining nodes run against the user's
+        // real repo and the sandbox is stranded. A resume that cannot find
+        // its sandbox refuses outright instead of falling back.
+        let sandbox = match resolve_resume_sandbox(&self.db, &graph_id) {
+            Ok(sandbox) => sandbox,
+            Err(msg) => {
+                tokio::spawn(async move {
+                    tracing::error!("Graph '{graph_id}' resume refused: {msg}");
+                    let _ = self
+                        .fail_graph(&graph_id, None, None, None, &msg, &[])
+                        .await;
+                });
+                return;
+            }
+        };
         let mode = match directed {
             Some(d) => DispatchMode::resume_from(d),
             None => DispatchMode::resume(),
@@ -297,5 +374,128 @@ impl GraphEngine {
                 }
             }
         });
+    }
+}
+
+/// Whether a wait-for-completion pause whose compare-and-set lost still
+/// counts as accepted, read off the status the race winner left behind:
+/// `Pausing` (the winner recorded `pause_requested`) or `Paused` (the node
+/// boundary completed the pause first) — matching [`GraphEngine::request_pause`]'s
+/// own arms for those states, without writing a duplicate event. Anything
+/// else means the graph genuinely left `Running` (finished, failed, reset)
+/// and the pause is refused.
+fn lost_pause_race_accepted(status: Option<GraphStatus>) -> bool {
+    matches!(status, Some(GraphStatus::Pausing | GraphStatus::Paused))
+}
+
+/// The sandbox a resumed graph must run inside: the `active` — or
+/// operator-`kept` — row whose worktree still exists. `Ok(None)` when the
+/// graph was never sandboxed. `Err`, naming the sandbox id, when the row
+/// exists but its worktree is gone (or the lookup itself failed), so the
+/// resume refuses instead of silently running against the user's real
+/// checkout.
+pub(crate) fn resolve_resume_sandbox(
+    db: &Database,
+    graph_id: &str,
+) -> Result<Option<Sandbox>, String> {
+    let row = db
+        .get_active_sandbox_for_owner("graph", graph_id)
+        .map_err(|e| format!("could not look up the sandbox for graph '{graph_id}': {e:#}"))?;
+    let Some(sandbox) = row else {
+        return Ok(None);
+    };
+    if sandbox.worktree_path.is_dir() {
+        return Ok(Some(sandbox));
+    }
+    Err(format!(
+        "sandbox '{}' for graph '{graph_id}' has no worktree at '{}'; refusing to resume against the original workdir",
+        sandbox.id,
+        sandbox.worktree_path.display()
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_db() -> (tempfile::TempDir, Database) {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let db = Database::new(&dir.path().join("test.db")).expect("open db");
+        (dir, db)
+    }
+
+    fn test_sandbox(id: &str, worktree: &std::path::Path) -> Sandbox {
+        Sandbox {
+            id: id.to_string(),
+            project_hash: "abcd1234".to_string(),
+            base_branch: "main".to_string(),
+            sandbox_branch: "canopy/sandbox-test".to_string(),
+            worktree_path: worktree.to_path_buf(),
+            cli_name: "opencode".to_string(),
+            original_workdir: "/home/user/project".to_string(),
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn none_without_row() {
+        let (_dir, db) = test_db();
+        assert!(resolve_resume_sandbox(&db, "graph-1").unwrap().is_none());
+    }
+
+    #[test]
+    fn lost_pause_race_accepts_pausing_and_paused_only() {
+        use GraphStatus::*;
+        for status in [Pausing, Paused] {
+            assert!(
+                lost_pause_race_accepted(Some(status)),
+                "{status:?} left behind by the race winner still accepts the pause"
+            );
+        }
+        for status in [
+            None,
+            Some(Draft),
+            Some(Running),
+            Some(Completed),
+            Some(Failed),
+        ] {
+            assert!(
+                !lost_pause_race_accepted(status),
+                "{status:?} after a lost pause race refuses the pause"
+            );
+        }
+    }
+
+    #[test]
+    fn finds_kept() {
+        let (_dir, db) = test_db();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        let sandbox = test_sandbox("sb-kept", worktree.path());
+        db.insert_sandbox_run(&sandbox, "graph", "graph-1")
+            .expect("insert sandbox run");
+        db.update_sandbox_run_status("sb-kept", "kept")
+            .expect("mark kept");
+
+        let found = resolve_resume_sandbox(&db, "graph-1")
+            .expect("kept sandbox resolves")
+            .expect("some sandbox");
+        assert_eq!(found.id, "sb-kept");
+        assert_eq!(found.worktree_path, worktree.path());
+    }
+
+    #[test]
+    fn refuses_missing_worktree() {
+        let (_dir, db) = test_db();
+        let dir = tempfile::tempdir().expect("parent dir");
+        let gone = dir.path().join("gone");
+        let sandbox = test_sandbox("sb-gone", &gone);
+        db.insert_sandbox_run(&sandbox, "graph", "graph-1")
+            .expect("insert sandbox run");
+
+        let err = resolve_resume_sandbox(&db, "graph-1").expect_err("missing worktree refuses");
+        assert!(
+            err.contains("sb-gone"),
+            "refusal must name the sandbox id: {err}"
+        );
     }
 }

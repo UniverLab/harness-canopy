@@ -17,20 +17,90 @@ pub(crate) struct EnsembleMemberContext {
     pub(crate) all_node_names: Vec<String>,
     pub(crate) bound_minutes: u64,
     pub(crate) member_timeout_minutes: Option<i64>,
-    pub(crate) retry_limit: u32,
-    pub(crate) crash_max_secs: u64,
-    pub(crate) backoff_secs: u64,
     /// CB82: the engine's shutdown flag — `drive_ensemble_member` is a static
     /// method with no `&GraphEngine`, so the flag travels in the context.
     pub(crate) shutdown: Arc<AtomicBool>,
+    /// Mutex set this member run acquires ahead of every attempt: its node's
+    /// own plus the ensemble's.
+    pub(crate) mutex_resources: Vec<String>,
 }
 
-/// Outcome of one attempt of an ensemble member: either the attempt produced
-/// an execution to settle against `is_infra_crash`, or it produced no verdict
-/// (a hard error or the member's own timeout) and the member is done.
-pub(crate) enum MemberAttempt {
-    Execution(NodeExecution),
-    NoVerdict(NodeExecution),
+/// Record one member's `node_started` event (CM46: one per member
+/// dispatch, before it spawns). The member's infra-retry budget itself is
+/// read by the drive loop's [`AttemptChain`], not here.
+fn begin_ensemble_member_run(
+    db: &Database,
+    lp: &crate::domain::graphs::Graph,
+    spec: &GraphSpec,
+    node: &GraphNode,
+    workdir: &str,
+    member_run_id: &str,
+) {
+    activity::record(
+        db,
+        activity::GraphEvent {
+            graph_id: &lp.id,
+            graph_name: &lp.name,
+            workdir,
+            spec_id: Some(&spec.id),
+            node_id: Some(&node.id),
+            run_id: Some(member_run_id),
+            kind: activity::GraphEventKind::NodeStarted,
+            message: format!("Node '{}' started.", node.name),
+            payload: None,
+        },
+    );
+}
+
+/// Settle one finished member attempt: apply the B19 infra-crash shape
+/// rewrite, persist the verdict when this drive still owns the run row, and
+/// return `(final_execution, member_had_no_verdict, settled_session_id)`.
+async fn settle_ensemble_member_attempt(
+    ctx: &EnsembleMemberContext,
+    member_run_id: &str,
+    mut execution: NodeExecution,
+    mut run: GraphNodeRun,
+    chain: &AttemptChain,
+) -> Result<(NodeExecution, bool, Option<String>)> {
+    let member_had_no_verdict = finalize_infra_crash_shape(
+        &ctx.db,
+        member_run_id,
+        &ctx.node,
+        &mut execution,
+        &mut run,
+        chain.attempt,
+        chain.retry_limit,
+        chain.crash_max_secs,
+    )
+    .await?;
+    let settled_session_id = run.session_id.clone();
+    let final_execution = if matches!(
+        run.status,
+        GraphRunStatus::Running | GraphRunStatus::Waiting
+    ) {
+        let _ = ctx.db.update_graph_run_result(
+            member_run_id,
+            execution.status,
+            Some(&execution.output),
+            Some(chrono::Utc::now()),
+        );
+        execution
+    } else {
+        // A self-reported member keeps its own output; carry the
+        // process record (ended_after_verdict / session_end) onto it.
+        let output = super::verdict_shutdown::merge_process_record(
+            &ctx.db,
+            member_run_id,
+            &run,
+            &execution.output,
+        );
+        NodeExecution {
+            status: run.status,
+            output,
+            summary: execution.summary,
+        }
+    };
+    Ok((final_execution, member_had_no_verdict, settled_session_id))
 }
 
 impl GraphEngine {
@@ -49,6 +119,7 @@ impl GraphEngine {
         all_node_names: &[String],
         initial_resume_candidate: Option<String>,
         resumable_sessions: &mut HashMap<String, String>,
+        ensemble_mutex: &[String],
     ) -> Result<(NodeExecution, bool)> {
         let bound_minutes = member_timeout_minutes
             .map(|minutes| minutes.max(0) as u64)
@@ -57,12 +128,21 @@ impl GraphEngine {
         // CB43: member run — resolved from the node config at dispatch.
         let (executed_platform, executed_model) = executed_pair_for_node(node);
         let (event_platform, event_model) = (executed_platform.clone(), executed_model.clone());
+        // The member run holds the union of its node's and its ensemble's
+        // mutexes, per member run — it starts `waiting` when that union is
+        // non-empty and the drive flips it to `running` at the grant.
+        let mutex_resources = union_mutex_resources(node, ensemble_mutex);
+        let initial_status = if mutex_resources.is_empty() {
+            GraphRunStatus::Running
+        } else {
+            GraphRunStatus::Waiting
+        };
         self.db.insert_graph_run(&GraphNodeRun {
             id: run_id.clone(),
             graph_id: lp.id.clone(),
             spec_id: spec.id.clone(),
             node_id: node.id.clone(),
-            status: GraphRunStatus::Running,
+            status: initial_status,
             input: previous_output.cloned(),
             output: None,
             started_at: chrono::Utc::now(),
@@ -75,23 +155,8 @@ impl GraphEngine {
             executed_model,
         })?;
 
-        let (retry_limit, crash_max_secs, backoff_secs) = read_infra_config(node);
         let member_run_id = run_id.clone();
-        // CM46: one `node_started` per member dispatch, before it spawns.
-        activity::record(
-            &self.db,
-            activity::GraphEvent {
-                graph_id: &lp.id,
-                graph_name: &lp.name,
-                workdir,
-                spec_id: Some(&spec.id),
-                node_id: Some(&node.id),
-                run_id: Some(&member_run_id),
-                kind: activity::GraphEventKind::NodeStarted,
-                message: format!("Node '{}' started.", node.name),
-                payload: None,
-            },
-        );
+        begin_ensemble_member_run(&self.db, lp, spec, node, workdir, &member_run_id);
         let ctx = EnsembleMemberContext {
             db: Arc::clone(&self.db),
             lp: lp.clone(),
@@ -105,10 +170,8 @@ impl GraphEngine {
             all_node_names: all_node_names.to_vec(),
             bound_minutes,
             member_timeout_minutes,
-            retry_limit,
-            crash_max_secs,
-            backoff_secs,
             shutdown: Arc::clone(&self.shutdown),
+            mutex_resources,
         };
 
         let (result, member_had_no_verdict, settled_session_id) =
@@ -170,7 +233,7 @@ impl GraphEngine {
         initial_run_id: String,
         initial_resume_candidate: Option<String>,
     ) -> Result<(NodeExecution, bool, Option<String>)> {
-        let mut attempt: u32 = 0;
+        let mut chain = AttemptChain::from_node(&ctx.node);
         let mut member_run_id = initial_run_id;
         let mut resume_candidate: Option<String> = initial_resume_candidate;
         let mut settled_session_id: Option<String> = None;
@@ -181,160 +244,97 @@ impl GraphEngine {
         // each get the member's full effective timeout, never a shared
         // ensemble-wide (or even single-member-wide) clock.
         let result: (NodeExecution, bool) = loop {
-            let execution =
-                match Self::run_member_attempt(&ctx, &member_run_id, resume_candidate.as_deref())
-                    .await?
-                {
-                    MemberAttempt::Execution(execution) => execution,
-                    MemberAttempt::NoVerdict(execution) => break (execution, true),
-                };
+            // The mutex gate sits ahead of every member attempt: the member's
+            // own full timeout starts at the grant, not at the enqueue. A
+            // refused wait ends the member with no verdict.
+            if !acquire_mutexes_before_run(
+                &ctx.db,
+                &ctx.shutdown,
+                &ctx.lp,
+                &ctx.spec.id,
+                &ctx.node,
+                &member_run_id,
+                &ctx.mutex_resources,
+            )
+            .await?
+            {
+                break (
+                    interrupted_execution(format!(
+                        "Ensemble member '{}' stopped while waiting for its mutex.",
+                        ctx.node.name
+                    )),
+                    true,
+                );
+            }
+            let execution = match run_member_attempt(
+                &ctx,
+                &member_run_id,
+                resume_candidate.as_deref(),
+                chain.nudged,
+            )
+            .await?
+            {
+                MemberAttempt::Execution(execution) => execution,
+                MemberAttempt::NoVerdict(execution) => break (execution, true),
+            };
 
             let run = ctx.db.get_graph_run(&member_run_id)?.ok_or_else(|| {
                 anyhow!("Graph run '{}' not found after execution.", member_run_id)
             })?;
-            if is_infra_crash(
-                &ctx.node,
-                &execution,
-                &run,
-                attempt,
-                ctx.retry_limit,
-                ctx.crash_max_secs,
-            ) {
-                // CB82: no new retry row is inserted during shutdown — settle
-                // the crashed attempt as interrupted and stop.
-                if ctx.shutdown.load(Ordering::SeqCst) {
-                    let _ = ctx.db.update_graph_run_result(
+            match chain.decide(&ctx.node, &execution, &run) {
+                AttemptRetry::Settle => {
+                    let (final_execution, member_had_no_verdict, settled_session) =
+                        settle_ensemble_member_attempt(
+                            &ctx,
+                            &member_run_id,
+                            execution,
+                            run,
+                            &chain,
+                        )
+                        .await?;
+                    settled_session_id = settled_session;
+                    break (final_execution, member_had_no_verdict);
+                }
+                kind => {
+                    // CB82: no new retry row is inserted during shutdown — settle
+                    // the crashed attempt as interrupted and stop.
+                    if ctx.shutdown.load(Ordering::SeqCst) {
+                        let _ = ctx.db.update_graph_run_result(
+                            &member_run_id,
+                            GraphRunStatus::Fail,
+                            Some(&shutdown_interrupted_output()),
+                            Some(chrono::Utc::now()),
+                        );
+                        break (
+                            interrupted_execution(format!(
+                                "Ensemble member '{}' interrupted: daemon shutdown.",
+                                ctx.node.name
+                            )),
+                            false,
+                        );
+                    }
+                    resume_candidate = run.session_id.clone();
+                    member_run_id = begin_infra_retry(
+                        &ctx.db,
+                        &ctx.lp,
+                        &ctx.spec,
+                        &ctx.node,
+                        ctx.previous_output.as_ref(),
+                        ctx.iteration,
                         &member_run_id,
-                        GraphRunStatus::Fail,
-                        Some(&shutdown_interrupted_output()),
-                        Some(chrono::Utc::now()),
-                    );
-                    break (
-                        interrupted_execution(format!(
-                            "Ensemble member '{}' interrupted: daemon shutdown.",
-                            ctx.node.name
-                        )),
-                        false,
-                    );
+                        &execution.output,
+                        chain.attempt,
+                        chain.backoff_secs,
+                        &ctx.mutex_resources,
+                    )
+                    .await?;
+                    chain.advance(kind);
+                    continue;
                 }
-                resume_candidate = run.session_id.clone();
-                member_run_id = begin_infra_retry(
-                    &ctx.db,
-                    &ctx.lp,
-                    &ctx.spec,
-                    &ctx.node,
-                    ctx.previous_output.as_ref(),
-                    ctx.iteration,
-                    &member_run_id,
-                    &execution.output,
-                    attempt,
-                    ctx.backoff_secs,
-                )
-                .await?;
-                attempt += 1;
-                continue;
             }
-            let mut execution = execution;
-            let mut run = run;
-            let member_had_no_verdict = finalize_infra_crash_shape(
-                &ctx.db,
-                &member_run_id,
-                &ctx.node,
-                &mut execution,
-                &mut run,
-                attempt,
-                ctx.retry_limit,
-                ctx.crash_max_secs,
-            )
-            .await?;
-            settled_session_id = run.session_id.clone();
-            let final_execution = if run.status == GraphRunStatus::Running {
-                let _ = ctx.db.update_graph_run_result(
-                    &member_run_id,
-                    execution.status,
-                    Some(&execution.output),
-                    Some(chrono::Utc::now()),
-                );
-                execution
-            } else {
-                // A self-reported member keeps its own output; carry the
-                // process record (ended_after_verdict / session_end) onto it.
-                let output = super::verdict_shutdown::merge_process_record(
-                    &ctx.db,
-                    &member_run_id,
-                    &run,
-                    &execution.output,
-                );
-                NodeExecution {
-                    status: run.status,
-                    output,
-                    summary: execution.summary,
-                }
-            };
-            break (final_execution, member_had_no_verdict);
         };
 
         Ok((result.0, result.1, settled_session_id))
-    }
-
-    pub(crate) async fn run_member_attempt(
-        ctx: &EnsembleMemberContext,
-        member_run_id: &str,
-        resume_candidate: Option<&str>,
-    ) -> Result<MemberAttempt> {
-        let attempt_outcome = tokio::time::timeout(
-            std::time::Duration::from_secs(ctx.bound_minutes * 60),
-            execute_agent_node(
-                &ctx.db,
-                &ctx.lp,
-                &ctx.spec,
-                &ctx.node,
-                ctx.previous_output.as_ref(),
-                member_run_id,
-                &ctx.workdir,
-                resume_candidate,
-                false,
-                ctx.dynamic_skills.as_ref(),
-                &ctx.node_outputs,
-                &ctx.all_node_names,
-            ),
-        )
-        .await;
-
-        match attempt_outcome {
-            Ok(Ok(execution)) => Ok(MemberAttempt::Execution(execution)),
-            // A hard error inside this attempt — the member never
-            // produced a verdict, so the caller moves on to the next one.
-            Ok(Err(error)) => Ok(MemberAttempt::NoVerdict(NodeExecution {
-                status: GraphRunStatus::Fail,
-                output: serde_json::json!({ "error": error.to_string() }),
-                summary: format!("Ensemble member '{}' failed: {error}", ctx.node.name),
-            })),
-            // This attempt's own full `bound_minutes` elapsed — kill
-            // whatever's live now (B12) and settle this member as failed.
-            // Never retried: a timeout is a hard kill, not a crash shape
-            // to feed back into `is_infra_crash`.
-            Err(_elapsed) => {
-                let (terminate_reason, source) =
-                    Self::member_timeout_source(ctx.member_timeout_minutes);
-                if let Ok(Some(run)) = ctx.db.get_active_graph_run_for_node(&ctx.node.id) {
-                    terminate_run_row(&ctx.db, &run, terminate_reason, &ctx.workdir);
-                }
-                Ok(MemberAttempt::NoVerdict(NodeExecution {
-                    status: GraphRunStatus::Fail,
-                    output: serde_json::json!({
-                        "kind": "agent",
-                        "node_id": ctx.node.id,
-                        "error": "member timeout",
-                        "timeout_minutes": ctx.bound_minutes,
-                    }),
-                    summary: format!(
-                        "Ensemble member '{}' timed out: {source} ({}m) elapsed.",
-                        ctx.node.name, ctx.bound_minutes
-                    ),
-                }))
-            }
-        }
     }
 
     #[expect(clippy::too_many_arguments)]
@@ -403,6 +403,7 @@ impl GraphEngine {
                     all_node_names,
                     candidate.clone(),
                     resumable_sessions,
+                    &ensemble.mutex,
                 )
                 .await?;
             let resumed_start_failed = cascade_is_resumed_start_failed(
@@ -525,6 +526,7 @@ impl GraphEngine {
                     all_node_names,
                     resume_candidate,
                     resumable_sessions,
+                    &ensemble.mutex,
                 )
                 .await?;
             if member_had_no_verdict {

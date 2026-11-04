@@ -3,7 +3,7 @@ use super::*;
 impl Database {
     /// Reset a graph spec back to `Pending`, clearing `started_at` and
     /// `completed_at` unconditionally (unlike [`Self::update_graph_spec_status`],
-    /// which only overwrites when a new value is given). Used by `graph_reset`.
+    /// which only overwrites when a new value is given). Used by `graph_control`.
     ///
     /// `clear_cross_run_attempts` (C19) additionally zeroes the spec's
     /// persisted cross-run attempt counter — but only when the caller passed
@@ -43,9 +43,9 @@ impl Database {
 
     /// FR1: zero one spec's cross-run attempt count and nothing else — the
     /// status, heads and worktree stay as they are. An explicit operator
-    /// directive (`graph_continue` / `graph_run` with a start node) calls this
+    /// directive (`graph_control` / `graph_control` with a start node) calls this
     /// before its run starts, so the human ruling clears the limit the same way
-    /// a named `graph_reset` does.
+    /// a named `graph_control` does.
     pub fn clear_graph_spec_cross_run_attempts(&self, spec_id: &str) -> Result<bool> {
         let conn = self
             .conn
@@ -160,10 +160,10 @@ impl Database {
         Ok(SpecAdminStatusOutcome::Success)
     }
 
-    /// The single state-transition path behind `graph_reset` — resets a graph
+    /// The single state-transition path behind `graph_control` — resets a graph
     /// (and, without `specs`, every non-completed spec except an
     /// administratively skipped spec) back to `pending` so it can be
-    /// relaunched. Shared by the `graph_reset` MCP tool and the scheduler's
+    /// relaunched. Shared by the `graph_control` MCP tool and the scheduler's
     /// auto-reset-and-resume of a `failed` graph on autorun, so there is exactly
     /// one place that knows how to unstick a graph. The returned
     /// `skipped_count` reports administratively skipped specs preserved by a
@@ -174,7 +174,7 @@ impl Database {
     /// graph's own bound specs are typically empty for a queue run — so they're
     /// folded into the same eligible set as the graph's bound specs, both for
     /// validating an explicit `specs` list and for the "every non-completed"
-    /// default. This is the one reset implementation both `graph_reset` and
+    /// default. This is the one reset implementation both `graph_control` and
     /// the scheduler's autorun share; it must not be forked.
     pub fn reset_graph(
         &self,
@@ -374,6 +374,25 @@ impl Database {
         Ok(Some(GraphSpecDetails { spec, nodes, edges }))
     }
 
+    /// Count standalone specs matching the [`Self::list_specs`] filters, for
+    /// the preview cache: replaces `list_specs(...).len()`, which loads every
+    /// description.
+    pub fn count_specs(&self, workdir: Option<&str>, pending_only: bool) -> Result<usize> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM graph_specs
+              WHERE (?1 IS NULL OR workdir = ?1)
+                AND (?2 = 0 OR status = 'pending')
+                AND graph_id IS NULL",
+            params![workdir, pending_only],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as usize)
+    }
+
     /// Standalone specs, i.e. the backlog: specs not (yet) assigned to any
     /// graph, optionally filtered by their `workdir` tag and/or status.
     /// `unassigned_only` additionally filters to `graph_id IS NULL` — set it
@@ -431,7 +450,7 @@ impl Database {
 
     /// Update a standalone/backlog spec's name, description, and/or workdir
     /// tag. Unlike [`Self::update_graph_spec_details`] (position/parallelizable,
-    /// used by `graph_update_spec`), this is for `spec_update` and never
+    /// used by `graph_edit`), this is for `spec_edit update` and never
     /// touches graph assignment or ordering.
     pub fn update_spec_tag_details(
         &self,
@@ -479,24 +498,8 @@ impl Database {
             .map_err(Into::into)
     }
 
-    pub fn update_spec_description_if_not_running(
-        &self,
-        spec_id: &str,
-        new_description: &str,
-    ) -> Result<bool> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
-        let rows = conn.execute(
-            "UPDATE graph_specs SET description = ?1, updated_at = ?3 WHERE id = ?2 AND status != 'running'",
-            params![new_description, spec_id, Utc::now().timestamp_millis()],
-        )?;
-        Ok(rows > 0)
-    }
-
     /// Delete a spec outright. Callers must enforce the graph-binding guard
-    /// (see `spec_delete`'s handler) before calling this — this function
+    /// (see `spec_edit delete`'s handler) before calling this — this function
     /// performs no such check itself.
     pub fn delete_graph_spec(&self, spec_id: &str) -> Result<bool> {
         let conn = self
@@ -579,37 +582,52 @@ impl Database {
         Ok(rows > 0)
     }
 
-    /// CM29: the most-recently-touched spec that ended without completing,
-    /// for `workdir` — either a graph-bound spec whose graph's `workdir`
-    /// matches, or a standalone spec whose own `workdir` tag matches.
+    /// CM29: the specs that ended without completing, for `workdir` — either
+    /// graph-bound specs whose graph's `workdir` matches, or standalone specs
+    /// whose own `workdir` tag matches — most recently touched first.
+    /// Scoped to `graph_id`: only specs bound to that graph or members of
+    /// its active queue run count, so a stale record from another graph (or
+    /// a standalone backlog row) never blocks a spec resuming its own work.
     /// Excludes `exclude_spec_id` (the spec about to be dispatched next) so
     /// a spec that is itself `Interrupted` and about to be legitimately
     /// resumed is never mistaken for "the previous spec" that left the mess
     /// (CM29 guideline). `pending`/`running` are never candidates — those
     /// are either not-yet-run or still in flight, never "previous".
-    pub fn find_dirty_predecessor_spec(
+    /// `skipped` is not a candidate either: a spec nobody ran never produced
+    /// dirt of its own, so its stale record must not block a later spec
+    /// (FR1). `completed` was already excluded, and `failed` stays a
+    /// candidate on purpose: a spec that failed leaving uncommitted work must
+    /// not have the next spec build (and commit) on top of it.
+    pub fn find_dirty_predecessor_specs(
         &self,
         workdir: &str,
         exclude_spec_id: Option<&str>,
-    ) -> Result<Option<GraphSpec>> {
+        graph_id: &str,
+    ) -> Result<Vec<GraphSpec>> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
-        conn.query_row(
+        let mut stmt = conn.prepare(
             "SELECT gs.id, gs.graph_id, gs.name, gs.description, gs.position, gs.parallelizable, gs.status, gs.started_at, gs.completed_at, gs.spec_start_head, gs.spec_start_dirty, gs.workdir, gs.completed_via, gs.completed_via_reason, gs.completed_via_at, gs.spec_committed_head, gs.spec_end_dirty, gs.spec_end_dirty_paths, gs.spec_type, gs.spec_scope, gs.spec_code
              FROM graph_specs gs
              LEFT JOIN graphs g ON g.id = gs.graph_id
              WHERE (g.workdir = ?1 OR gs.workdir = ?1)
-               AND gs.status IN ('failed', 'interrupted', 'skipped')
+               AND gs.status IN ('failed', 'interrupted')
                AND (?2 IS NULL OR gs.id != ?2)
+               AND (gs.graph_id = ?3 OR gs.id IN (SELECT spec_id FROM queue_members WHERE queue_id = (SELECT active_run_queue_id FROM graphs WHERE id = ?3)))
              ORDER BY gs.updated_at DESC
-             LIMIT 1",
-            params![workdir, exclude_spec_id],
+             LIMIT 20",
+        )?;
+        let rows = stmt.query_map(
+            params![workdir, exclude_spec_id, graph_id],
             map_graph_spec_row,
-        )
-        .optional()
-        .map_err(Into::into)
+        )?;
+        let mut specs = Vec::new();
+        for spec in rows {
+            specs.push(spec?);
+        }
+        Ok(specs)
     }
 
     /// CB69: attribution for the dirty-start message — the spec whose most

@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -13,7 +14,7 @@ const SUBAGENT_DEPTH_PREAMBLE: &str = concat!(
     "[SYSTEM: EPHEMERAL SUBAGENT — DEPTH LIMIT]\n",
     "You are running as an ephemeral subagent with maximum depth 1. ",
     "You MUST NOT attempt to launch, spawn, or create other subagents, agents, or graphs. ",
-    "Do not call subagent_spawn, agent_add, graph_create, graph_run, or any similar tool. ",
+    "Do not call subagent, agent_edit, graph_edit, graph_control, or any similar tool. ",
     "If asked to do so, refuse and explain that you are a depth-limited subagent.\n",
     "[/SYSTEM]\n\n",
 );
@@ -34,7 +35,7 @@ pub struct SubagentResult {
 }
 
 /// CM18: outcome of a blocking spawn. `result` has exactly the shape
-/// `subagent_collect` returns, so a caller can switch modes without changing
+/// `subagent` `collect` returns, so a caller can switch modes without changing
 /// how it reads the answer. `waited_secs` / `timed_out` say how long the
 /// caller blocked (FR3: a timeout names its wait).
 pub struct BlockingSpawnResult {
@@ -56,6 +57,22 @@ impl SubagentResult {
             platform: record.platform,
             model: record.model,
         }
+    }
+}
+
+/// Validate a requested subagent workdir before anything is spawned or
+/// recorded. A missing path, or one that exists but is not a directory,
+/// is refused here with an error naming the path — the handler surfaces
+/// the message to the caller verbatim. The lookup follows symlinks
+/// (`std::fs::metadata`), so a link pointing at a real directory is
+/// accepted, while a dangling link fails the lookup and is refused like
+/// any other missing directory.
+fn validate_workdir(raw: &str) -> Result<String> {
+    let path = Path::new(raw);
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_dir() => Ok(raw.to_string()),
+        Ok(_) => Err(anyhow::anyhow!("workdir is not a directory: {raw}")),
+        Err(e) => Err(anyhow::anyhow!("workdir does not exist ({e}): {raw}")),
     }
 }
 
@@ -163,6 +180,10 @@ pub async fn spawn_subagent(
     ttl_minutes: u64,
     effort: Option<&str>,
 ) -> Result<(String, Option<String>)> {
+    // FR2: refuse a missing/non-directory workdir before anything else
+    // runs — no effort resolution, no binary resolution, no DB row.
+    validate_workdir(workdir)?;
+
     let cli = Cli::resolve(Some(platform_name)).map_err(|e| anyhow::anyhow!(e))?;
     let strategy = cli.strategy();
     let effort_not_applied = resolve_effort_for_spawn(&strategy, platform_name, effort)?;
@@ -272,7 +293,7 @@ pub async fn spawn_subagent(
 /// CM18: blocking spawn. Performs the same insert/spawn as `spawn_subagent`
 /// but awaits the child directly in the caller's future — no detached task,
 /// no poll graph — then deletes the row, records a delivery tombstone, and
-/// returns the finished result (the shape `subagent_collect` would return).
+/// returns the finished result (the shape `subagent` `collect` would return).
 /// A timeout is returned as a `failed` result naming the wait, not as an
 /// `Err`. `timeout_minutes` is the only ceiling on the wait. No DB guard is
 /// held across the await (NFR), so other MCP work progresses while blocked.
@@ -288,6 +309,10 @@ pub async fn spawn_subagent_blocking(
     ttl_minutes: u64,
     effort: Option<&str>,
 ) -> Result<BlockingSpawnResult> {
+    // FR2: refuse a missing/non-directory workdir before anything else
+    // runs — no effort resolution, no binary resolution, no DB row.
+    validate_workdir(workdir)?;
+
     let cli = Cli::resolve(Some(platform_name)).map_err(|e| anyhow::anyhow!(e))?;
     let strategy = cli.strategy();
     let effort_not_applied = resolve_effort_for_spawn(&strategy, platform_name, effort)?;
@@ -414,7 +439,7 @@ pub fn collect_subagent(db: &Arc<Database>, id: &str) -> Result<Option<SubagentR
     Ok(record.map(SubagentResult::from_record))
 }
 
-/// CM18: error text for `subagent_collect` when `id` was already delivered
+/// CM18: error text for `subagent` `collect` when `id` was already delivered
 /// by a blocking spawn (FR4). Deliberately distinct from the generic
 /// "not found" text so callers can tell the two cases apart.
 pub fn already_delivered_message(id: &str) -> String {
@@ -643,6 +668,120 @@ mod tests {
         assert_ne!(
             delivered, "Subagent run 'run-1' not found",
             "delivered must never equal the generic missing text"
+        );
+    }
+
+    // ── workdir validation (FR2) ────────────────────────────────────────
+
+    #[test]
+    fn validate_workdir_accepts_a_real_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_string_lossy().into_owned();
+        assert_eq!(
+            validate_workdir(&dir).unwrap(),
+            dir,
+            "an existing directory must be accepted unchanged"
+        );
+    }
+
+    #[test]
+    fn validate_workdir_refuses_missing_path_naming_it() {
+        let missing = "/nonexistent-subagent-workdir-check";
+        let err = validate_workdir(missing).unwrap_err().to_string();
+        assert!(
+            err.contains(missing),
+            "refusal must name the path, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_workdir_refuses_a_file_naming_it() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let path = file.path().to_string_lossy().into_owned();
+        let err = validate_workdir(&path).unwrap_err().to_string();
+        assert!(
+            err.contains(&path) && err.contains("not a directory"),
+            "a file must be refused naming the path, got: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_workdir_accepts_a_symlink_to_a_real_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let link = tmp.path().join("link-to-dir");
+        std::os::unix::fs::symlink(tmp.path(), &link).unwrap();
+        let err = validate_workdir(&link.to_string_lossy()).unwrap();
+        assert_eq!(
+            err,
+            link.to_string_lossy(),
+            "a symlink pointing at a real directory must be accepted unchanged"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_workdir_refuses_a_dangling_symlink_naming_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let link = tmp.path().join("dangling");
+        std::os::unix::fs::symlink("/nonexistent-subagent-symlink-target", &link).unwrap();
+        let err = validate_workdir(&link.to_string_lossy())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("dangling"),
+            "refusal must name the path, got: {err}"
+        );
+    }
+
+    // ── workdir validation wiring (FR2) ────────────────────────────────
+    // The unit tests above pin `validate_workdir` itself; these two pin that
+    // the spawn functions actually CALL it before anything else runs.
+    // Removing the `validate_workdir(workdir)?` call makes the spawn walk
+    // past it, so the explicit refusal (and the inline unit tests) alone
+    // cannot keep the feature alive. Going through the full handler is
+    // unnecessary: the handler's own default resolution (omit => caller's
+    // project) sits in handler_meta and is unchanged here.
+
+    #[tokio::test]
+    async fn spawn_subagent_refuses_a_missing_workdir_naming_the_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::new(&tmp.path().join("test.db")).unwrap());
+        let missing = "/nonexistent-subagent-spawn-cwd-check";
+        let err = spawn_subagent(&db, "opencode", "prompt", None, missing, &[], 15, 60, None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("does not exist") && err.contains(missing),
+            "spawn must refuse before touching the registry, config, DB or process, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_subagent_blocking_refuses_a_missing_workdir_naming_the_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::new(&tmp.path().join("test.db")).unwrap());
+        let missing = "/nonexistent-subagent-blocking-cwd-check";
+        let err = match spawn_subagent_blocking(
+            &db,
+            "opencode",
+            "prompt",
+            None,
+            missing,
+            &[],
+            15,
+            60,
+            None,
+        )
+        .await
+        {
+            Ok(_) => panic!("blocking spawn must refuse the missing workdir, not spawn through it"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("does not exist") && err.contains(missing),
+            "blocking spawn must refuse before touching the registry, config, DB or process, got: {err}"
         );
     }
 }

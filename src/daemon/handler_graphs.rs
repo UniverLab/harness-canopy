@@ -5,7 +5,9 @@ use crate::daemon::handler::TaskTriggerHandler;
 use crate::daemon::handler_formatting::{
     build_graph_update_response, build_id_result, internal_error,
 };
-use crate::daemon::handler_helpers::record_config_change_if_running;
+use crate::daemon::handler_graph_updates::{
+    parse_graph_hooks_param, parse_graph_update_fields, record_graph_update_narration,
+};
 use crate::daemon::handler_run_exec::find_in_flight_run;
 use crate::daemon::handler_specs_helpers::validate_at_least_one_bool;
 use crate::daemon::handler_validate::{
@@ -13,26 +15,19 @@ use crate::daemon::handler_validate::{
 };
 use crate::daemon::helpers::error_result;
 use crate::daemon::params::*;
-use crate::daemon::params_extract::Parameters;
 use crate::db::Database;
-use crate::domain::graphs::{Graph, GraphCompletionHook, GraphHookEvent, GraphStatus};
+use crate::domain::graphs::{Graph, GraphHookEvent, GraphStatus};
 use crate::domain::models::Trigger;
 use crate::graph_engine::GRAPH_HOOK_BINDINGS;
 use rmcp::model::CallToolResult;
-use rmcp::tool;
 use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
 
 #[tool_router(router = tool_router_graphs, vis = "pub(crate)")]
 impl TaskTriggerHandler {
-    #[tool(
-        name = "graph_create",
-        description = "Create a graph container for a background graph of specs and nodes. \
-        Hooks are not retroactive — a hook registered after its event has already happened does not fire."
-    )]
-    pub(crate) async fn graph_create(
+    pub(crate) async fn graph_create_impl(
         &self,
-        Parameters(params): Parameters<GraphCreateParams>,
+        params: GraphCreateParams,
     ) -> Result<CallToolResult, McpError> {
         let name = params.name.trim();
         if let Err(e) = validate_non_empty(name, "Graph name") {
@@ -86,14 +81,9 @@ impl TaskTriggerHandler {
         Ok(build_id_result(&lp.id, "graph_id"))
     }
 
-    #[tool(
-        name = "graph_update",
-        description = "Update graph metadata such as name, description, or workdir. \
-        Hooks are not retroactive — a hook registered after its event has already happened does not fire."
-    )]
-    pub(crate) async fn graph_update(
+    pub(crate) async fn graph_update_impl(
         &self,
-        Parameters(params): Parameters<GraphUpdateParams>,
+        params: GraphUpdateParams,
     ) -> Result<CallToolResult, McpError> {
         let graph_id = match resolve_prefix_or_error(
             &self.db,
@@ -111,77 +101,17 @@ impl TaskTriggerHandler {
             return Ok(error_result(&e));
         }
 
-        let name = match params.name.as_deref().map(str::trim) {
-            Some("") => return Ok(error_result("Graph name must not be empty.")),
-            Some(value) => Some(value),
-            None => None,
-        };
-        let description = params.description.as_ref().map(|value| {
-            value
-                .as_deref()
-                .map(str::trim)
-                .filter(|description| !description.is_empty())
-        });
-        let workdir = match params.workdir.as_deref().map(str::trim) {
-            Some("") => return Ok(error_result("Graph workdir must not be empty.")),
-            Some(value) => {
-                if let Err(e) = validate_absolute_dir(value) {
-                    return Ok(error_result(&e));
-                }
-                Some(value)
-            }
-            None => None,
+        let mut parsed = match parse_graph_update_fields(&params) {
+            Ok(parsed) => parsed,
+            Err(e) => return Ok(e),
         };
 
-        // A provided `trigger` param (even kind = "manual") counts as an update.
-        let new_trigger = if params.trigger.is_some() {
-            match build_graph_trigger(&params.trigger) {
-                Ok(trigger) => Some(trigger),
-                Err(e) => return Ok(error_result(&e)),
-            }
-        } else {
-            None
+        parsed.hooks = match parse_graph_hooks_param(&params.hooks) {
+            Ok(hooks) => hooks,
+            Err(e) => return Ok(e),
         };
 
-        // A provided `on_completed` param (even `null`, to clear it) counts
-        // as an update — same `Option<Option<_>>` shape as `description`.
-        let new_completion_hook = match &params.on_completed {
-            None => None,
-            Some(None) => Some(None),
-            Some(Some(hook_params)) => match build_graph_completion_hook(hook_params) {
-                Ok(hook) => Some(Some(hook)),
-                Err(e) => return Ok(error_result(&e)),
-            },
-        };
-
-        // Parse the new event-keyed `hooks` parameter. Each key must be a
-        // valid event name; each value is an ordered array of hook configs.
-        let new_hooks = match &params.hooks {
-            None => None,
-            Some(map) => {
-                let mut parsed =
-                    std::collections::BTreeMap::<GraphHookEvent, Vec<GraphCompletionHook>>::new();
-                for (event_name, hooks) in map {
-                    let Some(event) = GraphHookEvent::from_str(event_name) else {
-                        return Ok(error_result(&format!(
-                            "Invalid hook event '{}'. Must be one of: on_completed, on_failed, on_blocked, on_spec_completed.",
-                            event_name
-                        )));
-                    };
-                    let mut hook_list = Vec::new();
-                    for hook_params in hooks {
-                        match build_graph_completion_hook(hook_params) {
-                            Ok(hook) => hook_list.push(hook),
-                            Err(e) => return Ok(error_result(&e)),
-                        }
-                    }
-                    parsed.insert(event, hook_list);
-                }
-                Some(parsed)
-            }
-        };
-
-        let new_infra_node_id = match &params.infra_node_id {
+        parsed.infra_node_id = match &params.infra_node_id {
             None => None,
             Some(None) => Some(None),
             Some(Some(value)) => {
@@ -196,104 +126,42 @@ impl TaskTriggerHandler {
 
         if let Err(e) = validate_at_least_one_bool(
             &[
-                name.is_some(),
-                description.is_some(),
-                workdir.is_some(),
-                new_trigger.is_some(),
-                new_completion_hook.is_some(),
-                new_hooks.is_some(),
-                new_infra_node_id.is_some(),
+                parsed.name.is_some(),
+                parsed.description.is_some(),
+                parsed.workdir.is_some(),
+                parsed.trigger.is_some(),
+                parsed.completion_hook.is_some(),
+                parsed.hooks.is_some(),
+                parsed.infra_node_id.is_some(),
                 params.allow_dirty_start.is_some(),
                 params.require_spec_type.is_some(),
             ],
-            "graph_update",
+            "graph_edit",
         ) {
             return Ok(error_result(&e));
         }
 
-        self.db
-            .update_graph_details(&graph_id, name, description, workdir)
-            .map_err(internal_error)?;
-
-        if let Some(trigger) = new_trigger {
-            self.db
-                .update_graph_trigger(&graph_id, trigger.as_ref())
-                .map_err(internal_error)?;
-            let _ = self.watcher_engine.stop_graph_watcher(&graph_id).await;
-            if let Ok(Some(lp)) = self.db.get_graph(&graph_id) {
-                self.activate_graph_trigger(&lp).await;
-            }
-        }
-
-        let hooks_changed = new_hooks.is_some() || new_completion_hook.is_some();
-
-        if let Some(hooks_map) = new_hooks {
-            // Merge legacy `on_completed` into the hooks map if both are provided
-            let mut final_hooks = hooks_map;
-            if let Some(Some(hook)) = new_completion_hook {
-                final_hooks
-                    .entry(GraphHookEvent::OnCompleted)
-                    .or_default()
-                    .push(hook);
-            } else if let Some(None) = new_completion_hook {
-                // Explicitly clear on_completed when legacy param is null
-                final_hooks.remove(&GraphHookEvent::OnCompleted);
-            }
-            self.db
-                .update_graph_hooks(&graph_id, &final_hooks)
-                .map_err(internal_error)?;
-        } else if let Some(hook) = new_completion_hook {
-            // Legacy path: only update on_completed, preserve other events
-            self.db
-                .update_graph_completion_hook(&graph_id, hook.as_ref())
-                .map_err(internal_error)?;
-        }
-
-        let infra_node_changed = new_infra_node_id.is_some();
-        if let Some(infra_node_id) = new_infra_node_id {
-            self.db
-                .update_graph_infra_node_id(&graph_id, infra_node_id.as_deref())
-                .map_err(internal_error)?;
-        }
-
-        if let Some(value) = params.allow_dirty_start {
-            self.db
-                .update_graph_allow_dirty_start(&graph_id, value)
-                .map_err(internal_error)?;
-        }
-
-        if let Some(value) = params.require_spec_type {
-            self.db
-                .update_graph_require_spec_type(&graph_id, value)
-                .map_err(internal_error)?;
-        }
+        let (hooks_changed, infra_node_changed) = self
+            .persist_graph_update(
+                &graph_id,
+                parsed,
+                params.allow_dirty_start,
+                params.require_spec_type,
+            )
+            .await?;
 
         let active_run_note = if hooks_changed {
             remaining_hook_events_for_active_run(&self.db, &graph_id)
         } else {
             None
         };
-        // CM46: hooks / infra wiring / allow_dirty_start edits on a RUNNING
-        // graph are narratable config changes. A pure name/description edit is
-        // not.
-        if hooks_changed || infra_node_changed || params.allow_dirty_start.is_some() {
-            let graph_name = self
-                .db
-                .get_graph(&graph_id)
-                .ok()
-                .flatten()
-                .map(|graph| graph.name)
-                .unwrap_or_else(|| graph_id.clone());
-            let change = if hooks_changed { "hook" } else { "metadata" };
-            record_config_change_if_running(
-                &self.db,
-                Some(&graph_id),
-                None,
-                None,
-                change,
-                format!("Graph '{}' config updated.", graph_name),
-            );
-        }
+        record_graph_update_narration(
+            &self.db,
+            &graph_id,
+            hooks_changed,
+            infra_node_changed,
+            params.allow_dirty_start,
+        );
         Ok(build_graph_update_response(
             &graph_id,
             active_run_note.as_deref(),
@@ -371,7 +239,7 @@ pub(crate) fn build_graph_trigger(
     }
 }
 
-/// CM45: when a `graph_update` changes hooks while a run is active, name the
+/// CM45: when a `graph_edit` changes hooks while a run is active, name the
 /// events that run will still fire under the new hooks — the events the
 /// just-applied map configures that have not already fired since the run
 /// started. Returns `None` when no run is active, when nothing was configured,

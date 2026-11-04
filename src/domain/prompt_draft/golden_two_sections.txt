@@ -1,0 +1,46 @@
+# [PROJECT CONTEXT]: Registered Project Metadata
+<project_context>
+  <project>
+    name: golden-proj
+    workdir_hash: golden01
+    path: /golden/proj
+    description: The golden project
+    tags: gold,demo
+    indexed_at: 1700000000
+  </project>
+
+</project_context>
+
+# [GOAL]: Desired Outcome
+<goal>
+  <goal_item>
+    ship the golden feature
+  </goal_item>
+
+</goal>
+
+# [INSTRUCTIONS]: Execution Logic
+<instruction_set>
+  <instruction>
+    do the golden thing
+  </instruction>
+
+  <instruction>
+    You are the golden reviewer.
+    Check every line twice.
+  </instruction>
+
+</instruction_set>
+
+# [TOOLS]: Skills & Capabilities
+<tools>
+  <skill>
+    skill:golden-alpha
+  </skill>
+
+  <skill>
+    canopy skill golden-beta — load it with the `skill` tool's `get` action (name="golden-beta")
+  </skill>
+
+</tools>
+

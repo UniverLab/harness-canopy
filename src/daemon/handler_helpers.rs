@@ -2,7 +2,7 @@ use chrono::Utc;
 use rmcp::model::CallToolResult;
 
 use crate::application::ports::{AgentRepository, RunRepository};
-use crate::daemon::helpers::{error_result, success_result};
+use crate::daemon::helpers::error_result;
 use crate::daemon::params::*;
 use crate::domain::activity::{self, GraphEvent, GraphEventKind};
 use crate::domain::graphs::GraphStatus;
@@ -349,16 +349,6 @@ pub(crate) fn new_agent_base(
     }
 }
 
-pub(crate) fn map_action_result<T>(
-    result: Result<T, impl std::fmt::Display>,
-    success_message: &str,
-) -> CallToolResult {
-    match result {
-        Ok(_) => success_result(success_message),
-        Err(e) => error_result(&e.to_string()),
-    }
-}
-
 /// `Some(reason)` when `platform` is configured in canopy and its registry
 /// entry is marked `headless = false` — that platform can host a live
 /// interactive session but can never run a graph node, an ensemble member, a
@@ -389,7 +379,10 @@ use crate::db::Database;
 use crate::shared::sync_identity::{self, header_str};
 
 /// Try to auto-detect the effective project_hash from session workdir,
-/// falling back to the caller-supplied value.
+/// falling back to the caller-supplied value. A workdir inside a sandbox
+/// worktree maps to the project the sandbox was cut from, so knowledge
+/// produced inside a sandbox is attributed to (and read back from) that
+/// project — never from a hash of the ephemeral worktree path.
 pub(crate) fn resolve_effective_project_hash(
     db: &Database,
     provided: Option<&str>,
@@ -398,10 +391,10 @@ pub(crate) fn resolve_effective_project_hash(
     if let Some(ph) = provided {
         return Some(ph.to_string());
     }
-    db.get_session_workdir(agent_id)
-        .ok()
-        .flatten()
-        .map(|wd| crate::domain::project::workdir_hash(&wd))
+    db.get_session_workdir(agent_id).ok().flatten().map(|wd| {
+        let mapped = db.map_workdir_out_of_sandbox(&wd).unwrap_or(wd);
+        crate::domain::project::workdir_hash(&mapped)
+    })
 }
 
 /// Load the seed identity bound to the current session agent.
@@ -518,7 +511,7 @@ mod tests {
     #[test]
     fn watcher_restart_needed_true() {
         let mut params = TaskUpdateParams {
-            action: None,
+            delivery_action: None,
             target_session_name: None,
             target_session_id: None,
             id: "test".to_string(),
@@ -629,7 +622,7 @@ mod tests {
         };
 
         let params = TaskUpdateParams {
-            action: None,
+            delivery_action: None,
             target_session_name: None,
             target_session_id: None,
             id: "test".to_string(),
@@ -677,7 +670,7 @@ mod tests {
         };
 
         let params = TaskUpdateParams {
-            action: None,
+            delivery_action: None,
             target_session_name: None,
             target_session_id: None,
             id: "test".to_string(),
@@ -725,7 +718,7 @@ mod tests {
         };
 
         let params = TaskUpdateParams {
-            action: None,
+            delivery_action: None,
             target_session_name: None,
             target_session_id: None,
             id: "test".to_string(),
@@ -753,25 +746,9 @@ mod tests {
     }
 
     #[test]
-    fn map_action_result_error() {
-        let result: Result<(), String> = Err("something failed".to_string());
-        let tool_result = map_action_result(result, "done");
-        // Error results have is_error = Some(true)
-        assert_eq!(tool_result.is_error, Some(true));
-    }
-
-    #[test]
-    fn map_action_result_success() {
-        let result: Result<(), String> = Ok(());
-        let tool_result = map_action_result(result, "done");
-        // Success results have is_error = None or Some(false)
-        assert_ne!(tool_result.is_error, Some(true));
-    }
-
-    #[test]
     fn prepare_cron_task_valid() {
         let params = TaskAddParams {
-            action: None,
+            delivery_action: None,
             target_session_name: None,
             target_session_id: None,
             id: "test-agent".to_string(),
@@ -795,7 +772,7 @@ mod tests {
     #[test]
     fn prepare_cron_task_invalid_id() {
         let params = TaskAddParams {
-            action: None,
+            delivery_action: None,
             target_session_name: None,
             target_session_id: None,
             id: "".to_string(),
@@ -816,7 +793,7 @@ mod tests {
     #[test]
     fn prepare_cron_task_invalid_schedule() {
         let params = TaskAddParams {
-            action: None,
+            delivery_action: None,
             target_session_name: None,
             target_session_id: None,
             id: "test-agent".to_string(),
@@ -837,7 +814,7 @@ mod tests {
     #[test]
     fn prepare_watch_task_valid() {
         let params = TaskWatchParams {
-            action: None,
+            delivery_action: None,
             target_session_name: None,
             target_session_id: None,
             id: "test-watcher".to_string(),
@@ -864,7 +841,7 @@ mod tests {
     #[test]
     fn prepare_watch_task_defaults() {
         let params = TaskWatchParams {
-            action: None,
+            delivery_action: None,
             target_session_name: None,
             target_session_id: None,
             id: "test-watcher".to_string(),
@@ -887,7 +864,7 @@ mod tests {
     #[test]
     fn prepare_watch_task_invalid_path() {
         let params = TaskWatchParams {
-            action: None,
+            delivery_action: None,
             target_session_name: None,
             target_session_id: None,
             id: "test-watcher".to_string(),
@@ -936,7 +913,7 @@ mod tests {
         };
 
         let params = TaskUpdateParams {
-            action: None,
+            delivery_action: None,
             target_session_name: None,
             target_session_id: None,
             id: "cron-agent".to_string(),

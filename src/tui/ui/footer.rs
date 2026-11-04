@@ -32,17 +32,20 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Them
     } else {
         format!(" v{} ", app.daemon_version)
     };
-    let update_notice = app
-        .update_available
-        .as_deref()
-        .map(|tag| format!(" canopy {tag} available — run canopy update"))
-        .unwrap_or_default();
+    // A hub notice (e.g. protocol mismatch) preempts the update notice.
+    let notice = app.hub_notice.as_deref().map(|notice| format!(" {notice}"));
+    let notice = notice.unwrap_or_else(|| {
+        app.update_available
+            .as_deref()
+            .map(|tag| format!(" canopy {tag} available — run canopy update"))
+            .unwrap_or_default()
+    });
     draw_footer_right(
         frame,
         area,
         split_label.as_deref(),
         &version,
-        &update_notice,
+        &notice,
         theme,
     );
 }
@@ -459,11 +462,15 @@ fn draw_footer_playground(
     } else {
         format!(" v{} ", app.daemon_version)
     };
-    let update_notice = app
-        .update_available
-        .as_deref()
-        .map(|tag| format!(" canopy {tag} available — run canopy update"))
-        .unwrap_or_default();
+    // A hub notice (a failed launch, a dropped hub) preempts the update
+    // notice here too: an error must stay visible on every face.
+    let notice = app.hub_notice.as_deref().map(|notice| format!(" {notice}"));
+    let update_notice = notice.unwrap_or_else(|| {
+        app.update_available
+            .as_deref()
+            .map(|tag| format!(" canopy {tag} available — run canopy update"))
+            .unwrap_or_default()
+    });
 
     let hints_line = Line::from(spans);
     frame.render_widget(Paragraph::new(hints_line), area);
@@ -878,17 +885,20 @@ mod tests {
         // child" hint must be gone, from this branch and everywhere else.
         let agent = crate::tui::agent::InteractiveAgent::spawn(
             crate::domain::models::Cli::new("cat"),
-            ".",
+            env!("CARGO_MANIFEST_DIR"),
             80,
             24,
             None,
             None,
             Color::Reset,
             Some("claimed-agent"),
+            None,
             &[],
             None,
             None,
             None,
+            None,
+            false,
         )
         .expect("spawn cat as a stand-in interactive child");
         *agent.kitty_keyboard_flags.lock().expect("lock") = Some(7);
@@ -924,17 +934,20 @@ mod tests {
         // because plain F4 belongs to the child while claimed.
         let agent = crate::tui::agent::InteractiveAgent::spawn(
             crate::domain::models::Cli::new("cat"),
-            ".",
+            env!("CARGO_MANIFEST_DIR"),
             80,
             24,
             None,
             None,
             Color::Reset,
             Some("claimed-end-agent"),
+            None,
             &[],
             None,
             None,
             None,
+            None,
+            false,
         )
         .expect("spawn cat as a stand-in interactive child");
         *agent.kitty_keyboard_flags.lock().expect("lock") = Some(7);
@@ -1008,6 +1021,27 @@ mod tests {
         assert!(
             text.contains("search"),
             "Agent playground footer should show 'search': {text}"
+        );
+    }
+
+    #[test]
+    fn footer_playground_shows_the_hub_notice_first() {
+        let mut app = make_app();
+        app.focus = Focus::Agent;
+        app.playground_active = true;
+        app.hub_notice = Some("Could not open session: hub down".to_string());
+        app.update_available = Some("v3.0.1".to_string());
+        let theme = Theme::classic();
+        let text = render_footer_to_text(120, 1, |frame, area| {
+            draw_footer(frame, area, &app, &theme);
+        });
+        assert!(
+            text.contains("Could not open session: hub down"),
+            "playground footer must show the error notice: {text}"
+        );
+        assert!(
+            !text.contains("run canopy update"),
+            "the error notice preempts the update notice: {text}"
         );
     }
 
@@ -1101,6 +1135,18 @@ mod tests {
     }
 
     #[test]
+    fn footer_on_a_pausing_graph_offers_pause_and_both_continue_modes() {
+        let app = app_on_graph(crate::domain::graphs::GraphStatus::Pausing);
+        let theme = Theme::classic();
+        let text = render_footer_to_text(200, 1, |frame, area| {
+            draw_footer(frame, area, &app, &theme);
+        });
+        assert!(text.contains("pause"), "{text}");
+        assert!(text.contains("continue (retry)"), "{text}");
+        assert!(text.contains("continue (skip spec)"), "{text}");
+    }
+
+    #[test]
     fn footer_on_a_completed_graph_offers_reset_and_run() {
         let app = app_on_graph(crate::domain::graphs::GraphStatus::Completed);
         let theme = Theme::classic();
@@ -1177,17 +1223,20 @@ mod tests {
         // pane's key-hint row, so the user never has to reach for Shift.
         let agent = crate::tui::agent::InteractiveAgent::spawn(
             crate::domain::models::Cli::new("cat"),
-            ".",
+            env!("CARGO_MANIFEST_DIR"),
             80,
             24,
             None,
             None,
             Color::Reset,
             Some("drag-copy-hint-agent"),
+            None,
             &[],
             None,
             None,
             None,
+            None,
+            false,
         )
         .expect("spawn cat as a stand-in interactive child");
         let mut app = make_app();

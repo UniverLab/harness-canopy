@@ -45,7 +45,7 @@ impl Database {
     }
 
     /// Schedule a one-shot deferred resume for a *paused* graph at `at`: the
-    /// scheduler fires the `graph_continue` action `action` (defaults to
+    /// scheduler fires the `graph_control` action `action` (defaults to
     /// `retry_current_node` when `None`) once `at` is reached, but only if
     /// the graph is still `Paused` — see
     /// [`crate::domain::graphs::Graph::is_auto_continue_due`]. Distinct from
@@ -121,7 +121,8 @@ impl Database {
              SET status = ?1,
                  started_at = COALESCE(?2, started_at),
                  completed_at = COALESCE(?3, completed_at),
-                 paused_by_reconciliation = 0
+                 paused_by_reconciliation = 0,
+                 blocker = CASE WHEN ?1 = 'paused' THEN blocker ELSE NULL END
              WHERE id = ?4",
             params![
                 status.as_str(),
@@ -162,6 +163,38 @@ impl Database {
         Ok(rows > 0)
     }
 
+    /// Cancel a pending pause, flipping the graph back to `Running` — the
+    /// resume path's counterpart to [`Self::complete_pause`]. A single
+    /// compare-and-set, so a concurrent node-boundary completion wins or
+    /// loses atomically rather than resurrecting a finished pause.
+    pub fn cancel_pause_pending(&self, graph_id: &str) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let rows = conn.execute(
+            "UPDATE graphs SET status = ?1 WHERE id = ?2 AND status = 'pausing'",
+            params![GraphStatus::Running.as_str(), graph_id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Display names of the node runs a pending pause is waiting for: every
+    /// still-`running` (or mutex-`waiting`) run under the graph, resolved to
+    /// its node name, falling back to the raw node id when the node row is
+    /// gone. Empty when nothing is in flight.
+    pub fn pause_waiting_node_names(&self, graph_id: &str) -> Result<Vec<String>> {
+        let mut names = Vec::new();
+        for run in self.list_running_graph_runs(graph_id)? {
+            let name = self
+                .get_graph_node(&run.node_id)?
+                .map(|node| node.name)
+                .unwrap_or(run.node_id);
+            names.push(name);
+        }
+        Ok(names)
+    }
+
     /// Atomically claim `graph_id` for a run by flipping it to `Running`, but
     /// only if it is not *already* `Running` (B42). Returns `true` when this
     /// call won the claim (the graph was fireable and is now `Running`), `false`
@@ -182,7 +215,8 @@ impl Database {
         let rows = conn.execute(
             "UPDATE graphs
              SET status = ?1,
-                 started_at = COALESCE(?2, started_at)
+                 started_at = COALESCE(?2, started_at),
+                 blocker = NULL
              WHERE id = ?3 AND status != ?1",
             params![
                 GraphStatus::Running.as_str(),
@@ -215,16 +249,129 @@ impl Database {
         Ok(rows > 0)
     }
 
-    /// Reset a graph back to `Draft` (the status `graph_run` accepts) and clear
+    /// The idea an idea-driven run of `graph_id` last ran with (`None` for a
+    /// graph that never ran with an idea, or is spec-driven). Read straight
+    /// from the row — there is deliberately no `Graph` field for it (cf.
+    /// `is_graph_hook_launched`), so only the resume paths that need it pay
+    /// for the read.
+    pub fn graph_active_run_idea(&self, graph_id: &str) -> Result<Option<String>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let mut stmt = conn.prepare("SELECT active_run_idea FROM graphs WHERE id = ?1")?;
+        let mut rows = stmt.query(params![graph_id])?;
+        match rows.next()? {
+            Some(row) => Ok(row.get::<_, Option<String>>(0)?),
+            None => Ok(None),
+        }
+    }
+
+    /// Persist the idea a run against `graph_id` is executing (called once
+    /// when the run starts — a resumed run re-persists the same value).
+    /// Returns whether the graph row existed.
+    pub fn set_graph_active_run_idea(&self, graph_id: &str, idea: Option<&str>) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let rows = conn.execute(
+            "UPDATE graphs SET active_run_idea = ?1 WHERE id = ?2",
+            params![idea, graph_id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// The workdir a run against `graph_id` was launched with: the override
+    /// it ran with, or the stored workdir when none was given (`None` for a
+    /// graph that never ran since the column shipped). Read straight from
+    /// the row — there is deliberately no `Graph` field for it (cf.
+    /// [`Self::graph_active_run_idea`]), so only the resume/hook/display
+    /// paths that need it pay for the read.
+    pub fn graph_active_run_workdir(&self, graph_id: &str) -> Result<Option<String>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let mut stmt = conn.prepare("SELECT active_run_workdir FROM graphs WHERE id = ?1")?;
+        let mut rows = stmt.query(params![graph_id])?;
+        match rows.next()? {
+            Some(row) => Ok(row.get::<_, Option<String>>(0)?),
+            None => Ok(None),
+        }
+    }
+
+    /// Persist the workdir a run against `graph_id` executes with (called
+    /// once when the run starts — a resumed run re-persists the same value,
+    /// a fresh run overwrites it). Returns whether the graph row existed.
+    pub fn set_graph_active_run_workdir(
+        &self,
+        graph_id: &str,
+        workdir: Option<&str>,
+    ) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let rows = conn.execute(
+            "UPDATE graphs SET active_run_workdir = ?1 WHERE id = ?2",
+            params![workdir, graph_id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// The workdir `graph_id`'s run executes with: the persisted run workdir,
+    /// falling back to `stored` (the graph's own workdir) for legacy rows
+    /// that never persisted one.
+    pub fn graph_run_workdir_or(&self, graph_id: &str, stored: &str) -> String {
+        self.graph_active_run_workdir(graph_id)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| stored.to_string())
+    }
+
+    /// The blocker text a guard pause stored for `graph_id` (`None` when the
+    /// graph is not paused behind a blocker). Read straight from the row —
+    /// there is deliberately no `Graph` field for it (cf.
+    /// [`Self::graph_active_run_idea`]), so only the readers that need it
+    /// pay for the read.
+    pub fn graph_blocker(&self, graph_id: &str) -> Result<Option<String>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let mut stmt = conn.prepare("SELECT blocker FROM graphs WHERE id = ?1")?;
+        let mut rows = stmt.query(params![graph_id])?;
+        match rows.next()? {
+            Some(row) => Ok(row.get::<_, Option<String>>(0)?),
+            None => Ok(None),
+        }
+    }
+
+    /// Persist (or, with `None`, clear) the blocker text for `graph_id`.
+    /// Returns whether the graph row existed.
+    pub fn set_graph_blocker(&self, graph_id: &str, blocker: Option<&str>) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let rows = conn.execute(
+            "UPDATE graphs SET blocker = ?1 WHERE id = ?2",
+            params![blocker, graph_id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Reset a graph back to `Draft` (the status `graph_control` accepts) and clear
     /// `completed_at`, so a `failed` or `completed` graph can be relaunched via
-    /// `graph_reset` + `graph_run` instead of being stuck forever.
+    /// `graph_control` + `graph_control` instead of being stuck forever.
     pub fn reset_graph_status(&self, graph_id: &str) -> Result<bool> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let rows = conn.execute(
-            "UPDATE graphs SET status = ?1, completed_at = NULL WHERE id = ?2",
+            "UPDATE graphs SET status = ?1, completed_at = NULL, blocker = NULL WHERE id = ?2",
             params![GraphStatus::Draft.as_str(), graph_id],
         )?;
         Ok(rows > 0)

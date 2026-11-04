@@ -2,7 +2,7 @@ use super::*;
 
 // ── Legacy MCP tool parameter types (used by backward-compatible tools) ──
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TaskAddParams {
     /// Unique identifier. Lowercase, hyphens, underscores.
     pub id: String,
@@ -25,7 +25,9 @@ pub struct TaskAddParams {
     /// Delivery action: "headless" (default) runs a CLI, or
     /// "send_to_session" delivers the prompt into a live interactive session.
     /// `cli` is ignored when this is "send_to_session".
-    pub action: Option<String>,
+    /// (Named `delivery_action`, not `action`: `action` is the dispatch key
+    /// of the `agent_edit` tool, and one JSON object cannot carry it twice.)
+    pub delivery_action: Option<String>,
     /// Target session *name* for action "send_to_session" (recommended — a
     /// name survives session recovery). Mutually exclusive with
     /// `target_session_id`.
@@ -35,7 +37,7 @@ pub struct TaskAddParams {
     pub target_session_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TaskWatchParams {
     /// Unique identifier for the watcher.
     pub id: String,
@@ -59,14 +61,16 @@ pub struct TaskWatchParams {
     pub timeout_minutes: Option<u32>,
     /// Delivery action: "headless" (default) runs a CLI, or
     /// "send_to_session" delivers the prompt into a live interactive session.
-    pub action: Option<String>,
+    /// (Named `delivery_action`, not `action`: `action` is the dispatch key
+    /// of the `agent_edit` tool, and one JSON object cannot carry it twice.)
+    pub delivery_action: Option<String>,
     /// Target session *name* for action "send_to_session".
     pub target_session_name: Option<String>,
     /// Target session *id* for action "send_to_session".
     pub target_session_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TaskUpdateParams {
     /// ID of the agent to update.
     pub id: String,
@@ -104,11 +108,13 @@ pub struct TaskUpdateParams {
     /// Opt this agent into a desktop toast on every *successful* run. When
     /// false (the default), successful scheduled/watch runs stay silent and
     /// only failures notify — so a frequent agent can't spam notifications.
-    /// Manual `agent_run` executions always report success regardless.
+    /// Manual `agent_edit` `run` executions always report success regardless.
     pub notify_on_success: Option<bool>,
     /// Set the delivery action: "headless" runs a CLI, "send_to_session"
     /// delivers the prompt into a live interactive session.
-    pub action: Option<String>,
+    /// (Named `delivery_action`, not `action`: `action` is the dispatch key
+    /// of the `agent_edit` tool, and one JSON object cannot carry it twice.)
+    pub delivery_action: Option<String>,
     /// Target session *name* for action "send_to_session".
     pub target_session_name: Option<String>,
     /// Target session *id* for action "send_to_session".
@@ -117,7 +123,7 @@ pub struct TaskUpdateParams {
 
 // ── Shared parameter types ─────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TaskLogsParams {
     /// Agent ID.
     pub id: String,
@@ -127,13 +133,13 @@ pub struct TaskLogsParams {
     pub since: Option<String>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct IdParam {
     /// Agent ID.
     pub id: String,
 }
 
-#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TaskModelsParams {
     /// Optional platform/CLI name (e.g. "opencode", "claude") to return only
     /// the models available to that configured platform. Omit for the full
@@ -158,7 +164,7 @@ pub struct TaskModelsParams {
     pub full: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentScheduleEnableParams {
     /// Agent ID.
     pub id: String,
@@ -192,7 +198,7 @@ where
     Deserialize::deserialize(deserializer).map(Some)
 }
 
-#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentProbeParams {
     /// Platform to probe (e.g. "claude"). Omit to probe every platform
     /// configured in canopy, each with its own default model.
@@ -211,7 +217,7 @@ pub struct AgentProbeParams {
     pub timeout_seconds: Option<u64>,
 }
 
-#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentProbeRecentParams {
     /// Seconds to wait for each response. Defaults to 30, clamped to [5, 120].
     #[serde(default)]

@@ -311,7 +311,7 @@ impl Database {
     }
 
     /// Ensemble ids bound to a crew, each with its graph's status string.
-    /// Used by `crew_update`'s eager sync to skip running/pausing graphs.
+    /// Used by `crew update`'s eager sync to skip running/pausing graphs.
     pub fn crew_bound_ensembles(&self, name: &str) -> Result<Vec<(String, String)>> {
         let rows: Vec<(String, Option<String>, Option<String>)> = {
             let conn = self
@@ -367,7 +367,7 @@ impl Database {
             .query_row(
                 "SELECT 1 FROM graph_runs
                  WHERE node_id IN (SELECT node_id FROM ensemble_members WHERE ensemble_id = ?1)
-                   AND status = 'running'
+                   AND status IN ('running', 'waiting')
                  LIMIT 1",
                 params![ensemble_id],
                 |row| row.get(0),
@@ -393,7 +393,7 @@ impl Database {
             .optional()?)
     }
 
-    /// CM49 requirement 5, the one sync function the engine and `crew_update`
+    /// CM49 requirement 5, the one sync function the engine and `crew update`
     /// share. Rewrites a bound ensemble's member rows from its crew when the
     /// applied version is stale, then stores the applied version and clamps
     /// `min_pass`. NEVER runs while a member of the ensemble is in flight —
@@ -475,7 +475,7 @@ impl Database {
         let mut new_nodes = Vec::with_capacity(crew_members.len());
         // New member nodes (a fresh or growing binding) continue the scope's
         // position sequence after every existing node, exactly as
-        // `graph_add_ensemble`'s append convention does — never colliding with
+        // `graph_ensemble`'s append convention does — never colliding with
         // a plain node already in the graph.
         let mut next_position = self
             .scope_max_node_position(ensemble.spec_id.as_deref(), ensemble.graph_id.as_deref())?
@@ -700,6 +700,7 @@ mod tests {
         .ok();
         let now = chrono::Utc::now();
         let ensemble = Ensemble {
+            mutex: Vec::new(),
             id: id.to_string(),
             spec_id: Some(spec_id.clone()),
             graph_id: None,

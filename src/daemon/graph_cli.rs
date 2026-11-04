@@ -9,8 +9,8 @@
 //! `list`/`info` already do — see [`resolve_graph`]) but then delegates the
 //! actual mutation to the daemon's MCP tool of the same name via
 //! `daemon::cli_daemon::call_tool`, never touching the database itself.
-//! This is the second surface for the operations `graph_import`/`graph_run`/
-//! `graph_pause`/`graph_continue`/`graph_reset`/`graph_schedule_autorun` already
+//! This is the second surface for the operations `graph_edit`/`graph_control`/
+//! `graph_control`/`graph_control`/`graph_control`/`graph_control` already
 //! expose over MCP — for when an MCP client can't reach them but the daemon
 //! and its database still can.
 
@@ -25,7 +25,9 @@ use crate::domain::graphs::GraphStatus;
 use crew::handle_graph_crew;
 use format::{current_spec_name, format_autorun_compact, graph_progress, short_id, status_icon};
 use info::handle_graph_info;
+use install::{handle_graph_install, InstallArgs};
 use resolve::resolve_graph;
+use validate::handle_graph_validate;
 
 #[cfg(test)]
 use crate::daemon::handler::{active_graph_spec_context, ActiveGraphSpec};
@@ -49,7 +51,9 @@ use resolve::{ambiguous_error, candidate_list, not_found_error};
 mod crew;
 pub(crate) mod format;
 mod info;
+mod install;
 mod resolve;
+mod validate;
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum GraphAction {
@@ -86,6 +90,21 @@ pub(crate) enum GraphAction {
         /// Graph name to use instead of the file's own name.
         #[arg(long)]
         name: Option<String>,
+    },
+    /// Install a graph from the catalogue in one command — fetch the
+    /// published document for the ref and import it as a new graph.
+    Install {
+        #[command(flatten)]
+        args: InstallArgs,
+    },
+    /// Validate a shared graph or node document without importing it —
+    /// no database access, no workdir needed.
+    Validate {
+        /// Path to the graph or node JSON file.
+        path: String,
+        /// Print the report as JSON instead of human-readable lines.
+        #[arg(long)]
+        json: bool,
     },
     /// Run a graph in the background, spec by spec.
     Run {
@@ -218,10 +237,16 @@ pub(crate) async fn handle_graph_action(
     action: GraphAction,
     port_override: Option<u16>,
 ) -> Result<()> {
+    // Validate touches neither the database nor the daemon — handle it
+    // before the data dir (and its side effects) come into play.
+    if let GraphAction::Validate { path, json } = &action {
+        return handle_graph_validate(path, *json);
+    }
     let data_dir = crate::ensure_data_dir()?;
     let db = Database::new_safe(&database_path(&data_dir), &data_dir)?;
 
     match action {
+        GraphAction::Validate { .. } => unreachable!("handled above"),
         GraphAction::List { workdir } => handle_graph_list(&db, workdir.as_deref()),
         GraphAction::Info { id_or_name } => handle_graph_info(&db, &id_or_name),
         GraphAction::Export { id_or_name, output } => {
@@ -232,6 +257,7 @@ pub(crate) async fn handle_graph_action(
             workdir,
             name,
         } => handle_graph_import(port_override, &path, workdir, name),
+        GraphAction::Install { args } => handle_graph_install(port_override, args),
         GraphAction::Run {
             id_or_name,
             queue,
@@ -345,9 +371,10 @@ fn query_graph_events(
     if let Some(spec) = spec {
         args["spec_id"] = serde_json::json!(spec);
     }
-    let text = call_tool(port_override, "graph_events", &args)?;
+    args["action"] = serde_json::json!("events");
+    let text = call_tool(port_override, "graph", &args)?;
     let value: serde_json::Value = serde_json::from_str(&text)
-        .with_context(|| format!("unexpected graph_events response: {text}"))?;
+        .with_context(|| format!("unexpected graph events response: {text}"))?;
     Ok(value["events"].as_array().cloned().unwrap_or_default())
 }
 
@@ -446,8 +473,9 @@ fn handle_graph_run(
     if let Some(node) = from {
         args["start_node_id"] = serde_json::json!(node);
     }
+    args["action"] = serde_json::json!("run");
 
-    println!("{}", call_tool(port_override, "graph_run", &args)?);
+    println!("{}", call_tool(port_override, "graph_control", &args)?);
     Ok(())
 }
 
@@ -459,8 +487,8 @@ fn handle_graph_pause(db: &Database, port_override: Option<u16>, id_or_name: &st
         "{}",
         call_tool(
             port_override,
-            "graph_pause",
-            &serde_json::json!({ "graph_id": lp.id }),
+            "graph_control",
+            &serde_json::json!({ "action": "pause", "graph_id": lp.id }),
         )?
     );
     Ok(())
@@ -478,8 +506,9 @@ fn handle_graph_remove_spec(
         "{}",
         call_tool(
             port_override,
-            "graph_remove_spec",
+            "graph_edit",
             &serde_json::json!({
+                "action": "detach_spec",
                 "graph_id": lp.id,
                 "spec_id": spec_id,
             }),
@@ -507,12 +536,12 @@ fn handle_graph_continue(
             ));
         }
         let mut args = serde_json::json!({
-            "graph_id": lp.id, "action": "run_from_node", "node_id": node
+            "graph_id": lp.id, "action": "continue", "mode": "run_from_node", "node_id": node
         });
         if let Some(spec) = spec {
             args["spec_id"] = serde_json::json!(spec);
         }
-        println!("{}", call_tool(port_override, "graph_continue", &args)?);
+        println!("{}", call_tool(port_override, "graph_control", &args)?);
         return Ok(());
     }
 
@@ -535,8 +564,8 @@ fn handle_graph_continue(
         "{}",
         call_tool(
             port_override,
-            "graph_continue",
-            &serde_json::json!({ "graph_id": lp.id, "action": action }),
+            "graph_control",
+            &serde_json::json!({ "graph_id": lp.id, "action": "continue", "mode": action }),
         )?
     );
     Ok(())
@@ -566,7 +595,8 @@ fn handle_graph_reset(
         args["clear_notes"] = serde_json::json!(true);
     }
 
-    println!("{}", call_tool(port_override, "graph_reset", &args)?);
+    args["action"] = serde_json::json!("reset");
+    println!("{}", call_tool(port_override, "graph_control", &args)?);
     Ok(())
 }
 
@@ -619,7 +649,7 @@ fn handle_graph_export(db: &Database, id_or_name: &str, output: Option<&str>) ->
 
 /// Import creates a new graph, which needs the daemon's own side effects
 /// (project path registration, trigger activation) — so unlike `export`
-/// this delegates to the daemon's `graph_import` MCP tool rather than
+/// this delegates to the daemon's `graph_edit` MCP tool rather than
 /// writing to the database directly (see module doc: every mutation goes
 /// through the daemon).
 fn handle_graph_import(
@@ -631,7 +661,7 @@ fn handle_graph_import(
     let raw = std::fs::read_to_string(path).with_context(|| format!("could not read '{path}'"))?;
     // Validated locally first so a malformed file (bad JSON, missing
     // format_version) fails fast with a clear message instead of a round
-    // trip to the daemon — `graph_import` re-validates it anyway (decision
+    // trip to the daemon — `graph_edit` re-validates it anyway (decision
     // 5), so this is a UX nicety, not the source of truth.
     let document = crate::domain::graph_transfer::parse_export_document_str(&raw)
         .map_err(|e| anyhow!("'{path}': {e}"))?;
@@ -649,8 +679,9 @@ fn handle_graph_import(
     if let Some(name) = name {
         args["name"] = serde_json::json!(name);
     }
+    args["action"] = serde_json::json!("import");
 
-    println!("{}", call_tool(port_override, "graph_import", &args)?);
+    println!("{}", call_tool(port_override, "graph_edit", &args)?);
     Ok(())
 }
 
@@ -687,11 +718,10 @@ fn handle_graph_autorun(
     } else {
         serde_json::json!({ "graph_id": lp.id, "quota_reset_message": quota_reset_message })
     };
+    let mut args = args;
+    args["action"] = serde_json::json!("schedule_autorun");
 
-    println!(
-        "{}",
-        call_tool(port_override, "graph_schedule_autorun", &args)?
-    );
+    println!("{}", call_tool(port_override, "graph_control", &args)?);
     Ok(())
 }
 
@@ -1383,7 +1413,7 @@ mod tests {
     #[test]
     fn format_autorun_compact_renders_utc_badge() {
         let at = DateTime::<Utc>::from_timestamp(5 * 3600, 0).unwrap(); // 05:00:00 UTC
-        assert_eq!(format_autorun_compact(at), "⏲ 05:00Z");
+        assert_eq!(format_autorun_compact(at), "◷ 05:00Z");
     }
 
     #[test]
@@ -1435,7 +1465,7 @@ mod tests {
     fn run_status_icon_error_is_warning_not_fail() {
         let icon = run_status_icon(GraphRunStatus::Error, None);
         assert!(
-            icon.contains("⚠"),
+            icon.contains("▲"),
             "Error must render a warning icon, got {icon:?}"
         );
         assert!(!icon.contains("✗"), "Error must not render the fail icon");
@@ -1723,7 +1753,7 @@ mod tests {
 
         let calls = fake.recorded_calls();
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0]["name"], "graph_run");
+        assert_eq!(calls[0]["name"], "graph_control");
         assert_eq!(calls[0]["arguments"]["graph_id"], "graph-1");
         assert_eq!(calls[0]["arguments"]["queue_id"], "q1");
     }
@@ -1751,7 +1781,7 @@ mod tests {
         handle_graph_pause(&db, Some(port), "graph-1").expect("pause should succeed");
 
         let calls = fake.recorded_calls();
-        assert_eq!(calls[0]["name"], "graph_pause");
+        assert_eq!(calls[0]["name"], "graph_control");
         assert_eq!(calls[0]["arguments"]["graph_id"], "graph-1");
     }
 
@@ -1768,7 +1798,9 @@ mod tests {
             .expect("should succeed");
 
         let calls = fake.recorded_calls();
-        assert_eq!(calls[0]["arguments"]["action"], "retry_current_node");
+        assert_eq!(calls[0]["name"], "graph_control");
+        assert_eq!(calls[0]["arguments"]["action"], "continue");
+        assert_eq!(calls[0]["arguments"]["mode"], "retry_current_node");
     }
 
     #[test]
@@ -1784,7 +1816,9 @@ mod tests {
             .expect("should succeed");
 
         let calls = fake.recorded_calls();
-        assert_eq!(calls[0]["arguments"]["action"], "skip_next_spec");
+        assert_eq!(calls[0]["name"], "graph_control");
+        assert_eq!(calls[0]["arguments"]["action"], "continue");
+        assert_eq!(calls[0]["arguments"]["mode"], "skip_next_spec");
     }
 
     #[test]
@@ -1826,7 +1860,7 @@ mod tests {
         .expect("reset should succeed");
 
         let calls = fake.recorded_calls();
-        assert_eq!(calls[0]["name"], "graph_reset");
+        assert_eq!(calls[0]["name"], "graph_control");
         assert_eq!(calls[0]["arguments"]["graph_id"], "graph-1");
         assert_eq!(
             calls[0]["arguments"]["specs"],
@@ -1889,7 +1923,7 @@ mod tests {
 
         let raw = std::fs::read_to_string(&out_path).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(doc["format_version"], 5);
+        assert_eq!(doc["format_version"], 6);
         assert_eq!(doc["name"], "my-graph");
         assert_eq!(doc["nodes"][0]["config"]["platform"], "claude");
         // No model stored (platform default): exported as explicit null.
@@ -1904,7 +1938,7 @@ mod tests {
         assert!(err.to_string().contains("No graph matches"));
     }
 
-    /// Import delegates to the daemon's `graph_import` MCP tool — unlike
+    /// Import delegates to the daemon's `graph_edit` MCP tool — unlike
     /// export, it has state-changing side effects (project registration,
     /// trigger activation) that only the running daemon can perform.
     #[test]
@@ -1939,7 +1973,7 @@ mod tests {
         .expect("import should succeed");
 
         let calls = fake.recorded_calls();
-        assert_eq!(calls[0]["name"], "graph_import");
+        assert_eq!(calls[0]["name"], "graph_edit");
         assert_eq!(calls[0]["arguments"]["workdir"], "/tmp/target");
         assert_eq!(calls[0]["arguments"]["name"], "Custom Name");
         assert_eq!(calls[0]["arguments"]["document"]["name"], "Shared Graph");
@@ -1960,6 +1994,48 @@ mod tests {
         let err =
             handle_graph_import(Some(65535), file_path.to_str().unwrap(), None, None).unwrap_err();
         assert!(err.to_string().contains("format_version"));
+    }
+
+    /// Validate is fully local: no database, no daemon — a valid file
+    /// succeeds with no fake daemon spawned.
+    #[test]
+    fn handle_graph_validate_accepts_valid_document_without_a_daemon() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("node.json");
+        std::fs::write(
+            &file_path,
+            serde_json::json!({
+                "format_version": 1,
+                "name": "auditor",
+                "kind": "agent",
+                "config": {"prompt_template": "audit this"},
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        handle_graph_validate(file_path.to_str().unwrap(), false).expect("valid doc passes");
+        handle_graph_validate(file_path.to_str().unwrap(), true).expect("json mode passes");
+    }
+
+    #[test]
+    fn handle_graph_validate_rejects_invalid_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("node.json");
+        std::fs::write(
+            &file_path,
+            serde_json::json!({
+                "format_version": 1,
+                "name": "Not A Slug!",
+                "kind": "agent",
+                "config": {"prompt_template": "audit this"},
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let err = handle_graph_validate(file_path.to_str().unwrap(), false).unwrap_err();
+        assert!(err.to_string().contains("not a valid shared document"));
     }
 
     #[test]

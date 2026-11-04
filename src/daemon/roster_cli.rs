@@ -56,11 +56,11 @@ pub(crate) enum RosterAction {
 pub async fn handle_roster_action(action: RosterAction, port_override: Option<u16>) -> Result<()> {
     match action {
         RosterAction::List { platform } => {
-            let mut args = serde_json::json!({});
+            let mut args = serde_json::json!({ "action": "roster_list" });
             if let Some(platform) = platform {
                 args["platform"] = serde_json::json!(platform);
             }
-            print_tool(port_override, "roster_list", &args)
+            print_tool(port_override, "harness", &args)
         }
         RosterAction::Set {
             platform,
@@ -71,7 +71,8 @@ pub async fn handle_roster_action(action: RosterAction, port_override: Option<u1
             until,
         } => {
             let state = resolve_state(available, unavailable)?;
-            let mut args = serde_json::json!({ "platform": platform, "state": state });
+            let mut args =
+                serde_json::json!({ "action": "roster_set", "platform": platform, "state": state });
             if let Some(pattern) = model_pattern {
                 args["model_pattern"] = serde_json::json!(pattern);
             }
@@ -81,24 +82,24 @@ pub async fn handle_roster_action(action: RosterAction, port_override: Option<u1
             if let Some(until) = until {
                 args["until"] = serde_json::json!(until);
             }
-            print_tool(port_override, "roster_set", &args)
+            print_tool(port_override, "harness", &args)
         }
         RosterAction::Clear {
             platform,
             model_pattern,
         } => {
-            let mut args = serde_json::json!({ "platform": platform });
+            let mut args = serde_json::json!({ "action": "roster_clear", "platform": platform });
             if let Some(pattern) = model_pattern {
                 args["model_pattern"] = serde_json::json!(pattern);
             }
-            print_tool(port_override, "roster_clear", &args)
+            print_tool(port_override, "harness", &args)
         }
         RosterAction::Check { platform, model } => {
-            let mut args = serde_json::json!({ "platform": platform });
+            let mut args = serde_json::json!({ "action": "roster_check", "platform": platform });
             if let Some(model) = model {
                 args["model"] = serde_json::json!(model);
             }
-            print_tool(port_override, "roster_check", &args)
+            print_tool(port_override, "harness", &args)
         }
     }
 }
@@ -189,7 +190,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_calls_roster_set_with_state_string() {
+    async fn set_calls_harness_roster_set_with_state_string() {
         let fake = spawn_fake_daemon(serde_json::json!({
             "content": [{"type": "text", "text": "ok"}],
             "isError": false
@@ -206,7 +207,8 @@ mod tests {
         handle_roster_action(action, Some(port)).await.unwrap();
 
         let calls = fake.recorded_calls();
-        assert_eq!(calls[0]["name"], "roster_set");
+        assert_eq!(calls[0]["name"], "harness");
+        assert_eq!(calls[0]["arguments"]["action"], "roster_set");
         assert_eq!(calls[0]["arguments"]["platform"], "opencode-go");
         assert_eq!(calls[0]["arguments"]["model_pattern"], "opencode-go/*");
         assert_eq!(calls[0]["arguments"]["state"], "unavailable");
@@ -215,7 +217,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn check_calls_roster_check() {
+    async fn check_calls_harness_roster_check() {
         let fake = spawn_fake_daemon(serde_json::json!({
             "content": [{"type": "text", "text": "{\"available\":true}"}],
             "isError": false
@@ -228,7 +230,8 @@ mod tests {
         handle_roster_action(action, Some(port)).await.unwrap();
 
         let calls = fake.recorded_calls();
-        assert_eq!(calls[0]["name"], "roster_check");
+        assert_eq!(calls[0]["name"], "harness");
+        assert_eq!(calls[0]["arguments"]["action"], "roster_check");
         assert_eq!(calls[0]["arguments"]["platform"], "claude");
         assert_eq!(calls[0]["arguments"]["model"], "opus");
     }

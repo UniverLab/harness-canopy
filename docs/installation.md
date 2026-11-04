@@ -29,6 +29,8 @@ curl -fsSL https://raw.githubusercontent.com/UniverLab/harness-canopy/main/scrip
 cargo install harness-canopy
 ```
 
+This build leaves out two patched dependencies that the release binaries carry, because cargo ignores `[patch]` in published crates. Without them, remote control can drop over a relay, so prefer the install script.
+
 The crate is `harness-canopy`; the installed binary is **`canopy`**.
 Available on [crates.io](https://crates.io/crates/harness-canopy).
 
@@ -98,6 +100,11 @@ is a percentage of the machine's physical memory, so the unit stays portable.
 (the systemd default for a unit written before this), naming the reinstall
 that fixes it.
 
+The generated unit also carries `CPUQuota=` from the
+`daemon.cpu_quota_percent` setting (half the host's logical CPUs by
+default; `0` disables it), so graph work can never saturate every core of
+the host — see [CPU quota cap](graphs-isolation.md#cpu-quota-cap).
+
 `canopy daemon start` and `canopy daemon restart` compare the unit's
 `ExecStart` with the `canopy` binary running the command. When it names a
 different or already-removed binary — a unit left behind by an older
@@ -125,6 +132,8 @@ All state lives under `~/.canopy/`:
 | Terminal history | `~/.canopy/terminals/<name>/history.toml` | TOML |
 | Configuration | `~/.canopy/config.toml` | TOML |
 | Agent logs | `~/.canopy/logs/<id>.log` | Text (5 MB rotation) |
+| TUI log | `~/.canopy/logs/tui.log` | Text (append-only) |
+| TUI panic log | `~/.canopy/logs/tui-panic.log` | Text (append-only) |
 | Daemon log | `~/.canopy/daemon.log` | Text |
 
 Each `[[clis]]` entry in `~/.canopy/config.toml` may also carry the
@@ -136,8 +145,8 @@ ensemble/member/node overrides win; see docs/graphs.md.
 An entry may also declare a binary identity check: `identity_args` (an
 argv array, e.g. `["--version"]`) plus `identity_pattern` (a regex the
 combined stdout+stderr must match). When both are set, every surface that
-resolves the binary — `agent_probe`, node dispatch, `agent_add` /
-`agent_watch` validation and `canopy doctor` — runs
+resolves the binary — `harness` `probe`, node dispatch, `agent_edit` `add` /
+`agent_edit` `watch` validation and `canopy doctor` — runs
 `<binary> <identity_args>` once per path+mtime (5 s timeout) and reports
 the platform as **not installed**
 (`<platform>: '<path>' is not <name> (identity check failed: …)`) on a
@@ -148,12 +157,12 @@ A platform whose CLI has no headless/print mode (e.g. `freebuff`) declares
 `headless = false`. Such a platform stays available for live interactive
 sessions and appears in `canopy doctor` and the new-session picker marked
 **interactive only**, but canopy refuses to use it anywhere a headless run
-is required: `graph_add_node` / `graph_update_node`, ensemble members,
-`agent_add`, and `agent_probe` (reported `interactive_only`, nothing
+is required: `graph_node` `add` / `graph_node` `update`, ensemble members,
+`agent_edit` `add`, and `harness` `probe` (reported `interactive_only`, nothing
 spawned) all reject it with
 `platform '<name>' is interactive-only (no headless mode)`, and
-`agent_models` returns an empty list with that reason instead of
-enumerating. `graph_preflight` flags every existing node that uses one.
+`harness` `models` returns an empty list with that reason instead of
+enumerating. `graph_control` `preflight` flags every existing node that uses one.
 Omit the field — the default is `true` — and the platform behaves exactly
 as before.
 
@@ -169,7 +178,9 @@ watchers, daemon process, registry connectivity and auto-update health.
 The database has a daily routine: a full integrity check and foreign-key
 check, then one verified backup written with `VACUUM INTO`, replacing the
 previous backup. It runs only while the daemon is idle (no graph running, no TUI
-attached). A busy daemon defers it, and after 72 hours of deferral it runs
+attached). Sessions whose process is already gone are reconciled shut first —
+at daemon startup and before each check — so stale rows never block it. A
+busy daemon defers it, and after 72 hours of deferral it runs
 anyway. `canopy doctor` reports the routine's last outcome, the backup and
 its age, and how many times it has been deferred, and warns when it has never
 completed. To run the check and backup now:

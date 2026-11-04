@@ -202,6 +202,7 @@ fn ensemble_member_status_tag(
         Some(GraphRunStatus::Interrupted) => ("[interrupted]", theme.status_fail),
         Some(GraphRunStatus::Error) => ("[error]", theme.status_interrupted),
         Some(GraphRunStatus::Running) => ("[running]", theme.status_running),
+        Some(GraphRunStatus::Waiting) => ("[waiting]", theme.status_running),
         None => ("[pending]", theme.dim_text),
     }
 }

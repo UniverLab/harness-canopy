@@ -1,7 +1,7 @@
 //! `canopy registry` — apply the platform registry to `config.toml` without
 //! the TUI. Registry fixes used to ship only through the 24-hour background
 //! refresh inside the TUI's startup path, which left operators hand-editing
-//! `config.toml`; this command (and the `registry_refresh` MCP tool) is the
+//! `config.toml`; this command (and the `harness refresh_registry` action) is the
 //! missing on-demand surface. It shares the exact merge path the TUI uses
 //! ([`super::registry_fetch::refresh_registry_inner`]), rewrites only
 //! `config.toml` and the baseline file, and never starts a TUI, wizard or

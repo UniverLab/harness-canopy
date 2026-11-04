@@ -20,6 +20,91 @@ pub struct InteractiveSession {
     /// Machine boot id recorded when the session started (see
     /// `system::boot_id`). NULL for rows written before this column existed.
     pub boot_id: Option<String>,
+    /// The harness's own conversation identifier (Claude Code session /
+    /// transcript id, opencode session id, muse resume id). A later
+    /// registration carrying the same value is the same conversation resumed,
+    /// so it reuses this row instead of minting a new id and name. NULL for
+    /// rows written before this column existed and for registrations that
+    /// carry no harness identifier.
+    pub harness_conversation_id: Option<String>,
+}
+
+/// Every column [`InteractiveSession`] needs, in the order
+/// `session_from_row` reads them.
+const SESSION_COLUMNS: &str = "id, name, cli, working_dir, args, started_at, status, \
+     session_type, pid, boot_id, harness_conversation_id";
+
+/// Ids of `active`/`resumed` rows whose process is already gone, per
+/// [`crate::system::session_process_is_live`]. Split out so the reconcile
+/// update borrows no live statement while it writes.
+fn stale_interactive_session_ids(
+    conn: &rusqlite::Connection,
+    current_boot_id: Option<&str>,
+) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, pid, boot_id FROM interactive_sessions
+         WHERE status IN ('active', 'resumed')",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows
+        .into_iter()
+        .filter(|(_, pid, boot_id)| {
+            !crate::system::session_process_is_live(*pid, boot_id.as_deref(), current_boot_id)
+        })
+        .map(|(id, _, _)| id)
+        .collect())
+}
+
+fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<InteractiveSession> {
+    Ok(InteractiveSession {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        cli: row.get(2)?,
+        working_dir: row.get(3)?,
+        args: row.get(4)?,
+        started_at: row.get(5)?,
+        status: row.get(6)?,
+        session_type: row.get(7)?,
+        pid: row.get(8)?,
+        boot_id: row.get(9)?,
+        harness_conversation_id: row.get(10)?,
+    })
+}
+
+/// The values needed to register (or re-register) an interactive session.
+/// Bundled in a struct so the registration call stays under the argument
+/// limit without a lint exception.
+pub struct SessionRegistration<'a> {
+    pub id: &'a str,
+    pub name: &'a str,
+    pub cli: &'a str,
+    pub working_dir: &'a str,
+    pub args: Option<&'a str>,
+    pub pid: Option<i64>,
+    pub session_type: &'a str,
+    pub boot_id: Option<&'a str>,
+    /// Harness conversation identifier, when the caller knows it.
+    pub harness_conversation_id: Option<&'a str>,
+    /// A resume relaunch: reactivate the existing row without rewriting its
+    /// recorded launch args (see [`Database::reactivate_keep_args`]).
+    pub preserve_args: bool,
+}
+
+/// Outcome of [`Database::register_interactive_session`]: either an earlier
+/// row for the same harness conversation was reactivated, or a new row was
+/// inserted under the supplied identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegistrationOutcome {
+    Reactivated { id: String, name: String },
+    Inserted,
 }
 
 #[allow(dead_code)]
@@ -45,6 +130,10 @@ impl Database {
         session_type: &str,
         boot_id: Option<&str>,
     ) -> Result<()> {
+        // A sandboxed workdir registers under the original project path — a
+        // sandbox never registers itself as a project (mapping locks the
+        // connection, so it must happen before this function takes it).
+        let working_dir = self.map_workdir_out_of_sandbox(working_dir)?;
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         conn.execute(
             "INSERT OR REPLACE INTO interactive_sessions (id, name, cli, working_dir, args, started_at, status, session_type, pid, boot_id)
@@ -52,6 +141,263 @@ impl Database {
             params![id, name, cli, working_dir, args, Utc::now().to_rfc3339(), session_type, pid, boot_id],
         )?;
         Ok(())
+    }
+
+    /// Find the earlier session row for a harness conversation, if canopy has
+    /// ever recorded it. Matched strictly on the harness's own conversation
+    /// identifier — never on workdir, model or timing — so two sessions in the
+    /// same directory stay distinct. Bridge sidecars are excluded (proxies,
+    /// never resumable conversations) and any status matches: a conversation
+    /// being resumed is usually `completed`, `error` or `resumed` by then.
+    /// Most recent row wins if history ever holds more than one.
+    pub fn find_session_by_harness_id(
+        &self,
+        harness_id: &str,
+    ) -> Result<Option<InteractiveSession>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {SESSION_COLUMNS} FROM interactive_sessions
+             WHERE harness_conversation_id = ?1 AND session_type != 'bridge'
+             ORDER BY started_at DESC LIMIT 1",
+        ))?;
+        let found = match stmt.query_row(params![harness_id], session_from_row) {
+            Ok(session) => Some(session),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(e.into()),
+        };
+        Ok(found)
+    }
+
+    /// Fetch one interactive session row by its canopy id (`None` when no such
+    /// row). Any status matches: a resume relaunches a finished session, and
+    /// the caller — not this lookup — decides what the row's state means.
+    pub fn get_interactive_session(&self, id: &str) -> Result<Option<InteractiveSession>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {SESSION_COLUMNS} FROM interactive_sessions WHERE id = ?1",
+        ))?;
+        let found = match stmt.query_row(params![id], session_from_row) {
+            Ok(session) => Some(session),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(e.into()),
+        };
+        Ok(found)
+    }
+
+    /// Rename one interactive session row. Only a resume that had to take a
+    /// fresh name (its source name was held by another live session) renames:
+    /// every other path keeps the name so hooks and scheduled sends addressed
+    /// to it keep resolving.
+    pub fn rename_interactive_session(&self, id: &str, new_name: &str) -> Result<()> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        conn.execute(
+            "UPDATE interactive_sessions SET name = ?1 WHERE id = ?2",
+            params![new_name, id],
+        )?;
+        Ok(())
+    }
+
+    /// Reactivate an existing session row in place, for a harness conversation
+    /// that came back: the row keeps its id, name and `session_type`, and only
+    /// the liveness fields move (pid, workdir, args, boot id, and `started_at`,
+    /// which doubles as last-seen). Never writes the name, so a hook or
+    /// scheduled send addressed to it keeps resolving.
+    pub fn reactivate_interactive_session(
+        &self,
+        id: &str,
+        pid: Option<i64>,
+        working_dir: &str,
+        args: Option<&str>,
+        boot_id: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        conn.execute(
+            "UPDATE interactive_sessions
+                SET status = 'active', pid = ?1, working_dir = ?2, args = ?3, boot_id = ?4,
+                    started_at = ?5
+              WHERE id = ?6",
+            params![pid, working_dir, args, boot_id, Utc::now().to_rfc3339(), id],
+        )?;
+        Ok(())
+    }
+
+    /// [`reactivate_interactive_session`](Self::reactivate_interactive_session),
+    /// but the recorded launch args are left untouched: a resume relaunch
+    /// reactivates the row for liveness only, since the resume command line
+    /// is rebuilt from the stored harness conversation id at every startup
+    /// and must never overwrite the original args.
+    pub fn reactivate_keep_args(
+        &self,
+        id: &str,
+        pid: Option<i64>,
+        working_dir: &str,
+        boot_id: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        conn.execute(
+            "UPDATE interactive_sessions
+                SET status = 'active', pid = ?1, working_dir = ?2, boot_id = ?3,
+                    started_at = ?4
+              WHERE id = ?5",
+            params![pid, working_dir, boot_id, Utc::now().to_rfc3339(), id],
+        )?;
+        Ok(())
+    }
+
+    /// Reactivate the row a registration resolves to, preserving its args
+    /// on the resume path.
+    fn reactivate_existing(
+        &self,
+        registration: &SessionRegistration<'_>,
+        id: &str,
+        working_dir: &str,
+    ) -> Result<()> {
+        if registration.preserve_args {
+            self.reactivate_keep_args(id, registration.pid, working_dir, registration.boot_id)
+        } else {
+            self.reactivate_interactive_session(
+                id,
+                registration.pid,
+                working_dir,
+                registration.args,
+                registration.boot_id,
+            )
+        }
+    }
+
+    /// Record the harness's own conversation identifier on a session row.
+    /// Best-effort by design (the caller never fails on it) and never
+    /// overwrites an identifier already recorded for that row: the first
+    /// identifier a session reports is the conversation it belongs to.
+    pub fn set_session_harness_conversation_id(
+        &self,
+        session_id: &str,
+        harness_id: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        conn.execute(
+            "UPDATE interactive_sessions SET harness_conversation_id = ?1
+              WHERE id = ?2
+                AND (harness_conversation_id IS NULL OR harness_conversation_id = '')",
+            params![harness_id, session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Forget the recorded harness conversation id: a fresh fallback after a
+    /// failed resume is a NEW conversation, and the no-overwrite recorder can
+    /// only store its id once the stale one is gone.
+    pub fn clear_session_harness_conversation_id(&self, session_id: &str) -> Result<()> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        conn.execute(
+            "UPDATE interactive_sessions SET harness_conversation_id = NULL WHERE id = ?1",
+            params![session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Read a session row's exit code, if it finished (`None` while active or
+    /// when the row is gone).
+    pub fn get_session_exit_code(&self, session_id: &str) -> Result<Option<i32>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mut stmt = conn.prepare("SELECT exit_code FROM interactive_sessions WHERE id = ?1")?;
+        let result = stmt.query_row(params![session_id], |row| row.get(0)).ok();
+        Ok(result)
+    }
+
+    /// Attach the failure detail to a session row: the harness's stderr
+    /// tail on a nonzero exit, or the resume guard's explanation. Overwrites
+    /// unconditionally — the latest failure is the one the row shows.
+    pub fn set_session_exit_detail(&self, session_id: &str, detail: &str) -> Result<()> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        conn.execute(
+            "UPDATE interactive_sessions SET exit_detail = ?1 WHERE id = ?2",
+            params![detail, session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Clear a session row's failure detail: a clean exit leaves no
+    /// explanation behind for the next failure to inherit.
+    pub fn clear_session_exit_detail(&self, session_id: &str) -> Result<()> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        conn.execute(
+            "UPDATE interactive_sessions SET exit_detail = NULL WHERE id = ?1",
+            params![session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Read a session row's failure detail, if any was recorded.
+    pub fn get_session_exit_detail(&self, session_id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mut stmt =
+            conn.prepare("SELECT exit_detail FROM interactive_sessions WHERE id = ?1")?;
+        let result = stmt.query_row(params![session_id], |row| row.get(0)).ok();
+        Ok(result)
+    }
+
+    /// Register a freshly launched interactive session, reusing the earlier row
+    /// when the registration carries an id canopy already knows (a resume
+    /// relaunched under its source session's id) or when the harness
+    /// conversation identifier matches one canopy has seen: that row is
+    /// reactivated and its id and name are returned, so the caller adopts
+    /// them instead of a second row appearing for the same conversation. With
+    /// neither, a new row is inserted under the supplied identity.
+    pub fn register_interactive_session(
+        &self,
+        registration: &SessionRegistration<'_>,
+    ) -> Result<RegistrationOutcome> {
+        // A sandboxed workdir resolves to the original project path before
+        // any row is written (mapping locks the connection, so it must run
+        // before this function locks it below).
+        let working_dir = self.map_workdir_out_of_sandbox(registration.working_dir)?;
+        // A resume relaunches the source session's own id: reactivate that
+        // row in place — status, pid, boot id and args move, the id never
+        // does. The name only moves when the spawn had to take a fresh one
+        // (the source name was held by another live session); a carried
+        // harness identifier is recorded but never overwrites the recorded
+        // one. No second row is ever added for the relaunched session.
+        if let Some(existing) = self.get_interactive_session(registration.id)? {
+            self.reactivate_existing(registration, &existing.id, &working_dir)?;
+            if existing.name != registration.name {
+                self.rename_interactive_session(&existing.id, registration.name)?;
+            }
+            if let Some(harness_id) = registration.harness_conversation_id {
+                self.set_session_harness_conversation_id(&existing.id, harness_id)?;
+            }
+            return Ok(RegistrationOutcome::Reactivated {
+                id: existing.id,
+                name: registration.name.to_string(),
+            });
+        }
+        if let Some(harness_id) = registration.harness_conversation_id {
+            if let Some(existing) = self.find_session_by_harness_id(harness_id)? {
+                self.reactivate_existing(registration, &existing.id, &working_dir)?;
+                return Ok(RegistrationOutcome::Reactivated {
+                    id: existing.id,
+                    name: existing.name,
+                });
+            }
+        }
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        conn.execute(
+            "INSERT OR REPLACE INTO interactive_sessions (id, name, cli, working_dir, args, started_at, status, session_type, pid, boot_id, harness_conversation_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?8, ?9, ?10)",
+            params![
+                registration.id,
+                registration.name,
+                registration.cli,
+                working_dir,
+                registration.args,
+                Utc::now().to_rfc3339(),
+                registration.session_type,
+                registration.pid,
+                registration.boot_id,
+                registration.harness_conversation_id,
+            ],
+        )?;
+        Ok(RegistrationOutcome::Inserted)
     }
 
     /// Get launch args for an interactive session by id.
@@ -100,26 +446,13 @@ impl Database {
     /// relaunch `canopy bridge` as if it were a chat session.
     pub fn get_active_sessions(&self) -> Result<Vec<InteractiveSession>> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
-        let mut stmt = conn.prepare(
-            "SELECT id, name, cli, working_dir, args, started_at, status, session_type, pid, boot_id
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {SESSION_COLUMNS}
              FROM interactive_sessions WHERE status = 'active' AND session_type != 'bridge'
              ORDER BY started_at DESC",
-        )?;
+        ))?;
         let rows = stmt
-            .query_map([], |row| {
-                Ok(InteractiveSession {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    cli: row.get(2)?,
-                    working_dir: row.get(3)?,
-                    args: row.get(4)?,
-                    started_at: row.get(5)?,
-                    status: row.get(6)?,
-                    session_type: row.get(7)?,
-                    pid: row.get(8)?,
-                    boot_id: row.get(9)?,
-                })
-            })?
+            .query_map([], session_from_row)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -139,26 +472,13 @@ impl Database {
     /// `session_list` surface.
     pub fn list_hookable_sessions(&self, limit: i64) -> Result<Vec<InteractiveSession>> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
-        let mut stmt = conn.prepare(
-            "SELECT id, name, cli, working_dir, args, started_at, status, session_type, pid, boot_id
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {SESSION_COLUMNS}
              FROM interactive_sessions WHERE status = 'active' AND session_type != 'bridge'
              ORDER BY started_at DESC LIMIT ?1",
-        )?;
+        ))?;
         let rows = stmt
-            .query_map(params![limit], |row| {
-                Ok(InteractiveSession {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    cli: row.get(2)?,
-                    working_dir: row.get(3)?,
-                    args: row.get(4)?,
-                    started_at: row.get(5)?,
-                    status: row.get(6)?,
-                    session_type: row.get(7)?,
-                    pid: row.get(8)?,
-                    boot_id: row.get(9)?,
-                })
-            })?
+            .query_map(params![limit], session_from_row)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -169,24 +489,11 @@ impl Database {
     /// clear not-found. Read-only; touches no PTY and wakes no session.
     pub fn get_hookable_session(&self, id: &str) -> Result<Option<InteractiveSession>> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
-        let mut stmt = conn.prepare(
-            "SELECT id, name, cli, working_dir, args, started_at, status, session_type, pid, boot_id
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {SESSION_COLUMNS}
              FROM interactive_sessions WHERE id = ?1 AND session_type != 'bridge'",
-        )?;
-        let result = match stmt.query_row(params![id], |row| {
-            Ok(InteractiveSession {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                cli: row.get(2)?,
-                working_dir: row.get(3)?,
-                args: row.get(4)?,
-                started_at: row.get(5)?,
-                status: row.get(6)?,
-                session_type: row.get(7)?,
-                pid: row.get(8)?,
-                boot_id: row.get(9)?,
-            })
-        }) {
+        ))?;
+        let result = match stmt.query_row(params![id], session_from_row) {
             Ok(session) => Some(session),
             Err(rusqlite::Error::QueryReturnedNoRows) => None,
             Err(e) => return Err(e.into()),
@@ -201,26 +508,13 @@ impl Database {
     /// auto-resumed at startup.
     pub fn get_orphaned_sessions(&self) -> Result<Vec<InteractiveSession>> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
-        let mut stmt = conn.prepare(
-            "SELECT id, name, cli, working_dir, args, started_at, status, session_type, pid, boot_id
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {SESSION_COLUMNS}
              FROM interactive_sessions WHERE status = 'orphaned' AND session_type != 'bridge'
              ORDER BY started_at DESC",
-        )?;
+        ))?;
         let rows = stmt
-            .query_map([], |row| {
-                Ok(InteractiveSession {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    cli: row.get(2)?,
-                    working_dir: row.get(3)?,
-                    args: row.get(4)?,
-                    started_at: row.get(5)?,
-                    status: row.get(6)?,
-                    session_type: row.get(7)?,
-                    pid: row.get(8)?,
-                    boot_id: row.get(9)?,
-                })
-            })?
+            .query_map([], session_from_row)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -235,28 +529,15 @@ impl Database {
     /// the form's harness and directory, keeping this order as-is.
     pub fn get_resumable_sessions(&self, limit: usize) -> Result<Vec<InteractiveSession>> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
-        let mut stmt = conn.prepare(
-            "SELECT id, name, cli, working_dir, args, started_at, status, session_type, pid, boot_id
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {SESSION_COLUMNS}
              FROM interactive_sessions
              WHERE status IN ('completed', 'error') AND session_type != 'bridge'
              ORDER BY started_at DESC
              LIMIT ?1",
-        )?;
+        ))?;
         let rows = stmt
-            .query_map(params![limit as i64], |row| {
-                Ok(InteractiveSession {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    cli: row.get(2)?,
-                    working_dir: row.get(3)?,
-                    args: row.get(4)?,
-                    started_at: row.get(5)?,
-                    status: row.get(6)?,
-                    session_type: row.get(7)?,
-                    pid: row.get(8)?,
-                    boot_id: row.get(9)?,
-                })
-            })?
+            .query_map(params![limit as i64], session_from_row)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -271,26 +552,13 @@ impl Database {
         session_type: &str,
     ) -> Result<Vec<InteractiveSession>> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
-        let mut stmt = conn.prepare(
-            "SELECT id, name, cli, working_dir, args, started_at, status, session_type, pid, boot_id
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {SESSION_COLUMNS}
              FROM interactive_sessions WHERE status = 'active' AND session_type = ?1
              ORDER BY started_at DESC",
-        )?;
+        ))?;
         let rows = stmt
-            .query_map(params![session_type], |row| {
-                Ok(InteractiveSession {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    cli: row.get(2)?,
-                    working_dir: row.get(3)?,
-                    args: row.get(4)?,
-                    started_at: row.get(5)?,
-                    status: row.get(6)?,
-                    session_type: row.get(7)?,
-                    pid: row.get(8)?,
-                    boot_id: row.get(9)?,
-                })
-            })?
+            .query_map(params![session_type], session_from_row)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -345,9 +613,46 @@ impl Database {
         Ok(rows)
     }
 
+    /// Reconcile stale interactive session rows: an `active`/`resumed` row
+    /// whose process is already gone is closed with the same values
+    /// [`Self::finish_interactive_session`] writes for a failed exit
+    /// (`status = 'error'`, `exited_at` set, `exit_code = 1`) — no new
+    /// status. Liveness is [`crate::system::session_process_is_live`]
+    /// (same boot id + PID alive, with a PID-only fail-closed fallback when
+    /// either boot id is unknown), the same rule `busy_reasons` counts by,
+    /// so a reconciled row stops blocking maintenance and stops listing as
+    /// live anywhere. Covers every `session_type`, including bridge
+    /// sidecars. Kills nothing: only rows whose process is already gone are
+    /// touched. Returns the number of rows closed.
+    pub fn reconcile_stale_interactive_sessions(&self) -> Result<usize> {
+        let current_boot_id = crate::system::boot_id();
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let stale_ids = stale_interactive_session_ids(&conn, current_boot_id.as_deref())?;
+        if stale_ids.is_empty() {
+            return Ok(0);
+        }
+        let now = Utc::now().to_rfc3339();
+        let mut closed = 0;
+        for id in &stale_ids {
+            closed += conn.execute(
+                "UPDATE interactive_sessions
+                 SET status = 'error', exited_at = ?1, exit_code = 1
+                 WHERE id = ?2 AND status IN ('active', 'resumed')",
+                params![now, id],
+            )?;
+        }
+        Ok(closed)
+    }
+
     /// Mark a single session 'resumed', once its replacement process has
     /// been launched. See `mark_session_orphaned` for why this is per-row
     /// rather than a mass update.
+    ///
+    /// Retained as a test-only fixture: a resumed harness conversation now
+    /// reactivates its own row (see [`Self::reactivate_interactive_session`])
+    /// instead of superseding it, but tests still need a way to synthesize a
+    /// historic `resumed` row.
+    #[cfg(test)]
     pub fn mark_session_resumed(&self, id: &str) -> Result<()> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         conn.execute(
@@ -421,6 +726,19 @@ impl Database {
         conn.execute(
             "UPDATE terminal_sessions SET status = 'orphaned' WHERE status = 'idle'",
             [],
+        )?;
+        Ok(())
+    }
+
+    /// Test-only: age a terminal session's `last_active`, the instant the
+    /// shelf's 7-day retention clock starts from, so retention tests do not
+    /// have to wait real days (same pattern as `set_shelf_created_at`).
+    #[cfg(test)]
+    pub fn set_terminal_last_active(&self, id: &str, at: &str) -> Result<()> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        conn.execute(
+            "UPDATE terminal_sessions SET last_active = ?1 WHERE id = ?2",
+            params![at, id],
         )?;
         Ok(())
     }
@@ -857,5 +1175,344 @@ mod tests {
         let db = test_db();
         let count = db.count_runs().unwrap();
         assert_eq!(count, 0);
+    }
+
+    // ── harness conversation identity across a resume ──────────────────────
+
+    /// Register a launch the way `App::launch_interactive` does: the spawned
+    /// process has its own id/name, and reports the harness conversation id
+    /// when it is a resume.
+    fn register(
+        db: &Database,
+        id: &str,
+        name: &str,
+        working_dir: &str,
+        harness_conversation_id: Option<&str>,
+    ) -> RegistrationOutcome {
+        db.register_interactive_session(&SessionRegistration {
+            id,
+            name,
+            cli: "claude",
+            working_dir,
+            args: Some("--continue"),
+            pid: Some(4242),
+            session_type: "interactive",
+            boot_id: Some("boot-new"),
+            harness_conversation_id,
+            preserve_args: false,
+        })
+        .unwrap()
+    }
+
+    /// A finished session whose harness conversation was recorded before it
+    /// ended — the shape a TUI restart finds when the user resumes.
+    fn finished_known_session(db: &Database, harness_id: &str) {
+        db.insert_interactive_session(
+            "sess-orch",
+            "marasmius",
+            "claude",
+            "/tmp/proj",
+            Some("--continue"),
+            Some(111),
+            "interactive",
+            Some("boot-old"),
+        )
+        .unwrap();
+        db.set_session_harness_conversation_id("sess-orch", harness_id)
+            .unwrap();
+        db.finish_interactive_session("sess-orch", 0).unwrap();
+    }
+
+    #[test]
+    fn resume_of_known_harness_conversation_keeps_id_and_name() {
+        let db = test_db();
+        finished_known_session(&db, "conv-abc");
+
+        let outcome = register(&db, "fresh-uuid", "populus", "/tmp/proj", Some("conv-abc"));
+
+        assert_eq!(
+            outcome,
+            RegistrationOutcome::Reactivated {
+                id: "sess-orch".to_string(),
+                name: "marasmius".to_string(),
+            }
+        );
+        // One live row, under the earlier identity — never two rows (FR5).
+        let live = db.list_hookable_sessions(200).unwrap();
+        assert_eq!(live.len(), 1, "a resumed conversation must not add a row");
+        assert_eq!(live[0].id, "sess-orch");
+        assert_eq!(live[0].name, "marasmius");
+        assert_eq!(live[0].status, "active");
+        // Only liveness fields moved.
+        assert_eq!(live[0].pid, Some(4242));
+        assert_eq!(live[0].boot_id.as_deref(), Some("boot-new"));
+        assert_eq!(db.count_interactive_sessions().unwrap(), 1);
+        assert!(db.get_hookable_session("fresh-uuid").unwrap().is_none());
+        assert_eq!(
+            db.find_session_by_harness_id("conv-abc")
+                .unwrap()
+                .unwrap()
+                .id,
+            "sess-orch",
+            "the harness id survives the resume"
+        );
+    }
+
+    #[test]
+    fn hook_targeting_the_name_of_a_resumed_session_resolves_to_it() {
+        use crate::db::session_target::SessionTarget;
+
+        let db = test_db();
+        finished_known_session(&db, "conv-abc");
+        assert_eq!(
+            db.resolve_target_session_name("marasmius").unwrap(),
+            SessionTarget::Missing,
+            "the finished session is not a hook target yet"
+        );
+
+        register(&db, "fresh-uuid", "populus", "/tmp/proj", Some("conv-abc"));
+
+        // A hook addressed to the name still finds the resumed session...
+        assert_eq!(
+            db.resolve_target_session_name("marasmius").unwrap(),
+            SessionTarget::Found {
+                id: "sess-orch".to_string(),
+                name: Some("marasmius".to_string()),
+            }
+        );
+        // ...and so does one addressed to its id.
+        assert_eq!(
+            db.resolve_target_session_id("sess-orch").unwrap(),
+            SessionTarget::Found {
+                id: "sess-orch".to_string(),
+                name: None,
+            }
+        );
+        // The name that was never minted resolves to nothing.
+        assert_eq!(
+            db.resolve_target_session_name("populus").unwrap(),
+            SessionTarget::Missing
+        );
+    }
+
+    #[test]
+    fn unknown_harness_conversation_gets_a_new_id_and_name() {
+        let db = test_db();
+        finished_known_session(&db, "conv-abc");
+
+        let outcome = register(&db, "sess-new", "populus", "/tmp/proj", Some("conv-new"));
+
+        assert_eq!(outcome, RegistrationOutcome::Inserted);
+        // Two conversations on record; only the new one is live.
+        assert_eq!(db.count_interactive_sessions().unwrap(), 2);
+        let live = db.list_hookable_sessions(200).unwrap();
+        assert_eq!(live.len(), 1);
+        assert!(live
+            .iter()
+            .any(|s| s.id == "sess-new" && s.name == "populus"));
+        // Both conversations are on record under their own harness ids.
+        assert_eq!(
+            db.find_session_by_harness_id("conv-new")
+                .unwrap()
+                .unwrap()
+                .id,
+            "sess-new"
+        );
+        assert_eq!(
+            db.find_session_by_harness_id("conv-abc")
+                .unwrap()
+                .unwrap()
+                .name,
+            "marasmius"
+        );
+    }
+
+    #[test]
+    fn registration_without_a_harness_id_keeps_todays_behaviour() {
+        let db = test_db();
+        finished_known_session(&db, "conv-abc");
+
+        let outcome = register(&db, "sess-2", "populus", "/tmp/proj", None);
+
+        assert_eq!(outcome, RegistrationOutcome::Inserted);
+        assert_eq!(
+            db.count_interactive_sessions().unwrap(),
+            2,
+            "two sessions in the same workdir are distinct: identity is never \
+             inferred from workdir, model or timing"
+        );
+        let live = db.list_hookable_sessions(200).unwrap();
+        assert_eq!(live.len(), 1);
+        assert!(live.iter().any(|s| s.id == "sess-2" && s.name == "populus"));
+        assert_eq!(
+            db.get_hookable_session("sess-orch").unwrap().unwrap().name,
+            "marasmius",
+            "the earlier session keeps its own row and name"
+        );
+    }
+
+    #[test]
+    fn recorded_harness_id_is_never_overwritten() {
+        let db = test_db();
+        db.insert_interactive_session(
+            "sess-1",
+            "marasmius",
+            "claude",
+            "/tmp/proj",
+            None,
+            None,
+            "interactive",
+            None,
+        )
+        .unwrap();
+
+        db.set_session_harness_conversation_id("sess-1", "conv-first")
+            .unwrap();
+        db.set_session_harness_conversation_id("sess-1", "conv-second")
+            .unwrap();
+
+        assert_eq!(
+            db.find_session_by_harness_id("conv-first")
+                .unwrap()
+                .unwrap()
+                .id,
+            "sess-1"
+        );
+        assert!(db
+            .find_session_by_harness_id("conv-second")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn bridge_sidecars_are_never_matched_by_harness_id() {
+        let db = test_db();
+        db.insert_interactive_session(
+            "sidecar", "sidecar", "claude", "/tmp", None, None, "bridge", None,
+        )
+        .unwrap();
+        db.set_session_harness_conversation_id("sidecar", "conv-abc")
+            .unwrap();
+
+        assert!(
+            db.find_session_by_harness_id("conv-abc").unwrap().is_none(),
+            "a bridge sidecar is a proxy, never a resumable conversation"
+        );
+        let outcome = register(&db, "sess-new", "populus", "/tmp", Some("conv-abc"));
+        assert_eq!(outcome, RegistrationOutcome::Inserted);
+    }
+
+    // ── resume by explicit session id ─────────────────────────────────
+
+    #[test]
+    fn resume_of_known_id_reactivates_the_same_row() {
+        let db = test_db();
+        finished_known_session(&db, "conv-abc");
+
+        // The relaunch carries no harness identifier at all: the id alone is
+        // the identity (FR1), yet the source row reactivates in place (FR2)
+        // instead of a second row appearing.
+        let outcome = register(&db, "sess-orch", "marasmius", "/tmp/proj", None);
+
+        assert_eq!(
+            outcome,
+            RegistrationOutcome::Reactivated {
+                id: "sess-orch".to_string(),
+                name: "marasmius".to_string(),
+            }
+        );
+        // No second row: the source row is reactivated in place (FR2).
+        assert_eq!(db.count_interactive_sessions().unwrap(), 1);
+        let row = db.get_interactive_session("sess-orch").unwrap().unwrap();
+        assert_eq!(row.id, "sess-orch");
+        assert_eq!(row.name, "marasmius");
+        assert_eq!(row.status, "active");
+        assert_eq!(row.pid, Some(4242));
+        assert_eq!(row.boot_id.as_deref(), Some("boot-new"));
+        assert_eq!(row.args.as_deref(), Some("--continue"));
+        assert_eq!(
+            row.harness_conversation_id.as_deref(),
+            Some("conv-abc"),
+            "the recorded harness id survives the resume"
+        );
+        assert!(db.get_interactive_session("no-such-id").unwrap().is_none());
+    }
+
+    #[test]
+    fn resume_of_known_id_with_a_fresh_name_renames_and_keeps_the_id() {
+        let db = test_db();
+        finished_known_session(&db, "conv-abc");
+
+        // FR5: the source name was held by another live session, so the
+        // spawn kept the id under a fresh name.
+        let outcome = register(&db, "sess-orch", "pholiota", "/tmp/proj", Some("conv-abc"));
+
+        assert_eq!(
+            outcome,
+            RegistrationOutcome::Reactivated {
+                id: "sess-orch".to_string(),
+                name: "pholiota".to_string(),
+            }
+        );
+        assert_eq!(db.count_interactive_sessions().unwrap(), 1);
+        let row = db.get_interactive_session("sess-orch").unwrap().unwrap();
+        assert_eq!(row.id, "sess-orch");
+        assert_eq!(row.name, "pholiota");
+        assert_eq!(row.status, "active");
+    }
+
+    #[test]
+    fn resume_of_known_id_records_a_carried_harness_id_without_overwriting() {
+        let db = test_db();
+        db.insert_interactive_session(
+            "sess-bare",
+            "populus",
+            "claude",
+            "/tmp/proj",
+            Some("--continue"),
+            Some(111),
+            "interactive",
+            Some("boot-old"),
+        )
+        .unwrap();
+        db.finish_interactive_session("sess-bare", 0).unwrap();
+
+        // First resume carries the conversation id: it is recorded.
+        let outcome = register(&db, "sess-bare", "populus", "/tmp/proj", Some("conv-first"));
+        assert_eq!(
+            outcome,
+            RegistrationOutcome::Reactivated {
+                id: "sess-bare".to_string(),
+                name: "populus".to_string(),
+            }
+        );
+        assert_eq!(
+            db.find_session_by_harness_id("conv-first")
+                .unwrap()
+                .unwrap()
+                .id,
+            "sess-bare"
+        );
+
+        // A later resume carrying a different id must not overwrite it.
+        register(
+            &db,
+            "sess-bare",
+            "populus",
+            "/tmp/proj",
+            Some("conv-second"),
+        );
+        assert_eq!(
+            db.get_interactive_session("sess-bare")
+                .unwrap()
+                .unwrap()
+                .harness_conversation_id
+                .as_deref(),
+            Some("conv-first")
+        );
+        assert!(db
+            .find_session_by_harness_id("conv-second")
+            .unwrap()
+            .is_none());
     }
 }

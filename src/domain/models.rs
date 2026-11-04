@@ -62,7 +62,7 @@ pub struct CorruptAgent {
 
 /// How an agent fires when its trigger fires: spawn a headless CLI
 /// subprocess (the default), or deliver its rendered prompt into a live
-/// interactive session via `scheduled_sends`.
+/// interactive session via `scheduled_prompts`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AgentAction {
@@ -204,7 +204,7 @@ pub struct Agent {
     pub trigger_count: u64,
     /// How this agent fires when triggered. `Headless` (default) spawns a
     /// CLI subprocess; `SendToSession` delivers the rendered prompt to a
-    /// live interactive session via `scheduled_sends`.
+    /// live interactive session via `scheduled_prompts`.
     #[serde(default)]
     pub action: AgentAction,
 }
@@ -352,6 +352,12 @@ impl Cli {
         let registry = Self::load_registry();
         let config = registry.as_ref().and_then(|r| r.get(self.as_str()));
         super::cli_config::PasteSubmitSpec::from_cli_config(config)
+    }
+
+    /// This platform's registry entry, if setup detected one — the
+    /// interactive args, fallback args and model flag a spawn builds with.
+    pub(crate) fn registry_config(&self) -> Option<super::cli_config::CliConfig> {
+        Self::load_registry()?.get(self.as_str()).cloned()
     }
 
     pub fn detect_available() -> Vec<Cli> {

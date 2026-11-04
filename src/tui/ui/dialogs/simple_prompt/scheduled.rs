@@ -50,7 +50,7 @@ pub(super) fn draw_raw_tab_content(
         width: inner.width.saturating_sub(2),
         height: avail_h as u16,
     };
-    let section_bg = theme.field_bg;
+    let section_bg = theme.stage_bg;
 
     if raw_empty {
         // Read-only preview, dimmed. ↑↓/PgUp/PgDn scroll it; edge markers show
@@ -135,7 +135,7 @@ pub(super) fn scheduled_row_text(
 /// the list has keyboard focus), the scroll offset, how many rows fit, and the
 /// id currently being edited inline.
 pub(super) struct ScheduledList<'a> {
-    pub pending: &'a [crate::db::scheduled_sends::ScheduledSend],
+    pub pending: &'a [crate::db::scheduled_prompts::ScheduledPrompt],
     pub selected: Option<usize>,
     pub scroll: usize,
     pub visible_rows: usize,

@@ -1,6 +1,142 @@
 use super::*;
 
 impl Database {
+    /// Newest run of `graph_id` without its output JSON: the id, node, status
+    /// and a `has_blocker` flag computed in SQL. TUI list paths that only need
+    /// the tail of a graph's history use this instead of
+    /// [`Self::list_graph_runs_for_graph`], which loads every row's output.
+    pub fn last_graph_run_summary(&self, graph_id: &str) -> Result<Option<LastGraphRunSummary>> {
+        let conn = self.conn.lock().map_err(|e| anyhow!("{e}"))?;
+        conn.query_row(
+            "SELECT id, node_id, status, (json_extract(output, '$.blocker') IS NOT NULL)
+             FROM graph_runs WHERE graph_id = ?1
+             ORDER BY started_at DESC, iteration DESC, rowid DESC LIMIT 1",
+            params![graph_id],
+            |row| {
+                Ok(LastGraphRunSummary {
+                    id: row.get(0)?,
+                    node_id: row.get(1)?,
+                    status: GraphRunStatus::from_str(&row.get::<_, String>(2)?),
+                    has_blocker: row.get(3)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Per-spec queue rows for a graph's live queue, with each spec's latest
+    /// run status and timestamp — no descriptions, no run outputs. One query
+    /// replaces the per-member `get_graph_spec` + `list_graph_runs_for_spec`
+    /// fan-out in `build_spec_queue`. `queue_id` selects the queue members;
+    /// when `None` the graph's own bound specs are used instead.
+    pub fn graph_queue_spec_states(
+        &self,
+        graph_id: &str,
+        queue_id: Option<&str>,
+    ) -> Result<Vec<GraphSpecQueueState>> {
+        let conn = self.conn.lock().map_err(|e| anyhow!("{e}"))?;
+        match queue_id {
+            Some(queue_id) => query_queue_member_rows(&conn, queue_id),
+            None => query_bound_spec_rows(&conn, graph_id),
+        }
+    }
+}
+
+/// Newest run of a graph, without its output JSON.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct LastGraphRunSummary {
+    pub id: String,
+    pub node_id: String,
+    pub status: GraphRunStatus,
+    /// True when the newest run's output JSON carries a `blocker` field.
+    pub has_blocker: bool,
+}
+
+/// One spec's queue row plus its latest run state — no descriptions, no
+/// outputs. Carries every field `build_spec_queue` needs for the live view.
+/// (`latest_run_*` is query contract asserted by tests; the live view reads
+/// the spec fields.)
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct GraphSpecQueueState {
+    pub spec_id: String,
+    pub spec_name: String,
+    pub status: GraphSpecStatus,
+    pub latest_run_status: Option<GraphRunStatus>,
+    pub latest_run_started_at: Option<i64>,
+    pub spec_code: Option<String>,
+    pub spec_type: Option<crate::domain::spec_type::SpecType>,
+    pub spec_scope: Option<String>,
+    pub completed_via_reason: Option<String>,
+}
+
+/// Latest-run columns, resolved inside SQLite per spec row: the newest run's
+/// status and start time without its output JSON. Served by the
+/// `graph_runs(spec_id, started_at)` index.
+const LATEST_RUN_COLUMNS: &str = "(SELECT status FROM graph_runs WHERE spec_id = s.id
+             ORDER BY started_at DESC, iteration DESC, rowid DESC LIMIT 1),
+         (SELECT started_at FROM graph_runs WHERE spec_id = s.id
+             ORDER BY started_at DESC, iteration DESC, rowid DESC LIMIT 1)";
+
+fn query_queue_member_rows(
+    conn: &rusqlite::Connection,
+    queue_id: &str,
+) -> Result<Vec<GraphSpecQueueState>> {
+    let sql = format!(
+        "SELECT s.id, s.name, s.status, s.spec_code, s.spec_type, s.spec_scope, s.completed_via_reason,
+         {LATEST_RUN_COLUMNS}
+         FROM graph_specs s JOIN queue_members q ON q.spec_id = s.id
+         WHERE q.queue_id = ?1 ORDER BY q.position ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![queue_id], map_graph_spec_queue_row)?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+fn query_bound_spec_rows(
+    conn: &rusqlite::Connection,
+    graph_id: &str,
+) -> Result<Vec<GraphSpecQueueState>> {
+    let sql = format!(
+        "SELECT s.id, s.name, s.status, s.spec_code, s.spec_type, s.spec_scope, s.completed_via_reason,
+         {LATEST_RUN_COLUMNS}
+         FROM graph_specs s
+         WHERE s.graph_id = ?1 ORDER BY s.position ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![graph_id], map_graph_spec_queue_row)?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+fn map_graph_spec_queue_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GraphSpecQueueState> {
+    let latest_status: Option<String> = row.get(7)?;
+    let latest_started_at: Option<i64> = row.get(8)?;
+    Ok(GraphSpecQueueState {
+        spec_id: row.get(0)?,
+        spec_name: row.get(1)?,
+        status: GraphSpecStatus::from_str(&row.get::<_, String>(2)?),
+        latest_run_status: latest_status.map(|s| GraphRunStatus::from_str(&s)),
+        latest_run_started_at: latest_started_at,
+        spec_code: row.get(3)?,
+        spec_type: row
+            .get::<_, Option<String>>(4)?
+            .and_then(|s| crate::domain::spec_type::SpecType::parse(&s)),
+        spec_scope: row.get(5)?,
+        completed_via_reason: row.get(6)?,
+    })
+}
+
+impl Database {
     pub fn insert_graph_run(&self, run: &GraphNodeRun) -> Result<()> {
         let conn = self
             .conn
@@ -103,7 +239,7 @@ impl Database {
 
     /// The active (`running`) node run for `spec_id`, if any. Mirrors
     /// [`Self::get_active_graph_run_for_node`] but scoped to a whole spec —
-    /// used by `graph_reset`, which resets a spec wholesale rather than one
+    /// used by `graph_control`, which resets a spec wholesale rather than one
     /// node at a time.
     pub fn get_active_graph_run_for_spec(&self, spec_id: &str) -> Result<Option<GraphNodeRun>> {
         let conn = self
@@ -113,8 +249,9 @@ impl Database {
         active_graph_run_for_spec_locked(&conn, spec_id).map_err(Into::into)
     }
 
-    /// Every node run still `running` across every graph — used at daemon
-    /// shutdown to terminate every process this boot owns before exiting.
+    /// Every node run still `running` (or `waiting` for a mutex) across
+    /// every graph — used at daemon shutdown to terminate every process this
+    /// boot owns before exiting.
     pub fn list_all_running_graph_runs(&self) -> Result<Vec<GraphNodeRun>> {
         let conn = self
             .conn
@@ -122,11 +259,27 @@ impl Database {
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
             "SELECT id, graph_id, spec_id, node_id, status, input, output, started_at, completed_at, iteration, pid, boot_id, session_id, executed_platform, executed_model
-             FROM graph_runs WHERE status = 'running'",
+             FROM graph_runs WHERE status IN ('running', 'waiting')",
         )?;
         let rows = stmt.query_map(params![], map_graph_run_row)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
+    }
+
+    /// The graph's most recent node-run activity: the newest `completed_at`
+    /// — or `started_at` for a run still in flight — across its runs. The
+    /// "last activity" stamp the remote graph list filters and sorts by.
+    pub fn latest_graph_run_at(&self, graph_id: &str) -> Result<Option<DateTime<Utc>>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let latest: Option<i64> = conn.query_row(
+            "SELECT MAX(COALESCE(completed_at, started_at)) FROM graph_runs WHERE graph_id = ?1",
+            params![graph_id],
+            |row| row.get(0),
+        )?;
+        latest.map(from_timestamp).transpose().map_err(Into::into)
     }
 
     pub fn list_graph_runs_for_spec(&self, spec_id: &str) -> Result<Vec<GraphNodeRun>> {
@@ -134,9 +287,11 @@ impl Database {
             .conn
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        // `started_at` has second granularity: `rowid` breaks ties in
+        // insertion order so "last" is deterministically the latest row.
         let mut stmt = conn.prepare(
             "SELECT id, graph_id, spec_id, node_id, status, input, output, started_at, completed_at, iteration, pid, boot_id, session_id, executed_platform, executed_model
-             FROM graph_runs WHERE spec_id = ?1 ORDER BY started_at ASC, iteration ASC",
+             FROM graph_runs WHERE spec_id = ?1 ORDER BY started_at ASC, iteration ASC, rowid ASC",
         )?;
         let rows = stmt.query_map(params![spec_id], map_graph_run_row)?;
 
@@ -157,7 +312,7 @@ impl Database {
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
             "SELECT id, graph_id, spec_id, node_id, status, input, output, started_at, completed_at, iteration, pid, boot_id, session_id, executed_platform, executed_model
-             FROM graph_runs WHERE graph_id = ?1 ORDER BY started_at ASC, iteration ASC",
+             FROM graph_runs WHERE graph_id = ?1 ORDER BY started_at ASC, iteration ASC, rowid ASC",
         )?;
         let rows = stmt.query_map(params![graph_id], map_graph_run_row)?;
 
@@ -167,7 +322,7 @@ impl Database {
 
     /// Page through a graph's node runs, most-recent-first, optionally
     /// narrowed to one spec and/or one node — the query a failure
-    /// investigation needs (`graph_node_runs_list`): find what ran, in what
+    /// investigation needs (`graph`): find what ran, in what
     /// order, without knowing a node id ahead of time. Unlike
     /// [`Self::list_graph_runs_for_graph`] (oldest-first, unbounded — built for
     /// the engine replaying a whole run), this is bounded by `limit`/`offset`
@@ -206,7 +361,7 @@ impl Database {
             sql.push_str(" AND node_id = ?");
             query_params.push(node_id);
         }
-        sql.push_str(" ORDER BY started_at DESC, iteration DESC LIMIT ? OFFSET ?");
+        sql.push_str(" ORDER BY started_at DESC, iteration DESC, rowid DESC LIMIT ? OFFSET ?");
         query_params.push(&limit);
         query_params.push(&offset);
 
@@ -266,8 +421,8 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT id, graph_id, spec_id, node_id, status, input, output, started_at, completed_at, iteration, pid, boot_id, session_id, executed_platform, executed_model
              FROM graph_runs
-             WHERE node_id = ?1 AND status = 'running'
-             ORDER BY started_at DESC
+             WHERE node_id = ?1 AND status IN ('running', 'waiting')
+             ORDER BY started_at DESC, rowid DESC
              LIMIT 1",
         )?;
 
@@ -301,11 +456,23 @@ impl Database {
                 run_id,
             ],
         )?;
+        // A terminal run holds no mutex: release its leases (and drop its
+        // queue entry) in the same locked write, so no waiter can observe the
+        // run ended but the resource still held.
+        let terminal = !matches!(status, GraphRunStatus::Running | GraphRunStatus::Waiting);
+        if terminal && rows > 0 {
+            Self::release_mutexes_locked(&conn, run_id)?;
+        }
+        drop(conn);
+        if terminal && rows > 0 {
+            self.notify_mutex_waiters();
+        }
         Ok(rows > 0)
     }
 
-    /// Mark a running node run as interrupted by an operator. Does NOT kill
-    /// the process — the caller is responsible for termination.
+    /// Mark a running (or mutex-waiting) node run as interrupted by an
+    /// operator. Does NOT kill the process — the caller is responsible for
+    /// termination. Releases the run's mutex leases, if any.
     pub fn interrupt_graph_run(&self, run_id: &str, reason: &str) -> Result<bool> {
         let conn = self
             .conn
@@ -317,7 +484,7 @@ impl Database {
                  output = ?2,
                  completed_at = ?3,
                  pid = NULL
-             WHERE id = ?4 AND status = 'running'",
+             WHERE id = ?4 AND status IN ('running', 'waiting')",
             params![
                 GraphRunStatus::Interrupted.as_str(),
                 serde_json::to_string(&serde_json::json!({
@@ -328,14 +495,21 @@ impl Database {
                 run_id,
             ],
         )?;
+        if rows > 0 {
+            Self::release_mutexes_locked(&conn, run_id)?;
+        }
+        drop(conn);
+        if rows > 0 {
+            self.notify_mutex_waiters();
+        }
         Ok(rows > 0)
     }
 
     /// CB31: flag every run of `node_ids` under `spec_id` at `iteration` as
     /// `paused_through` — the node(s) finalized with their own verdict while a
-    /// wait-for-completion `graph_pause` was pending. A single node has one such
+    /// wait-for-completion `graph_control` was pending. A single node has one such
     /// row; an ensemble step has one per member plus its join. The flag tells
-    /// [`Self::last_spec_node_run_was_operator_paused`] that `graph_continue`
+    /// [`Self::last_spec_node_run_was_operator_paused`] that `graph_control`
     /// re-executing this cursor must reuse the same iteration number rather
     /// than spend a fresh one. Returns the number of rows flagged.
     pub fn mark_spec_node_runs_paused_through(
@@ -368,7 +542,7 @@ impl Database {
 
     /// CB31: whether the most recent run among `node_ids` under `spec_id` was
     /// ended by an operator rather than by the node's own work — recorded
-    /// `Interrupted` (explicit `graph_pause(interrupt: true)`), or finalized
+    /// `Interrupted` (explicit `graph_control(interrupt: true)`), or finalized
     /// with its own verdict while a wait-for-completion pause was pending
     /// (`paused_through`). The engine consults this before incrementing the
     /// per-node iteration counter on a resumed dispatch: an operator pause or

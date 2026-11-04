@@ -12,6 +12,7 @@ pub mod knowledge_viewer;
 pub mod launchpad;
 pub mod new_agent;
 pub mod node_tail;
+pub(crate) mod node_tail_worker;
 pub mod prompt;
 
 pub use at_picker::*;
@@ -22,4 +23,5 @@ pub use knowledge_viewer::*;
 pub use launchpad::*;
 pub use new_agent::*;
 pub(crate) use node_tail::*;
+pub(crate) use node_tail_worker::*;
 pub use prompt::*;

@@ -47,6 +47,13 @@ pub struct Theme {
     pub status_disabled: Color,
     pub status_interrupted: Color,
     pub kind_router: Color,
+    /// Meaning-tinted grounds from the web look kit: info, ok, warning and
+    /// error blocks, plus the neutral stage big views stand on.
+    pub info_bg: Color,
+    pub ok_bg: Color,
+    pub warn_bg: Color,
+    pub error_bg: Color,
+    pub stage_bg: Color,
 }
 
 impl Theme {
@@ -76,6 +83,11 @@ impl Theme {
             status_disabled: Color::Rgb(120, 120, 120),
             status_interrupted: Color::Rgb(255, 179, 0),
             kind_router: Color::Rgb(171, 71, 188),
+            info_bg: rgb(brand::TINT_INFO),
+            ok_bg: rgb(brand::TINT_OK),
+            warn_bg: rgb(brand::TINT_WARN),
+            error_bg: rgb(brand::TINT_ERROR),
+            stage_bg: rgb(brand::STAGE),
         }
     }
 
@@ -106,6 +118,11 @@ impl Theme {
             status_disabled: Color::Rgb(120, 120, 120),
             status_interrupted: Color::Rgb(255, 179, 0),
             kind_router: Color::Rgb(171, 71, 188),
+            info_bg: Color::Rgb(16, 20, 34),
+            ok_bg: Color::Rgb(14, 28, 24),
+            warn_bg: Color::Rgb(30, 18, 28),
+            error_bg: Color::Rgb(30, 16, 20),
+            stage_bg: Color::Rgb(10, 10, 16),
         }
     }
 
@@ -165,6 +182,11 @@ mod tests {
         assert_eq!(theme.status_disabled, Color::Rgb(120, 120, 120));
         assert_eq!(theme.status_interrupted, Color::Rgb(255, 179, 0));
         assert_eq!(theme.kind_router, Color::Rgb(171, 71, 188));
+        assert_eq!(theme.info_bg, rgb(brand::TINT_INFO));
+        assert_eq!(theme.ok_bg, rgb(brand::TINT_OK));
+        assert_eq!(theme.warn_bg, rgb(brand::TINT_WARN));
+        assert_eq!(theme.error_bg, rgb(brand::TINT_ERROR));
+        assert_eq!(theme.stage_bg, rgb(brand::STAGE));
     }
 
     #[test]
@@ -208,6 +230,11 @@ mod tests {
         assert_eq!(theme.muted_text, Color::Rgb(130, 130, 145));
         assert_eq!(theme.field_bg, Color::Rgb(38, 38, 50));
         assert_eq!(theme.field_bg_focused, Color::Rgb(48, 48, 64));
+        assert_eq!(theme.info_bg, Color::Rgb(16, 20, 34));
+        assert_eq!(theme.ok_bg, Color::Rgb(14, 28, 24));
+        assert_eq!(theme.warn_bg, Color::Rgb(30, 18, 28));
+        assert_eq!(theme.error_bg, Color::Rgb(30, 16, 20));
+        assert_eq!(theme.stage_bg, Color::Rgb(10, 10, 16));
     }
 
     fn linear(channel: u8) -> f64 {
@@ -238,21 +265,25 @@ mod tests {
     }
 
     #[test]
-    fn modern_sidebar_text_contrast() {
-        let theme = Theme::modern();
-        for (foreground, threshold) in [
-            (theme.text_primary, 4.5),
-            (theme.dim_text, 4.5),
-            (theme.muted_text, 4.5),
-            (theme.header_color, 3.0),
-        ] {
-            assert!(
-                contrast_ratio(foreground, theme.sidebar_bg) >= threshold,
-                "{foreground:?} fails {threshold}:1 contrast against sidebar"
-            );
+    fn sidebar_text_contrast() {
+        // The sidebar paints `sidebar_bg` behind its body, cards and the
+        // Live / Automation / Knowledge tab strip, so every sidebar text
+        // token must clear its bar on that surface in every theme.
+        for theme in [Theme::classic(), Theme::modern()] {
+            for (foreground, threshold) in [
+                (theme.text_primary, 4.5),
+                (theme.dim_text, 4.5),
+                (theme.muted_text, 4.5),
+                (theme.header_color, 3.0),
+            ] {
+                assert!(
+                    contrast_ratio(foreground, theme.sidebar_bg) >= threshold,
+                    "{foreground:?} fails {threshold}:1 contrast against sidebar"
+                );
+            }
+            assert!(contrast_ratio(theme.text_primary, theme.panel_bg) >= 4.5);
+            assert!(contrast_ratio(theme.text_primary, theme.field_bg) >= 4.5);
         }
-        assert!(contrast_ratio(theme.text_primary, theme.panel_bg) >= 4.5);
-        assert!(contrast_ratio(theme.text_primary, theme.field_bg) >= 4.5);
     }
 
     #[test]
@@ -269,6 +300,47 @@ mod tests {
     }
 
     #[test]
+    fn text_stays_readable_on_the_new_tinted_grounds() {
+        // The builder draws body text, dimmed hints/previews and muted
+        // secondary text directly on the new grounds, so all three must
+        // clear 4.5:1 (same bar as `sidebar_text_contrast`).
+        for theme in [Theme::classic(), Theme::modern()] {
+            for background in [theme.info_bg, theme.stage_bg] {
+                for (name, foreground) in [
+                    ("text_primary", theme.text_primary),
+                    ("dim_text", theme.dim_text),
+                    ("muted_text", theme.muted_text),
+                ] {
+                    assert!(
+                        contrast_ratio(foreground, background) >= 4.5,
+                        "{name} {foreground:?} on {background:?} must clear 4.5:1",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn status_palette_stays_legible_on_the_graph_canvas() {
+        for theme in [Theme::classic(), Theme::modern()] {
+            for (name, foreground) in [
+                ("running", theme.status_running),
+                ("ok", theme.status_ok),
+                ("fail", theme.status_fail),
+                ("disabled", theme.status_disabled),
+                ("interrupted", theme.status_interrupted),
+                ("kind_router", theme.kind_router),
+            ] {
+                assert!(
+                    contrast_ratio(foreground, theme.info_bg) >= 3.0,
+                    "{name} {foreground:?} on info_bg {:?} must clear 3:1",
+                    theme.info_bg
+                );
+            }
+        }
+    }
+
+    #[test]
     fn modern_sidebar_panel_step_is_perceptible() {
         let theme = Theme::modern();
         let sidebar_luminance = rel_luminance(theme.sidebar_bg);
@@ -278,6 +350,30 @@ mod tests {
             contrast_ratio(theme.sidebar_bg, theme.panel_bg) >= 1.12
                 || (panel_luminance - sidebar_luminance).abs() >= 0.007
         );
+    }
+
+    /// The hub/prompt tab bar's active tab is the pill pair (`accent_fg` on
+    /// `header_color`) in every theme. It must never regress onto a dark
+    /// raise (`selected_bg` is only ~1.4:1 against `accent_fg` in modern)
+    /// and `accent_fg` must stay the dark ink it is meant to be. The inactive
+    /// tabs are `dim_text` straight on the dialog ground, so that pair has to
+    /// clear the bar too.
+    #[test]
+    fn active_tab_contrast() {
+        for theme in [Theme::classic(), Theme::modern()] {
+            assert!(
+                contrast_ratio(theme.accent_fg, theme.header_color) >= 4.5,
+                "active-tab pill {:?} on {:?} must clear 4.5:1",
+                theme.accent_fg,
+                theme.header_color
+            );
+            assert!(
+                contrast_ratio(theme.dim_text, theme.dialog_bg) >= 4.5,
+                "inactive-tab {:?} on the dialog ground {:?} must clear 4.5:1",
+                theme.dim_text,
+                theme.dialog_bg
+            );
+        }
     }
 
     /// Every colour role `Theme` declares must have a distinct value between
@@ -304,6 +400,11 @@ mod tests {
         assert_ne!(classic.error, modern.error);
         assert_ne!(classic.field_bg, modern.field_bg);
         assert_ne!(classic.field_bg_focused, modern.field_bg_focused);
+        assert_ne!(classic.info_bg, modern.info_bg);
+        assert_ne!(classic.ok_bg, modern.ok_bg);
+        assert_ne!(classic.warn_bg, modern.warn_bg);
+        assert_ne!(classic.error_bg, modern.error_bg);
+        assert_ne!(classic.stage_bg, modern.stage_bg);
     }
 
     #[test]

@@ -52,7 +52,7 @@ impl App {
 
     /// Retarget the `Edges` dialog's focused edge to the next/previous
     /// candidate node — applied immediately through the same validated path
-    /// as the `graph_update_edge` MCP tool
+    /// as the `graph_edge` MCP tool
     /// ([`crate::daemon::handler::retarget_graph_edge`]), so a running graph
     /// or a cross-graph target is rejected the same way it would be over
     /// MCP, with the rejection shown as the dialog's error line.
@@ -91,7 +91,7 @@ impl App {
     }
 
     /// Delete the `Edges` dialog's focused edge — through the same
-    /// validated path as the `graph_delete_edge` MCP tool
+    /// validated path as the `graph_edge` MCP tool
     /// ([`crate::daemon::handler::delete_graph_edge_checked`]).
     pub fn delete_focused_graph_edge(&mut self) -> Result<()> {
         let Some(dialog) = self.graph_editor_dialog.as_ref() else {
@@ -126,7 +126,7 @@ impl App {
     /// prompt/config can be tweaked (the closest thing the TUI has to a
     /// creation flow to pre-fill). Ensemble member/join nodes are
     /// engine-managed, so duplicating a whole ensemble is left to the
-    /// `graph_copy_ensemble` MCP tool and this is a no-op for those.
+    /// `graph_ensemble` MCP tool and this is a no-op for those.
     pub fn duplicate_selected_graph_node(&mut self) -> Result<()> {
         let Some(node) = self.selected_graph_node() else {
             return Ok(());
@@ -354,7 +354,7 @@ impl App {
         }
 
         let updated_config = self.compute_updated_node_config(&dialog, &node)?;
-        // Same allowlist `graph_add_node`/`graph_update_node` enforce (see
+        // Same allowlist `graph_node`/`graph_node` enforce (see
         // `daemon::handler::validate_node_config`) — a raw NodeConfig-mode
         // edit is the one TUI path that can hand-write a config the engine
         // will silently ignore (e.g. `prompt` instead of `prompt_template`),

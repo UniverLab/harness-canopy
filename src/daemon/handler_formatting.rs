@@ -25,7 +25,7 @@ pub(crate) fn format_uptime(secs: u64) -> String {
 pub(crate) fn format_agent_info(a: &Agent) -> String {
     let prompt_preview = if a.prompt.len() > 80 {
         format!(
-            "{}… (agent_get {} for the full prompt)",
+            "{}… (`agent get` {} for the full prompt)",
             &a.prompt[..80],
             a.id
         )
@@ -94,7 +94,7 @@ pub(crate) fn format_agent_info(a: &Agent) -> String {
 }
 
 /// The full stored definition of one agent as JSON — shared by the MCP
-/// `agent_get` tool and `canopy agent show --json` so both surfaces emit
+/// `agent get` action and `canopy agent show --json` so both surfaces emit
 /// byte-identical output (both serialize with `serde_json::to_string_pretty`).
 /// `notify_on_success` lives outside `AGENT_COLUMNS` (owned solely by
 /// `set_agent_notify_on_success`), so callers fetch it separately and pass
@@ -285,7 +285,7 @@ pub(crate) fn format_temporal_agents(agents: &[Agent]) -> String {
         .join("\n")
 }
 
-/// Providers surfaced by `agent_models`, with display names.
+/// Providers surfaced by `harness models`, with display names.
 const MODEL_PROVIDERS: &[(&str, &str)] = &[
     ("anthropic", "Anthropic"),
     ("openai", "OpenAI"),
@@ -298,7 +298,7 @@ const MODEL_PROVIDERS: &[(&str, &str)] = &[
 ];
 
 /// Cap on how many models are shown per provider in the **unfiltered**
-/// (no-platform) `agent_models` listing before `full: true` is required to see
+/// (no-platform) `harness models` listing before `full: true` is required to see
 /// the rest — *not* a "newest N" guarantee: ordering is source-dependent (see
 /// [`format_models_for_providers`], which sorts by release date, and
 /// [`format_native_models`], which preserves whatever order the CLI itself
@@ -556,7 +556,7 @@ pub(crate) fn build_id_result(id: &str, key: &str) -> CallToolResult {
 }
 
 /// Return an arbitrary JSON value as a tool result — used by the copy tools
-/// (`graph_copy_node`/`graph_copy_ensemble`) whose response carries an explicit
+/// (`graph_node`/`graph_ensemble`) whose response carries an explicit
 /// old→new id mapping and a wiring report, not just a single id.
 pub(crate) fn build_json_result(value: &serde_json::Value) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(
@@ -565,13 +565,13 @@ pub(crate) fn build_json_result(value: &serde_json::Value) -> CallToolResult {
 }
 
 /// Format a `SystemTime` as an RFC 3339 / ISO 8601 UTC timestamp for the
-/// `agent_models` cache metadata.
+/// `harness models` cache metadata.
 pub(crate) fn format_system_time(time: std::time::SystemTime) -> String {
     chrono::DateTime::<chrono::Utc>::from(time).to_rfc3339()
 }
 
 /// Render a `Duration` as a short human-readable age/TTL (`45s`, `12m`,
-/// `2h15m`, `3d4h`) for the `agent_models` footer — coarse on purpose, since
+/// `2h15m`, `3d4h`) for the `harness models` footer — coarse on purpose, since
 /// the footer only needs to convey rough freshness, not precise timing.
 pub(crate) fn format_duration_short(d: std::time::Duration) -> String {
     let secs = d.as_secs();
@@ -765,7 +765,7 @@ mod formatting_unit_tests {
         let prompt_line = info.lines().find(|l| l.contains("Prompt:")).unwrap();
         let after_prompt = prompt_line.split("Prompt: ").nth(1).unwrap();
         assert!(after_prompt.starts_with(&"x".repeat(80)));
-        assert!(after_prompt.ends_with("… (agent_get long-1 for the full prompt)"));
+        assert!(after_prompt.ends_with("… (`agent get` long-1 for the full prompt)"));
     }
 
     #[test]
@@ -1237,28 +1237,28 @@ mod formatting_unit_tests {
 
     #[test]
     fn write_error_busy_names_operation_and_says_retry() {
-        let mcp = write_error("graph_import", &busy_anyhow());
+        let mcp = write_error("graph_edit", &busy_anyhow());
         assert_eq!(mcp.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
         assert_eq!(
             mcp.message.to_string(),
-            "graph_import: database busy after 5 s — nothing was written, retry"
+            "graph_edit: database busy after 5 s — nothing was written, retry"
         );
     }
 
     #[test]
     fn write_error_non_busy_passes_through_unchanged() {
-        let mcp = write_error("graph_import", &anyhow::anyhow!("disk full"));
+        let mcp = write_error("graph_edit", &anyhow::anyhow!("disk full"));
         assert_eq!(mcp.message.to_string(), "disk full");
     }
 
     #[test]
     fn write_error_message_busy_and_plain() {
         assert_eq!(
-            write_error_message("graph_import", &busy_anyhow()),
-            "graph_import: database busy after 5 s — nothing was written, retry"
+            write_error_message("graph_edit", &busy_anyhow()),
+            "graph_edit: database busy after 5 s — nothing was written, retry"
         );
         assert_eq!(
-            write_error_message("graph_import", &anyhow::anyhow!("disk full")),
+            write_error_message("graph_edit", &anyhow::anyhow!("disk full")),
             "disk full"
         );
     }
@@ -1436,23 +1436,20 @@ pub(crate) fn format_session_info(session: &InteractiveSession) -> String {
 }
 
 /// Whether an interactive session is attached to a live CLI process on this
-/// host right now (CM16). `true` only when provable: the row was recorded on
-/// the current boot AND its PID is still alive. A different boot id, a NULL
-/// boot id, or a missing/dead PID all read as `false` — the session may
-/// still be a valid hook target (an enqueued send is delivered when a TUI
-/// next attaches), it just is not attached at this moment. Side-effect-free:
-/// no PTY touched, no session woken.
+/// host right now (CM16): [`crate::system::session_process_is_live`] — the
+/// row was recorded on the current boot AND its PID is still alive, with a
+/// PID-only fail-closed fallback when either boot id is unknown. A
+/// known-different boot id, or a missing/dead PID, reads as `false` — the
+/// session may still be a valid hook target (an enqueued send is delivered
+/// when a TUI next attaches), it just is not attached at this moment.
+/// Side-effect-free: no PTY touched, no session woken.
 pub(crate) fn session_is_attached(session: &InteractiveSession) -> bool {
-    match (
+    let current_boot_id = crate::system::boot_id();
+    crate::system::session_process_is_live(
+        session.pid,
         session.boot_id.as_deref(),
-        crate::system::boot_id().as_deref(),
-    ) {
-        (Some(stored), Some(current)) if stored == current => session
-            .pid
-            .map(crate::system::process_is_alive)
-            .unwrap_or(false),
-        _ => false,
-    }
+        current_boot_id.as_deref(),
+    )
 }
 
 pub(crate) fn transport_details(port: u16) -> (&'static str, String) {

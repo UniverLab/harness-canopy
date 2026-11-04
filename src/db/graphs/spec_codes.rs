@@ -45,7 +45,7 @@ impl Database {
     /// against: the bound graph's `workdir`, else the spec's own `workdir`
     /// tag, else `""`. Persisted per workdir and type in `spec_code_counters`;
     /// shared by the create path (handler resolves it before insert) and the
-    /// `spec_update` path that assigns a type to a legacy spec.
+    /// `spec_edit update` path that assigns a type to a legacy spec.
     pub fn spec_code_counter_key(&self, spec: &GraphSpec) -> Result<String> {
         if let Some(graph_id) = &spec.graph_id {
             if let Some(graph) = self.get_graph(graph_id)? {

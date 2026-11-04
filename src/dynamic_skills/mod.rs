@@ -1,7 +1,7 @@
 //! Dynamic skill system: skills are fetched on demand from configurable git
 //! sources into a canopy-owned store (`~/.canopy/skills/`), kept fresh
 //! lazily via a TTL'd commit-hash check, and served to any harness over MCP
-//! by `skill_list`/`skill_get`.
+//! by `skill` (`list`/`get`).
 //!
 //! This is additive to the global-symlink standard in [`crate::skills_module`]
 //! — nothing here touches `~/.agents/skills/` or the platform symlinks.
@@ -21,7 +21,7 @@ use source::CatalogEntry;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-/// A skill as reported by `skill_list`: the merged store + catalog view.
+/// A skill as reported by `skill` `list`: the merged store + catalog view.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SkillListEntry {
     pub name: String,
@@ -40,7 +40,7 @@ pub struct SkillFile {
     pub content: Option<String>,
 }
 
-/// Full skill content as returned by `skill_get`.
+/// Full skill content as returned by `skill` `get`.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SkillContent {
     pub name: String,
@@ -50,14 +50,14 @@ pub struct SkillContent {
     pub commit_hash: String,
 }
 
-/// Reference files at or under this size are inlined in `skill_get`'s
+/// Reference files at or under this size are inlined in `skill` `get`'s
 /// response; larger ones are listed by path only.
 const INLINE_FILE_LIMIT: u64 = 64 * 1024;
 
 type ClockFn = Box<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 
 /// Owns the on-disk skill store and the configured sources, and implements
-/// the lazy fetch/TTL-refresh dance shared by `skill_list` and `skill_get`.
+/// the lazy fetch/TTL-refresh dance shared by `skill` `list` and `get`.
 pub struct SkillStore {
     store_dir: PathBuf,
     sources: Vec<GitSource>,

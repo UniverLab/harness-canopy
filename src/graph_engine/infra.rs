@@ -1,4 +1,5 @@
 use super::*;
+use crate::db::connection::with_busy_retry;
 
 pub(crate) fn read_infra_config(node: &GraphNode) -> (u32, u64, u64) {
     let resolved = resolve_node_infra_config(node);
@@ -79,7 +80,7 @@ pub(crate) fn platform_cli_for_node(
 
 /// CM30: resolve a node's effective infra-retry config with provenance —
 /// used by `read_infra_config` (dispatch, values only) and by
-/// `graph_get`/`graph_audit_node_configs` in `daemon::handler` (values +
+/// `graph`/`graph` in `daemon::handler` (values +
 /// source, for read-back). `node_config` is `node.config` for a real node,
 /// or a bare `{"platform": ...}`/`Value::Null` to resolve a platform-only
 /// baseline (see `resolve_platform_only_infra_config`, used by the audit
@@ -127,13 +128,13 @@ pub(crate) fn resolve_infra_config_from_with(
 
 /// CM30: resolve a real node's effective config (node.config first, then
 /// its platform, then the engine default). Used by `read_infra_config` and
-/// by `graph_get`'s per-node `infra_config` block.
+/// by `graph`'s per-node `infra_config` block.
 pub(crate) fn resolve_node_infra_config(node: &GraphNode) -> NodeInfraConfig {
     resolve_infra_config_from(&node.config)
 }
 
 /// CM30: resolve what `platform` alone would give (node-level config never
-/// consulted) — the baseline `graph_audit_node_configs` compares the real
+/// consulted) — the baseline `graph` compares the real
 /// effective value against to decide "differs from platform's own value"
 /// (FR5). `platform: None` resolves straight to the engine default.
 pub(crate) fn resolve_platform_only_infra_config(platform: Option<&str>) -> NodeInfraConfig {
@@ -151,6 +152,111 @@ pub(crate) fn merge_attempt_marker(output: &Value, attempt: u32, is_crash: bool)
         map.insert("infra_crash".to_string(), Value::from(is_crash));
     }
     obj
+}
+
+/// What one agent attempt's outcome asks the retry loop to do next: settle
+/// on this attempt (`Settle`), re-dispatch once with the reporting nudge
+/// (`ReportNudge`), or re-dispatch on the infra-crash budget (`InfraCrash`).
+/// See [`AttemptChain::decide`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AttemptRetry {
+    Settle,
+    ReportNudge,
+    InfraCrash,
+}
+
+/// The retry state of one node dispatch: the zero-based `attempt` index of
+/// the attempt currently running, whether the one reporting nudge was already
+/// spent (`nudged`), and the node's resolved infra budget. Every retry loop
+/// (sequential, cascade/round-robin member, parallel member) drives one of
+/// these so the nudge-vs-crash-vs-settle decision is identical everywhere.
+pub(crate) struct AttemptChain {
+    pub attempt: u32,
+    pub nudged: bool,
+    pub retry_limit: u32,
+    pub crash_max_secs: u64,
+    pub backoff_secs: u64,
+}
+
+impl AttemptChain {
+    pub(crate) fn from_node(node: &GraphNode) -> Self {
+        let (retry_limit, crash_max_secs, backoff_secs) = read_infra_config(node);
+        Self {
+            attempt: 0,
+            nudged: false,
+            retry_limit,
+            crash_max_secs,
+            backoff_secs,
+        }
+    }
+
+    /// Classify one finished attempt: an unreported clean exit is nudged
+    /// exactly once (no retry-limit gate — the nudge is outside the crash
+    /// budget), then settled; anything else follows the infra-crash rule.
+    pub(crate) fn decide(
+        &self,
+        node: &GraphNode,
+        exec: &NodeExecution,
+        run: &GraphNodeRun,
+    ) -> AttemptRetry {
+        if unreported_exit(node, exec, run) {
+            if self.nudged {
+                AttemptRetry::Settle
+            } else {
+                AttemptRetry::ReportNudge
+            }
+        } else if is_infra_crash(
+            node,
+            exec,
+            run,
+            self.attempt,
+            self.retry_limit,
+            self.crash_max_secs,
+        ) {
+            AttemptRetry::InfraCrash
+        } else {
+            AttemptRetry::Settle
+        }
+    }
+
+    /// Record a retry: the next attempt's index, and the spent nudge.
+    pub(crate) fn advance(&mut self, kind: AttemptRetry) {
+        self.attempt += 1;
+        if kind == AttemptRetry::ReportNudge {
+            self.nudged = true;
+        }
+    }
+}
+
+/// The reporting-nudge shape: an AGENT run whose process exited 0 with real
+/// output but never filed a verdict — the agent plainly ran to completion
+/// and intended to report, so one re-dispatch with an explicit reporting
+/// instruction is warranted. A self-reported run, a permanent spawn failure,
+/// a nonzero (or missing) exit code, and the `no_output` shape are never
+/// this: crashes keep the infra budget, silence keeps it too.
+pub(crate) fn unreported_exit(
+    node: &GraphNode,
+    execution: &NodeExecution,
+    run: &GraphNodeRun,
+) -> bool {
+    if node.kind != GraphNodeKind::Agent || run_self_reported(run) {
+        return false;
+    }
+    let output = &execution.output;
+    if output
+        .get("spawn_permanent")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    if output.get("exit_code").and_then(Value::as_i64) != Some(0) {
+        return false;
+    }
+    !output
+        .get("no_output")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 /// B19/B39/CM13 infra-crash decision for one agent attempt: a
@@ -212,7 +318,7 @@ pub(crate) fn is_infra_crash_shape(
 /// been attempted, for the one case (`infra_retry_limit: 0`) where no retry
 /// ever runs to write it. Mutates `execution`/`run` in place (both the
 /// in-memory value used for immediate routing/consolidation and the value a
-/// later `graph_node_run_get`/`graph_audit_node_configs` reads must agree)
+/// later `graph`/`graph` reads must agree)
 /// and persists the tagged output. A no-op — returns the plain
 /// `is_infra_crash_shape` result — for every other case, including a
 /// retry_limit > 0 exhaustion (already partially visible via the retried
@@ -238,9 +344,11 @@ pub(crate) async fn finalize_infra_crash_shape(
                 Value::String("limit 0".to_string()),
             );
         }
-        db.update_graph_run_result(run_id, run.status, Some(&tagged), Some(chrono::Utc::now()))?;
         execution.output = tagged.clone();
-        run.output = Some(tagged);
+        run.output = Some(tagged.clone());
+        let _ = persist_bookkeeping("update_graph_run_result", || {
+            db.update_graph_run_result(run_id, run.status, Some(&tagged), Some(chrono::Utc::now()))
+        })?;
     }
     Ok(is_crash)
 }
@@ -272,10 +380,12 @@ pub(crate) fn execution_is_infra_failure(output: &Value) -> bool {
 
 /// Persist a crashed agent attempt with B19 `infra_attempt`/`infra_crash`
 /// markers, wait the doubling backoff (`backoff_secs * 2^attempt`), then
-/// insert a fresh `Running` run row for the retry and return its id. `attempt`
+/// insert a fresh run row for the retry and return its id. `attempt`
 /// is the zero-based index of the attempt that just crashed. Shared by the
 /// sequential node path and ensemble members (B26) so every infra retry — no
 /// matter which path — leaves the same distinct, marker-carrying run rows.
+/// The retry row starts `waiting` when `mutex_resources` is non-empty (the
+/// gate re-acquires ahead of the retry) and `running` otherwise.
 #[expect(clippy::too_many_arguments)]
 pub(crate) async fn begin_infra_retry(
     db: &Database,
@@ -288,13 +398,17 @@ pub(crate) async fn begin_infra_retry(
     crashed_output: &Value,
     attempt: u32,
     backoff_secs: u64,
+    mutex_resources: &[String],
 ) -> Result<String> {
-    db.update_graph_run_result(
-        crashed_run_id,
-        GraphRunStatus::Fail,
-        Some(&merge_attempt_marker(crashed_output, attempt, true)),
-        Some(chrono::Utc::now()),
-    )?;
+    let crashed_tagged = merge_attempt_marker(crashed_output, attempt, true);
+    let _ = persist_bookkeeping("update_graph_run_result", || {
+        db.update_graph_run_result(
+            crashed_run_id,
+            GraphRunStatus::Fail,
+            Some(&crashed_tagged),
+            Some(chrono::Utc::now()),
+        )
+    })?;
     tokio::time::sleep(std::time::Duration::from_secs(
         backoff_secs * 2u64.pow(attempt),
     ))
@@ -315,12 +429,17 @@ pub(crate) async fn begin_infra_retry(
             .filter(|(platform, _)| platform.is_some())
             .unwrap_or_else(|| executed_pair_for_node(node))
     };
-    db.insert_graph_run(&GraphNodeRun {
+    let retry_status = if mutex_resources.is_empty() {
+        GraphRunStatus::Running
+    } else {
+        GraphRunStatus::Waiting
+    };
+    let retry_row = GraphNodeRun {
         id: run_id.clone(),
         graph_id: lp.id.clone(),
         spec_id: spec.id.clone(),
         node_id: node.id.clone(),
-        status: GraphRunStatus::Running,
+        status: retry_status,
         input: previous_output.cloned(),
         output: None,
         started_at: chrono::Utc::now(),
@@ -331,6 +450,9 @@ pub(crate) async fn begin_infra_retry(
         session_id: None,
         executed_platform,
         executed_model,
-    })?;
+    };
+    // An exhausted busy escapes to the spec-loop backstop, which routes it
+    // as a Fail step — never an engine-fatal graph verdict.
+    with_busy_retry("insert_graph_run", || db.insert_graph_run(&retry_row))?;
     Ok(run_id)
 }

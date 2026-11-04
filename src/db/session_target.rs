@@ -42,7 +42,7 @@ impl Database {
     }
 
     /// Resolve a configured session *id*, using the same hookable rule as
-    /// `scheduled_send_create` (a bridge sidecar is never a target).
+    /// `scheduled_prompts` (a bridge sidecar is never a target).
     pub fn resolve_target_session_id(&self, id: &str) -> Result<SessionTarget> {
         Ok(match self.get_hookable_session(id)? {
             Some(session) => SessionTarget::Found {
@@ -127,6 +127,56 @@ mod tests {
             SessionTarget::Found {
                 id: "s1".to_string(),
                 name: None,
+            }
+        );
+    }
+
+    /// FR7: a hook addressed to the old name resolves to the resumed session.
+    /// The finished row is not a target, but the Resume step relaunches the
+    /// source id — with no recorded harness id (FR1) — and the registration
+    /// reactivates that same row in place (FR2), so the same name resolves
+    /// again to the same id.
+    #[test]
+    fn hook_targeting_the_old_name_resolves_after_the_resume() {
+        use crate::db::session::{RegistrationOutcome, SessionRegistration};
+
+        let db = test_db();
+        add_session(&db, "s1", "marasmius", "interactive");
+        db.finish_interactive_session("s1", 0).unwrap();
+        assert_eq!(
+            db.resolve_target_session_name("marasmius").unwrap(),
+            SessionTarget::Missing,
+            "the finished session is not a hook target yet"
+        );
+
+        let outcome = db
+            .register_interactive_session(&SessionRegistration {
+                id: "s1",
+                name: "marasmius",
+                cli: "opencode",
+                working_dir: "/tmp",
+                args: None,
+                pid: Some(99),
+                session_type: "interactive",
+                boot_id: Some("boot-new"),
+                harness_conversation_id: None,
+                preserve_args: true,
+            })
+            .unwrap();
+        assert_eq!(
+            outcome,
+            RegistrationOutcome::Reactivated {
+                id: "s1".to_string(),
+                name: "marasmius".to_string(),
+            },
+            "the resume must reactivate the source row, not add one"
+        );
+
+        assert_eq!(
+            db.resolve_target_session_name("marasmius").unwrap(),
+            SessionTarget::Found {
+                id: "s1".to_string(),
+                name: Some("marasmius".to_string()),
             }
         );
     }

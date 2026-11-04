@@ -4,123 +4,12 @@ use crate::daemon::handler_formatting::internal_error;
 use crate::daemon::handler_formatting::{build_id_result, build_json_result};
 use crate::daemon::handler_run_exec::graph_run_blocker;
 use crate::db::Database;
-use crate::domain::graphs::{GraphRunStatus, GraphSpec, GraphSpecStatus};
+use crate::domain::graphs::{GraphRunStatus, GraphSpec};
 use crate::domain::spec_type::{commit_message, SpecNaming};
-use crate::domain::specs::{
-    convert_legacy_spec_description, parse_spec_description, ParsedSpecDescription,
-};
 use rmcp::model::CallToolResult;
 use rmcp::ErrorData as McpError;
 
-/// Report structure for spec conversion operations.
-pub(crate) struct ConversionReport {
-    pub(crate) scanned: u64,
-    pub(crate) converted: u64,
-    pub(crate) already_tagged: u64,
-    pub(crate) deferred_running: u64,
-    pub(crate) invalid_legacy: u64,
-    pub(crate) converted_ids: Vec<String>,
-    pub(crate) deferred: Vec<serde_json::Value>,
-    pub(crate) errors: Vec<serde_json::Value>,
-}
-
-pub(crate) fn convert_specs(
-    db: &Database,
-    all_specs: &[GraphSpec],
-) -> Result<ConversionReport, McpError> {
-    let mut scanned = 0u64;
-    let mut converted = 0u64;
-    let mut already_tagged = 0u64;
-    let mut deferred_running = 0u64;
-    let mut invalid_legacy = 0u64;
-    let mut converted_ids: Vec<String> = Vec::new();
-    let mut deferred: Vec<serde_json::Value> = Vec::new();
-    let mut errors: Vec<serde_json::Value> = Vec::new();
-
-    for spec in all_specs {
-        scanned += 1;
-        let description = spec.description.as_deref().unwrap_or("");
-
-        if description.trim().is_empty() {
-            continue;
-        }
-
-        match parse_spec_description(description) {
-            Ok(ParsedSpecDescription::Tagged(_)) => {
-                already_tagged += 1;
-            }
-            Ok(ParsedSpecDescription::Legacy(_)) => {
-                if spec.status == GraphSpecStatus::Running {
-                    deferred_running += 1;
-                    deferred.push(serde_json::json!({
-                        "spec_id": spec.id,
-                        "reason": "spec is running; conversion deferred so a running graph cannot observe a mid-flight format change",
-                    }));
-                    continue;
-                }
-                match convert_legacy_spec_description(description) {
-                    Ok(new_body) => {
-                        match db.update_spec_description_if_not_running(&spec.id, &new_body) {
-                            Ok(true) => {
-                                converted += 1;
-                                converted_ids.push(spec.id.clone());
-                            }
-                            Ok(false) => {
-                                deferred_running += 1;
-                                deferred.push(serde_json::json!({
-                                    "spec_id": spec.id,
-                                    "reason": "spec became running before the write; conversion deferred",
-                                }));
-                            }
-                            Err(e) => {
-                                invalid_legacy += 1;
-                                errors.push(serde_json::json!({
-                                    "spec_id": spec.id,
-                                    "error": e.to_string(),
-                                }));
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        invalid_legacy += 1;
-                        errors.push(serde_json::json!({
-                            "spec_id": spec.id,
-                            "error": e.to_string(),
-                        }));
-                    }
-                }
-            }
-            Err(_) => {
-                if spec.status == GraphSpecStatus::Running {
-                    deferred_running += 1;
-                    deferred.push(serde_json::json!({
-                        "spec_id": spec.id,
-                        "reason": "spec is running and body does not parse; left untouched for human repair after it stops running",
-                    }));
-                } else {
-                    invalid_legacy += 1;
-                    errors.push(serde_json::json!({
-                        "spec_id": spec.id,
-                        "error": "unparseable spec body",
-                    }));
-                }
-            }
-        }
-    }
-
-    Ok(ConversionReport {
-        scanned,
-        converted,
-        already_tagged,
-        deferred_running,
-        invalid_legacy,
-        converted_ids,
-        deferred,
-        errors,
-    })
-}
-
-/// SPECCODE: create response for `spec_create` — an untyped, unconventional
+/// SPECCODE: create response for `spec_edit create` — an untyped, unconventional
 /// create succeeds but answers with a `warning` naming the consequence (no
 /// code, no prebuilt commit message) instead of silently dropping the data.
 pub(crate) fn spec_create_result(spec_id: &str, naming: &SpecNaming) -> CallToolResult {
@@ -149,7 +38,7 @@ pub(crate) fn validate_at_least_one_bool(updates: &[bool], field_name: &str) -> 
     }
 }
 
-/// Summary JSON for `spec_list` — no run/blocker info, since a standalone
+/// Summary JSON for `spec list` — no run/blocker info, since a standalone
 /// (unassigned) spec has never run. Compare [`graph_spec_details_json`],
 /// which adds that runtime detail for specs already inside a graph.
 pub(crate) fn spec_summary_json(spec: &GraphSpec, include_descriptions: bool) -> serde_json::Value {
@@ -203,6 +92,10 @@ pub(crate) struct SpecRunInfo {
     /// budget. Surfaced so an operator can see a spec approaching the limit
     /// before it actually blocks the graph, not just after.
     pub(crate) cross_run_attempts: i64,
+    /// What the current run is waiting for, when it is `waiting` for named
+    /// mutexes — one entry per resource with its current holder. Empty
+    /// otherwise.
+    pub(crate) waiting_for: Vec<crate::db::mutex_store::MutexWaitDetail>,
 }
 
 pub(crate) fn build_spec_run_info(
@@ -212,12 +105,25 @@ pub(crate) fn build_spec_run_info(
     let runs = db
         .list_graph_runs_for_spec(&spec.id)
         .map_err(internal_error)?;
-    let current_node = runs
+    // A mutex-waiting run is the spec's current run exactly like a running
+    // one — it is in flight, not history.
+    let current_run = runs
         .iter()
         .rev()
-        .find(|run| run.status == GraphRunStatus::Running)
-        .or_else(|| runs.last())
-        .map(|run| run.node_id.clone());
+        .find(|run| {
+            matches!(
+                run.status,
+                GraphRunStatus::Running | GraphRunStatus::Waiting
+            )
+        })
+        .or_else(|| runs.last());
+    let current_node = current_run.map(|run| run.node_id.clone());
+    let waiting_for = match current_run {
+        Some(run) if run.status == GraphRunStatus::Waiting => db
+            .get_graph_run_waiting_for(&run.id)
+            .map_err(internal_error)?,
+        _ => Vec::new(),
+    };
     let blocker = runs.last().and_then(graph_run_blocker);
     let cross_run_attempts = db
         .get_graph_spec_cross_run_attempts(&spec.id)
@@ -227,5 +133,6 @@ pub(crate) fn build_spec_run_info(
         current_node,
         blocker,
         cross_run_attempts,
+        waiting_for,
     })
 }

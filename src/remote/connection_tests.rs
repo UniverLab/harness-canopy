@@ -1,0 +1,1871 @@
+//! Loopback tests for the device-peer bridge: two real `webrtc` peers in one
+//! process, one playing the paired device (d4eb8558 scalar 0x22), one serving
+//! the hub through [`super::PeerSession`]. The relay only carries signaling,
+//! so the two peers hand their SDPs to each other directly here.
+
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use axum::extract::State;
+use axum::http::HeaderMap;
+use axum::response::IntoResponse;
+use axum::routing::get;
+use axum::Router;
+use base64::Engine as _;
+use serde_json::{json, Value};
+use sha2::{Digest as _, Sha256};
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+
+use super::*;
+use crate::remote::bridge::{CHUNK_BYTES, MAX_FRAME_BYTES};
+use crate::remote::devices::device_id;
+use crate::remote::hostkey::HostKey;
+use crate::remote::peer;
+use crate::remote::signaling::{self, MAX_DEVICE_PEERS};
+use crate::sessions::ws::SessionsState;
+use crate::sessions::{HubSession, SessionHub, SessionKind, SessionStatus};
+
+/// Device id the d4eb8558 device key (scalar 0x22) derives.
+const DEVICE_ID: &str = "bfcba2b742a807bb";
+/// Relay peer id the host addresses its trickle candidates to.
+const FROM: &str = "d:loopback";
+/// What the `cat` sessions echo back through their PTY.
+const ECHO: &[u8] = b"loopback-echo\n";
+/// The needle the echo is matched with: the PTY translates the line's
+/// newline to CRLF on the way back, so the full line would never match.
+/// (The local round-trip test uses a newline-less needle for the same reason.)
+const ECHO_NEEDLE: &[u8] = b"loopback-echo";
+/// How long the first sends may wait for the data channel to open.
+const OPEN_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long one inbound frame may take to arrive.
+const FRAME_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long to wait for `snapshot_more` after a `snapshot`: continuations
+/// travel back-to-back with it, so a quiet window means it was complete.
+const CONTINUATION_TIMEOUT: Duration = Duration::from_secs(2);
+/// Quiet window draining the echo's straggler chunks after the needle matched.
+const ECHO_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// What the device side of the loopback reports.
+enum DeviceEvent {
+    /// One inbound data-channel frame, raw and parsed.
+    Frame(Frame),
+    /// The channel, or the whole connection, is gone.
+    Closed,
+}
+
+/// One inbound frame; kept raw so tests can assert its size.
+struct Frame {
+    raw: String,
+    json: Value,
+}
+
+impl Frame {
+    /// Parse one inbound text frame.
+    fn parse(bytes: Vec<u8>) -> Self {
+        let raw = String::from_utf8(bytes).expect("frames are UTF-8 JSON");
+        let json = serde_json::from_str(&raw).expect("frames are JSON");
+        Self { raw, json }
+    }
+}
+
+/// The fake relay's `/turn`: records the bearer token, answers no ICE servers.
+#[derive(Clone)]
+struct TurnState {
+    auth: Arc<Mutex<Option<String>>>,
+}
+
+async fn turn_handler(State(state): State<TurnState>, headers: HeaderMap) -> impl IntoResponse {
+    let seen = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    *state.auth.lock().expect("auth lock") = seen;
+    (
+        axum::http::StatusCode::OK,
+        axum::Json(json!({"iceServers": []})),
+    )
+}
+
+/// Start the fake relay on an ephemeral port; `(url, seen authorization)`.
+async fn start_turn() -> (String, Arc<Mutex<Option<String>>>) {
+    let auth = Arc::new(Mutex::new(None));
+    let state = TurnState {
+        auth: Arc::clone(&auth),
+    };
+    let app = Router::new()
+        .route("/turn", get(turn_handler))
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind the fake relay");
+    let addr = listener.local_addr().expect("fake relay addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}"), auth)
+}
+
+fn encode(data: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(data)
+}
+
+fn decode(frame: &Value) -> Vec<u8> {
+    base64::engine::general_purpose::STANDARD
+        .decode(frame["data"].as_str().expect("base64 data"))
+        .expect("valid base64")
+}
+
+/// A spawned session, killed when the guard drops so no test leaves a child.
+struct KillGuard {
+    hub: SessionHub,
+    id: String,
+}
+
+impl Drop for KillGuard {
+    fn drop(&mut self) {
+        let _ = self.hub.kill(&self.id);
+    }
+}
+
+/// Spawn a `cat` session of `kind`; `cat` echoes whatever reaches its PTY.
+fn spawn_session(
+    hub: &SessionHub,
+    kind: SessionKind,
+    workdir: &Path,
+) -> (Arc<HubSession>, KillGuard) {
+    let request = crate::sessions::SpawnRequest {
+        kind,
+        cli: "cat".to_string(),
+        model: None,
+        workdir: workdir.to_string_lossy().to_string(),
+        name: None,
+        prompt: None,
+        interactive_args: None,
+        fallback_args: None,
+        model_flag: None,
+        id: None,
+        harness_conversation_id: None,
+        seed_id: None,
+        accent: None,
+        yolo: false,
+        preserve_args: false,
+    };
+    let session = hub.spawn(&request).expect("test spawn");
+    let guard = KillGuard {
+        hub: hub.clone(),
+        id: session.id.clone(),
+    };
+    (session, guard)
+}
+
+/// One connected device peer plus the hub it is bridged to.
+struct Loopback {
+    device: Arc<peer::device_side::DeviceSide>,
+    events: mpsc::UnboundedReceiver<DeviceEvent>,
+    pending: Option<Frame>,
+    peers: DevicePeers,
+    connections: ConnectionRegistry,
+    state: Arc<SessionsState>,
+    cat: Arc<HubSession>,
+    terminal: Arc<HubSession>,
+    /// The guards must outlive the setup: dropping one kills its session, and
+    /// the resulting `SessionRemoved` would reach the peer before its channel
+    /// opens and end the session.
+    _kills: Vec<KillGuard>,
+    _tasks: Vec<JoinHandle<()>>,
+}
+
+/// The hub side of the loopback: one agent session a device may use, one
+/// terminal it may not, plus the guards that keep both alive for every peer.
+struct LoopbackHub {
+    state: Arc<SessionsState>,
+    cat: Arc<HubSession>,
+    terminal: Arc<HubSession>,
+    kills: Vec<KillGuard>,
+}
+
+/// Build the hub every loopback peer of one test bridges to.
+fn loopback_hub() -> LoopbackHub {
+    // The hub: one agent session a device may use, one terminal it may not.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db =
+        Arc::new(crate::db::Database::new(&dir.path().join("test.db")).expect("test database"));
+    let hub = SessionHub::with_broadcast_capacity(db, "test-host".to_string(), 256);
+    let workdir = tempfile::tempdir().expect("workdir");
+    let (cat, kill_cat) = spawn_session(&hub, SessionKind::Agent, workdir.path());
+    let (terminal, kill_terminal) = spawn_session(&hub, SessionKind::Terminal, workdir.path());
+    let state = SessionsState::for_test(hub, "token".to_string());
+
+    LoopbackHub {
+        state,
+        cat,
+        terminal,
+        kills: vec![kill_cat, kill_terminal],
+    }
+}
+
+/// Connect one device peer to a hub shared with other peers: the fake
+/// relay's `/turn` supplies the ICE servers, the device opens the session
+/// channel, the host answers and bridges it. The device id derives from the
+/// `device_byte` scalar; `from` is the relay connection the trickle and the
+/// peer's control traffic are addressed to. `max_frame` presets the peer's
+/// frame cap (production computes it from the offer SDP via
+/// `peer_frame_cap`; the harness presets it to simulate a desktop or a
+/// mobile peer). Returns the device end, its inbound frames, the pump tasks,
+/// and the derived device id.
+async fn connect_loopback_device(
+    state: &Arc<SessionsState>,
+    peers: &DevicePeers,
+    connections: &ConnectionRegistry,
+    device_byte: u8,
+    from: &str,
+    max_frame: usize,
+) -> (
+    Arc<peer::device_side::DeviceSide>,
+    mpsc::UnboundedReceiver<DeviceEvent>,
+    Vec<JoinHandle<()>>,
+    String,
+) {
+    // The device identity derives its id from its scalar.
+    let device_key = HostKey::from_scalar_bytes(&[device_byte; 32]).expect("device key");
+    let id = device_id(device_key.spki_der());
+
+    // The relay hands out no ICE servers; the host still fetches them per
+    // connection, with its bearer token.
+    let (relay_url, auth) = start_turn().await;
+    let servers = peer::fetch_ice_servers(&relay_url, "gho_loopback")
+        .await
+        .expect("the /turn fetch");
+    assert!(
+        servers.is_empty(),
+        "the fake relay hands out no ICE servers"
+    );
+    assert_eq!(
+        auth.lock().expect("auth lock").as_deref(),
+        Some("Bearer gho_loopback")
+    );
+
+    // Offer and answer over loopback; the device end is the test-facing
+    // browser side, the host end is the production transport.
+    let (offer_sdp, device) = peer::device_side::DeviceSide::offer()
+        .await
+        .expect("the device offer");
+    let (answer_sdp, host_peer) = peer::Peer::answer_offer(servers, &offer_sdp)
+        .await
+        .expect("the host answer");
+    let device = Arc::new(device);
+    device
+        .accept(&answer_sdp)
+        .await
+        .expect("the device accepts the answer");
+
+    // Host bookkeeping, exactly like the relay's offer path.
+    let token = connections.register(&id);
+    let (control_tx, control_rx) = mpsc::unbounded_channel();
+    assert!(peers.register(&id, from, token.clone(), control_tx));
+    let (signal_tx, mut signal_rx) = mpsc::unbounded_channel();
+
+    // The device demultiplexes its peer: trickle to the host, frames here.
+    let (events_tx, events_rx) = mpsc::unbounded_channel();
+    let from_owned = from.to_string();
+    let demux = {
+        let device = Arc::clone(&device);
+        let peers = peers.clone();
+        let from = from_owned.clone();
+        tokio::spawn(async move {
+            while let Some(event) = device.next().await {
+                match event {
+                    peer::device_side::DeviceEvent::Candidate(candidate) => {
+                        let _ = peers.route(
+                            &from,
+                            Control::Ice(signaling::IceCandidate::bare(candidate)),
+                        );
+                    }
+                    peer::device_side::DeviceEvent::Frame(bytes) => {
+                        let _ = events_tx.send(DeviceEvent::Frame(Frame::parse(bytes)));
+                    }
+                    peer::device_side::DeviceEvent::Closed => {
+                        let _ = events_tx.send(DeviceEvent::Closed);
+                        return;
+                    }
+                }
+            }
+        })
+    };
+
+    // The host's trickled candidates reach the device through its signal channel.
+    let trickle = {
+        let device = Arc::clone(&device);
+        tokio::spawn(async move {
+            while let Some((_from, body)) = signal_rx.recv().await {
+                if let Some(candidate) = signaling::ice_candidate(&body) {
+                    let _ = device.add_candidate(&candidate.candidate).await;
+                }
+            }
+        })
+    };
+
+    spawn(PeerSession {
+        peer: host_peer,
+        device_id: id.clone(),
+        state: Arc::clone(state),
+        peers: peers.clone(),
+        connections: connections.clone(),
+        token,
+        control: control_rx,
+        signal: signal_tx,
+        from: from_owned,
+        max_frame,
+        grant: crate::remote::trust::Grant::All,
+        can_upload: true,
+        owner: false,
+    });
+
+    (device, events_rx, vec![demux, trickle], id)
+}
+
+/// Wire a device peer to a hub-backed [`PeerSession`] over a real loopback
+/// WebRTC connection: the fake relay's `/turn` supplies the ICE servers, the
+/// device opens the session channel, the host answers and bridges it.
+async fn connected_loopback() -> Loopback {
+    let hub = loopback_hub();
+    let peers = DevicePeers::default();
+    let connections = ConnectionRegistry::default();
+    let (device, events, tasks, id) = connect_loopback_device(
+        &hub.state,
+        &peers,
+        &connections,
+        0x22,
+        FROM,
+        MAX_CHANNEL_FRAME,
+    )
+    .await;
+    // The d4eb8558 vector key derives the vector id.
+    assert_eq!(id, DEVICE_ID);
+
+    Loopback {
+        device,
+        events,
+        pending: None,
+        peers,
+        connections,
+        state: hub.state,
+        cat: hub.cat,
+        terminal: hub.terminal,
+        _kills: hub.kills,
+        _tasks: tasks,
+    }
+}
+
+/// Connect another device peer to the hub `first` is bridged to, sharing its
+/// sessions, peers and connections. The caller must keep `first` alive: it
+/// owns the session guards.
+async fn second_loopback(first: &Loopback, device_byte: u8, from: &str) -> Loopback {
+    let (device, events, tasks, _id) = connect_loopback_device(
+        &first.state,
+        &first.peers,
+        &first.connections,
+        device_byte,
+        from,
+        MAX_CHANNEL_FRAME,
+    )
+    .await;
+    Loopback {
+        device,
+        events,
+        pending: None,
+        peers: first.peers.clone(),
+        connections: first.connections.clone(),
+        state: Arc::clone(&first.state),
+        cat: Arc::clone(&first.cat),
+        terminal: Arc::clone(&first.terminal),
+        _kills: Vec::new(),
+        _tasks: tasks,
+    }
+}
+
+impl Loopback {
+    /// Send one client frame; the first sends wait for the channel to open.
+    async fn send(&self, body: Value) {
+        let text = body.to_string();
+        let deadline = Instant::now() + OPEN_TIMEOUT;
+        loop {
+            match self.device.send_text(&text).await {
+                Ok(()) => return,
+                Err(error) if Instant::now() < deadline => {
+                    tracing::debug!("the data channel is not open yet: {error:#}");
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(error) => panic!("could not send over the data channel: {error:#}"),
+            }
+        }
+    }
+
+    /// The next inbound frame, failing the test when the peer ends first.
+    async fn recv(&mut self, what: &str) -> Frame {
+        if let Some(frame) = self.pending.take() {
+            return frame;
+        }
+        let next = tokio::time::timeout(FRAME_TIMEOUT, self.events.recv()).await;
+        match next {
+            Ok(Some(DeviceEvent::Frame(frame))) => frame,
+            Ok(Some(DeviceEvent::Closed)) => panic!("the channel closed while waiting for {what}"),
+            Ok(None) => panic!("the device peer ended while waiting for {what}"),
+            Err(_) => panic!("timed out waiting for {what}"),
+        }
+    }
+
+    /// Consume a `snapshot` and its `snapshot_more` continuations; the seq.
+    ///
+    /// A snapshot that fits in one frame has no continuations at all, so the
+    /// tail waits only a quiet window: anything that arrives must either
+    /// continue the snapshot or belong to whatever comes next.
+    async fn recv_snapshot(&mut self, what: &str) -> u64 {
+        let id = self.cat.id.clone();
+        self.recv_snapshot_for(&id, what).await
+    }
+
+    /// The same snapshot consumption for any session, not just the cat one.
+    async fn recv_snapshot_for(&mut self, id: &str, what: &str) -> u64 {
+        let frame = self.recv(what).await;
+        assert_eq!(
+            frame.json["t"], "snapshot",
+            "{what}: expected a snapshot, got {}",
+            frame.raw
+        );
+        assert_eq!(
+            frame.json["id"], id,
+            "{what}: the snapshot must be session {id}'s"
+        );
+        let seq = frame.json["seq"].as_u64().expect("snapshot seq");
+        loop {
+            let next = tokio::time::timeout(CONTINUATION_TIMEOUT, self.events.recv()).await;
+            let next = match next {
+                Ok(Some(DeviceEvent::Frame(frame))) => frame,
+                Ok(Some(DeviceEvent::Closed)) => {
+                    panic!("the channel closed while waiting for {what}'s continuations")
+                }
+                Ok(None) => {
+                    panic!("the device peer ended while waiting for {what}'s continuations")
+                }
+                Err(_) => return seq,
+            };
+            if next.json["t"] != "snapshot_more" {
+                self.pending = Some(next);
+                return seq;
+            }
+            assert!(
+                next.raw.len() <= MAX_FRAME_BYTES,
+                "frame of {} bytes exceeds {MAX_FRAME_BYTES}",
+                next.raw.len()
+            );
+            if next.json["last"].as_bool().expect("the last flag") {
+                return seq;
+            }
+        }
+    }
+}
+
+/// The next frame must be an error; return it for the caller's asserts.
+async fn expect_error(loopback: &mut Loopback, what: &str) -> Value {
+    let frame = loopback.recv(what).await;
+    assert_eq!(
+        frame.json["t"], "error",
+        "{what}: expected an error, got {}",
+        frame.raw
+    );
+    frame.json
+}
+
+/// One `out` frame of the echo: this session, size-bounded, seq in order.
+fn assert_echo_out(frame: &Frame, id: &str, previous_seq: u64) -> u64 {
+    assert_eq!(
+        frame.json["t"], "out",
+        "only out frames expected here: {}",
+        frame.raw
+    );
+    assert_eq!(frame.json["id"].as_str(), Some(id));
+    assert!(
+        frame.raw.len() <= MAX_FRAME_BYTES,
+        "frame of {} bytes exceeds {MAX_FRAME_BYTES}",
+        frame.raw.len()
+    );
+    let seq = frame.json["seq"].as_u64().expect("out seq");
+    assert!(
+        seq > previous_seq,
+        "out seq {seq} must advance past {previous_seq}"
+    );
+    seq
+}
+
+/// Send one line through the attached `cat` session and collect its echo:
+/// every `out` frame continues the snapshot's seq, none exceeds the limit.
+///
+/// A trailing drain collects the echo's straggler chunks — the PTY echo and
+/// `cat`'s own output can arrive as separate chunks — so nothing leaks into
+/// the next step.
+async fn echo_roundtrip(loopback: &mut Loopback, snapshot_seq: u64) {
+    loopback
+        .send(json!({"t": "input", "id": loopback.cat.id, "data": encode(ECHO)}))
+        .await;
+    let id = loopback.cat.id.clone();
+    let mut seen: Vec<u8> = Vec::new();
+    // Coalescing may fold several chunks into one frame: seq advances
+    // monotonically but not necessarily by one per frame.
+    let mut last_seq = snapshot_seq;
+    while !seen
+        .windows(ECHO_NEEDLE.len())
+        .any(|window| window == ECHO_NEEDLE)
+    {
+        let frame = loopback.recv("the echoed input").await;
+        last_seq = assert_echo_out(&frame, &id, last_seq);
+        seen.extend(decode(&frame.json));
+    }
+    loop {
+        let next = tokio::time::timeout(ECHO_DRAIN_TIMEOUT, loopback.events.recv()).await;
+        match next {
+            Ok(Some(DeviceEvent::Frame(frame))) => {
+                last_seq = assert_echo_out(&frame, &id, last_seq);
+            }
+            Ok(Some(DeviceEvent::Closed)) => {
+                panic!("the channel closed while draining the echo")
+            }
+            Ok(None) => panic!("the device peer ended while draining the echo"),
+            Err(_) => return,
+        }
+    }
+}
+
+/// Terminal sessions are first-class over the data channel: they attach,
+/// take input and prompts, and spawn without `cli` — while `resize` stays
+/// refused and unknown kinds stay `bad_request`.
+async fn assert_restrictions(loopback: &mut Loopback) {
+    // Input on the unattached terminal: no error, and no output either.
+    loopback
+        .send(json!({"t": "input", "id": loopback.terminal.id, "data": encode(b"x")}))
+        .await;
+    assert_quiet(loopback, "input on an unattached terminal").await;
+
+    // Attach answers the terminal's snapshot.
+    let terminal_id = loopback.terminal.id.clone();
+    loopback
+        .send(json!({"t": "attach", "id": terminal_id}))
+        .await;
+    loopback
+        .recv_snapshot_for(&terminal_id, "the terminal snapshot")
+        .await;
+
+    // Detached again, a prompt answers ok with no echo in the way.
+    loopback
+        .send(json!({"t": "detach", "id": terminal_id}))
+        .await;
+    loopback
+        .send(json!({"t": "prompt", "req": "p1", "id": terminal_id, "text": "hello"}))
+        .await;
+    let answer = loopback.recv("the terminal prompt answer").await;
+    assert_eq!(answer.json["t"], "ok", "got {}", answer.raw);
+    assert_eq!(answer.json["req"], "p1");
+
+    // `resize` is refused for a device that is not the owner's, even for
+    // the sessions it may use (this loopback peer is not flagged owner).
+    loopback
+        .send(json!({"t": "resize", "id": loopback.cat.id, "cols": 120, "rows": 40}))
+        .await;
+    assert_eq!(expect_error(loopback, "resize").await["code"], "forbidden");
+
+    // A terminal spawns without `cli` (its arrival may precede the answer).
+    let workdir = tempfile::tempdir().expect("spawn workdir");
+    loopback
+        .send(json!({
+            "t": "spawn", "req": "s1", "kind": "terminal",
+            "workdir": workdir.path().to_string_lossy(),
+        }))
+        .await;
+    let spawned_id = loop {
+        let frame = loopback.recv("the terminal spawn").await;
+        if frame.json["t"] == "spawned" {
+            assert_eq!(frame.json["req"], "s1");
+            break frame.json["id"].as_str().expect("spawned id").to_string();
+        }
+        assert_eq!(
+            frame.json["t"], "session_added",
+            "only the arrival precedes the answer: {}",
+            frame.raw
+        );
+    };
+    loopback._kills.push(KillGuard {
+        hub: loopback.state.hub.clone(),
+        id: spawned_id.clone(),
+    });
+
+    // ...and answers kill with ok (its exit pushes may come first).
+    loopback
+        .send(json!({"t": "kill", "req": "k1", "id": spawned_id}))
+        .await;
+    loop {
+        let frame = loopback.recv("the terminal kill").await;
+        match frame.json["t"].as_str() {
+            Some("ok") => {
+                assert_eq!(frame.json["req"], "k1");
+                break;
+            }
+            Some("exited" | "session_removed" | "session_added") => {}
+            _ => panic!("unexpected frame while killing: {}", frame.raw),
+        }
+    }
+    // A lagging lifecycle push must not leak into the next step.
+    loop {
+        match tokio::time::timeout(Duration::from_millis(300), loopback.events.recv()).await {
+            Ok(Some(DeviceEvent::Frame(frame))) => assert!(
+                matches!(
+                    frame.json["t"].as_str(),
+                    Some("exited" | "session_removed" | "session_added")
+                ),
+                "only kill lifecycle strays follow: {}",
+                frame.raw
+            ),
+            Ok(Some(DeviceEvent::Closed)) | Ok(None) => {
+                panic!("the channel closed while draining the kill")
+            }
+            Err(_) => break,
+        }
+    }
+
+    // Unknown kinds are still refused before spawning.
+    loopback
+        .send(json!({"t": "spawn", "req": "s2", "kind": "banana", "cli": "cat", "workdir": "/tmp"}))
+        .await;
+    assert_eq!(
+        expect_error(loopback, "spawn a bad kind").await["code"],
+        "bad_request"
+    );
+}
+
+/// Drive 100 KiB through the session's output in one hub chunk and check the
+/// bridge re-chunks it into size-bounded, in-order frames with the source seq.
+async fn assert_hundred_kib_intact(loopback: &mut Loopback) {
+    let payload: Vec<u8> = (0..100 * 1024).map(|index| (index % 251) as u8).collect();
+    loopback.cat.ingest_chunk(&payload);
+    let expected_frames = payload.len().div_ceil(CHUNK_BYTES);
+    let mut rebuilt: Vec<u8> = Vec::with_capacity(payload.len());
+    let mut frames = 0usize;
+    let mut payload_seq: Option<u64> = None;
+    while frames < expected_frames {
+        let frame = loopback.recv("a payload chunk").await;
+        assert_eq!(
+            frame.json["t"], "out",
+            "only out frames expected here: {}",
+            frame.raw
+        );
+        assert!(
+            frame.raw.len() <= MAX_FRAME_BYTES,
+            "frame of {} bytes exceeds {MAX_FRAME_BYTES}",
+            frame.raw.len()
+        );
+        let chunk = decode(&frame.json);
+        assert!(
+            chunk.len() <= CHUNK_BYTES,
+            "chunk of {} raw bytes exceeds {CHUNK_BYTES}",
+            chunk.len()
+        );
+        let seq = frame.json["seq"].as_u64().expect("out seq");
+        if payload_seq.is_none() {
+            if chunk.len() < CHUNK_BYTES {
+                // A trailing echo chunk that was sent before the payload.
+                continue;
+            }
+            payload_seq = Some(seq);
+        }
+        assert_eq!(
+            payload_seq,
+            Some(seq),
+            "every chunk keeps the seq of its source chunk"
+        );
+        rebuilt.extend_from_slice(&chunk);
+        frames += 1;
+    }
+    assert_eq!(
+        rebuilt, payload,
+        "the 100 KiB output arrived intact and in order"
+    );
+}
+
+/// A revoke — the same two calls [`RelayRuntime::revoke`] makes — closes the
+/// peer, and the freed slot shows up in the live-peer registry.
+///
+/// [`RelayRuntime::revoke`]: crate::remote::relay::RelayRuntime
+async fn close_by_revoking(loopback: &mut Loopback, device_id: &str) {
+    loopback.connections.close(device_id);
+    loopback.peers.close(device_id);
+    let closed = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match loopback.events.recv().await {
+                Some(DeviceEvent::Closed) | None => return,
+                // Trailing frames that were already in flight are fine.
+                Some(DeviceEvent::Frame(_)) => {}
+            }
+        }
+    })
+    .await;
+    assert!(
+        closed.is_ok(),
+        "a revoked device's peer must close within a second"
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while loopback.peers.live_ids().iter().any(|id| id == device_id) {
+        assert!(
+            Instant::now() < deadline,
+            "the peer slot must be released when the channel closes"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// 3 MiB of PNG-sniffable bytes: the 8-byte magic plus a deterministic
+/// pattern (the sniffer only reads the head).
+fn big_png_bytes() -> Vec<u8> {
+    let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    bytes.extend((0..3 * 1024 * 1024 - 8).map(|index| (index % 251) as u8));
+    bytes
+}
+
+/// 1 KiB of PNG-sniffable bytes, for tests that never transfer the file.
+fn small_png_bytes() -> Vec<u8> {
+    let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    bytes.extend((0..1024 - 8).map(|index| (index % 251) as u8));
+    bytes
+}
+
+/// Write `bytes` to a scratch file and put the copy on the shelf; the
+/// scratch dir is dropped after the copy lands, so only the file id returns.
+fn insert_shelf_png(
+    state: &SessionsState,
+    name: &str,
+    bytes: &[u8],
+    session_id: Option<&str>,
+) -> String {
+    let dir = tempfile::tempdir().expect("scratch dir");
+    let path = dir.path().join(name);
+    std::fs::write(&path, bytes).expect("write source");
+    state
+        .shelf
+        .insert(&path, session_id, None, "test")
+        .expect("shelf insert")
+        .file_id
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Fail when any frame arrives within a quiet window: the peer must stay
+/// silent (a suppressed push), not merely slow.
+async fn assert_quiet(loopback: &mut Loopback, what: &str) {
+    assert!(
+        loopback.pending.is_none(),
+        "{what}: no frame may be buffered"
+    );
+    match tokio::time::timeout(Duration::from_secs(1), loopback.events.recv()).await {
+        Err(_) => {}
+        Ok(Some(DeviceEvent::Frame(frame))) => {
+            panic!("{what}: expected silence, got {}", frame.raw)
+        }
+        Ok(Some(DeviceEvent::Closed)) | Ok(None) => {
+            panic!("{what}: the channel closed while waiting for silence")
+        }
+    }
+}
+
+/// End to end over a real data channel: list, attach, echo, the remote
+/// restrictions, 100 KiB chunking, and revoke-closes-the-peer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_paired_device_gets_the_session_hub_over_a_webrtc_data_channel() {
+    let mut loopback = connected_loopback().await;
+
+    // The device is greeted exactly like a local socket: hello, then list.
+    let hello = loopback.recv("the hello").await;
+    assert_eq!(hello.json["t"], "hello", "got {}", hello.raw);
+    assert_eq!(hello.json["proto"], 2);
+    assert_eq!(
+        hello.json["features"],
+        json!(["shelf", "shelf_upload"]),
+        "the data channel advertises the shelf: {}",
+        hello.raw
+    );
+
+    // The listing the device sees: agent and terminal sessions alike.
+    loopback.send(json!({"t": "list", "req": "l1"})).await;
+    let frame = loopback.recv("the sessions answer").await;
+    assert_eq!(frame.json["t"], "sessions");
+    assert_eq!(frame.json["req"], "l1");
+    let items = frame.json["items"].as_array().expect("items array");
+    let ids: Vec<&str> = items
+        .iter()
+        .map(|item| item["id"].as_str().expect("item id"))
+        .collect();
+    assert!(
+        ids.contains(&loopback.cat.id.as_str()),
+        "the agent session is listed: {ids:?}"
+    );
+    assert!(
+        ids.contains(&loopback.terminal.id.as_str()),
+        "the terminal session is listed: {ids:?}"
+    );
+    let cat_item = items
+        .iter()
+        .find(|item| item["id"] == loopback.cat.id)
+        .expect("the cat session item");
+    assert_eq!(cat_item["kind"], "agent");
+    let terminal_item = items
+        .iter()
+        .find(|item| item["id"] == loopback.terminal.id)
+        .expect("the terminal session item");
+    assert_eq!(terminal_item["kind"], "terminal");
+
+    // Attach the cat session: its snapshot arrives first, then the echo.
+    loopback
+        .send(json!({"t": "attach", "id": loopback.cat.id}))
+        .await;
+    let snapshot_seq = loopback.recv_snapshot("the cat snapshot").await;
+    echo_roundtrip(&mut loopback, snapshot_seq).await;
+
+    // The remote restrictions.
+    assert_restrictions(&mut loopback).await;
+
+    // Chunking over the real channel: 100 KiB intact, in order, size-bounded.
+    assert_hundred_kib_intact(&mut loopback).await;
+
+    // A revoke closes the peer and frees its slot.
+    close_by_revoking(&mut loopback, DEVICE_ID).await;
+}
+
+/// The greeting every peer sees: hello, proto 2, the shelf features.
+async fn assert_hello(peer: &mut Loopback, what: &str) {
+    let hello = peer.recv(what).await;
+    assert_eq!(hello.json["t"], "hello", "got {}", hello.raw);
+    assert_eq!(hello.json["proto"], 2);
+    assert_eq!(
+        hello.json["features"],
+        json!(["shelf", "shelf_upload"]),
+        "the data channel advertises the shelf: {}",
+        hello.raw
+    );
+}
+
+/// The catalog answer for `req`.
+async fn assert_catalog(peer: &mut Loopback, req: &str, what: &str) {
+    peer.send(json!({"t": "catalog", "req": req})).await;
+    let frame = peer.recv(what).await;
+    assert_eq!(
+        frame.json["t"], "catalog",
+        "{what}: expected a catalog, got {}",
+        frame.raw
+    );
+    assert_eq!(frame.json["req"], req);
+}
+
+/// The session ids one `list` answer carries, sorted for comparison.
+async fn list_ids(peer: &mut Loopback, req: &str, what: &str) -> Vec<String> {
+    peer.send(json!({"t": "list", "req": req})).await;
+    let frame = peer.recv(what).await;
+    assert_eq!(
+        frame.json["t"], "sessions",
+        "{what}: expected a sessions answer, got {}",
+        frame.raw
+    );
+    assert_eq!(frame.json["req"], req);
+    let mut ids: Vec<String> = frame.json["items"]
+        .as_array()
+        .expect("items array")
+        .iter()
+        .map(|item| item["id"].as_str().expect("item id").to_string())
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// Two device peers against one daemon: both are greeted, both get the
+/// catalog and the identical session list, and a session spawned after both
+/// connected is announced to both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_peers_share_hello_catalog_list_and_updates() {
+    let mut first = connected_loopback().await;
+    let second_id = device_id(
+        HostKey::from_scalar_bytes(&[0x33; 32])
+            .expect("second device key")
+            .spki_der(),
+    );
+    assert_ne!(second_id, DEVICE_ID);
+    let mut second = second_loopback(&first, 0x33, "d:second").await;
+    assert_eq!(first.peers.len(), 2, "both peers register");
+
+    assert_hello(&mut first, "the first hello").await;
+    assert_hello(&mut second, "the second hello").await;
+
+    assert_catalog(&mut first, "c1", "the first catalog").await;
+    assert_catalog(&mut second, "c2", "the second catalog").await;
+
+    let first_ids = list_ids(&mut first, "l1", "the first list").await;
+    let second_ids = list_ids(&mut second, "l2", "the second list").await;
+    assert_eq!(
+        first_ids, second_ids,
+        "both peers see the identical session list"
+    );
+    assert!(
+        first_ids.contains(&first.cat.id),
+        "the agent session is listed: {first_ids:?}"
+    );
+    assert!(
+        first_ids.contains(&first.terminal.id),
+        "the terminal session is listed: {first_ids:?}"
+    );
+
+    // A terminal spawned after both connected is announced to both.
+    let workdir = tempfile::tempdir().expect("workdir");
+    let (spawned, _kill) = spawn_session(&first.state.hub, SessionKind::Terminal, workdir.path());
+    for (peer, what) in [(&mut first, "first"), (&mut second, "second")] {
+        let added = peer.recv("the session_added").await;
+        assert_eq!(
+            added.json["t"], "session_added",
+            "{what}: expected a session_added, got {}",
+            added.raw
+        );
+        assert_eq!(added.json["item"]["id"], spawned.id);
+        assert_eq!(added.json["item"]["kind"], "terminal");
+    }
+
+    close_by_revoking(&mut first, DEVICE_ID).await;
+    close_by_revoking(&mut second, second_id.as_str()).await;
+}
+
+/// A revoked device hears `error{code:"revoked"}` before its channel
+/// closes — the same calls [`RelayRuntime::revoke`] makes, with the mark.
+///
+/// [`RelayRuntime::revoke`]: crate::remote::relay::RelayRuntime
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_revoked_device_hears_revoked_before_close() {
+    let mut loopback = connected_loopback().await;
+    assert_hello(&mut loopback, "the hello").await;
+
+    loopback.peers.close_revoked(DEVICE_ID);
+    loopback.connections.close(DEVICE_ID);
+
+    let frame = loopback.recv("the revoked error").await;
+    assert_eq!(frame.json["t"], "error", "got {}", frame.raw);
+    assert_eq!(frame.json["code"], "revoked");
+    match tokio::time::timeout(Duration::from_secs(5), loopback.events.recv()).await {
+        Ok(Some(DeviceEvent::Closed)) | Ok(None) => {}
+        Ok(Some(DeviceEvent::Frame(frame))) => {
+            panic!("nothing follows the revoked error: {}", frame.raw)
+        }
+        Err(_) => panic!("timed out waiting for the close after the error"),
+    }
+}
+
+/// `fitting_frame` passes a frame through under the peer's cap and answers
+/// an oversized one with `frame_too_large` for the same `req` — a push
+/// without a `req` errors without one too.
+#[test]
+fn fitting_frame_errors_only_past_the_peers_cap() {
+    let big = format!(
+        "{{\"t\":\"sessions\",\"req\":\"l1\",\"items\":[\"{}\"]}}",
+        "x".repeat(2000)
+    );
+    assert!(big.len() > 1024, "the fixture must exceed the small cap");
+    assert_eq!(
+        super::fitting_frame(big.clone(), MAX_CHANNEL_FRAME),
+        big,
+        "under the desktop cap it passes through"
+    );
+    let error: Value = serde_json::from_str(&super::fitting_frame(big, 1024)).expect("error frame");
+    assert_eq!(error["t"], "error");
+    assert_eq!(error["code"], "frame_too_large");
+    assert_eq!(error["req"], "l1");
+
+    let push = format!(
+        "{{\"t\":\"session_added\",\"item\":{{\"id\":\"{}\"}}}}",
+        "y".repeat(2000)
+    );
+    let error: Value =
+        serde_json::from_str(&super::fitting_frame(push, 1024)).expect("error frame");
+    assert_eq!(error["code"], "frame_too_large");
+    assert!(
+        error.get("req").is_none(),
+        "a push errors without a req: {error}"
+    );
+}
+
+/// `peer_frame_cap` reads the remote's `a=max-message-size` advertisement:
+/// the minimum when several are present, the 64 KiB RFC default when none
+/// is usable, and never above the desktop ceiling.
+#[test]
+fn peer_frame_cap_follows_the_remote_advertisement() {
+    let sdp_with = |attrs: &[&str]| {
+        format!(
+            "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n{}",
+            attrs.join("\r\n")
+        )
+    };
+    assert_eq!(
+        super::peer_frame_cap(&sdp_with(&["a=max-message-size:262144"])),
+        MAX_CHANNEL_FRAME
+    );
+    assert_eq!(
+        super::peer_frame_cap(&sdp_with(&["a=max-message-size:65536"])),
+        64 * 1024
+    );
+    assert_eq!(
+        super::peer_frame_cap(&sdp_with(&[
+            "a=max-message-size:262144",
+            "a=max-message-size:16384"
+        ])),
+        16 * 1024,
+        "several advertisements: the smallest wins"
+    );
+    // Zero advertises no limit; garbage and absence fall back to 64 KiB.
+    assert_eq!(
+        super::peer_frame_cap(&sdp_with(&["a=max-message-size:0"])),
+        64 * 1024
+    );
+    assert_eq!(
+        super::peer_frame_cap(&sdp_with(&["a=max-message-size:banana"])),
+        64 * 1024
+    );
+    assert_eq!(super::peer_frame_cap(&sdp_with(&[])), 64 * 1024);
+    // A huge advertisement never raises the desktop ceiling.
+    assert_eq!(
+        super::peer_frame_cap(&sdp_with(&["a=max-message-size:1073741823"])),
+        MAX_CHANNEL_FRAME
+    );
+}
+
+/// A peer with a small negotiated cap gets `frame_too_large` for a list
+/// that fits the desktop cap, and its channel stays alive: the answer is
+/// refused, never sent halfway to kill the peer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_small_cap_peer_gets_frame_too_large_for_a_desktop_sized_list() {
+    let hub = loopback_hub();
+    let LoopbackHub {
+        state,
+        cat,
+        terminal,
+        mut kills,
+    } = hub;
+    let peers = DevicePeers::default();
+    let connections = ConnectionRegistry::default();
+    // Enough sessions that the list answer dwarfs the mobile cap; one is
+    // doomed, so its later exit proves the channel is still alive.
+    let workdir = tempfile::tempdir().expect("workdir");
+    for _ in 0..10 {
+        let (_session, kill) = spawn_session(&state.hub, SessionKind::Agent, workdir.path());
+        kills.push(kill);
+    }
+    let (doomed, doomed_kill) = spawn_session(&state.hub, SessionKind::Agent, workdir.path());
+
+    let (device, events, tasks, id) =
+        connect_loopback_device(&state, &peers, &connections, 0x22, FROM, 1024).await;
+    assert_eq!(id, DEVICE_ID);
+    let mut peer = Loopback {
+        device,
+        events,
+        pending: None,
+        peers,
+        connections,
+        state,
+        cat,
+        terminal,
+        _kills: kills,
+        _tasks: tasks,
+    };
+
+    assert_hello(&mut peer, "the hello").await;
+    peer.send(json!({"t": "list", "req": "l1"})).await;
+    let error = expect_error(&mut peer, "the oversized list").await;
+    assert_eq!(error["code"], "frame_too_large");
+    assert_eq!(error["req"], "l1");
+
+    // The refusal killed nothing: the doomed session's exit still arrives.
+    drop(doomed_kill);
+    let exited = peer.recv("the exit after the refusal").await;
+    assert_eq!(
+        exited.json["t"], "exited",
+        "expected the exit, got {}",
+        exited.raw
+    );
+    assert_eq!(exited.json["id"], doomed.id);
+
+    close_by_revoking(&mut peer, DEVICE_ID).await;
+}
+
+/// A 3 MiB host-shelf PNG fetched over the data channel reassembles to the
+/// same sha256, no frame exceeds the wire cap, and terminal output sent
+/// mid-transfer arrives between the file's first and last part instead of
+/// stalling behind it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_remote_client_fetches_a_3mib_shelf_png_intact_while_output_interleaves() {
+    let mut loopback = connected_loopback().await;
+    assert_eq!(loopback.recv("the hello").await.json["t"], "hello");
+
+    let source = big_png_bytes();
+    let want = sha256_hex(&source);
+    let file_id = insert_shelf_png(&loopback.state, "photo.png", &source, None);
+
+    let added = loopback.recv("the shelf_added").await;
+    assert_eq!(added.json["t"], "shelf_added");
+    assert_eq!(added.json["item"]["file_id"], file_id);
+
+    loopback.send(json!({"t": "shelf_list", "req": "l1"})).await;
+    let shelf = loopback.recv("the shelf").await;
+    assert_eq!(shelf.json["t"], "shelf");
+    assert_eq!(shelf.json["req"], "l1");
+    let ids: Vec<&str> = shelf.json["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .map(|item| item["file_id"].as_str().expect("file_id"))
+        .collect();
+    assert!(
+        ids.contains(&file_id.as_str()),
+        "the host shelf lists the PNG: {ids:?}"
+    );
+
+    let cat_id = loopback.cat.id.clone();
+    loopback.send(json!({"t": "attach", "id": cat_id})).await;
+    let _snapshot_seq = loopback.recv_snapshot("the cat snapshot").await;
+
+    loopback
+        .send(json!({"t": "shelf_get", "req": "g1", "file_id": file_id}))
+        .await;
+    let output: Vec<u8> = (0..100 * 1024).map(|index| (index % 251) as u8).collect();
+    let mut reassembled = Vec::new();
+    let mut parts = 0u32;
+    let mut out_frames = 0usize;
+    let mut output_sent = false;
+    loop {
+        let frame = loopback.recv("a file part or interleaved out").await;
+        assert!(
+            frame.raw.len() <= MAX_FRAME_BYTES,
+            "frame of {} bytes exceeds {MAX_FRAME_BYTES}",
+            frame.raw.len()
+        );
+        if frame.json["t"] == "out" {
+            assert_eq!(frame.json["id"], cat_id);
+            out_frames += 1;
+            continue;
+        }
+        assert_eq!(
+            frame.json["t"], "file",
+            "only file parts and out frames expected here: {}",
+            frame.raw
+        );
+        assert_eq!(frame.json["req"], "g1");
+        assert_eq!(frame.json["file_id"], file_id);
+        assert_eq!(
+            frame.json["part"].as_u64(),
+            Some(u64::from(parts)),
+            "parts are contiguous from zero"
+        );
+        reassembled.extend(decode(&frame.json));
+        if !output_sent {
+            output_sent = true;
+            loopback.cat.ingest_chunk(&output);
+        }
+        parts += 1;
+        if frame.json["last"].as_bool().expect("the last flag") {
+            break;
+        }
+    }
+    assert!(
+        out_frames >= 1,
+        "terminal output must arrive between the first and last file part"
+    );
+    assert_eq!(reassembled.len(), source.len());
+    assert_eq!(
+        sha256_hex(&reassembled),
+        want,
+        "the PNG reassembles byte-for-byte"
+    );
+    close_by_revoking(&mut loopback, DEVICE_ID).await;
+}
+
+/// Terminal-session files stay hidden from remote clients — absent from
+/// lists and pushes, refused on fetch — while host files still arrive.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminal_session_files_are_hidden_and_refused_over_the_data_channel() {
+    let mut loopback = connected_loopback().await;
+    assert_eq!(loopback.recv("the hello").await.json["t"], "hello");
+
+    let terminal_id = loopback.terminal.id.clone();
+    let hidden = insert_shelf_png(
+        &loopback.state,
+        "term.png",
+        &small_png_bytes(),
+        Some(&terminal_id),
+    );
+    assert_quiet(&mut loopback, "a terminal file insert").await;
+
+    loopback
+        .send(json!({"t": "shelf_list", "req": "l1", "id": terminal_id}))
+        .await;
+    let shelf = loopback.recv("the terminal shelf").await;
+    assert_eq!(shelf.json["t"], "shelf");
+    assert_eq!(shelf.json["req"], "l1");
+    assert!(
+        shelf.json["items"].as_array().expect("items").is_empty(),
+        "the terminal shelf stays hidden: {}",
+        shelf.raw
+    );
+
+    loopback
+        .send(json!({"t": "shelf_get", "req": "g1", "file_id": hidden}))
+        .await;
+    let error = expect_error(&mut loopback, "shelf_get on a terminal file").await;
+    assert_eq!(error["code"], "forbidden");
+    assert_eq!(error["req"], "g1");
+
+    let _hidden_again = insert_shelf_png(
+        &loopback.state,
+        "term2.png",
+        &small_png_bytes(),
+        Some(&terminal_id),
+    );
+    assert_quiet(&mut loopback, "a second terminal file insert").await;
+
+    let shown = insert_shelf_png(&loopback.state, "host.png", &small_png_bytes(), None);
+    let added = loopback.recv("the host shelf_added").await;
+    assert_eq!(added.json["t"], "shelf_added");
+    assert_eq!(added.json["item"]["file_id"], shown);
+
+    close_by_revoking(&mut loopback, DEVICE_ID).await;
+}
+
+/// A device may hold two shelf downloads at once; the third answers `busy`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_third_concurrent_shelf_get_answers_busy() {
+    let mut loopback = connected_loopback().await;
+    assert_eq!(loopback.recv("the hello").await.json["t"], "hello");
+
+    let source = big_png_bytes();
+    let file_id = insert_shelf_png(&loopback.state, "photo.png", &source, None);
+    assert_eq!(
+        loopback.recv("the shelf_added").await.json["t"],
+        "shelf_added"
+    );
+
+    for req in ["g1", "g2", "g3"] {
+        loopback
+            .send(json!({"t": "shelf_get", "req": req, "file_id": file_id}))
+            .await;
+    }
+    loop {
+        let frame = loopback.recv("file parts or the busy error").await;
+        if frame.json["t"] == "error" {
+            assert_eq!(frame.json["code"], "busy");
+            assert_eq!(frame.json["req"], "g3");
+            break;
+        }
+        assert_eq!(
+            frame.json["t"], "file",
+            "only file parts arrive before the refusal: {}",
+            frame.raw
+        );
+        assert!(
+            frame.raw.len() <= MAX_FRAME_BYTES,
+            "frame of {} bytes exceeds {MAX_FRAME_BYTES}",
+            frame.raw.len()
+        );
+    }
+    close_by_revoking(&mut loopback, DEVICE_ID).await;
+}
+
+/// Revoking the device mid-download stops its transfer: the peer closes and
+/// no more file frames arrive.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_revoked_devices_shelf_transfer_stops() {
+    let mut loopback = connected_loopback().await;
+    assert_eq!(loopback.recv("the hello").await.json["t"], "hello");
+
+    let source = big_png_bytes();
+    let file_id = insert_shelf_png(&loopback.state, "photo.png", &source, None);
+    assert_eq!(
+        loopback.recv("the shelf_added").await.json["t"],
+        "shelf_added"
+    );
+
+    loopback
+        .send(json!({"t": "shelf_get", "req": "g1", "file_id": file_id}))
+        .await;
+    let first = loopback.recv("the first file frame").await;
+    assert_eq!(first.json["t"], "file");
+
+    close_by_revoking(&mut loopback, DEVICE_ID).await;
+
+    match tokio::time::timeout(Duration::from_secs(1), loopback.events.recv()).await {
+        Ok(Some(DeviceEvent::Frame(frame))) => {
+            panic!("no more file frames may arrive after revoke: {}", frame.raw)
+        }
+        Ok(Some(DeviceEvent::Closed)) | Ok(None) | Err(_) => {}
+    }
+}
+
+#[test]
+fn the_fifth_concurrent_peer_is_refused_busy() {
+    let peers = DevicePeers::default();
+    // The receivers must stay alive, or routing fails for a closed channel.
+    let mut kept: Vec<mpsc::UnboundedReceiver<Control>> = Vec::new();
+    for index in 0..MAX_DEVICE_PEERS {
+        let (control, rx) = mpsc::unbounded_channel();
+        kept.push(rx);
+        assert!(peers.register(
+            &format!("device-{index}"),
+            &format!("d:{index}"),
+            Arc::new(CancellationToken::new()),
+            control
+        ));
+    }
+    let (control, rx) = mpsc::unbounded_channel();
+    kept.push(rx);
+    assert!(
+        !peers.register(
+            "device-5",
+            "d:5",
+            Arc::new(CancellationToken::new()),
+            control
+        ),
+        "the fifth concurrent peer must be refused"
+    );
+    assert_eq!(peers.len(), MAX_DEVICE_PEERS);
+    // `ice` bodies carry no device id: they route by their relay connection.
+    assert!(peers.route(
+        "d:0",
+        Control::Ice(signaling::IceCandidate::bare("candidate".to_string()))
+    ));
+    assert!(!peers.route(
+        "d:5",
+        Control::Ice(signaling::IceCandidate::bare("candidate".to_string()))
+    ));
+    // A revoke frees the slot for the next device.
+    peers.close("device-0");
+    assert_eq!(peers.len(), MAX_DEVICE_PEERS - 1);
+    let (control, rx) = mpsc::unbounded_channel();
+    kept.push(rx);
+    assert!(peers.register(
+        "device-5",
+        "d:5",
+        Arc::new(CancellationToken::new()),
+        control
+    ));
+}
+
+/// A device that offers again before its old peer noticed keeps its new slot:
+/// the old peer's cleanup must not remove the new handle.
+#[test]
+fn a_reconnected_device_keeps_its_new_slot_when_the_old_peer_cleans_up() {
+    let peers = DevicePeers::default();
+    let old = Arc::new(CancellationToken::new());
+    let (old_control, mut old_rx) = mpsc::unbounded_channel();
+    assert!(peers.register("device-a", "d:old", Arc::clone(&old), old_control));
+    let new = Arc::new(CancellationToken::new());
+    let (new_control, mut new_rx) = mpsc::unbounded_channel();
+    assert!(peers.register("device-a", "d:new", Arc::clone(&new), new_control));
+    assert_eq!(peers.len(), 1, "a reconnect reuses its own slot");
+
+    // The replaced handle is dropped, so the old peer wakes and cleans up.
+    assert!(matches!(
+        old_rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Disconnected)
+    ));
+    peers.remove("device-a", &old);
+    assert_eq!(peers.len(), 1);
+    assert!(
+        peers.route(
+            "d:new",
+            Control::Ice(signaling::IceCandidate::bare("candidate".to_string()))
+        ),
+        "the reconnected peer still answers on its own connection"
+    );
+    assert!(new_rx.try_recv().is_ok());
+    assert!(!new.is_cancelled());
+}
+
+/// A frame that arrives before the device opens its channel is dropped, not
+/// fatal: a hub event in the setup window must never end the peer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_frame_before_the_channel_opens_is_not_fatal() {
+    let (offer, device) = peer::device_side::DeviceSide::offer()
+        .await
+        .expect("the device offer");
+    let (_answer, host) = peer::Peer::answer_offer(Vec::new(), &offer)
+        .await
+        .expect("the host answer");
+    // The device has not accepted the answer, so the host has no channel yet.
+    assert!(
+        host.send_text(r#"{"t":"session_added"}"#).await.is_ok(),
+        "the setup window must not end the peer"
+    );
+    drop(device);
+}
+
+/// FR3: only the `canopy-session-v1` channel, ordered and reliable, is
+/// accepted; a device that asks for another one has it closed unanswered.
+/// (Reliability has no case: webrtc 0.21.1 reports both caps as `None` for
+/// inbound channels, so an unreliable channel is indistinguishable on the
+/// host side and the reliable half of the check cannot be exercised.)
+async fn assert_channel_refused(label: &str, ordered: bool) {
+    let (offer, device) = peer::device_side::DeviceSide::offer_channel(label, ordered)
+        .await
+        .expect("the device offer");
+    let (answer, host) = peer::Peer::answer_offer(Vec::new(), &offer)
+        .await
+        .expect("the host answer");
+    device.accept(&answer).await.expect("the device accepts");
+    let closed = tokio::time::timeout(OPEN_TIMEOUT, async {
+        loop {
+            match device.next().await {
+                Some(peer::device_side::DeviceEvent::Closed) | None => return,
+                Some(_) => {}
+            }
+        }
+    })
+    .await;
+    assert!(
+        closed.is_ok(),
+        "the host must close a channel {label:?} ordered={ordered}"
+    );
+    assert!(
+        host.send_text("{}").await.is_ok(),
+        "a refused channel never becomes the session channel"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn only_an_ordered_reliable_session_channel_is_accepted() {
+    assert_channel_refused("some-other-channel", true).await;
+    assert_channel_refused(peer::CHANNEL_LABEL, false).await;
+}
+
+/// One bridge answer through a channel: the remote-restriction half of the
+/// loopback scenario, driven directly against the hub without a transport.
+async fn bridge_reply(state: &Arc<SessionsState>, frame: &Value) -> Vec<String> {
+    let (out_tx, mut out_rx) = crate::sessions::outbound::channel();
+    let mut bridge = crate::remote::bridge::RemoteBridge::new(Arc::clone(state));
+    bridge.handle_text(&frame.to_string(), &out_tx).await;
+    drop(out_tx);
+    let mut replies = Vec::new();
+    while let Ok(reply) = out_rx.try_recv() {
+        replies.push(reply);
+    }
+    replies
+}
+
+/// Assert one refusal frame with the `forbidden` code.
+fn assert_forbidden(replies: &[String], req: Option<&str>) {
+    assert_eq!(replies.len(), 1, "exactly one refusal, got {replies:?}");
+    let error: Value = serde_json::from_str(&replies[0]).expect("error frame");
+    assert_eq!(error["t"], "error");
+    assert_eq!(error["code"], "forbidden");
+    match req {
+        Some(req) => assert_eq!(error["req"], req),
+        None => assert!(error.get("req").is_none(), "no req echoed: {error}"),
+    }
+}
+
+/// One bridge answer that must be exactly one error frame, returned parsed.
+async fn bridge_refusal(state: &Arc<SessionsState>, frame: Value) -> Value {
+    let replies = bridge_reply(state, &frame).await;
+    assert_eq!(replies.len(), 1, "exactly one refusal, got {replies:?}");
+    let error: Value = serde_json::from_str(&replies[0]).expect("error frame");
+    assert_eq!(error["t"], "error", "must be an error: {error}");
+    error
+}
+
+/// One bridge answer that arrives asynchronously: `spawn`, `prompt` and
+/// `kill` answer from a spawned task, after `handle_text` returns, so
+/// `bridge_reply` (synchronous `try_recv`) never sees them.
+async fn bridge_await_frame(state: &Arc<SessionsState>, frame: &Value) -> Value {
+    let (out_tx, mut out_rx) = crate::sessions::outbound::channel();
+    let mut bridge = crate::remote::bridge::RemoteBridge::new(Arc::clone(state));
+    bridge.handle_text(&frame.to_string(), &out_tx).await;
+    let reply = tokio::time::timeout(Duration::from_secs(10), out_rx.recv())
+        .await
+        .expect("an async answer arrives")
+        .expect("the channel stays open");
+    serde_json::from_str(&reply).expect("JSON frame")
+}
+
+/// Spawn through a fresh bridge; the spawned session id.
+async fn bridge_spawned_id(state: &Arc<SessionsState>, frame: Value) -> String {
+    let spawned = bridge_await_frame(state, &frame).await;
+    assert_eq!(
+        spawned["t"], "spawned",
+        "expected a spawned answer: {spawned}"
+    );
+    assert_eq!(spawned["req"], frame["req"]);
+    spawned["id"].as_str().expect("spawned id").to_string()
+}
+
+/// Terminal sessions are first-class over the bridge: they list, attach,
+/// take input and prompts, and spawn with `cli` optional — while `resize`
+/// stays refused and unknown kinds stay `bad_request`.
+#[tokio::test]
+async fn bridge_terminals_are_first_class() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db =
+        Arc::new(crate::db::Database::new(&dir.path().join("test.db")).expect("test database"));
+    let hub = SessionHub::with_broadcast_capacity(db, "test-host".to_string(), 256);
+    let workdir = tempfile::tempdir().expect("workdir");
+    let workdir_path = workdir.path().to_string_lossy().to_string();
+    let (cat, _kill_cat) = spawn_session(&hub, SessionKind::Agent, workdir.path());
+    let (terminal, _kill_terminal) = spawn_session(&hub, SessionKind::Terminal, workdir.path());
+    let state = SessionsState::for_test(hub.clone(), "token".to_string());
+    let mut kills: Vec<KillGuard> = Vec::new();
+
+    // The listing keeps both sessions, with their kinds.
+    let replies = bridge_reply(&state, &json!({"t": "list", "req": "l1"})).await;
+    assert_eq!(replies.len(), 1);
+    let listed: Value = serde_json::from_str(&replies[0]).expect("sessions frame");
+    assert_eq!(listed["t"], "sessions");
+    assert_eq!(listed["req"], "l1");
+    let items = listed["items"].as_array().expect("items array");
+    let kind_of = |id: &str| {
+        items
+            .iter()
+            .find(|item| item["id"] == id)
+            .expect("listed")
+            .get("kind")
+            .and_then(Value::as_str)
+            .expect("kind")
+            .to_string()
+    };
+    assert_eq!(kind_of(&cat.id), "agent");
+    assert_eq!(kind_of(&terminal.id), "terminal");
+
+    // Attach answers the terminal's snapshot.
+    let replies = bridge_reply(&state, &json!({"t": "attach", "id": terminal.id})).await;
+    assert!(!replies.is_empty(), "attach answers at least a snapshot");
+    let first: Value = serde_json::from_str(&replies[0]).expect("snapshot frame");
+    assert_eq!(first["t"], "snapshot");
+    assert_eq!(first["id"], terminal.id);
+
+    // Input on the terminal answers nothing — and no error.
+    let replies = bridge_reply(
+        &state,
+        &json!({"t": "input", "id": terminal.id, "data": encode(b"x")}),
+    )
+    .await;
+    assert!(replies.is_empty(), "input answers nothing: {replies:?}");
+
+    // A prompt on the terminal answers ok.
+    let ok = bridge_await_frame(
+        &state,
+        &json!({"t": "prompt", "req": "p1", "id": terminal.id, "text": "hi"}),
+    )
+    .await;
+    assert_eq!(ok["t"], "ok");
+    assert_eq!(ok["req"], "p1");
+
+    // A terminal spawns without `cli`: running, terminal kind, default shell.
+    let spawned_id = bridge_spawned_id(
+        &state,
+        json!({"t": "spawn", "req": "s1", "kind": "terminal", "workdir": workdir_path}),
+    )
+    .await;
+    kills.push(KillGuard {
+        hub: hub.clone(),
+        id: spawned_id.clone(),
+    });
+    let spawned = hub.get(&spawned_id).expect("the spawned terminal lives");
+    assert_eq!(spawned.kind, SessionKind::Terminal);
+    assert_eq!(spawned.status(), SessionStatus::Running);
+    assert!(
+        !spawned.cli.is_empty(),
+        "a default shell fills the missing cli"
+    );
+
+    // The spawned terminal attaches like any session.
+    let replies = bridge_reply(&state, &json!({"t": "attach", "id": spawned_id})).await;
+    assert!(!replies.is_empty(), "attach answers at least a snapshot");
+    let first: Value = serde_json::from_str(&replies[0]).expect("snapshot frame");
+    assert_eq!(first["t"], "snapshot");
+    assert_eq!(first["id"], spawned_id);
+
+    // Spawns with `cli` behave as before, for both kinds.
+    let agent_id = bridge_spawned_id(
+        &state,
+        json!({"t": "spawn", "req": "s2", "kind": "agent", "cli": "cat", "workdir": workdir_path}),
+    )
+    .await;
+    kills.push(KillGuard {
+        hub: hub.clone(),
+        id: agent_id.clone(),
+    });
+    assert_eq!(
+        hub.get(&agent_id).expect("the agent lives").kind,
+        SessionKind::Agent
+    );
+    let shell_id = bridge_spawned_id(
+        &state,
+        json!({"t": "spawn", "req": "s3", "kind": "terminal", "cli": "cat", "workdir": workdir_path}),
+    )
+    .await;
+    kills.push(KillGuard {
+        hub: hub.clone(),
+        id: shell_id.clone(),
+    });
+    assert_eq!(
+        hub.get(&shell_id).expect("the terminal lives").kind,
+        SessionKind::Terminal
+    );
+
+    // Unknown kinds stay bad_request; resize stays forbidden.
+    let bad = bridge_reply(
+        &state,
+        &json!({"t": "spawn", "req": "s4", "kind": "banana", "cli": "cat", "workdir": "/tmp"}),
+    )
+    .await;
+    assert_eq!(bad.len(), 1);
+    let error: Value = serde_json::from_str(&bad[0]).expect("error frame");
+    assert_eq!(error["t"], "error");
+    assert_eq!(error["code"], "bad_request");
+    assert_forbidden(
+        &bridge_reply(
+            &state,
+            &json!({"t": "resize", "id": cat.id, "cols": 120, "rows": 40}),
+        )
+        .await,
+        None,
+    );
+
+    // A terminal arrival forwards through a manual bridge.
+    let (out_tx, mut out_rx) = crate::sessions::outbound::channel();
+    let mut bridge = crate::remote::bridge::RemoteBridge::new(Arc::clone(&state));
+    bridge.handle_event(
+        crate::sessions::HubEvent::SessionAdded(Box::new(terminal.item())),
+        &out_tx,
+    );
+    let pushed = out_rx.try_recv().expect("the terminal arrival forwards");
+    let added: Value = serde_json::from_str(&pushed).expect("JSON");
+    assert_eq!(added["t"], "session_added");
+    assert_eq!(added["item"]["id"], terminal.id);
+    bridge.abort();
+
+    // Killed last, the spawned terminal answers ok.
+    let ok = bridge_await_frame(&state, &json!({"t": "kill", "req": "k1", "id": spawned_id})).await;
+    assert_eq!(ok["t"], "ok");
+    assert_eq!(ok["req"], "k1");
+}
+
+/// A remote `spawn` runs the same extension checks as the local one: yolo
+/// needs a flagged harness, `workdir` must be absolute and real, and yolo
+/// on a terminal is refused exactly like on the local socket.
+#[tokio::test]
+async fn bridge_spawn_validates_yolo_and_workdir() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db =
+        Arc::new(crate::db::Database::new(&dir.path().join("test.db")).expect("test database"));
+    let hub = SessionHub::with_broadcast_capacity(db, "test-host".to_string(), 256);
+    let state = SessionsState::for_test(hub, "token".to_string());
+    let workdir = tempfile::tempdir().expect("workdir");
+    let workdir = workdir.path().to_string_lossy().to_string();
+
+    let error = bridge_refusal(
+        &state,
+        json!({
+            "t": "spawn", "req": "b-yolo", "kind": "agent",
+            "cli": "no-such-harness-xyz", "workdir": workdir, "yolo": true,
+        }),
+    )
+    .await;
+    assert_eq!(error["code"], "bad_request");
+    assert_eq!(error["req"], "b-yolo");
+    assert_eq!(
+        error["message"], "spawn: harness 'no-such-harness-xyz' has no yolo mode",
+        "must name the harness: {error}"
+    );
+
+    let error = bridge_refusal(
+        &state,
+        json!({
+            "t": "spawn", "req": "b-rel", "kind": "agent",
+            "cli": "cat", "workdir": "relative/dir",
+        }),
+    )
+    .await;
+    assert_eq!(error["code"], "bad_request");
+    assert_eq!(
+        error["message"], "spawn: field 'workdir' must be an absolute path",
+        "must name the field: {error}"
+    );
+
+    let missing = format!("{workdir}/not-a-directory");
+    let error = bridge_refusal(
+        &state,
+        json!({
+            "t": "spawn", "req": "b-missing", "kind": "agent",
+            "cli": "cat", "workdir": missing,
+        }),
+    )
+    .await;
+    assert_eq!(error["code"], "bad_request");
+    assert_eq!(
+        error["message"],
+        format!("spawn: workdir '{missing}' does not exist or is not a directory"),
+        "must name the path: {error}"
+    );
+
+    // Yolo on a terminal answers the same refusal as the local socket.
+    let error = bridge_refusal(
+        &state,
+        json!({
+            "t": "spawn", "req": "b-term", "kind": "terminal",
+            "cli": "sh", "workdir": workdir, "yolo": true,
+        }),
+    )
+    .await;
+    assert_eq!(error["code"], "bad_request");
+    assert_eq!(error["req"], "b-term");
+    assert_eq!(
+        error["message"], "spawn: field 'yolo' is not allowed for kind 'terminal'",
+        "must name the field and the kind: {error}"
+    );
+}
+
+/// Terminal files already on the shelf hide their later removal from a new
+/// bridge — including one that lands during the handshake — while host
+/// removals still push.
+#[tokio::test]
+async fn a_new_bridge_hides_pre_existing_terminal_files_removals() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db =
+        Arc::new(crate::db::Database::new(&dir.path().join("test.db")).expect("test database"));
+    let hub = SessionHub::with_broadcast_capacity(db, "test-host".to_string(), 256);
+    let workdir = tempfile::tempdir().expect("workdir");
+    let (_cat, _kill_cat) = spawn_session(&hub, SessionKind::Agent, workdir.path());
+    let (terminal, _kill_terminal) = spawn_session(&hub, SessionKind::Terminal, workdir.path());
+    let state = SessionsState::for_test(hub, "token".to_string());
+
+    let hidden = insert_shelf_png(&state, "term.png", &small_png_bytes(), Some(&terminal.id));
+    let shown = insert_shelf_png(&state, "host.png", &small_png_bytes(), None);
+
+    let (out_tx, mut out_rx) = crate::sessions::outbound::channel();
+    let mut bridge = crate::remote::bridge::RemoteBridge::new(Arc::clone(&state));
+
+    bridge.handle_event(
+        crate::sessions::HubEvent::ShelfRemoved { file_id: hidden },
+        &out_tx,
+    );
+    assert!(
+        out_rx.try_recv().is_err(),
+        "a hidden file's removal must not push"
+    );
+
+    bridge.handle_event(
+        crate::sessions::HubEvent::ShelfRemoved { file_id: shown },
+        &out_tx,
+    );
+    let pushed = out_rx.try_recv().expect("a host removal pushes");
+    let frame: Value = serde_json::from_str(&pushed).expect("removal frame");
+    assert_eq!(frame["t"], "shelf_removed");
+
+    // A terminal file that lands before the greeting (the serve loop feeds
+    // those to `note_hidden`, never forwarding them) hides its removal too.
+    let handshake = insert_shelf_png(&state, "term2.png", &small_png_bytes(), Some(&terminal.id));
+    let row = state.shelf.get(&handshake).expect("the new row");
+    let item = crate::sessions::protocol::ShelfItem::from(&row);
+    bridge.note_hidden(&crate::sessions::HubEvent::ShelfAdded(Box::new(item)));
+    assert!(
+        out_rx.try_recv().is_err(),
+        "noting a hidden arrival forwards nothing"
+    );
+    bridge.handle_event(
+        crate::sessions::HubEvent::ShelfRemoved { file_id: handshake },
+        &out_tx,
+    );
+    assert!(
+        out_rx.try_recv().is_err(),
+        "a handshake arrival's removal must not push"
+    );
+}
+
+/// Aborting the bridge stops its shelf transfers: no more parts arrive and
+/// both download slots free up for new ones.
+#[tokio::test]
+async fn aborting_the_bridge_cancels_its_shelf_transfers() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db =
+        Arc::new(crate::db::Database::new(&dir.path().join("test.db")).expect("test database"));
+    let hub = SessionHub::with_broadcast_capacity(db, "test-host".to_string(), 256);
+    let workdir = tempfile::tempdir().expect("workdir");
+    let (_cat, _kill_cat) = spawn_session(&hub, SessionKind::Agent, workdir.path());
+    let state = SessionsState::for_test(hub, "token".to_string());
+    let source = big_png_bytes();
+    let file_id = insert_shelf_png(&state, "photo.png", &source, None);
+
+    let (out_tx, mut out_rx) = crate::sessions::outbound::channel();
+    let mut bridge = crate::remote::bridge::RemoteBridge::new(Arc::clone(&state));
+    bridge
+        .handle_text(
+            &json!({"t": "shelf_get", "req": "g1", "file_id": file_id}).to_string(),
+            &out_tx,
+        )
+        .await;
+    let first = tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
+        .await
+        .expect("the first part arrives")
+        .expect("the channel stays open");
+    let frame: Value = serde_json::from_str(&first).expect("file frame");
+    assert_eq!(frame["t"], "file");
+    assert_eq!(frame["req"], "g1");
+
+    bridge.abort();
+
+    // Drain anything the task queued before the abort landed; after that the
+    // transfer stays silent — an uncancelled task would stream on, one part
+    // per millisecond, through the whole quiet window.
+    while out_rx.try_recv().is_ok() {}
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut stragglers = 0usize;
+    while out_rx.try_recv().is_ok() {
+        stragglers += 1;
+    }
+    assert_eq!(
+        stragglers, 0,
+        "the aborted transfer must send no more parts"
+    );
+
+    // Both slots are free again: two new downloads start, none answers busy.
+    bridge
+        .handle_text(
+            &json!({"t": "shelf_get", "req": "g2", "file_id": file_id}).to_string(),
+            &out_tx,
+        )
+        .await;
+    bridge
+        .handle_text(
+            &json!({"t": "shelf_get", "req": "g3", "file_id": file_id}).to_string(),
+            &out_tx,
+        )
+        .await;
+    let mut seen_g2 = false;
+    let mut seen_g3 = false;
+    while !(seen_g2 && seen_g3) {
+        let next = tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
+            .await
+            .expect("the new downloads answer")
+            .expect("the channel stays open");
+        let frame: Value = serde_json::from_str(&next).expect("transfer frame");
+        assert_ne!(
+            frame["t"], "error",
+            "no download answers busy after the abort: {frame}"
+        );
+        seen_g2 |= frame["req"] == "g2";
+        seen_g3 |= frame["req"] == "g3";
+    }
+    bridge.abort();
+}

@@ -109,7 +109,7 @@ pub struct CliConfig {
     pub session_end_args: Option<Vec<String>>,
     /// Subcommand/args that make this CLI print its own available model ids,
     /// one passable id per line (e.g. opencode's `models` → `opencode/big-pickle`,
-    /// `opencode-go/glm-5.2`). When set, `agent_models` uses this enumeration as
+    /// `opencode-go/glm-5.2`). When set, `harness models` uses this enumeration as
     /// the authoritative, guaranteed-passable catalog for the platform: each
     /// line is the literal string the model flag accepts, prefix and all —
     /// which models.dev cannot know for a universal gateway (it carries neither
@@ -141,7 +141,7 @@ pub struct CliConfig {
     /// platform "not installed" — `<platform>: '<path>' is not
     /// <platform_display> (identity check failed: <first line of its
     /// output>)` — on every surface that resolves the platform's binary
-    /// (probe, node dispatch, `agent_add` validation, doctor). The verdict
+    /// (probe, node dispatch, `agent_edit add` validation, doctor). The verdict
     /// is cached per resolved path + mtime for the daemon's lifetime.
     #[serde(default)]
     pub identity_pattern: Option<String>,
@@ -365,7 +365,7 @@ pub struct EffortDeclaration {
 
 /// The one place the "why `effort = value` won't apply on `platform`" wording
 /// is produced. `None` means it WILL apply. Every surface that reports
-/// non-application — the graph run record, `graph_preflight`, the background
+/// non-application — the graph run record, `graph_control`, the background
 /// agent log — goes through this so the message can never drift between them
 /// (the CM7 pre-mortem: a notice that says one thing here and another there
 /// is a notice someone stops trusting).
@@ -391,7 +391,7 @@ pub fn effort_rejection_reason(
 /// platform never declared one) and a blank string (CB34 — antigravity's
 /// `model_flag = ""`, which was being emitted as a stray empty argv word the
 /// CLI rejects before the run starts) both mean "this platform cannot select
-/// a model explicitly". The invocation path, the probe and `graph_preflight`
+/// a model explicitly". The invocation path, the probe and `graph_control`
 /// all read this one function so they can never disagree.
 pub fn model_flag_selects_model(model_flag: Option<&str>) -> bool {
     matches!(model_flag, Some(f) if !f.trim().is_empty())
@@ -418,8 +418,8 @@ pub fn model_rejection_reason(
 
 /// The single wording every interactive-only rejection uses — a platform
 /// whose registry entry sets `headless = false` (freebuff v0.1.2). Produced
-/// here so `graph_add_node`/`graph_update_node`, the ensemble handlers,
-/// `agent_add`, `agent_probe` and `graph_preflight` can never drift apart on
+/// here so `graph_node`/`graph_node`, the ensemble handlers,
+/// `agent_edit add`, `harness probe` and `graph_control` can never drift apart on
 /// the message a caller sees (CM35).
 pub fn interactive_only_reason(platform: &str) -> String {
     format!("platform '{platform}' is interactive-only (no headless mode)")
@@ -503,6 +503,24 @@ pub struct CliRegistry {
     pub available_clis: Vec<CliConfig>,
 }
 
+/// Does `path` name an existing file with an execute bit? The shared
+/// existence check for "is this harness's binary really there": doctor's
+/// service-unit probe already gates on exactly this, so prune/doctor can
+/// never disagree about what counts as installed.
+#[cfg(unix)]
+pub fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+/// Non-unix fallback: no execute-bit concept, so existence is the check.
+#[cfg(not(unix))]
+pub fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
+}
+
 impl CliConfig {
     /// Display string for this platform; see [`platform_display_name`].
     pub fn display_name(&self) -> String {
@@ -513,14 +531,15 @@ impl CliConfig {
         )
     }
 
-    /// Check if this CLI is available in the given PATH.
-    ///
-    /// Uses the shared resolver (`resolve_binary_in`) so detection can never
-    /// disagree with the spawner — there is one resolution path in the
-    /// codebase, not two. When `path` is `None`, the current process's PATH
-    /// is used.
-    pub fn is_available(&self) -> bool {
-        self.resolve().is_ok()
+    /// Is this harness's binary really on disk? `resolve()` alone is not
+    /// enough: its absolute-path step accepts the string as-is without
+    /// checking the file exists, so a stale absolute path in config.toml
+    /// would otherwise resolve `Ok`. Gating the resolved path on
+    /// [`is_executable_file`] closes that gap the way doctor's service-unit
+    /// check already does.
+    pub fn is_installed(&self) -> bool {
+        self.resolve()
+            .is_ok_and(|(path, _)| is_executable_file(&path))
     }
 
     /// Resolve this CLI's binary using the shared resolver, returning the
@@ -563,13 +582,16 @@ impl CliRegistry {
         }
     }
 
-    /// Detect which CLIs from a list are available in PATH.
+    /// Detect which CLIs from a list are really installed: the binary
+    /// resolves and names an executable file, so a stale absolute path in
+    /// the registry can never come back as "available" (see
+    /// [`CliConfig::is_installed`]).
     pub fn detect_available(platforms: &[crate::setup_module::PlatformWithCli]) -> Self {
         let mut registry = Self::new();
 
         for platform in platforms {
             if let Some(ref cli) = platform.cli {
-                if cli.is_available() {
+                if cli.is_installed() {
                     registry.available_clis.push(cli.clone());
                 }
             }
@@ -741,6 +763,25 @@ mod tests {
             step,
             super::super::cli_strategy::ResolutionStep::AbsolutePath
         );
+    }
+
+    #[test]
+    fn detect_available_rejects_a_stale_absolute_path() {
+        // The absolute-path resolver step accepts the string as-is without
+        // checking the file exists, so detection must gate on the executable
+        // bit (is_installed): a stale absolute path from the registry must
+        // never come back as "available" and resurrect a pruned entry.
+        let mut stale = sample_cli_config();
+        stale.name = "stale".to_string();
+        stale.binary = "/nonexistent/somewhere/opencode".to_string();
+        assert!(stale.resolve().is_ok());
+        assert!(!stale.is_installed());
+        let registry = CliRegistry::detect_available(&[crate::setup_module::PlatformWithCli {
+            name: "stale".to_string(),
+            config_path: "stale.marker".to_string(),
+            cli: Some(stale),
+        }]);
+        assert!(registry.available_clis.is_empty());
     }
 
     #[test]

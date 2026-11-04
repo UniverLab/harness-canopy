@@ -1,4 +1,4 @@
-//! CM48: `graph_preflight`'s roster split — which of a graph's probe targets
+//! CM48: `graph_control`'s roster split — which of a graph's probe targets
 //! are off-limits right now, and which ensembles the roster would stop.
 //!
 //! Split out of `handler_preflight.rs` (which grew past the file-size gate)
@@ -248,6 +248,7 @@ mod tests {
             created_at: now_ts,
         };
         let ensemble = Ensemble {
+            mutex: Vec::new(),
             commit_rights: false,
             id: "ens-dead".to_string(),
             spec_id: None,
@@ -323,6 +324,7 @@ mod tests {
         })
         .unwrap();
         let spec_ensemble = Ensemble {
+            mutex: Vec::new(),
             commit_rights: false,
             id: "ens-spec".to_string(),
             spec_id: Some("spec-1".to_string()),

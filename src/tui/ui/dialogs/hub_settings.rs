@@ -308,7 +308,12 @@ fn draw_path_list_editor(
     let mut lines: Vec<Line> = Vec::new();
     for (i, entry) in list.iter().enumerate() {
         let style = if i == idx {
-            Style::default().fg(theme.accent_fg).bg(theme.selected_bg)
+            // The pill pair (`accent_fg` on `header_color`): ink on the
+            // accent, never on a dark raise.
+            Style::default()
+                .fg(theme.accent_fg)
+                .bg(theme.header_color)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(theme.text_primary)
         };
@@ -351,7 +356,12 @@ fn draw_dir_picker(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     for (i, entry) in picker.entries.iter().enumerate() {
         let style = if i == picker.idx {
-            Style::default().fg(theme.accent_fg).bg(theme.selected_bg)
+            // The pill pair (`accent_fg` on `header_color`): ink on the
+            // accent, never on a dark raise.
+            Style::default()
+                .fg(theme.accent_fg)
+                .bg(theme.header_color)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(theme.text_primary)
         };

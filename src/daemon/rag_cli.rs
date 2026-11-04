@@ -58,14 +58,14 @@ pub(crate) async fn handle_rag_action(action: RagAction) -> Result<()> {
             action: AutoIndexAction::Start,
         } => {
             db.set_state("rag_paused", "0")?;
-            println!("\x1b[32m✓\x1b[0m  RAG auto-indexing \x1b[1menabled\x1b[0m");
+            println!("\x1b[32m✓\x1b[0m RAG auto-indexing \x1b[1menabled\x1b[0m");
         }
         RagAction::AutoIndex {
             action: AutoIndexAction::Stop,
         } => {
             db.set_state("rag_paused", "1")?;
-            println!("\x1b[33m⏸\x1b[0m  RAG auto-indexing \x1b[1mpaused\x1b[0m");
-            println!("     Run \x1b[1mcanopy rag auto-index start\x1b[0m to resume.");
+            println!("\x1b[33m‖\x1b[0m RAG auto-indexing \x1b[1mpaused\x1b[0m");
+            println!("  Run \x1b[1mcanopy rag auto-index start\x1b[0m to resume.");
         }
         RagAction::Report => handle_rag_report(&data_dir, &db).await?,
         RagAction::Compact => handle_rag_compact(&data_dir).await?,
@@ -468,7 +468,7 @@ fn print_rag_report_summary(db: &Database, report: &RagReportData<'_>) -> Result
     println!(
         " Status: {}",
         match &model_status {
-            crate::rag::status::RagModelStatus::Paused => "\x1b[33m⏸ paused\x1b[0m".to_string(),
+            crate::rag::status::RagModelStatus::Paused => "\x1b[33m‖ paused\x1b[0m".to_string(),
             crate::rag::status::RagModelStatus::Ready =>
                 "\x1b[32m● ready (model loaded)\x1b[0m".to_string(),
             crate::rag::status::RagModelStatus::Sleeping =>
@@ -476,11 +476,11 @@ fn print_rag_report_summary(db: &Database, report: &RagReportData<'_>) -> Result
             crate::rag::status::RagModelStatus::Unavailable(reason) =>
                 format!("\x1b[31m✗ unavailable\x1b[0m — {reason}"),
             crate::rag::status::RagModelStatus::Downloading { started_at } => format!(
-                "\x1b[33m⬇ downloading\x1b[0m ({}s so far)",
+                "\x1b[33m▼ downloading\x1b[0m ({}s so far)",
                 crate::rag::status::elapsed_secs(*started_at)
             ),
             crate::rag::status::RagModelStatus::Preparing { started_at } => format!(
-                "\x1b[33m⚙ preparing\x1b[0m ({}s so far)",
+                "\x1b[33m◉ preparing\x1b[0m ({}s so far)",
                 crate::rag::status::elapsed_secs(*started_at)
             ),
             crate::rag::status::RagModelStatus::DownloadFailed(reason) => format!(
@@ -612,8 +612,11 @@ async fn handle_rag_compact(data_dir: &std::path::Path) -> Result<()> {
     if crate::daemon::process::read_pid(data_dir)
         .is_some_and(crate::daemon::process::is_process_running)
     {
-        let text =
-            crate::daemon::cli_daemon::call_tool(None, "rag_compact", &serde_json::json!({}))?;
+        let text = crate::daemon::cli_daemon::call_tool(
+            None,
+            "rag",
+            &serde_json::json!({ "action": "compact" }),
+        )?;
         println!("{text}");
         return Ok(());
     }
@@ -679,7 +682,7 @@ fn print_rag_report_file(file: &str, report: &RagReportData<'_>) {
     } else if last_error.is_some() && chunks == 0 {
         "\x1b[31m✗\x1b[0m"
     } else if in_queue {
-        "\x1b[33m⏳\x1b[0m"
+        "\x1b[33m◷\x1b[0m"
     } else if chunks > 0 {
         "\x1b[32m✓\x1b[0m"
     } else {
@@ -1417,6 +1420,18 @@ mod tests {
         assert!(
             out.contains("queue:   queued"),
             "queue detail missing: {out:?}"
+        );
+        let queued_line = out
+            .lines()
+            .find(|line| line.contains("/docs/c.md"))
+            .expect("queued file entry missing");
+        assert!(
+            queued_line.contains('◷'),
+            "queued file must show the waiting glyph, got: {queued_line:?}"
+        );
+        assert!(
+            !out.contains(char::from_u32(0x23F3).expect("hourglass scalar")),
+            "report must not contain the double-width hourglass"
         );
         assert!(out.contains("error"), "error detail missing: {out:?}");
         assert!(

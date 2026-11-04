@@ -3,82 +3,17 @@
 use super::*;
 
 impl App {
+    /// Full refresh: the fast tick plus an unconditional slow refresh. Used
+    /// for the initial load (`App::new`); the event loop calls
+    /// [`App::refresh_fast`] every tick and [`App::refresh_slow`] on its
+    /// one-second cadence instead (FR2).
     pub fn refresh(&mut self) -> Result<()> {
-        self.animation_tick = self.animation_tick.wrapping_add(1);
-        // The project type-ahead only ever applies to the Knowledge layer's
-        // list, so it is dropped here — the one place every way of leaving
-        // that layer (arrows, F2, click, Home) passes through.
-        self.sync_project_filter_to_layer();
-        if self.update_available.is_none() {
-            self.update_available = crate::autoupdate::update_available_tag();
-        }
-        self.refresh_daemon_status();
-        self.refresh_agents()?;
-        self.refresh_projects()?;
-        self.refresh_graphs()?;
-        // CT14: correct stale sidebar indices on the existing refresh tick
-        // (pure state, no extra redraw) so navigation works after data
-        // shrinks between ticks.
-        self.normalize_automation_kind();
-        self.normalize_agent_section_focus();
-        self.clamp_sidebar_selection();
-        self.refresh_project_graph().ok();
-        self.refresh_rag_state()?;
-        self.refresh_active_runs()?;
-        self.poll_interactive_agents();
-        self.poll_terminal_agents();
-        self.deliver_due_scheduled_sends();
-        self.tick_banner_animation();
-        self.ensure_sidebar_brain();
-        self.refresh_log();
-        self.auto_hide_sidebar();
-        self.system_monitor_active
-            .store(self.sidebar_visible, Ordering::Relaxed);
-        self.dismiss_copied();
-        self.update_whimsg_context();
-        self.tick_atmosphere();
-        self.tick_missions()?;
-        self.resize_interactive_agents();
-        self.poll_playground_search();
-        self.refresh_playground_search()?;
-        self.poll_graph_action();
-        self.poll_node_tail_dialog();
-        self.dismiss_graph_action_message();
-        // CT30: apply any finished Crews-face fetch/write, then start a new
-        // one if the face is visible and its throttle allows (D5). Runs
-        // before the panel-face tick so the recomputation sees current data.
-        self.poll_crews_face();
-        self.poll_crews_write();
-        self.refresh_crews_face();
-        // CM51 (D4): a `config_set` from anywhere, or a hand edit the
-        // daemon's watcher saw, publishes a settings revision. When it moves,
-        // re-read the settings this TUI renders — no restart needed.
-        self.poll_settings_revision();
-        // CT31: apply any finished Settings-tab fetch/write, then start a new
-        // one if the hub's Settings tab is visible and the throttle allows.
-        self.poll_settings_rows();
-        self.poll_settings_write();
-        self.refresh_settings_rows();
-        self.dismiss_settings_message();
-        // CT1 multi-face panel: recompute the visible face from the
-        // switching rule after every data refresh above has run.
-        self.tick_panel_face();
-        if let Some(dialog) = self.simple_prompt_dialog.as_mut() {
-            dialog.tick_at_picker();
-        }
-
-        // Non-blocking check for updated system info from background thread
-        while let Ok(info) = self.system_info_rx.try_recv() {
-            self.system_info_target = info;
-            self.last_system_update = std::time::Instant::now();
-        }
-        self.interpolate_system_info();
-
-        Ok(())
+        let _ = self.refresh_fast();
+        self.refresh_slow()
     }
 
     /// CM51 (D4): re-read the settings this TUI renders when the daemon
-    /// publishes a newer `settings_revision` — from a `config_set`, or from a
+    /// publishes a newer `settings_revision` — from a `config set`, or from a
     /// hand edit its file watcher saw. The revision row carries the changed
     /// keys, but the cheap and always-correct move is to reload the config
     /// and re-derive theme, temperature unit and the pinned face.
@@ -89,6 +24,13 @@ impl App {
         else {
             return;
         };
+        self.apply_settings_revision(revision);
+    }
+
+    /// Apply a settings revision read elsewhere (worker mode: from the
+    /// snapshot). Reloads the config and re-derives the rendered settings.
+    /// No database call — the revision string is the input.
+    pub(crate) fn apply_settings_revision(&mut self, revision: String) {
         if revision == self.settings_seen {
             return;
         }
@@ -242,14 +184,9 @@ impl App {
         for project in &self.projects {
             let pending_backlog = self
                 .db
-                .list_specs(Some(project.path.as_str()), None, true, None)
-                .map(|specs| specs.len())
+                .count_specs(Some(project.path.as_str()), false)
                 .unwrap_or(0);
-            let knowledge_entries = self
-                .db
-                .list_project_knowledge(&project.hash, None, 200)
-                .map(|nodes| nodes.len())
-                .unwrap_or(0);
+            let knowledge_entries = self.db.count_project_knowledge(&project.hash).unwrap_or(0);
             let last_activity = self
                 .db
                 .list_graphs(Some(project.path.as_str()), true)
@@ -353,7 +290,7 @@ impl App {
     /// [`GraphSidebarMeta`]) and blocked status (a `Paused` graph whose latest
     /// run recorded a `graph_report_blocker` description). One
     /// `list_graph_last_run_times` query for every graph's last-run time, plus,
-    /// for paused graphs only, one `list_graph_runs_for_graph` query — bounded
+    /// for paused graphs only, one `last_graph_run_summary` query — bounded
     /// by the (typically small) number of graphs, run on the existing refresh
     /// cadence rather than a dedicated poller.
     ///
@@ -368,7 +305,11 @@ impl App {
             let running = lp.status == GraphStatus::Running;
             let last_run_at = last_run_times.get(&lp.id).copied();
             let last_activity = last_run_at.unwrap_or(lp.created_at);
-            let last_run_label = if running {
+            let last_run_label = if lp.status == GraphStatus::Pausing {
+                graph_live_state::pausing_label(
+                    &self.db.pause_waiting_node_names(&lp.id).unwrap_or_default(),
+                )
+            } else if running {
                 "running".to_string()
             } else {
                 match last_run_at {
@@ -376,13 +317,14 @@ impl App {
                     None => "never".to_string(),
                 }
             };
-            let blocked = lp.status == GraphStatus::Paused
+            let mut blocked = lp.status == GraphStatus::Paused
                 && self
                     .db
-                    .list_graph_runs_for_graph(&lp.id)
+                    .last_graph_run_summary(&lp.id)
                     .ok()
-                    .and_then(|runs| runs.last().and_then(|run| run.output.clone()))
-                    .is_some_and(|output| output.get("blocker").is_some());
+                    .flatten()
+                    .is_some_and(|summary| summary.has_blocker);
+            blocked |= self.db.graph_blocker(&lp.id).ok().flatten().is_some();
             let autorun_label = lp
                 .autorun_at
                 .map(|at| format!("resumes {}", utils::relative_time_until_compact(&at)));
@@ -656,7 +598,13 @@ impl App {
             .graph_runs
             .iter()
             .rev()
-            .find(|run| run.status == crate::domain::graphs::GraphRunStatus::Running)
+            .find(|run| {
+                matches!(
+                    run.status,
+                    crate::domain::graphs::GraphRunStatus::Running
+                        | crate::domain::graphs::GraphRunStatus::Waiting
+                )
+            })
             .or_else(|| self.graph_runs.last())
             .map(|run| run.node_id.as_str());
 

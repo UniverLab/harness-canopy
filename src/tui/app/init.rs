@@ -4,7 +4,8 @@ use super::*;
 
 macro_rules! app_new_fields {
     ($db:expr, $data_dir:expr, $canopy_config:expr, $system_info_rx:expr,
-     $system_monitor_active:expr, $mission_manager:expr) => {
+     $system_monitor_active:expr, $mission_manager:expr,
+     $clipboard_image_tx:expr, $clipboard_image_rx:expr) => {
         App {
             db: $db,
             data_dir: $data_dir,
@@ -14,7 +15,10 @@ macro_rules! app_new_fields {
             interactive_agents: Vec::new(),
             terminal_agents: Vec::new(),
             orphaned_sessions: Vec::new(),
-            scheduled_sends_restored: false,
+            session_hub: crate::tui::app::session_hub::SessionHubState::default(),
+            hub_notice: None,
+            version_notice: None,
+            pending_closes: Vec::new(),
             split_groups: Vec::new(),
             active_split_id: None,
             split_right_focused: false,
@@ -25,6 +29,7 @@ macro_rules! app_new_fields {
             daemon_running: false,
             daemon_pid: None,
             daemon_version: String::new(),
+            daemon_port: 7755,
             update_available: crate::autoupdate::update_available_tag(),
             selected: 0,
             focus: Focus::Home,
@@ -38,6 +43,7 @@ macro_rules! app_new_fields {
             project_last_activity: HashMap::new(),
             log_content: String::new(),
             log_scroll: 0,
+            log_seq: None,
             running: true,
             new_agent_dialog: None,
             launchpad_dialog: None,
@@ -121,6 +127,7 @@ macro_rules! app_new_fields {
             whimsg_last_log_hash: 0,
             whimsg_graphs: None,
             whimsg_announced_runs: HashSet::new(),
+            graph_whim_cache: HashMap::new(),
             context_transfer_modal: None,
             rag_transfer_modal: None,
             context_transfer_config: ContextTransferConfig::default(),
@@ -135,6 +142,17 @@ macro_rules! app_new_fields {
             notification_service: Arc::new(DefaultNotificationService),
             prev_active_run_ids: std::collections::HashSet::new(),
             animation_tick: 0,
+            focus_lost: false,
+            last_input_at: std::time::Instant::now(),
+            last_slow_refresh: std::time::Instant::now(),
+            slow_force: false,
+            snapshot_worker: None,
+            snapshot_dirty: false,
+            node_tail_worker: None,
+            activity_digest: 0,
+            overview_sessions_digest: 0,
+            hub_counts_digest: (0, 0, 0, 0),
+            pending_sends_digest: 0,
             temperature_unit: $canopy_config.temperature_unit,
             theme: crate::tui::ui::theme::Theme::resolve(&$canopy_config.theme),
             suggestion_picker: None,
@@ -144,6 +162,9 @@ macro_rules! app_new_fields {
             system_info_target: crate::system::SystemInfo::default(),
             system_info_rx: $system_info_rx,
             system_monitor_active: $system_monitor_active,
+            clipboard_image_tx: $clipboard_image_tx,
+            clipboard_image_rx: $clipboard_image_rx,
+            clipboard_image_pending: false,
             last_system_update: std::time::Instant::now() - std::time::Duration::from_secs(10),
             last_system_frame_at: std::time::Instant::now(),
             process_start_time: std::time::Instant::now(),
@@ -207,8 +228,10 @@ macro_rules! app_new_fields {
             atmosphere_hidden: false,
             mission_manager: $mission_manager,
             mission_pending_events: Vec::new(),
+            mission_pending_persist: Vec::new(),
             max_cpu_frequency_seen: None,
             cpu_temperature_seen: false,
+            has_parallel_graph: false,
             uptime_anchor: None,
         }
     };
@@ -223,6 +246,7 @@ impl App {
         let system_monitor_active = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let system_info_rx = spawn_system_monitor(&system_monitor_active);
         let mission_manager = Self::init_mission_manager(Arc::clone(&db))?;
+        let (clipboard_image_tx, clipboard_image_rx) = std::sync::mpsc::channel();
 
         let mut app = app_new_fields!(
             db,
@@ -230,7 +254,9 @@ impl App {
             canopy_config,
             system_info_rx,
             system_monitor_active,
-            mission_manager
+            mission_manager,
+            clipboard_image_tx,
+            clipboard_image_rx
         );
         app.refresh()?;
         Ok(app)
