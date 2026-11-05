@@ -226,10 +226,12 @@ impl RelayRuntime {
     }
 
     /// Route one body: `pair_init` answers inline, signalling bodies spawn or
-    /// reach a live peer, `device_identity` tracks guest connections, anything
-    /// else is `unknown_type`. Guest connections never reach the device path:
-    /// their `pair_init` fails like a wrong code and their offers verify
-    /// against relay-injected identity instead of a device row.
+    /// reach a live peer, the relay's `device_identity` and `device_left`
+    /// notices track guest connections, anything else is `unknown_type`.
+    /// Guest connections never reach the device path: their `pair_init`
+    /// fails like a wrong code and their offers verify against the
+    /// relay-attested identity (see [`super::guest::attested_body`]) instead
+    /// of a device row.
     pub fn route(&self, body: &Value, now: i64, from: &str, signal: &SignalTx) -> Option<Value> {
         match body.get("t").and_then(Value::as_str) {
             Some("pair_init") => {
@@ -241,6 +243,10 @@ impl RelayRuntime {
             }
             Some("device_identity") => {
                 self.guests.note_device_identity(body, from);
+                None
+            }
+            Some("device_left") => {
+                self.guests.note_device_left(body, from);
                 None
             }
             Some("offer") => {

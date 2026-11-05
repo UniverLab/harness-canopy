@@ -1053,6 +1053,7 @@ async fn graph_engine_on_completed_hook_fires_on_completion() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     db.update_graph_completion_hook(&graph_id, Some(&hook))
         .unwrap();
@@ -1113,6 +1114,7 @@ async fn graph_engine_on_completed_hook_does_not_fire_on_failure() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     db.update_graph_completion_hook(&graph_id, Some(&hook))
         .unwrap();
@@ -1172,6 +1174,7 @@ async fn graph_engine_on_completed_hook_fires_again_after_reset_and_recomplete()
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     db.update_graph_completion_hook(&graph_id, Some(&hook))
         .unwrap();

@@ -344,7 +344,7 @@ impl GraphEngine {
             workdir: &run_workdir,
             completed_specs,
             spec_name: None,
-            spec_id: None,
+            spec_id,
             blocker: Some(summary),
             node_name: ending_node_with_dirty_note.as_deref(),
             spec_code: None,

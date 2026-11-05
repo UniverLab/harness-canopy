@@ -40,15 +40,16 @@ pub enum HostFrame {
         code: i32,
     },
     /// `resized{id,cols,rows}`: another client changed the session's size.
-    /// Parsed so the frame is known; the TUI deliberately ignores it (see
-    /// `pump_session_text`), so its fields are only read by tests.
+    /// The TUI tracks it as a remote-owned size (see `session_hub`).
     Resized {
-        #[allow(dead_code)]
         id: String,
-        #[allow(dead_code)]
         cols: u16,
-        #[allow(dead_code)]
         rows: u16,
+    },
+    /// `size_released{id}`: the sizing device let go (or vanished). The TUI
+    /// clears the remote size and re-asserts its own pane size.
+    SizeReleased {
+        id: String,
     },
     SessionAdded {
         item: Box<SessionItem>,
@@ -215,6 +216,9 @@ enum HostFrameWire {
         cols: u16,
         rows: u16,
     },
+    SizeReleased {
+        id: String,
+    },
     SessionAdded {
         item: SessionItem,
     },
@@ -325,6 +329,7 @@ pub fn parse_host_frame(text: &str) -> Result<HostFrame, String> {
         HostFrameWire::Out { id, seq, data } => HostFrame::Out { id, seq, data },
         HostFrameWire::Exited { id, code } => HostFrame::Exited { id, code },
         HostFrameWire::Resized { id, cols, rows } => HostFrame::Resized { id, cols, rows },
+        HostFrameWire::SizeReleased { id } => HostFrame::SizeReleased { id },
         HostFrameWire::SessionAdded { item } => HostFrame::SessionAdded {
             item: Box::new(item),
         },

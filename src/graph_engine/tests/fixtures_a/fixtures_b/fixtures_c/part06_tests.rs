@@ -1314,6 +1314,7 @@ async fn graph_engine_queue_run_settles_failed_when_member_failed() {
         workdir_override: None,
         idea: None,
         crew: None,
+        spec_ids: None,
     };
     let mut hooks = std::collections::BTreeMap::new();
     hooks.insert(crate::domain::graphs::GraphHookEvent::OnFailed, vec![hook]);
@@ -1402,6 +1403,7 @@ async fn guard_pause_stores_blocker_and_fires_on_blocked_once() {
             workdir_override: None,
             idea: None,
             crew: None,
+            spec_ids: None,
         }],
     );
     db.update_graph_hooks(&graph_id, &hooks).unwrap();

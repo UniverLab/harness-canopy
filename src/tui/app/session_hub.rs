@@ -206,6 +206,8 @@ impl App {
             HostFrame::SessionAdded { item } => self.attach_hub_item(&item),
             HostFrame::SessionRemoved { id } => self.remove_hub_session(&id),
             HostFrame::Exited { id, code } => self.note_hub_session_exited(&id, code),
+            HostFrame::Resized { id, cols, rows } => self.note_remote_resized(&id, cols, rows),
+            HostFrame::SizeReleased { id } => self.note_remote_size_released(&id),
             HostFrame::ShelfAdded { item } => self.note_shelf_added(*item),
             HostFrame::ShelfRemoved { file_id } => self.note_shelf_removed(&file_id),
             HostFrame::Shelf { .. } | HostFrame::File { .. } | HostFrame::Unknown => {}
@@ -218,6 +220,49 @@ impl App {
                 self.relist_hub_sessions();
             }
             _ => {}
+        }
+    }
+
+    /// A `resized` frame from another device: when it differs from what the
+    /// TUI last set, the device owns the size now — track it and resize only
+    /// the local screen, without answering `resize` back. When it equals the
+    /// TUI's own size it is the echo of a TUI `resize` and is ignored. An
+    /// unknown id is ignored.
+    fn note_remote_resized(&mut self, id: &str, cols: u16, rows: u16) {
+        for agent in self
+            .interactive_agents
+            .iter_mut()
+            .chain(self.terminal_agents.iter_mut())
+        {
+            if agent.id == id {
+                if (cols, rows) == (agent.last_pty_cols, agent.last_pty_rows) {
+                    return;
+                }
+                agent.remote_size = Some((cols, rows));
+                agent.resize_vt_only(cols, rows);
+                return;
+            }
+        }
+    }
+
+    /// A `size_released` frame: the remote device let go (or vanished), so
+    /// the TUI owns the size again and re-asserts its own pane size, which
+    /// broadcasts `resized` to any remaining device. Unknown id is ignored.
+    fn note_remote_size_released(&mut self, id: &str) {
+        let mut known = false;
+        for agent in self
+            .interactive_agents
+            .iter_mut()
+            .chain(self.terminal_agents.iter_mut())
+        {
+            if agent.id == id {
+                agent.remote_size = None;
+                known = true;
+                break;
+            }
+        }
+        if known {
+            self.resize_interactive_agents();
         }
     }
 
@@ -900,5 +945,113 @@ mod tests {
         for id in [&clean, &bare, &unknown] {
             kill_test_hub_session(id);
         }
+    }
+
+    #[test]
+    fn own_resize_echo_is_ignored() {
+        let (mut app, _dir) = retention_app();
+        let id = push_running_interactive(&mut app, "echo-ignored");
+        app.handle_hub_frame(HostFrame::Resized {
+            id: id.clone(),
+            cols: 80,
+            rows: 24,
+        });
+        let agent = app
+            .interactive_agents
+            .iter()
+            .find(|agent| agent.id == id)
+            .expect("pushed agent");
+        assert!(
+            agent.remote_size.is_none(),
+            "the TUI's own echo must not mark the size remote"
+        );
+        assert_eq!((agent.last_pty_cols, agent.last_pty_rows), (80, 24));
+        kill_test_hub_session(&id);
+    }
+
+    #[test]
+    fn foreign_resize_sets_remote_and_skips_bulk_resize() {
+        let (mut app, _dir) = retention_app();
+        let id = push_running_interactive(&mut app, "remote-owned");
+        app.handle_hub_frame(HostFrame::Resized {
+            id: id.clone(),
+            cols: 60,
+            rows: 20,
+        });
+        let agent = app
+            .interactive_agents
+            .iter()
+            .find(|agent| agent.id == id)
+            .expect("pushed agent");
+        assert_eq!(agent.remote_size, Some((60, 20)));
+        assert_eq!((agent.last_pty_cols, agent.last_pty_rows), (60, 20));
+
+        // The bulk resizer must not fight the device that owns the size.
+        app.last_panel_inner = (80, 24);
+        app.resize_interactive_agents();
+        let agent = app
+            .interactive_agents
+            .iter()
+            .find(|agent| agent.id == id)
+            .expect("pushed agent");
+        assert_eq!(
+            (agent.last_pty_cols, agent.last_pty_rows),
+            (60, 20),
+            "bulk resize must skip a remotely-owned session"
+        );
+        kill_test_hub_session(&id);
+    }
+
+    #[test]
+    fn release_clears_remote_and_reasserts_pane_size() {
+        let (mut app, _dir) = retention_app();
+        let id = push_running_interactive(&mut app, "released-back");
+        app.handle_hub_frame(HostFrame::Resized {
+            id: id.clone(),
+            cols: 60,
+            rows: 20,
+        });
+        app.last_panel_inner = (80, 24);
+
+        app.handle_hub_frame(HostFrame::SizeReleased { id: id.clone() });
+
+        let agent = app
+            .interactive_agents
+            .iter()
+            .find(|agent| agent.id == id)
+            .expect("pushed agent");
+        assert!(
+            agent.remote_size.is_none(),
+            "a release hands the size back to the TUI"
+        );
+        assert_eq!(
+            (agent.last_pty_cols, agent.last_pty_rows),
+            (80, 24),
+            "a release re-asserts the pane size"
+        );
+        kill_test_hub_session(&id);
+    }
+
+    #[test]
+    fn frames_for_unknown_sessions_are_ignored() {
+        let (mut app, _dir) = retention_app();
+        let id = push_running_interactive(&mut app, "known-session");
+        app.handle_hub_frame(HostFrame::Resized {
+            id: "no-such-session".to_string(),
+            cols: 60,
+            rows: 20,
+        });
+        app.handle_hub_frame(HostFrame::SizeReleased {
+            id: "no-such-session".to_string(),
+        });
+        assert_eq!(app.interactive_agents.len(), 1);
+        let agent = app
+            .interactive_agents
+            .iter()
+            .find(|agent| agent.id == id)
+            .expect("pushed agent");
+        assert!(agent.remote_size.is_none());
+        assert_eq!((agent.last_pty_cols, agent.last_pty_rows), (80, 24));
+        kill_test_hub_session(&id);
     }
 }

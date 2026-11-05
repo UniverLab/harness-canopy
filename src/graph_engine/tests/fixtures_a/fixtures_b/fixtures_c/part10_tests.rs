@@ -39,6 +39,7 @@ async fn graph_engine_on_failed_fires_with_blocker_and_node() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let mut hooks = std::collections::BTreeMap::new();
     hooks.insert(crate::domain::graphs::GraphHookEvent::OnFailed, vec![hook]);
@@ -115,6 +116,7 @@ async fn graph_engine_on_blocked_fires_once_with_node_name() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let mut hooks = std::collections::BTreeMap::new();
     hooks.insert(crate::domain::graphs::GraphHookEvent::OnBlocked, vec![hook]);
@@ -177,6 +179,7 @@ async fn graph_engine_two_hooks_run_in_order_despite_first_failing() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let passing = crate::domain::graphs::GraphCompletionHook {
         platform: Some("test-cli".to_string()),
@@ -193,6 +196,7 @@ async fn graph_engine_two_hooks_run_in_order_despite_first_failing() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let mut hooks = std::collections::BTreeMap::new();
     hooks.insert(
@@ -270,6 +274,7 @@ async fn graph_engine_hook_registered_after_completion_does_not_fire() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let mut hooks = std::collections::BTreeMap::new();
     hooks.insert(
@@ -975,6 +980,7 @@ async fn command_hook_on_spec_completed_runs_once_per_spec() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let mut hooks = std::collections::BTreeMap::new();
     hooks.insert(
@@ -1045,6 +1051,7 @@ async fn command_hook_nonzero_exit_records_output_and_does_not_affect_graph() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let mut hooks = std::collections::BTreeMap::new();
     hooks.insert(
@@ -1119,6 +1126,7 @@ async fn command_hook_placeholder_substitution() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let mut hooks = std::collections::BTreeMap::new();
     hooks.insert(
@@ -1162,6 +1170,7 @@ async fn command_hook_graph_failure_without_node_renders_none_and_blocker() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let mut hooks = std::collections::BTreeMap::new();
     hooks.insert(GraphHookEvent::OnFailed, vec![hook]);
@@ -1236,6 +1245,7 @@ async fn command_hook_env_var_preserves_shell_metacharacters() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let mut hooks = std::collections::BTreeMap::new();
     hooks.insert(GraphHookEvent::OnSpecCompleted, vec![hook]);

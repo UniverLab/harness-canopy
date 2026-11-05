@@ -21,6 +21,7 @@ fn hook_fixture(platform: &str, prompt: &str) -> GraphCompletionHook {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     }
 }
 

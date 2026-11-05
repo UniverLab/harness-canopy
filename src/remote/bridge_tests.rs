@@ -14,10 +14,11 @@ use crate::db::Database;
 use crate::remote::metrics::{
     clamp_interval, host_metrics_frame, spawn_metrics_watch, MetricsSource,
 };
+use crate::remote::trust::Grant;
 use crate::sessions::outbound::{self, ConnRx, PushOut, SessionCoal};
-use crate::sessions::protocol::{parse_client_frame, ClientFrame};
+use crate::sessions::protocol::{parse_client_frame, ClientFrame, ERR_FORBIDDEN, ERR_NOT_FOUND};
 use crate::sessions::ws::SessionsState;
-use crate::sessions::{HubSession, SessionHub, SessionKind, SpawnRequest};
+use crate::sessions::{HubEvent, HubSession, SessionHub, SessionKind, SpawnRequest};
 use crate::system::host_metrics::{GpuMetrics, HostMetrics, PowerMetrics};
 use crate::system::{GpuInfo, PowerSource, SystemInfo};
 
@@ -507,4 +508,102 @@ async fn a_lagged_forwarder_resumes_live_output_after_the_snapshot_seq() {
         "live seq {live_seq} must advance past the snapshot seq {snapshot_seq}"
     );
     let _ = hub.kill(&session.id);
+}
+
+fn release_frame(id: &str) -> String {
+    serde_json::json!({"t": "resize_release", "id": id}).to_string()
+}
+
+/// A guest may never release a size: `forbidden` for a session it can see
+/// (narrow or full grant alike), `not_found` outside its grant.
+#[tokio::test]
+async fn guest_resize_release_is_refused() {
+    let (state, _dir) = test_state();
+    let session = spawn_cat(&state.hub, "/tmp");
+    let frame = release_frame(&session.id);
+
+    let narrow = Grant::Sessions(std::collections::HashSet::from([session.name.clone()]));
+    let (out_tx, mut out_rx) = outbound::channel();
+    let mut guest = RemoteBridge::with_grant(Arc::clone(&state), narrow, true);
+    guest.handle_text(&frame, &out_tx).await;
+    assert_eq!(
+        recv_frame(&mut out_rx, "refusal").await["code"],
+        ERR_FORBIDDEN
+    );
+    guest
+        .handle_text(&release_frame("no-such-session"), &out_tx)
+        .await;
+    assert_eq!(
+        recv_frame(&mut out_rx, "refusal").await["code"],
+        ERR_NOT_FOUND
+    );
+    assert!(
+        guest.resize_gates.is_empty(),
+        "a refused release registers no throttle"
+    );
+    guest.abort();
+
+    let (out_tx, mut out_rx) = outbound::channel();
+    let mut full = RemoteBridge::with_grant(Arc::clone(&state), Grant::All, true);
+    full.handle_text(&frame, &out_tx).await;
+    assert_eq!(
+        recv_frame(&mut out_rx, "refusal").await["code"],
+        ERR_FORBIDDEN
+    );
+    full.abort();
+
+    let _ = state.hub.kill(&session.id);
+}
+
+/// An owner release answers nothing and announces `SizeReleased`; an abort
+/// announces one release per session the device sized.
+#[tokio::test]
+async fn owner_release_and_abort_emit_size_released() {
+    let (state, _dir) = test_state();
+    let first = spawn_cat(&state.hub, "/tmp");
+    let second = spawn_cat(&state.hub, "/tmp");
+    let mut events = state.hub.subscribe_events();
+
+    let (out_tx, mut out_rx) = outbound::channel();
+    let mut owner = RemoteBridge::with_grant(Arc::clone(&state), Grant::All, true);
+    owner.set_owner(true);
+    for session in [&first, &second] {
+        let sized = serde_json::json!({
+            "t": "resize", "id": session.id, "cols": 100, "rows": 30,
+        })
+        .to_string();
+        owner.handle_text(&sized, &out_tx).await;
+    }
+    assert_eq!(owner.resize_gates.len(), 2);
+
+    owner.handle_text(&release_frame(&first.id), &out_tx).await;
+    assert!(
+        out_rx.try_recv().is_err(),
+        "a release answers nothing, like a resize"
+    );
+    assert!(
+        !owner.resize_gates.contains_key(&first.id),
+        "a release clears the session's throttle"
+    );
+    recv_released(&mut events, &first.id).await;
+
+    owner.abort();
+    recv_released(&mut events, &second.id).await;
+
+    let _ = state.hub.kill(&first.id);
+    let _ = state.hub.kill(&second.id);
+}
+
+async fn recv_released(events: &mut tokio::sync::broadcast::Receiver<HubEvent>, id: &str) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(HubEvent::SizeReleased { id: got }) = events.recv().await {
+                if got == id {
+                    return;
+                }
+            }
+        }
+    })
+    .await
+    .expect("the hub announces the release");
 }

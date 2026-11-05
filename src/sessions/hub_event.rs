@@ -25,6 +25,11 @@ pub enum HubEvent {
         cols: u16,
         rows: u16,
     },
+    /// The device that sized the session let go (or vanished); forwarded
+    /// to attached connections, which re-assert their own size.
+    SizeReleased {
+        id: String,
+    },
     ShelfAdded(Box<ShelfItem>),
     ShelfRemoved {
         file_id: String,

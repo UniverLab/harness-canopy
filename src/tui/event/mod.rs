@@ -205,9 +205,9 @@ use crate::tui::agent::InteractiveAgent;
 #[cfg(test)]
 use mouse::{
     clamped_pty_position, handle_copy_click, handle_graph_live_panel_mouse,
-    handle_preview_focus_click, handle_project_panel_mouse, handle_selection_mouse,
-    handle_sidebar_mouse, handle_sync_panel_scroll, mouse_pty_position, rect_contains_point,
-    scroll_direction, sidebar_agent_at, sidebar_tab_at,
+    handle_panel_border_drag, handle_preview_focus_click, handle_project_panel_mouse,
+    handle_selection_mouse, handle_sidebar_mouse, handle_sync_panel_scroll, mouse_pty_position,
+    rect_contains_point, scroll_direction, sidebar_agent_at, sidebar_tab_at,
 };
 #[cfg(test)]
 use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
@@ -447,6 +447,10 @@ mod sidebar_mouse_tests;
 /// click-map-populated-during-draw pattern as the sidebar.
 #[cfg(test)]
 mod project_panel_mouse_tests;
+
+/// The activity panel's draggable left border: press, move, clamp, release.
+#[cfg(test)]
+mod panel_border_drag_tests;
 
 #[cfg(test)]
 mod graph_live_panel_mouse_tests;

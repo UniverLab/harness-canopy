@@ -1091,6 +1091,7 @@ async fn graph_update_response_names_remaining_events_when_run_active() {
                 idea: None,
 
                 crew: None,
+                spec_ids: None,
             }],
         );
     }
@@ -1161,6 +1162,7 @@ async fn graph_update_response_has_no_hook_note_without_active_run() {
             idea: None,
 
             crew: None,
+            spec_ids: None,
         }],
     );
     let updated = call_graph_action(
@@ -1226,6 +1228,7 @@ async fn graph_update_rejects_unknown_hook_placeholder_before_persisting() {
             idea: None,
 
             crew: None,
+            spec_ids: None,
         }],
     );
     let updated = call_graph_action(
@@ -1268,6 +1271,7 @@ async fn graph_update_rejects_unknown_hook_placeholder_before_persisting() {
             idea: None,
 
             crew: None,
+            spec_ids: None,
         }],
     );
     let rejected = call_graph_action(

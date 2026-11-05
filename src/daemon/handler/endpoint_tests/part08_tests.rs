@@ -833,6 +833,7 @@ async fn graph_preflight_hook_warning_names_the_firing_event() {
             idea: None,
 
             crew: None,
+            spec_ids: None,
         }],
     );
     db.update_graph_hooks(&lp.id, &hooks).unwrap();

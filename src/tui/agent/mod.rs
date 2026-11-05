@@ -142,6 +142,10 @@ pub struct InteractiveAgent {
     /// Last known PTY dimensions (for resize detection).
     pub last_pty_cols: u16,
     pub last_pty_rows: u16,
+    /// Size a remote device set while it sizes this session narrower than
+    /// the TUI pane: the activity panel fills the freed strip instead of
+    /// leaving it empty. `None` while the TUI owns the size.
+    pub remote_size: Option<(u16, u16)>,
     /// Ring buffer of recent user prompts and their responses.
     pub prompt_history: Arc<Mutex<VecDeque<PromptEntry>>>,
     /// Current accumulated input (characters since last Enter).
@@ -376,6 +380,7 @@ impl InteractiveAgent {
             scroll_offset: 0,
             last_pty_cols: item.cols,
             last_pty_rows: item.rows,
+            remote_size: None,
             prompt_history: Arc::new(Mutex::new(VecDeque::with_capacity(MAX_PROMPT_HISTORY))),
             input_buffer: Arc::new(Mutex::new(String::new())),
             last_output_at: Arc::new(Mutex::new(parse_hub_time(&item.last_output_at))),
@@ -669,6 +674,15 @@ impl InteractiveAgent {
 
     /// Resize the hub session and the virtual terminal (e.g. on window resize).
     pub fn resize(&mut self, cols: u16, rows: u16) {
+        self.resize_vt_only(cols, rows);
+        // Resize the hub session so the child knows about the new size.
+        self.stream.resize(cols, rows);
+    }
+
+    /// Track a new size and resize the virtual terminal screen without
+    /// telling the hub: for sizes a remote device set, where answering
+    /// `resize` would fight the device that owns the size.
+    pub(crate) fn resize_vt_only(&mut self, cols: u16, rows: u16) {
         let old_rows = self.last_pty_rows;
         self.last_pty_cols = cols;
         self.last_pty_rows = rows;
@@ -678,8 +692,6 @@ impl InteractiveAgent {
         if let Ok(mut until) = self.activity_suppressed_until.lock() {
             *until = Utc::now() + chrono::Duration::seconds(1);
         }
-        // Resize the hub session so the child knows about the new size.
-        self.stream.resize(cols, rows);
         // Resize the virtual terminal screen. On a shrink, first scroll the rows
         // that would otherwise be truncated into the scrollback — both steps run
         // under one `vt` acquisition so a stream reader can't slip output in

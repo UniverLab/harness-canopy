@@ -29,6 +29,16 @@ fn unknown_frame_names_the_frame() {
 }
 
 #[test]
+fn resize_release_without_id_names_frame_and_field() {
+    let message = parse_err(r#"{"t": "resize_release"}"#);
+    assert!(
+        message.contains("resize_release"),
+        "must name the frame: {message}"
+    );
+    assert!(message.contains("id"), "must name the field: {message}");
+}
+
+#[test]
 fn missing_field_names_frame_and_field() {
     let message = parse_err(r#"{"t": "attach"}"#);
     assert!(message.contains("attach"), "must name the frame: {message}");
@@ -87,6 +97,10 @@ fn documented_shapes_parse() {
     assert!(matches!(
         parse_client_frame(r#"{"t": "resize", "id": "x", "cols": 80, "rows": 24}"#),
         Ok(ClientFrame::Resize { .. })
+    ));
+    assert!(matches!(
+        parse_client_frame(r#"{"t": "resize_release", "id": "x"}"#),
+        Ok(ClientFrame::ResizeRelease { .. })
     ));
     assert!(matches!(
         parse_client_frame(

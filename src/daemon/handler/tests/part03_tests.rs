@@ -718,6 +718,7 @@ fn build_graph_completion_hook_rejects_empty_platform() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let err = build_graph_completion_hook(&params).unwrap_err();
     assert!(err.contains("must have either"), "{err}");
@@ -740,6 +741,7 @@ fn build_graph_completion_hook_rejects_whitespace_platform() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let err = build_graph_completion_hook(&params).unwrap_err();
     assert!(err.contains("must have either"), "{err}");
@@ -762,6 +764,7 @@ fn build_graph_completion_hook_rejects_empty_prompt() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let err = build_graph_completion_hook(&params).unwrap_err();
     assert!(err.contains("prompt"), "{err}");
@@ -784,6 +787,7 @@ fn build_graph_completion_hook_rejects_whitespace_prompt() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let err = build_graph_completion_hook(&params).unwrap_err();
     assert!(err.contains("prompt"), "{err}");
@@ -806,6 +810,7 @@ fn build_graph_completion_hook_accepts_valid_config() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let hook = build_graph_completion_hook(&params).unwrap();
     assert_eq!(hook.platform.as_deref(), Some("claude"));
@@ -821,6 +826,7 @@ fn build_graph_completion_hook_crew_is_the_platform_alternative() {
     let params = GraphCompletionHookParams {
         platform: None,
         crew: Some("reviewers".to_string()),
+        spec_ids: None,
         model: None,
         effort: None,
         prompt: Some("review the diff".to_string()),
@@ -841,6 +847,7 @@ fn build_graph_completion_hook_crew_is_the_platform_alternative() {
     let both = GraphCompletionHookParams {
         platform: Some("claude".to_string()),
         crew: Some("reviewers".to_string()),
+        spec_ids: None,
         model: None,
         effort: None,
         prompt: Some("review the diff".to_string()),
@@ -859,6 +866,7 @@ fn build_graph_completion_hook_crew_is_the_platform_alternative() {
     let no_prompt = GraphCompletionHookParams {
         platform: None,
         crew: Some("reviewers".to_string()),
+        spec_ids: None,
         model: None,
         effort: None,
         prompt: None,
@@ -892,6 +900,7 @@ fn build_graph_completion_hook_rejects_unknown_placeholder() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let err = build_graph_completion_hook(&params).unwrap_err();
     assert!(err.contains("nodee"), "{err}");
@@ -917,6 +926,7 @@ fn build_graph_completion_hook_strips_whitespace() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let hook = build_graph_completion_hook(&params).unwrap();
     assert_eq!(hook.platform.as_deref(), Some("claude"));
@@ -941,6 +951,7 @@ fn build_graph_completion_hook_empty_model_becomes_none() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let hook = build_graph_completion_hook(&params).unwrap();
     assert!(hook.model.is_none());
@@ -965,6 +976,7 @@ fn build_graph_completion_hook_rejects_both_command_and_agent() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let err = build_graph_completion_hook(&params).unwrap_err();
     assert!(err.contains("command"), "{err}");
@@ -988,6 +1000,7 @@ fn build_graph_completion_hook_rejects_neither_command_nor_agent() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let err = build_graph_completion_hook(&params).unwrap_err();
     assert!(err.contains("either"), "{err}");
@@ -1010,6 +1023,7 @@ fn build_graph_completion_hook_accepts_command_only() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let hook = build_graph_completion_hook(&params).unwrap();
     assert_eq!(hook.command.as_deref(), Some("echo hello"));
@@ -1035,6 +1049,7 @@ fn build_graph_completion_hook_command_strips_whitespace() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let hook = build_graph_completion_hook(&params).unwrap();
     assert_eq!(hook.command.as_deref(), Some("echo hello"));
@@ -1057,6 +1072,7 @@ fn build_graph_completion_hook_accepts_interactive_config() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let hook = build_graph_completion_hook(&params).unwrap();
     assert!(hook.is_interactive());
@@ -1084,6 +1100,7 @@ fn build_graph_completion_hook_rejects_mixed_interactive_modes() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     assert!(build_graph_completion_hook(&params).is_err());
 
@@ -1103,6 +1120,7 @@ fn build_graph_completion_hook_rejects_mixed_interactive_modes() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     assert!(build_graph_completion_hook(&params).is_err());
 
@@ -1122,6 +1140,7 @@ fn build_graph_completion_hook_rejects_mixed_interactive_modes() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     assert!(build_graph_completion_hook(&params).is_err());
 
@@ -1141,6 +1160,7 @@ fn build_graph_completion_hook_rejects_mixed_interactive_modes() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     assert!(build_graph_completion_hook(&params).is_err());
 
@@ -1160,6 +1180,7 @@ fn build_graph_completion_hook_rejects_mixed_interactive_modes() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let err = build_graph_completion_hook(&params).unwrap_err();
     assert!(err.contains("prompt"), "{err}");
@@ -1182,6 +1203,7 @@ fn build_graph_completion_hook_accepts_name_based_interactive_config() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let hook = build_graph_completion_hook(&params).unwrap();
     assert!(hook.is_interactive());
@@ -1206,6 +1228,7 @@ fn build_graph_completion_hook_rejects_both_target_id_and_name() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let err = build_graph_completion_hook(&params).unwrap_err();
     assert!(err.contains("target_session_id"), "{err}");
@@ -1229,6 +1252,7 @@ fn build_graph_completion_hook_rejects_bare_prompt_with_no_target() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let err = build_graph_completion_hook(&params).unwrap_err();
     assert!(err.contains("target_session_id"), "{err}");
@@ -1252,6 +1276,7 @@ fn build_graph_completion_hook_rejects_target_graph_id_with_target_session_name(
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let err = build_graph_completion_hook(&params).unwrap_err();
     assert!(err.contains("target_session_name"), "{err}");

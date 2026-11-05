@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use crate::sessions::protocol::{error_frame, ERR_FORBIDDEN, ERR_NOT_FOUND};
 use crate::sessions::ws::{no_such_session, OutTx};
-use crate::sessions::SessionHub;
+use crate::sessions::{HubEvent, SessionHub};
 
 use super::RemoteBridge;
 
@@ -114,6 +114,33 @@ impl RemoteBridge {
         });
         self.resize_tasks.retain(|task| !task.is_finished());
         self.resize_tasks.push(task);
+    }
+
+    /// `resize_release{id}`: this owner device stops sizing the session, so
+    /// every attached client hears `size_released` and re-asserts its own
+    /// size. Owner-only under the same scope rules as `resize`: a guest is
+    /// refused (`forbidden` inside its grant, `not_found` outside it), and
+    /// an unknown session is `not_found`. No answer frame on success.
+    pub(crate) fn handle_resize_release(&mut self, id: &str, out: &OutTx) {
+        if !self.scope.granted(&self.state.hub, None, id, out) {
+            return;
+        }
+        if !self.scope.is_owner() {
+            let _ = out.send(error_frame(
+                None,
+                ERR_FORBIDDEN,
+                &format!("resize_release is only available to the host owner's devices ('{id}')"),
+            ));
+            return;
+        }
+        if self.state.hub.get(id).is_none() {
+            let _ = out.send(error_frame(None, ERR_NOT_FOUND, &no_such_session(id)));
+            return;
+        }
+        self.resize_gates.remove(id);
+        self.state
+            .hub
+            .emit(HubEvent::SizeReleased { id: id.to_string() });
     }
 }
 

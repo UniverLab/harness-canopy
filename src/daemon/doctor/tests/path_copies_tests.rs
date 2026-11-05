@@ -301,6 +301,7 @@ fn find_stale_2x_name_hits_lists_a_stale_graph_prompt_and_a_stale_agent_prompt()
             idea: None,
 
             crew: None,
+            spec_ids: None,
         }],
     );
     let graph_id = "graph-stale-prompt";
@@ -409,6 +410,7 @@ fn find_stale_2x_name_hits_scans_hook_commands_and_ensemble_prompts() {
             idea: None,
 
             crew: None,
+            spec_ids: None,
         }],
     );
 

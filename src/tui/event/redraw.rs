@@ -358,8 +358,19 @@ mod redraw_tests {
         let (dirty, _) = tick(&mut app, &mut state, false).unwrap();
         assert!(dirty, "attaching a session must draw");
 
-        let (dirty, _) = tick(&mut app, &mut state, false).unwrap();
-        assert!(!dirty, "quiet session must not draw");
+        // The hub streams startup output asynchronously, so a visible session
+        // may legitimately dirty the next ticks. Quiesce first: a quiet
+        // session must settle clean, rather than be clean on one fixed tick.
+        let mut quiet = false;
+        for _ in 0..30 {
+            let (dirty, _) = tick(&mut app, &mut state, false).unwrap();
+            if !dirty {
+                quiet = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(quiet, "quiet session must not draw");
 
         let seq = app.interactive_agents[0].output_seq();
         assert!(app.interactive_agents[0].apply_out_frame(seq + 1, b"hi"));

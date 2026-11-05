@@ -117,8 +117,11 @@ fn draw_body(
 /// panel area.
 fn draw_panel_and_sync(frame: &mut Frame, app: &mut App, theme: &Theme, body_area: Rect) -> Rect {
     let panel_visible = app.panel_face_visible();
+    app.last_body_width = body_area.width;
     let activity_width = app.activity_panel_layout_width(body_area.width, panel_visible);
-    if !panel_visible || activity_width == 0 {
+    // A remote fill forces the panel shown, whatever the visibility flag
+    // says — the fill is the only thing covering the freed strip.
+    if activity_width == 0 {
         app.last_sync_area = None;
         return body_area;
     }

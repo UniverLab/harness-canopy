@@ -350,6 +350,7 @@ fn build_graph_completion_hook_none_model_becomes_none() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let hook = build_graph_completion_hook(&params).unwrap();
     assert!(hook.model.is_none());
@@ -372,6 +373,7 @@ fn build_graph_completion_hook_timeout_passthrough() {
         idea: None,
 
         crew: None,
+        spec_ids: None,
     };
     let hook = build_graph_completion_hook(&params).unwrap();
     assert_eq!(hook.timeout_minutes, Some(45));

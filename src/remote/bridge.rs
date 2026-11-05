@@ -237,6 +237,7 @@ impl RemoteBridge {
             | ClientFrame::ScheduledList { .. }
             | ClientFrame::ScheduledCancel { .. }) => self.handle_schedule(frame, out),
             ClientFrame::Resize { id, cols, rows } => self.handle_resize(&id, cols, rows, out),
+            ClientFrame::ResizeRelease { id } => self.handle_resize_release(&id, out),
             ClientFrame::Spawn {
                 req,
                 kind,
@@ -322,6 +323,7 @@ impl RemoteBridge {
             | ClientFrame::ScheduledList { .. }
             | ClientFrame::ScheduledCancel { .. }
             | ClientFrame::Resize { .. }
+            | ClientFrame::ResizeRelease { .. }
             | ClientFrame::Spawn { .. }
             | ClientFrame::Kill { .. }
             | ClientFrame::ShelfPutBegin { .. }
@@ -366,6 +368,9 @@ impl RemoteBridge {
                     send(out, resized_frame(&id, cols, rows));
                 }
             }
+            // Releases stay host-local: remote peers never size, so they
+            // never need to re-assert a size.
+            HubEvent::SizeReleased { .. } => {}
             HubEvent::ShelfAdded(item) => {
                 if self.hidden_terminal_file(item.session_id.as_deref())
                     || self
@@ -404,6 +409,13 @@ impl RemoteBridge {
         }
         for task in self.resize_tasks.drain(..) {
             task.abort();
+        }
+        // A device that vanishes lets go of every session it sized: one
+        // release per sized session, so attached TUIs re-assert their size.
+        let sized: Vec<String> = self.resize_gates.keys().cloned().collect();
+        self.resize_gates.clear();
+        for id in sized {
+            self.state.hub.emit(HubEvent::SizeReleased { id });
         }
         for file_id in self.upload_permits.keys().cloned().collect::<Vec<_>>() {
             self.state.shelf.abort_upload(&file_id);

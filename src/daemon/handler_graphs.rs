@@ -106,7 +106,7 @@ impl TaskTriggerHandler {
             Err(e) => return Ok(e),
         };
 
-        parsed.hooks = match parse_graph_hooks_param(&params.hooks) {
+        parsed.hooks = match parse_graph_hooks_param(&self.db, &graph_id, &params.hooks) {
             Ok(hooks) => hooks,
             Err(e) => return Ok(e),
         };
@@ -475,6 +475,7 @@ pub(crate) fn build_graph_hook_target(
         idea,
 
         crew: None,
+        spec_ids: None,
     })
 }
 
@@ -537,6 +538,7 @@ pub(crate) fn build_interactive_graph_hook(
         target_session_name,
 
         crew: None,
+        spec_ids: None,
     })
 }
 
@@ -598,6 +600,7 @@ pub(crate) fn build_agent_graph_hook(
         queue_id: None,
         workdir_override: None,
         idea: None,
+        spec_ids: None,
     })
 }
 
@@ -622,5 +625,6 @@ pub(crate) fn build_command_graph_hook(
         idea: None,
 
         crew: None,
+        spec_ids: None,
     })
 }

@@ -22,6 +22,7 @@ fn interactive_hook_fixture(
         idea: None,
 
         crew: None,
+        spec_ids: None,
     }
 }
 
@@ -44,6 +45,7 @@ fn interactive_hook_name_fixture(
         target_session_name: Some(target_name.to_string()),
 
         crew: None,
+        spec_ids: None,
     }
 }
 

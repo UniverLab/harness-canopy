@@ -87,6 +87,8 @@ grace-gated check on every startup (and reinstalls re-appear on their own).
 |---|---|
 | `canopy graph list` | List all graphs with status and spec progress |
 | `canopy graph list --workdir <path>` | Filter graphs by workdir |
+| `canopy graph list --json` | Print one JSON array on stdout (keys: `id`, `name`, `status`, `workdir`, `current_spec`, `current_node`, the last two null when absent) instead of the table |
+| `canopy graph list --running` | Only graphs whose status is `running` (combinable with `--workdir` and `--json`); prints a compact one-line JSON array unless combined with `--json` |
 | `canopy graph info <id-or-name>` | Detailed status for a single graph (specs, runs, hooks) |
 | `canopy graph crew [id-or-name]` | List harness/model assignments — agent nodes outside ensembles, ensemble members and agent hooks, each with platform, model, timeout, crew and availability. Omit the graph for every graph |
 | `canopy graph crew --platform <p> --model <m>` | Filter by exact platform and case-insensitive model substring |
@@ -109,6 +111,12 @@ enforces are in [Graphs](graphs-sharing.md#validate-before-you-share).
 
 Graph ids can be specified by exact id, exact name, or unambiguous id
 prefix. Ambiguous references list the candidates.
+
+With `--json` or `--running` the command goes through the daemon instead of
+reading the database directly, so scripts can ask whether a graph is running
+without opening `background_agents.db`. An empty result prints `[]`. If the
+daemon is unreachable it prints `daemon not reachable` on stderr (nothing on
+stdout) and exits 3; it never starts the daemon.
 
 ## Nodes
 

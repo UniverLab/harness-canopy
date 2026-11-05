@@ -21,13 +21,20 @@ pub(crate) fn draw_panel_face(frame: &mut Frame, area: Rect, app: &mut App, them
     if let Some(reason) = badge {
         title = format!("{title}· {reason} ");
     }
+    // While the user drags the panel's left border, the border takes the
+    // accent colour so the drag target stays visible.
+    let border = if app.activity_panel_dragging {
+        theme.header_color
+    } else {
+        theme.border_color
+    };
     let block = Block::default()
         .title(
             Line::from(Span::styled(title, Style::default().fg(theme.dim_text)))
                 .alignment(ratatui::layout::Alignment::Right),
         )
         .borders(crate::tui::ui::borders_for(theme))
-        .border_style(Style::default().fg(theme.border_color));
+        .border_style(Style::default().fg(border));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
