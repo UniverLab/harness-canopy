@@ -456,7 +456,12 @@ mod tests {
     }
 
     fn write_lock(store: &Path, id: &str, pid: i64) {
-        let dir = store.join("2026").join("11").join("03").join(id);
+        let today = chrono::Utc::now().date_naive();
+        let dir = store
+            .join(today.format("%Y").to_string())
+            .join(today.format("%m").to_string())
+            .join(today.format("%d").to_string())
+            .join(id);
         std::fs::create_dir_all(&dir).expect("lock dir");
         std::fs::write(dir.join(".session.lock"), format!("pid={pid}\nhost=TEST\n"))
             .expect("lock file");

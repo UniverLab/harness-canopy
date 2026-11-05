@@ -282,6 +282,7 @@ enum Commands {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    restore_default_sigpipe(&cli.command);
 
     match cli.command {
         Some(Commands::Daemon { action }) => handle_daemon_action(action, cli.port).await,
@@ -375,6 +376,66 @@ async fn main() -> Result<()> {
             })?;
             Ok(())
         }
+    }
+}
+
+/// Whether this invocation should keep SIGPIPE ignored.
+///
+/// Long-lived servers write to sockets and must observe the write error
+/// instead of dying; short-lived CLI commands should end silently when their
+/// stdout reader closes, as any Unix tool does.
+#[cfg_attr(windows, allow(dead_code))]
+fn keeps_sigpipe_ignored(cmd: &Option<Commands>) -> bool {
+    match cmd {
+        None => true,
+        Some(Commands::Daemon { .. }) => true,
+        Some(Commands::Serve) => true,
+        Some(Commands::Bridge { .. }) => true,
+        Some(Commands::Update { .. })
+        | Some(Commands::Doctor { .. })
+        | Some(Commands::Stdio)
+        | Some(Commands::Setup { .. })
+        | Some(Commands::Registry { .. })
+        | Some(Commands::Uninstall { .. })
+        | Some(Commands::Mcp { .. })
+        | Some(Commands::Rag { .. })
+        | Some(Commands::Graph { .. })
+        | Some(Commands::Node { .. })
+        | Some(Commands::Agent { .. })
+        | Some(Commands::Spec { .. })
+        | Some(Commands::Roster { .. })
+        | Some(Commands::Crew { .. })
+        | Some(Commands::Mutex { .. })
+        | Some(Commands::Config { .. })
+        | Some(Commands::Queue { .. })
+        | Some(Commands::Models { .. })
+        | Some(Commands::Missions { .. })
+        | Some(Commands::Project { .. })
+        | Some(Commands::Clean { .. })
+        | Some(Commands::Prompts { .. })
+        | Some(Commands::Subagent { .. })
+        | Some(Commands::Sandbox { .. })
+        | Some(Commands::Shelf { .. })
+        | Some(Commands::Remote { .. })
+        | Some(Commands::InternalPdfExtract { .. }) => false,
+    }
+}
+
+/// Restore the default SIGPIPE disposition for short-lived CLI commands.
+fn restore_default_sigpipe(cmd: &Option<Commands>) {
+    #[cfg(unix)]
+    {
+        if !keeps_sigpipe_ignored(cmd) {
+            // SAFETY: setting the disposition to the default only. The process
+            // inherits no SIGPIPE handler that needs to survive this call.
+            unsafe {
+                libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = cmd;
     }
 }
 
@@ -502,5 +563,65 @@ mod tests {
             }) => assert!(!keep_shared_servers),
             _ => panic!("expected Commands::Uninstall with keep_shared_servers"),
         }
+    }
+
+    fn command_line(args: &[&str]) -> Option<Commands> {
+        let mut argv = vec!["canopy"];
+        argv.extend_from_slice(args);
+        Cli::try_parse_from(argv)
+            .unwrap_or_else(|err| panic!("`canopy {}` must parse: {err}", args.join(" ")))
+            .command
+    }
+
+    #[test]
+    fn sigpipe_kept_ignored_for_long_lived_modes() {
+        for args in [
+            &[][..],
+            &["daemon", "status"][..],
+            &["serve"][..],
+            &["bridge"][..],
+        ] {
+            assert!(
+                keeps_sigpipe_ignored(&command_line(args)),
+                "`canopy {}` must keep SIGPIPE ignored",
+                args.join(" ")
+            );
+        }
+    }
+
+    #[test]
+    fn sigpipe_restored_for_short_lived_commands() {
+        for args in [&["graph", "list"][..], &["clean", "--dry-run"][..]] {
+            assert!(
+                !keeps_sigpipe_ignored(&command_line(args)),
+                "`canopy {}` must restore the default SIGPIPE disposition",
+                args.join(" ")
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sigpipe_restore_actually_changes_disposition() {
+        // Guards the real side effect: if `restore_default_sigpipe` stops
+        // calling `libc::signal`, this fails while the pure-function tests
+        // above still pass.
+        unsafe {
+            libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+        }
+        restore_default_sigpipe(&command_line(&["graph", "list"]));
+        let prev = unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+        assert_eq!(
+            prev,
+            libc::SIG_DFL,
+            "`graph list` must leave SIGPIPE at SIG_DFL"
+        );
+
+        unsafe {
+            libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+        }
+        restore_default_sigpipe(&command_line(&[]));
+        let prev = unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
+        assert_eq!(prev, libc::SIG_IGN, "bare TUI must keep SIGPIPE ignored");
     }
 }
