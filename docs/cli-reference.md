@@ -486,19 +486,21 @@ closed; attaching it afterwards answers `not_found`. A `spawn` names a directory
 rather than a project. `workdir` may be absolute or start with `~/` (`~` and
 `~/` alone mean the host user's home), and the expanded path must be an
 existing directory; the browser's New dialog types that directory. A
-`dir_list{req,path?}` frame — the same owner-only gate — lists one
-directory's subdirectories for the dialog's folder picker: `path` follows
-the `workdir` rules (absent, empty, `~` or `~/…` mean the home directory,
-anything else must be absolute), and the answer `dir_list{req,path,parent,
-dirs,truncated}` reports the canonical path, its parent (`null` at the
-root), the subdirectory names — hidden names and symlinks to directories
-included, files never, sorted case-insensitively, capped at 500 with
-`truncated: true` — and a missing or non-directory path answers
-`error{code:"not_found"}` while an unreadable one answers `forbidden`. A
 relative path is refused with `spawn: field 'workdir' must be an
 absolute path`, and a path that does not exist or is not a directory with
 `spawn: workdir '<expanded>' does not exist or is not a directory`; both are
-`error{code:"bad_request"}`. The `yolo` field (default `false`) launches the
+`error{code:"bad_request"}`. The dialog picks that directory with
+`dir_list{req,path?}` — another owner-only frame — which lists one
+directory's subdirectories: `path` follows the same `workdir` rules
+(absent, empty, `~` or `~/…` mean the home directory; anything else must be
+absolute, or the answer is `dir_list: field 'path' must be absolute or
+~-prefixed`), and the answer `dir_list{req,path,parent,dirs,truncated}`
+reports the canonical path, its parent (`null` at the root) and the
+subdirectory names — hidden names and symlinks to directories included,
+files never, sorted case-insensitively, capped at 500 with
+`truncated: true`; a missing or non-directory path answers
+`error{code:"not_found"}` and one that cannot be read answers
+`forbidden`. The `yolo` field (default `false`) launches the
 harness with its approval prompts off — the switch the TUI's New dialog
 offers — by appending that harness's registry `yolo_flag` after whatever
 interactive args the frame sent; a harness with no `yolo_flag` refuses it
