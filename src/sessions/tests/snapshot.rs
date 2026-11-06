@@ -151,6 +151,61 @@ fn scrollback_render_round_trips_rows_and_attributes() {
     assert_eq!(plain, vt100::Color::Default, "the colour does not leak");
 }
 
+/// A scrollback longer than the snapshot cap replays only the newest rows,
+/// and the live session keeps everything: an attach on a long-running
+/// session costs the cap, not the whole buffer.
+#[test]
+fn snapshot_carries_only_the_newest_scrollback_rows() {
+    use crate::sessions::hub::SNAPSHOT_SCROLLBACK_LINES;
+
+    let mut source = vt100::Parser::new(24, 80, 5_000);
+    for i in 0..1_200 {
+        source.process(format!("line {i:04}\r\n").as_bytes());
+    }
+    // `scrollback()` reads the view offset, so expose the whole buffer to
+    // measure the fixture (the call under test pages from MAX anyway).
+    source.screen_mut().set_scrollback(usize::MAX);
+    let full = source.screen().scrollback();
+    assert!(
+        full > SNAPSHOT_SCROLLBACK_LINES,
+        "the fixture must overflow the cap"
+    );
+
+    let bytes = crate::sessions::hub::scrollback_formatted(source.screen_mut());
+    assert_eq!(source.screen().scrollback(), 0, "the source stays live");
+
+    let mut client = vt100::Parser::new(24, 80, 5_000);
+    client.process(&bytes);
+    client.process(&source.screen().contents_formatted());
+    client.screen_mut().set_scrollback(usize::MAX);
+    assert_eq!(
+        client.screen().scrollback(),
+        SNAPSHOT_SCROLLBACK_LINES,
+        "the client replays exactly the cap"
+    );
+    // `contents()` reads the visible page: the first replayed page must hold
+    // the oldest rows inside the cap, never anything older (the trailing
+    // newline shifts the replay by one row: it starts at 0177, not 0176).
+    client
+        .screen_mut()
+        .set_scrollback(SNAPSHOT_SCROLLBACK_LINES);
+    let first = client.screen().contents();
+    assert!(
+        first.contains("line 0177"),
+        "the oldest rows inside the cap survive the round trip"
+    );
+    assert!(
+        !first.contains("line 0100"),
+        "rows older than the cap stay out of the snapshot"
+    );
+    // The live screen rides along untouched: the newest rows stay visible.
+    client.screen_mut().set_scrollback(0);
+    assert!(
+        client.screen().contents().contains("line 1177"),
+        "the newest rows stay on the live screen"
+    );
+}
+
 /// A session attached while a full-screen app runs: the snapshot leaves a
 /// fresh client on the alternate screen showing the app, with the main
 /// buffer (scrollback and screen) intact underneath, so the app's later
