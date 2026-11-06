@@ -5,6 +5,7 @@
 mod auth;
 mod badframe;
 mod catalog;
+mod graph_control;
 mod graphs;
 mod hello;
 mod muse_resume;

@@ -9,9 +9,10 @@
 //!   reaches attached peers as `resized{id,cols,rows}` (see
 //!   `bridge_resize.rs`).
 //!
-//!   `spawn`, `kill`, `graphs`, `graph_watch`, `catalog` and `compose` are
-//!   owner-only too: a guest inside its grant answers `forbidden` naming the
-//!   frame, and `kill` outside the grant stays `not_found`.
+//!   `spawn`, `kill`, `graphs`, `graph_watch`, `graph_control`, `catalog`
+//!   and `compose` are owner-only too: a guest inside its grant answers
+//!   `forbidden` naming the frame, and `kill` outside the grant stays
+//!   `not_found`.
 //!
 //! Terminal sessions are first-class here, as on the local socket: they
 //! list, attach, and (for the owner) spawn without `cli` they open the
@@ -37,7 +38,9 @@ use crate::remote::metrics::{
 };
 use crate::remote::trust::{Grant, GrantScope};
 use crate::sessions::catalog::{handle_catalog, handle_compose, handle_prompt_draft};
-use crate::sessions::graphs::{handle_graph_unwatch, handle_graph_watch, handle_graphs};
+use crate::sessions::graphs::{
+    handle_graph_control, handle_graph_unwatch, handle_graph_watch, handle_graphs,
+};
 use crate::sessions::protocol::{
     error_frame, exited_frame, ok_frame, parse_client_frame, resized_frame, session_added_frame,
     session_removed_frame, sessions_frame, shelf_added_frame, shelf_missing_frame,
@@ -191,8 +194,8 @@ impl RemoteBridge {
 
     /// Answer one inbound client frame. Sync frames answer inline; `prompt`
     /// and `kill` answer from a blocking task, exactly like the local socket.
-    /// `graph_watch` is awaited here (it validates and builds its first
-    /// answer off the executor) before the next frame is processed.
+    /// `graph_watch` and `graph_control` are awaited here (they validate and
+    /// work off the executor) before the next frame is processed.
     pub async fn handle_text(&mut self, text: &str, out: &OutTx) {
         let frame = match parse_client_frame(text) {
             Ok(frame) => frame,
@@ -280,13 +283,15 @@ impl RemoteBridge {
             | ClientFrame::Graphs { .. }
             | ClientFrame::GraphWatch { .. }
             | ClientFrame::GraphUnwatch { .. }
+            | ClientFrame::GraphControl { .. }
             | ClientFrame::HostMetrics { .. }
             | ClientFrame::HostMetricsWatch { .. }
             | ClientFrame::HostMetricsUnwatch) => self.handle_read_frame(frame, out).await,
         }
     }
 
-    /// Answer one read-only frame: shelf, catalog, graphs and host metrics.
+    /// Answer one read frame: shelf, catalog, graphs and host metrics, plus
+    /// the owner-only `graph_control` that pauses or continues a graph.
     /// The session-mutating arms stay in [`Self::handle_text`], which only
     /// routes the variants matched here, so both matches stay exhaustive: a
     /// new frame fails to compile until both sides name it.
@@ -338,6 +343,13 @@ impl RemoteBridge {
             }
             ClientFrame::GraphUnwatch { id } => {
                 handle_graph_unwatch(&mut self.watches, &id);
+            }
+            ClientFrame::GraphControl { req, id, action } => {
+                if !self.scope.is_owner() {
+                    owner_denied(out, Some(&req), "graph_control");
+                    return;
+                }
+                handle_graph_control(&self.state, out, req, id, action).await;
             }
             ClientFrame::HostMetrics { req } => handle_host_metrics(&self.metrics, out, &req),
             ClientFrame::HostMetricsWatch { interval_s } => {

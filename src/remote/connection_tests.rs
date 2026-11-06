@@ -809,7 +809,7 @@ async fn a_paired_device_gets_the_session_hub_over_a_webrtc_data_channel() {
     assert_eq!(hello.json["proto"], 2);
     assert_eq!(
         hello.json["features"],
-        json!(["shelf", "shelf_upload"]),
+        json!(["shelf", "shelf_upload", "graph_control"]),
         "the data channel advertises the shelf: {}",
         hello.raw
     );
@@ -867,7 +867,7 @@ async fn assert_hello(peer: &mut Loopback, what: &str) {
     assert_eq!(hello.json["proto"], 2);
     assert_eq!(
         hello.json["features"],
-        json!(["shelf", "shelf_upload"]),
+        json!(["shelf", "shelf_upload", "graph_control"]),
         "the data channel advertises the shelf: {}",
         hello.raw
     );

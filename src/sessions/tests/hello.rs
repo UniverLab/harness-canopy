@@ -85,3 +85,11 @@ fn hello_owner_features_extend_the_guest_list() {
     expected.extend_from_slice(OWNER_FEATURES);
     assert_eq!(owner["features"], serde_json::json!(expected));
 }
+
+#[test]
+fn hello_owner_features_offer_graph_control() {
+    assert!(
+        OWNER_FEATURES.contains(&"graph_control"),
+        "the owner device must be offered graph_control: {OWNER_FEATURES:?}"
+    );
+}

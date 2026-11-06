@@ -466,15 +466,16 @@ shape — is logged and ignored, and the connection stays up.
 
 Once the data channel is open, the browser speaks the same protocol v2 as
 `/sessions/ws`, with owner-only frames: `spawn`, `kill`, `graphs`,
-`graph_watch`, `catalog`, `compose`, `resize` and `resize_release` answer
-only the host owner's own paired device. A guest inside its grant answers
-`error{code:"forbidden"}` naming the frame — `spawn is only available to
-the host owner's devices`, and so on — `kill` outside its grant stays
-`not_found`, and `graph_unwatch` stays a silent no-op. `resize` is clamped
-to 20–500 columns and 5–200 rows, at most one resize per session every
-100 ms, the latest winning; the browser otherwise renders the host's size
-scaled, following `resized`. Terminal sessions are first-class for the
-owner, as on the local socket: they list, attach, and spawn — a terminal
+`graph_watch`, `graph_control`, `catalog`, `compose`, `resize` and
+`resize_release` answer only the host owner's own paired device. A guest
+inside its grant answers `error{code:"forbidden"}` naming the frame —
+`spawn is only available to the host owner's devices`, and so on — `kill`
+outside its grant stays `not_found`, and `graph_unwatch` stays a silent
+no-op. `resize` is clamped to 20–500 columns and 5–200 rows, at most one
+resize per session every 100 ms, the latest winning; the browser otherwise
+renders the host's size scaled, following `resized`. Terminal sessions
+are first-class for the owner, as on the local socket: they list, attach,
+and spawn — a terminal
 `spawn` may omit `cli` (or send `null`) to open the host user's default
 shell. A browser paired as a trusted guest login
 sees only its granted sessions — every other session answers `not_found`,
@@ -558,10 +559,12 @@ and at most three uploads run per device — a fourth `begin` answers
 `error{code:"busy"}`. Uploads are stored with origin `user`, and a live
 target session receives one automatic `📎 the user attached NAME (N.N MB) →
 SHELF_PATH` line. `hello` carries `proto: 2` and
-`features: ["shelf", "shelf_upload"]`; a client offers upload only when
+`features: ["shelf", "shelf_upload"]` — plus `"graph_control"` for the
+host owner's own paired device; a client offers upload only when
 `shelf_upload` is listed, so an older host without it stays usable.
 
-Graphs ride the same channel, read-only. `graphs{req}` answers
+Graphs ride the same channel, watched read-only and paused or continued
+by one owner-only frame. `graphs{req}` answers
 `graphs{req,graphs}` with the non-archived running, paused and failed
 graphs plus completed graphs active within the last 24 hours — running
 first, then paused, failed, completed, most recent activity first, at
@@ -605,8 +608,20 @@ A connection holds at most four watches — a fifth answers
 id answers `error{code:"not_found"}` and starts no watch either, and
 every watch ends with the connection — or as soon as its graph is
 deleted, which stops the pushes and frees the slot for another watch.
-None of these frames ever changes a graph, a spec or a queue: pausing
-and continuing stay local.
+
+`graph_control{req,id,action}` pauses (`"pause"`) or continues
+(`"continue"`, retrying the node that was mid-flight) one graph through
+the daemon's `graph_control` tool — the same contract `canopy graph
+pause` and `canopy graph continue` call, so the engine's rules stay in
+one place. It is the only graph frame that changes anything: an unknown
+or archived id answers `error{code:"not_found"}`, a tool refusal answers
+`error{code:"busy"}` with the tool's text verbatim, and success answers
+`ok{req}` — the state change itself reaches watchers through the
+`graph_state` poll, with no new push frame:
+
+```json
+{"t": "graph_control", "req": "c1", "id": "7c1e4b2a-9d3f-4a6e-8b5c-2f0d1e3a4b6c", "action": "pause"}
+```
 
 Host metrics ride the same channel, read-only. `host.metrics{req}`
 answers `host.metrics{req,metrics}` with one sample — `cpu_usage`,

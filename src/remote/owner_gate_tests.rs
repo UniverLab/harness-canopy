@@ -1,5 +1,5 @@
-//! The owner gate: `spawn`, `kill`, `graphs`, `graph_watch`, `catalog` and
-//! `compose` answer only the host owner's own devices.
+//! The owner gate: `spawn`, `kill`, `graphs`, `graph_watch`, `graph_control`,
+//! `catalog` and `compose` answer only the host owner's own devices.
 //!
 //! A guest — full grant or narrow — answers `forbidden` naming the frame for
 //! each of them, and the refusal has no side effect: nothing spawns, nothing
@@ -139,6 +139,10 @@ async fn assert_guest_refusals(grant: Grant) {
         (
             json!({"t": "graph_watch", "req": "w1", "id": "g-run"}),
             "graph_watch",
+        ),
+        (
+            json!({"t": "graph_control", "req": "p1", "id": "g-run", "action": "pause"}),
+            "graph_control",
         ),
         (json!({"t": "catalog", "req": "c1"}), "catalog"),
         (

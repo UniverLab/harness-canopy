@@ -14,6 +14,8 @@ pub use super::host_frame::{parse_host_frame, HostFrame};
 
 #[path = "protocol_frames.rs"]
 mod protocol_frames;
+#[path = "protocol_graph.rs"]
+mod protocol_graph;
 #[path = "protocol_put.rs"]
 mod protocol_put;
 #[path = "protocol_release.rs"]
@@ -32,6 +34,7 @@ pub use protocol_frames::{
     shelf_removed_frame, size_released_frame, snapshot_frame, snapshot_more_frame, spawn_frame,
     spawn_frame_full, spawned_frame, SpawnFrameArgs,
 };
+pub use protocol_graph::GraphControlAction;
 #[cfg(test)]
 pub use protocol_put::{
     shelf_put_abort_frame, shelf_put_begin_frame, shelf_put_end_frame, shelf_put_part_frame,
@@ -227,6 +230,15 @@ pub enum ClientFrame {
     GraphUnwatch {
         id: String,
     },
+    /// `graph_control{req,id,action}`: pause or continue one graph
+    /// (`action` is `"pause"` or `"continue"`). Owner-only on the remote
+    /// bridge; the local socket answers every peer. Success is `ok`; the
+    /// state change itself reaches watchers through the `graph_state` poll.
+    GraphControl {
+        req: String,
+        id: String,
+        action: GraphControlAction,
+    },
     /// `host.metrics{req}`: one host-metrics frame. Remote-only: the local
     /// socket answers `error{code:"forbidden"}`.
     HostMetrics {
@@ -364,6 +376,7 @@ pub fn parse_client_frame(text: &str) -> Result<ClientFrame, FrameError> {
             let id = id_field(&value, &frame)?;
             Ok(ClientFrame::GraphUnwatch { id })
         }
+        "graph_control" => protocol_graph::parse(&value, &frame),
         "host.metrics" => {
             let req = req_field(&value, &frame)?;
             Ok(ClientFrame::HostMetrics { req })
