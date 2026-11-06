@@ -466,7 +466,8 @@ shape — is logged and ignored, and the connection stays up.
 
 Once the data channel is open, the browser speaks the same protocol v2 as
 `/sessions/ws`, with owner-only frames: `spawn`, `kill`, `graphs`,
-`graph_watch`, `graph_control`, `catalog`, `compose`, `resize` and
+`graph_watch`, `graph_control`, `catalog`, `compose`, `resumable_list`,
+`session_resume`, `resize` and
 `resize_release` answer only the host owner's own paired device. A guest
 inside its grant answers `error{code:"forbidden"}` naming the frame —
 `spawn is only available to the host owner's devices`, and so on — `kill`
