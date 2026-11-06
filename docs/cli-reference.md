@@ -563,7 +563,7 @@ SHELF_PATH` line. `hello` carries `proto: 2` and
 host owner's own paired device; a client offers upload only when
 `shelf_upload` is listed, so an older host without it stays usable.
 
-Graphs ride the same channel, watched read-only and paused or continued
+Graphs ride the same channel: watched read-only, and paused or continued
 by one owner-only frame. `graphs{req}` answers
 `graphs{req,graphs}` with the non-archived running, paused and failed
 graphs plus completed graphs active within the last 24 hours — running
@@ -615,9 +615,11 @@ the daemon's `graph_control` tool — the same contract `canopy graph
 pause` and `canopy graph continue` call, so the engine's rules stay in
 one place. It is the only graph frame that changes anything: an unknown
 or archived id answers `error{code:"not_found"}`, a tool refusal answers
-`error{code:"busy"}` with the tool's text verbatim, and success answers
-`ok{req}` — the state change itself reaches watchers through the
-`graph_state` poll, with no new push frame:
+`error{code:"busy"}` with the tool's text verbatim, a missing field or
+an `action` other than `"pause"`/`"continue"` answers
+`error{code:"bad_request"}`, and success answers `ok{req}` — the state
+change itself reaches watchers through the `graph_state` poll, with no
+new push frame:
 
 ```json
 {"t": "graph_control", "req": "c1", "id": "7c1e4b2a-9d3f-4a6e-8b5c-2f0d1e3a4b6c", "action": "pause"}
