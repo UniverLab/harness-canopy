@@ -209,6 +209,21 @@ fn resume_interactive_session(
     canopy_config: &CanopyConfig,
     current_boot_id: Option<&str>,
 ) {
+    if let Err(e) = resume_recorded_session(hub, session, canopy_config, current_boot_id) {
+        tracing::warn!("Failed to auto-resume session '{}': {e}", session.name);
+    }
+}
+
+/// Relaunch one recorded session exactly as a daemon start would: rebuild its
+/// resume command line, spawn it (falling back to a fresh conversation), and
+/// reactivate its own row so its id, name, hooks and scheduled sends carry
+/// over. Errors when no process started at all.
+pub(crate) fn resume_recorded_session(
+    hub: &SessionHub,
+    session: &InteractiveSession,
+    canopy_config: &CanopyConfig,
+    current_boot_id: Option<&str>,
+) -> anyhow::Result<()> {
     let cli = Cli::from_str(&session.cli);
     let cli_config = canopy_config.get_cli(cli.as_str());
     let resume_args = build_resumed_session_args(
@@ -219,16 +234,15 @@ fn resume_interactive_session(
         cli_config.and_then(|config| config.yolo_flag.as_deref()),
         session.harness_conversation_id.as_deref(),
     );
-    let Some(spawned) = spawn_resumed_or_fresh(hub, session, cli_config, resume_args.as_deref())
-    else {
-        return;
-    };
+    let spawned = spawn_resumed_or_fresh(hub, session, cli_config, resume_args.as_deref())
+        .ok_or_else(|| anyhow::anyhow!("no process started for session '{}'", session.name))?;
     finalize_resumed_session(hub, session, spawned.pid, current_boot_id);
+    Ok(())
 }
 
 /// Spawn the resumed session, falling back to the platform's fresh
 /// interactive args when the resume launch fails.
-fn spawn_resumed_or_fresh(
+pub(crate) fn spawn_resumed_or_fresh(
     hub: &SessionHub,
     session: &InteractiveSession,
     cli_config: Option<&crate::domain::cli_config::CliConfig>,
@@ -317,7 +331,7 @@ fn record_fresh_muse_conversation(
 /// resumed process. The recorded launch args are never rewritten with the
 /// resume command line: it is rebuilt from the stored harness conversation
 /// id at every startup.
-fn finalize_resumed_session(
+pub(crate) fn finalize_resumed_session(
     hub: &SessionHub,
     session: &InteractiveSession,
     pid: Option<i64>,

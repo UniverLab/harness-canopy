@@ -348,15 +348,19 @@ fn terminal_opens_clean_after_a_hub_restart() {
     .expect("write legacy history");
 
     // A restart: the PTY is gone, the row is what the previous daemon left.
+    // The row takes a new id on purpose: dropping the old hub does not stop
+    // its reader thread, and when that thread, not `kill`, recorded the exit
+    // it can land its own `finished` write for 'term-hist' after the insert
+    // below — a write that must not decide this test.
     let _ = hub.kill("term-hist");
     drop(hub);
-    db.insert_terminal_session("term-hist", "hist-shell", "sh", "/tmp")
+    db.insert_terminal_session("term-restarted", "hist-shell", "sh", "/tmp")
         .unwrap();
 
     let restarted = test_hub(&db);
     reconcile_at_startup(&restarted, dir.path());
 
-    let resumed = restarted.get("term-hist").expect("terminal respawned");
+    let resumed = restarted.get("term-restarted").expect("terminal respawned");
     assert_eq!(resumed.name, "hist-shell");
     let contents = resumed.test_contents().unwrap_or_default();
     assert!(
@@ -367,5 +371,5 @@ fn terminal_opens_clean_after_a_hub_restart() {
         !contents.contains("canopy-legacy-scrollback-marker"),
         "a respawned terminal must ignore legacy stored scrollback: {contents:?}"
     );
-    let _ = restarted.kill("term-hist");
+    let _ = restarted.kill("term-restarted");
 }

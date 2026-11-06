@@ -14,12 +14,17 @@ pub use super::host_frame::{parse_host_frame, HostFrame};
 
 #[path = "protocol_frames.rs"]
 mod protocol_frames;
+#[path = "protocol_graph.rs"]
+mod protocol_graph;
 #[path = "protocol_put.rs"]
 mod protocol_put;
 #[path = "protocol_release.rs"]
 mod protocol_release;
 #[path = "protocol_schedule.rs"]
 mod protocol_schedule;
+pub use super::protocol_dir::{dir_list_frame, DirEntry};
+#[cfg(test)]
+pub use super::protocol_resume::{resumable_frame, ResumableItem};
 #[cfg(test)]
 pub(crate) use protocol_frames::harnesses_in;
 pub use protocol_frames::{
@@ -30,6 +35,9 @@ pub use protocol_frames::{
     shelf_removed_frame, size_released_frame, snapshot_frame, snapshot_more_frame, spawn_frame,
     spawn_frame_full, spawned_frame, SpawnFrameArgs,
 };
+#[cfg(test)]
+pub use protocol_frames::{resumable_list_frame, session_resume_frame, OWNER_FEATURES};
+pub use protocol_graph::GraphControlAction;
 #[cfg(test)]
 pub use protocol_put::{
     shelf_put_abort_frame, shelf_put_begin_frame, shelf_put_end_frame, shelf_put_part_frame,
@@ -225,6 +233,33 @@ pub enum ClientFrame {
     GraphUnwatch {
         id: String,
     },
+    /// `graph_control{req,id,action}`: pause or continue one graph
+    /// (`action` is `"pause"` or `"continue"`). Owner-only on the remote
+    /// bridge; the local socket answers every peer. Success is `ok`; the
+    /// state change itself reaches watchers through the `graph_state` poll.
+    GraphControl {
+        req: String,
+        id: String,
+        action: GraphControlAction,
+    },
+    /// `resumable_list{req}`: the recorded conversations the picker offers,
+    /// newest first. Owner-only on the remote bridge.
+    ResumableList {
+        req: String,
+    },
+    /// `session_resume{req,id}`: relaunch one recorded conversation under its
+    /// own id. Owner-only on the remote bridge.
+    SessionResume {
+        req: String,
+        id: String,
+    },
+    /// `dir_list{req,path?}`: list one directory's subdirectories for the
+    /// New dialog's folder picker. `path` absent, empty, `~` or `~/…` means
+    /// the host home or a path under it. Owner-only on the remote bridge.
+    DirList {
+        req: String,
+        path: Option<String>,
+    },
     /// `host.metrics{req}`: one host-metrics frame. Remote-only: the local
     /// socket answers `error{code:"forbidden"}`.
     HostMetrics {
@@ -362,6 +397,9 @@ pub fn parse_client_frame(text: &str) -> Result<ClientFrame, FrameError> {
             let id = id_field(&value, &frame)?;
             Ok(ClientFrame::GraphUnwatch { id })
         }
+        "graph_control" => protocol_graph::parse(&value, &frame),
+        "resumable_list" | "session_resume" => super::protocol_resume::parse(&value, &frame),
+        "dir_list" => super::protocol_dir::parse(&value, &frame),
         "host.metrics" => {
             let req = req_field(&value, &frame)?;
             Ok(ClientFrame::HostMetrics { req })
@@ -439,11 +477,11 @@ fn parse_spawn_frame(value: &Value, frame: &str) -> Result<ClientFrame, FrameErr
     })
 }
 
-fn req_field(value: &Value, frame: &str) -> Result<String, FrameError> {
+pub(super) fn req_field(value: &Value, frame: &str) -> Result<String, FrameError> {
     str_field(value, frame, "req")
 }
 
-fn id_field(value: &Value, frame: &str) -> Result<String, FrameError> {
+pub(super) fn id_field(value: &Value, frame: &str) -> Result<String, FrameError> {
     str_field(value, frame, "id")
 }
 
@@ -461,7 +499,11 @@ fn str_field(value: &Value, frame: &str, field: &str) -> Result<String, FrameErr
     }
 }
 
-fn opt_str_field(value: &Value, frame: &str, field: &str) -> Result<Option<String>, FrameError> {
+pub(super) fn opt_str_field(
+    value: &Value,
+    frame: &str,
+    field: &str,
+) -> Result<Option<String>, FrameError> {
     match value.get(field) {
         Some(Value::String(s)) => Ok(Some(s.clone())),
         Some(Value::Null) | None => Ok(None),

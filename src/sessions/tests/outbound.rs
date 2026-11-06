@@ -111,7 +111,7 @@ fn control_frames_survive_a_saturated_output_queue() {
     assert!(saturated, "output eventually saturates the connection");
     assert!(tx.pending() > 0, "frames are still queued");
 
-    assert!(tx.push_control(hello_frame("host", &[])));
+    assert!(tx.push_control(hello_frame("host", &[], false)));
     assert!(tx.push_control(ok_frame("r1")));
     assert!(tx.push_control(error_frame(Some("r2"), ERR_INTERNAL, "boom")));
 
@@ -304,4 +304,87 @@ async fn the_remote_rate_cap_lets_the_first_frame_after_a_lull_through() {
     assert_eq!(coal.push_out(&tx, 3, b"z"), PushOut::Buffered);
     assert!(flush_coal("s", &tx, &mut coal));
     assert_eq!(out_payloads(&mut rx), vec![b"z".to_vec()]);
+}
+
+/// An attach snapshot larger than the whole byte budget must not make the
+/// first output chunk ask for a second snapshot: the forwarder credits the
+/// snapshot's wire bytes, so output queues behind it.
+#[test]
+fn an_attach_snapshot_over_budget_does_not_ask_for_another() {
+    let (tx, _rx) = outbound::channel();
+    let mut coal = SessionCoal::remote();
+    // The measured fistulina attach: 771,888 wire bytes still queued.
+    assert!(tx.push_control("s".repeat(771_888)));
+    coal.allow_snapshot(771_888);
+    assert_eq!(
+        coal.push_out(&tx, 1, b"live output"),
+        PushOut::Buffered,
+        "output behind an over-budget snapshot queues, not snapshots again"
+    );
+}
+
+/// The allowance excuses only the snapshot's own bytes: output that would
+/// take the queue past the budget on top of them still falls back.
+#[test]
+fn output_over_budget_beyond_the_allowance_still_asks_for_a_snapshot() {
+    let (tx, _rx) = outbound::channel();
+    let mut coal = SessionCoal::remote();
+    assert!(tx.push_control("s".repeat(600_000)));
+    coal.allow_snapshot(100_000);
+    let chunk = vec![b'x'; 300_000];
+    assert_eq!(
+        coal.push_out(&tx, 1, &chunk),
+        PushOut::NeedSnapshot,
+        "600,000 pending less a 100,000 allowance plus this chunk is over budget"
+    );
+}
+
+/// The allowance tracks the queue down: once the snapshot has drained, the
+/// stale-window fallback is armed again instead of staying disabled.
+#[tokio::test]
+async fn a_shrinking_queue_shrinks_the_allowance() {
+    let (tx, mut rx) = outbound::channel();
+    let mut coal = SessionCoal::remote();
+    assert!(tx.push_control("s".repeat(600_000)));
+    coal.allow_snapshot(600_000);
+    assert_eq!(coal.push_out(&tx, 1, b"live"), PushOut::Buffered);
+
+    // The snapshot drains; the next push pins the allowance at the empty
+    // queue's size.
+    while rx.try_recv().is_ok() {}
+    assert_eq!(tx.pending(), 0);
+    assert_eq!(coal.push_out(&tx, 2, b"next"), PushOut::Buffered);
+
+    // A queue that now stalls past the stale window falls back again: had
+    // the allowance stayed at 600,000 the stale check would still be off.
+    assert!(tx.push_control("z".repeat(100)));
+    tokio::time::sleep(std::time::Duration::from_millis(550)).await;
+    assert_eq!(
+        coal.push_out(&tx, 3, b"more"),
+        PushOut::NeedSnapshot,
+        "the allowance shrank with the queue, re-arming the stale fallback"
+    );
+}
+
+/// While a snapshot is in flight, output is dropped only until the
+/// transport's own backlog falls below half the budget — the gauge is what
+/// the 250 ms refresh keeps honest.
+#[test]
+fn dropped_output_resumes_once_the_gauge_falls() {
+    let (tx, _rx) = outbound::channel();
+    let mut coal = SessionCoal::remote();
+    assert!(tx.push_control("s".repeat(1_024)));
+    tx.set_transport_backlog(578_916);
+    coal.mark_snapshot_sent();
+    assert_eq!(
+        coal.push_out(&tx, 1, b"lost"),
+        PushOut::Dropped,
+        "the transport gauge keeps the queue over half the budget"
+    );
+    tx.set_transport_backlog(0);
+    assert_eq!(
+        coal.push_out(&tx, 2, b"live"),
+        PushOut::Buffered,
+        "once the gauge falls the in-flight snapshot stops muting output"
+    );
 }

@@ -207,6 +207,10 @@ pub struct SessionCoal {
     window: Duration,
     min_interval: Option<Duration>,
     awaiting_drain: bool,
+    /// Wire bytes of an attach snapshot still owed a pass through the byte
+    /// budget: output queued behind it is not charged against [`MAX_BYTES`]
+    /// until the queue drains below it.
+    snapshot_allowance: usize,
 }
 
 impl SessionCoal {
@@ -233,24 +237,40 @@ impl SessionCoal {
             window,
             min_interval,
             awaiting_drain: false,
+            snapshot_allowance: 0,
         }
+    }
+
+    /// Credit the wire bytes of a snapshot the connection just queued: while
+    /// those bytes are still pending they do not count against [`MAX_BYTES`],
+    /// so output produced during the snapshot's trip queues behind it instead
+    /// of asking for a second snapshot. The credit shrinks with the queue on
+    /// every [`Self::push_out`].
+    pub fn allow_snapshot(&mut self, wire_bytes: usize) {
+        self.snapshot_allowance += wire_bytes;
     }
 
     /// Buffer one output chunk (or report that a snapshot is needed).
     pub fn push_out(&mut self, tx: &ConnTx, seq: u64, chunk: &[u8]) -> PushOut {
         let now = Instant::now();
+        self.snapshot_allowance = self.snapshot_allowance.min(tx.pending());
         if self.awaiting_drain {
             if tx.pending() > MAX_BYTES / 2 {
                 return PushOut::Dropped;
             }
             self.awaiting_drain = false;
         }
-        if tx.behind().is_some_and(|behind| behind > STALE) {
+        if self.snapshot_allowance == 0 && tx.behind().is_some_and(|behind| behind > STALE) {
             self.reset();
             return PushOut::NeedSnapshot;
         }
         self.append(now, seq, chunk);
-        if tx.pending().saturating_add(wire_bytes(self.buf.len())) > MAX_BYTES {
+        if tx
+            .pending()
+            .saturating_sub(self.snapshot_allowance)
+            .saturating_add(wire_bytes(self.buf.len()))
+            > MAX_BYTES
+        {
             self.reset();
             return PushOut::NeedSnapshot;
         }

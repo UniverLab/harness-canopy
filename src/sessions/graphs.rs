@@ -2,14 +2,16 @@
 //! `graph_unwatch` following one graph's drawing, active node and spec
 //! checklist live.
 //!
-//! Everything here is read-only — no frame in this module changes a graph,
-//! a spec or a queue. The first `graph` answer carries exactly the
-//! catalogue-plate document [`build_export_document_with_pending`] produces
-//! (so the web plate renderer reads it as it reads catalogue documents);
-//! after it, a 2-second diffed poll keeps the wire quiet: `graph_state`
-//! travels only when the state actually differs from the last one sent on
-//! that connection. The polling is deliberate — the graph engine has no
-//! event bus into the hub, and this spec adds none.
+//! Only `graph_control` changes a graph — it pauses or continues it through
+//! the daemon's `graph_control` tool, the same contract the CLI calls, never
+//! a direct DB write. The rest of this module stays read-only: the first
+//! `graph` answer carries exactly the catalogue-plate document
+//! [`build_export_document_with_pending`] produces (so the web plate renderer
+//! reads it as it reads catalogue documents); after it, a 2-second diffed
+//! poll keeps the wire quiet: `graph_state` travels only when the state
+//! actually differs from the last one sent on that connection. The polling
+//! is deliberate — the graph engine has no event bus into the hub, and this
+//! spec adds none.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -20,14 +22,18 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 
+use crate::daemon::bridge::resolve_bridge_port;
 use crate::daemon::handler_read::{active_graph_spec_context, ActiveGraphSpec};
 use crate::daemon::handler_specs_helpers::{build_spec_run_info, SpecRunInfo};
 use crate::db::Database;
 use crate::domain::graph_transfer::{build_export_document_with_pending, GraphExportDocument};
 use crate::domain::graphs::{Graph, GraphRunStatus, GraphSpec, GraphSpecStatus, GraphStatus};
 use crate::graph_engine::is_no_spec_placeholder;
+use crate::tui::mcp_client::call_daemon_tool;
 
-use super::protocol::{error_frame, ERR_BUSY, ERR_INTERNAL, ERR_NOT_FOUND};
+use super::protocol::{
+    error_frame, ok_frame, GraphControlAction, ERR_BUSY, ERR_INTERNAL, ERR_NOT_FOUND,
+};
 use super::ws::{OutTx, SessionsState};
 
 /// Poll period of a live watch: the graph engine has no event bus into the
@@ -228,6 +234,90 @@ pub fn handle_graph_unwatch(watches: &mut HashMap<String, JoinHandle<()>>, id: &
     }
 }
 
+/// `graph_control`: pause or continue one graph through the daemon's
+/// `graph_control` tool — the only frame in this module that changes a
+/// graph. The id is validated first (unknown or archived answers
+/// `not_found` and calls nothing); the tool's own text is the answer on
+/// refusal, and watchers learn the new state through the `graph_state`
+/// poll — no new push frame.
+pub async fn handle_graph_control(
+    state: &Arc<SessionsState>,
+    out_tx: &OutTx,
+    req: String,
+    id: String,
+    action: GraphControlAction,
+) {
+    let db = Arc::clone(state.hub.db());
+    let check_id = id.clone();
+    let checked = tokio::task::spawn_blocking(move || live_graph(&db, &check_id).map(|_| ())).await;
+    match checked {
+        Ok(Ok(())) => {}
+        Ok(Err(WatchError::NotFound)) => {
+            let _ = out_tx.send(error_frame(Some(&req), ERR_NOT_FOUND, &no_such_graph(&id)));
+            return;
+        }
+        Ok(Err(WatchError::Internal)) | Err(_) => {
+            let _ = out_tx.send(error_frame(
+                Some(&req),
+                ERR_INTERNAL,
+                "graph control failed",
+            ));
+            return;
+        }
+    }
+    run_graph_control(None, out_tx, req, id, action).await;
+}
+
+/// Run the daemon's `graph_control` tool for `id`: pause finishes the
+/// running node first (no `interrupt` is ever passed, as with
+/// `canopy graph pause`); continue retries the node that was mid-flight.
+/// `port_override` is `None` in production and `Some` in tests, so the
+/// fake daemon's port reaches [`call_daemon_tool`] without touching the
+/// bridge-port resolution.
+pub(crate) async fn run_graph_control(
+    port_override: Option<u16>,
+    out_tx: &OutTx,
+    req: String,
+    id: String,
+    action: GraphControlAction,
+) {
+    let out_tx = out_tx.clone();
+    let called = tokio::task::spawn_blocking(move || {
+        let port = resolve_bridge_port(port_override);
+        call_daemon_tool(
+            &port.to_string(),
+            "graph_control",
+            &control_args(&action, &id),
+        )
+    })
+    .await;
+    match called {
+        Ok(Ok(outcome)) if outcome.is_error => {
+            let _ = out_tx.send(error_frame(Some(&req), ERR_BUSY, &outcome.text));
+        }
+        Ok(Ok(_)) => {
+            let _ = out_tx.send(ok_frame(&req));
+        }
+        Ok(Err(_)) | Err(_) => {
+            let _ = out_tx.send(error_frame(
+                Some(&req),
+                ERR_INTERNAL,
+                "graph control failed",
+            ));
+        }
+    }
+}
+
+/// The daemon `graph_control` tool arguments for `action` on `id`.
+fn control_args(action: &GraphControlAction, id: &str) -> serde_json::Value {
+    match action {
+        GraphControlAction::Pause => serde_json::json!({"action": "pause", "graph_id": id}),
+        GraphControlAction::Continue => serde_json::json!({
+            "action": "continue", "graph_id": id, "mode": "retry_current_node",
+        }),
+    }
+}
+
 /// One watch's life: re-read the state every [`WATCH_POLL`] and push
 /// `graph_state` only when it differs from the last one sent on this
 /// connection. Ends when the connection closes (its handle is aborted with
@@ -265,16 +355,21 @@ async fn watch_loop(
     }
 }
 
+/// One live graph row: the id names a non-archived graph. Archived reads
+/// as not found; a failed read is ours.
+fn live_graph(db: &Database, id: &str) -> Result<Graph, WatchError> {
+    db.get_graph(id)
+        .map_err(|_| WatchError::Internal)?
+        .filter(|graph| !graph.archived)
+        .ok_or(WatchError::NotFound)
+}
+
 /// Build a watch's first answer: the export document the plate renders
 /// (the production shape — `build_export_document_with_pending` over the
 /// graph's own rows, `platform`/`model` in node configs kept so the plate
 /// can colour nodes by harness) plus the live state.
 fn build_watch(db: &Database, id: &str) -> Result<(GraphExportDocument, GraphState), WatchError> {
-    let graph = db
-        .get_graph(id)
-        .map_err(|_| WatchError::Internal)?
-        .filter(|graph| !graph.archived)
-        .ok_or(WatchError::NotFound)?;
+    let graph = live_graph(db, id)?;
     let nodes = db
         .list_graph_nodes_for_graph(id)
         .map_err(|_| WatchError::Internal)?;

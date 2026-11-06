@@ -5,12 +5,15 @@
 mod auth;
 mod badframe;
 mod catalog;
+mod dir_list;
+mod graph_control;
 mod graphs;
 mod hello;
 mod muse_resume;
 mod outbound;
 mod resize_kill;
 mod resume;
+mod resume_protocol;
 mod roundtrip;
 mod scheduled;
 mod shelf;

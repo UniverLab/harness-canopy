@@ -37,15 +37,24 @@ pub(crate) fn harnesses_in(canopy_dir: &Path) -> Vec<String> {
     names
 }
 
+/// Features only the host owner's own devices are offered, on top of the
+/// guest list.
+pub const OWNER_FEATURES: &[&str] = &["graph_control", "session_resume", "dir_list"];
+
 /// `hello{proto,host_label,features,harnesses}`, sent on connect. `features`
 /// advertises the optional extensions this host speaks — `shelf` plus
-/// `shelf_upload` — so a client can tell an older host from a newer one
+/// `shelf_upload` for every peer, followed by [`OWNER_FEATURES`] for the host
+/// owner's own devices — so a client can tell an older host from a newer one
 /// without probing. `harnesses` lists the installed harness names (see
 /// [`installed_harnesses`]) so the New dialog knows what to offer.
-pub fn hello_frame(host_label: &str, harnesses: &[String]) -> String {
+pub fn hello_frame(host_label: &str, harnesses: &[String], owner: bool) -> String {
+    let mut features: Vec<&str> = vec!["shelf", "shelf_upload"];
+    if owner {
+        features.extend_from_slice(OWNER_FEATURES);
+    }
     serde_json::json!({
         "t": "hello", "proto": PROTO_VERSION, "host_label": host_label,
-        "features": ["shelf", "shelf_upload"], "harnesses": harnesses,
+        "features": features, "harnesses": harnesses,
     })
     .to_string()
 }
@@ -276,4 +285,17 @@ pub fn shelf_get_frame(req: &str, file_id: &str) -> String {
 /// `shelf_delete{req,file_id}`: ask the host to remove one shelf file.
 pub fn shelf_delete_frame(req: &str, file_id: &str) -> String {
     serde_json::json!({"t": "shelf_delete", "req": req, "file_id": file_id}).to_string()
+}
+
+/// `resumable_list{req}`: ask for the resumable recorded conversations.
+#[cfg(test)]
+pub fn resumable_list_frame(req: &str) -> String {
+    serde_json::json!({"t": "resumable_list", "req": req}).to_string()
+}
+
+/// `session_resume{req,id}`: bring one recorded conversation back under its
+/// own id.
+#[cfg(test)]
+pub fn session_resume_frame(req: &str, id: &str) -> String {
+    serde_json::json!({"t": "session_resume", "req": req, "id": id}).to_string()
 }

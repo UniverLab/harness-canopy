@@ -9,9 +9,16 @@
 //!   reaches attached peers as `resized{id,cols,rows}` (see
 //!   `bridge_resize.rs`).
 //!
+//!   `spawn`, `kill`, `graphs`, `graph_watch`, `graph_control`, `catalog`,
+//!   `compose`, `resumable_list`, `session_resume` and `dir_list` are
+//!   owner-only too: a guest inside its grant answers
+//!   `forbidden` naming the frame, and `kill` outside the grant stays
+//!   `not_found`.
+//!
 //! Terminal sessions are first-class here, as on the local socket: they
-//! list, attach, and spawn (without `cli` they open the default shell).
-//! Only their shelf files stay hidden (see `handle_shelf_list`).
+//! list, attach, and (for the owner) spawn without `cli` they open the
+//! default shell. Only their shelf files stay hidden (see
+//! `handle_shelf_list`).
 //!
 //! Outbound frames are size-bounded for a data channel: raw `out`,
 //! `snapshot` and `file` payloads are split into chunks that keep the source
@@ -23,7 +30,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use tokio::sync::{broadcast, Semaphore};
+use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 
 use crate::remote::metrics::{
@@ -32,20 +39,20 @@ use crate::remote::metrics::{
 };
 use crate::remote::trust::{Grant, GrantScope};
 use crate::sessions::catalog::{handle_catalog, handle_compose, handle_prompt_draft};
-use crate::sessions::graphs::{handle_graph_unwatch, handle_graph_watch, handle_graphs};
-use crate::sessions::outbound::{self, PushOut, SessionCoal};
-use crate::sessions::protocol::{
-    error_frame, exited_frame, ok_frame, out_frame, parse_client_frame, resized_frame,
-    session_added_frame, session_removed_frame, sessions_frame, shelf_added_frame,
-    shelf_missing_frame, shelf_removed_frame, snapshot_frame, snapshot_more_frame, ClientFrame,
-    SessionItem, SpawnExt, ERR_BAD_REQUEST, ERR_DELIVERY_FAILED, ERR_FORBIDDEN, ERR_INTERNAL,
-    ERR_NOT_FOUND, ERR_SPAWN_FAILED,
+use crate::sessions::dir_list::handle_dir_list;
+use crate::sessions::graphs::{
+    handle_graph_control, handle_graph_unwatch, handle_graph_watch, handle_graphs,
 };
+use crate::sessions::protocol::{
+    error_frame, exited_frame, ok_frame, parse_client_frame, resized_frame, session_added_frame,
+    session_removed_frame, sessions_frame, shelf_added_frame, shelf_missing_frame,
+    shelf_removed_frame, ClientFrame, SessionItem, SpawnExt, ERR_BAD_REQUEST, ERR_DELIVERY_FAILED,
+    ERR_FORBIDDEN, ERR_INTERNAL, ERR_NOT_FOUND, ERR_SPAWN_FAILED,
+};
+use crate::sessions::protocol_resume::{handle_resumable_list, handle_session_resume};
 use crate::sessions::ws::no_such_session;
 use crate::sessions::ws::{handle_shelf_delete, validate_spawn_extensions, OutTx, SessionsState};
-use crate::sessions::{
-    HubEvent, HubSession, OutputReceiver, SessionHub, SessionKind, SessionStatus, SpawnRequest,
-};
+use crate::sessions::{HubEvent, HubSession, SessionHub, SessionKind, SessionStatus, SpawnRequest};
 
 /// Hard limit for one outbound JSON frame on a data channel.
 pub const MAX_FRAME_BYTES: usize = 16 * 1024;
@@ -190,8 +197,8 @@ impl RemoteBridge {
 
     /// Answer one inbound client frame. Sync frames answer inline; `prompt`
     /// and `kill` answer from a blocking task, exactly like the local socket.
-    /// `graph_watch` is awaited here (it validates and builds its first
-    /// answer off the executor) before the next frame is processed.
+    /// `graph_watch` and `graph_control` are awaited here (they validate and
+    /// work off the executor) before the next frame is processed.
     pub async fn handle_text(&mut self, text: &str, out: &OutTx) {
         let frame = match parse_client_frame(text) {
             Ok(frame) => frame,
@@ -248,11 +255,21 @@ impl RemoteBridge {
                 prompt,
                 ext,
             } => {
+                if !self.scope.is_owner() {
+                    owner_denied(out, Some(&req), "spawn");
+                    return;
+                }
                 let request = spawn_request(cli, model, workdir, name, prompt, *ext);
                 self.handle_spawn(req, &kind, request, out);
             }
             ClientFrame::Kill { req, id } => {
+                // The grant check runs first, so a session outside the grant
+                // still answers `not_found` and never confirms it exists.
                 if !self.scope.granted(&self.state.hub, Some(&req), &id, out) {
+                    return;
+                }
+                if !self.scope.is_owner() {
+                    owner_denied(out, Some(&req), "kill");
                     return;
                 }
                 deliver_kill(self.state.hub.clone(), req, id, out.clone());
@@ -269,13 +286,18 @@ impl RemoteBridge {
             | ClientFrame::Graphs { .. }
             | ClientFrame::GraphWatch { .. }
             | ClientFrame::GraphUnwatch { .. }
+            | ClientFrame::GraphControl { .. }
+            | ClientFrame::ResumableList { .. }
+            | ClientFrame::SessionResume { .. }
+            | ClientFrame::DirList { .. }
             | ClientFrame::HostMetrics { .. }
             | ClientFrame::HostMetricsWatch { .. }
             | ClientFrame::HostMetricsUnwatch) => self.handle_read_frame(frame, out).await,
         }
     }
 
-    /// Answer one read-only frame: shelf, catalog, graphs and host metrics.
+    /// Answer one read frame: shelf, catalog, graphs and host metrics, plus
+    /// the owner-only `graph_control` that pauses or continues a graph.
     /// The session-mutating arms stay in [`Self::handle_text`], which only
     /// routes the variants matched here, so both matches stay exhaustive: a
     /// new frame fails to compile until both sides name it.
@@ -297,14 +319,48 @@ impl RemoteBridge {
                     handle_shelf_delete(&self.state, out, req, file_id);
                 }
             }
-            ClientFrame::Compose { req, draft } => handle_compose(&self.state, out, req, draft),
-            ClientFrame::Catalog { req } => handle_catalog(&self.state, out, req),
-            ClientFrame::Graphs { req } => handle_graphs(&self.state, out, req),
+            ClientFrame::Compose { req, draft } => {
+                if self.owner_allowed(out, &req, "compose") {
+                    handle_compose(&self.state, out, req, draft);
+                }
+            }
+            ClientFrame::Catalog { req } => {
+                if self.owner_allowed(out, &req, "catalog") {
+                    handle_catalog(&self.state, out, req);
+                }
+            }
+            ClientFrame::Graphs { req } => {
+                if self.owner_allowed(out, &req, "graphs") {
+                    handle_graphs(&self.state, out, req);
+                }
+            }
             ClientFrame::GraphWatch { req, id } => {
-                handle_graph_watch(&self.state, out, &mut self.watches, req, id).await;
+                if self.owner_allowed(out, &req, "graph_watch") {
+                    handle_graph_watch(&self.state, out, &mut self.watches, req, id).await;
+                }
             }
             ClientFrame::GraphUnwatch { id } => {
                 handle_graph_unwatch(&mut self.watches, &id);
+            }
+            ClientFrame::GraphControl { req, id, action } => {
+                if self.owner_allowed(out, &req, "graph_control") {
+                    handle_graph_control(&self.state, out, req, id, action).await;
+                }
+            }
+            ClientFrame::ResumableList { req } => {
+                if self.owner_allowed(out, &req, "resumable_list") {
+                    handle_resumable_list(&self.state, out, req);
+                }
+            }
+            ClientFrame::SessionResume { req, id } => {
+                if self.owner_allowed(out, &req, "session_resume") {
+                    handle_session_resume(&self.state, out, req, id);
+                }
+            }
+            ClientFrame::DirList { req, path } => {
+                if self.owner_allowed(out, &req, "dir_list") {
+                    handle_dir_list(&self.state, out, req, path);
+                }
             }
             ClientFrame::HostMetrics { req } => handle_host_metrics(&self.metrics, out, &req),
             ClientFrame::HostMetricsWatch { interval_s } => {
@@ -333,6 +389,16 @@ impl RemoteBridge {
                 unreachable!("session frames never route to handle_read_frame");
             }
         }
+    }
+
+    /// `true` when this peer may run an owner-only frame; a guest already
+    /// got its `forbidden` answer naming the frame.
+    fn owner_allowed(&self, out: &OutTx, req: &str, frame: &str) -> bool {
+        if self.scope.is_owner() {
+            return true;
+        }
+        owner_denied(out, Some(req), frame);
+        false
     }
 
     /// Forward one hub lifecycle event, with ungranted sessions
@@ -490,16 +556,22 @@ impl RemoteBridge {
         if let Some(previous) = self.attached.remove(id) {
             previous.abort();
         }
-        for frame in split_snapshot_frames(
+        let frames = forward::split_snapshot_frames(
             id,
             snapshot.cols,
             snapshot.rows,
             snapshot.seq,
             &snapshot.data,
-        ) {
+        );
+        // The snapshot's wire bytes still owe a pass through the connection's
+        // byte budget: the forwarder credits them so output produced while
+        // the snapshot travels queues behind it instead of asking for a
+        // second snapshot.
+        let snapshot_wire = frames.iter().map(String::len).sum();
+        for frame in frames {
             send(out, frame);
         }
-        let task = spawn_forwarder(session, snapshot.seq, rx, out.clone());
+        let task = forward::spawn_forwarder(session, snapshot.seq, rx, out.clone(), snapshot_wire);
         self.attached.insert(id.to_string(), task);
     }
 
@@ -577,6 +649,15 @@ fn send(out: &OutTx, frame: String) {
     let _ = out.send(frame);
 }
 
+/// Refuse an owner-only frame, naming it in `resize`'s wording.
+fn owner_denied(out: &OutTx, req: Option<&str>, frame: &str) {
+    let _ = out.send(error_frame(
+        req,
+        ERR_FORBIDDEN,
+        &format!("{frame} is only available to the host owner's devices"),
+    ));
+}
+
 fn deliver_prompt(session: Arc<HubSession>, req: String, text: String, out: OutTx) {
     tokio::spawn(async move {
         match tokio::task::spawn_blocking(move || session.prompt(&text)).await {
@@ -614,39 +695,6 @@ fn deliver_kill(hub: SessionHub, req: String, id: String, out: OutTx) {
     });
 }
 
-/// Split one raw output payload into wire frames of at most
-/// [`MAX_FRAME_BYTES`], each keeping the source `seq`. An empty payload is
-/// one empty frame; nothing is ever truncated.
-pub fn split_out_frames(id: &str, seq: u64, data: &[u8]) -> Vec<String> {
-    if data.is_empty() {
-        return vec![out_frame(id, seq, &[])];
-    }
-    data.chunks(CHUNK_BYTES)
-        .map(|chunk| out_frame(id, seq, chunk))
-        .collect()
-}
-
-/// Split one snapshot into a leading `snapshot` frame (cols/rows/seq and the
-/// first chunk) followed by `snapshot_more` frames, the final one carrying
-/// `last: true`. A snapshot that fits the first frame still ends with an
-/// empty `snapshot_more{last:true}`: the device only knows the snapshot is
-/// whole when it sees `last`, so a lone `snapshot` would never be drawn.
-pub fn split_snapshot_frames(id: &str, cols: u16, rows: u16, seq: u64, data: &[u8]) -> Vec<String> {
-    let mut chunks = data.chunks(CHUNK_BYTES);
-    let first = chunks.next().unwrap_or(&[]);
-    let mut frames = vec![snapshot_frame(id, cols, rows, seq, first)];
-    let rest: Vec<&[u8]> = chunks.collect();
-    if rest.is_empty() {
-        frames.push(snapshot_more_frame(id, &[], true));
-        return frames;
-    }
-    let total = rest.len();
-    for (index, chunk) in rest.into_iter().enumerate() {
-        frames.push(snapshot_more_frame(id, chunk, index + 1 == total));
-    }
-    frames
-}
-
 #[cfg(test)]
 #[path = "bridge_tests.rs"]
 mod tests;
@@ -660,91 +708,5 @@ mod upload;
 #[path = "bridge_resize.rs"]
 pub(crate) mod resize;
 
-fn spawn_forwarder(
-    session: Arc<HubSession>,
-    from_seq: u64,
-    rx: OutputReceiver,
-    out: OutTx,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut rx = rx;
-        let mut next = from_seq;
-        let mut coal = SessionCoal::remote();
-        loop {
-            let deadline = coal.next_deadline();
-            tokio::select! {
-                outcome = rx.recv() => {
-                    if !pump(&session, &mut next, outcome, &out, &mut coal) {
-                        return;
-                    }
-                }
-                _ = outbound::wait_until(deadline) => {
-                    if !flush_coal(&session.id, &out, &mut coal) {
-                        return;
-                    }
-                }
-            }
-        }
-    })
-}
-
-/// Send the coalesced buffer as size-bounded `out` frames; false ends the
-/// forwarder.
-pub(crate) fn flush_coal(id: &str, out: &OutTx, coal: &mut SessionCoal) -> bool {
-    match coal.take_flush() {
-        Some((seq, data)) => send_frames(out, split_out_frames(id, seq, &data)),
-        None => true,
-    }
-}
-
-/// Buffer one broadcast outcome (or fall back to a snapshot); false ends the
-/// forwarder.
-pub(crate) fn pump(
-    session: &HubSession,
-    next: &mut u64,
-    outcome: Result<(u64, Vec<u8>), broadcast::error::RecvError>,
-    out: &OutTx,
-    coal: &mut SessionCoal,
-) -> bool {
-    match outcome {
-        Ok((seq, chunk)) => {
-            if seq <= *next {
-                return true;
-            }
-            *next = seq;
-            match coal.push_out(out, seq, &chunk) {
-                PushOut::Buffered | PushOut::Dropped => true,
-                PushOut::NeedSnapshot => send_snapshot(session, next, out, coal),
-            }
-        }
-        Err(broadcast::error::RecvError::Lagged(_)) => send_snapshot(session, next, out, coal),
-        Err(broadcast::error::RecvError::Closed) => false,
-    }
-}
-
-/// Drop buffered output, queue one fresh snapshot, and resume after its seq.
-fn send_snapshot(
-    session: &HubSession,
-    next: &mut u64,
-    out: &OutTx,
-    coal: &mut SessionCoal,
-) -> bool {
-    let Some(snapshot) = session.fresh_snapshot() else {
-        return false;
-    };
-    *next = snapshot.seq;
-    coal.mark_snapshot_sent();
-    let frames = split_snapshot_frames(
-        &session.id,
-        snapshot.cols,
-        snapshot.rows,
-        snapshot.seq,
-        &snapshot.data,
-    );
-    send_frames(out, frames)
-}
-
-/// Send every frame in order; `false` when the connection is gone.
-fn send_frames(out: &OutTx, frames: Vec<String>) -> bool {
-    frames.into_iter().all(|frame| out.send(frame).is_ok())
-}
+#[path = "bridge_forward.rs"]
+mod forward;

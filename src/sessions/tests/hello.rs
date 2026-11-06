@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use crate::domain::canopy_config::CanopyConfig;
 use crate::domain::cli_config::CliConfig;
-use crate::sessions::protocol::{harnesses_in, hello_frame};
+use crate::sessions::protocol::{harnesses_in, hello_frame, OWNER_FEATURES};
 
 fn cli(name: &str, binary: &str) -> CliConfig {
     CliConfig {
@@ -47,7 +47,7 @@ fn hello_frame_lists_resolvable_cli_and_omits_unresolvable() {
 #[test]
 fn hello_frame_carries_sorted_harnesses_key() {
     let list = vec!["claude".to_string(), "muse".to_string()];
-    let raw = hello_frame("test-host", &list);
+    let raw = hello_frame("test-host", &list, false);
     assert!(raw.contains("\"harnesses\""), "missing key: {raw}");
 
     let hello: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
@@ -68,4 +68,36 @@ fn hello_frame_carries_sorted_harnesses_key() {
     assert_eq!(names, ["claude", "muse"]);
 
     println!("{raw}");
+}
+
+#[test]
+fn hello_owner_features_extend_the_guest_list() {
+    let guest: serde_json::Value =
+        serde_json::from_str(&hello_frame("test-host", &[], false)).expect("valid JSON");
+    assert_eq!(
+        guest["features"],
+        serde_json::json!(["shelf", "shelf_upload"])
+    );
+
+    let owner: serde_json::Value =
+        serde_json::from_str(&hello_frame("test-host", &[], true)).expect("valid JSON");
+    let mut expected: Vec<&str> = vec!["shelf", "shelf_upload"];
+    expected.extend_from_slice(OWNER_FEATURES);
+    assert_eq!(owner["features"], serde_json::json!(expected));
+}
+
+#[test]
+fn hello_owner_features_offer_graph_control() {
+    assert!(
+        OWNER_FEATURES.contains(&"graph_control"),
+        "the owner device must be offered graph_control: {OWNER_FEATURES:?}"
+    );
+}
+
+#[test]
+fn hello_owner_features_offer_dir_list() {
+    assert!(
+        OWNER_FEATURES.contains(&"dir_list"),
+        "the owner device must be offered dir_list: {OWNER_FEATURES:?}"
+    );
 }

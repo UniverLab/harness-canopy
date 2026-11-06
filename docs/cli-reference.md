@@ -465,14 +465,20 @@ LAN. A body with no candidate — the key missing, `null`, or another
 shape — is logged and ignored, and the connection stays up.
 
 Once the data channel is open, the browser speaks the same protocol v2 as
-`/sessions/ws`, with one restriction: only the host owner's own paired
-device may `resize` a session (clamped to 20–500 columns and 5–200 rows,
-at most one resize per session every 100 ms, the latest winning); every
-guest's `resize` answers `forbidden`, and the browser otherwise renders
-the host's size scaled, following `resized`. Terminal
-sessions are first-class, as on the local socket: they list, attach, and
-spawn — a terminal `spawn` may omit `cli` (or send `null`) to open the
-host user's default shell. A browser paired as a trusted guest login
+`/sessions/ws`, with owner-only frames: `spawn`, `kill`, `graphs`,
+`graph_watch`, `graph_control`, `catalog`, `compose`, `resumable_list`,
+`session_resume`, `dir_list`, `resize` and
+`resize_release` answer only the host owner's own paired device. A guest
+inside its grant answers `error{code:"forbidden"}` naming the frame —
+`spawn is only available to the host owner's devices`, and so on — `kill`
+outside its grant stays `not_found`, and `graph_unwatch` stays a silent
+no-op. `resize` is clamped to 20–500 columns and 5–200 rows, at most one
+resize per session every 100 ms, the latest winning; the browser otherwise
+renders the host's size scaled, following `resized`. Terminal sessions
+are first-class for the owner, as on the local socket: they list, attach,
+and spawn — a terminal
+`spawn` may omit `cli` (or send `null`) to open the host user's default
+shell. A browser paired as a trusted guest login
 sees only its granted sessions — every other session answers `not_found`,
 as if it did not exist — while the owner keeps the full view. A session
 whose process ends leaves the list for owner and guest alike, as if
@@ -483,7 +489,18 @@ existing directory; the browser's New dialog types that directory. A
 relative path is refused with `spawn: field 'workdir' must be an
 absolute path`, and a path that does not exist or is not a directory with
 `spawn: workdir '<expanded>' does not exist or is not a directory`; both are
-`error{code:"bad_request"}`. The `yolo` field (default `false`) launches the
+`error{code:"bad_request"}`. The dialog picks that directory with
+`dir_list{req,path?}` — another owner-only frame — which lists one
+directory's subdirectories: `path` follows the same `workdir` rules
+(absent, empty, `~` or `~/…` mean the home directory; anything else must be
+absolute, or the answer is `dir_list: field 'path' must be absolute or
+~-prefixed`), and the answer `dir_list{req,path,parent,dirs,truncated}`
+reports the canonical path, its parent (`null` at the root) and the
+subdirectory names — hidden names and symlinks to directories included,
+files never, sorted case-insensitively, capped at 500 with
+`truncated: true`; a missing or non-directory path answers
+`error{code:"not_found"}` and one that cannot be read answers
+`forbidden`. The `yolo` field (default `false`) launches the
 harness with its approval prompts off — the switch the TUI's New dialog
 offers — by appending that harness's registry `yolo_flag` after whatever
 interactive args the frame sent; a harness with no `yolo_flag` refuses it
@@ -554,10 +571,13 @@ and at most three uploads run per device — a fourth `begin` answers
 `error{code:"busy"}`. Uploads are stored with origin `user`, and a live
 target session receives one automatic `📎 the user attached NAME (N.N MB) →
 SHELF_PATH` line. `hello` carries `proto: 2` and
-`features: ["shelf", "shelf_upload"]`; a client offers upload only when
-`shelf_upload` is listed, so an older host without it stays usable.
+`features: ["shelf", "shelf_upload"]` — plus `"graph_control"`,
+`"session_resume"` and `"dir_list"` for the host owner's own paired device; a client offers
+upload only when `shelf_upload` is listed, so an older host without it
+stays usable.
 
-Graphs ride the same channel, read-only. `graphs{req}` answers
+Graphs ride the same channel: watched read-only, and paused or continued
+by one owner-only frame. `graphs{req}` answers
 `graphs{req,graphs}` with the non-archived running, paused and failed
 graphs plus completed graphs active within the last 24 hours — running
 first, then paused, failed, completed, most recent activity first, at
@@ -601,8 +621,47 @@ A connection holds at most four watches — a fifth answers
 id answers `error{code:"not_found"}` and starts no watch either, and
 every watch ends with the connection — or as soon as its graph is
 deleted, which stops the pushes and frees the slot for another watch.
-None of these frames ever changes a graph, a spec or a queue: pausing
-and continuing stay local.
+
+`graph_control{req,id,action}` pauses (`"pause"`) or continues
+(`"continue"`, retrying the node that was mid-flight) one graph through
+the daemon's `graph_control` tool — the same contract `canopy graph
+pause` and `canopy graph continue` call, so the engine's rules stay in
+one place. It is the only graph frame that changes anything: an unknown
+or archived id answers `error{code:"not_found"}`, a tool refusal answers
+`error{code:"busy"}` with the tool's text verbatim, a missing field or
+an `action` other than `"pause"`/`"continue"` answers
+`error{code:"bad_request"}`, and success answers `ok{req}` — the state
+change itself reaches watchers through the `graph_state` poll, with no
+new push frame:
+
+```json
+{"t": "graph_control", "req": "c1", "id": "7c1e4b2a-9d3f-4a6e-8b5c-2f0d1e3a4b6c", "action": "pause"}
+```
+
+Recorded conversations resume the same way the TUI's New dialog does, for
+the host owner's devices only. `resumable_list{req}` answers
+`resumable{req,sessions}` — the finished conversations newest first, at most
+50, each row carrying `id`, `name`, `cli`, `workdir` (the absolute path),
+`started_at` (RFC3339) and `has_conversation` (whether a harness conversation
+id was recorded, so a resume lands on that conversation rather than the
+harness's newest). The list drops a session already live on the host, a
+harness with neither `resume_args` nor `session_resume_cmd` configured (it
+could only start fresh), and a conversation already listed by a newer row:
+
+```json
+{"t": "resumable_list", "req": "r1"}
+```
+
+`session_resume{req,id}` relaunches that row under its own id, name, hooks
+and scheduled sends; success answers `spawned{req,id}` and the hub's
+`session_added` announces it. Resuming a session that is already live
+answers `spawned` and starts nothing, so a double tap is harmless; an id
+that is not a finished non-bridge session answers `error{code:"not_found"}`
+and a launch that starts no process answers `error{code:"spawn_failed"}`:
+
+```json
+{"t": "session_resume", "req": "r2", "id": "7c1e4b2a-9d3f-4a6e-8b5c-2f0d1e3a4b6c"}
+```
 
 Host metrics ride the same channel, read-only. `host.metrics{req}`
 answers `host.metrics{req,metrics}` with one sample — `cpu_usage`,

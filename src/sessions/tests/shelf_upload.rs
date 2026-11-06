@@ -317,7 +317,7 @@ fn empty_declared_mime_falls_back_to_octet_stream() {
 
 #[tokio::test]
 async fn hello_advertises_shelf_upload_and_proto_is_two() {
-    let hello = json(&crate::sessions::protocol::hello_frame("host", &[]));
+    let hello = json(&crate::sessions::protocol::hello_frame("host", &[], false));
     assert_eq!(PROTO_VERSION, 2);
     assert_eq!(hello["proto"], 2);
     let features: Vec<&str> = hello["features"]
