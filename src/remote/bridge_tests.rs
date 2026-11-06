@@ -6,10 +6,8 @@ use std::time::Duration;
 use base64::Engine as _;
 use serde_json::Value;
 
-use super::{
-    flush_coal, pump, split_out_frames, split_snapshot_frames, RemoteBridge, CHUNK_BYTES,
-    MAX_FRAME_BYTES,
-};
+use super::forward::{flush_coal, pump, split_out_frames, split_snapshot_frames};
+use super::{RemoteBridge, CHUNK_BYTES, MAX_FRAME_BYTES};
 use crate::db::Database;
 use crate::remote::metrics::{
     clamp_interval, host_metrics_frame, spawn_metrics_watch, MetricsSource,
@@ -592,6 +590,58 @@ async fn owner_release_and_abort_emit_size_released() {
 
     let _ = state.hub.kill(&first.id);
     let _ = state.hub.kill(&second.id);
+}
+
+/// An attach snapshot larger than the connection's byte budget must not make
+/// the forwarder ask for a second snapshot: the snapshot's wire bytes are
+/// credited to the coalescer, so output produced while it travels arrives as
+/// ordinary `out` frames behind it.
+#[tokio::test]
+async fn attach_passes_the_snapshot_size_to_the_forwarder() {
+    let (state, _dir) = test_state();
+    let workdir = tempfile::tempdir().expect("workdir");
+    let session = spawn_cat(&state.hub, &workdir.path().to_string_lossy());
+    // A wide screen plus a full scrollback puts the snapshot well past
+    // MAX_BYTES on the wire (5000 rows of 200 columns).
+    session.resize(200, 24);
+    let mut flood = String::new();
+    for _ in 0..6_000 {
+        flood.push_str(&"x".repeat(200));
+        flood.push_str("\r\n");
+    }
+    session.ingest_chunk(flood.as_bytes());
+
+    let (out, mut rx) = outbound::channel();
+    let mut bridge = RemoteBridge::new(Arc::clone(&state));
+    bridge
+        .handle_text(
+            &serde_json::json!({"t": "attach", "id": session.id}).to_string(),
+            &out,
+        )
+        .await;
+
+    session.ingest_chunk(b"after the snapshot\r\n");
+
+    let mut snapshots = 0;
+    let mut saw_out = false;
+    for _ in 0..400 {
+        if saw_out {
+            break;
+        }
+        let frame = recv_frame(&mut rx, "snapshot or out").await;
+        match frame["t"].as_str() {
+            Some("snapshot") => snapshots += 1,
+            Some("out") => saw_out = true,
+            _ => {}
+        }
+    }
+    assert!(saw_out, "output produced during the snapshot still arrives");
+    assert_eq!(
+        snapshots, 1,
+        "exactly one snapshot: the attach snapshot never asks for another"
+    );
+    bridge.abort();
+    let _ = state.hub.kill(&session.id);
 }
 
 async fn recv_released(events: &mut tokio::sync::broadcast::Receiver<HubEvent>, id: &str) {

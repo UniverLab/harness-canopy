@@ -221,6 +221,12 @@ const DEFAULT_REMOTE_MAX_FRAME: usize = 64 * 1024;
 /// connection closes.
 const REVOKED_FAREWELL_WAIT: Duration = Duration::from_millis(250);
 
+/// How often the serve loop re-reads the transport's buffered amount. Output
+/// dropped while a snapshot drains never produces a frame, so
+/// `set_transport_backlog` cannot wait for `on_out_frame` alone:
+/// without this tick the gauge would stay high and output would stay dropped.
+const BACKLOG_REFRESH: Duration = Duration::from_millis(250);
+
 /// The largest frame a peer accepts, from its offer SDP: the minimum of
 /// every `a=max-message-size` it advertises (a zero advertises no limit and
 /// is skipped), or the 64 KiB RFC default when it advertises nothing usable.
@@ -347,6 +353,8 @@ async fn serve(session: &mut PeerSession, config: WatchdogConfig) {
     let started = Instant::now();
     let mut disconnected_since: Option<Instant> = None;
     let mut watchdog = tokio::time::interval(config.tick);
+    let mut backlog_refresh = tokio::time::interval(BACKLOG_REFRESH);
+    backlog_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // Every arm resolves to why the peer ends, if it does; one break point
     // below keeps the loop readable as arms are added.
     let ended = loop {
@@ -370,6 +378,12 @@ async fn serve(session: &mut PeerSession, config: WatchdogConfig) {
                     started,
                     config,
                 )
+            }
+            _ = backlog_refresh.tick() => {
+                if greeted {
+                    out_tx.set_transport_backlog(session.peer.buffered_amount().await);
+                }
+                None
             }
         };
         if let Some(ended) = reason {
