@@ -5,6 +5,7 @@
 mod auth;
 mod badframe;
 mod catalog;
+mod dir_list;
 mod graph_control;
 mod graphs;
 mod hello;

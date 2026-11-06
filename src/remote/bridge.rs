@@ -9,8 +9,9 @@
 //!   reaches attached peers as `resized{id,cols,rows}` (see
 //!   `bridge_resize.rs`).
 //!
-//!   `spawn`, `kill`, `graphs`, `graph_watch`, `graph_control`, `catalog`
-//!   and `compose` are owner-only too: a guest inside its grant answers
+//!   `spawn`, `kill`, `graphs`, `graph_watch`, `graph_control`, `catalog`,
+//!   `compose`, `resumable_list`, `session_resume` and `dir_list` are
+//!   owner-only too: a guest inside its grant answers
 //!   `forbidden` naming the frame, and `kill` outside the grant stays
 //!   `not_found`.
 //!
@@ -38,6 +39,7 @@ use crate::remote::metrics::{
 };
 use crate::remote::trust::{Grant, GrantScope};
 use crate::sessions::catalog::{handle_catalog, handle_compose, handle_prompt_draft};
+use crate::sessions::dir_list::handle_dir_list;
 use crate::sessions::graphs::{
     handle_graph_control, handle_graph_unwatch, handle_graph_watch, handle_graphs,
 };
@@ -287,6 +289,7 @@ impl RemoteBridge {
             | ClientFrame::GraphControl { .. }
             | ClientFrame::ResumableList { .. }
             | ClientFrame::SessionResume { .. }
+            | ClientFrame::DirList { .. }
             | ClientFrame::HostMetrics { .. }
             | ClientFrame::HostMetricsWatch { .. }
             | ClientFrame::HostMetricsUnwatch) => self.handle_read_frame(frame, out).await,
@@ -317,56 +320,47 @@ impl RemoteBridge {
                 }
             }
             ClientFrame::Compose { req, draft } => {
-                if !self.scope.is_owner() {
-                    owner_denied(out, Some(&req), "compose");
-                    return;
+                if self.owner_allowed(out, &req, "compose") {
+                    handle_compose(&self.state, out, req, draft);
                 }
-                handle_compose(&self.state, out, req, draft);
             }
             ClientFrame::Catalog { req } => {
-                if !self.scope.is_owner() {
-                    owner_denied(out, Some(&req), "catalog");
-                    return;
+                if self.owner_allowed(out, &req, "catalog") {
+                    handle_catalog(&self.state, out, req);
                 }
-                handle_catalog(&self.state, out, req);
             }
             ClientFrame::Graphs { req } => {
-                if !self.scope.is_owner() {
-                    owner_denied(out, Some(&req), "graphs");
-                    return;
+                if self.owner_allowed(out, &req, "graphs") {
+                    handle_graphs(&self.state, out, req);
                 }
-                handle_graphs(&self.state, out, req);
             }
             ClientFrame::GraphWatch { req, id } => {
-                if !self.scope.is_owner() {
-                    owner_denied(out, Some(&req), "graph_watch");
-                    return;
+                if self.owner_allowed(out, &req, "graph_watch") {
+                    handle_graph_watch(&self.state, out, &mut self.watches, req, id).await;
                 }
-                handle_graph_watch(&self.state, out, &mut self.watches, req, id).await;
             }
             ClientFrame::GraphUnwatch { id } => {
                 handle_graph_unwatch(&mut self.watches, &id);
             }
             ClientFrame::GraphControl { req, id, action } => {
-                if !self.scope.is_owner() {
-                    owner_denied(out, Some(&req), "graph_control");
-                    return;
+                if self.owner_allowed(out, &req, "graph_control") {
+                    handle_graph_control(&self.state, out, req, id, action).await;
                 }
-                handle_graph_control(&self.state, out, req, id, action).await;
             }
             ClientFrame::ResumableList { req } => {
-                if !self.scope.is_owner() {
-                    owner_denied(out, Some(&req), "resumable_list");
-                    return;
+                if self.owner_allowed(out, &req, "resumable_list") {
+                    handle_resumable_list(&self.state, out, req);
                 }
-                handle_resumable_list(&self.state, out, req);
             }
             ClientFrame::SessionResume { req, id } => {
-                if !self.scope.is_owner() {
-                    owner_denied(out, Some(&req), "session_resume");
-                    return;
+                if self.owner_allowed(out, &req, "session_resume") {
+                    handle_session_resume(&self.state, out, req, id);
                 }
-                handle_session_resume(&self.state, out, req, id);
+            }
+            ClientFrame::DirList { req, path } => {
+                if self.owner_allowed(out, &req, "dir_list") {
+                    handle_dir_list(&self.state, out, req, path);
+                }
             }
             ClientFrame::HostMetrics { req } => handle_host_metrics(&self.metrics, out, &req),
             ClientFrame::HostMetricsWatch { interval_s } => {
@@ -395,6 +389,16 @@ impl RemoteBridge {
                 unreachable!("session frames never route to handle_read_frame");
             }
         }
+    }
+
+    /// `true` when this peer may run an owner-only frame; a guest already
+    /// got its `forbidden` answer naming the frame.
+    fn owner_allowed(&self, out: &OutTx, req: &str, frame: &str) -> bool {
+        if self.scope.is_owner() {
+            return true;
+        }
+        owner_denied(out, Some(req), frame);
+        false
     }
 
     /// Forward one hub lifecycle event, with ungranted sessions

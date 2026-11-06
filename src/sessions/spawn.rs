@@ -228,7 +228,7 @@ pub fn resolve_spawn_workdir(raw: &str) -> Result<String, String> {
 /// `~` and `~/x` become the host user's home and its child; any other path is
 /// returned unchanged (and a `~user` form is left for the absolute check to
 /// refuse).
-fn expand_home(raw: &str) -> String {
+pub(crate) fn expand_home(raw: &str) -> String {
     let Some(home) = dirs::home_dir() else {
         return raw.to_string();
     };

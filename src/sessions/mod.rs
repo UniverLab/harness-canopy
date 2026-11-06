@@ -8,6 +8,7 @@
 pub mod auth;
 pub mod catalog;
 pub mod client;
+pub mod dir_list;
 pub mod graphs;
 pub mod host_frame;
 pub mod hub;
@@ -17,6 +18,7 @@ pub mod hub_shelf;
 pub mod muse_conversation;
 pub mod outbound;
 pub mod protocol;
+pub mod protocol_dir;
 pub mod protocol_resume;
 pub mod resume;
 pub mod shelf;

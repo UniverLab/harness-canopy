@@ -39,7 +39,7 @@ pub(crate) fn harnesses_in(canopy_dir: &Path) -> Vec<String> {
 
 /// Features only the host owner's own devices are offered, on top of the
 /// guest list.
-pub const OWNER_FEATURES: &[&str] = &["graph_control", "session_resume"];
+pub const OWNER_FEATURES: &[&str] = &["graph_control", "session_resume", "dir_list"];
 
 /// `hello{proto,host_label,features,harnesses}`, sent on connect. `features`
 /// advertises the optional extensions this host speaks — `shelf` plus

@@ -22,6 +22,7 @@ mod protocol_put;
 mod protocol_release;
 #[path = "protocol_schedule.rs"]
 mod protocol_schedule;
+pub use super::protocol_dir::{dir_list_frame, DirEntry};
 #[cfg(test)]
 pub use super::protocol_resume::{resumable_frame, ResumableItem};
 #[cfg(test)]
@@ -252,6 +253,13 @@ pub enum ClientFrame {
         req: String,
         id: String,
     },
+    /// `dir_list{req,path?}`: list one directory's subdirectories for the
+    /// New dialog's folder picker. `path` absent, empty, `~` or `~/…` means
+    /// the host home or a path under it. Owner-only on the remote bridge.
+    DirList {
+        req: String,
+        path: Option<String>,
+    },
     /// `host.metrics{req}`: one host-metrics frame. Remote-only: the local
     /// socket answers `error{code:"forbidden"}`.
     HostMetrics {
@@ -391,6 +399,7 @@ pub fn parse_client_frame(text: &str) -> Result<ClientFrame, FrameError> {
         }
         "graph_control" => protocol_graph::parse(&value, &frame),
         "resumable_list" | "session_resume" => super::protocol_resume::parse(&value, &frame),
+        "dir_list" => super::protocol_dir::parse(&value, &frame),
         "host.metrics" => {
             let req = req_field(&value, &frame)?;
             Ok(ClientFrame::HostMetrics { req })
@@ -490,7 +499,11 @@ fn str_field(value: &Value, frame: &str, field: &str) -> Result<String, FrameErr
     }
 }
 
-fn opt_str_field(value: &Value, frame: &str, field: &str) -> Result<Option<String>, FrameError> {
+pub(super) fn opt_str_field(
+    value: &Value,
+    frame: &str,
+    field: &str,
+) -> Result<Option<String>, FrameError> {
     match value.get(field) {
         Some(Value::String(s)) => Ok(Some(s.clone())),
         Some(Value::Null) | None => Ok(None),

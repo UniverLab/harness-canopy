@@ -93,3 +93,11 @@ fn hello_owner_features_offer_graph_control() {
         "the owner device must be offered graph_control: {OWNER_FEATURES:?}"
     );
 }
+
+#[test]
+fn hello_owner_features_offer_dir_list() {
+    assert!(
+        OWNER_FEATURES.contains(&"dir_list"),
+        "the owner device must be offered dir_list: {OWNER_FEATURES:?}"
+    );
+}

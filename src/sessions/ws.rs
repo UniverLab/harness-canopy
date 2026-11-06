@@ -25,6 +25,7 @@ use crate::sessions::outbound::{self, ConnTx, PushOut, SessionCoal};
 
 use super::auth::{bearer_token, ensure_token, token_valid};
 use super::catalog::{handle_catalog, handle_compose, handle_prompt_draft, handle_schedule_frame};
+use super::dir_list::handle_dir_list;
 use super::graphs::{
     handle_graph_control, handle_graph_unwatch, handle_graph_watch, handle_graphs,
 };
@@ -344,6 +345,7 @@ async fn handle_client_text(
         }
         ClientFrame::ResumableList { req } => handle_resumable_list(state, out_tx, req),
         ClientFrame::SessionResume { req, id } => handle_session_resume(state, out_tx, req, id),
+        ClientFrame::DirList { req, path } => handle_dir_list(state, out_tx, req, path),
         ClientFrame::HostMetrics { req } => reject_host_metrics(out_tx, Some(&req)),
         ClientFrame::HostMetricsWatch { .. } | ClientFrame::HostMetricsUnwatch => {
             reject_host_metrics(out_tx, None);

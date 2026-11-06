@@ -467,7 +467,7 @@ shape — is logged and ignored, and the connection stays up.
 Once the data channel is open, the browser speaks the same protocol v2 as
 `/sessions/ws`, with owner-only frames: `spawn`, `kill`, `graphs`,
 `graph_watch`, `graph_control`, `catalog`, `compose`, `resumable_list`,
-`session_resume`, `resize` and
+`session_resume`, `dir_list`, `resize` and
 `resize_release` answer only the host owner's own paired device. A guest
 inside its grant answers `error{code:"forbidden"}` naming the frame —
 `spawn is only available to the host owner's devices`, and so on — `kill`
@@ -486,6 +486,15 @@ closed; attaching it afterwards answers `not_found`. A `spawn` names a directory
 rather than a project. `workdir` may be absolute or start with `~/` (`~` and
 `~/` alone mean the host user's home), and the expanded path must be an
 existing directory; the browser's New dialog types that directory. A
+`dir_list{req,path?}` frame — the same owner-only gate — lists one
+directory's subdirectories for the dialog's folder picker: `path` follows
+the `workdir` rules (absent, empty, `~` or `~/…` mean the home directory,
+anything else must be absolute), and the answer `dir_list{req,path,parent,
+dirs,truncated}` reports the canonical path, its parent (`null` at the
+root), the subdirectory names — hidden names and symlinks to directories
+included, files never, sorted case-insensitively, capped at 500 with
+`truncated: true` — and a missing or non-directory path answers
+`error{code:"not_found"}` while an unreadable one answers `forbidden`. A
 relative path is refused with `spawn: field 'workdir' must be an
 absolute path`, and a path that does not exist or is not a directory with
 `spawn: workdir '<expanded>' does not exist or is not a directory`; both are
@@ -560,8 +569,8 @@ and at most three uploads run per device — a fourth `begin` answers
 `error{code:"busy"}`. Uploads are stored with origin `user`, and a live
 target session receives one automatic `📎 the user attached NAME (N.N MB) →
 SHELF_PATH` line. `hello` carries `proto: 2` and
-`features: ["shelf", "shelf_upload"]` — plus `"graph_control"` and
-`"session_resume"` for the host owner's own paired device; a client offers
+`features: ["shelf", "shelf_upload"]` — plus `"graph_control"`,
+`"session_resume"` and `"dir_list"` for the host owner's own paired device; a client offers
 upload only when `shelf_upload` is listed, so an older host without it
 stays usable.
 
