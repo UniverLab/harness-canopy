@@ -6,17 +6,26 @@
 use super::{HubSession, SessionStatus};
 use super::{OutputState, Snapshot};
 
-/// Render every scrollback row, oldest first, each with its attributes and
-/// followed by `\r\n`. A trailing home + Scroll Up parks exactly those rows
-/// back into a fresh parser's scrollback, so feeding the result to one
-/// reproduces this scrollback (a plain dump would leave a short scrollback on
-/// the visible screen, where the snapshot's visible part wipes it). Empty when
-/// there is none. Pages with `set_scrollback` and leaves the view at the live
-/// screen, using only vt100's public API so the published crate builds without
-/// the vendored patch.
+/// Rows of scrollback a snapshot carries: the live parser keeps everything
+/// up to `VT_SCROLLBACK_LINES`, but replaying all of it on every attach
+/// costs a remote client the whole buffer over the data channel, so an
+/// attach (or resync) only replays the newest rows.
+pub(crate) const SNAPSHOT_SCROLLBACK_LINES: usize = 1_000;
+
+/// Render the newest scrollback rows (at most [`SNAPSHOT_SCROLLBACK_LINES`]),
+/// oldest first, each with its attributes and followed by `\r\n`. A trailing
+/// home + Scroll Up parks exactly those rows back into a fresh parser's
+/// scrollback, so feeding the result to one reproduces this scrollback (a
+/// plain dump would leave a short scrollback on the visible screen, where
+/// the snapshot's visible part wipes it). Empty when there is none. Pages a
+/// clone with `set_scrollback`, so the live screen keeps its full scrollback
+/// and stays live; uses only vt100's public API so the published crate
+/// builds without the vendored patch.
 pub(crate) fn scrollback_formatted(screen: &mut vt100::Screen) -> Vec<u8> {
+    // `set_scrollback` only moves a view offset, so paging never destroys
+    // rows: older than the cap simply stay out of the snapshot.
     screen.set_scrollback(usize::MAX);
-    let total = screen.scrollback();
+    let total = screen.scrollback().min(SNAPSHOT_SCROLLBACK_LINES);
     let mut contents = Vec::new();
     if total == 0 {
         return contents;

@@ -398,9 +398,9 @@ impl HubSession {
 
 #[path = "hub_snapshot.rs"]
 mod snapshot;
-#[cfg(test)]
-pub(crate) use snapshot::scrollback_formatted;
 use snapshot::snapshot_locked;
+#[cfg(test)]
+pub(crate) use snapshot::{scrollback_formatted, SNAPSHOT_SCROLLBACK_LINES};
 
 /// The daemon's session hub: owns hub sessions and broadcasts their
 /// lifecycle events. Clone shares the hub.
