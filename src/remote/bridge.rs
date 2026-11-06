@@ -47,6 +47,7 @@ use crate::sessions::protocol::{
     shelf_removed_frame, ClientFrame, SessionItem, SpawnExt, ERR_BAD_REQUEST, ERR_DELIVERY_FAILED,
     ERR_FORBIDDEN, ERR_INTERNAL, ERR_NOT_FOUND, ERR_SPAWN_FAILED,
 };
+use crate::sessions::protocol_resume::{handle_resumable_list, handle_session_resume};
 use crate::sessions::ws::no_such_session;
 use crate::sessions::ws::{handle_shelf_delete, validate_spawn_extensions, OutTx, SessionsState};
 use crate::sessions::{HubEvent, HubSession, SessionHub, SessionKind, SessionStatus, SpawnRequest};
@@ -284,6 +285,8 @@ impl RemoteBridge {
             | ClientFrame::GraphWatch { .. }
             | ClientFrame::GraphUnwatch { .. }
             | ClientFrame::GraphControl { .. }
+            | ClientFrame::ResumableList { .. }
+            | ClientFrame::SessionResume { .. }
             | ClientFrame::HostMetrics { .. }
             | ClientFrame::HostMetricsWatch { .. }
             | ClientFrame::HostMetricsUnwatch) => self.handle_read_frame(frame, out).await,
@@ -350,6 +353,20 @@ impl RemoteBridge {
                     return;
                 }
                 handle_graph_control(&self.state, out, req, id, action).await;
+            }
+            ClientFrame::ResumableList { req } => {
+                if !self.scope.is_owner() {
+                    owner_denied(out, Some(&req), "resumable_list");
+                    return;
+                }
+                handle_resumable_list(&self.state, out, req);
+            }
+            ClientFrame::SessionResume { req, id } => {
+                if !self.scope.is_owner() {
+                    owner_denied(out, Some(&req), "session_resume");
+                    return;
+                }
+                handle_session_resume(&self.state, out, req, id);
             }
             ClientFrame::HostMetrics { req } => handle_host_metrics(&self.metrics, out, &req),
             ClientFrame::HostMetricsWatch { interval_s } => {

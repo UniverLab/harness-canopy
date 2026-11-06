@@ -23,9 +23,9 @@ mod protocol_release;
 #[path = "protocol_schedule.rs"]
 mod protocol_schedule;
 #[cfg(test)]
-pub(crate) use protocol_frames::harnesses_in;
+pub use super::protocol_resume::{resumable_frame, ResumableItem};
 #[cfg(test)]
-pub use protocol_frames::OWNER_FEATURES;
+pub(crate) use protocol_frames::harnesses_in;
 pub use protocol_frames::{
     attach_frame, detach_frame, error_frame, exited_frame, file_frame, hello_frame, input_frame,
     installed_harnesses, kill_frame, list_frame, ok_frame, out_frame, prompt_frame, resize_frame,
@@ -34,6 +34,8 @@ pub use protocol_frames::{
     shelf_removed_frame, size_released_frame, snapshot_frame, snapshot_more_frame, spawn_frame,
     spawn_frame_full, spawned_frame, SpawnFrameArgs,
 };
+#[cfg(test)]
+pub use protocol_frames::{resumable_list_frame, session_resume_frame, OWNER_FEATURES};
 pub use protocol_graph::GraphControlAction;
 #[cfg(test)]
 pub use protocol_put::{
@@ -239,6 +241,17 @@ pub enum ClientFrame {
         id: String,
         action: GraphControlAction,
     },
+    /// `resumable_list{req}`: the recorded conversations the picker offers,
+    /// newest first. Owner-only on the remote bridge.
+    ResumableList {
+        req: String,
+    },
+    /// `session_resume{req,id}`: relaunch one recorded conversation under its
+    /// own id. Owner-only on the remote bridge.
+    SessionResume {
+        req: String,
+        id: String,
+    },
     /// `host.metrics{req}`: one host-metrics frame. Remote-only: the local
     /// socket answers `error{code:"forbidden"}`.
     HostMetrics {
@@ -377,6 +390,7 @@ pub fn parse_client_frame(text: &str) -> Result<ClientFrame, FrameError> {
             Ok(ClientFrame::GraphUnwatch { id })
         }
         "graph_control" => protocol_graph::parse(&value, &frame),
+        "resumable_list" | "session_resume" => super::protocol_resume::parse(&value, &frame),
         "host.metrics" => {
             let req = req_field(&value, &frame)?;
             Ok(ClientFrame::HostMetrics { req })
@@ -454,11 +468,11 @@ fn parse_spawn_frame(value: &Value, frame: &str) -> Result<ClientFrame, FrameErr
     })
 }
 
-fn req_field(value: &Value, frame: &str) -> Result<String, FrameError> {
+pub(super) fn req_field(value: &Value, frame: &str) -> Result<String, FrameError> {
     str_field(value, frame, "req")
 }
 
-fn id_field(value: &Value, frame: &str) -> Result<String, FrameError> {
+pub(super) fn id_field(value: &Value, frame: &str) -> Result<String, FrameError> {
     str_field(value, frame, "id")
 }
 

@@ -17,6 +17,7 @@ pub mod hub_shelf;
 pub mod muse_conversation;
 pub mod outbound;
 pub mod protocol;
+pub mod protocol_resume;
 pub mod resume;
 pub mod shelf;
 pub mod shelf_upload;

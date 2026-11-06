@@ -146,6 +146,14 @@ async fn assert_guest_refusals(grant: Grant) {
         ),
         (json!({"t": "catalog", "req": "c1"}), "catalog"),
         (
+            json!({"t": "resumable_list", "req": "r1"}),
+            "resumable_list",
+        ),
+        (
+            json!({"t": "session_resume", "req": "r2", "id": "sess-finished"}),
+            "session_resume",
+        ),
+        (
             json!({
                 "t": "compose", "req": "m1",
                 "draft": {"sections": [{"title": "goal", "content": "g"}]},

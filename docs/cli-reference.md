@@ -559,9 +559,10 @@ and at most three uploads run per device — a fourth `begin` answers
 `error{code:"busy"}`. Uploads are stored with origin `user`, and a live
 target session receives one automatic `📎 the user attached NAME (N.N MB) →
 SHELF_PATH` line. `hello` carries `proto: 2` and
-`features: ["shelf", "shelf_upload"]` — plus `"graph_control"` for the
-host owner's own paired device; a client offers upload only when
-`shelf_upload` is listed, so an older host without it stays usable.
+`features: ["shelf", "shelf_upload"]` — plus `"graph_control"` and
+`"session_resume"` for the host owner's own paired device; a client offers
+upload only when `shelf_upload` is listed, so an older host without it
+stays usable.
 
 Graphs ride the same channel: watched read-only, and paused or continued
 by one owner-only frame. `graphs{req}` answers
@@ -623,6 +624,31 @@ new push frame:
 
 ```json
 {"t": "graph_control", "req": "c1", "id": "7c1e4b2a-9d3f-4a6e-8b5c-2f0d1e3a4b6c", "action": "pause"}
+```
+
+Recorded conversations resume the same way the TUI's New dialog does, for
+the host owner's devices only. `resumable_list{req}` answers
+`resumable{req,sessions}` — the finished conversations newest first, at most
+50, each row carrying `id`, `name`, `cli`, `workdir` (the absolute path),
+`started_at` (RFC3339) and `has_conversation` (whether a harness conversation
+id was recorded, so a resume lands on that conversation rather than the
+harness's newest). The list drops a session already live on the host, a
+harness with neither `resume_args` nor `session_resume_cmd` configured (it
+could only start fresh), and a conversation already listed by a newer row:
+
+```json
+{"t": "resumable_list", "req": "r1"}
+```
+
+`session_resume{req,id}` relaunches that row under its own id, name, hooks
+and scheduled sends; success answers `spawned{req,id}` and the hub's
+`session_added` announces it. Resuming a session that is already live
+answers `spawned` and starts nothing, so a double tap is harmless; an id
+that is not a finished non-bridge session answers `error{code:"not_found"}`
+and a launch that starts no process answers `error{code:"spawn_failed"}`:
+
+```json
+{"t": "session_resume", "req": "r2", "id": "7c1e4b2a-9d3f-4a6e-8b5c-2f0d1e3a4b6c"}
 ```
 
 Host metrics ride the same channel, read-only. `host.metrics{req}`

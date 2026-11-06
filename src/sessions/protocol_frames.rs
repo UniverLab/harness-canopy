@@ -39,7 +39,7 @@ pub(crate) fn harnesses_in(canopy_dir: &Path) -> Vec<String> {
 
 /// Features only the host owner's own devices are offered, on top of the
 /// guest list.
-pub const OWNER_FEATURES: &[&str] = &["graph_control"];
+pub const OWNER_FEATURES: &[&str] = &["graph_control", "session_resume"];
 
 /// `hello{proto,host_label,features,harnesses}`, sent on connect. `features`
 /// advertises the optional extensions this host speaks — `shelf` plus
@@ -285,4 +285,17 @@ pub fn shelf_get_frame(req: &str, file_id: &str) -> String {
 /// `shelf_delete{req,file_id}`: ask the host to remove one shelf file.
 pub fn shelf_delete_frame(req: &str, file_id: &str) -> String {
     serde_json::json!({"t": "shelf_delete", "req": req, "file_id": file_id}).to_string()
+}
+
+/// `resumable_list{req}`: ask for the resumable recorded conversations.
+#[cfg(test)]
+pub fn resumable_list_frame(req: &str) -> String {
+    serde_json::json!({"t": "resumable_list", "req": req}).to_string()
+}
+
+/// `session_resume{req,id}`: bring one recorded conversation back under its
+/// own id.
+#[cfg(test)]
+pub fn session_resume_frame(req: &str, id: &str) -> String {
+    serde_json::json!({"t": "session_resume", "req": req, "id": id}).to_string()
 }

@@ -35,6 +35,7 @@ use super::protocol::{
     spawned_frame, ClientFrame, SessionItem, ERR_BAD_REQUEST, ERR_DELIVERY_FAILED, ERR_FORBIDDEN,
     ERR_INTERNAL, ERR_NOT_FOUND, ERR_SPAWN_FAILED,
 };
+use super::protocol_resume::{handle_resumable_list, handle_session_resume};
 use super::shelf::{ShelfStore, READ_CHUNK_BYTES};
 use super::{
     default_terminal_shell, resolve_spawn_workdir, yolo_flag_for, HubEvent, HubSession,
@@ -341,6 +342,8 @@ async fn handle_client_text(
         | ClientFrame::GraphControl { .. }) => {
             handle_graph_frame(state, out_tx, watches, frame).await;
         }
+        ClientFrame::ResumableList { req } => handle_resumable_list(state, out_tx, req),
+        ClientFrame::SessionResume { req, id } => handle_session_resume(state, out_tx, req, id),
         ClientFrame::HostMetrics { req } => reject_host_metrics(out_tx, Some(&req)),
         ClientFrame::HostMetricsWatch { .. } | ClientFrame::HostMetricsUnwatch => {
             reject_host_metrics(out_tx, None);
