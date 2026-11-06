@@ -692,7 +692,14 @@ impl SessionHub {
     /// plus `session_removed` to every connection. Returns the exit code, or
     /// `None` when there is no such session.
     pub fn kill(&self, id: &str) -> Option<i32> {
-        let session = self.inner.sessions.lock().ok()?.remove(id)?;
+        let session = self.inner.sessions.lock().ok()?.remove(id);
+        let Some(session) = session else {
+            // Already finished naturally (e.g. the reader thread won the
+            // race): still treat this as an explicit close and drop any
+            // failure tail so the row reads as closed, not failed.
+            let _ = self.inner.db.clear_session_exit_detail(id);
+            return None;
+        };
         if let Ok(mut child) = session.child.lock() {
             #[cfg(unix)]
             send_sighup_to_group(child.as_mut());

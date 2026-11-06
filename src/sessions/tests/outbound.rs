@@ -111,7 +111,7 @@ fn control_frames_survive_a_saturated_output_queue() {
     assert!(saturated, "output eventually saturates the connection");
     assert!(tx.pending() > 0, "frames are still queued");
 
-    assert!(tx.push_control(hello_frame("host", &[])));
+    assert!(tx.push_control(hello_frame("host", &[], false)));
     assert!(tx.push_control(ok_frame("r1")));
     assert!(tx.push_control(error_frame(Some("r2"), ERR_INTERNAL, "boom")));
 

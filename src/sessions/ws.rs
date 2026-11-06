@@ -185,7 +185,13 @@ async fn handle_connection(socket: WebSocket, state: Arc<SessionsState>) {
         }
     });
 
-    let _ = out_tx.send(hello_frame(state.hub.host_label(), &installed_harnesses()));
+    // The local socket's token is the owner's, so it is offered the owner
+    // feature list.
+    let _ = out_tx.send(hello_frame(
+        state.hub.host_label(),
+        &installed_harnesses(),
+        true,
+    ));
     let mut events = state.hub.subscribe_events();
     let mut attached: Attached = HashMap::new();
     // Per-connection `graph_watch` tasks: dropped (aborted) with the

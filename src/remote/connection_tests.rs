@@ -321,7 +321,9 @@ async fn connect_loopback_device(
         max_frame,
         grant: crate::remote::trust::Grant::All,
         can_upload: true,
-        owner: false,
+        // These loopback peers drive the owner-only frames (spawn, kill,
+        // catalog), so they are the owner's own paired device.
+        owner: true,
     });
 
     (device, events_rx, vec![demux, trickle], id)
@@ -569,12 +571,25 @@ async fn assert_restrictions(loopback: &mut Loopback) {
     assert_eq!(answer.json["t"], "ok", "got {}", answer.raw);
     assert_eq!(answer.json["req"], "p1");
 
-    // `resize` is refused for a device that is not the owner's, even for
-    // the sessions it may use (this loopback peer is not flagged owner).
+    // `resize` is accepted for the owner's device: the attached cat hears
+    // the new size (guest refusal lives in the grant tests).
     loopback
         .send(json!({"t": "resize", "id": loopback.cat.id, "cols": 120, "rows": 40}))
         .await;
-    assert_eq!(expect_error(loopback, "resize").await["code"], "forbidden");
+    let resized = loop {
+        let frame = loopback.recv("the owner resize").await;
+        if frame.json["t"] == "resized" {
+            break frame;
+        }
+        assert_eq!(
+            frame.json["t"], "out",
+            "only cat output precedes the resize: {}",
+            frame.raw
+        );
+    };
+    assert_eq!(resized.json["id"], loopback.cat.id);
+    assert_eq!(resized.json["cols"], 120);
+    assert_eq!(resized.json["rows"], 40);
 
     // A terminal spawns without `cli` (its arrival may precede the answer).
     let workdir = tempfile::tempdir().expect("spawn workdir");
@@ -1455,6 +1470,7 @@ async fn only_an_ordered_reliable_session_channel_is_accepted() {
 async fn bridge_reply(state: &Arc<SessionsState>, frame: &Value) -> Vec<String> {
     let (out_tx, mut out_rx) = crate::sessions::outbound::channel();
     let mut bridge = crate::remote::bridge::RemoteBridge::new(Arc::clone(state));
+    bridge.set_owner(true);
     bridge.handle_text(&frame.to_string(), &out_tx).await;
     drop(out_tx);
     let mut replies = Vec::new();
@@ -1462,18 +1478,6 @@ async fn bridge_reply(state: &Arc<SessionsState>, frame: &Value) -> Vec<String> 
         replies.push(reply);
     }
     replies
-}
-
-/// Assert one refusal frame with the `forbidden` code.
-fn assert_forbidden(replies: &[String], req: Option<&str>) {
-    assert_eq!(replies.len(), 1, "exactly one refusal, got {replies:?}");
-    let error: Value = serde_json::from_str(&replies[0]).expect("error frame");
-    assert_eq!(error["t"], "error");
-    assert_eq!(error["code"], "forbidden");
-    match req {
-        Some(req) => assert_eq!(error["req"], req),
-        None => assert!(error.get("req").is_none(), "no req echoed: {error}"),
-    }
 }
 
 /// One bridge answer that must be exactly one error frame, returned parsed.
@@ -1491,6 +1495,7 @@ async fn bridge_refusal(state: &Arc<SessionsState>, frame: Value) -> Value {
 async fn bridge_await_frame(state: &Arc<SessionsState>, frame: &Value) -> Value {
     let (out_tx, mut out_rx) = crate::sessions::outbound::channel();
     let mut bridge = crate::remote::bridge::RemoteBridge::new(Arc::clone(state));
+    bridge.set_owner(true);
     bridge.handle_text(&frame.to_string(), &out_tx).await;
     let reply = tokio::time::timeout(Duration::from_secs(10), out_rx.recv())
         .await
@@ -1511,8 +1516,8 @@ async fn bridge_spawned_id(state: &Arc<SessionsState>, frame: Value) -> String {
 }
 
 /// Terminal sessions are first-class over the bridge: they list, attach,
-/// take input and prompts, and spawn with `cli` optional — while `resize`
-/// stays refused and unknown kinds stay `bad_request`.
+/// take input and prompts, and spawn with `cli` optional — while unknown
+/// kinds stay `bad_request`.
 #[tokio::test]
 async fn bridge_terminals_are_first_class() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1623,7 +1628,8 @@ async fn bridge_terminals_are_first_class() {
         SessionKind::Terminal
     );
 
-    // Unknown kinds stay bad_request; resize stays forbidden.
+    // Unknown kinds stay bad_request; the owner's resize is accepted (it
+    // answers nothing, `resized` being the confirmation).
     let bad = bridge_reply(
         &state,
         &json!({"t": "spawn", "req": "s4", "kind": "banana", "cli": "cat", "workdir": "/tmp"}),
@@ -1633,13 +1639,14 @@ async fn bridge_terminals_are_first_class() {
     let error: Value = serde_json::from_str(&bad[0]).expect("error frame");
     assert_eq!(error["t"], "error");
     assert_eq!(error["code"], "bad_request");
-    assert_forbidden(
-        &bridge_reply(
-            &state,
-            &json!({"t": "resize", "id": cat.id, "cols": 120, "rows": 40}),
-        )
-        .await,
-        None,
+    let resized = bridge_reply(
+        &state,
+        &json!({"t": "resize", "id": cat.id, "cols": 120, "rows": 40}),
+    )
+    .await;
+    assert!(
+        resized.is_empty(),
+        "the owner's resize answers no frame: {resized:?}"
     );
 
     // A terminal arrival forwards through a manual bridge.

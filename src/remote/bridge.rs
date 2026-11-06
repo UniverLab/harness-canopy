@@ -9,9 +9,14 @@
 //!   reaches attached peers as `resized{id,cols,rows}` (see
 //!   `bridge_resize.rs`).
 //!
+//!   `spawn`, `kill`, `graphs`, `graph_watch`, `catalog` and `compose` are
+//!   owner-only too: a guest inside its grant answers `forbidden` naming the
+//!   frame, and `kill` outside the grant stays `not_found`.
+//!
 //! Terminal sessions are first-class here, as on the local socket: they
-//! list, attach, and spawn (without `cli` they open the default shell).
-//! Only their shelf files stay hidden (see `handle_shelf_list`).
+//! list, attach, and (for the owner) spawn without `cli` they open the
+//! default shell. Only their shelf files stay hidden (see
+//! `handle_shelf_list`).
 //!
 //! Outbound frames are size-bounded for a data channel: raw `out`,
 //! `snapshot` and `file` payloads are split into chunks that keep the source
@@ -248,11 +253,21 @@ impl RemoteBridge {
                 prompt,
                 ext,
             } => {
+                if !self.scope.is_owner() {
+                    owner_denied(out, Some(&req), "spawn");
+                    return;
+                }
                 let request = spawn_request(cli, model, workdir, name, prompt, *ext);
                 self.handle_spawn(req, &kind, request, out);
             }
             ClientFrame::Kill { req, id } => {
+                // The grant check runs first, so a session outside the grant
+                // still answers `not_found` and never confirms it exists.
                 if !self.scope.granted(&self.state.hub, Some(&req), &id, out) {
+                    return;
+                }
+                if !self.scope.is_owner() {
+                    owner_denied(out, Some(&req), "kill");
                     return;
                 }
                 deliver_kill(self.state.hub.clone(), req, id, out.clone());
@@ -297,10 +312,32 @@ impl RemoteBridge {
                     handle_shelf_delete(&self.state, out, req, file_id);
                 }
             }
-            ClientFrame::Compose { req, draft } => handle_compose(&self.state, out, req, draft),
-            ClientFrame::Catalog { req } => handle_catalog(&self.state, out, req),
-            ClientFrame::Graphs { req } => handle_graphs(&self.state, out, req),
+            ClientFrame::Compose { req, draft } => {
+                if !self.scope.is_owner() {
+                    owner_denied(out, Some(&req), "compose");
+                    return;
+                }
+                handle_compose(&self.state, out, req, draft);
+            }
+            ClientFrame::Catalog { req } => {
+                if !self.scope.is_owner() {
+                    owner_denied(out, Some(&req), "catalog");
+                    return;
+                }
+                handle_catalog(&self.state, out, req);
+            }
+            ClientFrame::Graphs { req } => {
+                if !self.scope.is_owner() {
+                    owner_denied(out, Some(&req), "graphs");
+                    return;
+                }
+                handle_graphs(&self.state, out, req);
+            }
             ClientFrame::GraphWatch { req, id } => {
+                if !self.scope.is_owner() {
+                    owner_denied(out, Some(&req), "graph_watch");
+                    return;
+                }
                 handle_graph_watch(&self.state, out, &mut self.watches, req, id).await;
             }
             ClientFrame::GraphUnwatch { id } => {
@@ -575,6 +612,15 @@ impl RemoteBridge {
 
 fn send(out: &OutTx, frame: String) {
     let _ = out.send(frame);
+}
+
+/// Refuse an owner-only frame, naming it in `resize`'s wording.
+fn owner_denied(out: &OutTx, req: Option<&str>, frame: &str) {
+    let _ = out.send(error_frame(
+        req,
+        ERR_FORBIDDEN,
+        &format!("{frame} is only available to the host owner's devices"),
+    ));
 }
 
 fn deliver_prompt(session: Arc<HubSession>, req: String, text: String, out: OutTx) {

@@ -465,14 +465,18 @@ LAN. A body with no candidate — the key missing, `null`, or another
 shape — is logged and ignored, and the connection stays up.
 
 Once the data channel is open, the browser speaks the same protocol v2 as
-`/sessions/ws`, with one restriction: only the host owner's own paired
-device may `resize` a session (clamped to 20–500 columns and 5–200 rows,
-at most one resize per session every 100 ms, the latest winning); every
-guest's `resize` answers `forbidden`, and the browser otherwise renders
-the host's size scaled, following `resized`. Terminal
-sessions are first-class, as on the local socket: they list, attach, and
-spawn — a terminal `spawn` may omit `cli` (or send `null`) to open the
-host user's default shell. A browser paired as a trusted guest login
+`/sessions/ws`, with owner-only frames: `spawn`, `kill`, `graphs`,
+`graph_watch`, `catalog`, `compose`, `resize` and `resize_release` answer
+only the host owner's own paired device. A guest inside its grant answers
+`error{code:"forbidden"}` naming the frame — `spawn is only available to
+the host owner's devices`, and so on — `kill` outside its grant stays
+`not_found`, and `graph_unwatch` stays a silent no-op. `resize` is clamped
+to 20–500 columns and 5–200 rows, at most one resize per session every
+100 ms, the latest winning; the browser otherwise renders the host's size
+scaled, following `resized`. Terminal sessions are first-class for the
+owner, as on the local socket: they list, attach, and spawn — a terminal
+`spawn` may omit `cli` (or send `null`) to open the host user's default
+shell. A browser paired as a trusted guest login
 sees only its granted sessions — every other session answers `not_found`,
 as if it did not exist — while the owner keeps the full view. A session
 whose process ends leaves the list for owner and guest alike, as if

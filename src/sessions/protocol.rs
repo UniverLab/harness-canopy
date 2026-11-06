@@ -22,6 +22,8 @@ mod protocol_release;
 mod protocol_schedule;
 #[cfg(test)]
 pub(crate) use protocol_frames::harnesses_in;
+#[cfg(test)]
+pub use protocol_frames::OWNER_FEATURES;
 pub use protocol_frames::{
     attach_frame, detach_frame, error_frame, exited_frame, file_frame, hello_frame, input_frame,
     installed_harnesses, kill_frame, list_frame, ok_frame, out_frame, prompt_frame, resize_frame,

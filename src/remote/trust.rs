@@ -267,3 +267,7 @@ impl GrantScope {
 #[cfg(test)]
 #[path = "grant_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "owner_gate_tests.rs"]
+mod owner_gate_tests;

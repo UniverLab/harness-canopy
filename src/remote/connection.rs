@@ -511,6 +511,7 @@ async fn on_peer_event(
                 let _ = out_tx.send(hello_frame(
                     session.state.hub.host_label(),
                     &installed_harnesses(),
+                    session.owner,
                 ));
             }
         }

@@ -37,15 +37,24 @@ pub(crate) fn harnesses_in(canopy_dir: &Path) -> Vec<String> {
     names
 }
 
+/// Features only the host owner's own devices are offered, on top of the
+/// guest list.
+pub const OWNER_FEATURES: &[&str] = &[];
+
 /// `hello{proto,host_label,features,harnesses}`, sent on connect. `features`
 /// advertises the optional extensions this host speaks — `shelf` plus
-/// `shelf_upload` — so a client can tell an older host from a newer one
+/// `shelf_upload` for every peer, followed by [`OWNER_FEATURES`] for the host
+/// owner's own devices — so a client can tell an older host from a newer one
 /// without probing. `harnesses` lists the installed harness names (see
 /// [`installed_harnesses`]) so the New dialog knows what to offer.
-pub fn hello_frame(host_label: &str, harnesses: &[String]) -> String {
+pub fn hello_frame(host_label: &str, harnesses: &[String], owner: bool) -> String {
+    let mut features: Vec<&str> = vec!["shelf", "shelf_upload"];
+    if owner {
+        features.extend_from_slice(OWNER_FEATURES);
+    }
     serde_json::json!({
         "t": "hello", "proto": PROTO_VERSION, "host_label": host_label,
-        "features": ["shelf", "shelf_upload"], "harnesses": harnesses,
+        "features": features, "harnesses": harnesses,
     })
     .to_string()
 }
