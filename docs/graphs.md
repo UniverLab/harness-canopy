@@ -33,6 +33,32 @@ Graph
     sends low-confidence answers to the declared fallback. The platform must
     declare a decision-model invocation (`decision_args`) in the registry or
     the node is refused.
+
+    With `"mode": "value"` a router is deterministic: it reads a value the
+    engine already knows, with no model call, and matches it case-sensitively
+    against its routes. `mode` is optional and takes only `"model"` (the
+    default, both behaviours above) or `"value"`:
+
+    ```json
+    {
+      "mode": "value",
+      "source": "spec_type",
+      "routes": [{ "label": "feat" }, { "label": "fix" }],
+      "default_route": "fix"
+    }
+    ```
+
+    `source` is one of `spec_type` and `spec_scope` (the spec's
+    Conventional Commits parts, empty when the spec has none) or
+    `previous_output` (the previous node's trimmed stdout for a check node,
+    or the same text a model router receives for any other node). A value
+    router declares 1–8 routes whose labels are the values that select them
+    (`description` is optional and unused), an optional `default_route`
+    naming one of those labels, and no `fallback`, `decision` or
+    `min_confidence` — those are model-router fields and are refused. Every
+    route needs exactly one outgoing edge. A value that matches no route
+    takes `default_route` or fails the node; no silent fallback and no
+    platform is required.
   - `quorum` — engine-managed node that closes an
     [ensemble](graphs-ensembles.md#ensembles), never created directly.
 - **Edges** — connect nodes with routing conditions: `pass`, `fail`,

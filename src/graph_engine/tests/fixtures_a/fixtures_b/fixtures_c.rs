@@ -814,3 +814,4 @@ mod part22_tests;
 mod part23_tests;
 mod part24_tests;
 mod part25_tests;
+mod value_router_tests;

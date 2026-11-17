@@ -152,6 +152,12 @@ pub(crate) async fn execute_router_node(
     run_id: &str,
     workdir: &str,
 ) -> Result<NodeExecution> {
+    // `mode` decides the router's whole behaviour; a value router reads a
+    // known value and never touches a platform, model or agent process.
+    if crate::domain::graphs::router_mode(&node.config).map_err(anyhow::Error::msg)? == "value" {
+        return execute_value_router_node(spec, node, previous_output);
+    }
+
     let (routes, fallback) = parse_router_config(node)?;
     let (decision, min_confidence) = parse_router_decision(node)?;
 

@@ -238,7 +238,23 @@ pub(crate) fn validate_effective_node_config(
             if let Err(e) = validate_router_edges_declared(&routes, node_id, &edges) {
                 return Err(EarlyReturn::tool_error(&e));
             }
-            if let Err(e) = validate_router_route_coverage(&routes, node_id, &edges) {
+            let mode = crate::domain::graphs::router_mode(effective_config)
+                .map_err(|e| EarlyReturn::tool_error(&e))?;
+            if mode == "value" {
+                // A value router never has a silent fallback: every route must
+                // be wired to exactly one edge, so a chosen value can never
+                // dead-end or fan out ambiguously.
+                let coverage = crate::domain::graphs::validate_value_router_route_coverage(
+                    &routes,
+                    node_id,
+                    edges
+                        .iter()
+                        .map(|edge| (edge.from_node.as_str(), edge.condition.route_label())),
+                );
+                if let Err(e) = coverage {
+                    return Err(EarlyReturn::tool_error(&e));
+                }
+            } else if let Err(e) = validate_router_route_coverage(&routes, node_id, &edges) {
                 return Err(EarlyReturn::tool_error(&e));
             }
         }

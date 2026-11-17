@@ -60,6 +60,7 @@ mod run_spec;
 mod shell_utils;
 mod spawn_identity;
 mod spec_step;
+mod value_router;
 mod verdict_shutdown;
 
 pub(crate) use agent_exec::*;
@@ -106,6 +107,7 @@ pub(crate) use shell_utils::*;
 pub(crate) use spawn_identity::*;
 #[allow(unused_imports)]
 pub(crate) use spec_step::*;
+pub(crate) use value_router::*;
 
 impl GraphEngine {
     pub fn new(db: Arc<Database>, notification_service: Arc<dyn NotificationService>) -> Self {

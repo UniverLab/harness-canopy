@@ -241,11 +241,14 @@ pub(crate) const CHECK_CONFIG_KEYS: &[&str] = &[
 /// Every config key a `gate` node is read for — see `execute_gate_node`.
 pub(crate) const GATE_CONFIG_KEYS: &[&str] = &["evaluate", "value", "commit_rights", "mutex"];
 
-/// Every config key a `router` node is read for — see `parse_router_routes`
-/// and `parse_router_decision`.
+/// Every config key a `router` node is read for — see `parse_router_routes`,
+/// `parse_router_decision` and `mode: "value"`'s `source`/`default_route`.
 pub(crate) const ROUTER_CONFIG_KEYS: &[&str] = &[
+    "mode",
     "routes",
     "fallback",
+    "source",
+    "default_route",
     "platform",
     "cli",
     "model",
@@ -410,26 +413,33 @@ pub(crate) fn validate_node_config(
         // refuse `kind: "join"` outright.
         GraphNodeKind::Join => {}
         GraphNodeKind::Router => {
-            let (routes, fallback) = parse_router_routes(config)?;
-            validate_router_routes(&routes, &fallback)?;
-            if let Some(value) = map.get("decision") {
-                if value.as_bool().is_none() {
-                    return Err("Graph node config field 'decision' must be a boolean.".to_string());
+            // Value mode owns its whole shape (source, 1-8 routes,
+            // default_route); model mode keeps today's checks verbatim.
+            let mode = crate::domain::graphs::validate_router_config_shape(config)?;
+            if mode == "model" {
+                let (routes, fallback) = parse_router_routes(config)?;
+                validate_router_routes(&routes, &fallback)?;
+                if let Some(value) = map.get("decision") {
+                    if value.as_bool().is_none() {
+                        return Err(
+                            "Graph node config field 'decision' must be a boolean.".to_string()
+                        );
+                    }
                 }
-            }
-            if let Some(value) = map.get("min_confidence") {
-                let n = value.as_f64().ok_or_else(|| {
-                    "Graph node config field 'min_confidence' must be a number from 0 to 1."
-                        .to_string()
-                })?;
-                if !(0.0..=1.0).contains(&n) || n.is_nan() {
-                    return Err(
+                if let Some(value) = map.get("min_confidence") {
+                    let n = value.as_f64().ok_or_else(|| {
                         "Graph node config field 'min_confidence' must be a number from 0 to 1."
-                            .to_string(),
-                    );
+                            .to_string()
+                    })?;
+                    if !(0.0..=1.0).contains(&n) || n.is_nan() {
+                        return Err(
+                            "Graph node config field 'min_confidence' must be a number from 0 to 1."
+                                .to_string(),
+                        );
+                    }
                 }
+                validate_router_decision_config(map)?;
             }
-            validate_router_decision_config(map)?;
         }
     }
 

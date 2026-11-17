@@ -23,7 +23,10 @@ use crate::domain::graph_transfer::{
     parse_export_document_value, validate_entry as validate_preset_entry, GraphExportDocument,
     GraphImportPlan, GRAPH_EXPORT_FORMAT_VERSION,
 };
-use crate::domain::graphs::GraphNodeKind;
+use crate::domain::graphs::{
+    router_mode, validate_router_config_shape, validate_value_router_config,
+    validate_value_router_route_coverage, GraphNodeKind,
+};
 
 /// One validation failure: where in the document, and why.
 #[derive(Debug, Clone, Serialize)]
@@ -106,6 +109,7 @@ fn validate_graph_document(value: &Value) -> Value {
 
     let mut problems = Vec::new();
     validate_graph_node_configs(&document, &mut problems);
+    validate_graph_value_router_edges(&document, &mut problems);
     validate_bundled_preset_entries(&document, &mut problems);
     validate_shared_presets(&document, &mut problems);
 
@@ -172,7 +176,40 @@ fn validate_graph_node_configs(document: &GraphExportDocument, problems: &mut Ve
             }
         }
         if let Err(message) = validate_node_mutex_config(&node.name, &node.config) {
-            problems.push(problem(path, message));
+            problems.push(problem(path.clone(), message));
+        }
+        if node.kind == GraphNodeKind::Router {
+            if let Err(message) = validate_router_config_shape(&node.config) {
+                problems.push(problem(path, message));
+            }
+        }
+    }
+}
+
+/// A `mode: "value"` router in a graph document must wire every declared
+/// route to exactly one outgoing edge — same rule `graph_node` update and
+/// import apply.
+fn validate_graph_value_router_edges(document: &GraphExportDocument, problems: &mut Vec<Problem>) {
+    for (index, node) in document.nodes.iter().enumerate() {
+        if node.kind != GraphNodeKind::Router || router_mode(&node.config).ok() != Some("value") {
+            continue;
+        }
+        let Ok(config) = validate_value_router_config(&node.config) else {
+            // The config shape problem is reported by
+            // `validate_graph_node_configs`; no edges to pair with a config
+            // that cannot be parsed.
+            continue;
+        };
+        let coverage = validate_value_router_route_coverage(
+            &config.routes,
+            &node.name,
+            document
+                .edges
+                .iter()
+                .map(|edge| (edge.from_node.as_str(), edge.condition.route_label())),
+        );
+        if let Err(message) = coverage {
+            problems.push(problem(format!("nodes[{index}].config.routes"), message));
         }
     }
 }
@@ -494,6 +531,11 @@ fn validate_node_config(kind: GraphNodeKind, config: &Value, problems: &mut Vec<
     };
     if let Err(message) = validate_known_config_keys(kind, map) {
         problems.push(problem("config", message));
+    }
+    if kind == GraphNodeKind::Router {
+        if let Err(message) = validate_router_config_shape(config) {
+            problems.push(problem("config", message));
+        }
     }
     collect_harness_key_problems(config, "config", problems);
 }

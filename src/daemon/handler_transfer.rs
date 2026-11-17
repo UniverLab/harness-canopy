@@ -332,6 +332,20 @@ fn check_import_node_configs(
             validate_known_config_keys(node.kind, map)?;
         }
         crate::daemon::handler_validate::validate_node_mutex_config(&node.name, &node.config)?;
+        if node.kind == crate::domain::graphs::GraphNodeKind::Router {
+            let mode = crate::domain::graphs::validate_router_config_shape(&node.config)?;
+            if mode == "value" {
+                let config = crate::domain::graphs::validate_value_router_config(&node.config)?;
+                crate::domain::graphs::validate_value_router_route_coverage(
+                    &config.routes,
+                    &node.name,
+                    document
+                        .edges
+                        .iter()
+                        .map(|edge| (edge.from_node.as_str(), edge.condition.route_label())),
+                )?;
+            }
+        }
     }
     Ok(())
 }
