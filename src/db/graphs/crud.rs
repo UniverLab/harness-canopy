@@ -248,6 +248,22 @@ impl Database {
         Ok(())
     }
 
+    /// How many graphs are currently running. The host-metrics recorder
+    /// reports it as `running_nodes`; same status predicate as
+    /// [`Self::has_running_graphs`].
+    pub fn count_running_graphs(&self) -> Result<i64> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM graphs WHERE status = 'running'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
     /// Whether any graph is currently running.  The update restart guard
     /// uses the same exact status predicate as the cleanup busy check.
     pub fn has_running_graphs(&self) -> Result<bool> {

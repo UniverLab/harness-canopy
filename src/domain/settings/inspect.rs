@@ -295,6 +295,7 @@ pub fn config_value(config: &CanopyConfig, key: &str) -> Value {
         "spec_review.max_parallel" => Value::from(config.spec_review.max_parallel as i64),
         "clean.retention_days" => Value::from(config.clean.retention_days as i64),
         "graph_event_retention_days" => Value::from(config.graph_event_retention_days as i64),
+        "metrics_retention_days" => Value::from(config.metrics_retention_days as i64),
         "skills.sources" => {
             Value::from(toml::to_string(&config.skills.sources).unwrap_or_else(|_| String::new()))
         }

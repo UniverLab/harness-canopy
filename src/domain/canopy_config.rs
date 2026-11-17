@@ -150,6 +150,13 @@ pub struct CanopyConfig {
     #[serde(default = "default_graph_event_retention_days")]
     pub graph_event_retention_days: u64,
 
+    /// Days of per-10-second host-metrics JSONL history kept in
+    /// `~/.canopy/metrics/host-YYYY-MM-DD.jsonl`. The recorder re-reads it
+    /// from `config.toml` every hour, so a change applies without a daemon
+    /// restart. Out-of-range hand edits fall back to the default at use.
+    #[serde(default = "default_metrics_retention_days")]
+    pub metrics_retention_days: u64,
+
     /// `[scheduler]` settings for the cron scheduler's retry policy.
     /// `CANOPY_RETRY_ENABLED`, `CANOPY_RETRY_DELAY_MINUTES` and
     /// `CANOPY_RETRY_MAX` still override these when set.
@@ -675,6 +682,10 @@ fn default_graph_event_retention_days() -> u64 {
     settings::default_duration_units("graph_event_retention_days")
 }
 
+fn default_metrics_retention_days() -> u64 {
+    settings::default_int("metrics_retention_days") as u64
+}
+
 fn default_theme() -> String {
     settings::default_string("theme")
 }
@@ -760,6 +771,7 @@ impl Default for CanopyConfig {
             announcements_enabled: default_announcements_enabled(),
             pinned_panel_face: None,
             graph_event_retention_days: default_graph_event_retention_days(),
+            metrics_retention_days: default_metrics_retention_days(),
             scheduler: SchedulerConfig::default(),
             graphs: GraphsConfig::default(),
             spec_review: SpecReviewConfig::default(),

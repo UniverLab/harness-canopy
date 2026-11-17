@@ -309,6 +309,12 @@ fn start_background_tasks(
     let health_routine = Arc::new(HealthRoutine::new(Arc::clone(db), data_dir.to_path_buf()));
     let health_routine_cancel = health_routine.start();
 
+    crate::system::host_metrics_recorder::spawn(
+        Arc::clone(db),
+        sessions.hub.clone(),
+        data_dir.to_path_buf(),
+    );
+
     let announcements_cancel = if announcements_enabled {
         let client = Arc::new(crate::daemon::announcements::AnnouncementsClient::new(
             Arc::clone(db),

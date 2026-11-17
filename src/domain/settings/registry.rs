@@ -226,6 +226,15 @@ pub static REGISTRY: &[SettingDef] = &[
         wizard: true,
     },
     SettingDef {
+        key: "metrics_retention_days",
+        kind: Kind::Int { min: 1, max: 30 },
+        default: DefaultValue::Literal("1"),
+        group: Group::DaemonStorage,
+        description: "Days of host-metrics history kept in ~/.canopy/metrics.",
+        apply: Apply::Hot,
+        wizard: false,
+    },
+    SettingDef {
         key: "rag_vector_cache_entries",
         kind: Kind::Int { min: 1, max: 4_096 },
         default: DefaultValue::Literal("64"),
@@ -567,7 +576,7 @@ mod tests {
 
     #[test]
     fn registry_has_one_entry_per_setting_and_they_are_unique() {
-        assert_eq!(REGISTRY.len(), 57);
+        assert_eq!(REGISTRY.len(), 58);
         for def in REGISTRY {
             assert_eq!(find(def.key).map(|d| d.key), Some(def.key));
         }
