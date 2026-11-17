@@ -150,7 +150,7 @@ missing.
 
 | Command | Description |
 |---|---|
-| `canopy graph run <id-or-name>` | Run a graph in the background, spec by spec |
+| `canopy graph run <id-or-name>` | Run a graph in the background, spec by spec. A spec-less graph with a cron trigger and a `trigger_prompt` runs on that prompt with no `--idea` and no `--queue` ([Cron triggers and trigger prompts](graphs-operations.md#cron-triggers-and-trigger-prompts)) |
 | `canopy graph run <id-or-name> --queue <queue-id>` | Run the queue's pending specs through the graph instead |
 | `canopy graph run <id-or-name> --workdir <path>` | Override the graph's workdir for this run only (the stored workdir is unchanged; every continuation of the run keeps using the override) |
 | `canopy graph run <id-or-name> --from <node>` | Start the first spec this run executes at a chosen node (id, id prefix, node name, or ensemble name), reusing the recorded outputs of upstream nodes; refused, naming the node, if an upstream node's latest run failed, errored or was interrupted |

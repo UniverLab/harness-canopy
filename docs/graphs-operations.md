@@ -91,26 +91,36 @@ it — one `pause_cancelled` event, then the graph keeps running.
 A graph with a cron trigger can run on its own on every tick with no
 specs bound: `graph_edit` `create`/`update` accept `trigger_prompt`
 alongside a cron `trigger`, and each tick launches the graph with the
-prompt as its idea (`{{spec_content}}` renders it). `trigger_prompt` is
-part of the trigger, not of the graph document: setting it on a manual
-or watch graph is refused (`set a cron trigger, or clear
-trigger_prompt`), and so is removing or changing the cron trigger of a
-graph that keeps one. `graph` `export` never carries it and `graph_edit`
-`import` never sets it. `graph` `get`/`list` report it as
+prompt as its idea (`{{spec_content}}` renders it). The prompt stands in
+for the idea everywhere: `graph_control` `run` (`canopy graph run`) on
+that graph needs no `idea` and no `queue_id` either. On a graph that
+also has bound, non-blank specs the prompt is ignored — those specs run
+as they always have.
+
+`trigger_prompt` is part of the trigger, not of the graph document:
+setting it on a manual or watch graph is refused (`set a cron trigger,
+or clear trigger_prompt`), and so is removing or changing the cron
+trigger of a graph that keeps one. `graph` `export` never carries it and
+`graph_edit` `import` never sets it. `graph` `get`/`list` report it as
 `trigger_prompt`. A tick never starts a second run while the previous
 one is still running — it logs `tick skipped: previous run still
 running` and moves on.
 
 The intended shape is check-then-agent: a `check` node whose exit code 0
 means "news found" routes `pass` to the `agent` node and has no `fail`
-edge, while a non-zero exit means "nothing to do". On a cron tick of a
-spec-less graph only, that quiet failure completes the run as
-`completed` — with `graph_completed` payload `{"outcome": "idle"}` —
-instead of failing it: no failure hook fires and the attempt budget is
-untouched. A tick run that reaches and runs its agent node records
-`{"outcome": "worked"}`. Every other failure — a failing agent, a `fail`
-edge leading to a failing node, an infrastructure error — fails exactly
-as before, as does the same graph run manually via `graph_control`.
+edge, while any other outcome means "nothing to do". On a cron tick of a
+spec-less graph only, a `check` node that ends the run with no outgoing
+`fail` edge, no `fail` edge having routed earlier in that run and no
+agent having run, completes it as `completed` — with `graph_completed`
+payload `{"outcome": "idle"}` — instead of failing it: no failure hook
+fires and the attempt budget is untouched. A non-zero exit, a timeout
+and an unfillable `{{…}}` marker in the command all count as that quiet
+check failure. A tick run that reaches and runs its agent node records
+`{"outcome": "worked"}` when it then completes. Every other failure — a
+failing agent, a `fail` edge leading to a failing node, an infrastructure
+error, a check dead end after an agent already ran — fails exactly as
+before, as does the same graph run manually via `graph_control` (only a
+tick run can be idle).
 
 Copy-paste example over MCP (a per-minute inbox sweep; the check exits
 non-zero when there is nothing to do):
@@ -128,11 +138,14 @@ non-zero when there is nothing to do):
   "config": { "platform": "opencode", "prompt_template": "{{spec_content}}" } }
 { "tool": "graph_edge", "action": "add",
   "graph_id": "<graph_id>",
-  "from_node": "sweep", "to_node": "worker", "condition": "pass" }
+  "from_node": "<sweep node id>", "to_node": "<worker node id>",
+  "condition": "pass" }
 ```
 
-Note there is deliberately no `fail` edge out of `sweep`: that is what
-makes a quiet tick complete idle instead of failing the graph.
+Each `graph_node` `add` answers with the new `node_id`; edge endpoints
+take a node id (or an unambiguous prefix), not a name. Note there is
+deliberately no `fail` edge out of `sweep`: that is what makes a quiet
+tick complete idle instead of failing the graph.
 
 ## Tuning the engine
 
