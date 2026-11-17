@@ -78,6 +78,7 @@ async fn spec_list_default_compact_omits_description() {
         "spec_edit",
         "create",
         params_id(SpecCreateParams {
+            intent: None,
             name: "Compact test".to_string(),
             description: valid_spec_description(),
             workdir: None,
@@ -122,6 +123,7 @@ async fn spec_list_with_include_descriptions_returns_description() {
         "spec_edit",
         "create",
         params_id(SpecCreateParams {
+            intent: None,
             name: "Verbose test".to_string(),
             description: desc.clone(),
             workdir: None,
@@ -805,6 +807,7 @@ async fn spec_update_with_prefix_resolves() {
         "spec_edit",
         "create",
         params_id(SpecCreateParams {
+            intent: None,
             name: "Prefix test".to_string(),
             description: valid_spec_description(),
             workdir: None,
@@ -825,6 +828,7 @@ async fn spec_update_with_prefix_resolves() {
         "spec_edit",
         "update",
         params_id(SpecUpdateParams {
+            intent: None,
             spec_id: prefix.to_string(),
             name: Some("Renamed via prefix".to_string()),
             description: None,
@@ -850,6 +854,7 @@ async fn spec_section_get_returns_section_from_tagged_spec() {
         "spec_edit",
         "create",
         params_id(SpecCreateParams {
+            intent: None,
             name: "Section test".to_string(),
             description: valid_spec_description(),
             workdir: None,
@@ -890,6 +895,7 @@ async fn spec_section_get_rejects_unknown_section() {
         "spec_edit",
         "create",
         params_id(SpecCreateParams {
+            intent: None,
             name: "Section test 2".to_string(),
             description: valid_spec_description(),
             workdir: None,
@@ -925,6 +931,7 @@ async fn spec_section_get_rejects_unknown_section() {
 async fn resolve_spec_id_by_prefix_tests() {
     let (_dir, db, _handler) = endpoint_test_handler();
     let spec1 = GraphSpec {
+        intent: None,
         id: "aaaaaaaa-1111-1111-1111-111111111111".to_string(),
         graph_id: None,
         name: "Spec A".to_string(),
@@ -949,6 +956,7 @@ async fn resolve_spec_id_by_prefix_tests() {
     };
     db.insert_graph_spec(&spec1).unwrap();
     let spec2 = GraphSpec {
+        intent: None,
         id: "aaaaaaaa-2222-2222-2222-222222222222".to_string(),
         graph_id: None,
         name: "Spec B".to_string(),
@@ -1369,6 +1377,7 @@ async fn run_from_node_code_starts_member_spec() {
     let lp = insert_test_graph(&db, dir.path());
     let workdir = dir.path().to_string_lossy().to_string();
     let member = GraphSpec {
+        intent: None,
         id: uuid::Uuid::new_v4().to_string(),
         graph_id: None,
         name: "Member One".to_string(),

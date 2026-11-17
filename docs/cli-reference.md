@@ -818,6 +818,10 @@ it came from. **Apply** says when a change takes effect: `applied` (at once),
 | `scheduler.retry_delay_minutes` | 60 | 1–1440 | next run | Wait before a scheduled run is retried |
 | `scheduler.retry_max` | 3 | 0–20 | next run | Retries of a failed scheduled run |
 | `spec_attempt_limit` | 3 | 1–20 | restart the daemon | Separate graph executions a spec may fail with a verdict before it is blocked |
+| `spec_review.enabled` | `false` | bool | next run | Run the built-in adversarial spec review; while on, `spec_edit` requires a non-empty `intent` |
+| `spec_review.platform` | empty | — | next run | Platform the spec review runs on; enabling the review requires a platform from the platform registry |
+| `spec_review.model` | empty | — | next run | Model the spec review uses; empty takes the platform-wide roster entry |
+| `spec_review.max_parallel` | 2 | 1–8 | next run | Concurrent spec reviews |
 | `ensemble_concurrency_cap` | 4 | 1–64 | restart the daemon | Ensemble members that run at once across every graph |
 | `graphs.*` | see [Tuning the engine](graphs-operations.md#tuning-the-engine) | see there | see there | Graph engine retry budgets, ensemble member caps, check output, and the graph catalogue URL |
 | `clean.retention_days` | 7 | 1–3650 days | next run | Days kept before `canopy clean` removes sessions and files |
@@ -830,8 +834,8 @@ it came from. **Apply** says when a change takes effect: `applied` (at once),
 | `remote.host_label` | empty | — | next run | Label shown for this host; empty means the hostname |
 | `daemon.cpu_quota_percent` | half the host's logical CPUs | 0–25600 | applied | CPU cap for every agent and gate the daemon spawns, in percent of one core (600 = 6 cores); `0` disables the cap ([CPU quota cap](graphs-isolation.md#cpu-quota-cap)) |
 
-`scheduler.retry_*` and `spec_attempt_limit` are not in `graphs.*`, which is
-why they are listed here.
+`scheduler.retry_*`, `spec_attempt_limit` and `spec_review.*` are not in
+`graphs.*`, which is why they are listed here.
 
 ## Spec queues
 

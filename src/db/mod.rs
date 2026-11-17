@@ -282,6 +282,7 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
                 graph_id TEXT REFERENCES graphs(id) ON DELETE CASCADE,
                 name TEXT NOT NULL,
                 description TEXT,
+                intent TEXT,
                 position INTEGER NOT NULL,
                 parallelizable INTEGER NOT NULL DEFAULT 0,
                 status TEXT NOT NULL,
@@ -683,6 +684,7 @@ impl Database {
         Self::migrate_spec_commit_evidence_columns(&conn)?;
         Self::migrate_spec_cross_run_attempts_column(&conn)?;
         Self::migrate_spec_type_columns(&conn)?;
+        Self::migrate_spec_intent_column(&conn)?;
         Self::migrate_intelligence_touch_columns(&conn)?;
         Self::migrate_ensemble_execution_columns(&conn)?;
         Self::migrate_graph_run_output_tails(&conn)?;
@@ -780,6 +782,7 @@ pub mod session;
 pub mod session_finish;
 pub mod session_target;
 pub mod shelf;
+mod spec_intent_migration;
 pub mod state;
 mod subagent_runs;
 pub mod sync;

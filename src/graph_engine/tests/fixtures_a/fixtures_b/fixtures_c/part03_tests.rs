@@ -21,6 +21,7 @@ async fn graph_engine_spec_committed_head_scoped_per_spec_not_shared() {
     // A second spec in the same graph, with its own committer that also
     // commits.
     let spec_b = crate::domain::graphs::GraphSpec {
+        intent: None,
         id: "spec-b".to_string(),
         graph_id: Some(graph_id.clone()),
         name: "Spec B".to_string(),
@@ -503,6 +504,7 @@ async fn graph_events_records_ordered_history_for_failing_spec() {
     .unwrap();
     // Spec 2: never reached, because spec 1 fails first.
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
         id: "spec-two".to_string(),
         graph_id: Some(graph_id.clone()),
         name: "Spec Two".to_string(),
@@ -608,6 +610,7 @@ async fn graph_events_records_ordered_history_for_failing_spec() {
 #[test]
 fn resolve_spec_start_retries_last_running_node() {
     let spec = GraphSpec {
+        intent: None,
         id: "spec".to_string(),
         graph_id: Some("wf".to_string()),
         name: "Spec".to_string(),
@@ -703,6 +706,7 @@ fn resolve_spec_start_retries_last_running_node() {
 #[test]
 fn resolve_spec_start_resumes_interrupted_spec_at_cursor() {
     let spec = GraphSpec {
+        intent: None,
         id: "spec".to_string(),
         graph_id: Some("wf".to_string()),
         name: "Spec".to_string(),
@@ -812,6 +816,7 @@ fn resolve_spec_start_resumes_interrupted_spec_at_cursor() {
 #[test]
 fn resolve_spec_start_restarts_interrupted_spec_on_loop_run() {
     let spec = GraphSpec {
+        intent: None,
         id: "spec".to_string(),
         graph_id: Some("wf".to_string()),
         name: "Spec".to_string(),
@@ -916,6 +921,7 @@ fn resolve_spec_start_restarts_interrupted_spec_on_loop_run() {
 #[test]
 fn resolve_spec_start_resets_iterations_for_fresh_spec() {
     let spec = GraphSpec {
+        intent: None,
         id: "spec".to_string(),
         graph_id: Some("wf".to_string()),
         name: "Spec".to_string(),
@@ -996,6 +1002,7 @@ fn find_entry_node_picks_lowest_position_in_retry_cycle() {
     // edge, so there is no source node. The entry must be the designated
     // start (lowest position), not an error.
     let spec = GraphSpec {
+        intent: None,
         id: "spec".to_string(),
         graph_id: Some("wf".to_string()),
         name: "Spec".to_string(),
@@ -1088,6 +1095,7 @@ fn render_agent_prompt_includes_reporting_contract() {
         require_spec_type: false,
     };
     let spec = GraphSpec {
+        intent: None,
         id: "spec".to_string(),
         graph_id: Some("wf".to_string()),
         name: "Spec".to_string(),
@@ -1170,6 +1178,7 @@ fn render_agent_prompt_places_spec_notes_before_reporting() {
         require_spec_type: false,
     };
     let spec = GraphSpec {
+        intent: None,
         id: "spec".to_string(),
         graph_id: Some("wf".to_string()),
         name: "Spec".to_string(),
@@ -1258,6 +1267,7 @@ fn render_agent_prompt_adds_continuation_notice_only_when_spec_interrupted() {
         require_spec_type: false,
     };
     let mut spec = GraphSpec {
+        intent: None,
         id: "spec".to_string(),
         graph_id: Some("wf".to_string()),
         name: "Spec".to_string(),
@@ -1446,6 +1456,7 @@ fn render_agent_prompt_elides_huge_previous_feedback() {
         require_spec_type: false,
     };
     let spec = GraphSpec {
+        intent: None,
         id: "spec".to_string(),
         graph_id: Some("wf".to_string()),
         name: "Spec".to_string(),

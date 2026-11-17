@@ -62,12 +62,19 @@ pub(crate) static SPEC_EDIT: ToolSpec = ToolSpec {
         ActionSpec {
             name: "create",
             required: &["name", "description"],
-            optional: &["workdir", "spec_type", "spec_scope"],
+            optional: &["workdir", "spec_type", "spec_scope", "intent"],
         },
         ActionSpec {
             name: "update",
             required: &["spec_id"],
-            optional: &["name", "description", "workdir", "spec_type", "spec_scope"],
+            optional: &[
+                "name",
+                "description",
+                "workdir",
+                "spec_type",
+                "spec_scope",
+                "intent",
+            ],
         },
         ActionSpec {
             name: "delete",
@@ -476,8 +483,9 @@ impl TaskTriggerHandler {
         name = "spec_edit",
         description = "Create, change, delete, and administratively transition specs, and write spec notes. Pass `action` plus the parameters listed for it. \
         Actions (required params; optional params): \
-        `create` (required: name, description; optional: workdir, spec_type, spec_scope) — create a standalone spec. \
-        `update` (required: spec_id; optional: name, description, workdir, spec_type, spec_scope) — update a spec's name, description, and/or workdir tag. \
+        `create` (required: name, description; optional: workdir, spec_type, spec_scope, intent) — create a standalone spec. `intent` is a short (max 500 characters) human-approved sentence of what the spec must achieve. \
+        `update` (required: spec_id; optional: name, description, workdir, spec_type, spec_scope, intent) — update a spec's name, description, workdir tag, and/or intent. \
+        While `spec_review.enabled` is true, create and update refuse a spec whose intent is empty; while it is off, intent stays optional. \
         `delete` (required: spec_id; optional: none) — delete a standalone spec; refused while it is bound to a graph. \
         `set_status` (required: spec_id, status, reason; optional: none) — administratively complete, skip, or reopen a standalone spec. \
         `note_write` (required: body; optional: run_id, spec_id) — write or replace the caller's note; pass exactly one of run_id (your note) or spec_id (the operator note)."
@@ -652,7 +660,8 @@ impl TaskTriggerHandler {
         `get` (required: key; optional: none) — read one setting by its dotted key. \
         `list` (required: none; optional: group) — list every setting with its group, kind, default, effective value, source, apply mode and status. \
         `set` (required: key, value; optional: none) — change one setting; validated against its type and range first, and nothing is written if it is refused. \
-        `reset` (required: key; optional: none) — reset one setting to its registry default."
+        `reset` (required: key; optional: none) — reset one setting to its registry default. \
+        The built-in adversarial spec review is configured here through spec_review.enabled (bool, default false), spec_review.platform, spec_review.model and spec_review.max_parallel (1-8, default 2); enabling it requires a platform from the platform registry whose platform/model pair is available in the roster."
     )]
     pub(crate) async fn config(
         &self,

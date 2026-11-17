@@ -760,6 +760,7 @@ mod tests {
 
     fn test_spec(name: &str, code: Option<&str>) -> crate::domain::graphs::GraphSpec {
         crate::domain::graphs::GraphSpec {
+            intent: None,
             id: format!("s-{name}"),
             graph_id: Some("g1".to_string()),
             name: name.to_string(),

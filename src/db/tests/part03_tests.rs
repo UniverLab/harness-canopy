@@ -153,6 +153,7 @@ fn legacy_queue_table_rename_is_a_noop_on_an_already_migrated_database() {
     // First open: fresh database, already on the current (post-rename) schema.
     let db = Database::new(&path).expect("create fresh db");
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
         id: "spec-1".to_string(),
         graph_id: None,
         name: "spec-1".to_string(),

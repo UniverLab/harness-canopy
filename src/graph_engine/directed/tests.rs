@@ -52,6 +52,7 @@ fn run(
 
 fn spec(id: &str) -> GraphSpec {
     GraphSpec {
+        intent: None,
         id: id.to_string(),
         graph_id: Some("g".to_string()),
         name: "S".to_string(),

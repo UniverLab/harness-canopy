@@ -202,6 +202,7 @@ fn seed_live_graph(db: &Database, node_ids: &[&str]) {
     })
     .unwrap();
     db.insert_graph_spec(&crate::domain::graphs::GraphSpec {
+        intent: None,
         id: "s1".to_string(),
         graph_id: Some("lp1".to_string()),
         name: "Spec".to_string(),
@@ -296,6 +297,7 @@ fn seed_completed_graph_with_nodes(db: &Database) {
     })
     .unwrap();
     db.insert_graph_spec(&crate::domain::graphs::GraphSpec {
+        intent: None,
         id: "s1".to_string(),
         graph_id: Some("lp1".to_string()),
         name: "Spec".to_string(),

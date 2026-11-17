@@ -9,6 +9,9 @@ use super::daemon_config::DaemonConfig;
 pub use super::remote_config::RemoteConfig;
 use super::settings;
 
+mod spec_review;
+pub use spec_review::SpecReviewConfig;
+
 /// Top-level canopy configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CanopyConfig {
@@ -156,6 +159,10 @@ pub struct CanopyConfig {
     /// `[graphs]` settings for the graph engine.
     #[serde(default)]
     pub graphs: GraphsConfig,
+
+    /// `[spec_review]` settings for the built-in adversarial spec review.
+    #[serde(default)]
+    pub spec_review: SpecReviewConfig,
 
     /// `[agents]` settings for agents and harnesses.
     #[serde(default)]
@@ -755,6 +762,7 @@ impl Default for CanopyConfig {
             graph_event_retention_days: default_graph_event_retention_days(),
             scheduler: SchedulerConfig::default(),
             graphs: GraphsConfig::default(),
+            spec_review: SpecReviewConfig::default(),
             agents: AgentsConfig::default(),
             activity: ActivityConfig::default(),
             update: UpdateConfig::default(),

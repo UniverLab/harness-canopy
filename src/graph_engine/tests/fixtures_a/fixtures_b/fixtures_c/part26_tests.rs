@@ -488,6 +488,7 @@ async fn bound_specs_ignore_prompt_and_run_as_before() {
     let workdir = dir.path().to_string_lossy().to_string();
     let graph_id = tick_graph(&db, &workdir, TICK_PROMPT);
     let spec = GraphSpec {
+        intent: None,
         id: "bound-spec".to_string(),
         graph_id: Some(graph_id.clone()),
         name: "Bound work".to_string(),

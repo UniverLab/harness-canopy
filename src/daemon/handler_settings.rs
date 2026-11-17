@@ -21,6 +21,7 @@ use crate::daemon::params::*;
 use crate::daemon::process::RealRunner;
 use crate::db::Database;
 use crate::domain::canopy_config::CanopyConfig;
+use crate::domain::roster::effective_state;
 use crate::domain::settings::{self, inspect, Kind};
 
 impl TaskTriggerHandler {
@@ -102,6 +103,7 @@ fn apply_set(
         None => def.default_value(),
     };
     settings::validate::validate_value(def, &value).map_err(|reason| anyhow::anyhow!(reason))?;
+    validate_spec_review_write(db, canopy_dir, key, &value)?;
 
     // D8: an absent `pinned_panel_face` is automatic mode, so writing
     // "auto" (and resetting to it) removes the key instead of storing it.
@@ -137,6 +139,81 @@ fn apply_set(
     Ok(result)
 }
 
+/// Refuse a `spec_review.*` write that would leave `spec_review.enabled` true
+/// without a usable platform/model pair. The prospective values come from the
+/// parsed `value` for the key being written and from the file for the other
+/// three, so this covers both enabling the review and editing its platform or
+/// model while it is already on.
+///
+/// Only the three keys that can change whether the pair is usable are checked
+/// — `enabled`, `platform` and `model`. A pair that later goes unavailable in
+/// the roster (quota, expiry) must not block unrelated config writes, nor a
+/// harmless `max_parallel` change, so an operator can still edit those while
+/// the review is on.
+fn validate_spec_review_write(
+    db: &Database,
+    canopy_dir: &Path,
+    key: &str,
+    value: &toml_edit::Value,
+) -> Result<()> {
+    if !matches!(
+        key,
+        "spec_review.enabled" | "spec_review.platform" | "spec_review.model"
+    ) {
+        return Ok(());
+    }
+    let current = CanopyConfig::load(canopy_dir);
+    let prospective = |target: &str| -> toml_edit::Value {
+        if target == key {
+            value.clone()
+        } else {
+            inspect::config_value(&current, target)
+        }
+    };
+    if !prospective("spec_review.enabled")
+        .as_bool()
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    let platform = prospective("spec_review.platform")
+        .as_str()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if platform.is_empty() {
+        bail!(
+            "spec_review.enabled cannot be on: spec_review.platform is empty; set it to a \
+             platform from the registry first"
+        );
+    }
+    if !current.clis.iter().any(|cli| cli.name == platform) {
+        bail!(
+            "spec_review.platform '{platform}' is not in the platform registry; run \
+             `harness refresh_registry` or pick a registered platform"
+        );
+    }
+    let model = prospective("spec_review.model")
+        .as_str()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let model = (!model.is_empty()).then_some(model);
+    let entries = db.roster_list_for_platform(&platform).unwrap_or_default();
+    let state = effective_state(&entries, &platform, model.as_deref(), &chrono::Utc::now());
+    if !state.available {
+        let pair = model.as_deref().map_or_else(
+            || format!("{platform} (platform-wide)"),
+            |m| format!("{platform}/{m}"),
+        );
+        bail!(
+            "spec_review platform/model pair {pair} is unavailable in the roster; make it \
+             available or pick another pair"
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,6 +221,116 @@ mod tests {
 
     fn test_db(dir: &TempDir) -> Database {
         Database::new(&dir.path().join("state.db")).unwrap()
+    }
+
+    use crate::db::roster_entries::{NewRosterEntry, RosterState};
+
+    fn write_platform(dir: &TempDir, platform: &str) {
+        std::fs::write(
+            dir.path().join("config.toml"),
+            format!("[[clis]]\nname = \"{platform}\"\nbinary = \"{platform}\"\n"),
+        )
+        .unwrap();
+    }
+
+    fn mark_unavailable(db: &Database, platform: &str, model: Option<&str>) {
+        db.roster_upsert(NewRosterEntry {
+            platform,
+            model_pattern: model,
+            state: RosterState::Unavailable,
+            reason: Some("quota"),
+            until: None,
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn spec_review_cannot_be_enabled_without_a_platform() {
+        let dir = TempDir::new().unwrap();
+        let db = test_db(&dir);
+        let error = apply_set(&db, dir.path(), "spec_review.enabled", Some("true"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("spec_review.platform"), "{error}");
+        assert!(error.contains("empty"), "{error}");
+        assert!(
+            !dir.path().join("config.toml").exists(),
+            "a refused enable must write nothing"
+        );
+    }
+
+    #[test]
+    fn spec_review_platform_must_exist_in_the_platform_registry() {
+        let dir = TempDir::new().unwrap();
+        let db = test_db(&dir);
+        write_platform(&dir, "opencode");
+        apply_set(&db, dir.path(), "spec_review.platform", Some("ghost")).unwrap();
+        let error = apply_set(&db, dir.path(), "spec_review.enabled", Some("true"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("ghost"), "{error}");
+        assert!(error.contains("platform registry"), "{error}");
+    }
+
+    #[test]
+    fn spec_review_refuses_an_unavailable_platform_model_pair() {
+        let dir = TempDir::new().unwrap();
+        let db = test_db(&dir);
+        write_platform(&dir, "opencode");
+        mark_unavailable(&db, "opencode", None);
+        apply_set(&db, dir.path(), "spec_review.platform", Some("opencode")).unwrap();
+        let error = apply_set(&db, dir.path(), "spec_review.enabled", Some("true"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("opencode"), "{error}");
+        assert!(error.contains("unavailable in the roster"), "{error}");
+    }
+
+    /// Editing the model while the review is already on revalidates the pair:
+    /// the model's own unavailable entry is the deciding one.
+    #[test]
+    fn spec_review_revalidates_the_pair_when_the_model_is_written() {
+        let dir = TempDir::new().unwrap();
+        let db = test_db(&dir);
+        write_platform(&dir, "opencode");
+        apply_set(&db, dir.path(), "spec_review.platform", Some("opencode")).unwrap();
+        apply_set(&db, dir.path(), "spec_review.enabled", Some("true")).unwrap();
+        mark_unavailable(&db, "opencode", Some("bad-model"));
+        let error = apply_set(&db, dir.path(), "spec_review.model", Some("bad-model"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("opencode/bad-model"), "{error}");
+        assert!(error.contains("unavailable in the roster"), "{error}");
+    }
+
+    /// A pair that goes unavailable after the review is on must not block an
+    /// unrelated write: the check is scoped to `spec_review.*` keys.
+    #[test]
+    fn an_unavailable_pair_does_not_block_unrelated_config_writes() {
+        let dir = TempDir::new().unwrap();
+        let db = test_db(&dir);
+        write_platform(&dir, "opencode");
+        apply_set(&db, dir.path(), "spec_review.platform", Some("opencode")).unwrap();
+        apply_set(&db, dir.path(), "spec_review.enabled", Some("true")).unwrap();
+        mark_unavailable(&db, "opencode", None);
+        assert_eq!(
+            apply_set(&db, dir.path(), "theme", Some("modern")).unwrap()["effective"],
+            "\"modern\""
+        );
+    }
+
+    #[test]
+    fn spec_review_max_parallel_is_bounded() {
+        let dir = TempDir::new().unwrap();
+        let db = test_db(&dir);
+        for bad in ["0", "9"] {
+            let error = apply_set(&db, dir.path(), "spec_review.max_parallel", Some(bad))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("1..=8"), "{error}");
+        }
+        let result = apply_set(&db, dir.path(), "spec_review.max_parallel", Some("4")).unwrap();
+        assert_eq!(result["effective"], "4");
     }
 
     #[test]

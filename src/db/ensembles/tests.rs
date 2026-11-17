@@ -12,6 +12,7 @@ fn test_db() -> Database {
 
 fn insert_spec(db: &Database, id: &str) {
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
         id: id.to_string(),
         graph_id: None,
         name: id.to_string(),

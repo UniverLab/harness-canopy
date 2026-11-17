@@ -1139,6 +1139,7 @@ mod tests {
 
     fn make_spec(graph_id: &str, name: &str, position: i64, status: GraphSpecStatus) -> GraphSpec {
         GraphSpec {
+            intent: None,
             id: format!("{graph_id}-{position}"),
             graph_id: Some(graph_id.to_string()),
             name: name.to_string(),

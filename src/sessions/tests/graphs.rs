@@ -60,6 +60,7 @@ fn spec_row(
     status: GraphSpecStatus,
 ) -> GraphSpec {
     GraphSpec {
+        intent: None,
         id: id.to_string(),
         graph_id: graph_id.map(str::to_string),
         name: name.to_string(),

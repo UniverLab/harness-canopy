@@ -269,6 +269,7 @@ fn graph_live_enter_seeds_from_most_recent_run_on_finished_graph() {
     })
     .unwrap();
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
         id: "s1".to_string(),
         graph_id: Some("lp1".to_string()),
         name: "Spec".to_string(),

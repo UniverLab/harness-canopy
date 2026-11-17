@@ -1024,6 +1024,7 @@ mod hang_repro {
         })
         .unwrap();
         db.insert_graph_spec(&GraphSpec {
+            intent: None,
             id: spec_id.clone(),
             graph_id: Some(graph_id.clone()),
             name: "Spec".to_string(),
@@ -1576,6 +1577,7 @@ mod stdio_startup_reconciliation_tests {
             require_spec_type: false,
         };
         let spec = GraphSpec {
+            intent: None,
             id: format!("spec-stdio-startup-{suffix}"),
             graph_id: Some(lp.id.clone()),
             name: "Spec".to_string(),

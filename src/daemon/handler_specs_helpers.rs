@@ -4,6 +4,7 @@ use crate::daemon::handler_formatting::internal_error;
 use crate::daemon::handler_formatting::{build_id_result, build_json_result};
 use crate::daemon::handler_run_exec::graph_run_blocker;
 use crate::db::Database;
+use crate::domain::canopy_config::CanopyConfig;
 use crate::domain::graphs::{GraphRunStatus, GraphSpec};
 use crate::domain::spec_type::{commit_message, SpecNaming};
 use rmcp::model::CallToolResult;
@@ -26,6 +27,43 @@ pub(crate) fn spec_create_result(spec_id: &str, naming: &SpecNaming) -> CallTool
     } else {
         build_id_result(spec_id, "spec_id")
     }
+}
+
+/// `intent` is capped at 500 characters: one human-approved sentence, not a
+/// second description.
+pub(crate) const MAX_SPEC_INTENT_CHARS: usize = 500;
+
+/// The refusal the spec mandates while `spec_review.enabled` is true.
+pub(crate) const INTENT_REQUIRED: &str = "intent is required while spec review is on: one human-approved sentence of what this spec must achieve";
+
+/// Whether the built-in spec review is switched on in the effective config.
+pub(crate) fn spec_review_enabled() -> Result<bool, McpError> {
+    let dir = crate::daemon::helpers::data_dir()?;
+    Ok(CanopyConfig::load(&dir).spec_review.enabled)
+}
+
+/// Trim and size-check a caller-supplied intent. A blank value means "no
+/// intent" (`None`); with the review on that is refused with the exact
+/// message the spec pins.
+pub(crate) fn normalize_spec_intent(
+    intent: Option<&str>,
+    review_enabled: bool,
+) -> Result<Option<String>, String> {
+    let intent = intent
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string);
+    if let Some(text) = &intent {
+        if text.chars().count() > MAX_SPEC_INTENT_CHARS {
+            return Err(format!(
+                "intent must be at most {MAX_SPEC_INTENT_CHARS} characters"
+            ));
+        }
+    }
+    if review_enabled && intent.is_none() {
+        return Err(INTENT_REQUIRED.to_string());
+    }
+    Ok(intent)
 }
 
 pub(crate) fn validate_at_least_one_bool(updates: &[bool], field_name: &str) -> Result<(), String> {
@@ -55,6 +93,7 @@ pub(crate) fn spec_summary_json(spec: &GraphSpec, include_descriptions: bool) ->
             "graph_id": spec.graph_id,
             "name": spec.name,
             "description": spec.description,
+            "intent": spec.intent,
             "workdir": spec.workdir,
             "position": spec.position,
             "parallelizable": spec.parallelizable,
@@ -73,6 +112,7 @@ pub(crate) fn spec_summary_json(spec: &GraphSpec, include_descriptions: bool) ->
             "id": spec.id,
             "graph_id": spec.graph_id,
             "name": spec.name,
+            "intent": spec.intent,
             "status": spec.status.as_str(),
             "workdir": spec.workdir,
             "type": spec_type,
@@ -135,4 +175,42 @@ pub(crate) fn build_spec_run_info(
         cross_run_attempts,
         waiting_for,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn intent_is_optional_and_trimmed_while_the_review_is_off() {
+        assert_eq!(normalize_spec_intent(None, false).unwrap(), None);
+        assert_eq!(normalize_spec_intent(Some("   "), false).unwrap(), None);
+        assert_eq!(
+            normalize_spec_intent(Some("  ship the field  "), false).unwrap(),
+            Some("ship the field".to_string())
+        );
+    }
+
+    #[test]
+    fn review_on_rejects_an_empty_intent_with_the_pinned_message() {
+        let error = normalize_spec_intent(None, true).unwrap_err();
+        assert_eq!(error, INTENT_REQUIRED);
+        assert_eq!(
+            normalize_spec_intent(Some("  "), true).unwrap_err(),
+            INTENT_REQUIRED
+        );
+        assert_eq!(
+            normalize_spec_intent(Some("one sentence"), true).unwrap(),
+            Some("one sentence".to_string())
+        );
+    }
+
+    #[test]
+    fn intent_over_five_hundred_characters_is_refused() {
+        let long = "a".repeat(MAX_SPEC_INTENT_CHARS + 1);
+        let error = normalize_spec_intent(Some(&long), false).unwrap_err();
+        assert!(error.contains("500"), "{error}");
+        let exact = "a".repeat(MAX_SPEC_INTENT_CHARS);
+        assert!(normalize_spec_intent(Some(&exact), false).is_ok());
+    }
 }

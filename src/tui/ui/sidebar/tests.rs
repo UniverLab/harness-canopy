@@ -235,6 +235,7 @@ fn seed_queue_driven_run(
     let spec_id = format!("{graph_id}-spec");
     let node_id = format!("{graph_id}-node");
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
         id: spec_id.clone(),
         graph_id: None,
         name: "queued spec".to_string(),

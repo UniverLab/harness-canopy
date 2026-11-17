@@ -234,6 +234,7 @@ fn seed_running_graph(db: &Database) {
     db.insert_graph(&lp).unwrap();
 
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
         id: "s1".to_string(),
         graph_id: Some("lp1".to_string()),
         name: "spec one".to_string(),

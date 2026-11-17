@@ -15,6 +15,7 @@ fn test_db() -> Arc<Database> {
 
 fn backlog_spec(id: &str, name: &str) -> GraphSpec {
     GraphSpec {
+        intent: None,
         id: id.to_string(),
         graph_id: None,
         name: name.to_string(),

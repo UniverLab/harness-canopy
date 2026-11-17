@@ -540,6 +540,7 @@ mod tests {
 
     fn standalone_spec(id: &str, workdir: &str) -> crate::domain::graphs::GraphSpec {
         crate::domain::graphs::GraphSpec {
+            intent: None,
             id: id.to_string(),
             graph_id: None,
             name: format!("Backlog {id}"),

@@ -82,6 +82,7 @@ async fn overlapping_tick_skips_while_run_in_flight() {
     let workdir = dir.path().to_string_lossy().to_string();
     let lp = tickable_graph(&db, &workdir, "exit 1");
     db.insert_graph_spec(&crate::domain::graphs::GraphSpec {
+        intent: None,
         id: "spec-in-flight".to_string(),
         graph_id: Some(lp.id.clone()),
         name: String::new(),

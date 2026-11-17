@@ -50,6 +50,7 @@ pub(crate) fn graph_fixture() -> Result<(TempDir, Arc<Database>, GraphEngine, St
         require_spec_type: false,
     };
     let spec = crate::domain::graphs::GraphSpec {
+        intent: None,
             id: "spec-test".to_string(),
             graph_id: Some(lp.id.clone()),
             name: "Spec".to_string(),
@@ -250,6 +251,7 @@ fn graph_fixture_with_mock() -> Result<MockGraphFixture> {
         require_spec_type: false,
     };
     let spec = crate::domain::graphs::GraphSpec {
+        intent: None,
         id: "spec-test".to_string(),
         graph_id: Some(lp.id.clone()),
         name: "Spec".to_string(),
@@ -360,6 +362,7 @@ fn commit_line(path: &std::path::Path, rev: &str, subject: &str) -> String {
 /// having to actually run anything through it.
 fn dirty_predecessor_spec(id: &str, workdir: &str, status: GraphSpecStatus) -> GraphSpec {
     GraphSpec {
+        intent: None,
         id: id.to_string(),
         graph_id: None,
         name: "Predecessor".to_string(),
@@ -838,6 +841,7 @@ fn ensemble_details_fixture(
 
 fn second_spec(graph_id: &str, id: &str, position: i64) -> GraphSpec {
     GraphSpec {
+        intent: None,
             id: id.to_string(),
             graph_id: Some(graph_id.to_string()),
             name: format!("Spec {id}"),
@@ -907,6 +911,7 @@ fn bare_graph_fixture() -> Result<(TempDir, Arc<Database>, GraphEngine, String)>
 /// queue membership never binds the spec to a graph.
 fn standalone_spec(id: &str, position: i64) -> GraphSpec {
     GraphSpec {
+        intent: None,
             id: id.to_string(),
             graph_id: None,
             name: id.to_string(),

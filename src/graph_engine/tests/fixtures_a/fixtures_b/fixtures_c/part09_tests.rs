@@ -20,6 +20,7 @@ async fn blank_bound_spec_is_rejected_before_any_agent_executes() {
     let home = write_resume_cli_home(cli);
 
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
         id: "blank-spec".to_string(),
         graph_id: Some(graph_id.clone()),
         name: String::new(),
@@ -96,6 +97,7 @@ async fn blank_bound_spec_is_rejected_before_any_agent_executes() {
 async fn whitespace_only_bound_spec_is_rejected() {
     let (_dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
         id: "ws-spec".to_string(),
         graph_id: Some(graph_id.clone()),
         name: "   ".to_string(),
@@ -137,6 +139,7 @@ async fn whitespace_only_bound_spec_is_rejected() {
 async fn description_only_bound_spec_is_executable() {
     let (_dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
         id: "description-only".to_string(),
         graph_id: Some(graph_id.clone()),
         name: String::new(),
@@ -191,6 +194,7 @@ async fn description_only_bound_spec_is_executable() {
 async fn queue_run_ignores_unrelated_blank_bound_spec() {
     let (_dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
         id: "blank-bound".to_string(),
         graph_id: Some(graph_id.clone()),
         name: String::new(),
@@ -256,6 +260,7 @@ async fn queue_run_ignores_unrelated_blank_bound_spec() {
 async fn blank_queue_member_is_rejected() {
     let (_dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
         id: "blank-member".to_string(),
         graph_id: None,
         name: String::new(),
@@ -454,6 +459,7 @@ async fn explicit_idea_run_executes_graph_and_rerun_picks_up_new_idea() {
 async fn completed_blank_bookkeeping_does_not_block_real_bound_spec() {
     let (_dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
         id: "legacy-blank".to_string(),
         graph_id: Some(graph_id.clone()),
         name: String::new(),
@@ -478,6 +484,7 @@ async fn completed_blank_bookkeeping_does_not_block_real_bound_spec() {
     })
     .unwrap();
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
             id: "real-spec".to_string(),
             graph_id: Some(graph_id.clone()),
             name: "Real Work".to_string(),
@@ -541,6 +548,7 @@ async fn completed_blank_bookkeeping_does_not_block_real_bound_spec() {
 async fn only_terminal_blank_bookkeeping_is_refused_before_claim() {
     let (_dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
         id: "stale-bookkeeping".to_string(),
         graph_id: Some(graph_id.clone()),
         name: String::new(),

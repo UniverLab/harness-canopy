@@ -196,6 +196,7 @@ mod tests {
 
     fn test_spec(name: &str, code: Option<&str>) -> GraphSpec {
         GraphSpec {
+            intent: None,
             id: "s1".to_string(),
             graph_id: None,
             name: name.to_string(),

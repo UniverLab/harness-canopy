@@ -676,6 +676,7 @@ mod tests {
     ) {
         let spec_id = format!("{id}-spec");
         db.insert_graph_spec(&GraphSpec {
+            intent: None,
             id: spec_id.clone(),
             graph_id: None,
             name: "Spec One".to_string(),

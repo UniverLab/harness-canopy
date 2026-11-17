@@ -224,6 +224,7 @@ async fn spec_create_and_list_and_update() {
         "spec_edit",
         "create",
         params_id(SpecCreateParams {
+            intent: None,
             name: "Backlog item".to_string(),
             description: valid_spec_description(),
             workdir: Some("/tmp".to_string()),
@@ -240,6 +241,7 @@ async fn spec_create_and_list_and_update() {
         "spec_edit",
         "create",
         params_id(SpecCreateParams {
+            intent: None,
             name: "Backlog item 2".to_string(),
             description: "too short".to_string(),
             workdir: None,
@@ -300,6 +302,7 @@ async fn spec_create_and_list_and_update() {
         "spec_edit",
         "update",
         params_id(SpecUpdateParams {
+            intent: None,
             spec_id: spec_id.clone(),
             name: Some("Renamed backlog item".to_string()),
             description: None,
@@ -326,6 +329,7 @@ async fn spec_create_with_conventional_title_stores_subject_type_scope_and_code(
         "spec_edit",
         "create",
         params_id(SpecCreateParams {
+            intent: None,
             name: "fix(tui): open F1 from inside a session".to_string(),
             description: valid_spec_description(),
             workdir: Some(dir.path().to_string_lossy().to_string()),
@@ -376,6 +380,7 @@ async fn spec_update_name_only_conventional_title_stores_subject_and_code() {
         "spec_edit",
         "create",
         params_id(SpecCreateParams {
+            intent: None,
             name: "Vague bug report".to_string(),
             description: valid_spec_description(),
             workdir: None,
@@ -399,6 +404,7 @@ async fn spec_update_name_only_conventional_title_stores_subject_and_code() {
         "spec_edit",
         "update",
         params_id(SpecUpdateParams {
+            intent: None,
             spec_id: spec_id.clone(),
             name: Some("fix(tui): open F1 from inside a session".to_string()),
             description: None,
@@ -439,6 +445,7 @@ async fn spec_set_status_transitions_and_rejects_bound_spec() {
         "spec_edit",
         "create",
         params_id(SpecCreateParams {
+            intent: None,
             name: "Standalone".to_string(),
             description: valid_spec_description(),
             workdir: None,
@@ -530,6 +537,7 @@ async fn spec_delete_removes_standalone_but_refuses_bound_spec() {
         "spec_edit",
         "create",
         params_id(SpecCreateParams {
+            intent: None,
             name: "Deletable".to_string(),
             description: valid_spec_description(),
             workdir: None,
@@ -674,6 +682,7 @@ async fn graph_remove_spec_rejects_standalone_spec() {
         "spec_edit",
         "create",
         params_id(SpecCreateParams {
+            intent: None,
             name: "Standalone".to_string(),
             description: valid_spec_description(),
             workdir: None,

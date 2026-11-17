@@ -172,9 +172,10 @@ pub(crate) const MCP_RESULT_BUDGET_BYTES: usize = 32_000;
 
 /// Measured serialised size of one compact `spec list` row in bytes: 339
 /// compact specs measured 55,605 characters on 2026-09-02, i.e. ~164
-/// bytes/row. Budgeted at 200 bytes/row so the default page keeps headroom
-/// against longer-than-average names.
-const SPEC_LIST_COMPACT_ROW_BYTES: usize = 280;
+/// bytes/row. Budgeted at 320 bytes/row so the default page keeps headroom
+/// against longer-than-average names and the always-surfaced `intent` key
+/// (null when unset, up to 500 chars when set).
+const SPEC_LIST_COMPACT_ROW_BYTES: usize = 320;
 
 /// Default `session_list` page derived from the MCP result budget. The
 /// compact row estimate leaves room for long names while keeping the default
@@ -191,7 +192,7 @@ const _: () = assert!(
 
 /// Default `spec list` page derived from the budget, not a round number:
 /// `MCP_RESULT_BUDGET_BYTES / SPEC_LIST_COMPACT_ROW_BYTES`, clamped to
-/// `[1, 200]` like `graph` (the quotient is 160, so the upper
+/// `[1, 200]` like `graph` (the quotient is 100, so the upper
 /// clamp is vacuous and the lower clamp is enforced by the const assert).
 pub(crate) const SPEC_LIST_DEFAULT_LIMIT: u32 =
     MCP_RESULT_BUDGET_BYTES as u32 / SPEC_LIST_COMPACT_ROW_BYTES as u32;

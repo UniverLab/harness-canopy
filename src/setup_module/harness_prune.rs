@@ -369,6 +369,7 @@ mod tests {
         })
         .unwrap();
         db.insert_graph_spec(&GraphSpec {
+            intent: None,
             id: "s1".to_string(),
             graph_id: Some("g1".to_string()),
             name: "refs-spec".to_string(),

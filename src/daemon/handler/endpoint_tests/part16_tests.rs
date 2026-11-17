@@ -99,12 +99,19 @@ async fn spec_edit_refusals_list_the_full_action_table() {
         (
             "create",
             &["name", "description"],
-            &["workdir", "spec_type", "spec_scope"],
+            &["workdir", "spec_type", "spec_scope", "intent"],
         ),
         (
             "update",
             &["spec_id"],
-            &["name", "description", "workdir", "spec_type", "spec_scope"],
+            &[
+                "name",
+                "description",
+                "workdir",
+                "spec_type",
+                "spec_scope",
+                "intent",
+            ],
         ),
         ("delete", &["spec_id"], &[]),
         ("set_status", &["spec_id", "status", "reason"], &[]),
@@ -437,6 +444,7 @@ async fn spec_get_returns_the_list_row_with_its_description() {
         "spec_edit",
         "create",
         params_id(SpecCreateParams {
+            intent: None,
             name: "Gettable".to_string(),
             description: valid_spec_description(),
             workdir: None,
@@ -506,6 +514,7 @@ async fn spec_operator_note_round_trip() {
         "spec_edit",
         "create",
         params_id(SpecCreateParams {
+            intent: None,
             name: "Noted".to_string(),
             description: valid_spec_description(),
             workdir: None,
@@ -565,6 +574,7 @@ async fn queue_round_trip() {
             "spec_edit",
             "create",
             params_id(SpecCreateParams {
+                intent: None,
                 name: name.to_string(),
                 description: valid_spec_description(),
                 workdir: None,
@@ -889,4 +899,299 @@ async fn crew_round_trip() {
     .await
     .unwrap();
     assert!(!is_err(&deleted), "{}", text(&deleted));
+}
+
+// ── spec review: `intent` ───────────────────────────────────────────
+
+fn write_review_config(home: &std::path::Path, enabled: bool) {
+    let canopy = home.join(".canopy");
+    std::fs::create_dir_all(&canopy).unwrap();
+    std::fs::write(
+        canopy.join("config.toml"),
+        format!("[spec_review]\nenabled = {enabled}\n"),
+    )
+    .unwrap();
+}
+
+fn reviewed_spec(name: &str, intent: Option<&str>) -> SpecCreateParams {
+    SpecCreateParams {
+        intent: intent.map(str::to_string),
+        name: name.to_string(),
+        description: valid_spec_description(),
+        workdir: None,
+        spec_type: None,
+        spec_scope: None,
+    }
+}
+
+async fn create_spec(handler: &TaskTriggerHandler, params: SpecCreateParams) -> CallToolResult {
+    call_resource_action(handler, "spec_edit", "create", params_id(params))
+        .await
+        .unwrap()
+}
+
+fn created_spec_id(db: &Database, name: &str) -> String {
+    db.list_specs(None, None, true, None)
+        .unwrap()
+        .into_iter()
+        .find(|spec| spec.name == name)
+        .expect("created spec")
+        .id
+}
+
+#[tokio::test]
+async fn spec_intent_is_optional_while_review_is_off() {
+    let (home, db, handler) = endpoint_test_handler();
+    let _home = HomeVar::set(home.path());
+
+    let without = create_spec(&handler, reviewed_spec("Reviewed backlog item", None)).await;
+    assert!(!is_err(&without), "{}", text(&without));
+    let with = create_spec(
+        &handler,
+        reviewed_spec("Reviewed with intent", Some("Keep the field")),
+    )
+    .await;
+    assert!(!is_err(&with), "{}", text(&with));
+
+    let id = created_spec_id(&db, "Reviewed with intent");
+    let got = call_resource_action(
+        &handler,
+        "spec",
+        "get",
+        params_id(SpecGetParams {
+            spec_id: id.clone(),
+        }),
+    )
+    .await
+    .unwrap();
+    let body: serde_json::Value = serde_json::from_str(&raw_text(&got)).unwrap();
+    assert_eq!(body["intent"], "Keep the field");
+
+    let listed = call_resource_action(
+        &handler,
+        "spec",
+        "list",
+        params_id(SpecListParams {
+            workdir: None,
+            status: None,
+            unassigned_only: Some(true),
+            include_descriptions: Some(true),
+            limit: None,
+            offset: None,
+            spec_type: None,
+        }),
+    )
+    .await
+    .unwrap();
+    let body: serde_json::Value = serde_json::from_str(&raw_text(&listed)).unwrap();
+    let entries = body["specs"].as_array().unwrap();
+    assert!(entries
+        .iter()
+        .any(|entry| entry["intent"] == "Keep the field"));
+
+    // The off-path update sets the field too: intent is optional, not ignored.
+    let updated = call_resource_action(
+        &handler,
+        "spec_edit",
+        "update",
+        params_id(SpecUpdateParams {
+            intent: Some("Set while review is off".to_string()),
+            spec_id: id.clone(),
+            name: None,
+            description: None,
+            workdir: None,
+            spec_type: None,
+            spec_scope: None,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!is_err(&updated), "{}", text(&updated));
+    assert_eq!(
+        db.get_graph_spec(&id).unwrap().unwrap().intent.as_deref(),
+        Some("Set while review is off")
+    );
+}
+
+#[tokio::test]
+async fn spec_review_on_requires_intent_on_create_and_update() {
+    let (home, db, handler) = endpoint_test_handler();
+    let _home = HomeVar::set(home.path());
+    write_review_config(home.path(), true);
+
+    let refused = create_spec(&handler, reviewed_spec("Reviewed backlog item", None)).await;
+    assert!(is_err(&refused), "{}", text(&refused));
+    assert!(
+        raw_text(&refused).contains(crate::daemon::handler_specs_helpers::INTENT_REQUIRED),
+        "{}",
+        raw_text(&refused)
+    );
+
+    let created = create_spec(
+        &handler,
+        reviewed_spec("Reviewed backlog item", Some("Ship the intent field")),
+    )
+    .await;
+    assert!(!is_err(&created), "{}", text(&created));
+    let id = created_spec_id(&db, "Reviewed backlog item");
+
+    // A description-only update is fine while the spec already has an intent.
+    let updated = call_resource_action(
+        &handler,
+        "spec_edit",
+        "update",
+        params_id(SpecUpdateParams {
+            intent: None,
+            spec_id: id.clone(),
+            name: None,
+            description: Some(valid_spec_description()),
+            workdir: None,
+            spec_type: None,
+            spec_scope: None,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!is_err(&updated), "{}", text(&updated));
+
+    let cleared = call_resource_action(
+        &handler,
+        "spec_edit",
+        "update",
+        params_id(SpecUpdateParams {
+            intent: Some(String::new()),
+            spec_id: id.clone(),
+            name: None,
+            description: None,
+            workdir: None,
+            spec_type: None,
+            spec_scope: None,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(is_err(&cleared), "{}", text(&cleared));
+
+    let restated = call_resource_action(
+        &handler,
+        "spec_edit",
+        "update",
+        params_id(SpecUpdateParams {
+            intent: Some("Restate it".to_string()),
+            spec_id: id.clone(),
+            name: None,
+            description: None,
+            workdir: None,
+            spec_type: None,
+            spec_scope: None,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!is_err(&restated), "{}", text(&restated));
+    assert_eq!(
+        db.get_graph_spec(&id).unwrap().unwrap().intent.as_deref(),
+        Some("Restate it")
+    );
+}
+
+#[tokio::test]
+async fn spec_review_on_refuses_updating_a_spec_without_intent() {
+    let (home, db, handler) = endpoint_test_handler();
+    let _home = HomeVar::set(home.path());
+
+    let created = create_spec(&handler, reviewed_spec("Reviewed backlog item", None)).await;
+    assert!(!is_err(&created), "{}", text(&created));
+    let id = created_spec_id(&db, "Reviewed backlog item");
+    write_review_config(home.path(), true);
+
+    let refused = call_resource_action(
+        &handler,
+        "spec_edit",
+        "update",
+        params_id(SpecUpdateParams {
+            intent: None,
+            spec_id: id,
+            name: Some("Renamed".to_string()),
+            description: None,
+            workdir: None,
+            spec_type: None,
+            spec_scope: None,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(is_err(&refused), "{}", text(&refused));
+    assert!(
+        raw_text(&refused).contains(crate::daemon::handler_specs_helpers::INTENT_REQUIRED),
+        "{}",
+        raw_text(&refused)
+    );
+}
+
+#[tokio::test]
+async fn spec_intent_over_five_hundred_characters_is_refused() {
+    let (home, _db, handler) = endpoint_test_handler();
+    let _home = HomeVar::set(home.path());
+
+    let long = "a".repeat(501);
+    let refused = create_spec(
+        &handler,
+        reviewed_spec("Reviewed backlog item", Some(&long)),
+    )
+    .await;
+    assert!(is_err(&refused), "{}", text(&refused));
+    assert!(raw_text(&refused).contains("500"), "{}", raw_text(&refused));
+}
+
+#[tokio::test]
+async fn queue_listing_returns_spec_intent() {
+    let (home, db, handler) = endpoint_test_handler();
+    let _home = HomeVar::set(home.path());
+
+    let created = create_spec(
+        &handler,
+        reviewed_spec("Reviewed backlog item", Some("Queue intent")),
+    )
+    .await;
+    assert!(!is_err(&created), "{}", text(&created));
+    let spec_id = created_spec_id(&db, "Reviewed backlog item");
+
+    call_resource_action(
+        &handler,
+        "queue",
+        "create",
+        params_id(QueueCreateParams {
+            name: "reviewed".to_string(),
+        }),
+    )
+    .await
+    .unwrap();
+    let queue_id = db.list_queues().unwrap().into_iter().next().unwrap().id;
+    call_resource_action(
+        &handler,
+        "queue",
+        "add_spec",
+        params_id(QueueAddSpecParams {
+            queue_id: queue_id.clone(),
+            spec_id,
+            group: None,
+        }),
+    )
+    .await
+    .unwrap();
+
+    let listed = call_resource_action(
+        &handler,
+        "queue",
+        "list",
+        params_id(QueueListParams {
+            queue_id: Some(queue_id),
+            include_descriptions: None,
+        }),
+    )
+    .await
+    .unwrap();
+    let body: serde_json::Value = serde_json::from_str(&raw_text(&listed)).unwrap();
+    assert_eq!(body["queue"]["members"][0]["intent"], "Queue intent");
 }

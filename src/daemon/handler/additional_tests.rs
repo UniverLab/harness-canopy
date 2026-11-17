@@ -12,6 +12,7 @@ use tempfile::tempdir;
 
 fn standalone_spec(id: &str) -> GraphSpec {
     GraphSpec {
+        intent: None,
         id: id.to_string(),
         graph_id: None,
         name: id.to_string(),

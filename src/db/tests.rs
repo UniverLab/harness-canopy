@@ -125,6 +125,7 @@ fn sample_graph(id: &str) -> Graph {
 
 fn sample_graph_spec(graph_id: &str, id: &str, position: i64) -> GraphSpec {
     GraphSpec {
+        intent: None,
         id: id.to_string(),
         graph_id: Some(graph_id.to_string()),
         name: format!("Spec {position}"),
@@ -167,6 +168,7 @@ fn sample_graph_node(spec_id: &str, id: &str, position: i64) -> GraphNode {
 
 fn sample_standalone_spec(id: &str, workdir: Option<&str>) -> GraphSpec {
     GraphSpec {
+        intent: None,
         id: id.to_string(),
         graph_id: None,
         name: format!("Backlog {id}"),
@@ -463,3 +465,4 @@ mod part06_tests;
 mod part07_tests;
 mod part08_tests;
 mod snapshot_query_tests;
+mod spec_intent_tests;

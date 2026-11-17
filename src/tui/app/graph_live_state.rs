@@ -729,6 +729,7 @@ mod tests {
 
     fn make_spec(id: &str, graph_id: &str, status: GraphSpecStatus, position: i64) -> GraphSpec {
         GraphSpec {
+            intent: None,
             id: id.to_string(),
             graph_id: Some(graph_id.to_string()),
             name: format!("Spec {id}"),
@@ -918,6 +919,7 @@ mod tests {
 
         // Specs are NOT bound to the graph (graph_id = None) — they're queue members.
         let ps1 = GraphSpec {
+            intent: None,
             id: "ps1".to_string(),
             graph_id: None,
             name: "Queue Spec 1".to_string(),
@@ -941,6 +943,7 @@ mod tests {
             spec_type: None,
         };
         let ps2 = GraphSpec {
+            intent: None,
             id: "ps2".to_string(),
             graph_id: None,
             name: "Queue Spec 2".to_string(),

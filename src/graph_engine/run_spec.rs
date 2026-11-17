@@ -692,6 +692,7 @@ mod tests {
             require_spec_type: false,
         };
         let spec = GraphSpec {
+            intent: None,
             id: "s1".to_string(),
             graph_id: Some(lp.id.clone()),
             name: "Add retry".to_string(),

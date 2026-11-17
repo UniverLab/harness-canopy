@@ -908,6 +908,7 @@ async fn command_hook_on_spec_completed_runs_once_per_spec() {
 
     // Second spec with its own check node.
     let spec2 = crate::domain::graphs::GraphSpec {
+        intent: None,
             id: "spec-test-2".to_string(),
             graph_id: Some(graph_id.clone()),
             name: "Spec2".to_string(),

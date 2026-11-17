@@ -549,6 +549,7 @@ mod tests {
         })
         .unwrap();
         db.insert_graph_spec(&crate::domain::graphs::GraphSpec {
+            intent: None,
             id: "spec-standalone-1".to_string(),
             graph_id: None,
             name: "standalone".to_string(),

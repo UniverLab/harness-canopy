@@ -93,6 +93,42 @@ pub static REGISTRY: &[SettingDef] = &[
         wizard: false,
     },
     SettingDef {
+        key: "spec_review.enabled",
+        kind: Kind::Bool,
+        default: DefaultValue::Literal("false"),
+        group: Group::GraphsEngine,
+        description: "Run the built-in adversarial spec review; while on, spec_edit requires a non-empty intent.",
+        apply: Apply::NextRun,
+        wizard: false,
+    },
+    SettingDef {
+        key: "spec_review.platform",
+        kind: Kind::String,
+        default: DefaultValue::Literal("\"\""),
+        group: Group::GraphsEngine,
+        description: "Platform the spec review runs on; must exist in the platform registry.",
+        apply: Apply::NextRun,
+        wizard: false,
+    },
+    SettingDef {
+        key: "spec_review.model",
+        kind: Kind::String,
+        default: DefaultValue::Literal("\"\""),
+        group: Group::GraphsEngine,
+        description: "Model the spec review runs with; empty uses the platform-wide roster entry.",
+        apply: Apply::NextRun,
+        wizard: false,
+    },
+    SettingDef {
+        key: "spec_review.max_parallel",
+        kind: Kind::Int { min: 1, max: 8 },
+        default: DefaultValue::Literal("2"),
+        group: Group::GraphsEngine,
+        description: "How many spec reviews may run concurrently.",
+        apply: Apply::NextRun,
+        wizard: false,
+    },
+    SettingDef {
         key: "clean.retention_days",
         kind: Kind::Duration {
             unit: DurationUnit::Days,
@@ -531,7 +567,7 @@ mod tests {
 
     #[test]
     fn registry_has_one_entry_per_setting_and_they_are_unique() {
-        assert_eq!(REGISTRY.len(), 53);
+        assert_eq!(REGISTRY.len(), 57);
         for def in REGISTRY {
             assert_eq!(find(def.key).map(|d| d.key), Some(def.key));
         }

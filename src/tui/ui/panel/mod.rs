@@ -654,6 +654,7 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
         db.insert_graph_spec(&GraphSpec {
+            intent: None,
             id: "spec-1".to_string(),
             graph_id: None,
             name: "Add retry backoff".to_string(),

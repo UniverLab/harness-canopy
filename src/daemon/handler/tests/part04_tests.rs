@@ -321,6 +321,7 @@ fn validate_queue_reorder_rejects_unknown_id() {
 #[test]
 fn spec_summary_json_includes_required_fields() {
     let spec = GraphSpec {
+        intent: None,
         id: "spec-1".to_string(),
         graph_id: Some("graph-1".to_string()),
         name: "My Spec".to_string(),
@@ -358,6 +359,7 @@ fn spec_summary_json_includes_required_fields() {
 #[test]
 fn spec_summary_json_includes_completed_via_when_set() {
     let spec = GraphSpec {
+        intent: None,
         id: "spec-2".to_string(),
         graph_id: None,
         name: "Done".to_string(),

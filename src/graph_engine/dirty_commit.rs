@@ -346,6 +346,7 @@ pub(crate) fn ensemble_owning_node(node_id: &str, ensembles: &[EnsembleDetails])
 /// those are refused before reaching the dispatch body.
 pub(crate) fn no_spec_placeholder(graph_id: &str) -> GraphSpec {
     GraphSpec {
+        intent: None,
         id: uuid::Uuid::new_v4().to_string(),
         graph_id: Some(graph_id.to_string()),
         name: String::new(),

@@ -383,6 +383,7 @@ fn validate_node_not_ensemble_owned_rejects_member_and_join_nodes() {
     let dir = tempdir().unwrap();
     let db = Database::new(&dir.path().join("test.db")).unwrap();
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
         id: "spec-1".to_string(),
         graph_id: None,
         name: "spec-1".to_string(),
@@ -714,6 +715,7 @@ fn graph_reset_blanket_preserves_admin_skipped_specs() {
     let (_dir, db, graph_id) = graph_reset_fixture(GraphStatus::Failed);
     // Administrative skip — must survive blanket reset.
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
         id: "spec-admin-skipped".to_string(),
         graph_id: Some(graph_id.clone()),
         name: "admin-skipped".to_string(),
@@ -797,6 +799,7 @@ fn graph_reset_blanket_resets_engine_skipped_spec() {
 fn graph_reset_explicit_specs_resets_skipped_spec_and_clears_provenance() {
     let (_dir, db, graph_id) = graph_reset_fixture(GraphStatus::Failed);
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
         id: "spec-admin-skipped".to_string(),
         graph_id: Some(graph_id.clone()),
         name: "admin-skipped".to_string(),
@@ -906,6 +909,7 @@ fn graph_reset_queue_run_resets_pending_queue_members_and_reports_count() {
     .unwrap();
 
     let standalone = |id: &str, position: i64, status: GraphSpecStatus| GraphSpec {
+        intent: None,
         id: id.to_string(),
         graph_id: None,
         name: id.to_string(),

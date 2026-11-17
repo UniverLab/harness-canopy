@@ -281,8 +281,8 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         conn.execute(
-            "INSERT INTO graph_specs (id, graph_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head, spec_start_dirty, workdir, spec_committed_head, spec_end_dirty, spec_end_dirty_paths, completed_via, completed_via_reason, completed_via_at, updated_at, spec_type, spec_scope, spec_code)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+            "INSERT INTO graph_specs (id, graph_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head, spec_start_dirty, workdir, spec_committed_head, spec_end_dirty, spec_end_dirty_paths, completed_via, completed_via_reason, completed_via_at, updated_at, spec_type, spec_scope, spec_code, intent)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
             params![
                 &spec.id,
                 &spec.graph_id,
@@ -306,6 +306,7 @@ impl Database {
                 spec.spec_type.map(|t| t.as_str()),
                 &spec.spec_scope,
                 &spec.spec_code,
+                &spec.intent,
             ],
         )?;
         Ok(())
@@ -317,7 +318,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, graph_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head, spec_start_dirty, workdir, completed_via, completed_via_reason, completed_via_at, spec_committed_head, spec_end_dirty, spec_end_dirty_paths, spec_type, spec_scope, spec_code
+            "SELECT id, graph_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head, spec_start_dirty, workdir, completed_via, completed_via_reason, completed_via_at, spec_committed_head, spec_end_dirty, spec_end_dirty_paths, spec_type, spec_scope, spec_code, intent
              FROM graph_specs WHERE graph_id = ?1 ORDER BY position ASC",
         )?;
         let rows = stmt.query_map(params![graph_id], map_graph_spec_row)?;
@@ -332,7 +333,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, graph_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head, spec_start_dirty, workdir, completed_via, completed_via_reason, completed_via_at, spec_committed_head, spec_end_dirty, spec_end_dirty_paths, spec_type, spec_scope, spec_code
+            "SELECT id, graph_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head, spec_start_dirty, workdir, completed_via, completed_via_reason, completed_via_at, spec_committed_head, spec_end_dirty, spec_end_dirty_paths, spec_type, spec_scope, spec_code, intent
              FROM graph_specs WHERE id = ?1",
         )?;
 
@@ -409,7 +410,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, graph_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head, spec_start_dirty, workdir, completed_via, completed_via_reason, completed_via_at, spec_committed_head, spec_end_dirty, spec_end_dirty_paths, spec_type, spec_scope, spec_code
+            "SELECT id, graph_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head, spec_start_dirty, workdir, completed_via, completed_via_reason, completed_via_at, spec_committed_head, spec_end_dirty, spec_end_dirty_paths, spec_type, spec_scope, spec_code, intent
              FROM graph_specs
              WHERE (?1 IS NULL OR workdir = ?1)
                AND (?2 IS NULL OR status = ?2)
@@ -489,7 +490,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, graph_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head, spec_start_dirty, workdir, completed_via, completed_via_reason, completed_via_at, spec_committed_head, spec_end_dirty, spec_end_dirty_paths, spec_type, spec_scope, spec_code
+            "SELECT id, graph_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head, spec_start_dirty, workdir, completed_via, completed_via_reason, completed_via_at, spec_committed_head, spec_end_dirty, spec_end_dirty_paths, spec_type, spec_scope, spec_code, intent
              FROM graph_specs
              ORDER BY rowid ASC",
         )?;
@@ -609,7 +610,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT gs.id, gs.graph_id, gs.name, gs.description, gs.position, gs.parallelizable, gs.status, gs.started_at, gs.completed_at, gs.spec_start_head, gs.spec_start_dirty, gs.workdir, gs.completed_via, gs.completed_via_reason, gs.completed_via_at, gs.spec_committed_head, gs.spec_end_dirty, gs.spec_end_dirty_paths, gs.spec_type, gs.spec_scope, gs.spec_code
+            "SELECT gs.id, gs.graph_id, gs.name, gs.description, gs.position, gs.parallelizable, gs.status, gs.started_at, gs.completed_at, gs.spec_start_head, gs.spec_start_dirty, gs.workdir, gs.completed_via, gs.completed_via_reason, gs.completed_via_at, gs.spec_committed_head, gs.spec_end_dirty, gs.spec_end_dirty_paths, gs.spec_type, gs.spec_scope, gs.spec_code, gs.intent
              FROM graph_specs gs
              LEFT JOIN graphs g ON g.id = gs.graph_id
              WHERE (g.workdir = ?1 OR gs.workdir = ?1)
@@ -647,7 +648,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         conn.query_row(
-            "SELECT gs.id, gs.graph_id, gs.name, gs.description, gs.position, gs.parallelizable, gs.status, gs.started_at, gs.completed_at, gs.spec_start_head, gs.spec_start_dirty, gs.workdir, gs.completed_via, gs.completed_via_reason, gs.completed_via_at, gs.spec_committed_head, gs.spec_end_dirty, gs.spec_end_dirty_paths, gs.spec_type, gs.spec_scope, gs.spec_code
+            "SELECT gs.id, gs.graph_id, gs.name, gs.description, gs.position, gs.parallelizable, gs.status, gs.started_at, gs.completed_at, gs.spec_start_head, gs.spec_start_dirty, gs.workdir, gs.completed_via, gs.completed_via_reason, gs.completed_via_at, gs.spec_committed_head, gs.spec_end_dirty, gs.spec_end_dirty_paths, gs.spec_type, gs.spec_scope, gs.spec_code, gs.intent
              FROM graph_runs gr
              JOIN graph_specs gs ON gs.id = gr.spec_id
              WHERE gr.graph_id = ?1
@@ -678,14 +679,14 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT gs.id, gs.graph_id, gs.name, gs.description, gs.position, gs.parallelizable, gs.status, gs.started_at, gs.completed_at, gs.spec_start_head, gs.spec_start_dirty, gs.workdir, gs.completed_via, gs.completed_via_reason, gs.completed_via_at, gs.spec_committed_head, gs.spec_end_dirty, gs.spec_end_dirty_paths, gs.spec_type, gs.spec_scope, gs.spec_code, g.workdir
+            "SELECT gs.id, gs.graph_id, gs.name, gs.description, gs.position, gs.parallelizable, gs.status, gs.started_at, gs.completed_at, gs.spec_start_head, gs.spec_start_dirty, gs.workdir, gs.completed_via, gs.completed_via_reason, gs.completed_via_at, gs.spec_committed_head, gs.spec_end_dirty, gs.spec_end_dirty_paths, gs.spec_type, gs.spec_scope, gs.spec_code, gs.intent, g.workdir
              FROM graph_specs gs
              LEFT JOIN graphs g ON g.id = gs.graph_id
              WHERE gs.status = 'interrupted' AND gs.spec_end_dirty IS NULL",
         )?;
         let rows = stmt.query_map([], |row| {
             let spec = map_graph_spec_row(row)?;
-            let graph_workdir: Option<String> = row.get(21)?;
+            let graph_workdir: Option<String> = row.get(22)?;
             Ok((spec, graph_workdir))
         })?;
         rows.map(|r| {
@@ -749,6 +750,21 @@ impl Database {
                 spec_id,
                 Utc::now().timestamp_millis()
             ],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Set (or clear with `None`) a spec's `intent`. The handler decides
+    /// whether an empty string becomes `None`; this writes exactly what it is
+    /// given, so the review gate and the column can never disagree.
+    pub fn set_graph_spec_intent(&self, spec_id: &str, intent: Option<&str>) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let rows = conn.execute(
+            "UPDATE graph_specs SET intent = ?1, updated_at = ?3 WHERE id = ?2",
+            params![intent, spec_id, Utc::now().timestamp_millis()],
         )?;
         Ok(rows > 0)
     }

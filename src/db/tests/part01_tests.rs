@@ -1188,6 +1188,7 @@ fn graph_specs_migration_relaxes_graph_id_and_adds_workdir_and_is_idempotent() {
 
     // The rebuilt table now supports standalone specs (no graph) too.
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
         id: "standalone-spec".to_string(),
         graph_id: None,
         name: "Backlog item".to_string(),

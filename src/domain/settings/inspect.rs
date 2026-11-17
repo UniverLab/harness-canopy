@@ -289,6 +289,10 @@ pub fn config_value(config: &CanopyConfig, key: &str) -> Value {
         "embeddings_idle_unload_secs" => Value::from(config.embeddings_idle_unload_secs as i64),
         "ensemble_concurrency_cap" => Value::from(config.ensemble_concurrency_cap as i64),
         "spec_attempt_limit" => Value::from(config.spec_attempt_limit as i64),
+        "spec_review.enabled" => Value::from(config.spec_review.enabled),
+        "spec_review.platform" => Value::from(config.spec_review.platform.clone()),
+        "spec_review.model" => Value::from(config.spec_review.model.clone()),
+        "spec_review.max_parallel" => Value::from(config.spec_review.max_parallel as i64),
         "clean.retention_days" => Value::from(config.clean.retention_days as i64),
         "graph_event_retention_days" => Value::from(config.graph_event_retention_days as i64),
         "skills.sources" => {

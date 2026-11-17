@@ -492,6 +492,7 @@ mod check_command_tests {
         let dir = tempfile::tempdir().unwrap();
         let db = Database::new(&dir.path().join("test.db")).unwrap();
         db.insert_graph_spec(&GraphSpec {
+            intent: None,
             id: "s".to_string(),
             graph_id: None,
             name: "Spec".to_string(),
@@ -573,6 +574,7 @@ mod check_command_tests {
             created_at: chrono::Utc::now(),
         };
         let spec = GraphSpec {
+            intent: None,
             id: "s".to_string(),
             graph_id: None,
             name: "Spec".to_string(),
@@ -658,6 +660,7 @@ mod check_command_tests {
         spec_only.graph_nodes.clear();
         spec_only.specs = vec![crate::domain::graphs::GraphSpecDetails {
             spec: GraphSpec {
+                intent: None,
                 id: "s".to_string(),
                 graph_id: Some("g".to_string()),
                 name: "Spec".to_string(),

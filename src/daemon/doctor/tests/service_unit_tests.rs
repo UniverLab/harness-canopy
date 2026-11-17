@@ -738,6 +738,7 @@ fn report_orphan_joins_flags_orphans_and_stays_silent_when_healthy() {
     })
     .unwrap();
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
         id: "s1".to_string(),
         graph_id: Some("g1".to_string()),
         name: "Spec".to_string(),

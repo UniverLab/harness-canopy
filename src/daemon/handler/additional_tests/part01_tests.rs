@@ -517,6 +517,7 @@ fn graph_run_status_guard_completed_error_names_reset() {
 #[test]
 fn validate_spec_deletable_standalone_spec_ok() {
     let spec = GraphSpec {
+        intent: None,
         id: "spec-1".to_string(),
         graph_id: None,
         name: "test".to_string(),
@@ -649,6 +650,7 @@ fn build_spec_update_response_text() {
 #[test]
 fn spec_summary_json_with_null_fields() {
     let spec = GraphSpec {
+        intent: None,
         id: "s1".to_string(),
         graph_id: None,
         name: "spec".to_string(),

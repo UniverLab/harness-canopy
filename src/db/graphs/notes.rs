@@ -170,6 +170,7 @@ mod tests {
 
     fn seed_spec(db: &Database, spec_id: &str) {
         db.insert_graph_spec(&GraphSpec {
+            intent: None,
             id: spec_id.to_string(),
             graph_id: None,
             name: spec_id.to_string(),

@@ -861,6 +861,7 @@ mod tests {
 
         // Cascade children attached to the graph.
         let spec = crate::domain::graphs::GraphSpec {
+            intent: None,
             id: "spec-1".to_string(),
             graph_id: Some("graph-1".to_string()),
             name: "spec".to_string(),
@@ -901,6 +902,7 @@ mod tests {
         // never deletes (spec C2: "standalone specs ... are NOT deleted"),
         // so it must not inflate the printed plan either.
         db.insert_graph_spec(&crate::domain::graphs::GraphSpec {
+            intent: None,
             id: "spec-standalone".to_string(),
             graph_id: None,
             name: "standalone".to_string(),
@@ -1035,6 +1037,7 @@ mod tests {
         db.insert_graph(&make_graph("graph-c", workdir, GraphStatus::Completed))
             .unwrap();
         let spec = crate::domain::graphs::GraphSpec {
+            intent: None,
             id: "spec-c".to_string(),
             graph_id: Some("graph-c".to_string()),
             name: "spec".to_string(),
@@ -1341,6 +1344,7 @@ mod tests {
         let doomed_spec_id = "spec-p-1";
         let safe_spec_id = "spec-p-2";
         db.insert_graph_spec(&crate::domain::graphs::GraphSpec {
+            intent: None,
             id: doomed_spec_id.to_string(),
             graph_id: Some("graph-p".to_string()),
             name: "d".to_string(),
@@ -1365,6 +1369,7 @@ mod tests {
         })
         .unwrap();
         db.insert_graph_spec(&crate::domain::graphs::GraphSpec {
+            intent: None,
             id: safe_spec_id.to_string(),
             graph_id: None,
             name: "s".to_string(),

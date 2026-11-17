@@ -580,6 +580,12 @@ pub struct GraphSpec {
     pub graph_id: Option<String>,
     pub name: String,
     pub description: Option<String>,
+    /// A short, human-approved sentence of what this spec must achieve. Kept
+    /// apart from `description` so the adversarial spec review has one stable
+    /// statement to judge the spec against. `None` on every legacy row and on
+    /// specs created while `spec_review.enabled` is off.
+    #[serde(default)]
+    pub intent: Option<String>,
     pub position: i64,
     pub parallelizable: bool,
     pub status: GraphSpecStatus,

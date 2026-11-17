@@ -561,6 +561,7 @@ async fn no_verdict_block_is_resumable_via_retry_current_node() {
     db.update_graph_spec_details(&designer_id, Some("Designer"), None, Some(1), None)
         .unwrap();
     let implementer = GraphSpec {
+        intent: None,
         graph_id: Some(graph_id.clone()),
         name: "Implementer".to_string(),
         ..standalone_spec("spec-implementer", 2)

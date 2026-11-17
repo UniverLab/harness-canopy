@@ -234,6 +234,7 @@ mod tests {
 
     fn sample_spec(id: &str, graph_id: &str) -> GraphSpec {
         GraphSpec {
+            intent: None,
             id: id.to_string(),
             graph_id: Some(graph_id.to_string()),
             name: "refs-spec".to_string(),

@@ -390,6 +390,7 @@ fn create_target_graph(db: &Database, id: &str, name: &str) -> Result<String> {
     db.insert_graph_node(&node)?;
     // Add a spec so the graph has something to run.
     let spec = crate::domain::graphs::GraphSpec {
+        intent: None,
         id: format!("{id}-spec"),
         graph_id: Some(id.to_string()),
         name: "Spec".to_string(),
@@ -519,6 +520,7 @@ fn setup_graph_hook_source(
     db.insert_graph_node(&node)?;
     // Add a spec so the graph has something to run.
     let spec = crate::domain::graphs::GraphSpec {
+        intent: None,
         id: format!("{source_id}-spec"),
         graph_id: Some(source_id.to_string()),
         name: "Spec".to_string(),
@@ -742,6 +744,7 @@ fn setup_decision_cli_home(clis: &[(&str, &str, &str)]) -> tempfile::TempDir {
 /// A minimal `GraphSpec` for decision router tests.
 fn decision_spec(spec_id: &str) -> GraphSpec {
     GraphSpec {
+        intent: None,
         id: spec_id.to_string(),
         graph_id: None,
         name: format!("Spec {spec_id}"),

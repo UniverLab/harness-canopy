@@ -301,6 +301,7 @@ mod tests {
         // through the same roster filter as the graph-level one, so a
         // roster that would stop it must count toward `would_fail` too.
         db.insert_graph_spec(&crate::domain::graphs::GraphSpec {
+            intent: None,
             id: "spec-1".to_string(),
             graph_id: Some("g1".to_string()),
             name: "Spec One".to_string(),

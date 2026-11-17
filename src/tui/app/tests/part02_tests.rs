@@ -312,6 +312,7 @@ fn duplicate_selected_graph_node_copies_config_and_opens_editor() {
     db.insert_graph(&make_graph("graph-1", "Graph", GraphStatus::Draft))
         .unwrap();
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
         id: "spec-a".to_string(),
         graph_id: Some("graph-1".to_string()),
         name: "spec-a".to_string(),
@@ -1219,6 +1220,7 @@ fn save_graph_editor_dialog_rejects_unknown_config_key_in_node_config_mode() {
     })
     .unwrap();
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
         id: "cs1".to_string(),
         graph_id: Some("clp1".to_string()),
         name: "spec one".to_string(),

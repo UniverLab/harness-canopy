@@ -321,6 +321,9 @@ fn insert_graph_edge_tx(tx: &Transaction, edge: &GraphEdge) -> Result<()> {
 }
 
 #[cfg(test)]
+mod spec_intent_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::domain::graph_transfer::{

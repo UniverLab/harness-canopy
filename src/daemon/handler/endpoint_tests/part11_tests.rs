@@ -427,6 +427,7 @@ async fn idea_placeholder_spec_is_absent_from_spec_listings() {
     // to carry `{{spec_content}}`: blank name, idea text in the
     // description. It is engine bookkeeping and must not surface as work.
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
         id: uuid::Uuid::new_v4().to_string(),
         graph_id: Some(lp.id.clone()),
         name: String::new(),
@@ -506,6 +507,7 @@ async fn graph_run_refuses_blank_bound_spec_and_leaves_graph_untouched() {
     let lp = insert_test_graph(&db, dir.path());
     let blank_id = uuid::Uuid::new_v4().to_string();
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
         id: blank_id.clone(),
         graph_id: Some(lp.id.clone()),
         name: String::new(),
@@ -619,6 +621,7 @@ async fn graph_run_with_queue_ignores_unrelated_blank_bound_spec() {
     let (dir, db, handler) = endpoint_test_handler();
     let lp = insert_test_graph(&db, dir.path());
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
         id: uuid::Uuid::new_v4().to_string(),
         graph_id: Some(lp.id.clone()),
         name: String::new(),
@@ -644,6 +647,7 @@ async fn graph_run_with_queue_ignores_unrelated_blank_bound_spec() {
     .unwrap();
 
     let member = GraphSpec {
+        intent: None,
         id: uuid::Uuid::new_v4().to_string(),
         graph_id: None,
         name: "Queue Member".to_string(),
@@ -707,6 +711,7 @@ async fn graph_preflight_warns_for_blank_bound_spec_without_probe_targets() {
     let lp = insert_test_graph(&db, dir.path());
     let blank_id = uuid::Uuid::new_v4().to_string();
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
         id: blank_id.clone(),
         graph_id: Some(lp.id.clone()),
         name: String::new(),
@@ -773,6 +778,7 @@ async fn graph_preflight_includes_spec_warnings_alongside_probes() {
     let lp = insert_test_graph(&db, dir.path());
     let blank_id = uuid::Uuid::new_v4().to_string();
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
         id: blank_id.clone(),
         graph_id: Some(lp.id.clone()),
         name: String::new(),

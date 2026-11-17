@@ -765,6 +765,7 @@ async fn graph_b_full_lifecycle_never_touches_graph_a_in_a_different_workdir() {
         require_spec_type: false,
     };
     let spec_a = GraphSpec {
+        intent: None,
         id: "spec-graph-a".to_string(),
         graph_id: Some(graph_a.id.clone()),
         name: "Spec A".to_string(),
@@ -853,6 +854,7 @@ async fn graph_b_full_lifecycle_never_touches_graph_a_in_a_different_workdir() {
         require_spec_type: false,
     };
     let spec_b = GraphSpec {
+        intent: None,
         id: "spec-graph-b".to_string(),
         graph_id: Some(graph_b.id.clone()),
         name: "Spec B".to_string(),
@@ -1007,6 +1009,7 @@ async fn pausing_graph_b_never_signals_or_mutates_graph_a_run() {
         require_spec_type: false,
     };
     let spec_a = GraphSpec {
+        intent: None,
         id: "spec-signal-a".to_string(),
         graph_id: Some(graph_a.id.clone()),
         name: "Spec A".to_string(),
@@ -1089,6 +1092,7 @@ async fn pausing_graph_b_never_signals_or_mutates_graph_a_run() {
         require_spec_type: false,
     };
     let spec_b = GraphSpec {
+        intent: None,
         id: "spec-signal-b".to_string(),
         graph_id: Some(graph_b.id.clone()),
         name: "Spec B".to_string(),

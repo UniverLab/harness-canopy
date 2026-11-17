@@ -166,6 +166,7 @@ fn render_agent_prompt_preserves_tagged_spec_body_verbatim() {
     };
     let tagged_body = "<spec>\n  <objective>Ship it.</objective>\n  <functional_requirements>Does thing.</functional_requirements>\n  <non_functional_requirements>Fast.</non_functional_requirements>\n  <constraints>None.</constraints>\n  <guidelines>Style.</guidelines>\n  <in_scope>This.</in_scope>\n  <out_of_scope>Nothing.</out_of_scope>\n</spec>";
     let spec = GraphSpec {
+        intent: None,
         id: "spec".to_string(),
         graph_id: Some("wf".to_string()),
         name: "Spec".to_string(),
@@ -476,6 +477,7 @@ async fn graph_hook_depth_cap_refuses_second_launch() {
     db.insert_graph_node(&b_node).unwrap();
     // Add a spec so graph B has something to run.
     let b_spec = crate::domain::graphs::GraphSpec {
+        intent: None,
         id: "graph-b-spec".to_string(),
         graph_id: Some("graph-b".to_string()),
         name: "Spec".to_string(),
@@ -788,6 +790,7 @@ fn graph_hook_spec_is_queryable() {
     };
     db.insert_graph(&lp).unwrap();
     let spec = crate::domain::graphs::GraphSpec {
+        intent: None,
         id: "test-spec".to_string(),
         graph_id: Some("test-graph".to_string()),
         name: "Spec".to_string(),
@@ -869,6 +872,7 @@ async fn graph_hook_runs_on_completion() {
 
     // Verify spec exists before running
     let spec = crate::domain::graphs::GraphSpec {
+        intent: None,
         id: "spec-compl".to_string(),
         graph_id: Some("source-compl".to_string()),
         name: "Spec".to_string(),

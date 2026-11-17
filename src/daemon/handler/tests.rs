@@ -117,7 +117,7 @@ const EXPECTED_TOOL_ROWS: &[&str] = &[
     "agent_edit|9f9d97739be8934e8023b86d6ed35d9acf9209d18d42a8cafd8ffc99154965cf|eb0e7e1757828c2db9669176f36f437dc1cfc1797eacee875d69ff61ae80b271",
     "agent_report|998eb6d649fe53809656f0a4db81248aa0feb0b045f957686d917fbcfe289224|f40f986d373435cf862cf0e260812d92f78eaf4bfcfbe98ffce5d724a1685d54",
     "catalogue|5084e83660b0e00c3592158b31c8407706d10cbd8a3387e08c927a7536f98712|54b0d07012084989914328de42d7bddc35ad16ebe2f14dec04aecbdaa7292a51",
-    "config|9f0c345de8207c8c734ceec7e64bcc92f46e237d6e7ac57ac80d6b90a00622fc|9c61b49e03def9786bddde303a06fa926bc59590ec475298d0422eb795af9d4b",
+    "config|eb46212a6d527f698017c0360b099c7ae3d4b01e690fcd3c879ab8764368ee63|9c61b49e03def9786bddde303a06fa926bc59590ec475298d0422eb795af9d4b",
     "crew|886ff7c084a09bd0b3b7927447619bde9e91ee322e31e828a10ca6b14630d563|88f5e7ff9d44dbf81716852b19df5fe0764a848aab616b3cb7ea8bb2f5c2d113",
     "get_tools|1e7a235797cc4043ef72fbe9821989c7fdf78c19dfb4afa2f97dec22b28ad2b9|8d1085667f9f7b280bc979a52911ce87934bee573c8dd9a35175afad22365c8f",
     "graph|d430e133b8f3fb2f69fa901969a339a14191f3cd2da796bfccd5887a44709d82|6023bdf911453dad5fc39d06fb2dcec120580102864eb673be3e0952fdba2921",
@@ -149,12 +149,13 @@ const EXPECTED_TOOL_ROWS: &[&str] = &[
     "session_send_file|9424b037dd8df451162063514cb2d43a4892d1d77cf0a04fe208a1d1f9088978|35ce6f69b6ea1f5b513740aab091a7b4bf3afd859803470f1a93a631f735142d",
     "skill|0f77b55bf9e5bff59383d9d96a628615e4ce85cb0f780ddff691be95175a2943|c1849c347bfba170073e7b6f79a3f0a07f2db09cad05d4c0fc51319a6c05a6ae",
     "spec|3a76fcb9ac04bc4e33bf9e92b34c5a16ab77d4f9fd73e8411eba177341ab04ea|95a2a14538394eafccf45e3054aaffd06ee7ff0573212da02bc7649d35fd1620",
-    "spec_edit|ad4f5ead3b9a869f25be22ec633cd75f6d09d7d13d54379040e108fe19c046b6|07d233d7c7bcbebdbc3c12c7215abd398ee6f15a0ea6f7d3a5103ad3a988b294",
+    "spec_edit|fd2d292b6beb651392ebc9de3daedf958c83a603362ef6aba11817690bb7327c|cee26178c80807163a0ce626ff038aedba54299ec56a29c19b69db9ba9e11394",
     "subagent|5e0c38144198037deab293244b2839d8b17dad4cd1afc1f9ea76952712e95657|36b2b21117d562b09f957fa0f6c4a5c85d5dbebec594923718c3dd8636ac4e87",
 ];
 
 fn spec_with_status(graph_id: &str, id: &str, position: i64, status: GraphSpecStatus) -> GraphSpec {
     GraphSpec {
+        intent: None,
         id: id.to_string(),
         graph_id: Some(graph_id.to_string()),
         name: id.to_string(),
@@ -222,6 +223,7 @@ fn two_routes_json() -> serde_json::Value {
 
 fn standalone_spec(id: &str) -> GraphSpec {
     GraphSpec {
+        intent: None,
         id: id.to_string(),
         graph_id: None,
         name: id.to_string(),
@@ -616,6 +618,7 @@ fn u10_source_ensemble(
 /// off it without needing a full `Graph` row too.
 fn insert_standalone_spec(db: &Database, id: &str) {
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
         id: id.to_string(),
         graph_id: None,
         name: id.to_string(),

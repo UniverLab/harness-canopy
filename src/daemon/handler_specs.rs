@@ -6,7 +6,8 @@ use crate::daemon::handler_formatting::{
     build_id_result, build_spec_update_response, internal_error,
 };
 use crate::daemon::handler_specs_helpers::{
-    spec_create_result, spec_summary_json, validate_at_least_one_bool,
+    normalize_spec_intent, spec_create_result, spec_review_enabled, spec_summary_json,
+    validate_at_least_one_bool, INTENT_REQUIRED,
 };
 use crate::daemon::handler_validate::{
     resolve_prefix_or_error, validate_non_empty, validate_position_conflict,
@@ -94,6 +95,7 @@ impl TaskTriggerHandler {
         }
 
         let spec = GraphSpec {
+            intent: None,
             id: uuid::Uuid::new_v4().to_string(),
             graph_id: Some(graph_id),
             name: naming.name.clone(),
@@ -281,6 +283,10 @@ impl TaskTriggerHandler {
         if let Err(error) = validate_spec_description_template(description) {
             return Ok(error_result(&error));
         }
+        let intent = match normalize_spec_intent(params.intent.as_deref(), spec_review_enabled()?) {
+            Ok(intent) => intent,
+            Err(e) => return Ok(error_result(&e)),
+        };
         let workdir = match params.workdir.as_deref().map(str::trim) {
             Some("") | None => None,
             Some(value) => {
@@ -308,6 +314,7 @@ impl TaskTriggerHandler {
             None => None,
         };
         let spec = GraphSpec {
+            intent,
             id: uuid::Uuid::new_v4().to_string(),
             graph_id: None,
             name: naming.name.clone(),
@@ -458,6 +465,20 @@ impl TaskTriggerHandler {
             Some(None) => Some(None),
             None => None,
         };
+        // Some(..) means "write it" (an empty value clears the column);
+        // None means "leave it unchanged". While the review is on, an update
+        // that would leave the spec without an intent is refused.
+        let review_enabled = spec_review_enabled()?;
+        let update_intent = match params.intent.as_deref() {
+            Some(raw) => match normalize_spec_intent(Some(raw), review_enabled) {
+                Ok(intent) => Some(intent),
+                Err(e) => return Ok(error_result(&e)),
+            },
+            None if review_enabled && spec.intent.is_none() => {
+                return Ok(error_result(INTENT_REQUIRED))
+            }
+            None => None,
+        };
 
         self.apply_spec_type_update(&spec, &spec_id, &params, name)?;
 
@@ -473,6 +494,7 @@ impl TaskTriggerHandler {
                 params.spec_type.is_some(),
                 params.spec_scope.is_some(),
                 adopts_type_by_name,
+                update_intent.is_some(),
             ],
             "spec_edit update",
         ) {
@@ -491,6 +513,11 @@ impl TaskTriggerHandler {
                 workdir,
             )
             .map_err(internal_error)?;
+        if let Some(intent) = &update_intent {
+            self.db
+                .set_graph_spec_intent(&spec_id, intent.as_deref())
+                .map_err(internal_error)?;
+        }
 
         Ok(build_spec_update_response(&spec_id))
     }

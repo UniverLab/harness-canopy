@@ -599,6 +599,7 @@ fn render_agent_prompt_refuses_template_with_unbindable_placeholder() {
         require_spec_type: false,
     };
     let spec = GraphSpec {
+        intent: None,
         id: "spec".to_string(),
         graph_id: Some("wf".to_string()),
         name: "Spec".to_string(),
@@ -686,6 +687,7 @@ fn render_agent_prompt_spawns_with_an_escaped_unknown_marker() {
         require_spec_type: false,
     };
     let spec = GraphSpec {
+        intent: None,
         id: "spec".to_string(),
         graph_id: Some("wf".to_string()),
         name: "Spec".to_string(),
@@ -774,6 +776,7 @@ fn render_agent_prompt_escape_wins_over_a_real_binding() {
         require_spec_type: false,
     };
     let spec = GraphSpec {
+        intent: None,
         id: "spec".to_string(),
         graph_id: Some("wf".to_string()),
         name: "Spec".to_string(),
@@ -870,6 +873,7 @@ fn escaped_output_marker_stays_literal_while_unescaped_still_substitutes() {
         require_spec_type: false,
     };
     let spec = GraphSpec {
+        intent: None,
         id: "spec".to_string(),
         graph_id: Some(lp.id.clone()),
         name: "Spec".to_string(),
@@ -1001,6 +1005,7 @@ fn render_agent_prompt_substitutes_named_output_marker() {
         require_spec_type: false,
     };
     let spec = GraphSpec {
+        intent: None,
         id: "spec".to_string(),
         graph_id: Some(lp.id.clone()),
         name: "Spec".to_string(),
@@ -1091,6 +1096,7 @@ fn render_agent_prompt_accepts_output_marker_without_refusing() {
         require_spec_type: false,
     };
     let spec = GraphSpec {
+        intent: None,
         id: "spec".to_string(),
         graph_id: Some(lp.id.clone()),
         name: "Spec".to_string(),
@@ -1171,6 +1177,7 @@ fn previous_feedback_still_works_without_named_outputs() {
         require_spec_type: false,
     };
     let spec = GraphSpec {
+        intent: None,
         id: "spec".to_string(),
         graph_id: Some(lp.id.clone()),
         name: "Spec".to_string(),

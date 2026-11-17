@@ -284,6 +284,7 @@ fn map_graph_spec_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GraphSpec> {
             .and_then(|s| SpecType::parse(&s)),
         spec_scope: row.get(19)?,
         spec_code: row.get(20)?,
+        intent: row.get(21)?,
     })
 }
 
@@ -819,6 +820,7 @@ mod tests {
         let lp = sample_graph("graph-1");
         db.insert_graph(&lp).unwrap();
         let spec = GraphSpec {
+            intent: None,
             id: "spec-1".to_string(),
             graph_id: Some(lp.id.clone()),
             name: "Spec".to_string(),
@@ -893,6 +895,7 @@ mod tests {
                   workdir: Option<&str>|
          -> GraphSpec {
             GraphSpec {
+                intent: None,
                 id: id.to_string(),
                 graph_id: graph_id.map(str::to_string),
                 name: id.to_string(),
@@ -997,6 +1000,7 @@ mod tests {
         use crate::domain::graphs::GraphRunStatus;
         db.insert_graph(&sample_graph("tail-graph")).unwrap();
         db.insert_graph_spec(&crate::domain::graphs::GraphSpec {
+            intent: None,
             id: "tail-spec".to_string(),
             graph_id: Some("tail-graph".to_string()),
             name: "Tail spec".to_string(),
@@ -1085,6 +1089,7 @@ mod tests {
         })
         .unwrap();
         db.insert_graph_spec(&crate::domain::graphs::GraphSpec {
+            intent: None,
             id: spec_id.to_string(),
             graph_id: Some(graph_id.to_string()),
             name: "Tail spec".to_string(),
@@ -1281,6 +1286,7 @@ mod tests {
         let db = test_db();
         db.insert_graph(&sample_graph("atomic-graph")).unwrap();
         db.insert_graph_spec(&GraphSpec {
+            intent: None,
             id: "atomic-spec".to_string(),
             graph_id: Some("atomic-graph".to_string()),
             name: "Atomic spec".to_string(),

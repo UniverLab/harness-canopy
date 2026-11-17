@@ -37,6 +37,7 @@ fn insert_second_graph(
         hooks: std::collections::BTreeMap::new(),
     })?;
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
         id: spec_id.clone(),
         graph_id: Some(graph_id.clone()),
         name: format!("Spec {tag}"),

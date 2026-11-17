@@ -147,6 +147,7 @@ async fn fire_due_autorun_graphs_resets_failed_graph_through_shared_path_and_res
     })
     .unwrap();
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
             id: "spec-1".to_string(),
             graph_id: Some(graph_id.clone()),
             name: "Spec 1".to_string(),
@@ -259,6 +260,7 @@ async fn fire_due_autorun_graphs_preserves_admin_skipped_specs() {
     .unwrap();
     // One failed spec — will be reset and resumed.
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
             id: "spec-failed".to_string(),
             graph_id: Some(graph_id.clone()),
             name: "Failed spec".to_string(),
@@ -286,6 +288,7 @@ async fn fire_due_autorun_graphs_preserves_admin_skipped_specs() {
         .unwrap();
     // One admin-skipped spec — must survive the autorun reset.
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
         id: "spec-admin-skipped".to_string(),
         graph_id: Some(graph_id.clone()),
         name: "Admin skipped spec".to_string(),
@@ -396,6 +399,7 @@ async fn fire_due_autorun_graphs_fires_reconciliation_paused_graph() {
     db.insert_graph(&lp).unwrap();
 
     let spec = crate::domain::graphs::GraphSpec {
+        intent: None,
             id: "spec-reconciled".to_string(),
             graph_id: Some(graph_id.clone()),
             name: "Spec 1".to_string(),
@@ -597,6 +601,7 @@ async fn fire_due_autorun_graphs_never_fires_a_c19_blocked_graph() {
 
     let spec_id = "c19-blocked-spec".to_string();
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
         id: spec_id.clone(),
         graph_id: Some(graph_id.clone()),
         name: "Spec".to_string(),
@@ -713,6 +718,7 @@ async fn fire_due_autorun_graphs_resumes_same_queue_after_failed_run() {
     .unwrap();
 
     let standalone = |id: &str, position: i64, status: GraphSpecStatus| GraphSpec {
+        intent: None,
         id: id.to_string(),
         graph_id: None,
         name: id.to_string(),
@@ -840,6 +846,7 @@ async fn fire_due_autorun_graphs_refuses_dirty_predecessor_and_stays_cleared() {
     // A predecessor spec, standalone, tagged with the shared workdir,
     // left `failed` by an earlier (unrelated) attempt.
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
         id: "pred-spec".to_string(),
         graph_id: None,
         name: "Predecessor".to_string(),
@@ -1048,6 +1055,7 @@ async fn fire_due_auto_continue_graphs_resumes_paused_graph_without_reset_or_rel
     })
     .unwrap();
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
             id: "spec-1".to_string(),
             graph_id: Some(graph_id.clone()),
             name: "Spec 1".to_string(),
@@ -1170,6 +1178,7 @@ async fn fire_due_auto_continue_graphs_applies_skip_next_spec_action() {
     })
     .unwrap();
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
         id: "spec-skip".to_string(),
         graph_id: Some(graph_id.clone()),
         name: "Spec skip".to_string(),

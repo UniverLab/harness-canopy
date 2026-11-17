@@ -260,6 +260,10 @@ pub struct SpecCreateParams {
     /// SPECCODE: optional scope of that type; overridable even when the
     /// scope was parsed from a conventional title.
     pub spec_scope: Option<String>,
+    /// A short (max 500 characters) human-approved sentence of what this spec
+    /// must achieve. Optional while `spec_review.enabled` is false; required
+    /// while it is true.
+    pub intent: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -301,6 +305,11 @@ pub struct SpecUpdateParams {
     /// SPECCODE: set (or clear with null) the scope part of the commit
     /// message.
     pub spec_scope: Option<Option<String>>,
+    /// Set the short human-approved sentence of what this spec must achieve;
+    /// an empty string clears it. Omit to leave it unchanged. Required by
+    /// `spec_review.enabled`: an update that would leave the spec without an
+    /// intent is refused while the review is on.
+    pub intent: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]

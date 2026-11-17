@@ -71,6 +71,7 @@ fn make_backlog_spec(
     workdir: Option<&str>,
 ) -> crate::domain::graphs::GraphSpec {
     crate::domain::graphs::GraphSpec {
+        intent: None,
         id: id.to_string(),
         graph_id: None,
         name: name.to_string(),
@@ -204,6 +205,7 @@ fn seed_plain_edge_graph(db: &Database) {
     })
     .unwrap();
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
         id: "ps1".to_string(),
         graph_id: Some("plp1".to_string()),
         name: "spec one".to_string(),
@@ -299,6 +301,7 @@ fn seed_router_graph(db: &Database) {
     })
     .unwrap();
     db.insert_graph_spec(&GraphSpec {
+        intent: None,
         id: "rs1".to_string(),
         graph_id: Some("rlp1".to_string()),
         name: "spec one".to_string(),

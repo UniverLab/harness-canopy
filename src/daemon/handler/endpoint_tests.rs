@@ -423,6 +423,7 @@ fn insert_test_graph(db: &Database, workdir: &std::path::Path) -> Graph {
 
 fn insert_test_spec(db: &Database, graph_id: &str, position: i64) -> GraphSpec {
     let spec = GraphSpec {
+        intent: None,
         id: uuid::Uuid::new_v4().to_string(),
         graph_id: Some(graph_id.to_string()),
         name: "Test Spec".to_string(),
@@ -457,6 +458,7 @@ fn insert_named_spec(
     status: GraphSpecStatus,
 ) -> GraphSpec {
     let spec = GraphSpec {
+        intent: None,
         id: uuid::Uuid::new_v4().to_string(),
         graph_id: Some(graph_id.to_string()),
         name: name.to_string(),
@@ -986,6 +988,7 @@ async fn upsert_large_intel_node(
 
 fn insert_standalone_spec(db: &Database, name: &str) -> GraphSpec {
     let spec = GraphSpec {
+        intent: None,
         id: uuid::Uuid::new_v4().to_string(),
         graph_id: None,
         name: name.to_string(),

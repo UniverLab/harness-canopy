@@ -331,6 +331,7 @@ async fn e2big_resilience_path_elision_stdin_and_spawn_failure() {
         require_spec_type: false,
     };
     let spec = GraphSpec {
+        intent: None,
         id: "spec".to_string(),
         graph_id: Some("wf".to_string()),
         name: "Spec".to_string(),

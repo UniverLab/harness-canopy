@@ -535,6 +535,7 @@ mod tests {
         })
         .unwrap();
         db.insert_graph_spec(&GraphSpec {
+            intent: None,
             id: "spec-tail".to_string(),
             graph_id: Some("lp-tail".to_string()),
             name: "Spec".to_string(),
@@ -687,6 +688,7 @@ mod tests {
         })
         .unwrap();
         db.insert_graph_spec(&GraphSpec {
+            intent: None,
             id: spec_id.to_string(),
             graph_id: Some("lp-pane".to_string()),
             name: "Pane spec".to_string(),
