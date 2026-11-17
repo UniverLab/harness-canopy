@@ -243,6 +243,8 @@ impl GraphEngine {
                 shutdown,
                 canopy_dir,
                 scheduled_prompt_notify,
+                #[cfg(test)]
+                panic_at_dispatch: None,
             };
             if let Err(error) = engine
                 .run_graph(

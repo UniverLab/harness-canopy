@@ -128,6 +128,10 @@ impl GraphEngine {
         idea: Option<String>,
         sandbox: Option<Sandbox>,
     ) -> Result<()> {
+        #[cfg(test)]
+        if let Some(panic_at_dispatch) = self.panic_at_dispatch {
+            panic_at_dispatch();
+        }
         let is_resume = mode.is_resume;
         let directed = mode.directed.as_ref();
         let Some(lp) = self.db.get_graph(&graph_id)? else {

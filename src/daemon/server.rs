@@ -34,6 +34,7 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
     crate::domain::notification::register_aumid();
     crate::domain::notification::clear_stale_notifications();
     init_tracing();
+    super::panic_hook::install_panic_hook();
 
     // CB83: one instant per daemon process; every MCP session's handler
     // inherits it so `agent_status` Uptime is the daemon's age.
@@ -562,6 +563,7 @@ async fn terminate_all_running_node_processes_at_shutdown(db: &Database) {
 
 pub(crate) async fn run_stdio_server() -> Result<()> {
     init_tracing();
+    super::panic_hook::install_panic_hook();
     tracing::info!("Starting in stdio MCP transport mode");
 
     let data_dir = crate::ensure_data_dir()?;

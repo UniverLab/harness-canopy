@@ -82,6 +82,7 @@ pub(crate) mod models_cli;
 pub(crate) mod mutex_cli;
 pub(crate) mod node_cli;
 pub(crate) mod node_install;
+pub(crate) mod panic_hook;
 pub(crate) mod params;
 pub(crate) mod params_extract;
 pub(crate) mod probe;

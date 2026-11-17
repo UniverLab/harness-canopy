@@ -124,6 +124,8 @@ impl GraphEngine {
             shutdown: Arc::new(AtomicBool::new(false)),
             canopy_dir: crate::domain::prompts::canopy_dir(),
             scheduled_prompt_notify: Arc::new(Notify::new()),
+            #[cfg(test)]
+            panic_at_dispatch: None,
         }
     }
 
@@ -236,6 +238,10 @@ pub struct GraphEngine {
     /// Wakes the scheduler's scheduled-send delivery task after an
     /// interactive hook enqueues a send.
     scheduled_prompt_notify: Arc<Notify>,
+    /// Test-only hook called at the very start of every dispatch, letting a
+    /// test make a run panic and exercise `run_guarded`'s failure path.
+    #[cfg(test)]
+    pub(crate) panic_at_dispatch: Option<fn()>,
 }
 
 /// Where a spec's sequential graph cursor currently is: at a single ordinary
