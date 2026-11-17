@@ -272,6 +272,7 @@ mod tests {
     fn seed_graph(db: &Database) {
         use crate::domain::graphs::{Graph, GraphStatus};
         db.insert_graph(&Graph {
+            trigger_prompt: None,
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,

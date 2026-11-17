@@ -715,6 +715,7 @@ fn report_orphan_joins_flags_orphans_and_stays_silent_when_healthy() {
 
     let db = Database::new(&database_path(&canopy_dir)).unwrap();
     db.insert_graph(&Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,

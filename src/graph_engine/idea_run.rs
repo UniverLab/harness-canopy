@@ -42,6 +42,34 @@ impl GraphEngine {
         Ok(!self.db.list_graph_nodes_for_graph(&lp.id)?.is_empty())
     }
 
+    /// The idea a spec-less cron graph runs on each tick: its
+    /// `trigger_prompt`, when the graph has a cron trigger and no non-blank
+    /// bound spec (`None` otherwise, so a graph with real specs keeps today's
+    /// behaviour and never turns its prompt into an idea). Also what
+    /// `graph_control run` uses when called without an `idea`/`queue_id`.
+    pub(crate) fn trigger_prompt_idea(&self, lp: &Graph) -> Result<Option<String>> {
+        let Some(prompt) = lp
+            .trigger_prompt
+            .as_deref()
+            .map(str::trim)
+            .filter(|prompt| !prompt.is_empty())
+        else {
+            return Ok(None);
+        };
+        if !lp.is_cron() {
+            return Ok(None);
+        }
+        let has_real_spec = self
+            .db
+            .list_graph_specs(&lp.id)?
+            .iter()
+            .any(|spec| !spec.name.trim().is_empty());
+        if has_real_spec {
+            return Ok(None);
+        }
+        Ok(Some(prompt.to_string()))
+    }
+
     /// The idea this dispatch runs with: an explicit one always wins;
     /// otherwise a resume/directed dispatch may fall back to the idea the
     /// graph last ran with — but only when `lp` really is idea-driven, so a

@@ -8,6 +8,7 @@ use super::{
 
 fn graph_with_trigger(status: GraphStatus, trigger: Option<super::Trigger>) -> super::Graph {
     super::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,

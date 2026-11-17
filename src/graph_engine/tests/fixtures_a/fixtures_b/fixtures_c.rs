@@ -354,6 +354,7 @@ exit 0
 /// Helper: create a second graph with a simple graph and spec, returning its id.
 fn create_target_graph(db: &Database, id: &str, name: &str) -> Result<String> {
     let lp = crate::domain::graphs::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -417,6 +418,7 @@ fn create_target_graph(db: &Database, id: &str, name: &str) -> Result<String> {
 
 fn create_target_graph_no_specs(db: &Database, id: &str, name: &str) -> Result<String> {
     let lp = crate::domain::graphs::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -481,6 +483,7 @@ fn setup_graph_hook_source(
     let mut hooks = std::collections::BTreeMap::new();
     hooks.insert(GraphHookEvent::OnCompleted, vec![hook]);
     let lp = crate::domain::graphs::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -767,6 +770,7 @@ fn decision_spec(spec_id: &str) -> GraphSpec {
 fn decision_graph() -> crate::domain::graphs::Graph {
     use std::collections::BTreeMap;
     crate::domain::graphs::Graph {
+        trigger_prompt: None,
         id: "graph-decision-test".to_string(),
         name: "decision-test-graph".to_string(),
         description: None,
@@ -814,4 +818,5 @@ mod part22_tests;
 mod part23_tests;
 mod part24_tests;
 mod part25_tests;
+mod part26_tests;
 mod value_router_tests;

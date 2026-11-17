@@ -124,7 +124,7 @@ const EXPECTED_TOOL_ROWS: &[&str] = &[
     "graph_complete_node|cd65852e0bb702902c8fc61858fb514f0f75d749de39d9014f2ae037d39a5a24|174f4383731a376d4ffd07080c26cbc61bd66839093939ea3f6defaebd64cd5e",
     "graph_control|c5d15f5253e8a81c6a2a6510e9994bb11be889d767fdfd943b9b80219344f6ee|5c16b4e016c6d8de3d68dabd607e3a29cc777b8a2a6f11b5504d74e61113ea12",
     "graph_edge|dc837b1ca327d911a1f60b27d4546747dcb70411b35c7a51d4954256e73987de|78b3584a55307259ba886f8371e49efad61a12b996a821c014343fd545196f47",
-    "graph_edit|7bdde9172acea2efe7c1d82ae46a829552eb3c844d14a15679c0e48eb40092b7|1c0516130bf2b5aa74bc237df37293c53c33b8daca0c68c7c4f1957619f641b0",
+    "graph_edit|8249beac55595850ee6e3331bfe612da04fcd03e6b367a2e0606e3ce5d416ee9|fe818b3aea21d24f7df037ab64f7178ee8619fe4bd033c8b98703796c3db83fc",
     "graph_ensemble|de9b6ae3f76602a7e5b1f8dfc1dbd36a127265dba6149340b3fe1710ee052ec7|3baf8f276e40a612e23cac47960df84a6949236c21f36f07521560d9894d7974",
     "graph_node|7fce2b505b0d7e9dc1256d68c5ded89516a89bbbbcd5ea128cc35d360793141c|2216ae95d00d2978c711101c9113ed1051d4691fa6a6bfea8bff67260a71dd1d",
     "graph_report_blocker|0af53e5791486ff4aacdfd49ff7e2a12171ff71ba4825fe03147683c8bea8d95|55366b14da2aae0cf6af2fb6f92900d8db343c7051e7d01dc025f8196b8bf599",
@@ -184,6 +184,7 @@ fn graph_reset_fixture(status: GraphStatus) -> (tempfile::TempDir, Database, Str
     let db = Database::new(&dir.path().join("test.db")).unwrap();
     let graph_id = "graph-reset-test".to_string();
     db.insert_graph(&Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -341,6 +342,7 @@ fn interrupted_spec(id: &str) -> GraphSpec {
 /// A minimal graph row, needed only to satisfy `graph_runs.graph_id`'s FK.
 fn insert_test_graph(db: &Database, id: &str) {
     db.insert_graph(&Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -415,6 +417,7 @@ fn reported_run_fixture() -> (tempfile::TempDir, Database) {
 /// graph or standing alone as a queue member.
 fn cb30_test_graph(id: &str, status: GraphStatus) -> Graph {
     Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -496,6 +499,7 @@ fn queue_driven_test_db() -> (tempfile::TempDir, Database) {
 
 fn autorun_test_graph(graph_id: &str, workdir: &str, status: GraphStatus) -> Graph {
     Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -641,6 +645,7 @@ fn insert_standalone_spec(db: &Database, id: &str) {
 
 fn make_graph_with_trigger(trigger: Option<Trigger>) -> Graph {
     Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,

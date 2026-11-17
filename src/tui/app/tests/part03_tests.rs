@@ -246,6 +246,7 @@ fn graph_live_enter_seeds_from_most_recent_run_on_finished_graph() {
     };
     let db = test_db();
     db.insert_graph(&Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,

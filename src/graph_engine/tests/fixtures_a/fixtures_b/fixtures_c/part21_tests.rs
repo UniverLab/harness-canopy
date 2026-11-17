@@ -482,8 +482,13 @@ async fn a_pending_bound_spec_is_never_reported_as_a_completed_graph() {
         is_resume: false,
         directed: None,
         claimed_at,
+        idle_run: false,
+        run_activity: RunActivity::default(),
     };
-    engine.finish_dispatch(&ctx, None, None, &[]).await.unwrap();
+    engine
+        .finish_dispatch(&ctx, None, None, &[], false, false)
+        .await
+        .unwrap();
 
     let lp = db.get_graph(&graph_id).unwrap().unwrap();
     assert_eq!(
@@ -559,8 +564,13 @@ async fn the_completion_message_never_reports_fewer_done_than_total() {
         is_resume: false,
         directed: None,
         claimed_at: chrono::Utc::now(),
+        idle_run: false,
+        run_activity: RunActivity::default(),
     };
-    engine.finish_dispatch(&ctx, None, None, &[]).await.unwrap();
+    engine
+        .finish_dispatch(&ctx, None, None, &[], false, false)
+        .await
+        .unwrap();
 
     let messages = activity_messages(&db, &workdir);
     assert_eq!(

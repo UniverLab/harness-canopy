@@ -36,7 +36,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, description, workdir, status, trigger_type, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start, require_spec_type
+            "SELECT id, name, description, workdir, status, trigger_type, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start, require_spec_type, trigger_prompt
               FROM graphs WHERE autorun_at IS NOT NULL",
         )?;
         let rows = stmt.query_map([], map_graph_row)?;
@@ -91,7 +91,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, description, workdir, status, trigger_type, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start, require_spec_type
+            "SELECT id, name, description, workdir, status, trigger_type, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start, require_spec_type, trigger_prompt
               FROM graphs WHERE auto_continue_at IS NOT NULL",
         )?;
         let rows = stmt.query_map([], map_graph_row)?;

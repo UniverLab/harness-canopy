@@ -71,6 +71,7 @@ fn make_run(id: &str, agent_id: &str, status: RunStatus) -> RunLog {
 
 fn make_graph(id: &str) -> Graph {
     Graph {
+        trigger_prompt: None,
         id: id.to_string(),
         name: format!("{id} name"),
         description: None,

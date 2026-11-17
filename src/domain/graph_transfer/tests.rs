@@ -4,6 +4,7 @@ use chrono::Utc;
 
 fn make_graph(name: &str) -> Graph {
     Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,

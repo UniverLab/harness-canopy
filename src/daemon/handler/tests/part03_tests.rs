@@ -220,6 +220,7 @@ fn graph_copy_node_auto_wires_error_edge_when_graph_has_infra_node() {
     let dir = tempdir().unwrap();
     let db = Database::new(&dir.path().join("t.db")).unwrap();
     db.insert_graph(&Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,

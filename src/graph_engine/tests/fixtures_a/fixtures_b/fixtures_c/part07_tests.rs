@@ -309,6 +309,7 @@ async fn e2big_resilience_path_elision_stdin_and_spawn_failure() {
 
     // 2. Render the full prompt — elision must survive composition.
     let lp = crate::domain::graphs::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,

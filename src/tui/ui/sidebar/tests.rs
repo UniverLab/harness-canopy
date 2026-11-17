@@ -74,6 +74,7 @@ fn render_sidebar_text_with(
         .unwrap();
     }
     db.insert_graph(&Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -193,6 +194,7 @@ fn render_automation_text_for(
 
 fn bare_graph(id: &str, status: GraphStatus) -> Graph {
     Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,

@@ -70,6 +70,7 @@ impl TaskTriggerHandler {
             idea,
             workdir,
         } = or_early_return!(validate_launch_inputs(&self.db, &graph_id, &params));
+        let idea = self.trigger_prompt_launch_idea(&lp, idea, queue_id)?;
         let () = or_early_return!(validate_launch_guards(
             &self.db,
             &graph_id,
@@ -82,13 +83,8 @@ impl TaskTriggerHandler {
         // instead of a misleading successful background-launch response. A
         // run with no bound specs and no queue is refused here — the TUI
         // must not manufacture a blank spec to fill the gap.
-        match self
-            .graph_engine
-            .empty_launch_check(&graph_id, queue_id, idea.as_deref())
-        {
-            Ok(Some(message)) => return Ok(error_result(&message)),
-            Ok(None) => {}
-            Err(e) => return Err(internal_error(e.to_string())),
+        if let Some(message) = self.refuse_empty_launch(&graph_id, queue_id, idea.as_deref())? {
+            return Ok(error_result(&message));
         }
 
         let (next_spec_preview, launch_warning) = or_early_return!(
@@ -141,6 +137,43 @@ impl TaskTriggerHandler {
             ),
             None => format!("Graph '{}' launched in background.{}", graph_id, report),
         }))
+    }
+
+    /// FR3: a spec-less cron graph with a `trigger_prompt` launches without
+    /// an `idea` or `queue_id`; the prompt is its idea. Every other launch
+    /// keeps whatever idea it was given.
+    fn trigger_prompt_launch_idea(
+        &self,
+        lp: &Graph,
+        idea: Option<String>,
+        queue_id: Option<&str>,
+    ) -> Result<Option<String>, McpError> {
+        if idea.is_some() || queue_id.is_some() {
+            return Ok(idea);
+        }
+        match self.graph_engine.trigger_prompt_idea(lp) {
+            Ok(prompt) => Ok(prompt.or(idea)),
+            Err(e) => Err(internal_error(e.to_string())),
+        }
+    }
+
+    /// (CB22) The synchronous empty-launch refusal: `Some(message)` when
+    /// the graph has no effective spec to run, `None` when the launch may
+    /// proceed. Surfaced here (as well as in the dispatch) so the caller
+    /// learns what is missing immediately.
+    fn refuse_empty_launch(
+        &self,
+        graph_id: &str,
+        queue_id: Option<&str>,
+        idea: Option<&str>,
+    ) -> Result<Option<String>, McpError> {
+        match self
+            .graph_engine
+            .empty_launch_check(graph_id, queue_id, idea)
+        {
+            Ok(message) => Ok(message),
+            Err(e) => Err(internal_error(e.to_string())),
+        }
     }
 }
 

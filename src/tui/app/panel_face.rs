@@ -633,6 +633,7 @@ mod tests {
 
     fn make_graph(id: &str, status: GraphStatus) -> Graph {
         Graph {
+            trigger_prompt: None,
             id: id.to_string(),
             name: format!("graph {id}"),
             description: None,

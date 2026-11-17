@@ -15,6 +15,7 @@ fn insert_second_graph(
     let graph_id = format!("graph-{tag}");
     let spec_id = format!("spec-{tag}");
     db.insert_graph(&Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,

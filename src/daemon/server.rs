@@ -999,6 +999,7 @@ mod hang_repro {
         let graph_id = "wf-hang-repro".to_string();
         let spec_id = "spec-hang-repro".to_string();
         db.insert_graph(&Graph {
+            trigger_prompt: None,
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,
@@ -1551,6 +1552,7 @@ mod stdio_startup_reconciliation_tests {
         std::fs::write(dir.path().join("truncated.rs"), "fn broken(").unwrap();
 
         let lp = Graph {
+            trigger_prompt: None,
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,

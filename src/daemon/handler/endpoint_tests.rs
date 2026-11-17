@@ -191,6 +191,7 @@ async fn build_simple_graph(
             description: Some("A shareable design".to_string()),
             workdir: workdir.to_string(),
             trigger: None,
+            trigger_prompt: None,
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
@@ -395,6 +396,7 @@ async fn preflight_warnings(
 
 fn insert_test_graph(db: &Database, workdir: &std::path::Path) -> Graph {
     let lp = Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -1096,6 +1098,7 @@ async fn build_crew_ensemble(
             description: None,
             workdir: workdir.to_string(),
             trigger: None,
+            trigger_prompt: None,
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
@@ -1188,6 +1191,7 @@ async fn build_literal_ensemble(
             description: None,
             workdir: workdir.to_string(),
             trigger: None,
+            trigger_prompt: None,
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
@@ -1331,3 +1335,4 @@ mod part18_tests;
 mod part19_tests;
 mod part20_tests;
 mod part21_tests;
+mod part22_tests;

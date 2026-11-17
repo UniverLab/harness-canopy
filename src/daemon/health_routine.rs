@@ -552,6 +552,7 @@ mod tests {
 
     fn make_running_graph(id: &str) -> Graph {
         Graph {
+            trigger_prompt: None,
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,

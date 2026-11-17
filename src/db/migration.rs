@@ -6,6 +6,7 @@ use super::{Database, SCHEMA_VERSION};
 mod late;
 mod mutex_schema;
 mod pause_kinds_schema;
+mod trigger_prompt_schema;
 
 impl Database {
     /// Refuses to open a database stamped with a schema version newer than

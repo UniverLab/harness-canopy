@@ -861,6 +861,7 @@ async fn graph_engine_all_bound_specs_already_done_completes_without_firing_hook
 #[tokio::test]
 async fn render_completion_hook_prompt_substitutes_all_placeholders() {
     let lp = crate::domain::graphs::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -904,6 +905,7 @@ async fn render_completion_hook_prompt_substitutes_all_placeholders() {
 #[tokio::test]
 async fn render_completion_hook_prompt_empty_specs_shows_none() {
     let lp = crate::domain::graphs::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,

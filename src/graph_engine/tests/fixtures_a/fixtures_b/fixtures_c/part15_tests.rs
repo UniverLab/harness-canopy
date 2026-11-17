@@ -577,6 +577,7 @@ async fn check_node_large_output_tail_snapshot_stays_bounded() {
 #[test]
 fn render_agent_prompt_refuses_template_with_unbindable_placeholder() {
     let lp = crate::domain::graphs::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -663,6 +664,7 @@ fn render_agent_prompt_refuses_template_with_unbindable_placeholder() {
 #[test]
 fn render_agent_prompt_spawns_with_an_escaped_unknown_marker() {
     let lp = crate::domain::graphs::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -750,6 +752,7 @@ fn render_agent_prompt_spawns_with_an_escaped_unknown_marker() {
 #[test]
 fn render_agent_prompt_escape_wins_over_a_real_binding() {
     let lp = crate::domain::graphs::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -845,6 +848,7 @@ fn escaped_output_marker_stays_literal_while_unescaped_still_substitutes() {
     assert_eq!(escaped, "Literal {{output:Architect}} here.");
 
     let lp = crate::domain::graphs::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -975,6 +979,7 @@ fn named_output_substitution_preserves_multiple_markers() {
 fn render_agent_prompt_substitutes_named_output_marker() {
     let dir = tempdir().unwrap();
     let lp = crate::domain::graphs::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -1064,6 +1069,7 @@ fn render_agent_prompt_substitutes_named_output_marker() {
 fn render_agent_prompt_accepts_output_marker_without_refusing() {
     let dir = tempdir().unwrap();
     let lp = crate::domain::graphs::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -1143,6 +1149,7 @@ fn render_agent_prompt_accepts_output_marker_without_refusing() {
 fn previous_feedback_still_works_without_named_outputs() {
     let dir = tempdir().unwrap();
     let lp = crate::domain::graphs::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,

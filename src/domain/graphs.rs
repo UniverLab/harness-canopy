@@ -375,6 +375,13 @@ pub struct Graph {
     /// agent. `None` means the graph is manual-only (`graph_control`).
     #[serde(default)]
     pub trigger: Option<Trigger>,
+    /// Optional prompt a cron tick feeds a spec-less graph as its idea: the
+    /// text `{{spec_content}}` renders for the run each tick launches. Part of
+    /// the trigger, not of the graph document — export omits it and import
+    /// never sets it, exactly like the trigger itself. `None` on manual/watch
+    /// graphs and on pre-migration rows; only meaningful with a cron trigger.
+    #[serde(default)]
+    pub trigger_prompt: Option<String>,
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,

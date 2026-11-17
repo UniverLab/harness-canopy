@@ -663,6 +663,7 @@ impl Database {
         Self::migrate_interactive_exit_detail_column(&conn)?;
         Self::migrate_agent_optin_columns(&conn)?;
         Self::migrate_graph_trigger_columns(&conn)?;
+        Self::migrate_graph_trigger_prompt_column(&conn)?;
         Self::migrate_graph_schedule_columns(&conn)?;
         Self::migrate_spec_start_columns(&conn)?;
         Self::migrate_graph_specs_nullable_graph_id(&conn)?;

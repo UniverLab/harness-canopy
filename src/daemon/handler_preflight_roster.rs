@@ -193,6 +193,7 @@ mod tests {
 
         let db = test_db();
         db.insert_graph(&crate::domain::graphs::Graph {
+            trigger_prompt: None,
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,

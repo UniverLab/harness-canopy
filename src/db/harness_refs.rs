@@ -209,6 +209,7 @@ mod tests {
 
     fn sample_graph(id: &str) -> Graph {
         Graph {
+            trigger_prompt: None,
             id: id.to_string(),
             name: "refs-graph".to_string(),
             description: None,

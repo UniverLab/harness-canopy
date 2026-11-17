@@ -29,6 +29,7 @@ use crate::sessions::ws::SessionsState;
 
 fn graph_row(id: &str, status: GraphStatus, workdir: &str) -> Graph {
     Graph {
+        trigger_prompt: None,
         id: id.to_string(),
         name: format!("graph-{id}"),
         description: None,

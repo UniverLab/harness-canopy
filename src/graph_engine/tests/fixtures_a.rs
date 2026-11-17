@@ -28,6 +28,7 @@ pub(crate) fn graph_fixture() -> Result<(TempDir, Arc<Database>, GraphEngine, St
     let dir = tempdir()?;
     let db = Arc::new(Database::new(&dir.path().join(TEST_DB_FILENAME))?);
     let lp = crate::domain::graphs::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -227,6 +228,7 @@ fn graph_fixture_with_mock() -> Result<MockGraphFixture> {
     let dir = tempdir()?;
     let db = Arc::new(Database::new(&dir.path().join("test.db"))?);
     let lp = crate::domain::graphs::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -871,6 +873,7 @@ fn bare_graph_fixture() -> Result<(TempDir, Arc<Database>, GraphEngine, String)>
     let dir = tempdir()?;
     let db = Arc::new(Database::new(&dir.path().join(TEST_DB_FILENAME))?);
     let lp = crate::domain::graphs::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,

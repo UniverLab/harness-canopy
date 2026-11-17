@@ -143,6 +143,7 @@ async fn no_idea_no_graph_still_errors() {
 #[test]
 fn render_agent_prompt_preserves_tagged_spec_body_verbatim() {
     let lp = crate::domain::graphs::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -439,6 +440,7 @@ async fn graph_hook_depth_cap_refuses_second_launch() {
     let mut b_hooks = std::collections::BTreeMap::new();
     b_hooks.insert(GraphHookEvent::OnCompleted, vec![b_hook]);
     let lp_b = crate::domain::graphs::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -763,6 +765,7 @@ fn graph_hook_spec_is_queryable() {
     let dir = tempdir().unwrap();
     let db = Arc::new(Database::new(&dir.path().join("test.db")).unwrap());
     let lp = crate::domain::graphs::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -841,6 +844,7 @@ async fn graph_hook_runs_on_completion() {
     let mut hooks = std::collections::BTreeMap::new();
     hooks.insert(GraphHookEvent::OnCompleted, vec![hook]);
     let lp = crate::domain::graphs::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,

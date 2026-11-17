@@ -650,6 +650,20 @@ fn poll_until(timeout: Duration, mut done: impl FnMut() -> bool) -> bool {
     done()
 }
 
+fn wait_for_argv_lines(
+    scratch: &ScratchMuse,
+    timeout: Duration,
+    expected: impl Fn(&[String]) -> bool,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    let found = poll_until(timeout, || {
+        lines = scratch.argv_lines();
+        expected(&lines)
+    });
+    assert!(found, "timed out waiting for muse argv lines: {lines:?}");
+    lines
+}
+
 /// A canopy data dir whose config carries the muse resume machinery.
 fn write_muse_config(data_dir: &std::path::Path) {
     std::fs::write(
@@ -742,12 +756,17 @@ fn real_muse_restart_resumes_each_session_by_its_own_id() {
     );
     insert_muse_row(&db, "s1", "one", &scratch.work_str(), Some(&id_a));
     insert_muse_row(&db, "s2", "two", &scratch.work_str(), Some(&id_b));
+    let resume_needles = [format!("resume {id_a}"), format!("resume {id_b}")];
 
     // First restart.
     let hub = test_hub(&db);
     reconcile_at_startup(&hub, db_dir.path());
 
-    let lines = scratch.argv_lines();
+    let lines = wait_for_argv_lines(&scratch, Duration::from_secs(10), |lines| {
+        resume_needles
+            .iter()
+            .all(|needle| lines.iter().any(|line| line.contains(needle)))
+    });
     assert!(
         lines
             .iter()
@@ -806,7 +825,11 @@ fn real_muse_restart_resumes_each_session_by_its_own_id() {
     let hub = test_hub(&db);
     reconcile_at_startup(&hub, db_dir.path());
 
-    let lines = scratch.argv_lines();
+    let lines = wait_for_argv_lines(&scratch, Duration::from_secs(10), |lines| {
+        resume_needles
+            .iter()
+            .all(|needle| lines.iter().filter(|line| line.contains(needle)).count() == 2)
+    });
     for id in [&id_a, &id_b] {
         let relaunches = lines
             .iter()
@@ -846,8 +869,15 @@ fn real_muse_last_fallback_resumes_at_most_one_idless_session() {
 
     let hub = test_hub(&db);
     reconcile_at_startup(&hub, db_dir.path());
+    assert_eq!(
+        hub.list().len(),
+        1,
+        "only one id-less session may take the shared fallback"
+    );
 
-    let lines = scratch.argv_lines();
+    let lines = wait_for_argv_lines(&scratch, Duration::from_secs(10), |lines| {
+        lines.iter().any(|line| line.contains("resume --last"))
+    });
     assert_eq!(
         lines.len(),
         1,
@@ -952,7 +982,11 @@ fn real_muse_interactive_spawn_records_its_conversation_id() {
     let hub = test_hub(&db);
     reconcile_at_startup(&hub, db_dir.path());
 
-    let lines = scratch.argv_lines();
+    let lines = wait_for_argv_lines(&scratch, Duration::from_secs(10), |lines| {
+        lines
+            .iter()
+            .any(|line| line.contains(&format!("resume {recorded}")))
+    });
     assert!(
         lines
             .iter()
@@ -1122,7 +1156,7 @@ fn real_muse_cmd_without_fallback_resumes_every_idless_session() {
             "{id} stays active"
         );
     }
-    let lines = scratch.argv_lines();
+    let lines = wait_for_argv_lines(&scratch, Duration::from_secs(10), |lines| lines.len() == 2);
     assert_eq!(lines.len(), 2, "both sessions spawn: {lines:?}");
     assert!(
         lines.iter().all(|line| !line.contains("resume")),
@@ -1148,7 +1182,11 @@ fn real_muse_failed_resume_records_error_with_tail() {
     let hub = test_hub(&db);
     reconcile_at_startup(&hub, db_dir.path());
 
-    let lines = scratch.argv_lines();
+    let lines = wait_for_argv_lines(&scratch, Duration::from_secs(10), |lines| {
+        lines
+            .iter()
+            .any(|line| line.contains(&format!("resume {bogus}")))
+    });
     assert!(
         lines
             .iter()

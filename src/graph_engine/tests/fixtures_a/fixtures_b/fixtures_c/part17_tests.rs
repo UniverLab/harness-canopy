@@ -978,6 +978,7 @@ fn run_self_reported_is_the_only_report_check() {
 #[test]
 fn resolve_dispatch_workdir_prefers_sandbox_then_override_then_graph() {
     let lp = crate::domain::graphs::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -1244,6 +1245,7 @@ async fn shutdown_check_kill_traverses_no_edge_and_marks_interrupted() {
     let edges: Vec<GraphEdge> = Vec::new();
     let ensembles: Vec<EnsembleDetails> = Vec::new();
     let names: Vec<String> = Vec::new();
+    let run_activity = RunActivity::default();
     let ctx = SpecStepCtx {
         lp: &lp,
         spec: &spec,
@@ -1256,6 +1258,8 @@ async fn shutdown_check_kill_traverses_no_edge_and_marks_interrupted() {
         all_node_names: &names,
         spec_start_head: None,
         spec_group: None,
+        idle_run: false,
+        run_activity: &run_activity,
     };
     let mut state = SpecRunState {
         cursor: SpecCursor::Node("check-a".to_string()),
@@ -1266,6 +1270,7 @@ async fn shutdown_check_kill_traverses_no_edge_and_marks_interrupted() {
         spec_committed_head: None,
         resumable_sessions: HashMap::new(),
         round_robin_pins: HashMap::new(),
+        ran_agent: false,
     };
     let step = NodeStepResult {
         execution: NodeExecution {

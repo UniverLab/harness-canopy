@@ -210,6 +210,7 @@ fn seed_running_graph(db: &Database) {
     use crate::domain::graphs::{Graph, GraphNodeRun, GraphSpec};
 
     let lp = Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,

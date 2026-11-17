@@ -27,15 +27,42 @@ impl GraphEngine {
         sandbox: Option<Sandbox>,
         directed: Option<DirectedStart>,
     ) {
+        let mode = match directed {
+            Some(directed) => DispatchMode::fresh_from(directed),
+            None => DispatchMode::fresh(),
+        };
+        self.spawn_dispatch(graph_id, queue_id, workdir_override, idea, sandbox, mode);
+    }
+
+    /// FR3/FR5: a cron tick launches a spec-less graph with its
+    /// `trigger_prompt` as the idea, through the same idea-run machinery as
+    /// every other launch. The tick flag is what enables the idle carve-out —
+    /// an operator's own `graph_control run` of the same graph never sets it.
+    pub(crate) fn start_background_tick(self: Arc<Self>, graph_id: String, idea: String) {
+        self.spawn_dispatch(graph_id, None, None, Some(idea), None, DispatchMode::tick());
+    }
+
+    /// Spawn a fire-and-forget dispatch in `mode`, translating a launch
+    /// refusal (`EmptySpecSetError`) and a real failure exactly as the
+    /// operator-facing launch paths always have.
+    fn spawn_dispatch(
+        self: Arc<Self>,
+        graph_id: String,
+        queue_id: Option<String>,
+        workdir_override: Option<String>,
+        idea: Option<String>,
+        sandbox: Option<Sandbox>,
+        mode: DispatchMode,
+    ) {
         tokio::spawn(async move {
             if let Err(error) = self
-                .run_graph(
+                .run_graph_mode(
                     graph_id.clone(),
                     queue_id,
                     workdir_override,
                     idea,
                     sandbox,
-                    directed,
+                    mode,
                 )
                 .await
             {
@@ -274,6 +301,21 @@ impl GraphEngine {
             Some(d) => DispatchMode::fresh_from(d),
             None => DispatchMode::fresh(),
         };
+        self.run_graph_mode(graph_id, queue_id, workdir_override, idea, sandbox, mode)
+            .await
+    }
+
+    /// [`Self::run_graph`] with the dispatch mode spelled out — the one body
+    /// every launch path (operator, hook, cron tick) shares.
+    pub(crate) async fn run_graph_mode(
+        &self,
+        graph_id: String,
+        queue_id: Option<String>,
+        workdir_override: Option<String>,
+        idea: Option<String>,
+        sandbox: Option<Sandbox>,
+        mode: DispatchMode,
+    ) -> Result<()> {
         let result = self
             .run_graph_dispatch(
                 graph_id.clone(),

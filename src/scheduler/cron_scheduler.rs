@@ -513,8 +513,7 @@ impl CronScheduler {
         let Some(graph_engine) = self.graph_engine.as_ref() else {
             return Ok(());
         };
-        // A graph already running/paused must not be relaunched by its trigger.
-        if !lp.is_fireable() {
+        if self.skip_unfireable_graph(lp)? {
             return Ok(());
         }
 
@@ -558,10 +557,47 @@ impl CronScheduler {
             last_fired.insert(key, scheduled_tick);
         }
 
+        self.launch_due_graph(graph_engine, lp)
+    }
+
+    /// A graph already running/paused must not be relaunched by its trigger.
+    /// Returns `true` when the tick is skipped. FR4: a tick never starts a
+    /// second run while the previous one is still running. `is_fireable` is
+    /// also false for paused graphs, so only log when a run is genuinely in
+    /// flight — paused graphs keep skipping silently.
+    fn skip_unfireable_graph(&self, lp: &crate::domain::graphs::Graph) -> anyhow::Result<bool> {
+        if lp.is_fireable() {
+            return Ok(false);
+        }
+        if !self.db.list_running_graph_runs(&lp.id)?.is_empty() {
+            tracing::info!("Graph '{}' tick skipped: previous run still running", lp.id);
+        }
+        Ok(true)
+    }
+
+    /// Launch a due cron graph. FR3: a spec-less graph with a
+    /// `trigger_prompt` runs its nodes on every tick with the prompt as its
+    /// idea, through the same idea-run machinery as every other launch. A
+    /// graph with bound specs keeps today's behaviour (the prompt is
+    /// ignored). Graphs launch fire-and-forget: the graph engine drives the
+    /// graph and owns its own failure handling, so the agent RetryPolicy
+    /// does not apply here.
+    fn launch_due_graph(
+        &self,
+        graph_engine: &Arc<GraphEngine>,
+        lp: &crate::domain::graphs::Graph,
+    ) -> anyhow::Result<()> {
         tracing::info!("Cron graph '{}' is due; launching", lp.id);
-        // Graphs are launched fire-and-forget: the graph engine drives the graph
-        // and owns its own failure handling, so the agent RetryPolicy does not
-        // apply here.
+        if let Some(idea) = graph_engine.trigger_prompt_idea(lp)? {
+            // FR4: re-check under the tick — the run may have started
+            // between the fireability check above and this launch.
+            if !self.db.list_running_graph_runs(&lp.id)?.is_empty() {
+                tracing::info!("Graph '{}' tick skipped: previous run still running", lp.id);
+                return Ok(());
+            }
+            Arc::clone(graph_engine).start_background_tick(lp.id.clone(), idea);
+            return Ok(());
+        }
         Arc::clone(graph_engine).start_background(lp.id.clone());
         Ok(())
     }

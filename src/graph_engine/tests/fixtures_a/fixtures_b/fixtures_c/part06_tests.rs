@@ -990,6 +990,7 @@ async fn graph_engine_run_workdir_override_is_used_as_check_node_cwd() {
     let engine = GraphEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
 
     let lp = crate::domain::graphs::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,

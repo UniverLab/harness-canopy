@@ -127,6 +127,8 @@ impl GraphEngine {
         queue_id: Option<&str>,
         sandbox: Option<Sandbox>,
         completed_specs: &[(String, String)],
+        idle: bool,
+        agent_ran: bool,
     ) -> Result<()> {
         if self
             .fail_on_leftover_bound_specs(ctx, queue_id, completed_specs)
@@ -144,6 +146,22 @@ impl GraphEngine {
             Some(chrono::Utc::now()),
         )?;
         let (done, total) = self.spec_progress(ctx.graph_id, queue_id)?;
+        // FR5: a tick run of a spec-less graph names how the run ended on
+        // the `graph_completed` event — `idle` when its check found nothing
+        // to do, `worked` when it reached and ran an agent node. Every
+        // other dispatch (including a manual run of the same graph) keeps
+        // the payload-less event exactly as before.
+        let outcome = if ctx.idle_run {
+            if idle {
+                Some("idle")
+            } else if agent_ran {
+                Some("worked")
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         activity::record(
             &self.db,
             activity::GraphEvent {
@@ -155,7 +173,7 @@ impl GraphEngine {
                 run_id: None,
                 kind: activity::GraphEventKind::GraphCompleted,
                 message: format!("Completed ({done}/{total} specs)."),
-                payload: None,
+                payload: outcome.map(|outcome| serde_json::json!({"outcome": outcome})),
             },
         );
         let executed_any_spec = !completed_specs.is_empty();

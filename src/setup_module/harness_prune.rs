@@ -346,6 +346,7 @@ mod tests {
         };
         let db = test_db();
         db.insert_graph(&Graph {
+            trigger_prompt: None,
             id: "g1".to_string(),
             name: "refs-graph".to_string(),
             description: None,
@@ -416,6 +417,7 @@ mod tests {
         use crate::domain::graphs::{Graph, GraphHookEvent, GraphStatus};
         let db = test_db();
         let mut graph = Graph {
+            trigger_prompt: None,
             id: "g1".to_string(),
             name: "refs-graph".to_string(),
             description: None,

@@ -100,6 +100,7 @@ fn sample_manual_agent(id: &str) -> Agent {
 
 fn sample_graph(id: &str) -> Graph {
     Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -194,6 +195,7 @@ fn sample_standalone_spec(id: &str, workdir: Option<&str>) -> GraphSpec {
 
 fn graph_with_trigger(id: &str, trigger: Option<Trigger>) -> Graph {
     Graph {
+        trigger_prompt: None,
         trigger,
         ..sample_graph(id)
     }

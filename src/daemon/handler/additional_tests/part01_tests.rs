@@ -1196,6 +1196,7 @@ fn graph_run_status_guard_draft() {
 #[test]
 fn graph_trigger_json_manual() {
     let lp = Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -1224,6 +1225,7 @@ fn graph_trigger_json_manual() {
 #[test]
 fn graph_trigger_json_cron() {
     let lp = Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,

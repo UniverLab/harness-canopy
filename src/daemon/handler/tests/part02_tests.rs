@@ -686,6 +686,7 @@ fn graph_get_response_includes_graph_level_graph_alongside_specs() {
     let db = Database::new(&dir.path().join("test.db")).unwrap();
     let graph_id = "graph-with-graph".to_string();
     db.insert_graph(&Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -931,6 +932,7 @@ fn graph_get_response_surfaces_pinned_skills_on_a_node() {
     let db = Database::new(&dir.path().join("test.db")).unwrap();
     let graph_id = "graph-with-pinned-skills".to_string();
     db.insert_graph(&Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -986,6 +988,7 @@ fn graph_get_response_exposes_autorun_at_so_agents_never_need_sql() {
     let db = Database::new(&dir.path().join("test.db")).unwrap();
     let graph_id = "graph-with-autorun".to_string();
     db.insert_graph(&Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,

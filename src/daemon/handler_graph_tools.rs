@@ -79,6 +79,7 @@ pub(crate) static GRAPH_EDIT: ToolSpec = ToolSpec {
             optional: &[
                 "description",
                 "trigger",
+                "trigger_prompt",
                 "infra_node_id",
                 "allow_dirty_start",
                 "require_spec_type",
@@ -92,6 +93,7 @@ pub(crate) static GRAPH_EDIT: ToolSpec = ToolSpec {
                 "description",
                 "workdir",
                 "trigger",
+                "trigger_prompt",
                 "on_completed",
                 "hooks",
                 "infra_node_id",
@@ -463,8 +465,8 @@ impl TaskTriggerHandler {
         name = "graph_edit",
         description = "Create, change, and archive graphs and their specs. Pass `action` plus the parameters listed for it. \
         Actions (required params; optional params): \
-        `create` (required: name, workdir; optional: description, trigger, infra_node_id, allow_dirty_start, require_spec_type) — create a graph container. \
-        `update` (required: graph_id; optional: name, description, workdir, trigger, on_completed, hooks, infra_node_id, allow_dirty_start, require_spec_type) — update graph metadata and hooks. \
+        `create` (required: name, workdir; optional: description, trigger, trigger_prompt, infra_node_id, allow_dirty_start, require_spec_type) — create a graph container. \
+        `update` (required: graph_id; optional: name, description, workdir, trigger, trigger_prompt, on_completed, hooks, infra_node_id, allow_dirty_start, require_spec_type) — update graph metadata and hooks. \
         `archive` (required: graph_id; optional: none) — archive a graph out of the main list (restorable). \
         `restore` (required: graph_id; optional: none) — restore an archived graph to the main list. \
         `import` (required: document, workdir; optional: name) — import an exported graph document. \

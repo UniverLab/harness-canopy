@@ -343,6 +343,7 @@ mod tests {
 
     fn draft_graph(id: &str, name: &str, workdir: &str) -> Graph {
         Graph {
+            trigger_prompt: None,
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,

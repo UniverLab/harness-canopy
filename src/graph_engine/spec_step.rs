@@ -107,6 +107,7 @@ impl GraphEngine {
         );
         Ok(SpecExecutionOutcome::Completed {
             summary: execution.summary,
+            ran_agent: state.ran_agent,
         })
     }
 
@@ -127,6 +128,17 @@ impl GraphEngine {
             return self.apply_no_verdict_step(ctx, state, &step).await;
         }
         let (selection, is_routed_router) = self.select_spec_step(ctx, &step)?;
+        // FR5: a routed `Fail` edge is explicit failure handling — a later
+        // check dead end in this run is a failure, never idle. Run-scoped:
+        // a spec bound mid-run must not reset it.
+        if selection
+            .as_ref()
+            .is_some_and(|sel| sel.edge_condition == GraphEdgeCondition::Fail)
+        {
+            ctx.run_activity
+                .fail_edge_routed
+                .store(true, Ordering::SeqCst);
+        }
         match &selection {
             Some(sel) => Self::log_edge_traversal(&step, sel),
             None => {
@@ -148,7 +160,7 @@ impl GraphEngine {
                 self.complete_terminal_spec(ctx, state, &step).await?,
             )),
             None => Ok(SpecLoopFlow::Done(
-                self.fail_terminal_spec(ctx, &step).await?,
+                self.fail_terminal_spec(ctx, state, &step).await?,
             )),
         }
     }
@@ -419,6 +431,25 @@ impl GraphEngine {
         state: &SpecRunState,
         step: &NodeStepResult,
     ) -> Result<SpecExecutionOutcome> {
+        let summary = self
+            .record_spec_completed(ctx, state, &step.execution.summary)
+            .await?;
+        Ok(SpecExecutionOutcome::Completed {
+            summary,
+            ran_agent: state.ran_agent,
+        })
+    }
+
+    /// FR5: the shared completion bookkeeping for a spec that ends
+    /// `Completed` — status row, dirty record, completion notification and
+    /// `SpecCompleted` activity — used by both the pass terminal and the
+    /// idle tick terminal. Returns the summary the outcome carries.
+    async fn record_spec_completed(
+        &self,
+        ctx: &SpecStepCtx<'_>,
+        state: &SpecRunState,
+        summary: &str,
+    ) -> Result<String> {
         let _ = persist_bookkeeping("update_graph_spec_status", || {
             self.db.update_graph_spec_status(
                 &ctx.spec.id,
@@ -450,14 +481,13 @@ impl GraphEngine {
                 payload: None,
             },
         );
-        Ok(SpecExecutionOutcome::Completed {
-            summary: step.execution.summary.clone(),
-        })
+        Ok(summary.to_string())
     }
 
     pub(crate) async fn fail_terminal_spec(
         &self,
         ctx: &SpecStepCtx<'_>,
+        state: &SpecRunState,
         step: &NodeStepResult,
     ) -> Result<SpecExecutionOutcome> {
         // C19: this dead-end Fail is what just ended the
@@ -466,6 +496,17 @@ impl GraphEngine {
         // write, rather than re-deriving "did an agent actually
         // produce a verdict".
         let is_infra = execution_is_infra_failure(&step.execution.output);
+        // FR5: a tick run of a spec-less graph whose check found nothing to
+        // do (failed, no outgoing Fail edge, no agent ran) completes idle:
+        // no attempt is recorded and no failure hook fires. Every other
+        // failure — including the same graph run manually — keeps failing
+        // exactly as before.
+        if !is_infra && self.is_idle_terminal(ctx, step) {
+            let summary = self
+                .record_spec_completed(ctx, state, &step.execution.summary)
+                .await?;
+            return Ok(SpecExecutionOutcome::Idle { summary });
+        }
         if let Some(blocker) =
             self.record_spec_attempt(ctx.spec, &step.execution.summary, is_infra)?
         {
@@ -495,6 +536,39 @@ impl GraphEngine {
             false,
         )
         .await
+    }
+
+    /// FR5: whether this dead-end check failure is an idle tick completion
+    /// rather than a failure. All of these must hold: the dispatch is a
+    /// cron tick of a spec-less graph, the terminal node is a failed
+    /// check, no outgoing `Fail` edge could have routed it elsewhere
+    /// (reaching this dead end already implies no `Fail` or `Always` edge
+    /// matched, so this is the literal spec wording), no `Fail` edge
+    /// routed anywhere earlier in this run, and no agent node ran in this
+    /// run. Timeout and marker-violation check verdicts also land here as
+    /// `Fail`; only engine-level infra markers are excluded (by the
+    /// caller). A failing agent, or a check with a `Fail` edge leading to
+    /// a failing node, never satisfies this.
+    fn is_idle_terminal(&self, ctx: &SpecStepCtx<'_>, step: &NodeStepResult) -> bool {
+        if !ctx.idle_run
+            || ctx.run_activity.agent_ran.load(Ordering::SeqCst)
+            || ctx.run_activity.fail_edge_routed.load(Ordering::SeqCst)
+        {
+            return false;
+        }
+        if step.execution.status != GraphRunStatus::Fail {
+            return false;
+        }
+        let is_check = ctx
+            .nodes_by_id
+            .get(step.from_node_id.as_str())
+            .is_some_and(|node| node.kind == GraphNodeKind::Check);
+        if !is_check {
+            return false;
+        }
+        !ctx.edges.iter().any(|edge| {
+            edge.from_node == step.from_node_id && edge.condition == GraphEdgeCondition::Fail
+        })
     }
 
     pub(crate) async fn finish_failed_spec(

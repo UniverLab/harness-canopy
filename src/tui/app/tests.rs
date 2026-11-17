@@ -42,6 +42,7 @@ fn make_graph(
     status: crate::domain::graphs::GraphStatus,
 ) -> crate::domain::graphs::Graph {
     crate::domain::graphs::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -180,6 +181,7 @@ fn seed_plain_edge_graph(db: &Database) {
     };
 
     db.insert_graph(&Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -274,6 +276,7 @@ fn seed_router_graph(db: &Database) {
     };
 
     db.insert_graph(&Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,

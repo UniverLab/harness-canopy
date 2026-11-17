@@ -16,6 +16,13 @@ pub(crate) struct DirectedStart {
 pub(crate) struct DispatchMode {
     pub(crate) is_resume: bool,
     pub(crate) directed: Option<DirectedStart>,
+    /// FR5: this dispatch was launched by a cron tick of a spec-less graph
+    /// (see `GraphEngine::trigger_prompt_idea`), so its idle rule applies: a
+    /// check that ends the run with no outgoing Fail edge and no agent node
+    /// having run records `completed`/`outcome: idle` instead of `failed`.
+    /// Only the scheduler's tick path sets this — a manual `graph_control`
+    /// run of the same graph keeps failing exactly as today.
+    pub(crate) tick: bool,
 }
 
 impl DispatchMode {
@@ -23,24 +30,36 @@ impl DispatchMode {
         Self {
             is_resume: false,
             directed: None,
+            tick: false,
         }
     }
     pub(crate) fn resume() -> Self {
         Self {
             is_resume: true,
             directed: None,
+            tick: false,
         }
     }
     pub(crate) fn fresh_from(directed: DirectedStart) -> Self {
         Self {
             is_resume: false,
             directed: Some(directed),
+            tick: false,
         }
     }
     pub(crate) fn resume_from(directed: DirectedStart) -> Self {
         Self {
             is_resume: true,
             directed: Some(directed),
+            tick: false,
+        }
+    }
+    /// A fresh dispatch launched by a cron tick (never a resume).
+    pub(crate) fn tick() -> Self {
+        Self {
+            is_resume: false,
+            directed: None,
+            tick: true,
         }
     }
 }

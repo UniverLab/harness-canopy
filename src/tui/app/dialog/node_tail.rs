@@ -512,6 +512,7 @@ mod tests {
 
     fn seed_running_node(db: &Database) {
         db.insert_graph(&Graph {
+            trigger_prompt: None,
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,
@@ -663,6 +664,7 @@ mod tests {
     /// given Agent nodes.
     fn seed_pane_graph(db: &Database, spec_id: &str, node_ids: &[&str]) {
         db.insert_graph(&Graph {
+            trigger_prompt: None,
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,

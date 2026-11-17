@@ -14,8 +14,8 @@ impl Database {
         )?;
         let hooks = encode_graph_hooks(&lp.hooks)?;
         conn.execute(
-            "INSERT INTO graphs (id, name, description, workdir, status, trigger_type, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start, require_spec_type)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+            "INSERT INTO graphs (id, name, description, workdir, status, trigger_type, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start, require_spec_type, trigger_prompt)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
             params![
                 &lp.id,
                 &lp.name,
@@ -38,6 +38,7 @@ impl Database {
                 hooks,
                 lp.allow_dirty_start,
                 lp.require_spec_type,
+                &lp.trigger_prompt,
             ],
         )?;
         Ok(())
@@ -80,7 +81,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, description, workdir, status, trigger_type, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start, require_spec_type
+            "SELECT id, name, description, workdir, status, trigger_type, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start, require_spec_type, trigger_prompt
              FROM graphs WHERE id = ?1",
         )?;
 
@@ -109,12 +110,12 @@ impl Database {
         };
         let sql = if workdir.is_some() {
             format!(
-                "SELECT id, name, description, workdir, status, trigger_type, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start, require_spec_type
+                "SELECT id, name, description, workdir, status, trigger_type, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start, require_spec_type, trigger_prompt
                  FROM graphs WHERE workdir = ?1{archived_clause} ORDER BY created_at DESC"
             )
         } else {
             format!(
-                "SELECT id, name, description, workdir, status, trigger_type, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start, require_spec_type
+                "SELECT id, name, description, workdir, status, trigger_type, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start, require_spec_type, trigger_prompt
                  FROM graphs WHERE 1=1{archived_clause} ORDER BY created_at DESC"
             )
         };
@@ -277,6 +278,25 @@ impl Database {
         Ok(rows > 0)
     }
 
+    /// Set (or clear, with `None`) the prompt a cron tick feeds a spec-less
+    /// graph as its idea. Callers validate that the graph has a cron trigger:
+    /// this method persists whatever it is given.
+    pub fn update_graph_trigger_prompt(
+        &self,
+        graph_id: &str,
+        prompt: Option<&str>,
+    ) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let rows = conn.execute(
+            "UPDATE graphs SET trigger_prompt = ?1 WHERE id = ?2",
+            params![prompt, graph_id],
+        )?;
+        Ok(rows > 0)
+    }
+
     /// Replace a graph's `on_completed` hook config (N2). Passing `None`
     /// clears it, making the graph's completion behave exactly as it did
     /// before N2 (no hook). Writes both the legacy `on_completed` column
@@ -360,7 +380,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, description, workdir, status, trigger_type, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start, require_spec_type
+            "SELECT id, name, description, workdir, status, trigger_type, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start, require_spec_type, trigger_prompt
               FROM graphs WHERE trigger_type = ?1 ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map(params![trigger_type], map_graph_row)?;

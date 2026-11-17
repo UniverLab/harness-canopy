@@ -124,6 +124,7 @@ async fn fire_due_autorun_graphs_resets_failed_graph_through_shared_path_and_res
     let workdir = tempfile::tempdir().unwrap();
     let graph_id = "failed-autorun".to_string();
     db.insert_graph(&Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -234,6 +235,7 @@ async fn fire_due_autorun_graphs_preserves_admin_skipped_specs() {
     let workdir = tempfile::tempdir().unwrap();
     let graph_id = "failed-autorun-admin-skip".to_string();
     db.insert_graph(&Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -570,6 +572,7 @@ async fn fire_due_autorun_graphs_never_fires_a_c19_blocked_graph() {
     let workdir = tempfile::tempdir().unwrap();
     let graph_id = "c19-blocked-autorun".to_string();
     db.insert_graph(&Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -686,6 +689,7 @@ async fn fire_due_autorun_graphs_resumes_same_queue_after_failed_run() {
     let workdir = tempfile::tempdir().unwrap();
     let graph_id = "failed-queue-autorun".to_string();
     db.insert_graph(&Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -1021,6 +1025,7 @@ async fn fire_due_auto_continue_graphs_resumes_paused_graph_without_reset_or_rel
     let workdir = tempfile::tempdir().unwrap();
     let graph_id = "paused-auto-continue".to_string();
     db.insert_graph(&Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -1142,6 +1147,7 @@ async fn fire_due_auto_continue_graphs_applies_skip_next_spec_action() {
     let workdir = tempfile::tempdir().unwrap();
     let graph_id = "paused-auto-continue-skip".to_string();
     db.insert_graph(&Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,

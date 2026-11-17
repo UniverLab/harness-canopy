@@ -6,7 +6,8 @@ use crate::daemon::handler_formatting::{
     build_graph_update_response, build_id_result, internal_error,
 };
 use crate::daemon::handler_graph_updates::{
-    parse_graph_hooks_param, parse_graph_update_fields, record_graph_update_narration,
+    parse_graph_hooks_param, parse_graph_update_fields, reconcile_trigger_prompt,
+    record_graph_update_narration,
 };
 use crate::daemon::handler_run_exec::find_in_flight_run;
 use crate::daemon::handler_specs_helpers::validate_at_least_one_bool;
@@ -18,6 +19,27 @@ use crate::daemon::params::*;
 use crate::db::Database;
 use crate::domain::graphs::{Graph, GraphHookEvent, GraphStatus};
 use crate::domain::models::Trigger;
+
+/// The one refusal for every `trigger_prompt`/trigger mismatch: the prompt is
+/// only meaningful to a cron tick, so either give the graph a cron trigger or
+/// clear the prompt.
+pub(crate) const TRIGGER_PROMPT_NEEDS_CRON: &str = "set a cron trigger, or clear trigger_prompt";
+
+/// Normalize a supplied `trigger_prompt` against the trigger the graph will
+/// have: blank clears it, and a non-blank prompt on a manual/watch graph is
+/// refused with [`TRIGGER_PROMPT_NEEDS_CRON`].
+pub(crate) fn normalize_trigger_prompt(
+    trigger: Option<&Trigger>,
+    prompt: Option<&str>,
+) -> Result<Option<String>, String> {
+    let Some(prompt) = prompt.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if !matches!(trigger, Some(Trigger::Cron { .. })) {
+        return Err(TRIGGER_PROMPT_NEEDS_CRON.to_string());
+    }
+    Ok(Some(prompt.to_string()))
+}
 use crate::graph_engine::GRAPH_HOOK_BINDINGS;
 use rmcp::model::CallToolResult;
 use rmcp::tool_router;
@@ -45,8 +67,14 @@ impl TaskTriggerHandler {
             Ok(trigger) => trigger,
             Err(e) => return Ok(error_result(&e)),
         };
+        let trigger_prompt =
+            match normalize_trigger_prompt(trigger.as_ref(), params.trigger_prompt.as_deref()) {
+                Ok(prompt) => prompt,
+                Err(e) => return Ok(error_result(&e)),
+            };
 
         let lp = Graph {
+            trigger_prompt,
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: params
@@ -100,10 +128,23 @@ impl TaskTriggerHandler {
         if let Err(e) = validate_graph_exists(&self.db, &graph_id) {
             return Ok(error_result(&e));
         }
+        let existing = match self.db.get_graph(&graph_id) {
+            Ok(Some(lp)) => lp,
+            Ok(None) => return Ok(error_result(&format!("Graph '{graph_id}' not found."))),
+            Err(e) => return Err(internal_error(e)),
+        };
 
         let mut parsed = match parse_graph_update_fields(&params) {
             Ok(parsed) => parsed,
             Err(e) => return Ok(e),
+        };
+        parsed.trigger_prompt = match reconcile_trigger_prompt(
+            &existing,
+            parsed.trigger.as_ref(),
+            &parsed.trigger_prompt,
+        ) {
+            Ok(update) => update,
+            Err(e) => return Ok(error_result(&e)),
         };
 
         parsed.hooks = match parse_graph_hooks_param(&self.db, &graph_id, &params.hooks) {
@@ -130,6 +171,7 @@ impl TaskTriggerHandler {
                 parsed.description.is_some(),
                 parsed.workdir.is_some(),
                 parsed.trigger.is_some(),
+                params.trigger_prompt.is_some(),
                 parsed.completion_hook.is_some(),
                 parsed.hooks.is_some(),
                 parsed.infra_node_id.is_some(),

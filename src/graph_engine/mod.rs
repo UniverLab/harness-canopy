@@ -32,6 +32,7 @@ mod decision;
 mod directed;
 mod dirty_commit;
 mod dispatch;
+mod dispatch_bound;
 mod dispatch_finish;
 mod ensemble_attempt;
 mod ensemble_cascade;
@@ -57,6 +58,7 @@ mod prompts;
 mod roster_filter;
 mod routing;
 mod run_spec;
+mod run_spec_node;
 mod shell_utils;
 mod spawn_identity;
 mod spec_step;
@@ -256,6 +258,16 @@ pub(crate) enum SpecExecutionOutcome {
     /// placeholder reports for this spec.
     Completed {
         summary: String,
+        /// Whether any agent node ran in this spec's execution — the "worked"
+        /// half of FR5's idle/worked distinction for a tick run.
+        ran_agent: bool,
+    },
+    /// FR5: this spec was a tick run of a spec-less graph and ended on a
+    /// check failure with no outgoing Fail edge, with no agent node having
+    /// run. The spec row is `completed` and the dispatch completes with
+    /// `outcome: idle`; no failure hook or attempt counter is touched.
+    Idle {
+        summary: String,
     },
     Paused,
     Failed(String),
@@ -344,6 +356,15 @@ fn current_previous_output(state: &SpecRunState) -> Option<Value> {
 fn build_nodes_by_id(nodes: &[GraphNode]) -> HashMap<&str, &GraphNode> {
     nodes.iter().map(|node| (node.id.as_str(), node)).collect()
 }
+/// FR5 run-scoped activity for a tick dispatch, shared by every spec the
+/// dispatch executes: whether any agent node ran and whether any `Fail`
+/// edge routed — anywhere in the run, not just the spec that is ending.
+/// The idle rule keys on the run, so a spec bound mid-run cannot reset it.
+#[derive(Default)]
+pub(crate) struct RunActivity {
+    pub(crate) agent_ran: AtomicBool,
+    pub(crate) fail_edge_routed: AtomicBool,
+}
 /// Immutable per-call inputs of one spec run.
 pub(crate) struct SpecStepCtx<'a> {
     lp: &'a Graph,
@@ -357,6 +378,14 @@ pub(crate) struct SpecStepCtx<'a> {
     all_node_names: &'a [String],
     spec_start_head: Option<&'a str>,
     spec_group: Option<&'a str>,
+    /// FR5: this spec runs inside a cron tick of a spec-less graph, so a
+    /// check-failure dead end with no agent run completes idle instead of
+    /// failing. `false` for every other dispatch, including a manual run
+    /// of the same graph.
+    idle_run: bool,
+    /// FR5: run-scoped activity shared across every spec of this dispatch
+    /// (see [`RunActivity`]). Only consulted when `idle_run` is set.
+    run_activity: &'a RunActivity,
 }
 /// Mutable cursor/loop state carried across spec iterations.
 pub(crate) struct SpecRunState {
@@ -368,6 +397,9 @@ pub(crate) struct SpecRunState {
     spec_committed_head: Option<String>,
     resumable_sessions: HashMap<String, String>,
     round_robin_pins: HashMap<String, i64>,
+    /// FR5: whether any agent node executed in this spec's run — the
+    /// "worked" half of the tick run's idle/worked distinction.
+    ran_agent: bool,
 }
 /// Settled result of one cursor step: the execution plus routing inputs.
 pub(crate) struct NodeStepResult {

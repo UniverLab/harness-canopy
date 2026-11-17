@@ -37,6 +37,7 @@ fn spec_ids_test_db() -> (tempfile::TempDir, std::sync::Arc<Database>, String) {
     let (_dir, db, _handler) = queue_test_handler();
     let graph_id = "graph-spec-ids";
     db.insert_graph(&Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,

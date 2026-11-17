@@ -309,6 +309,7 @@ async fn dirty_start_check_ignores_other_graphs_overlapping_dirty_record() {
 
     // G1: another graph on the same git workdir, carrying spec A.
     db.insert_graph(&Graph {
+        trigger_prompt: None,
         id: "g1".to_string(),
         name: "Graph1".to_string(),
         description: None,

@@ -743,6 +743,7 @@ async fn graph_b_full_lifecycle_never_touches_graph_a_in_a_different_workdir() {
 
     // Graph A: seeded as mid-run and left alone for the rest of the test.
     let graph_a = crate::domain::graphs::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -830,6 +831,7 @@ async fn graph_b_full_lifecycle_never_touches_graph_a_in_a_different_workdir() {
     // Graph B: a real graph in a different workdir, driven through its
     // full lifecycle by the engine.
     let graph_b = crate::domain::graphs::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -983,6 +985,7 @@ async fn pausing_graph_b_never_signals_or_mutates_graph_a_run() {
     let db = Arc::new(Database::new(&db_dir.path().join("shared.db")).unwrap());
 
     let graph_a = crate::domain::graphs::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -1064,6 +1067,7 @@ async fn pausing_graph_b_never_signals_or_mutates_graph_a_run() {
     let run_a_before = serde_json::to_value(db.get_graph_run(&run_a.id).unwrap().unwrap()).unwrap();
 
     let graph_b = crate::domain::graphs::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,

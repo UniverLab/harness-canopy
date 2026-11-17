@@ -1114,6 +1114,7 @@ mod tests {
 
     fn make_graph(id: &str, name: &str, status: GraphStatus) -> Graph {
         Graph {
+            trigger_prompt: None,
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,

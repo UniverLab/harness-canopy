@@ -798,6 +798,7 @@ async fn ensemble_runs_end_to_end_through_a_queue_dispatch() {
     let dir = tempdir().unwrap();
     let db = Arc::new(Database::new(&dir.path().join("test.db")).unwrap());
     let lp = crate::domain::graphs::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,

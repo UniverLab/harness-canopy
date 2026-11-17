@@ -463,6 +463,7 @@ mod tests {
 
     fn test_graph() -> Graph {
         Graph {
+            trigger_prompt: None,
             id: "g1".to_string(),
             name: "Graph".to_string(),
             description: None,

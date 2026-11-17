@@ -1083,6 +1083,7 @@ async fn remote_disconnect_keeps_the_row_and_answers_disconnected() {
 
 fn insert_paused_graph(db: &Database, id: &str, workdir: &str) {
     db.insert_graph(&Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,

@@ -306,6 +306,7 @@ fn find_stale_2x_name_hits_lists_a_stale_graph_prompt_and_a_stale_agent_prompt()
     );
     let graph_id = "graph-stale-prompt";
     db.insert_graph(&Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -505,6 +506,7 @@ fn stale_name_report_groups_several_nodes_in_one_graph() {
     let db = Database::new(&dir.path().join("test.db")).unwrap();
     let graph_id = "graph-many-nodes";
     db.insert_graph(&Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,

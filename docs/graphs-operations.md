@@ -86,6 +86,54 @@ indicator. Requesting pause again while one is pending is a no-op answering
 `pause already pending`, and `continue`/`run` while one is pending cancels
 it — one `pause_cancelled` event, then the graph keeps running.
 
+## Cron triggers and trigger prompts
+
+A graph with a cron trigger can run on its own on every tick with no
+specs bound: `graph_edit` `create`/`update` accept `trigger_prompt`
+alongside a cron `trigger`, and each tick launches the graph with the
+prompt as its idea (`{{spec_content}}` renders it). `trigger_prompt` is
+part of the trigger, not of the graph document: setting it on a manual
+or watch graph is refused (`set a cron trigger, or clear
+trigger_prompt`), and so is removing or changing the cron trigger of a
+graph that keeps one. `graph` `export` never carries it and `graph_edit`
+`import` never sets it. `graph` `get`/`list` report it as
+`trigger_prompt`. A tick never starts a second run while the previous
+one is still running — it logs `tick skipped: previous run still
+running` and moves on.
+
+The intended shape is check-then-agent: a `check` node whose exit code 0
+means "news found" routes `pass` to the `agent` node and has no `fail`
+edge, while a non-zero exit means "nothing to do". On a cron tick of a
+spec-less graph only, that quiet failure completes the run as
+`completed` — with `graph_completed` payload `{"outcome": "idle"}` —
+instead of failing it: no failure hook fires and the attempt budget is
+untouched. A tick run that reaches and runs its agent node records
+`{"outcome": "worked"}`. Every other failure — a failing agent, a `fail`
+edge leading to a failing node, an infrastructure error — fails exactly
+as before, as does the same graph run manually via `graph_control`.
+
+Copy-paste example over MCP (a per-minute inbox sweep; the check exits
+non-zero when there is nothing to do):
+
+```json
+{ "tool": "graph_edit", "action": "create",
+  "name": "inbox-sweep", "workdir": "/srv/inbox",
+  "trigger": { "kind": "cron", "schedule": "* * * * *" },
+  "trigger_prompt": "Fetch new messages and hand the new ones to the agent." }
+{ "tool": "graph_node", "action": "add",
+  "graph_id": "<graph_id>", "name": "sweep", "kind": "check",
+  "config": { "command": "fetch-new-messages", "success_condition": "exit_code_0" } }
+{ "tool": "graph_node", "action": "add",
+  "graph_id": "<graph_id>", "name": "worker", "kind": "agent",
+  "config": { "platform": "opencode", "prompt_template": "{{spec_content}}" } }
+{ "tool": "graph_edge", "action": "add",
+  "graph_id": "<graph_id>",
+  "from_node": "sweep", "to_node": "worker", "condition": "pass" }
+```
+
+Note there is deliberately no `fail` edge out of `sweep`: that is what
+makes a quiet tick complete idle instead of failing the graph.
+
 ## Tuning the engine
 
 These `[graphs]` settings (see `canopy config list`) adjust the engine's

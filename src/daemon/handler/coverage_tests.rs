@@ -68,6 +68,7 @@ fn make_agent(id: &str) -> Agent {
 
 fn make_graph(graph_id: &str, status: GraphStatus) -> Graph {
     Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,

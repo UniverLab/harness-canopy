@@ -598,6 +598,7 @@ mod tests {
         use crate::domain::graphs::{Graph, GraphStatus};
         let (db, _dir) = test_db();
         db.insert_graph(&Graph {
+            trigger_prompt: None,
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,

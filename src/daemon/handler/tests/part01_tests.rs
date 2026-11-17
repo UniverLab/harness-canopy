@@ -882,6 +882,7 @@ fn graph_reset_queue_run_resets_pending_queue_members_and_reports_count() {
     let db = Database::new(&dir.path().join("test.db")).unwrap();
     let graph_id = "graph-queue-reset-test".to_string();
     db.insert_graph(&Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,

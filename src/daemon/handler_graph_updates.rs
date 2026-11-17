@@ -3,13 +3,15 @@
 
 use crate::daemon::handler::TaskTriggerHandler;
 use crate::daemon::handler_formatting::internal_error;
-use crate::daemon::handler_graphs::{build_graph_completion_hook, build_graph_trigger};
+use crate::daemon::handler_graphs::{
+    build_graph_completion_hook, build_graph_trigger, TRIGGER_PROMPT_NEEDS_CRON,
+};
 use crate::daemon::handler_helpers::record_config_change_if_running;
 use crate::daemon::handler_validate::validate_absolute_dir;
 use crate::daemon::helpers::error_result;
 use crate::daemon::params::{GraphCompletionHookParams, GraphUpdateParams};
 use crate::db::Database;
-use crate::domain::graphs::{GraphCompletionHook, GraphHookEvent};
+use crate::domain::graphs::{Graph, GraphCompletionHook, GraphHookEvent};
 use crate::domain::models::Trigger;
 use rmcp::model::CallToolResult;
 use rmcp::ErrorData as McpError;
@@ -103,6 +105,8 @@ pub(crate) struct ParsedGraphUpdate<'a> {
     pub description: Option<Option<&'a str>>,
     pub workdir: Option<&'a str>,
     pub trigger: Option<Option<Trigger>>,
+    /// `None` = leave unchanged; `Some(None)` = clear; `Some(Some(text))` = set.
+    pub trigger_prompt: Option<Option<String>>,
     pub completion_hook: Option<Option<GraphCompletionHook>>,
     pub hooks: Option<std::collections::BTreeMap<GraphHookEvent, Vec<GraphCompletionHook>>>,
     pub infra_node_id: Option<Option<String>>,
@@ -141,6 +145,13 @@ pub(crate) fn parse_graph_update_fields(
     } else {
         None
     };
+    let trigger_prompt = params.trigger_prompt.as_ref().map(|value| {
+        value
+            .as_deref()
+            .map(str::trim)
+            .filter(|prompt| !prompt.is_empty())
+            .map(str::to_string)
+    });
     // A provided `on_completed` param (even `null`, to clear it) counts
     // as an update — same `Option<Option<_>>` shape as `description`.
     // `spec_ids` is per-spec: the legacy single-event param never carries
@@ -165,6 +176,7 @@ pub(crate) fn parse_graph_update_fields(
         description,
         workdir,
         trigger,
+        trigger_prompt,
         completion_hook,
         hooks: None,
         infra_node_id: None,
@@ -254,6 +266,56 @@ pub(crate) fn record_graph_update_narration(
     }
 }
 
+/// Reconcile the requested `trigger_prompt` change with the trigger the graph
+/// will have after this update. A prompt only exists on a cron-triggered
+/// graph: setting one on a manual/watch graph is refused, and so is removing
+/// or changing the cron trigger of a graph that still keeps a prompt. Clearing
+/// both in the same call is allowed (that is exactly "clear trigger_prompt").
+pub(crate) fn reconcile_trigger_prompt(
+    existing: &Graph,
+    new_trigger: Option<&Option<Trigger>>,
+    requested: &Option<Option<String>>,
+) -> Result<Option<Option<String>>, String> {
+    let effective_prompt = match requested {
+        Some(value) => value.clone(),
+        None => existing.trigger_prompt.clone(),
+    };
+    let keeps_prompt = effective_prompt
+        .as_deref()
+        .is_some_and(|prompt| !prompt.trim().is_empty());
+
+    let effective_trigger = match new_trigger {
+        Some(trigger) => trigger.clone(),
+        None => existing.trigger.clone(),
+    };
+    if matches!(requested, Some(Some(_)))
+        && !matches!(effective_trigger, Some(Trigger::Cron { .. }))
+    {
+        return Err(TRIGGER_PROMPT_NEEDS_CRON.to_string());
+    }
+
+    if keeps_prompt && existing.is_cron() {
+        if let Some(new_trigger) = new_trigger {
+            let changed = match (existing.trigger.as_ref(), new_trigger.as_ref()) {
+                (
+                    Some(Trigger::Cron {
+                        schedule_expr: before,
+                    }),
+                    Some(Trigger::Cron {
+                        schedule_expr: after,
+                    }),
+                ) => before != after,
+                (Some(Trigger::Cron { .. }), _) => true,
+                _ => false,
+            };
+            if changed {
+                return Err(TRIGGER_PROMPT_NEEDS_CRON.to_string());
+            }
+        }
+    }
+    Ok(requested.clone())
+}
+
 impl TaskTriggerHandler {
     /// Write the parsed update to the store and reconcile live trigger
     /// wiring. Returns `(hooks_changed, infra_node_changed)`.
@@ -275,6 +337,11 @@ impl TaskTriggerHandler {
             if let Ok(Some(lp)) = self.db.get_graph(graph_id) {
                 self.activate_graph_trigger(&lp).await;
             }
+        }
+        if let Some(trigger_prompt) = update.trigger_prompt {
+            self.db
+                .update_graph_trigger_prompt(graph_id, trigger_prompt.as_deref())
+                .map_err(internal_error)?;
         }
         let hooks_changed = update.hooks.is_some() || update.completion_hook.is_some();
         if let Some(hooks_map) = update.hooks {

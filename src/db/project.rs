@@ -526,6 +526,7 @@ mod tests {
         db.insert_terminal_session("term-1", "term-1", "bash", workdir)
             .unwrap();
         db.insert_graph(&crate::domain::graphs::Graph {
+            trigger_prompt: None,
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,
@@ -750,6 +751,7 @@ mod tests {
         db.upsert_project(&sample_project_at("hash-b", "/proj-b"))
             .unwrap();
         db.insert_graph(&crate::domain::graphs::Graph {
+            trigger_prompt: None,
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,

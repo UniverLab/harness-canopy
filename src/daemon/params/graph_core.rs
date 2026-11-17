@@ -34,6 +34,9 @@ pub struct GraphCreateParams {
     pub workdir: String,
     /// Optional automatic trigger (cron/watch). Omit for a manual graph.
     pub trigger: Option<GraphTriggerParams>,
+    /// Optional prompt a cron tick feeds a spec-less graph as its idea. Only
+    /// valid together with a cron trigger; refused on a manual or watch graph.
+    pub trigger_prompt: Option<String>,
     /// Optional pre-wired target for infrastructure failures (`Error` edges).
     /// When set, every new agent/check/gate node auto-creates a `Error` edge
     /// to this node.
@@ -149,6 +152,13 @@ pub struct GraphUpdateParams {
     /// New automatic trigger. Provide kind = "manual" to clear it. Omit to
     /// leave the current trigger unchanged.
     pub trigger: Option<GraphTriggerParams>,
+    /// Optional prompt a cron tick feeds a spec-less graph as its idea, or
+    /// null to clear it. Only valid when the graph has (or is being given) a
+    /// cron trigger: setting it on a manual/watch graph, or removing/changing
+    /// the cron trigger of a graph that has one, is refused. Omit to leave it
+    /// unchanged.
+    #[serde(default, deserialize_with = "double_option")]
+    pub trigger_prompt: Option<Option<String>>,
     /// New `on_completed` post-completion hook config, or null to clear it.
     /// Omit to leave the current hook unchanged. This is a compatibility
     /// alias — prefer `hooks` for event-keyed hook management. Legacy update

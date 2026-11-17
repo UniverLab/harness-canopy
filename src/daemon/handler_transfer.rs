@@ -275,6 +275,7 @@ impl TaskTriggerHandler {
             crate::domain::graph_transfer::resolve_unique_graph_name(&existing_names, desired_name);
 
         let lp = Graph {
+            trigger_prompt: None,
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,

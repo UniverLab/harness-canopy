@@ -6,6 +6,7 @@ use super::*;
 /// wait-for-completion pause observes.
 fn insert_running_graph_with_node(db: &Database, id: &str, workdir: &str) {
     db.insert_graph(&Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -74,6 +75,7 @@ fn insert_pausing_graph(db: &Database, id: &str, workdir: &str) {
 /// state a lost pause-race compare-and-set leaves behind.
 fn insert_bare_graph(db: &Database, id: &str, workdir: &str, status: GraphStatus) {
     db.insert_graph(&Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,

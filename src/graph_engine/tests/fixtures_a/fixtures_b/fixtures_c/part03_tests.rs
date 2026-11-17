@@ -1066,6 +1066,7 @@ fn find_entry_node_picks_lowest_position_in_retry_cycle() {
 #[test]
 fn render_agent_prompt_includes_reporting_contract() {
     let lp = crate::domain::graphs::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -1147,6 +1148,7 @@ fn render_agent_prompt_includes_reporting_contract() {
 #[test]
 fn render_agent_prompt_places_spec_notes_before_reporting() {
     let lp = crate::domain::graphs::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -1234,6 +1236,7 @@ fn render_agent_prompt_places_spec_notes_before_reporting() {
 #[test]
 fn render_agent_prompt_adds_continuation_notice_only_when_spec_interrupted() {
     let lp = crate::domain::graphs::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -1421,6 +1424,7 @@ fn render_agent_prompt_elides_huge_previous_feedback() {
     // was a 65KB test log blowing up argv. The full text must never be
     // interpolated whole; the marker must show it was cut.
     let lp = crate::domain::graphs::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,

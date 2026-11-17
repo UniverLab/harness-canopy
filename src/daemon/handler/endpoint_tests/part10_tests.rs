@@ -1021,6 +1021,7 @@ async fn resolve_graph_id_by_prefix_tests() {
     let (dir, db, _handler) = endpoint_test_handler();
     let lp1 = insert_test_graph(&db, dir.path());
     let lp2 = Graph {
+        trigger_prompt: None,
         id: "graph-bbbbbbbb-2222".to_string(),
         name: "Graph B".to_string(),
         description: None,

@@ -27,6 +27,7 @@ fn hook_fixture(platform: &str, prompt: &str) -> GraphCompletionHook {
 
 fn graph_with_hooks(id: &str, hooks: BTreeMap<GraphHookEvent, Vec<GraphCompletionHook>>) -> Graph {
     Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,

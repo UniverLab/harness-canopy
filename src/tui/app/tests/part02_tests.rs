@@ -1196,6 +1196,7 @@ fn save_graph_editor_dialog_rejects_unknown_config_key_in_node_config_mode() {
 
     let db = test_db();
     db.insert_graph(&Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,

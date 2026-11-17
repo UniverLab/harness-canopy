@@ -170,6 +170,7 @@ fn map_graph_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Graph> {
         infra_node_id: row.get(17)?,
         allow_dirty_start: row.get(19)?,
         require_spec_type: row.get(20)?,
+        trigger_prompt: row.get(21)?,
     })
 }
 
@@ -460,6 +461,7 @@ mod tests {
 
     fn sample_graph(id: &str) -> Graph {
         Graph {
+            trigger_prompt: None,
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,
@@ -1060,6 +1062,7 @@ mod tests {
     ) {
         use crate::domain::graphs::GraphRunStatus;
         db.insert_graph(&Graph {
+            trigger_prompt: None,
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,

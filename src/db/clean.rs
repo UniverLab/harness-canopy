@@ -799,6 +799,7 @@ mod tests {
         status: crate::domain::graphs::GraphStatus,
     ) -> crate::domain::graphs::Graph {
         crate::domain::graphs::Graph {
+            trigger_prompt: None,
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,

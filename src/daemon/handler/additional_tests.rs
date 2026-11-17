@@ -38,6 +38,7 @@ fn standalone_spec(id: &str) -> GraphSpec {
 
 fn insert_test_graph(db: &Database, id: &str) {
     db.insert_graph(&Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,

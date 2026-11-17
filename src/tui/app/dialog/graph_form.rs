@@ -331,6 +331,7 @@ mod tests {
 
     fn sample_graph(id: &str, trigger: Option<Trigger>) -> Graph {
         Graph {
+            trigger_prompt: None,
             archived: false,
             paused_by_reconciliation: false,
             allow_dirty_start: false,

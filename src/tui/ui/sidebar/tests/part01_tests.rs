@@ -36,6 +36,7 @@ fn sidebar_brain_reaches_the_right_edge_of_its_area() {
     std::mem::forget(tmp);
     let db = Arc::new(Database::new(&path).unwrap());
     db.insert_graph(&Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,

@@ -735,6 +735,7 @@ mod tests {
 
     fn test_graph() -> crate::domain::graphs::Graph {
         crate::domain::graphs::Graph {
+            trigger_prompt: None,
             id: "g1".to_string(),
             name: "Grove".to_string(),
             description: None,

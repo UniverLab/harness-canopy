@@ -81,6 +81,7 @@ fn sample_graph(
     status: crate::domain::graphs::GraphStatus,
 ) -> crate::domain::graphs::Graph {
     crate::domain::graphs::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -126,3 +127,4 @@ fn init_git_repo(path: &std::path::Path) {
 
 mod part01_tests;
 mod part02_tests;
+mod part03_tests;

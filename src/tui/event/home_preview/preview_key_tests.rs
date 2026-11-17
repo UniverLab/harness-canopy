@@ -57,6 +57,7 @@ fn app_with_agents() -> App {
 
 fn graph_with_status(status: crate::domain::graphs::GraphStatus) -> crate::domain::graphs::Graph {
     crate::domain::graphs::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -178,6 +179,7 @@ fn app_with_open_tail() -> App {
 /// runs to resolve (the temp DB the test App holds is otherwise empty).
 fn seed_live_graph(db: &Database, node_ids: &[&str]) {
     db.insert_graph(&crate::domain::graphs::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
@@ -271,6 +273,7 @@ fn insert_live_run(
 /// reassemble a live state whose effective nodes still contain the graph.
 fn seed_completed_graph_with_nodes(db: &Database) {
     db.insert_graph(&crate::domain::graphs::Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,

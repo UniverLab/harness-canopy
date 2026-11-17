@@ -1090,6 +1090,7 @@ async fn graph_get_running_with_scheduled_resume_does_not_warn() {
     let (dir, db, handler) = endpoint_test_handler();
     // Build a running graph with an autorun schedule directly.
     let lp = Graph {
+        trigger_prompt: None,
         archived: false,
         paused_by_reconciliation: false,
         allow_dirty_start: false,
