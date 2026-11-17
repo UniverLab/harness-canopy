@@ -208,6 +208,32 @@ served from the local database — no daemon required.
 | `canopy missions` | List every mission: icon, title, category, `unlocked <date>` or `locked: <challenge>`, plus `N / 28 unlocked` |
 | `canopy missions --json` | Print the same report as one JSON object (`unlocked`, `total`, `missions` with `id`, `title`, `icon`, `category`, `challenge`, `unlocked_at` as RFC 3339 UTC or null) |
 
+<!-- RETIRED-VOCAB-BEGIN: `loop_lag_ms` below is a live metric key (event-loop lag), not the retired `loop:` attribution — the guard regex cannot tell the prefix apart, so this section is exempt. -->
+
+## Metrics
+
+Read-only host usage history from `~/.canopy/metrics/` — no daemon required.
+A missing directory, a missing day file and a malformed line (a power-off can
+leave a truncated last line) all read as "no samples in this window", never as
+an error.
+
+| Command | Description |
+|---|---|
+| `canopy metrics host` | Summary of the last hour: samples count, and for `cpu_usage`, `memory_used_mb`, `swap_used_mb`, `load1`, `daemon_cpu`, `daemon_rss_mb`, `running_nodes` and `loop_lag_ms` the average, p95 and maximum with the time of the maximum; the highest `cpu_temperature_c` when present; the three process names most often seen in `top_procs` with their share of samples |
+| `canopy metrics host --since 6h --until <RFC3339>` | Summary of a window (`--since` is an RFC 3339 instant or a duration like `30m`, `6h`, `1d` before `--until`, which defaults to now) |
+| `canopy metrics host --json` | The same report as one JSON object: `window` holds the resolved `since`/`until` instants and the sample count, `summary` holds per-key `{avg, p95, max, max_at}` plus `temp_max` and `top_procs`, and `samples` holds the raw lines of the window |
+| `canopy metrics host --json --no-samples` | JSON without the `samples` array |
+| `canopy metrics host --at <RFC3339>` | Samples within 60 seconds of the instant, each with its `top_procs` — what the machine was doing at that minute |
+
+Examples:
+
+```sh
+canopy metrics host --since 6h
+canopy metrics host --at 2026-03-02T11:32:00+00:00
+```
+
+<!-- RETIRED-VOCAB-END -->
+
 ## Spec backlog
 
 | Command | Description |

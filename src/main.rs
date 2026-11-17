@@ -259,6 +259,11 @@ enum Commands {
         #[command(subcommand)]
         action: RemoteAction,
     },
+    /// Read host usage history (no daemon required).
+    Metrics {
+        #[command(subcommand)]
+        action: MetricsAction,
+    },
     /// Run a stdio sidecar proxy that injects canopy identity headers.
     Bridge {
         /// Agent session ID to bind this bridge process.
@@ -277,6 +282,31 @@ enum Commands {
     /// Start the HTTP API server (used by the daemon).
     #[command(hide = true)]
     Serve,
+}
+
+/// Read-only views over locally stored history.
+#[derive(Subcommand)]
+enum MetricsAction {
+    /// Host usage history: peaks, culprits and what the machine was doing.
+    Host {
+        /// Window start: RFC 3339 instant or duration before `--until`
+        /// (`30m`, `6h`, `1d`). Defaults to `1h`.
+        #[arg(long, default_value = "1h")]
+        since: String,
+        /// Window end: RFC 3339 instant. Defaults to now.
+        #[arg(long)]
+        until: Option<String>,
+        /// Samples within 60 seconds of this RFC 3339 instant, each with its
+        /// `top_procs`. Overrides `--since`/`--until`.
+        #[arg(long)]
+        at: Option<String>,
+        /// Print the report as JSON.
+        #[arg(long)]
+        json: bool,
+        /// With `--json`: omit the `samples` array.
+        #[arg(long = "no-samples")]
+        no_samples: bool,
+    },
 }
 
 #[tokio::main]
@@ -357,6 +387,7 @@ async fn main() -> Result<()> {
         Some(Commands::Sandbox { action }) => handle_sandbox_action(action).await,
         Some(Commands::Shelf { action }) => handle_shelf_action(action, cli.port).await,
         Some(Commands::Remote { action }) => handle_remote_action(action).await,
+        Some(Commands::Metrics { action }) => handle_metrics_action(action),
         Some(Commands::Bridge {
             agent_id,
             port,
@@ -416,6 +447,7 @@ fn keeps_sigpipe_ignored(cmd: &Option<Commands>) -> bool {
         | Some(Commands::Subagent { .. })
         | Some(Commands::Sandbox { .. })
         | Some(Commands::Shelf { .. })
+        | Some(Commands::Metrics { .. })
         | Some(Commands::Remote { .. })
         | Some(Commands::InternalPdfExtract { .. }) => false,
     }
@@ -437,6 +469,28 @@ fn restore_default_sigpipe(cmd: &Option<Commands>) {
     {
         let _ = cmd;
     }
+}
+
+fn handle_metrics_action(action: MetricsAction) -> Result<()> {
+    let MetricsAction::Host {
+        since,
+        until,
+        at,
+        json,
+        no_samples,
+    } = action;
+    let home =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+    crate::system::host_metrics_reader::run_host(
+        &home.join(".canopy").join("metrics"),
+        &crate::system::host_metrics_reader::HostOptions {
+            since,
+            until,
+            at,
+            json,
+            no_samples,
+        },
+    )
 }
 
 fn handle_uninstall(

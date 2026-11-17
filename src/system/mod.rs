@@ -6,6 +6,7 @@
 
 mod gpu;
 pub mod host_metrics;
+pub mod host_metrics_reader;
 pub mod host_metrics_recorder;
 mod platform;
 mod power;
