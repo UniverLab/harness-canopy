@@ -8,6 +8,7 @@
 pub mod auth;
 pub mod catalog;
 pub mod client;
+pub mod compose_guard;
 pub mod dir_list;
 pub mod graphs;
 pub mod host_frame;

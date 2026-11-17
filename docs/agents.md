@@ -61,6 +61,12 @@ offers) and a notification says the session was not found, rather than the
 message being dropped silently. If a fire is already waiting for the same
 target, a new fire replaces that message rather than piling up a second one.
 
+If the user is typing in the target session when the send fires, delivery
+waits until they submit or clear the line instead of cutting into what they
+typed; sends held this way stay queued in fire time order. A send held for
+over a minute raises one `Scheduled send held` notification naming the
+session.
+
 Cron example (MCP call):
 
 ```json

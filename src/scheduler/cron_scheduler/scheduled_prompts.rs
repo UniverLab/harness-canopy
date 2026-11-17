@@ -5,16 +5,19 @@
 //! attached. A send whose target session is gone keeps the prompt recoverable
 //! and says so, exactly as `preserve_dead_scheduled_prompt` did in the TUI.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
+use super::held_sends::{hold_sleep, HeldTracker};
 use crate::application::ports::AgentRepository;
 use crate::db::scheduled_prompts::{is_target_alive, ScheduledPrompt, ScheduledPromptProvenance};
 use crate::db::Database;
 use crate::domain::notification::{send_notification, NotificationLevel};
+use crate::sessions::compose_guard::Delivery;
 use crate::sessions::{SessionHub, SessionKind, SessionStatus};
 
 /// Longest the delivery task sleeps between iterations. Sends created by
@@ -33,9 +36,10 @@ pub(crate) async fn run_delivery_loop(
     notify: Arc<Notify>,
     cancel: CancellationToken,
 ) {
+    let mut held = HeldTracker::new();
     loop {
-        deliver_once(&db, &hub).await;
-        let sleep = next_delivery_sleep(&db);
+        deliver_once(&db, &hub, &mut held).await;
+        let sleep = next_delivery_sleep(&db, !held.is_empty());
         tokio::select! {
             _ = cancel.cancelled() => break,
             _ = notify.notified() => {},
@@ -45,43 +49,54 @@ pub(crate) async fn run_delivery_loop(
 }
 
 /// One delivery pass, off the async executor: delivery writes to a PTY and
-/// waits out the target CLI's paste-settle window.
-async fn deliver_once(db: &Arc<Database>, hub: &SessionHub) {
+/// waits out the target CLI's paste-settle window. Held sends ride along in
+/// `held` so their hold times survive the blocking hop.
+async fn deliver_once(db: &Arc<Database>, hub: &SessionHub, held: &mut HeldTracker) {
     let db = Arc::clone(db);
     let hub = hub.clone();
-    let delivered =
-        tokio::task::spawn_blocking(move || deliver_due_scheduled_prompts(&db, &hub)).await;
-    if delivered.is_err() {
-        tracing::warn!("Scheduled-send delivery task failed");
+    let mut tracker = std::mem::take(held);
+    let joined = tokio::task::spawn_blocking(move || {
+        deliver_due_scheduled_prompts(&db, &hub, &mut tracker);
+        tracker
+    })
+    .await;
+    match joined {
+        Ok(tracker) => *held = tracker,
+        Err(_) => tracing::warn!("Scheduled-send delivery task failed"),
     }
 }
 
 /// How long the delivery task sleeps before its next pass: the time until
-/// the next send is due, capped at the 2-second ceiling. Anything else —
-/// no pending sends, a send already due (the pass just above handled it),
-/// or a failed query — sleeps the full ceiling, so a persistently failing
-/// query retries on a bounded interval instead of spinning.
-fn next_delivery_sleep(db: &Database) -> Duration {
+/// the next send is due, capped at the 2-second ceiling — or at the 500 ms
+/// hold retry while sends are held, so a held send is retried promptly
+/// without spinning. Anything else — no pending sends, a send already due
+/// (the pass just above handled it), or a failed query — sleeps the full
+/// cap, so a persistently failing query retries on a bounded interval
+/// instead of spinning.
+fn next_delivery_sleep(db: &Database, held: bool) -> Duration {
+    let cap = if held {
+        hold_sleep().min(MAX_DELIVERY_WAIT)
+    } else {
+        MAX_DELIVERY_WAIT
+    };
     match db.next_scheduled_prompt_at() {
         Ok(Some(fire_at)) => {
             let now = chrono::Utc::now();
             if fire_at > now {
-                (fire_at - now)
-                    .to_std()
-                    .unwrap_or(MAX_DELIVERY_WAIT)
-                    .min(MAX_DELIVERY_WAIT)
+                (fire_at - now).to_std().unwrap_or(cap).min(cap)
             } else {
-                MAX_DELIVERY_WAIT
+                cap
             }
         }
-        _ => MAX_DELIVERY_WAIT,
+        _ => cap,
     }
 }
 
-/// Deliver every send whose `fire_at` has passed: to its live target session,
+/// Deliver every send whose `fire_at` has passed: to its live target session
+/// (unless the user is typing there, in which case the send stays queued),
 /// or — when that session is gone — to the failed-sends table plus a desktop
-/// notification. Either way the schedule is consumed once.
-pub fn deliver_due_scheduled_prompts(db: &Database, hub: &SessionHub) {
+/// notification.
+pub fn deliver_due_scheduled_prompts(db: &Database, hub: &SessionHub, held: &mut HeldTracker) {
     let now = chrono::Utc::now();
     let due = match db.list_due_scheduled_prompts(now) {
         Ok(due) => due,
@@ -93,36 +108,83 @@ pub fn deliver_due_scheduled_prompts(db: &Database, hub: &SessionHub) {
     if due.is_empty() {
         return;
     }
+    held.retain(&due.iter().map(|send| send.id.clone()).collect());
 
     let live_session_ids = live_agent_ids(hub);
-    // Sends arrive ordered by `fire_at` and are delivered in that order.
+    // Sends arrive ordered by `fire_at` and are delivered in that order. Once
+    // a send is held, later sends for the same session wait behind it, so a
+    // composing state flipping mid-pass can never reorder them.
+    let mut held_sessions: HashSet<String> = HashSet::new();
     for send in &due {
-        deliver_one_send(db, hub, send, now, &live_session_ids);
+        deliver_one_send(
+            db,
+            hub,
+            send,
+            now,
+            &live_session_ids,
+            held,
+            &mut held_sessions,
+        );
     }
 }
 
-/// Deliver one due send and consume its schedule. A failure — error or
-/// panic — is logged and never stops the loop or drops the sends behind it.
+/// Deliver one due send and consume its schedule — unless the user is
+/// typing, in which case the row is kept untouched for a later pass. A
+/// failure — error or panic — is logged and never stops the loop or drops
+/// the sends behind it.
 fn deliver_one_send(
     db: &Database,
     hub: &SessionHub,
     send: &ScheduledPrompt,
     now: chrono::DateTime<chrono::Utc>,
     live_session_ids: &[String],
+    held: &mut HeldTracker,
+    held_sessions: &mut HashSet<String>,
 ) {
-    let delivered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    if held_sessions.contains(&send.target_session_id) {
+        hold_send(hub, send, held);
+        return;
+    }
+    match attempt_delivery(db, hub, send, now, live_session_ids) {
+        Ok(Delivery::Delivered) => {
+            held.record_delivered(&send.id);
+            delete_send_row(db, send);
+        }
+        Ok(Delivery::Held) => {
+            held_sessions.insert(send.target_session_id.clone());
+            hold_send(hub, send, held);
+        }
+        Err(_) => {
+            tracing::warn!(
+                "Scheduled send '{}' delivery panicked; continuing with the rest",
+                send.id
+            );
+            delete_send_row(db, send);
+        }
+    }
+}
+
+/// Run one delivery attempt, catching panics so one bad send never stops
+/// the loop or drops the sends behind it.
+fn attempt_delivery(
+    db: &Database,
+    hub: &SessionHub,
+    send: &ScheduledPrompt,
+    now: chrono::DateTime<chrono::Utc>,
+    live_session_ids: &[String],
+) -> std::thread::Result<Delivery> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         if is_target_alive(&send.target_session_id, live_session_ids) {
-            deliver_live_scheduled_prompt(db, hub, send);
+            deliver_live_scheduled_prompt(db, hub, send)
         } else {
             preserve_dead_scheduled_prompt(db, send, now);
+            Delivery::Delivered
         }
-    }));
-    if delivered.is_err() {
-        tracing::warn!(
-            "Scheduled send '{}' delivery panicked; continuing with the rest",
-            send.id
-        );
-    }
+    }))
+}
+
+/// Delete a consumed schedule row, logging instead of failing.
+fn delete_send_row(db: &Database, send: &ScheduledPrompt) {
     if let Err(e) = db.delete_scheduled_prompt(&send.id) {
         tracing::warn!("Failed to delete scheduled send '{}': {e}", send.id);
     }
@@ -140,25 +202,61 @@ fn live_agent_ids(hub: &SessionHub) -> Vec<String> {
         .collect()
 }
 
-fn deliver_live_scheduled_prompt(db: &Database, hub: &SessionHub, send: &ScheduledPrompt) {
+/// Deliver one due send to its live target session — unless the user is
+/// typing there, in which case nothing is written and the send stays queued.
+/// Returns whether the schedule row is consumed.
+fn deliver_live_scheduled_prompt(
+    db: &Database,
+    hub: &SessionHub,
+    send: &ScheduledPrompt,
+) -> Delivery {
     let Some(session) = hub.get(&send.target_session_id) else {
-        return;
+        return Delivery::Delivered;
     };
-    if let Err(e) = session.prompt(&send.prompt) {
-        tracing::warn!("Scheduled send '{}' delivery failed: {e}", send.id);
-        send_notification(
-            "Scheduled send failed",
-            &format!("Could not deliver prompt: {e}"),
-            NotificationLevel::Error,
-        );
-        return;
+    match session.prompt_if_idle(&send.prompt) {
+        Ok(Delivery::Delivered) => {
+            tracing::info!(
+                "Scheduled send '{}' delivered to session '{}'",
+                send.id,
+                send.target_session_id
+            );
+            notify_hook_delivery(db, send);
+            Delivery::Delivered
+        }
+        Ok(Delivery::Held) => {
+            tracing::info!(
+                "Scheduled send '{}' held: user is typing in session '{}'",
+                send.id,
+                send.target_session_id
+            );
+            Delivery::Held
+        }
+        Err(e) => {
+            tracing::warn!("Scheduled send '{}' delivery failed: {e}", send.id);
+            send_notification(
+                "Scheduled send failed",
+                &format!("Could not deliver prompt: {e}"),
+                NotificationLevel::Error,
+            );
+            Delivery::Delivered
+        }
     }
-    tracing::info!(
-        "Scheduled send '{}' delivered to session '{}'",
-        send.id,
-        send.target_session_id
-    );
-    notify_hook_delivery(db, send);
+}
+
+/// Keep a held send queued; after a minute of holding, tell the user once.
+fn hold_send(hub: &SessionHub, send: &ScheduledPrompt, held: &mut HeldTracker) {
+    held.record_held(&send.id);
+    if held.held_overdue(&send.id) {
+        let name = hub
+            .get(&send.target_session_id)
+            .map(|session| session.name.clone())
+            .unwrap_or_else(|| send.target_session_id.clone());
+        send_notification(
+            "Scheduled send held",
+            &format!("Delivery held: you are typing in {name}"),
+            NotificationLevel::Info,
+        );
+    }
 }
 
 fn notify_hook_delivery(db: &Database, send: &ScheduledPrompt) -> bool {
@@ -362,7 +460,7 @@ mod tests {
         )
         .expect("insert scheduled send");
 
-        deliver_due_scheduled_prompts(&db, &hub);
+        deliver_due_scheduled_prompts(&db, &hub, &mut HeldTracker::new());
 
         wait_for_output(&session, "deliver me from the daemon");
         assert!(
@@ -399,7 +497,7 @@ mod tests {
         )
         .expect("insert scheduled send");
 
-        deliver_due_scheduled_prompts(&db, &hub);
+        deliver_due_scheduled_prompts(&db, &hub, &mut HeldTracker::new());
 
         assert!(
             db.list_due_scheduled_prompts(chrono::Utc::now())
@@ -438,7 +536,7 @@ mod tests {
         )
         .expect("insert scheduled send");
 
-        deliver_due_scheduled_prompts(&db, &hub);
+        deliver_due_scheduled_prompts(&db, &hub, &mut HeldTracker::new());
 
         assert_eq!(
             db.list_failed_scheduled_prompts_for_workdir(workdir)
@@ -749,7 +847,7 @@ mod tests {
     #[test]
     fn next_delivery_sleep_math() {
         let (db, _dir) = test_db();
-        assert_eq!(next_delivery_sleep(&db), MAX_DELIVERY_WAIT);
+        assert_eq!(next_delivery_sleep(&db, false), MAX_DELIVERY_WAIT);
 
         db.insert_scheduled_prompt(
             "ss-far",
@@ -761,7 +859,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(next_delivery_sleep(&db), MAX_DELIVERY_WAIT);
+        assert_eq!(next_delivery_sleep(&db, false), MAX_DELIVERY_WAIT);
 
         // Whole-second arithmetic: `fire_at` is stored truncated to seconds,
         // so a sub-2 s offset would be timing-flaky. A send 2 whole seconds
@@ -770,7 +868,7 @@ mod tests {
             .expect("whole-second timestamp");
         db.insert_scheduled_prompt("ss-near", "near", "sess", None, near, None, None)
             .unwrap();
-        let sleep = next_delivery_sleep(&db);
+        let sleep = next_delivery_sleep(&db, false);
         assert!(
             sleep < MAX_DELIVERY_WAIT,
             "a send due in ~2 s must shorten the wait, got {sleep:?}"
@@ -792,6 +890,204 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(next_delivery_sleep(&db), MAX_DELIVERY_WAIT);
+        assert_eq!(next_delivery_sleep(&db, false), MAX_DELIVERY_WAIT);
+
+        // While sends are held the wait is capped at the 500 ms retry,
+        // whether the earliest send is past or far in the future.
+        assert_eq!(next_delivery_sleep(&db, true), hold_sleep());
+        assert!(hold_sleep() <= Duration::from_millis(500));
+    }
+
+    // ── hold while the user is typing ─────────────────────────────
+
+    /// Ids of the sends currently due, in delivery order.
+    fn due_ids(db: &Database) -> Vec<String> {
+        db.list_due_scheduled_prompts(chrono::Utc::now())
+            .expect("list due")
+            .iter()
+            .map(|send| send.id.clone())
+            .collect()
+    }
+
+    fn due_send(
+        db: &Database,
+        id: &str,
+        prompt: &str,
+        session_id: &str,
+        fire_at: chrono::DateTime<chrono::Utc>,
+    ) {
+        db.insert_scheduled_prompt(id, prompt, session_id, Some("/tmp"), fire_at, None, None)
+            .expect("insert scheduled send");
+    }
+
+    fn overdue() -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc::now() - chrono::Duration::minutes(1)
+    }
+
+    /// Typing holds a due send: the row stays queued and the PTY receives
+    /// only what the user typed.
+    #[test]
+    fn typing_holds_a_due_send_and_keeps_the_row() {
+        let (db, _dir) = test_db();
+        let hub = test_hub(&db);
+        let session = hub.spawn(&agent_spawn("cat")).expect("spawn cat session");
+        session.write_to_pty(b"abc").expect("type abc");
+        due_send(&db, "ss-held", "held-prompt-abc", &session.id, overdue());
+
+        deliver_due_scheduled_prompts(&db, &hub, &mut HeldTracker::new());
+
+        assert_eq!(due_ids(&db), vec!["ss-held".to_string()]);
+        wait_for_output(&session, "abc");
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(
+            !session
+                .test_contents()
+                .unwrap_or_default()
+                .contains("held-prompt-abc"),
+            "a held send never reaches the PTY"
+        );
+        let _ = hub.kill(&session.id);
+    }
+
+    /// Submitting the line releases the held send, delivered after the
+    /// user's own line.
+    #[test]
+    fn submitted_line_releases_the_held_send() {
+        let (db, _dir) = test_db();
+        let hub = test_hub(&db);
+        let session = hub.spawn(&agent_spawn("cat")).expect("spawn cat session");
+        session.write_to_pty(b"abc").expect("type abc");
+        due_send(&db, "ss-held", "held-prompt-enter", &session.id, overdue());
+        deliver_due_scheduled_prompts(&db, &hub, &mut HeldTracker::new());
+        assert_eq!(due_ids(&db), vec!["ss-held".to_string()]);
+
+        session.write_to_pty(b"\r").expect("submit the line");
+        std::thread::sleep(Duration::from_millis(2200));
+        deliver_due_scheduled_prompts(&db, &hub, &mut HeldTracker::new());
+
+        assert!(due_ids(&db).is_empty(), "the released send is consumed");
+        let contents = wait_for_output(&session, "held-prompt-enter");
+        let typed = contents.find("abc").expect("user line echoed");
+        let pasted = contents.find("held-prompt-enter").expect("send echoed");
+        assert!(
+            typed < pasted,
+            "send lands after the user line: {contents:?}"
+        );
+        let _ = hub.kill(&session.id);
+    }
+
+    /// Cursor keys, focus reports and mouse reports alone never hold a send.
+    #[test]
+    fn escape_sequences_alone_do_not_hold_a_send() {
+        let (db, _dir) = test_db();
+        let hub = test_hub(&db);
+        let session = hub.spawn(&agent_spawn("cat")).expect("spawn cat session");
+        session
+            .write_to_pty(b"\x1b[A\x1b[B\x1bOC\x1bOD\x1b[I\x1b[O")
+            .expect("arrows and focus reports");
+        session
+            .write_to_pty(b"\x1b[<0;10;20M")
+            .expect("mouse report");
+        due_send(&db, "ss-seq", "seq-prompt", &session.id, overdue());
+
+        deliver_due_scheduled_prompts(&db, &hub, &mut HeldTracker::new());
+
+        assert!(due_ids(&db).is_empty(), "nothing typed: send is consumed");
+        wait_for_output(&session, "seq-prompt");
+        let _ = hub.kill(&session.id);
+    }
+
+    /// Ctrl-U clears the composing line, but only once the recency window
+    /// expires; a stale dirty line holds indefinitely until it is cleared.
+    #[test]
+    fn ctrl_u_clears_the_line_and_releases_the_send() {
+        let (db, _dir) = test_db();
+        let hub = test_hub(&db);
+        let session = hub.spawn(&agent_spawn("cat")).expect("spawn cat session");
+        session.write_to_pty(b"abc").expect("type abc");
+        due_send(&db, "ss-held", "held-prompt-ctrl-u", &session.id, overdue());
+        let mut held = HeldTracker::new();
+        deliver_due_scheduled_prompts(&db, &hub, &mut held);
+        assert_eq!(due_ids(&db), vec!["ss-held".to_string()]);
+
+        // A stale dirty line never releases on its own.
+        std::thread::sleep(Duration::from_millis(2200));
+        deliver_due_scheduled_prompts(&db, &hub, &mut held);
+        assert_eq!(due_ids(&db), vec!["ss-held".to_string()]);
+
+        // Clearing the line releases the send once the recency window
+        // of the Ctrl-U keystroke itself expires.
+        session.write_to_pty(b"\x15").expect("ctrl-u clears");
+        deliver_due_scheduled_prompts(&db, &hub, &mut held);
+        assert_eq!(due_ids(&db), vec!["ss-held".to_string()]);
+        std::thread::sleep(Duration::from_millis(2200));
+        deliver_due_scheduled_prompts(&db, &hub, &mut held);
+
+        assert!(due_ids(&db).is_empty(), "the cleared send is consumed");
+        wait_for_output(&session, "held-prompt-ctrl-u");
+        let _ = hub.kill(&session.id);
+    }
+
+    /// Two held sends stay queued in `fire_at` order and deliver in that
+    /// order once the user is idle — none jumps ahead of an earlier hold.
+    #[test]
+    fn two_held_sends_deliver_in_fire_at_order() {
+        let (db, _dir) = test_db();
+        let hub = test_hub(&db);
+        let session = hub.spawn(&agent_spawn("cat")).expect("spawn cat session");
+        session.write_to_pty(b"abc").expect("type abc");
+        // Inserted later-first so the answer must come from `fire_at` order.
+        due_send(&db, "ss-second", "order-second-BBB", &session.id, overdue());
+        due_send(
+            &db,
+            "ss-first",
+            "order-first-AAA",
+            &session.id,
+            overdue() - chrono::Duration::minutes(1),
+        );
+
+        let mut held = HeldTracker::new();
+        deliver_due_scheduled_prompts(&db, &hub, &mut held);
+        assert_eq!(
+            due_ids(&db),
+            vec!["ss-first".to_string(), "ss-second".to_string()]
+        );
+
+        session.write_to_pty(b"\x15").expect("ctrl-u clears");
+        std::thread::sleep(Duration::from_millis(2200));
+        deliver_due_scheduled_prompts(&db, &hub, &mut held);
+
+        assert!(due_ids(&db).is_empty(), "both sends are consumed");
+        let contents = wait_for_output(&session, "order-second-BBB");
+        assert!(
+            contents.contains("order-first-AAA"),
+            "first send echoed: {contents:?}"
+        );
+        let first = contents.find("order-first-AAA").expect("first send echoed");
+        let second = contents
+            .find("order-second-BBB")
+            .expect("second send echoed");
+        assert!(
+            first < second,
+            "sends deliver in fire_at order: {contents:?}"
+        );
+        let _ = hub.kill(&session.id);
+    }
+
+    /// A session with no user input is never composing: delivery is
+    /// immediate.
+    #[test]
+    fn fresh_session_without_input_delivers_immediately() {
+        let (db, _dir) = test_db();
+        let hub = test_hub(&db);
+        let session = hub.spawn(&agent_spawn("cat")).expect("spawn cat session");
+        assert!(!session.user_is_composing());
+        due_send(&db, "ss-fresh", "fresh-prompt", &session.id, overdue());
+
+        deliver_due_scheduled_prompts(&db, &hub, &mut HeldTracker::new());
+
+        assert!(due_ids(&db).is_empty(), "no input: send is consumed");
+        wait_for_output(&session, "fresh-prompt");
+        let _ = hub.kill(&session.id);
     }
 }

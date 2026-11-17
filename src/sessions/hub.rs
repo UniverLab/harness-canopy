@@ -32,6 +32,7 @@ fn send_sighup_to_group(child: &mut dyn portable_pty::Child) {
     let _ = crate::daemon::process::send_signal_to_group(pid, libc::SIGHUP);
 }
 
+use super::compose_guard::{ComposeState, Delivery};
 use super::protocol::SessionItem;
 use super::{preserve_rows_on_shrink, spawn_identity, write_submitted_prompt, VT_SCROLLBACK_LINES};
 
@@ -148,6 +149,7 @@ pub struct HubSession {
     pub pid: Option<i64>,
     state: Mutex<OutputState>,
     status: Mutex<SessionStatus>,
+    compose: Mutex<ComposeState>,
     writer: Mutex<Box<dyn Write + Send>>,
     child: Mutex<Box<dyn portable_pty::Child + Send>>,
     master: Mutex<Box<dyn portable_pty::MasterPty + Send>>,
@@ -234,6 +236,9 @@ impl HubSession {
 
     /// Send raw bytes to the session's PTY stdin.
     pub fn write_to_pty(&self, data: &[u8]) -> anyhow::Result<()> {
+        if let Ok(mut compose) = self.compose.lock() {
+            compose.observe(data);
+        }
         if let Ok(mut w) = self.writer.lock() {
             w.write_all(data)?;
             w.flush()?;
@@ -260,6 +265,31 @@ impl HubSession {
             .map_err(|_| anyhow::anyhow!("pty writer lock poisoned"))?;
         write_submitted_prompt(&mut *writer, text, bracketed, spec)?;
         Ok(())
+    }
+
+    /// Whether the user is composing a prompt: a dirty line, or any
+    /// keystroke in the last two seconds.
+    pub fn user_is_composing(&self) -> bool {
+        self.compose
+            .lock()
+            .map(|state| state.is_composing())
+            .unwrap_or(false)
+    }
+
+    /// Deliver `text` only while the user is idle (else [`Delivery::Held`]);
+    /// explicit prompts stay on [`Self::prompt`].
+    pub fn prompt_if_idle(&self, text: &str) -> anyhow::Result<Delivery> {
+        let bracketed = self.bracketed_paste_enabled();
+        let spec = Cli::new(self.cli.as_str()).paste_submit_spec();
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("pty writer lock poisoned"))?;
+        if self.user_is_composing() {
+            return Ok(Delivery::Held);
+        }
+        write_submitted_prompt(&mut *writer, text, bracketed, spec)?;
+        Ok(Delivery::Delivered)
     }
 
     /// Resize the PTY and the parser through the same shrink-safe path the
@@ -537,6 +567,7 @@ impl SessionHub {
                 rows: DEFAULT_ROWS,
             }),
             status: Mutex::new(SessionStatus::Running),
+            compose: Mutex::new(ComposeState::new()),
             writer: Mutex::new(writer),
             child: Mutex::new(child),
             master: Mutex::new(master),
@@ -765,4 +796,69 @@ fn wait_for_exit_code(session: &HubSession) -> Option<i32> {
         std::thread::sleep(KILL_WAIT_INTERVAL);
     }
     session.poll_exit_code()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_db() -> (Arc<Database>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::new(&dir.path().join("test.db")).expect("test database");
+        (Arc::new(db), dir)
+    }
+
+    fn agent_spawn() -> SpawnRequest {
+        SpawnRequest {
+            kind: SessionKind::Agent,
+            cli: "cat".to_string(),
+            model: None,
+            workdir: "/tmp".to_string(),
+            name: None,
+            prompt: None,
+            interactive_args: None,
+            fallback_args: None,
+            model_flag: None,
+            id: None,
+            harness_conversation_id: None,
+            seed_id: None,
+            accent: None,
+            yolo: false,
+            preserve_args: false,
+        }
+    }
+
+    /// A keystroke parked behind the writer lock must already count as
+    /// composing: `prompt_if_idle` checks under that same lock, so observing
+    /// after writing would let a delivery slip through ahead of the parked
+    /// keystroke and mix with the user's line.
+    #[test]
+    fn parked_keystroke_counts_as_composing_before_reaching_the_pty() {
+        let (db, _dir) = test_db();
+        let hub =
+            SessionHub::with_broadcast_capacity(Arc::clone(&db), "test-host".to_string(), 256);
+        let session = hub.spawn(&agent_spawn()).expect("spawn cat session");
+        assert!(!session.user_is_composing());
+
+        // Hold the writer so a concurrent keystroke parks before writing.
+        let writer_guard = session.writer.lock().expect("writer lock");
+        let parked = Arc::clone(&session);
+        let handle = std::thread::spawn(move || parked.write_to_pty(b"x"));
+        // The parked keystroke is observed before it reaches the PTY.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !session.user_is_composing() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "parked keystroke never marked the session composing"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        drop(writer_guard);
+        handle
+            .join()
+            .expect("keystroke thread")
+            .expect("write_to_pty");
+        assert!(session.user_is_composing());
+        let _ = hub.kill(&session.id);
+    }
 }

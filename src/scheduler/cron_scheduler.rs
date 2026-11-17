@@ -39,6 +39,7 @@ const RECONCILE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 pub use retry::RetryPolicy;
 
 mod autorun;
+mod held_sends;
 mod retry;
 mod schedule_math;
 mod scheduled_prompts;
