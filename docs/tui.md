@@ -117,8 +117,9 @@ step instead of launching straight away:
 - **A busy database never blocks the open** — the launchpad's mission
   bookkeeping row is not required for the session to run: when the database
   stays locked past the 5 s busy timeout the session still opens, selected
-  and focused, and only that row is skipped. That mission is missing from
-  the launchpad's recent-mission list the next time it opens.
+  and focused, and the failed row is skipped instead of failing the open.
+  That mission is missing from the launchpad's recent-mission list the next
+  time it opens.
 
 ## Startup checks and diagnostics
 
