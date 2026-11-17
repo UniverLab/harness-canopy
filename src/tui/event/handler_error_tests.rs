@@ -18,6 +18,32 @@ use crate::tui::app::dialog::{DialogStep, NewAgentDialog, NewTaskType};
 use crate::tui::app::types::{App, Focus};
 use crate::tui::app::version_check::VersionNotice;
 
+/// Point `$HOME` at `path` for the test body: the launchpad path persists CLI
+/// usage stats under the real home (`App::record_cli_usage`), and a test must
+/// never touch the developer's `~/.canopy`. Same guard as
+/// `daemon::handler::endpoint_tests`: safe under nextest's one process per
+/// test, which is how the gates run.
+struct HomeVar {
+    prev: Option<std::ffi::OsString>,
+}
+
+impl HomeVar {
+    fn set(path: &std::path::Path) -> Self {
+        let prev = std::env::var_os("HOME");
+        unsafe { std::env::set_var("HOME", path) };
+        HomeVar { prev }
+    }
+}
+
+impl Drop for HomeVar {
+    fn drop(&mut self) {
+        match &self.prev {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+}
+
 /// A bare `App` over a scratch database and data dir; the temp dir must stay
 /// alive while the app (and its database) is used.
 fn test_app() -> (App, tempfile::TempDir) {
@@ -85,9 +111,14 @@ fn report_writes_the_notice_to_the_tui_log() {
 #[test]
 fn launchpad_launch_failure_sets_the_notice_and_keeps_running() {
     let (mut app, dir) = test_app();
+    // The confirm reaches the real spawn path now, which records CLI usage
+    // under `$HOME`; keep that out of the developer's `~/.canopy`.
+    let _home = HomeVar::set(dir.path());
     let workdir = dir.path().to_string_lossy().to_string();
     let mut dialog = NewAgentDialog::new(Some(workdir.as_str()));
-    dialog.available_clis = vec![Cli::new("claude")];
+    // `cat` always spawns, so the launch itself succeeds and only the refresh
+    // below fails (a harness the machine lacks would fail the spawn first).
+    dialog.available_clis = vec![Cli::new("cat")];
     dialog.cli_configs = vec![None];
     dialog.cli_index = 0;
     app.pending_launch_dialog = Some(dialog);
@@ -102,11 +133,12 @@ fn launchpad_launch_failure_sets_the_notice_and_keeps_running() {
         prev_focus: None,
     });
     app.focus = Focus::LaunchpadDialog;
-    // Break the mission registration the confirm path writes first: the DB
-    // error stands in for the daemon-down failure of the original report.
+    // Break the refresh that runs after the launch: the DB error stands in for
+    // the daemon-down failure of the original report. The bookkeeping write is
+    // no longer a launch failure (it is logged and the open continues).
     app.db
-        .exec_test_sql("DROP TABLE operational_sessions;")
-        .expect("drop the mission table");
+        .exec_test_sql("DROP TABLE agents;")
+        .expect("drop the agents table");
 
     handle_launchpad_key(&mut app, KeyCode::Enter).expect("launch errors must stay in the loop");
 
@@ -120,13 +152,16 @@ fn launchpad_launch_failure_sets_the_notice_and_keeps_running() {
         "notice: {notice}"
     );
     assert!(
-        notice.contains("operational_sessions"),
+        notice.contains("agents"),
         "the notice must carry the cause: {notice}"
     );
     assert!(
         app.launchpad_dialog.is_none() && matches!(app.focus, Focus::Preview),
         "the consumed dialog must not leave a dangling focus"
     );
+    for agent in &mut app.interactive_agents {
+        agent.kill();
+    }
 }
 
 #[test]

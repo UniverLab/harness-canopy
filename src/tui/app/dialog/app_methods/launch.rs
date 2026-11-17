@@ -179,13 +179,17 @@ impl App {
         // `continues` edge to previous node is dropped — operational
         // sessions have no edges (CM8, out of scope schema).
 
-        let _launchpad_node_id = Self::record_launchpad_session(
+        // Bookkeeping only: the session must open even when the database
+        // is busy, so a failure here is logged and the open continues.
+        if let Err(e) = Self::record_launchpad_session(
             self,
             &mission_title,
             mission_context.as_deref(),
             mode,
             &dialog.working_dir,
-        )?;
+        ) {
+            tracing::warn!("Failed to record launchpad session: {e}");
+        }
 
         let is_nursery = dialog.is_planting_new_seed();
         self.launch_interactive(&dialog)?;
@@ -723,9 +727,13 @@ fn yolo_launch_args(dialog: &NewAgentDialog) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::models::Cli;
     use crate::tui::app::dialog::new_agent::NewAgentDialog;
     use crate::tui::app::session_resume::ResumableSession;
+    use crate::tui::app::types::AgentEntry;
+    use std::path::PathBuf;
     use std::sync::Arc;
+    use std::time::Duration;
     use tempfile::tempdir;
 
     fn app_with_known_session() -> (App, Arc<crate::db::Database>, tempfile::TempDir) {
@@ -885,5 +893,165 @@ mod tests {
             resume_rename_notice(false, Some("paulownia"), "platanus"),
             None
         );
+    }
+
+    fn app_with_db_path() -> (App, Arc<crate::db::Database>, PathBuf, tempfile::TempDir) {
+        // Same file pattern as `app_with_known_session`, with no seeded
+        // rows: the path survives for the second connection's lock.
+        let tmp = tempfile::NamedTempFile::new().expect("create temp file");
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let db = Arc::new(crate::db::Database::new(&path).expect("create test db"));
+        let data_dir = tempdir().unwrap();
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        (app, db, path, data_dir)
+    }
+
+    /// Point `$HOME` at `path` for the test body. A launch persists CLI
+    /// usage stats under the real home (`App::record_cli_usage`), and a test
+    /// must never touch the developer's `~/.canopy`. Same guard as
+    /// `daemon::handler::endpoint_tests`: safe under nextest's one process
+    /// per test, which is how the gates run.
+    struct HomeVar {
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl HomeVar {
+        fn set(path: &std::path::Path) -> Self {
+            let prev = std::env::var_os("HOME");
+            unsafe { std::env::set_var("HOME", path) };
+            HomeVar { prev }
+        }
+    }
+
+    impl Drop for HomeVar {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(value) => unsafe { std::env::set_var("HOME", value) },
+                None => unsafe { std::env::remove_var("HOME") },
+            }
+        }
+    }
+
+    /// A scratch database plus the launchpad already open on a new mission
+    /// named `mission` — index 0 (`New mission`) is the confirmable row, and
+    /// `cat` is a CLI that always spawns. The returned path is the file a
+    /// second connection can lock.
+    fn app_with_open_launchpad(
+        mission: &str,
+    ) -> (App, Arc<crate::db::Database>, PathBuf, tempfile::TempDir) {
+        let (mut app, db, path, data_dir) = app_with_db_path();
+        let mut dialog = NewAgentDialog::new(Some(env!("CARGO_MANIFEST_DIR")));
+        dialog.available_clis = vec![Cli::new("cat")];
+        dialog.cli_configs = vec![None];
+        dialog.cli_index = 0;
+        app.open_launchpad_dialog(dialog).unwrap();
+        app.launchpad_dialog.as_mut().unwrap().new_mission = mission.to_string();
+        (app, db, path, data_dir)
+    }
+
+    /// The open completed: one interactive session, both dialogs consumed,
+    /// the prompt builder up and the session selected in the sidebar.
+    fn assert_session_opened(app: &App) {
+        assert_eq!(app.interactive_agents.len(), 1);
+        assert!(app.launchpad_dialog.is_none());
+        assert!(app.pending_launch_dialog.is_none());
+        assert!(app.simple_prompt_dialog.is_some());
+        assert!(matches!(
+            app.agents.get(app.selected),
+            Some(AgentEntry::Interactive(0))
+        ));
+        assert!(matches!(
+            app.focus,
+            crate::tui::app::types::Focus::PromptTemplateDialog
+        ));
+    }
+
+    fn kill_spawned_agents(app: &mut App) {
+        for agent in &mut app.interactive_agents {
+            agent.kill();
+        }
+    }
+
+    /// Hold a write lock on the test database from a second connection:
+    /// `BEGIN IMMEDIATE` (its own 30 s busy timeout absorbs any engine
+    /// write in flight), signal once held, `ROLLBACK` at the end. A write
+    /// that starts during the hold waits out `DB_BUSY_TIMEOUT` and fails
+    /// busy unless the hold ends first. Uses `std::sync::mpsc`: this module
+    /// runs sync tests.
+    fn spawn_write_holder(
+        db_path: PathBuf,
+        hold: Duration,
+    ) -> (std::sync::mpsc::Receiver<()>, std::thread::JoinHandle<()>) {
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.busy_timeout(Duration::from_secs(30)).unwrap();
+            conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+            let _ = held_tx.send(());
+            std::thread::sleep(hold);
+            conn.execute_batch("ROLLBACK").unwrap();
+        });
+        (held_rx, handle)
+    }
+
+    /// FR3: with the database free the open is unchanged — the mission row
+    /// is still written and the session launches, selected and focused.
+    /// Without this the busy test would stay green if the bookkeeping write
+    /// were dropped altogether.
+    #[test]
+    fn confirm_records_the_mission_when_the_write_succeeds() {
+        let (mut app, db, _path, data_dir) = app_with_open_launchpad("quiet mission");
+        let _home = HomeVar::set(data_dir.path());
+
+        app.confirm_launchpad_dialog()
+            .expect("the session opens when the write succeeds");
+
+        assert_session_opened(&app);
+        let rows = db
+            .search_operational_sessions("quiet mission", 10)
+            .expect("search operational sessions");
+        assert!(
+            rows.iter().any(|row| row.title == "quiet mission"),
+            "the bookkeeping row must still be written"
+        );
+        kill_spawned_agents(&mut app);
+    }
+
+    /// FR2: a launchpad confirm with the bookkeeping write lock held past
+    /// `DB_BUSY_TIMEOUT` still launches the session and returns Ok — the
+    /// failed write is logged, not propagated.
+    #[test]
+    fn confirm_opens_the_session_when_the_bookkeeping_write_is_busy() {
+        let (mut app, db, path, data_dir) = app_with_open_launchpad("busy mission");
+        let _home = HomeVar::set(data_dir.path());
+
+        let (held_rx, holder) =
+            spawn_write_holder(path, crate::db::DB_BUSY_TIMEOUT + Duration::from_secs(2));
+        // The confirm must land while the lock is held; without this wait
+        // the test would pass vacuously.
+        held_rx.recv().unwrap();
+
+        let result = app.confirm_launchpad_dialog();
+        holder.join().unwrap();
+
+        assert!(
+            result.is_ok(),
+            "a busy bookkeeping write must not fail the open"
+        );
+        assert_session_opened(&app);
+        let rows = db
+            .search_operational_sessions("busy mission", 10)
+            .expect("search operational sessions");
+        assert!(
+            !rows.iter().any(|row| row.title == "busy mission"),
+            "the bookkeeping write must have failed while the lock was held"
+        );
+        kill_spawned_agents(&mut app);
     }
 }

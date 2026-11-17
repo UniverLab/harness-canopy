@@ -109,11 +109,16 @@ step instead of launching straight away:
   daemon (canopy daemon restart)` and nothing attaches until the restarted
   daemon matches.
 - **Failed launches stay in the TUI** — when opening a session fails (the
-  daemon is down or restarting, the hub is unreachable, the mission write
-  fails), the footer shows `Could not open session: <cause>` and the TUI
-  keeps running instead of exiting; the same error is appended to
-  `~/.canopy/logs/tui.log`. Fix the cause and reopen the dialog to try
+  daemon is down or restarting, the hub is unreachable, the session list
+  cannot be refreshed), the footer shows `Could not open session: <cause>`
+  and the TUI keeps running instead of exiting; the same error is appended
+  to `~/.canopy/logs/tui.log`. Fix the cause and reopen the dialog to try
   again.
+- **A busy database never blocks the open** — the launchpad's mission
+  bookkeeping row is not required for the session to run: when the database
+  stays locked past the 5 s busy timeout the session still opens, selected
+  and focused, and only that row is skipped. That mission is missing from
+  the launchpad's recent-mission list the next time it opens.
 
 ## Startup checks and diagnostics
 
