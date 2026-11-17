@@ -9,6 +9,7 @@ use chrono::Utc;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::process::Command;
+use tokio::sync::Notify;
 
 use crate::application::notification_service::NotificationService;
 use crate::application::ports::{AgentRepository, RunRepository};
@@ -62,6 +63,9 @@ struct ExecutionContext<'a> {
 pub struct Executor {
     db: Arc<Database>,
     notification_service: Arc<dyn NotificationService>,
+    /// Wakes the scheduler's scheduled-send delivery task after a
+    /// `send_to_session` fire inserts a due-now send.
+    scheduled_prompt_notify: Arc<Notify>,
 }
 
 impl Executor {
@@ -69,7 +73,14 @@ impl Executor {
         Self {
             db,
             notification_service,
+            scheduled_prompt_notify: Arc::new(Notify::new()),
         }
+    }
+
+    /// Share the scheduler's scheduled-send wake handle with this executor.
+    pub fn with_scheduled_prompt_notify(mut self, notify: Arc<Notify>) -> Self {
+        self.scheduled_prompt_notify = notify;
+        self
     }
 
     /// Resolve a timed-out active run by marking it as timeout.

@@ -1,15 +1,82 @@
 //! Delivering due scheduled sends from the daemon.
 //!
 //! Moved here from `tui::app::data`: with the hub owning every PTY, a schedule
-//! fires on the daemon's scheduler tick whether or not a TUI is attached. A
-//! send whose target session is gone keeps the prompt recoverable and says so,
-//! exactly as `preserve_dead_scheduled_prompt` did in the TUI.
+//! fires on the daemon's dedicated delivery task whether or not a TUI is
+//! attached. A send whose target session is gone keeps the prompt recoverable
+//! and says so, exactly as `preserve_dead_scheduled_prompt` did in the TUI.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 
 use crate::application::ports::AgentRepository;
 use crate::db::scheduled_prompts::{is_target_alive, ScheduledPrompt, ScheduledPromptProvenance};
 use crate::db::Database;
 use crate::domain::notification::{send_notification, NotificationLevel};
 use crate::sessions::{SessionHub, SessionKind, SessionStatus};
+
+/// Longest the delivery task sleeps between iterations. Sends created by
+/// another process (the TUI, which cannot reach the daemon's notifier) are
+/// picked up on this ceiling instead of a creation wake.
+const MAX_DELIVERY_WAIT: Duration = Duration::from_secs(2);
+
+/// Dedicated delivery task, spawned by [`super::CronScheduler::start`] when
+/// a hub is present. Each iteration delivers everything due off the async
+/// executor, then waits for the earliest of a creation wake, the next
+/// `fire_at`, and the 2-second ceiling. Stops on the scheduler's
+/// cancellation token.
+pub(crate) async fn run_delivery_loop(
+    db: Arc<Database>,
+    hub: SessionHub,
+    notify: Arc<Notify>,
+    cancel: CancellationToken,
+) {
+    loop {
+        deliver_once(&db, &hub).await;
+        let sleep = next_delivery_sleep(&db);
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            _ = notify.notified() => {},
+            _ = tokio::time::sleep(sleep) => {},
+        }
+    }
+}
+
+/// One delivery pass, off the async executor: delivery writes to a PTY and
+/// waits out the target CLI's paste-settle window.
+async fn deliver_once(db: &Arc<Database>, hub: &SessionHub) {
+    let db = Arc::clone(db);
+    let hub = hub.clone();
+    let delivered =
+        tokio::task::spawn_blocking(move || deliver_due_scheduled_prompts(&db, &hub)).await;
+    if delivered.is_err() {
+        tracing::warn!("Scheduled-send delivery task failed");
+    }
+}
+
+/// How long the delivery task sleeps before its next pass: the time until
+/// the next send is due, capped at the 2-second ceiling. Anything else —
+/// no pending sends, a send already due (the pass just above handled it),
+/// or a failed query — sleeps the full ceiling, so a persistently failing
+/// query retries on a bounded interval instead of spinning.
+fn next_delivery_sleep(db: &Database) -> Duration {
+    match db.next_scheduled_prompt_at() {
+        Ok(Some(fire_at)) => {
+            let now = chrono::Utc::now();
+            if fire_at > now {
+                (fire_at - now)
+                    .to_std()
+                    .unwrap_or(MAX_DELIVERY_WAIT)
+                    .min(MAX_DELIVERY_WAIT)
+            } else {
+                MAX_DELIVERY_WAIT
+            }
+        }
+        _ => MAX_DELIVERY_WAIT,
+    }
+}
 
 /// Deliver every send whose `fire_at` has passed: to its live target session,
 /// or — when that session is gone — to the failed-sends table plus a desktop
@@ -28,15 +95,36 @@ pub fn deliver_due_scheduled_prompts(db: &Database, hub: &SessionHub) {
     }
 
     let live_session_ids = live_agent_ids(hub);
+    // Sends arrive ordered by `fire_at` and are delivered in that order.
     for send in &due {
-        if is_target_alive(&send.target_session_id, &live_session_ids) {
+        deliver_one_send(db, hub, send, now, &live_session_ids);
+    }
+}
+
+/// Deliver one due send and consume its schedule. A failure — error or
+/// panic — is logged and never stops the loop or drops the sends behind it.
+fn deliver_one_send(
+    db: &Database,
+    hub: &SessionHub,
+    send: &ScheduledPrompt,
+    now: chrono::DateTime<chrono::Utc>,
+    live_session_ids: &[String],
+) {
+    let delivered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if is_target_alive(&send.target_session_id, live_session_ids) {
             deliver_live_scheduled_prompt(db, hub, send);
         } else {
             preserve_dead_scheduled_prompt(db, send, now);
         }
-        if let Err(e) = db.delete_scheduled_prompt(&send.id) {
-            tracing::warn!("Failed to delete scheduled send '{}': {e}", send.id);
-        }
+    }));
+    if delivered.is_err() {
+        tracing::warn!(
+            "Scheduled send '{}' delivery panicked; continuing with the rest",
+            send.id
+        );
+    }
+    if let Err(e) = db.delete_scheduled_prompt(&send.id) {
+        tracing::warn!("Failed to delete scheduled send '{}': {e}", send.id);
     }
 }
 
@@ -526,5 +614,184 @@ mod tests {
         };
         assert!(!notify_hook_delivery(&db, &send(Some(other))));
         assert!(!notify_hook_delivery(&db, &send(None)));
+    }
+
+    // ── dedicated delivery task (`run_delivery_loop`) ─────────────
+
+    /// Poll the session's parsed screen until `needle` shows up, failing the
+    /// test if it never does within `timeout`. Async, so the delivery task
+    /// keeps running while waiting.
+    async fn wait_for_delivery(
+        session: &crate::sessions::HubSession,
+        needle: &str,
+        timeout: Duration,
+    ) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let contents = session.test_contents().unwrap_or_default();
+            if contents.contains(needle) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "send not delivered in time: expected {needle:?} in {contents:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    fn delivery_loop(
+        db: &Arc<Database>,
+        hub: &SessionHub,
+        notify: Arc<tokio::sync::Notify>,
+    ) -> (
+        tokio_util::sync::CancellationToken,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let task = tokio::spawn(run_delivery_loop(
+            Arc::clone(db),
+            hub.clone(),
+            notify,
+            cancel.clone(),
+        ));
+        (cancel, task)
+    }
+
+    /// A notified send due in 1 s is delivered within 3 s, even with the
+    /// cron loop otherwise idle.
+    #[tokio::test]
+    async fn delivery_loop_wakes_on_notify_and_delivers_within_3s() {
+        let (db, _dir) = test_db();
+        let hub = test_hub(&db);
+        let session = hub.spawn(&agent_spawn("cat")).expect("spawn cat session");
+
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let (cancel, task) = delivery_loop(&db, &hub, Arc::clone(&notify));
+
+        db.insert_scheduled_prompt(
+            "ss-notify",
+            "notify me fast",
+            &session.id,
+            Some("/tmp"),
+            chrono::Utc::now() + chrono::Duration::seconds(1),
+            None,
+            None,
+        )
+        .expect("insert scheduled send");
+        notify.notify_one();
+
+        wait_for_delivery(&session, "notify me fast", Duration::from_secs(3)).await;
+        cancel.cancel();
+        task.await.expect("delivery task stops on cancel");
+        let _ = hub.kill(&session.id);
+    }
+
+    /// A send stored without a notify (the TUI process, which cannot reach
+    /// the daemon's notifier) is still picked up on the 2-second ceiling.
+    #[tokio::test]
+    async fn delivery_loop_picks_up_unnotified_send_within_4s() {
+        let (db, _dir) = test_db();
+        let hub = test_hub(&db);
+        let session = hub.spawn(&agent_spawn("cat")).expect("spawn cat session");
+
+        let (cancel, task) = delivery_loop(&db, &hub, Arc::new(tokio::sync::Notify::new()));
+        // Let the loop finish its first (empty) pass and settle into its
+        // wait, so the send below can only be found by the ceiling wake.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        db.insert_scheduled_prompt(
+            "ss-unnotified",
+            "ceiling picks me up",
+            &session.id,
+            Some("/tmp"),
+            chrono::Utc::now(),
+            None,
+            None,
+        )
+        .expect("insert scheduled send");
+
+        wait_for_delivery(&session, "ceiling picks me up", Duration::from_secs(4)).await;
+        cancel.cancel();
+        task.await.expect("delivery task stops on cancel");
+        let _ = hub.kill(&session.id);
+    }
+
+    /// Sends already due at startup are delivered on the first iteration.
+    #[tokio::test]
+    async fn delivery_loop_delivers_overdue_send_on_first_iteration() {
+        let (db, _dir) = test_db();
+        let hub = test_hub(&db);
+        let session = hub.spawn(&agent_spawn("cat")).expect("spawn cat session");
+
+        db.insert_scheduled_prompt(
+            "ss-overdue",
+            "already due at startup",
+            &session.id,
+            Some("/tmp"),
+            chrono::Utc::now() - chrono::Duration::minutes(1),
+            None,
+            None,
+        )
+        .expect("insert scheduled send");
+
+        let (cancel, task) = delivery_loop(&db, &hub, Arc::new(tokio::sync::Notify::new()));
+
+        wait_for_delivery(&session, "already due at startup", Duration::from_secs(3)).await;
+        cancel.cancel();
+        task.await.expect("delivery task stops on cancel");
+        let _ = hub.kill(&session.id);
+    }
+
+    /// The sleep math: nothing pending or a failure-shaped past instant
+    /// sleeps the full ceiling (no spin); a near-future send sleeps until
+    /// it; a far-future send is capped at the ceiling.
+    #[test]
+    fn next_delivery_sleep_math() {
+        let (db, _dir) = test_db();
+        assert_eq!(next_delivery_sleep(&db), MAX_DELIVERY_WAIT);
+
+        db.insert_scheduled_prompt(
+            "ss-far",
+            "far",
+            "sess",
+            None,
+            chrono::Utc::now() + chrono::Duration::hours(1),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(next_delivery_sleep(&db), MAX_DELIVERY_WAIT);
+
+        // Whole-second arithmetic: `fire_at` is stored truncated to seconds,
+        // so a sub-2 s offset would be timing-flaky. A send 2 whole seconds
+        // out must still land strictly under the ceiling.
+        let near = chrono::DateTime::from_timestamp(chrono::Utc::now().timestamp() + 2, 0)
+            .expect("whole-second timestamp");
+        db.insert_scheduled_prompt("ss-near", "near", "sess", None, near, None, None)
+            .unwrap();
+        let sleep = next_delivery_sleep(&db);
+        assert!(
+            sleep < MAX_DELIVERY_WAIT,
+            "a send due in ~2 s must shorten the wait, got {sleep:?}"
+        );
+        assert!(
+            sleep > Duration::from_millis(100),
+            "a send due in ~2 s must sleep most of it, got {sleep:?}"
+        );
+
+        // A send already due (a persistently failing query leaves one
+        // behind) sleeps the full ceiling instead of spinning at ~0.
+        db.insert_scheduled_prompt(
+            "ss-past",
+            "past",
+            "sess",
+            None,
+            chrono::Utc::now() - chrono::Duration::minutes(1),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(next_delivery_sleep(&db), MAX_DELIVERY_WAIT);
     }
 }

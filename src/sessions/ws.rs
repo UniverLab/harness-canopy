@@ -17,7 +17,7 @@ use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use futures::{SinkExt as _, StreamExt as _};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Notify};
 use tokio::task::JoinHandle;
 
 use crate::db::Database;
@@ -51,12 +51,15 @@ mod ws_shelf_put;
 pub struct SessionsState {
     pub hub: SessionHub,
     pub shelf: std::sync::Arc<ShelfStore>,
-    token: String,
+    /// Wakes the scheduler's scheduled-send delivery task after a remote
+    /// `prompt_schedule` frame stores a send.
+    pub scheduled_prompt_notify: Arc<Notify>,
+    pub(crate) token: String,
     /// Live `graph_watch` poll tasks across this state's connections:
     /// bumped when a watch registers and dropped with its task (abort on
     /// `graph_unwatch` or socket close, or the watch's own exit), so a test
     /// can show a closed socket ended every watch it held.
-    live_graph_watches: std::sync::atomic::AtomicUsize,
+    pub(crate) live_graph_watches: std::sync::atomic::AtomicUsize,
 }
 
 impl SessionsState {
@@ -66,7 +69,11 @@ impl SessionsState {
     /// directory and run the startup lifecycle checks (retention, cap,
     /// orphans — FR1/FR4). Fails when the token cannot be read or created —
     /// the daemon must never serve without auth.
-    pub fn ensure(data_dir: &Path, db: Arc<Database>) -> anyhow::Result<Arc<Self>> {
+    pub fn ensure(
+        data_dir: &Path,
+        db: Arc<Database>,
+        scheduled_prompt_notify: Arc<Notify>,
+    ) -> anyhow::Result<Arc<Self>> {
         let token = ensure_token(data_dir)?;
         let config = crate::domain::canopy_config::CanopyConfig::load(data_dir);
         let hub = SessionHub::new(db.clone(), host_label(data_dir));
@@ -78,6 +85,7 @@ impl SessionsState {
         Ok(Arc::new(Self {
             hub,
             shelf,
+            scheduled_prompt_notify,
             token,
             live_graph_watches: std::sync::atomic::AtomicUsize::new(0),
         }))
@@ -85,15 +93,7 @@ impl SessionsState {
 
     #[cfg(test)]
     pub fn for_test(hub: SessionHub, token: String) -> Arc<Self> {
-        let shelf = ShelfStore::for_test(hub.db());
-        hub.wire_shelf(shelf.clone());
-        shelf.maintenance();
-        Arc::new(Self {
-            hub,
-            shelf,
-            token,
-            live_graph_watches: std::sync::atomic::AtomicUsize::new(0),
-        })
+        Self::for_test_with_scheduled_prompt_notify(hub, token, Arc::new(Notify::new()))
     }
 
     /// Count one `graph_watch` starting; paired with

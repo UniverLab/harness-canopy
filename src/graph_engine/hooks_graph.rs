@@ -231,6 +231,7 @@ impl GraphEngine {
         let spec_attempt_limit = self.spec_attempt_limit;
         let shutdown = Arc::clone(&self.shutdown);
         let canopy_dir = self.canopy_dir.clone();
+        let scheduled_prompt_notify = Arc::clone(&self.scheduled_prompt_notify);
 
         tokio::spawn(async move {
             let engine = GraphEngine {
@@ -241,6 +242,7 @@ impl GraphEngine {
                 spec_attempt_limit,
                 shutdown,
                 canopy_dir,
+                scheduled_prompt_notify,
             };
             if let Err(error) = engine
                 .run_graph(

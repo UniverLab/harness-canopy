@@ -467,9 +467,9 @@ impl Database {
     /// NOTE: `status = 'active'` does NOT mean a TUI is attached right now —
     /// attachment lives in TUI-process memory, not in this table, and a row
     /// stays `active` with no TUI running. The hook contract already promises
-    /// an enqueued send is delivered when a TUI later starts, so such rows
-    /// are legitimate targets and are listed with `hook_target: yes` by the
-    /// `session_list` surface.
+    /// an enqueued send is delivered by the daemon whether or not a TUI is
+    /// attached, so such rows are legitimate targets and are listed with
+    /// `hook_target: yes` by the `session_list` surface.
     pub fn list_hookable_sessions(&self, limit: i64) -> Result<Vec<InteractiveSession>> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         let mut stmt = conn.prepare(&format!(

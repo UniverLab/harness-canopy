@@ -52,10 +52,14 @@ pub struct CronScheduler {
     /// Optional graph engine — when set, the scheduler also evaluates graphs
     /// whose trigger is `Cron` and launches them alongside agents.
     graph_engine: Option<Arc<GraphEngine>>,
-    /// Optional session hub — when set, the scheduler also delivers due
-    /// scheduled sends to hub sessions and wakes for them, so a schedule
-    /// fires with no TUI attached.
+    /// Optional session hub — when set, `start` also spawns the dedicated
+    /// delivery task that delivers due scheduled sends to hub sessions, so
+    /// a schedule fires with no TUI attached.
     hub: Option<SessionHub>,
+    /// Wakes the dedicated scheduled-send delivery task when a send is
+    /// created, so delivery lands within seconds instead of waiting for the
+    /// next cron tick.
+    scheduled_prompt_notify: Arc<Notify>,
     /// Tick idempotency: the most recent *scheduled* tick already fired per
     /// schedulable (agents keyed by their id; graphs by [`graph_key`] to avoid
     /// colliding with an agent that happens to share the same id).
@@ -94,6 +98,7 @@ impl CronScheduler {
             notify: Arc::new(Notify::new()),
             graph_engine: None,
             hub: None,
+            scheduled_prompt_notify: Arc::new(Notify::new()),
             last_fired: Arc::new(Mutex::new(std::collections::HashMap::new())),
             in_flight: Arc::new(Mutex::new(std::collections::HashSet::new())),
             retry: RetryPolicy::default(),
@@ -120,9 +125,9 @@ impl CronScheduler {
         }
     }
 
-    /// Deliver due scheduled sends to this hub's sessions on every tick, and
-    /// wake for the nearest `fire_at`. Without a hub the scheduler neither
-    /// delivers nor considers scheduled sends at all.
+    /// Attach the hub the dedicated delivery task delivers due scheduled
+    /// sends through. Without a hub no delivery task starts and the
+    /// scheduler neither delivers nor considers scheduled sends at all.
     pub fn with_hub(mut self, hub: SessionHub) -> Self {
         self.hub = Some(hub);
         self
@@ -131,6 +136,20 @@ impl CronScheduler {
     /// Get a handle to wake the scheduler when agents change.
     pub fn notifier(&self) -> Arc<Notify> {
         Arc::clone(&self.notify)
+    }
+
+    /// Share one wake handle for scheduled sends: every successful
+    /// `insert_scheduled_prompt` in the daemon notifies it, and the
+    /// dedicated delivery task waits on it.
+    pub fn with_scheduled_prompt_notify(mut self, notify: Arc<Notify>) -> Self {
+        self.scheduled_prompt_notify = notify;
+        self
+    }
+
+    /// Get a handle to wake the scheduled-send delivery task when a send is
+    /// created.
+    pub fn scheduled_prompt_notifier(&self) -> Arc<Notify> {
+        Arc::clone(&self.scheduled_prompt_notify)
     }
 
     /// Seed the tick-idempotency map from the database so a restart doesn't
@@ -167,6 +186,19 @@ impl CronScheduler {
             scheduler.run_graph().await;
             tracing::info!("Internal cron scheduler stopped");
         });
+
+        // Due sends get their own delivery task, off the serial cron tick:
+        // it delivers everything due, then waits for the earliest of a
+        // creation wake, the next `fire_at`, and a 2-second ceiling (which
+        // covers sends created by another process that cannot notify).
+        if let Some(hub) = self.hub.clone() {
+            let db = Arc::clone(&self.db);
+            let notify = Arc::clone(&self.scheduled_prompt_notify);
+            let delivery_cancel = self.cancel.clone();
+            tokio::spawn(async move {
+                scheduled_prompts::run_delivery_loop(db, hub, notify, delivery_cancel).await;
+            });
+        }
 
         cancel
     }
@@ -222,22 +254,10 @@ impl CronScheduler {
 
         self.fold_fireable_graph_schedules(&mut earliest, now_local);
         self.fold_pending_one_shot_wakeups(&mut earliest);
-        self.fold_pending_scheduled_prompts(&mut earliest);
 
         match earliest {
             Some(t) => earliest_duration_before(now_utc, t),
             None => FALLBACK,
-        }
-    }
-
-    /// A pending scheduled send wakes the scheduler at its `fire_at`, so it is
-    /// delivered close to when it is due even when no agent is scheduled.
-    fn fold_pending_scheduled_prompts(&self, earliest: &mut Option<chrono::DateTime<Utc>>) {
-        if self.hub.is_none() {
-            return;
-        }
-        if let Ok(next) = self.db.next_scheduled_prompt_at() {
-            fold_earliest_instant(earliest, next);
         }
     }
 
@@ -323,7 +343,6 @@ impl CronScheduler {
 
     /// Fire all agents whose next cron time is now (within a 1-second tolerance).
     async fn fire_due_tasks(&self) -> anyhow::Result<()> {
-        self.deliver_scheduled_prompts().await;
         self.quarantine_corrupt_agents()?;
         let agents = self.db.list_cron_agents()?;
         // Evaluate schedules in the user's local timezone. `now_utc` is only
@@ -349,24 +368,6 @@ impl CronScheduler {
         self.fire_due_auto_continue_graphs(now_utc)?;
 
         Ok(())
-    }
-
-    /// Deliver due scheduled sends through the hub. Runs off the async
-    /// executor: delivery writes to a PTY and waits out the target CLI's
-    /// paste-settle window.
-    async fn deliver_scheduled_prompts(&self) {
-        let Some(hub) = self.hub.as_ref() else {
-            return;
-        };
-        let db = Arc::clone(&self.db);
-        let hub = hub.clone();
-        let delivered = tokio::task::spawn_blocking(move || {
-            scheduled_prompts::deliver_due_scheduled_prompts(&db, &hub);
-        })
-        .await;
-        if delivered.is_err() {
-            tracing::warn!("Scheduled-send delivery task failed");
-        }
     }
 
     /// One-shot `enable_at`: for each disabled agent with a pending

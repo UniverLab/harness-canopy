@@ -4,8 +4,8 @@
 //! prompt into a live interactive session by enqueuing one due-now scheduled
 //! send — the same transport the interactive graph hook (CH3) and
 //! `scheduled_prompts` (CM22) use. No CLI process is ever spawned on this
-//! path; delivery itself stays TUI-driven, so a send enqueued while no TUI is
-//! open simply waits.
+//! path; delivery itself is the daemon's dedicated delivery task, woken by
+//! the notify this fire sends after storing the send.
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -175,6 +175,7 @@ impl Executor {
             None,
             Some(provenance),
         )?;
+        self.scheduled_prompt_notify.notify_one();
         Ok(delivered_summary(&target.display, &target.id))
     }
 }
@@ -226,14 +227,14 @@ fn failed_result() -> CliRunResult {
 fn delivered_summary(display: &str, id: &str) -> String {
     format!(
         "Delivered to session '{display}' ({id}): one scheduled send queued for now; \
-         it is delivered when a TUI is open."
+         the daemon delivers it within seconds."
     )
 }
 
 fn coalesced_summary(send_id: &str, display: &str) -> String {
     format!(
         "Coalesced into pending send '{send_id}' for session '{display}': prompt and fire \
-         time replaced; it will be delivered when a TUI is open."
+         time replaced; the daemon delivers it within seconds of the fire time."
     )
 }
 

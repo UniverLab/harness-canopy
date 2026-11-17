@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::Value;
 use tokio::process::Command;
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 
 use crate::application::notification_service::{GraphFinishOutcome, NotificationService};
 use crate::daemon::process::KILL_GRACE;
@@ -119,7 +119,15 @@ impl GraphEngine {
             spec_attempt_limit: crate::domain::settings::default_int("spec_attempt_limit") as usize,
             shutdown: Arc::new(AtomicBool::new(false)),
             canopy_dir: crate::domain::prompts::canopy_dir(),
+            scheduled_prompt_notify: Arc::new(Notify::new()),
         }
+    }
+
+    /// Share the scheduler's scheduled-send wake handle with this engine, so
+    /// an interactive hook enqueue wakes the delivery task.
+    pub fn with_scheduled_prompt_notify(mut self, notify: Arc<Notify>) -> Self {
+        self.scheduled_prompt_notify = notify;
+        self
     }
 
     /// Override the default ensemble concurrency cap (F1) — e.g. from
@@ -221,6 +229,9 @@ pub struct GraphEngine {
     /// value, so `NextRun`/`Hot` settings stay live. Tests override it with
     /// [`GraphEngine::with_canopy_dir`].
     canopy_dir: std::path::PathBuf,
+    /// Wakes the scheduler's scheduled-send delivery task after an
+    /// interactive hook enqueues a send.
+    scheduled_prompt_notify: Arc<Notify>,
 }
 
 /// Where a spec's sequential graph cursor currently is: at a single ordinary

@@ -13,7 +13,7 @@ impl TaskTriggerHandler {
     /// Schedule a prompt for future delivery to an interactive session
     /// (CM22). Exposes the same `scheduled_prompts` mechanism the
     /// promptbuilder and graph hooks already use: delivery happens on the
-    /// TUI's next refresh tick, a dead target is preserved in
+    /// daemon's delivery task within seconds of `fire_at`, a dead target is preserved in
     /// `failed_scheduled_prompts`, and a message enqueued while no TUI is
     /// running simply waits.
     pub(crate) async fn scheduled_prompt_create_impl(
@@ -90,6 +90,8 @@ impl TaskTriggerHandler {
                 Some(&provenance),
             )
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        self.scheduled_prompt_notify.notify_one();
 
         Ok(success_result(&format!(
             "Scheduled send '{}' created for session '{}' — fires at {}.",

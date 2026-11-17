@@ -31,8 +31,9 @@ impl Database {
     }
 
     /// Replace a pending send's prompt and fire time in place, leaving its id
-    /// and target. Returns false when the row vanished (a TUI delivered and
-    /// deleted it between the find and this update) so the caller can fall
+    /// and target. Returns false when the row vanished (the delivery task
+    /// delivered and deleted it between the find and this update) so the
+    /// caller can fall
     /// back to a fresh insert.
     pub fn replace_scheduled_prompt(
         &self,

@@ -302,6 +302,7 @@ fn queue_test_handler() -> (
         executor,
         watcher_engine,
         scheduler_notify: Arc::new(Notify::new()),
+        scheduled_prompt_notify: Arc::new(Notify::new()),
         graph_engine,
         notification_service: notif,
         ingestion,

@@ -1384,3 +1384,127 @@ fn test_retry_policy_defaults() {
     assert_eq!(d.delay_minutes, 60);
     assert_eq!(d.max_retries, 3);
 }
+
+/// The scheduler tick no longer delivers scheduled sends — delivery is the
+/// dedicated delivery task's job, so a blocked tick must not hold a due
+/// send back, and the tick must leave it pending.
+#[tokio::test]
+async fn fire_due_tasks_leaves_due_send_pending() {
+    let (db, scheduler) = test_scheduler();
+    db.insert_scheduled_prompt(
+        "ss-tick-pending",
+        "the tick must not consume me",
+        "sess",
+        None,
+        Utc::now() - chrono::Duration::minutes(1),
+        None,
+        None,
+    )
+    .unwrap();
+
+    scheduler.fire_due_tasks().await.unwrap();
+
+    let due = db.list_due_scheduled_prompts(Utc::now()).unwrap();
+    assert_eq!(
+        due.len(),
+        1,
+        "a due send survives the cron tick for the delivery task"
+    );
+    assert_eq!(due[0].id, "ss-tick-pending");
+}
+
+/// Spec req 6: a scheduler tick parked inside `fire_due_tasks` must not hold
+/// a due send back — delivery is its own task and does not wait for the tick.
+#[tokio::test]
+async fn delivery_loop_delivers_due_send_while_fire_due_tasks_is_blocked() {
+    use crate::sessions::{SessionHub, SessionKind, SpawnRequest};
+    use std::time::Duration;
+
+    let (db, scheduler) = test_scheduler();
+    // A due cron agent makes the tick take `last_fired`; holding that lock
+    // parks `fire_due_tasks` mid-flight. `* * * * *` is always due inside the
+    // scheduler's 60-second lookback.
+    let mut agent = manual_agent("blocked-tick-agent", true);
+    agent.trigger = Some(Trigger::Cron {
+        schedule_expr: "* * * * *".to_string(),
+    });
+    db.upsert_agent(&agent).unwrap();
+
+    let scheduler = Arc::new(scheduler);
+    let tick_block = Arc::clone(&scheduler.last_fired).lock_owned().await;
+    let tick = tokio::spawn({
+        let scheduler = Arc::clone(&scheduler);
+        async move { scheduler.fire_due_tasks().await }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !tick.is_finished(),
+        "the tick must be parked on the held last_fired lock"
+    );
+
+    let hub = SessionHub::with_broadcast_capacity(Arc::clone(&db), "test-host".to_string(), 256);
+    let session = hub
+        .spawn(&SpawnRequest {
+            kind: SessionKind::Agent,
+            cli: "cat".to_string(),
+            model: None,
+            workdir: "/tmp".to_string(),
+            name: None,
+            prompt: None,
+            interactive_args: None,
+            fallback_args: None,
+            model_flag: None,
+            id: None,
+            harness_conversation_id: None,
+            seed_id: None,
+            accent: None,
+            yolo: false,
+            preserve_args: false,
+        })
+        .expect("spawn cat session");
+
+    let notify = Arc::new(tokio::sync::Notify::new());
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let delivery = tokio::spawn(super::super::scheduled_prompts::run_delivery_loop(
+        Arc::clone(&db),
+        hub.clone(),
+        Arc::clone(&notify),
+        cancel.clone(),
+    ));
+
+    db.insert_scheduled_prompt(
+        "ss-tick-blocked",
+        "delivered while the tick is blocked",
+        &session.id,
+        Some("/tmp"),
+        Utc::now(),
+        None,
+        None,
+    )
+    .expect("insert scheduled send");
+    notify.notify_one();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let contents = session.test_contents().unwrap_or_default();
+        if contents.contains("delivered while the tick is blocked") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "due send not delivered while the tick was blocked: {contents:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        !tick.is_finished(),
+        "delivery must not wait for the parked tick"
+    );
+
+    tick.abort();
+    let _ = tick.await;
+    drop(tick_block);
+    cancel.cancel();
+    delivery.await.expect("delivery task stops on cancel");
+    let _ = hub.kill(&session.id);
+}

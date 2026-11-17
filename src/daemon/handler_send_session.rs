@@ -190,7 +190,7 @@ impl TaskTriggerHandler {
         self.scheduler_notify.notify_one();
 
         Ok(success_result(&format!(
-            "Agent '{}' will deliver to session '{}' on schedule '{}'. Delivery waits for a TUI to be open; the message is not lost.",
+            "Agent '{}' will deliver to session '{}' on schedule '{}'. Delivery happens within seconds of each fire; the message is not lost.",
             agent.id,
             target_label(&agent.action),
             schedule_expr

@@ -310,7 +310,8 @@ pub fn handle_schedule_frame(state: &Arc<SessionsState>, out_tx: &OutTx, frame: 
 /// `prompt_schedule`: build the draft's text and store it for delivery at
 /// `fire_at`. Unknown choices fail exactly like `compose`; the row carries
 /// the session's workdir with no provenance or builder state, like the TUI's
-/// raw path. Delivery itself is the daemon scheduler's tick.
+/// raw path. Delivery itself is the daemon's dedicated delivery task, woken
+/// by the notify this frame fires after storing the send.
 fn handle_prompt_schedule(
     state: &Arc<SessionsState>,
     out_tx: &OutTx,
@@ -335,6 +336,7 @@ fn handle_prompt_schedule(
         return;
     };
     let db = Arc::clone(state.hub.db());
+    let notify = Arc::clone(&state.scheduled_prompt_notify);
     let out_tx = out_tx.clone();
     tokio::spawn(async move {
         let outcome = tokio::task::spawn_blocking(move || {
@@ -351,6 +353,7 @@ fn handle_prompt_schedule(
                 None,
             )
             .map_err(|_| DraftFailure::Internal)?;
+            notify.notify_one();
             Ok::<_, DraftFailure>((schedule_id, text))
         })
         .await;

@@ -33,7 +33,7 @@ pub fn reconcile_at_startup(hub: &SessionHub, data_dir: &Path) {
 /// Startup sweep (B32): retire any row still in the removed `orphaned`
 /// status to `completed` so historic red orphan cards disappear. A swept
 /// session is not resumed, so it never joins the hub and a pending schedule
-/// aimed at it is preserved as a dead target on the next scheduler tick.
+/// aimed at it is preserved as a dead target when the delivery task next runs.
 fn sweep_orphaned_sessions(db: &Database) {
     match db.close_orphaned_interactive_sessions() {
         Ok(n) if n > 0 => {

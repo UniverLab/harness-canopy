@@ -48,10 +48,14 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
         tracing::warn!("Could not seed builtin prompt presets: {e}");
     }
     let notification_service: Arc<dyn NotificationService> = Arc::new(DefaultNotificationService);
-    let executor = Arc::new(Executor::new(
-        Arc::clone(&db),
-        Arc::clone(&notification_service),
-    ));
+    // Shared wake handle for scheduled sends: every successful daemon-side
+    // `insert_scheduled_prompt` notifies it, and the scheduler's dedicated
+    // delivery task waits on it.
+    let scheduled_prompt_notify = Arc::new(tokio::sync::Notify::new());
+    let executor = Arc::new(
+        Executor::new(Arc::clone(&db), Arc::clone(&notification_service))
+            .with_scheduled_prompt_notify(Arc::clone(&scheduled_prompt_notify)),
+    );
     let canopy_config = crate::domain::canopy_config::CanopyConfig::load(&data_dir);
     // CM51 (D12): remember what the running daemon loaded, so `config_list`
     // can report `pending_restart`, and watch the file so a hand edit takes
@@ -71,7 +75,8 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
             .with_ensemble_concurrency_cap(canopy_config.ensemble_concurrency_cap)
             .with_spec_attempt_limit(canopy_config.spec_attempt_limit)
             .with_dynamic_skills(Arc::clone(&dynamic_skills))
-            .with_shutdown_flag(Arc::clone(&shutdown_flag)),
+            .with_shutdown_flag(Arc::clone(&shutdown_flag))
+            .with_scheduled_prompt_notify(Arc::clone(&scheduled_prompt_notify)),
     );
     let watcher_engine = Arc::new(WatcherEngine::new(
         Arc::clone(&db),
@@ -105,7 +110,11 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
     // owns every PTY, so reconciliation has to respawn the previous daemon's
     // sessions before the first client can connect, and the scheduler gets
     // the hub to deliver scheduled sends through.
-    let sessions_state = crate::sessions::ws::SessionsState::ensure(&data_dir, Arc::clone(&db))?;
+    let sessions_state = crate::sessions::ws::SessionsState::ensure(
+        &data_dir,
+        Arc::clone(&db),
+        Arc::clone(&scheduled_prompt_notify),
+    )?;
     // The relay answers offers by bridging into the hub, so the hub exists
     // first.
     crate::remote::relay::spawn(
@@ -123,7 +132,7 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
         &notification_service,
         &data_dir,
         canopy_config.announcements_enabled,
-        &sessions_state.hub,
+        &sessions_state,
     );
 
     let ct = tokio_util::sync::CancellationToken::new();
@@ -133,6 +142,7 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
             executor: Arc::clone(&executor),
             watcher_engine: Arc::clone(&watcher_engine),
             scheduler_notify: Arc::clone(&background.scheduler_notify),
+            scheduled_prompt_notify: Arc::clone(&background.scheduled_prompt_notify),
             graph_engine: Arc::clone(&graph_engine),
             notification_service: Arc::clone(&notification_service),
             ingestion: Arc::clone(&ingestion),
@@ -264,6 +274,7 @@ async fn capture_interrupted_state(graph_engine: &GraphEngine, watcher_engine: &
 /// routine, then (only when enabled) the announcements client.
 struct HttpBackgroundTasks {
     scheduler_notify: Arc<tokio::sync::Notify>,
+    scheduled_prompt_notify: Arc<tokio::sync::Notify>,
     scheduler_cancel: tokio_util::sync::CancellationToken,
     health_routine_cancel: tokio_util::sync::CancellationToken,
     announcements_cancel: Option<tokio_util::sync::CancellationToken>,
@@ -276,7 +287,7 @@ fn start_background_tasks(
     notification_service: &Arc<dyn NotificationService>,
     data_dir: &std::path::Path,
     announcements_enabled: bool,
-    sessions: &crate::sessions::SessionHub,
+    sessions: &crate::sessions::ws::SessionsState,
 ) -> HttpBackgroundTasks {
     let cron_scheduler = Arc::new(
         CronScheduler::with_graphs(
@@ -284,12 +295,14 @@ fn start_background_tasks(
             Arc::clone(executor),
             Arc::clone(graph_engine),
         )
-        .with_hub(sessions.clone())
+        .with_hub(sessions.hub.clone())
+        .with_scheduled_prompt_notify(Arc::clone(&sessions.scheduled_prompt_notify))
         .with_retry(crate::scheduler::cron_scheduler::RetryPolicy::from_config(
             &crate::domain::canopy_config::CanopyConfig::load(data_dir).scheduler,
         )),
     );
     let scheduler_notify = cron_scheduler.notifier();
+    let scheduled_prompt_notify = cron_scheduler.scheduled_prompt_notifier();
     let scheduler_cancel = Arc::clone(&cron_scheduler).start();
 
     let health_routine = Arc::new(HealthRoutine::new(Arc::clone(db), data_dir.to_path_buf()));
@@ -307,6 +320,7 @@ fn start_background_tasks(
 
     HttpBackgroundTasks {
         scheduler_notify,
+        scheduled_prompt_notify,
         scheduler_cancel,
         health_routine_cancel,
         announcements_cancel,
@@ -331,6 +345,7 @@ fn build_mcp_router(
         executor: handler_executor,
         watcher_engine: handler_watcher_engine,
         scheduler_notify: handler_scheduler_notify,
+        scheduled_prompt_notify: handler_scheduled_prompt_notify,
         graph_engine: handler_graph_engine,
         notification_service,
         ingestion: handler_ingestion,
@@ -347,6 +362,7 @@ fn build_mcp_router(
                 executor: Arc::clone(&handler_executor),
                 watcher_engine: Arc::clone(&handler_watcher_engine),
                 scheduler_notify: Arc::clone(&handler_scheduler_notify),
+                scheduled_prompt_notify: Arc::clone(&handler_scheduled_prompt_notify),
                 graph_engine: Arc::clone(&handler_graph_engine),
                 notification_service: Arc::clone(&notification_service),
                 ingestion: Arc::clone(&handler_ingestion),
@@ -574,6 +590,7 @@ fn build_stdio_handler(
         executor: Arc::clone(&startup.executor),
         watcher_engine: Arc::clone(&startup.watcher_engine),
         scheduler_notify: Arc::clone(&startup.scheduler_notify),
+        scheduled_prompt_notify: Arc::clone(&startup.scheduled_prompt_notify),
         graph_engine: Arc::clone(&startup.graph_engine),
         notification_service: Arc::clone(&startup.notification_service),
         ingestion: Arc::clone(&startup.ingestion),
@@ -631,6 +648,7 @@ struct StdioServerStartup {
     start_time: std::time::Instant,
     cron_scheduler: Arc<CronScheduler>,
     scheduler_notify: Arc<tokio::sync::Notify>,
+    scheduled_prompt_notify: Arc<tokio::sync::Notify>,
     _ingestion_cancel: tokio_util::sync::CancellationToken,
     _scheduler_cancel: tokio_util::sync::CancellationToken,
     _health_routine_cancel: tokio_util::sync::CancellationToken,
@@ -641,10 +659,13 @@ async fn stdio_server_startup(db: Arc<Database>, data_dir: &std::path::Path) -> 
         tracing::warn!("Could not seed builtin prompt presets: {e}");
     }
     let notification_service: Arc<dyn NotificationService> = Arc::new(DefaultNotificationService);
-    let executor = Arc::new(Executor::new(
-        Arc::clone(&db),
-        Arc::clone(&notification_service),
-    ));
+    // No hub here (a stdio server has no session hub), so the delivery task
+    // never starts — but the constructors still take the shared handle.
+    let scheduled_prompt_notify = Arc::new(tokio::sync::Notify::new());
+    let executor = Arc::new(
+        Executor::new(Arc::clone(&db), Arc::clone(&notification_service))
+            .with_scheduled_prompt_notify(Arc::clone(&scheduled_prompt_notify)),
+    );
     let canopy_config = crate::domain::canopy_config::CanopyConfig::load(data_dir);
     let dynamic_skills = Arc::new(crate::dynamic_skills::SkillStore::from_config(
         data_dir,
@@ -654,7 +675,8 @@ async fn stdio_server_startup(db: Arc<Database>, data_dir: &std::path::Path) -> 
         GraphEngine::new(Arc::clone(&db), Arc::clone(&notification_service))
             .with_ensemble_concurrency_cap(canopy_config.ensemble_concurrency_cap)
             .with_spec_attempt_limit(canopy_config.spec_attempt_limit)
-            .with_dynamic_skills(Arc::clone(&dynamic_skills)),
+            .with_dynamic_skills(Arc::clone(&dynamic_skills))
+            .with_scheduled_prompt_notify(Arc::clone(&scheduled_prompt_notify)),
     );
     let watcher_engine = Arc::new(WatcherEngine::new(
         Arc::clone(&db),
@@ -689,6 +711,7 @@ async fn stdio_server_startup(db: Arc<Database>, data_dir: &std::path::Path) -> 
             Arc::clone(&executor),
             Arc::clone(&graph_engine),
         )
+        .with_scheduled_prompt_notify(Arc::clone(&scheduled_prompt_notify))
         .with_retry(crate::scheduler::cron_scheduler::RetryPolicy::from_config(
             &canopy_config.scheduler,
         )),
@@ -709,6 +732,7 @@ async fn stdio_server_startup(db: Arc<Database>, data_dir: &std::path::Path) -> 
         start_time: std::time::Instant::now(),
         cron_scheduler,
         scheduler_notify,
+        scheduled_prompt_notify,
         _ingestion_cancel: ingestion_cancel,
         _scheduler_cancel: scheduler_cancel,
         _health_routine_cancel: health_routine_cancel,
@@ -853,6 +877,7 @@ mod hang_repro {
         let handler_executor = Arc::clone(&executor);
         let handler_watcher_engine = Arc::clone(&watcher_engine);
         let handler_scheduler_notify = Arc::clone(&scheduler_notify);
+        let handler_scheduled_prompt_notify = Arc::new(tokio::sync::Notify::new());
         let handler_graph_engine = Arc::clone(&graph_engine);
         let handler_notif = Arc::clone(&notif);
         let handler_ingestion = Arc::clone(&ingestion);
@@ -865,6 +890,7 @@ mod hang_repro {
                     executor: Arc::clone(&handler_executor),
                     watcher_engine: Arc::clone(&handler_watcher_engine),
                     scheduler_notify: Arc::clone(&handler_scheduler_notify),
+                    scheduled_prompt_notify: Arc::clone(&handler_scheduled_prompt_notify),
                     graph_engine: Arc::clone(&handler_graph_engine),
                     notification_service: Arc::clone(&handler_notif),
                     ingestion: Arc::clone(&handler_ingestion),

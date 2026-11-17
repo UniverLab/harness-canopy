@@ -151,6 +151,29 @@ fn decode_b64(s: &str) -> Vec<u8> {
         .expect("valid base64")
 }
 
+/// Test constructor sharing one wake handle with the assertion: a remote
+/// `prompt_schedule` frame must fire it when the send is stored. Lives here
+/// (not on `SessionsState`) so the endpoint file stays under the file-size
+/// limit; resolved in test builds exactly like an inherent method.
+impl SessionsState {
+    pub fn for_test_with_scheduled_prompt_notify(
+        hub: SessionHub,
+        token: String,
+        scheduled_prompt_notify: Arc<tokio::sync::Notify>,
+    ) -> Arc<Self> {
+        let shelf = crate::sessions::shelf::ShelfStore::for_test(hub.db());
+        hub.wire_shelf(shelf.clone());
+        shelf.maintenance();
+        Arc::new(Self {
+            hub,
+            shelf,
+            scheduled_prompt_notify,
+            token,
+            live_graph_watches: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+}
+
 /// Spawn a request on `hub`, killing the session when the guard drops so no
 /// test ever leaves a live child behind.
 struct KillGuard {

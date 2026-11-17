@@ -393,6 +393,51 @@ async fn cancel_other_session_row_refused_and_kept() {
     server.abort();
 }
 
+/// A remote `prompt_schedule` frame fires the injected wake handle when the
+/// send is stored, so the daemon's delivery task wakes for it.
+#[tokio::test]
+async fn schedule_ok_fires_injected_notify() {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let (db, _db_dir) = test_db();
+    let workdir = tempfile::tempdir().expect("workdir");
+    let workdir_str = workdir.path().to_string_lossy().to_string();
+    let hub = test_hub(&db);
+    let (session, _guard) = KillGuard::spawn(&hub, &agent_spawn("cat", &workdir_str));
+    let id = session.id.clone();
+    drop(session);
+
+    let notify = Arc::new(tokio::sync::Notify::new());
+    let state = SessionsState::for_test_with_scheduled_prompt_notify(
+        hub,
+        "token".to_string(),
+        Arc::clone(&notify),
+    );
+    let (addr, server) = serve_state(state).await;
+    let mut client = connect_client(addr, Some("token")).await;
+    assert_eq!(recv_json(&mut client, "hello").await["t"], "hello");
+
+    let fire_at = (chrono::Utc::now() + chrono::Duration::hours(2))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let draft = sections_draft();
+    send_json(
+        &mut client,
+        &serde_json::json!({
+            "t": "prompt_schedule", "req": "s-notify", "id": id,
+            "draft": draft_json(&draft), "fire_at": fire_at,
+        }),
+    )
+    .await;
+    let scheduled = recv_json(&mut client, "scheduled").await;
+    assert_eq!(scheduled["req"], "s-notify");
+
+    tokio::time::timeout(Duration::from_secs(2), notify.notified())
+        .await
+        .expect("storing the send must fire the injected notify");
+    server.abort();
+}
+
 #[test]
 fn scheduled_and_list_shapes_roundtrip() {
     let item = ScheduledPromptItem {

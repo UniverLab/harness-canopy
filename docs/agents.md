@@ -53,8 +53,8 @@ list that canopy has never seen starts a fresh session with a new id and a
 new generated name (see
 [Graphs](graphs-hooks-and-queues.md#event-keyed-hooks)). Every time the agent's cron or watch
 trigger fires, canopy enqueues the prompt as a scheduled send to that session,
-and the daemon delivers it on its next scheduler tick. Delivery does not need
-a TUI: a message that fires while nobody is watching still reaches a live
+and the daemon delivers it within seconds of its fire time. Delivery does not
+need a TUI: a message that fires while nobody is watching still reaches a live
 session. If the target session is gone by the time it is due, the prompt is
 preserved for recall in that project (the same recall the schedule dialog
 offers) and a notification says the session was not found, rather than the

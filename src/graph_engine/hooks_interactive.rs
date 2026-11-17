@@ -18,9 +18,10 @@ impl GraphEngine {
     /// send carrying the rendered prompt, a canonical promptbuilder-equivalent
     /// builder state, and structured hook provenance (graph id + event).
     ///
-    /// Delivery itself runs in the daemon's scheduler
-    /// (`scheduler::cron_scheduler::scheduled_prompts`), so a send is delivered
-    /// on the next tick whether or not a TUI is attached. A missing or
+    /// Delivery itself runs in the daemon's dedicated delivery task
+    /// (`scheduler::cron_scheduler::scheduled_prompts`), woken by the notify
+    /// this enqueue fires, so a send lands within seconds whether or not a
+    /// TUI is attached. A missing or
     /// non-live target fails the hook run naming the exact session
     /// id, without inserting anything and without touching the graph's status
     /// (the caller records the failure and continues to later hooks).
@@ -236,6 +237,7 @@ impl GraphEngine {
             Some(&provenance),
         ) {
             Ok(()) => {
+                self.scheduled_prompt_notify.notify_one();
                 let mut output = serde_json::json!({
                     "scheduled_prompt_id": send_id,
                     "target_session_id": send.target,
@@ -248,7 +250,7 @@ impl GraphEngine {
                     status: GraphRunStatus::Pass,
                     output,
                     summary: format!(
-                        "{} hook enqueued a message for live session '{}'; it will be delivered when a TUI is running.",
+                        "{} hook enqueued a message for live session '{}'; the daemon delivers it within seconds.",
                         send.event.as_str(),
                         send.target
                     ),
