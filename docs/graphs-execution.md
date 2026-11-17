@@ -251,7 +251,8 @@ its own old output is never reused. If an upstream node's latest run is
 is named: a failed prerequisite is never treated as passed. An upstream
 `failed` or `error` is met when the graph's own edges route that status
 toward the start node — `fail`/`always` edges for a `failed` run, `error`
-edges for an `error` run (the join node's edges for a quorum verdict);
+edges only for an `error` run (`always` does not route it; the join node's
+edges for a quorum verdict);
 `interrupted` is never met this way. An upstream node
 that belongs to an ensemble is judged by the ensemble's quorum result — its
 join node's run for this spec — not by any member's own latest run: a member
