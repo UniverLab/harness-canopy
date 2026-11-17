@@ -1,4 +1,4 @@
-use super::ensemble_member_settle::{RoundRobinSettle, RoundRobinWalkCtx};
+use super::ensemble_member_settle::{member_at, RoundRobinSettle, RoundRobinWalkCtx};
 use super::*;
 
 /// Invariant inputs of a single ensemble-member run, gathered once by
@@ -492,7 +492,7 @@ impl GraphEngine {
         let mut skipped_unavailable = false;
         for offset in 0..setup.member_count {
             let current_index = (setup.start_index + offset).rem_euclid(setup.member_count);
-            let member = &details.members[current_index as usize];
+            let (current_index, member) = member_at(details, current_index)?;
             // CM48: an unavailable member is stepped over, not counted.
             if !setup.available_members.contains(member.node_id.as_str()) {
                 skipped_unavailable = true;
@@ -502,7 +502,7 @@ impl GraphEngine {
             // The rotation cursor is the member that actually ran, so a bounce
             // back into the ensemble continues past the roster's skips.
             if skipped_unavailable {
-                round_robin_pins.insert(ensemble.id.clone(), current_index);
+                round_robin_pins.insert(ensemble.id.clone(), current_index as i64);
             }
             // CB82: no further round-robin member starts during shutdown.
             if self.is_shutting_down() {
@@ -549,7 +549,7 @@ impl GraphEngine {
                     execution,
                     members_ran,
                     skipped_unavailable,
-                    next_after_winner: (current_index + 1).rem_euclid(setup.member_count),
+                    next_after_winner: (current_index as i64 + 1).rem_euclid(setup.member_count),
                     next_index: setup.next_index,
                     commit_watch: &setup.commit_watch,
                     workdir,
@@ -573,24 +573,23 @@ impl GraphEngine {
     pub(crate) fn resolve_round_robin_start(
         &self,
         details: &EnsembleDetails,
-        member_count: i64,
         round_robin_pins: &mut HashMap<String, i64>,
         resumable_sessions: &HashMap<String, String>,
     ) -> Result<(i64, Option<String>, i64)> {
         let ensemble = &details.ensemble;
         if !round_robin_pins.contains_key(&ensemble.id) {
-            return self.resolve_round_robin_first_visit(details, member_count, round_robin_pins);
+            return self.resolve_round_robin_first_visit(details, round_robin_pins);
         }
-        self.resolve_round_robin_bounce(details, member_count, round_robin_pins, resumable_sessions)
+        self.resolve_round_robin_bounce(details, round_robin_pins, resumable_sessions)
     }
 
     pub(crate) fn resolve_round_robin_first_visit(
         &self,
         details: &EnsembleDetails,
-        member_count: i64,
         round_robin_pins: &mut HashMap<String, i64>,
     ) -> Result<(i64, Option<String>, i64)> {
         let ensemble = &details.ensemble;
+        let member_count = details.members.len() as i64;
         let persisted_index = self
             .db
             .get_ensemble(&ensemble.id)
@@ -599,7 +598,8 @@ impl GraphEngine {
             .and_then(|e| e.round_robin_index)
             .or(ensemble.round_robin_index)
             .unwrap_or(0);
-        let start = persisted_index.rem_euclid(member_count);
+        let (start_index, _) = member_at(details, persisted_index)?;
+        let start = start_index as i64;
         let next = (start + 1).rem_euclid(member_count);
         self.db
             .update_ensemble_kind(&ensemble.id, None, Some(Some(next)))?;
@@ -610,14 +610,24 @@ impl GraphEngine {
     pub(crate) fn resolve_round_robin_bounce(
         &self,
         details: &EnsembleDetails,
-        member_count: i64,
         round_robin_pins: &mut HashMap<String, i64>,
         resumable_sessions: &HashMap<String, String>,
     ) -> Result<(i64, Option<String>, i64)> {
         let ensemble = &details.ensemble;
-        let pinned = round_robin_pins[&ensemble.id];
-        let pinned_node_id = details.members[pinned as usize].node_id.clone();
+        let member_count = details.members.len() as i64;
+        let raw = round_robin_pins[&ensemble.id];
+        let (reduced, member) = member_at(details, raw)?;
+        let pinned = reduced as i64;
+        if pinned != raw {
+            tracing::warn!(
+                "round-robin index {raw} out of range for ensemble '{}' ({} members); wrapped",
+                ensemble.name,
+                details.members.len()
+            );
+        }
+        let pinned_node_id = member.node_id.clone();
         if let Some(sid) = resumable_sessions.get(&pinned_node_id).cloned() {
+            round_robin_pins.insert(ensemble.id.clone(), pinned);
             return Ok((pinned, Some(sid), pinned));
         }
         let next = (pinned + 1).rem_euclid(member_count);

@@ -30,6 +30,21 @@ pub(crate) struct RoundRobinSettle<'a> {
     pub(crate) workdir: &'a str,
 }
 
+/// The member at `index` in the CURRENT member list, with the index reduced
+/// into range. A stale persisted rotation index or pin computed against an
+/// earlier crew wraps instead of panicking; an empty list is an error.
+pub(crate) fn member_at(details: &EnsembleDetails, index: i64) -> Result<(usize, &EnsembleMember)> {
+    let count = details.members.len() as i64;
+    if count == 0 {
+        anyhow::bail!(
+            "Round-robin ensemble '{}' has no members to run.",
+            details.ensemble.id
+        );
+    }
+    let reduced = index.rem_euclid(count) as usize;
+    Ok((reduced, &details.members[reduced]))
+}
+
 /// The values the no-verdict tail of a round-robin walk needs to settle.
 pub(crate) struct RoundRobinWalkCtx<'a> {
     pub(crate) join_ctx: &'a EnsembleJoinCtx<'a>,
@@ -67,12 +82,8 @@ impl GraphEngine {
             .iter()
             .map(|member| member.node_id.as_str())
             .collect();
-        let (start_index, initial_resume_candidate, next_index) = self.resolve_round_robin_start(
-            details,
-            member_count,
-            round_robin_pins,
-            resumable_sessions,
-        )?;
+        let (start_index, initial_resume_candidate, next_index) =
+            self.resolve_round_robin_start(details, round_robin_pins, resumable_sessions)?;
         let member_nodes = load_ensemble_member_nodes(&self.db, details)?;
         let commit_watch = CommitRightsWatch::begin(
             enforce_commit_rights,
