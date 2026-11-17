@@ -131,13 +131,23 @@ a workdir for filtering:
 
 | Tool | Description |
 |---|---|
-| `spec` `list` | List specs (filterable by workdir, status) |
-| `spec` `get` | One spec with its full description |
-| `spec_edit` `create` | Create a standalone spec |
-| `spec_edit` `update` | Update a spec's name, description, or workdir tag |
+| `spec` `list` | List specs (filterable by workdir, status), each with its `intent` |
+| `spec` `get` | One spec with its full description and `intent` |
+| `spec_edit` `create` | Create a standalone spec, optionally with an `intent` |
+| `spec_edit` `update` | Update a spec's name, description, workdir tag, or `intent` |
 | `spec_edit` `delete` | Delete an unbound spec |
 | `spec_edit` `set_status` | Admin transition: complete, skip, or reopen a standalone spec |
 | `spec` `section` | Extract one canonical section from a spec body |
+
+**Intent.** A spec may carry an `intent`: one human-approved sentence, at most
+500 characters, of what it must achieve. `spec_edit` `create` accepts it,
+`spec_edit` `update` sets it (an empty string clears it), and `spec`
+`list`/`get` return it as `null` when unset. It is optional until
+`spec_review.enabled` is switched on
+([Settings reference](cli-reference.md#settings-reference)): then a create, or
+an update that would leave the spec without an intent, is refused with
+`intent is required while spec review is on: one human-approved sentence of
+what this spec must achieve`.
 
 Spec bodies are written in the tagged `<spec>` format — all seven canonical
 section tags (`<objective>`, `<functional_requirements>`,
@@ -161,7 +171,7 @@ bound specs:
 |---|---|
 | `queue` `create` | Create an empty queue |
 | `queue` `add_spec` | Append a spec to a queue — a grouped add lands after the group's last pending member |
-| `queue` `list` | List a queue's members (or all queues) |
+| `queue` `list` | List a queue's members (or all queues), each with its `intent` |
 | `queue` `remove_spec` | Remove a spec from a queue |
 | `queue` `reorder` | Full replacement of a queue's order |
 | `queue` `set_group` | Set or clear a member's context group |

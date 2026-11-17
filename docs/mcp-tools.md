@@ -112,7 +112,7 @@ pending`, and `continue`/`run` cancel it — see
 
 | Tool | Description |
 |---|---|
-| `config` | Read and change canopy settings. Actions: `get` (one setting by its dotted key, e.g. `clean.retention_days`), `list` (every setting with group, kind, default, effective value, source, apply mode and status; optional `group` filter), `set` (validated against the setting's type and range first — nothing is written on refusal; returns the new effective value and what the user must do: `applied`, `applies on next run`, `restart the daemon`, or `restart the TUI`), `reset` (one setting back to its registry default) — pass `action` plus the params the refusal/table lists |
+| `config` | Read and change canopy settings. Actions: `get` (one setting by its dotted key, e.g. `clean.retention_days`), `list` (every setting with group, kind, default, effective value, source, apply mode and status; optional `group` filter), `set` (validated against the setting's type and range first — nothing is written on refusal; returns the new effective value and what the user must do: `applied`, `applies on next run`, `restart the daemon`, or `restart the TUI`), `reset` (one setting back to its registry default) — pass `action` plus the params the refusal/table lists. The built-in adversarial spec review is configured here through `spec_review.enabled`, `spec_review.platform`, `spec_review.model` and `spec_review.max_parallel`; enabling it is refused while the platform is empty, is not in the platform registry, or its platform/model pair is unavailable in the roster ([Settings reference](cli-reference.md#settings-reference)) |
 
 Every authoring tool that stores prompt text — `graph_node` `add`,
 `graph_node` `update`, `graph_ensemble` `add`, `graph_ensemble` `update`,
@@ -185,7 +185,7 @@ resolved within the caller's or the graph's workdir.
 
 | Tool | Description |
 |---|---|
-| `spec` | Read specs, sections, and notes. Actions: `list` (filterable by workdir, status, and `spec_type`, with limit/offset pagination), `get` (one spec with its full description), `section` (one canonical section from a spec body), `notes` (every note of a spec, newest first, with owner, author model, `updated_at` and body) — pass `action` plus the params the refusal/table lists |
+| `spec` | Read specs, sections, and notes. Actions: `list` (filterable by workdir, status, and `spec_type`, with limit/offset pagination; each spec carries its `intent`), `get` (one spec with its full description and `intent`), `section` (one canonical section from a spec body), `notes` (every note of a spec, newest first, with owner, author model, `updated_at` and body) — pass `action` plus the params the refusal/table lists |
 | `spec_edit` | Create, change, and transition specs. Actions: `create` (a standalone spec — supports `spec_type`/`spec_scope` for automatic code generation and deterministic commit messages; a conventional name such as `fix(tui): open F1` sets the type and scope and stores the subject alone, while an untyped create still succeeds but returns a `warning`), `update`, `delete` (refused while bound to a graph), `set_status` (admin transition: complete, skip, or reopen), `note_write` (`run_id` + `body`, or `spec_id` + `body` for the `operator` note; body ≤ 2 500 chars). `create` and `update` accept a short `intent` (≤ 500 chars) describing what the spec must achieve: required while `spec_review.enabled` is on, optional while it is off |
 
 Spec bodies use the tagged `<spec>` format with all seven canonical section

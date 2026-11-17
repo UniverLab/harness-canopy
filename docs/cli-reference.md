@@ -818,10 +818,10 @@ it came from. **Apply** says when a change takes effect: `applied` (at once),
 | `scheduler.retry_delay_minutes` | 60 | 1–1440 | next run | Wait before a scheduled run is retried |
 | `scheduler.retry_max` | 3 | 0–20 | next run | Retries of a failed scheduled run |
 | `spec_attempt_limit` | 3 | 1–20 | restart the daemon | Separate graph executions a spec may fail with a verdict before it is blocked |
-| `spec_review.enabled` | `false` | bool | next run | Run the built-in adversarial spec review; while on, `spec_edit` requires a non-empty `intent` |
-| `spec_review.platform` | empty | — | next run | Platform the spec review runs on; enabling the review requires a platform from the platform registry |
+| `spec_review.enabled` | `false` | bool | next run | Switch on the built-in adversarial spec review; while on, `spec_edit` requires a non-empty `intent` |
+| `spec_review.platform` | empty | — | next run | Platform the spec review uses; enabling the review requires a platform from the platform registry |
 | `spec_review.model` | empty | — | next run | Model the spec review uses; empty takes the platform-wide roster entry |
-| `spec_review.max_parallel` | 2 | 1–8 | next run | Concurrent spec reviews |
+| `spec_review.max_parallel` | 2 | 1–8 | next run | Spec reviews that may run at once |
 | `ensemble_concurrency_cap` | 4 | 1–64 | restart the daemon | Ensemble members that run at once across every graph |
 | `graphs.*` | see [Tuning the engine](graphs-operations.md#tuning-the-engine) | see there | see there | Graph engine retry budgets, ensemble member caps, check output, and the graph catalogue URL |
 | `clean.retention_days` | 7 | 1–3650 days | next run | Days kept before `canopy clean` removes sessions and files |
@@ -836,6 +836,17 @@ it came from. **Apply** says when a change takes effect: `applied` (at once),
 
 `scheduler.retry_*`, `spec_attempt_limit` and `spec_review.*` are not in
 `graphs.*`, which is why they are listed here.
+
+`spec_review.*` configures the built-in adversarial spec review, off by
+default. Enabling it is refused while `spec_review.platform` is empty, names
+a platform missing from the platform registry (`canopy registry refresh` or
+`harness` `refresh_registry` updates it), or its platform/model pair is
+unavailable in the roster; an empty `spec_review.model` means that platform's
+roster-wide entry. While the review is on, `spec_edit` `create` refuses a
+spec whose `intent` is empty and `spec_edit` `update` refuses one that would
+leave the spec without an intent; otherwise the `intent` stays optional and
+is capped at 500 characters. A pair that becomes unavailable after the review
+is on does not block writes to other settings.
 
 ## Spec queues
 
