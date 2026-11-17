@@ -248,7 +248,11 @@ most recent recorded output of each node upstream of the start node for that
 spec; the start node and everything downstream of it always run again, and
 its own old output is never reused. If an upstream node's latest run is
 `failed`, `error` or `interrupted`, the directed run is refused and that node
-is named: a failed prerequisite is never treated as passed. An upstream node
+is named: a failed prerequisite is never treated as passed. An upstream
+`failed` or `error` is met when the graph's own edges route that status
+toward the start node — `fail`/`always` edges for a `failed` run, `error`
+edges for an `error` run (the join node's edges for a quorum verdict);
+`interrupted` is never met this way. An upstream node
 that belongs to an ensemble is judged by the ensemble's quorum result — its
 join node's run for this spec — not by any member's own latest run: a member
 that failed while the quorum passed is a satisfied prerequisite, while a failed

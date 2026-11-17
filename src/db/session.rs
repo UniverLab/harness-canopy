@@ -308,6 +308,10 @@ impl Database {
     /// Attach the failure detail to a session row: the harness's stderr
     /// tail on a nonzero exit, or the resume guard's explanation. Overwrites
     /// unconditionally — the latest failure is the one the row shows.
+    /// Test-only: production finishes go through
+    /// [`Self::finish_interactive_session_with_detail`], which writes the
+    /// status flip and the detail in one update.
+    #[cfg(test)]
     pub fn set_session_exit_detail(&self, session_id: &str, detail: &str) -> Result<()> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         conn.execute(
@@ -877,6 +881,49 @@ mod tests {
 
         let status = db.get_interactive_session_status(session_id).unwrap();
         assert_eq!(status, Some("completed".to_string()));
+    }
+
+    #[test]
+    fn finish_with_detail_writes_status_and_detail_together() {
+        let db = test_db();
+        let session_id = "test-session-detail";
+        db.insert_interactive_session(
+            session_id,
+            "detail",
+            "muse",
+            "/tmp",
+            None,
+            None,
+            "interactive",
+            None,
+        )
+        .unwrap();
+
+        db.finish_interactive_session_with_detail(session_id, 1, Some("tail"))
+            .unwrap();
+        assert_eq!(
+            db.get_interactive_session_status(session_id)
+                .unwrap()
+                .as_deref(),
+            Some("error")
+        );
+        assert_eq!(
+            db.get_session_exit_detail(session_id).unwrap().as_deref(),
+            Some("tail")
+        );
+
+        // A clean finish clears any earlier detail in the same write.
+        db.reactivate_interactive_session(session_id, None, "/tmp", None, None)
+            .unwrap();
+        db.finish_interactive_session_with_detail(session_id, 0, None)
+            .unwrap();
+        assert_eq!(
+            db.get_interactive_session_status(session_id)
+                .unwrap()
+                .as_deref(),
+            Some("completed")
+        );
+        assert_eq!(db.get_session_exit_detail(session_id).unwrap(), None);
     }
 
     #[test]

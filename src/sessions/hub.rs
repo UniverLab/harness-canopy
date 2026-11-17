@@ -359,17 +359,16 @@ impl HubSession {
     }
 
     /// Mark this session's database row finished, the way the TUI does when
-    /// a session of the same kind ends.
+    /// a session of the same kind ends. The status flip and the failure
+    /// detail commit in one update: a reader polling the row can never
+    /// observe `error` ahead of its explanation.
     fn finish_db_row(&self, db: &Database) {
         match self.kind {
             SessionKind::Agent => {
                 let code = self.status().exit_code().unwrap_or(-1);
-                let _ = db.finish_interactive_session(&self.id, code);
-                if code == 0 {
-                    let _ = db.clear_session_exit_detail(&self.id);
-                } else {
-                    let _ = db.set_session_exit_detail(&self.id, &self.exit_detail_text(code));
-                }
+                let detail = (code != 0).then(|| self.exit_detail_text(code));
+                let _ =
+                    db.finish_interactive_session_with_detail(&self.id, code, detail.as_deref());
             }
             SessionKind::Terminal => {
                 let _ = db.finish_terminal_session(&self.id);
@@ -385,8 +384,7 @@ impl HubSession {
         match self.kind {
             SessionKind::Agent => {
                 let code = self.status().exit_code().unwrap_or(-1);
-                let _ = db.finish_interactive_session(&self.id, code);
-                let _ = db.clear_session_exit_detail(&self.id);
+                let _ = db.finish_interactive_session_with_detail(&self.id, code, None);
             }
             SessionKind::Terminal => {
                 let _ = db.finish_terminal_session(&self.id);

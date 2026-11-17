@@ -405,7 +405,14 @@ pub(crate) fn resolve_spec_start(
         // The cursor's own node (and everything downstream) is executed
         // fresh, so its prior output/input is never seeded.
         let upstream_ids = directed_upstream_node_ids(edges, &target.start_node_ids);
-        check_upstream_prerequisites(nodes, &upstream_ids, existing_runs, ensembles)?;
+        check_upstream_prerequisites(
+            nodes,
+            edges,
+            &upstream_ids,
+            &target.start_node_ids,
+            existing_runs,
+            ensembles,
+        )?;
         let node_outputs = upstream_node_outputs(nodes, &upstream_ids, existing_runs);
         return Ok((target.cursor, node_outputs, None, HashMap::new()));
     }
@@ -539,30 +546,113 @@ fn prerequisite_judge<'a>(
     })
 }
 
+/// Mirrors [`crate::graph_engine::routing::select_next_step`]: a `Fail` run is
+/// routed by `fail` and `always` edges, an `Error` run by `error` edges only.
+/// `Pass` is never judged here and `Interrupted` never routes this way.
+fn routes_status(status: GraphRunStatus, condition: &GraphEdgeCondition) -> bool {
+    match status {
+        GraphRunStatus::Fail => matches!(
+            condition,
+            GraphEdgeCondition::Fail | GraphEdgeCondition::Always
+        ),
+        GraphRunStatus::Error => matches!(condition, GraphEdgeCondition::Error),
+        _ => false,
+    }
+}
+
+/// Whether `from_id`'s `status` is routed toward the directed start: one
+/// outgoing edge whose condition routes that status and whose destination is
+/// another upstream node or one of the start nodes. Existential on purpose —
+/// one matching edge into the upstream cone is enough, even beside a second
+/// matching edge to a dead end that live routing would call ambiguous.
+fn failure_routes_to_start(
+    from_id: &str,
+    status: GraphRunStatus,
+    edges: &[GraphEdge],
+    targets: &HashSet<String>,
+) -> bool {
+    edges.iter().any(|edge| {
+        edge.from_node == from_id
+            && edge.to_node != from_id
+            && routes_status(status, &edge.condition)
+            && targets.contains(&edge.to_node)
+    })
+}
+
+/// The label refusals name the directed start by: a plain target names its
+/// node; an ensemble target (members plus join) names the ensemble.
+fn start_target_label(
+    start_node_ids: &[String],
+    nodes: &[GraphNode],
+    ensembles: &[EnsembleDetails],
+) -> String {
+    if start_node_ids.len() == 1 {
+        let id = &start_node_ids[0];
+        return nodes
+            .iter()
+            .find(|n| &n.id == id)
+            .map(|n| n.name.clone())
+            .unwrap_or_else(|| id.clone());
+    }
+    let start: HashSet<&str> = start_node_ids.iter().map(String::as_str).collect();
+    for details in ensembles {
+        let member_set: HashSet<&str> = details
+            .members
+            .iter()
+            .map(|m| m.node_id.as_str())
+            .chain(std::iter::once(details.ensemble.join_node_id.as_str()))
+            .collect();
+        if member_set == start {
+            return details.ensemble.name.clone();
+        }
+    }
+    nodes
+        .iter()
+        .find(|n| start.contains(n.id.as_str()))
+        .map(|n| n.name.clone())
+        .unwrap_or_else(|| start_node_ids.join(","))
+}
+
 /// Refuses a directed start when one upstream prerequisite is unmet: a plain
 /// node whose latest run is Fail, Error or Interrupted, an ensemble whose
 /// verdict is, or an ensemble with no verdict for the latest attempt.
-/// Skipping any of those as if it had passed would route on work that never
-/// cleared its gates. Refusals name the ensemble, never a member or the join.
+/// A Fail or Error verdict is met when the graph's own edges route that
+/// status toward the start node (the join's edges for a quorum verdict);
+/// Interrupted never is. Skipping any other unmet gate as if it had passed
+/// would route on work that never cleared its gates. Refusals name the
+/// ensemble, never a member or the join.
 fn check_one_prerequisite(
     node: &GraphNode,
     runs: &[GraphNodeRun],
     ensembles: &[EnsembleDetails],
+    edges: &[GraphEdge],
+    targets: &HashSet<String>,
+    start_label: &str,
 ) -> anyhow::Result<()> {
     let Some(judge) = prerequisite_judge(node, runs, ensembles) else {
         return Ok(());
     };
     match judge {
         PrerequisiteJudge::Plain { run } => {
-            if matches!(
-                run.status,
-                GraphRunStatus::Fail | GraphRunStatus::Error | GraphRunStatus::Interrupted
-            ) {
+            if matches!(run.status, GraphRunStatus::Interrupted) {
                 bail!(
                     "Directed run refused: prerequisite node '{}' last run was {} ({}). Re-run it first or start at an earlier node.",
                     node.name,
                     run.status.as_str(),
                     run.id
+                );
+            }
+            if matches!(run.status, GraphRunStatus::Fail | GraphRunStatus::Error) {
+                if failure_routes_to_start(&node.id, run.status, edges, targets) {
+                    return Ok(());
+                }
+                bail!(
+                    "Directed run refused: prerequisite node '{}' last run was {} ({}); no {} edge leads from it toward the start node '{}'. Re-run it first or start at an earlier node.",
+                    node.name,
+                    run.status.as_str(),
+                    run.id,
+                    run.status.as_str(),
+                    start_label
                 );
             }
         }
@@ -573,15 +663,30 @@ fn check_one_prerequisite(
                     details.ensemble.name
                 );
             };
-            if matches!(
-                latest.status,
-                GraphRunStatus::Fail | GraphRunStatus::Error | GraphRunStatus::Interrupted
-            ) {
+            if matches!(latest.status, GraphRunStatus::Interrupted) {
                 bail!(
                     "Directed run refused: prerequisite ensemble '{}' last run was {} ({}). Re-run it first or start at an earlier node.",
                     details.ensemble.name,
                     latest.status.as_str(),
                     latest.id
+                );
+            }
+            if matches!(latest.status, GraphRunStatus::Fail | GraphRunStatus::Error) {
+                if failure_routes_to_start(
+                    &details.ensemble.join_node_id,
+                    latest.status,
+                    edges,
+                    targets,
+                ) {
+                    return Ok(());
+                }
+                bail!(
+                    "Directed run refused: prerequisite ensemble '{}' last run was {} ({}); no {} edge leads from it toward the start node '{}'. Re-run it first or start at an earlier node.",
+                    details.ensemble.name,
+                    latest.status.as_str(),
+                    latest.id,
+                    latest.status.as_str(),
+                    start_label
                 );
             }
         }
@@ -590,15 +695,27 @@ fn check_one_prerequisite(
 }
 
 /// Refuses a directed start when an upstream prerequisite (one whose output
-/// would be reused) is unmet — see [`check_one_prerequisite`].
+/// would be reused) is unmet — see [`check_one_prerequisite`]. A failed or
+/// errored upstream node is met when the graph's own edges route that status
+/// toward the start node ([`select_next_step`]'s table).
+///
+/// [`select_next_step`]: crate::graph_engine::routing::select_next_step
 pub(crate) fn check_upstream_prerequisites(
     nodes: &[GraphNode],
+    edges: &[GraphEdge],
     upstream_ids: &HashSet<String>,
+    start_node_ids: &[String],
     runs: &[GraphNodeRun],
     ensembles: &[EnsembleDetails],
 ) -> anyhow::Result<()> {
+    let targets: HashSet<String> = upstream_ids
+        .iter()
+        .cloned()
+        .chain(start_node_ids.iter().cloned())
+        .collect();
+    let start_label = start_target_label(start_node_ids, nodes, ensembles);
     for node in nodes.iter().filter(|n| upstream_ids.contains(&n.id)) {
-        check_one_prerequisite(node, runs, ensembles)?;
+        check_one_prerequisite(node, runs, ensembles, edges, &targets, &start_label)?;
     }
     Ok(())
 }

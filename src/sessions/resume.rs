@@ -134,14 +134,16 @@ fn fail_idless_session(
         session.cli,
         session.working_dir,
     );
-    if let Err(e) = hub.db().finish_interactive_session(&session.id, 1) {
-        tracing::warn!("Failed to close session '{}': {e}", session.name);
-    }
     let detail = format!(
         "not resumed: no recorded harness conversation id, and another '{}' session in '{}' was already resumed with '{fallback}'; relaunch it fresh instead",
         session.cli, session.working_dir,
     );
-    if let Err(e) = hub.db().set_session_exit_detail(&session.id, &detail) {
+    // Status flip and explanation commit together: a reader polling the row
+    // never observes `error` ahead of its detail.
+    if let Err(e) = hub
+        .db()
+        .finish_interactive_session_with_detail(&session.id, 1, Some(&detail))
+    {
         tracing::warn!(
             "Failed to record the resume-guard explanation for '{}': {e}",
             session.name

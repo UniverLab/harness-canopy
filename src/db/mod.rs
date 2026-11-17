@@ -777,6 +777,7 @@ pub mod scheduled_prompts_agent;
 mod schema;
 pub mod seeds;
 pub mod session;
+pub mod session_finish;
 pub mod session_target;
 pub mod shelf;
 pub mod state;
