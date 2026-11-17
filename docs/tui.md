@@ -433,7 +433,9 @@ message delivered to this session` (for example `canopy-tui-polish ·
 on_completed: message delivered to this session`); `Agent message
 delivered` reads `<agent id> (<trigger>): message delivered to this
 session`. When the graph or agent no longer exists, the first 8
-characters of its id stand in for the name.
+characters of its id stand in for the name. A send held because the user
+is typing in the target session raises one `Scheduled send held`
+notification naming that session once it has been held for over a minute.
 
 ## Colour and tinting
 
