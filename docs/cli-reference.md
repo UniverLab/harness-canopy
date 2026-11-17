@@ -214,8 +214,9 @@ served from the local database — no daemon required.
 
 Read-only host usage history from `~/.canopy/metrics/` — no daemon required.
 A missing directory, a missing day file and a malformed line (a power-off can
-leave a truncated last line) all read as "no samples in this window", never as
-an error.
+leave a truncated last line) never fail: an empty window prints
+"no samples in this window" (with `--json`, the same shape with an empty
+`samples` array).
 
 | Command | Description |
 |---|---|
