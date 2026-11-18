@@ -62,6 +62,7 @@ fn make_spec(id: &str, name: &str, intent: Option<&str>) -> GraphSpec {
         review_state: SpecReviewState::Unreviewed,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     }
 }
 
@@ -364,4 +365,320 @@ async fn placeholder_never_queued() {
     assert!(claimed.is_none());
     let stored = db.get_graph_spec(&placeholder.id).unwrap().unwrap();
     assert_eq!(stored.review_state, SpecReviewState::Approved);
+}
+
+fn make_spec_for_session(id: &str, name: &str, intent: Option<&str>, session: &str) -> GraphSpec {
+    let mut spec = make_spec(id, name, intent);
+    spec.created_by_session = Some(session.to_string());
+    spec
+}
+
+fn insert_session(db: &Database, id: &str, workdir: &str) {
+    db.insert_interactive_session(id, id, "test", workdir, None, None, "interactive", None)
+        .unwrap();
+}
+
+async fn process_all_sync(db: &Arc<Database>) {
+    // Process sequentially so drains see a stable state per completion.
+    let _ = db.requeue_in_review_specs();
+    while let Some(spec) = db.claim_next_unreviewed_spec().unwrap() {
+        spec_review::review_one(Arc::clone(db), spec).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn three_parallel_specs_produce_one_message() {
+    let home = tempfile::tempdir().unwrap();
+    let _home = HomeGuard::set(home.path());
+    write_config(home.path(), true, 3);
+    let (_dir, db) = test_db();
+    insert_session(&db, "sess-a", "/tmp/proj");
+    for (id, name) in [("s1", "one"), ("s2", "two"), ("s3", "three")] {
+        db.insert_graph_spec(&make_spec_for_session(id, name, Some("i"), "sess-a"))
+            .unwrap();
+    }
+    spec_review::set_review_runner_for_tests(Arc::new(|_, _, _| {
+        Box::pin(async { Ok(r#"{"verdict":"approve","tier":"normal","findings":[]}"#.into()) })
+    }));
+    // Run all reviews concurrently via the worker path logic: claim+spawn
+    // up to max_parallel, wait for completions, then drain remaining.
+    for _ in 0..20 {
+        spec_review::run_pending_reviews(Arc::clone(&db))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        if db.count_in_review_specs().unwrap() == 0 {
+            if db.claim_next_unreviewed_spec().unwrap().is_none() {
+                break;
+            } else {
+                // shouldn't happen, but keep consistent
+            }
+        }
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    spec_review::clear_review_runner_for_tests();
+    let sends = db
+        .list_pending_scheduled_prompts_for_session("sess-a")
+        .unwrap();
+    assert_eq!(
+        sends.len(),
+        1,
+        "expected one batched message, got {sends:?}"
+    );
+    assert!(sends[0].prompt.contains("3 reviewed"));
+    assert!(sends[0].prompt.contains("one -> approved"));
+    assert!(sends[0].prompt.contains("two -> approved"));
+    assert!(sends[0].prompt.contains("three -> approved"));
+}
+
+#[tokio::test]
+async fn mid_drain_spec_joins_same_message() {
+    let home = tempfile::tempdir().unwrap();
+    let _home = HomeGuard::set(home.path());
+    write_config(home.path(), true, 2);
+    let (_dir, db) = test_db();
+    insert_session(&db, "sess-a", "/tmp/proj");
+    db.insert_graph_spec(&make_spec_for_session("s1", "first", Some("i"), "sess-a"))
+        .unwrap();
+    db.insert_graph_spec(&make_spec_for_session("s2", "second", Some("i"), "sess-a"))
+        .unwrap();
+
+    spec_review::set_review_runner_for_tests(Arc::new(|_, _, _| {
+        Box::pin(async { Ok(r#"{"verdict":"approve","tier":"normal","findings":[]}"#.into()) })
+    }));
+
+    // Complete s1 while s2 remains in_review: no drain fires because session
+    // still has a pending review.
+    let a = db.claim_next_unreviewed_spec().unwrap().unwrap();
+    let b = db.claim_next_unreviewed_spec().unwrap().unwrap();
+    spec_review::review_one(Arc::clone(&db), a).await.unwrap();
+    assert!(db
+        .list_pending_scheduled_prompts_for_session("sess-a")
+        .unwrap()
+        .is_empty());
+
+    // Spec added while drain is pending joins the same eventual message.
+    db.insert_graph_spec(&make_spec_for_session("s3", "third", Some("i"), "sess-a"))
+        .unwrap();
+    let c = db.claim_next_unreviewed_spec().unwrap().unwrap();
+    spec_review::review_one(Arc::clone(&db), c).await.unwrap();
+    assert!(db
+        .list_pending_scheduled_prompts_for_session("sess-a")
+        .unwrap()
+        .is_empty());
+
+    // Last pending spec completes -> one drain containing all three.
+    spec_review::review_one(Arc::clone(&db), b).await.unwrap();
+    spec_review::clear_review_runner_for_tests();
+    let sends = db
+        .list_pending_scheduled_prompts_for_session("sess-a")
+        .unwrap();
+    assert_eq!(
+        sends.len(),
+        1,
+        "expected one batched message, got {sends:?}"
+    );
+    assert!(
+        sends[0].prompt.contains("3 reviewed"),
+        "{}",
+        sends[0].prompt
+    );
+    assert!(sends[0].prompt.contains("first"), "{}", sends[0].prompt);
+    assert!(sends[0].prompt.contains("second"), "{}", sends[0].prompt);
+    assert!(sends[0].prompt.contains("third"), "{}", sends[0].prompt);
+}
+
+#[tokio::test]
+async fn two_sessions_get_one_message_each() {
+    let home = tempfile::tempdir().unwrap();
+    let _home = HomeGuard::set(home.path());
+    write_config(home.path(), true, 2);
+    let (_dir, db) = test_db();
+    insert_session(&db, "sess-a", "/tmp/a");
+    insert_session(&db, "sess-b", "/tmp/b");
+    db.insert_graph_spec(&make_spec_for_session("s1", "a1", Some("i"), "sess-a"))
+        .unwrap();
+    db.insert_graph_spec(&make_spec_for_session("s2", "b1", Some("i"), "sess-b"))
+        .unwrap();
+    spec_review::set_review_runner_for_tests(Arc::new(|_, _, _| {
+        Box::pin(async { Ok(r#"{"verdict":"approve","tier":"normal","findings":[]}"#.into()) })
+    }));
+    process_all_sync(&db).await;
+    spec_review::clear_review_runner_for_tests();
+    let a = db
+        .list_pending_scheduled_prompts_for_session("sess-a")
+        .unwrap();
+    let b = db
+        .list_pending_scheduled_prompts_for_session("sess-b")
+        .unwrap();
+    assert_eq!(a.len(), 1);
+    assert_eq!(b.len(), 1);
+    assert!(a[0].prompt.contains("a1") && !a[0].prompt.contains("b1"));
+    assert!(b[0].prompt.contains("b1") && !b[0].prompt.contains("a1"));
+}
+
+#[tokio::test]
+async fn dead_session_preserves_message() {
+    let home = tempfile::tempdir().unwrap();
+    let _home = HomeGuard::set(home.path());
+    write_config(home.path(), true, 1);
+    let (_dir, db) = test_db();
+    insert_session(&db, "sess-dead", "/tmp/dead");
+    db.insert_graph_spec(&make_spec_for_session("s1", "gone", Some("i"), "sess-dead"))
+        .unwrap();
+    // make session not live/dead by marking it finished/removed from active? delivery uses hub liveness;
+    // simulate by removing session row so delivery treats as dead target? get_session_workdir may fail.
+    // Keep row for workdir resolution but deliver against empty hub.
+    spec_review::set_review_runner_for_tests(Arc::new(|_, _, _| {
+        Box::pin(async { Ok(r#"{"verdict":"approve","tier":"normal","findings":[]}"#.into()) })
+    }));
+    process_all_sync(&db).await;
+    spec_review::clear_review_runner_for_tests();
+    let sends = db
+        .list_pending_scheduled_prompts_for_session("sess-dead")
+        .unwrap();
+    assert_eq!(sends.len(), 1);
+    // Deliver with no live sessions -> preserved as failed (dead-target path).
+    let hub = crate::sessions::SessionHub::with_broadcast_capacity(Arc::clone(&db), "h".into(), 8);
+    let mut held = crate::scheduler::cron_scheduler::held_sends::HeldTracker::new();
+    crate::scheduler::cron_scheduler::scheduled_prompts::deliver_due_scheduled_prompts(
+        &db, &hub, &mut held,
+    );
+    let failed = db
+        .list_failed_scheduled_prompts_for_workdir("/tmp/dead")
+        .unwrap();
+    assert_eq!(failed.len(), 1);
+    assert!(failed[0].prompt.contains("gone"));
+}
+
+#[tokio::test]
+async fn null_session_produces_no_message_but_spec_readable() {
+    let home = tempfile::tempdir().unwrap();
+    let _home = HomeGuard::set(home.path());
+    write_config(home.path(), true, 1);
+    let (_dir, db) = test_db();
+    db.insert_graph_spec(&make_spec("s1", "anon", Some("i")))
+        .unwrap();
+    spec_review::set_review_runner_for_tests(Arc::new(|_, _, _| {
+        Box::pin(async { Ok(r#"{"verdict":"approve","tier":"trivial","findings":[]}"#.into()) })
+    }));
+    process_all_sync(&db).await;
+    spec_review::clear_review_runner_for_tests();
+    // No scheduled prompts at all.
+    let due = db
+        .list_due_scheduled_prompts(chrono::Utc::now() + chrono::Duration::hours(1))
+        .unwrap();
+    assert!(due.is_empty());
+    let spec = db.get_graph_spec("s1").unwrap().unwrap();
+    assert_eq!(spec.review_state, SpecReviewState::Approved);
+    assert_eq!(spec.name, "anon");
+}
+
+#[tokio::test]
+async fn reupdate_after_drain_opens_new_set_without_resending_old() {
+    let home = tempfile::tempdir().unwrap();
+    let _home = HomeGuard::set(home.path());
+    write_config(home.path(), true, 1);
+    let (_dir, db) = test_db();
+    insert_session(&db, "sess-a", "/tmp/proj");
+    db.insert_graph_spec(&make_spec_for_session("s1", "first", Some("i"), "sess-a"))
+        .unwrap();
+    spec_review::set_review_runner_for_tests(Arc::new(|_, _, _| {
+        Box::pin(async { Ok(r#"{"verdict":"approve","tier":"normal","findings":[]}"#.into()) })
+    }));
+    process_all_sync(&db).await;
+    let sends = db
+        .list_pending_scheduled_prompts_for_session("sess-a")
+        .unwrap();
+    assert_eq!(sends.len(), 1);
+    // consume first send
+    for s in &sends {
+        db.delete_scheduled_prompt(&s.id).unwrap();
+    }
+
+    // re-update triggers re-review: mark unreviewed as handler would
+    crate::daemon::handler_specs_helpers::mark_spec_dirty_for_review(&db, "s1").unwrap();
+    process_all_sync(&db).await;
+    spec_review::clear_review_runner_for_tests();
+    let sends2 = db
+        .list_pending_scheduled_prompts_for_session("sess-a")
+        .unwrap();
+    assert_eq!(sends2.len(), 1, "only new drain, old set never resent");
+    assert!(sends2[0].prompt.contains("1 reviewed"));
+}
+
+fn reviewed_spec(id: &str, state: SpecReviewState, tier: Option<SpecReviewTier>) -> GraphSpec {
+    let mut spec = make_spec(id, id, Some("i"));
+    spec.review_state = state;
+    spec.review_tier = tier;
+    spec
+}
+
+fn finding(severity: &str, text: &str) -> SpecReviewFinding {
+    SpecReviewFinding {
+        severity: severity.to_string(),
+        text: text.to_string(),
+    }
+}
+
+/// The drain message pins the spec's exact format: header counts, rejected
+/// and error blocks before approved ones, tier brackets, finding lines.
+#[test]
+fn format_message_orders_blocks_and_names_tiers() {
+    use crate::graph_engine::spec_review_drain::format_review_message;
+    let mut rejected = reviewed_spec("s-rej", SpecReviewState::Rejected, None);
+    rejected.review_findings = Some(vec![finding("high", "contradicts intent")]);
+    let mut errored = reviewed_spec("s-err", SpecReviewState::ReviewError, None);
+    errored.review_findings = Some(vec![finding("high", "boom")]);
+    let mut big = reviewed_spec(
+        "s-big",
+        SpecReviewState::Approved,
+        Some(SpecReviewTier::Normal),
+    );
+    big.review_findings = Some(vec![finding("low", "nit"), finding("medium", "smell")]);
+    let tiny = reviewed_spec(
+        "s-tiny",
+        SpecReviewState::Approved,
+        Some(SpecReviewTier::Trivial),
+    );
+
+    let msg = format_review_message(&[tiny, big, errored, rejected]);
+    let expected = "Spec review finished: 4 reviewed, 2 approved (1 trivial, 1 normal), 1 rejected, 1 errors.\n\
+        s-rej -> rejected\n  [high] contradicts intent\n\
+        s-err -> review_error\n  [high] boom\n\
+        s-big -> approved [normal]\n  [low] nit\n  [medium] smell\n\
+        s-tiny -> approved [trivial]";
+    assert_eq!(msg, expected);
+}
+
+/// Over-cap messages drop low-severity findings first and end with the
+/// recall suffix instead of silently truncating.
+#[test]
+fn format_message_caps_at_6000_chars_dropping_low_first() {
+    use crate::graph_engine::spec_review_drain::format_review_message;
+    let mut noisy = reviewed_spec(
+        "s-big",
+        SpecReviewState::Approved,
+        Some(SpecReviewTier::Normal),
+    );
+    let mut findings = vec![finding("medium", "keep me")];
+    for i in 0..200 {
+        findings.push(finding("low", &format!("nit number {i} with padding text")));
+    }
+    noisy.review_findings = Some(findings);
+
+    let msg = format_review_message(&[noisy]);
+    assert!(msg.chars().count() <= 6000, "len {}", msg.chars().count());
+    assert!(
+        msg.contains("  [medium] keep me"),
+        "medium findings survive a low-severity trim:\n{msg}"
+    );
+    assert!(
+        !msg.contains("[low]"),
+        "low findings are dropped first:\n{msg}"
+    );
+    assert!(
+        msg.ends_with("(+200 more findings: read them with the spec tool)"),
+        "capped message ends with the recall suffix:\n{msg}"
+    );
 }

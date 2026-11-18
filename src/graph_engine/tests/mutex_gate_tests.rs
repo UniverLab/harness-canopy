@@ -65,6 +65,7 @@ fn insert_second_graph(
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     })?;
     Ok((graph_id, spec_id))
 }

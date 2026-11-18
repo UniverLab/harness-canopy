@@ -372,6 +372,7 @@ pub(crate) fn no_spec_placeholder(graph_id: &str) -> GraphSpec {
         review_state: SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     }
 }
 

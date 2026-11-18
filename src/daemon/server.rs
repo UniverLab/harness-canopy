@@ -1012,6 +1012,7 @@ mod hang_repro {
             review_state: crate::domain::graphs::SpecReviewState::Approved,
             review_tier: None,
             review_findings: None,
+            created_by_session: None,
         })
         .unwrap();
         db.insert_graph_node(&GraphNode {
@@ -1568,6 +1569,7 @@ mod stdio_startup_reconciliation_tests {
             review_state: crate::domain::graphs::SpecReviewState::Approved,
             review_tier: None,
             review_findings: None,
+            created_by_session: None,
         };
         let node = GraphNode {
             id: format!("node-stdio-startup-{suffix}"),

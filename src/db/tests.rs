@@ -150,6 +150,7 @@ fn sample_graph_spec(graph_id: &str, id: &str, position: i64) -> GraphSpec {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     }
 }
 
@@ -198,6 +199,7 @@ fn sample_standalone_spec(id: &str, workdir: Option<&str>) -> GraphSpec {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     }
 }
 

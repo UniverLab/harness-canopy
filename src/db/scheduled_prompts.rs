@@ -90,6 +90,20 @@ impl ScheduledPromptProvenance {
         }
     }
 
+    /// Provenance for a batched spec-review drain delivered to the session
+    /// that created the reviewed specs.
+    pub fn spec_review() -> Self {
+        Self {
+            kind: "spec_review".to_string(),
+            graph_id: String::new(),
+            event: String::new(),
+            session_id: None,
+            agent_id: None,
+            trigger: None,
+            target_session_name: None,
+        }
+    }
+
     fn from_json(raw: Option<String>) -> Result<Option<Self>> {
         raw.map(|json| serde_json::from_str(&json).map_err(|e| anyhow!("{e}")))
             .transpose()

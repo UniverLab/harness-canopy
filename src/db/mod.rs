@@ -311,7 +311,7 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
                 updated_at INTEGER NOT NULL DEFAULT 0,
                 review_state TEXT NOT NULL DEFAULT 'approved',
                 review_tier TEXT,
-                review_findings TEXT
+                review_findings TEXT, created_by_session TEXT
             );
 
             CREATE UNIQUE INDEX IF NOT EXISTS idx_graph_specs_position
@@ -485,6 +485,7 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
 
             CREATE INDEX IF NOT EXISTS idx_seed_sessions_seed
                 ON seed_sessions(seed_id);
+            CREATE TABLE IF NOT EXISTS spec_review_drains (session_id TEXT PRIMARY KEY, drained_at_ms INTEGER NOT NULL);
 
             CREATE TABLE IF NOT EXISTS scheduled_prompts (
                 id TEXT PRIMARY KEY,
@@ -786,6 +787,7 @@ pub mod session_finish;
 pub mod session_target;
 pub mod shelf;
 mod spec_intent_migration;
+mod spec_review_drains;
 pub mod state;
 mod subagent_runs;
 pub mod sync;

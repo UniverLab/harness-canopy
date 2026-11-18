@@ -45,6 +45,7 @@ async fn blank_bound_spec_is_rejected_before_any_agent_executes() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     })
     .unwrap();
     db.insert_graph_node(&GraphNode {
@@ -125,6 +126,7 @@ async fn whitespace_only_bound_spec_is_rejected() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     })
     .unwrap();
 
@@ -170,6 +172,7 @@ async fn description_only_bound_spec_is_executable() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     })
     .unwrap();
     db.insert_graph_node(&GraphNode {
@@ -228,6 +231,7 @@ async fn queue_run_ignores_unrelated_blank_bound_spec() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     })
     .unwrap();
 
@@ -297,6 +301,7 @@ async fn blank_queue_member_is_rejected() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     })
     .unwrap();
     insert_queue_with_members(&db, "queue-1", &["blank-member"]);
@@ -499,6 +504,7 @@ async fn completed_blank_bookkeeping_does_not_block_real_bound_spec() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     })
     .unwrap();
     db.insert_graph_spec(&GraphSpec {
@@ -529,6 +535,7 @@ async fn completed_blank_bookkeeping_does_not_block_real_bound_spec() {
             review_state: crate::domain::graphs::SpecReviewState::Approved,
             review_tier: None,
             review_findings: None,
+        created_by_session: None,
         })
         .unwrap();
     db.insert_graph_node(&GraphNode {
@@ -594,6 +601,7 @@ async fn only_terminal_blank_bookkeeping_is_refused_before_claim() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     })
     .unwrap();
     db.insert_graph_node(&GraphNode {

@@ -285,8 +285,8 @@ impl Database {
             .as_ref()
             .and_then(|f| serde_json::to_string(f).ok());
         conn.execute(
-            "INSERT INTO graph_specs (id, graph_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head, spec_start_dirty, workdir, spec_committed_head, spec_end_dirty, spec_end_dirty_paths, completed_via, completed_via_reason, completed_via_at, updated_at, spec_type, spec_scope, spec_code, intent, review_state, review_tier, review_findings)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
+            "INSERT INTO graph_specs (id, graph_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head, spec_start_dirty, workdir, spec_committed_head, spec_end_dirty, spec_end_dirty_paths, completed_via, completed_via_reason, completed_via_at, updated_at, spec_type, spec_scope, spec_code, intent, review_state, review_tier, review_findings, created_by_session)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
             params![
                 &spec.id,
                 &spec.graph_id,
@@ -314,6 +314,7 @@ impl Database {
                 spec.review_state.as_str(),
                 spec.review_tier.map(|t| t.as_str()),
                 review_findings,
+                &spec.created_by_session,
             ],
         )?;
         Ok(())
@@ -325,7 +326,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, graph_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head, spec_start_dirty, workdir, completed_via, completed_via_reason, completed_via_at, spec_committed_head, spec_end_dirty, spec_end_dirty_paths, spec_type, spec_scope, spec_code, intent, review_state, review_tier, review_findings
+            "SELECT id, graph_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head, spec_start_dirty, workdir, completed_via, completed_via_reason, completed_via_at, spec_committed_head, spec_end_dirty, spec_end_dirty_paths, spec_type, spec_scope, spec_code, intent, review_state, review_tier, review_findings, created_by_session
              FROM graph_specs WHERE graph_id = ?1 ORDER BY position ASC",
         )?;
         let rows = stmt.query_map(params![graph_id], map_graph_spec_row)?;
@@ -340,7 +341,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, graph_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head, spec_start_dirty, workdir, completed_via, completed_via_reason, completed_via_at, spec_committed_head, spec_end_dirty, spec_end_dirty_paths, spec_type, spec_scope, spec_code, intent, review_state, review_tier, review_findings
+            "SELECT id, graph_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head, spec_start_dirty, workdir, completed_via, completed_via_reason, completed_via_at, spec_committed_head, spec_end_dirty, spec_end_dirty_paths, spec_type, spec_scope, spec_code, intent, review_state, review_tier, review_findings, created_by_session
              FROM graph_specs WHERE id = ?1",
         )?;
 
@@ -417,7 +418,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, graph_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head, spec_start_dirty, workdir, completed_via, completed_via_reason, completed_via_at, spec_committed_head, spec_end_dirty, spec_end_dirty_paths, spec_type, spec_scope, spec_code, intent, review_state, review_tier, review_findings
+            "SELECT id, graph_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head, spec_start_dirty, workdir, completed_via, completed_via_reason, completed_via_at, spec_committed_head, spec_end_dirty, spec_end_dirty_paths, spec_type, spec_scope, spec_code, intent, review_state, review_tier, review_findings, created_by_session
              FROM graph_specs
              WHERE (?1 IS NULL OR workdir = ?1)
                AND (?2 IS NULL OR status = ?2)
@@ -491,13 +492,31 @@ impl Database {
         Ok(rows > 0)
     }
 
+    /// Record the interactive session that last created/updated this spec.
+    pub fn set_graph_spec_created_by_session(
+        &self,
+        spec_id: &str,
+        session_id: Option<&str>,
+    ) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let updated_at = Utc::now().timestamp_millis();
+        let rows = conn.execute(
+            "UPDATE graph_specs SET created_by_session = ?1, updated_at = ?3 WHERE id = ?2",
+            params![session_id, spec_id, updated_at],
+        )?;
+        Ok(rows > 0)
+    }
+
     pub fn list_all_specs_for_conversion(&self) -> Result<Vec<GraphSpec>> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, graph_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head, spec_start_dirty, workdir, completed_via, completed_via_reason, completed_via_at, spec_committed_head, spec_end_dirty, spec_end_dirty_paths, spec_type, spec_scope, spec_code, intent, review_state, review_tier, review_findings
+            "SELECT id, graph_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head, spec_start_dirty, workdir, completed_via, completed_via_reason, completed_via_at, spec_committed_head, spec_end_dirty, spec_end_dirty_paths, spec_type, spec_scope, spec_code, intent, review_state, review_tier, review_findings, created_by_session
              FROM graph_specs
              ORDER BY rowid ASC",
         )?;

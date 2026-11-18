@@ -31,6 +31,7 @@ impl TaskTriggerHandler {
     pub(crate) async fn spec_edit_update_impl(
         &self,
         params: SpecUpdateParams,
+        parts: Option<&axum::http::request::Parts>,
     ) -> Result<CallToolResult, McpError> {
         let spec_id = match resolve_prefix_or_error(
             &self.db,
@@ -107,6 +108,10 @@ impl TaskTriggerHandler {
             || params.spec_type.is_some()
             || params.spec_scope.is_some()
         {
+            let created_by_session = self.resolve_sync_agent_id(parts).ok();
+            self.db
+                .set_graph_spec_created_by_session(&spec_id, created_by_session.as_deref())
+                .map_err(internal_error)?;
             crate::daemon::handler_specs_helpers::mark_spec_dirty_for_review(&self.db, &spec_id)?;
         }
 

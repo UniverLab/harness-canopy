@@ -452,6 +452,7 @@ async fn idea_placeholder_spec_is_absent_from_spec_listings() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     })
     .unwrap();
 
@@ -535,6 +536,7 @@ async fn graph_run_refuses_blank_bound_spec_and_leaves_graph_untouched() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     })
     .unwrap();
 
@@ -652,6 +654,7 @@ async fn graph_run_with_queue_ignores_unrelated_blank_bound_spec() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     })
     .unwrap();
 
@@ -681,6 +684,7 @@ async fn graph_run_with_queue_ignores_unrelated_blank_bound_spec() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     };
     db.insert_graph_spec(&member).unwrap();
     let queue_id = uuid::Uuid::new_v4().to_string();
@@ -748,6 +752,7 @@ async fn graph_preflight_warns_for_blank_bound_spec_without_probe_targets() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     })
     .unwrap();
 
@@ -818,6 +823,7 @@ async fn graph_preflight_includes_spec_warnings_alongside_probes() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     })
     .unwrap();
     db.insert_graph_node(&GraphNode {

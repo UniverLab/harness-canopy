@@ -666,3 +666,121 @@ fn four_surfaces_refuse_empty_and_multiline_subjects() {
         "clean subject"
     );
 }
+
+/// Request parts carrying the caller session id, the way an HTTP transport
+/// attaches the sync identity header (mirrors part20's shelf helper).
+fn parts_with_session(session_id: &str) -> axum::http::request::Parts {
+    axum::http::Request::builder()
+        .header(
+            crate::shared::sync_identity::CANOPY_AGENT_ID_HEADER,
+            session_id,
+        )
+        .body(())
+        .unwrap()
+        .into_parts()
+        .0
+}
+
+/// Clears `CANOPY_AGENT_ID` for the test body (restored on drop), so the
+/// session-less case is hermetic against a leaked process env, which
+/// `resolve_sync_agent_id` consults after the header.
+struct NoAgentIdEnv(Option<std::ffi::OsString>);
+
+impl NoAgentIdEnv {
+    fn clear() -> Self {
+        let prev = std::env::var_os(crate::shared::sync_identity::CANOPY_AGENT_ID_ENV);
+        unsafe {
+            std::env::remove_var(crate::shared::sync_identity::CANOPY_AGENT_ID_ENV);
+        }
+        Self(prev)
+    }
+}
+
+impl Drop for NoAgentIdEnv {
+    fn drop(&mut self) {
+        if let Some(v) = self.0.take() {
+            unsafe { std::env::set_var(crate::shared::sync_identity::CANOPY_AGENT_ID_ENV, v) };
+        }
+    }
+}
+
+/// `graph_edit attach_spec`/`update_spec` record the caller's session in
+/// `created_by_session` (spec-review drain attribution): the header session
+/// when present, NULL when the caller has none.
+#[test]
+fn graph_spec_surfaces_attribute_creator_session() {
+    let _no_agent = NoAgentIdEnv::clear();
+    let (dir, db, handler) = endpoint_test_handler();
+    let lp = insert_test_graph(&db, dir.path());
+
+    let attached = run(handler.graph_add_spec_impl(
+        GraphAddSpecParams {
+            graph_id: lp.id,
+            name: "attributed subject".to_string(),
+            description: Some(valid_spec_description()),
+            position: 1,
+            parallelizable: false,
+            spec_type: Some(SpecType::Fix),
+            spec_scope: None,
+        },
+        Some(&parts_with_session("sess-graph")),
+    ))
+    .unwrap();
+    assert!(!is_err(&attached), "{}", text(&attached));
+    let spec_id = extract_id(&attached, "spec_id");
+    assert_eq!(
+        db.get_graph_spec(&spec_id)
+            .unwrap()
+            .unwrap()
+            .created_by_session
+            .as_deref(),
+        Some("sess-graph")
+    );
+
+    // A session-less content change re-attributes to NULL (no caller).
+    let renamed = run(handler.graph_update_spec_impl(
+        GraphUpdateSpecParams {
+            spec_id: spec_id.clone(),
+            name: Some("renamed subject".to_string()),
+            description: None,
+            position: None,
+            parallelizable: None,
+            spec_type: None,
+            spec_scope: None,
+        },
+        None,
+    ))
+    .unwrap();
+    assert!(!is_err(&renamed), "{}", text(&renamed));
+    assert_eq!(
+        db.get_graph_spec(&spec_id)
+            .unwrap()
+            .unwrap()
+            .created_by_session,
+        None
+    );
+
+    // A position-only update still re-attributes to its caller.
+    let moved = run(handler.graph_update_spec_impl(
+        GraphUpdateSpecParams {
+            spec_id: spec_id.clone(),
+            name: None,
+            description: None,
+            position: Some(2),
+            parallelizable: None,
+            spec_type: None,
+            spec_scope: None,
+        },
+        Some(&parts_with_session("sess-other")),
+    ))
+    .unwrap();
+    assert!(!is_err(&moved), "{}", text(&moved));
+    assert_eq!(
+        db.get_graph_spec(&spec_id)
+            .unwrap()
+            .unwrap()
+            .created_by_session
+            .as_deref(),
+        Some("sess-other")
+    );
+}

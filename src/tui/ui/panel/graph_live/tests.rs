@@ -259,6 +259,7 @@ fn seed_running_graph(db: &Database) {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     })
     .unwrap();
 

@@ -63,6 +63,7 @@ mod run_spec_node;
 mod shell_utils;
 mod spawn_identity;
 pub mod spec_review;
+pub mod spec_review_drain;
 mod spec_step;
 mod value_router;
 mod verdict_shutdown;

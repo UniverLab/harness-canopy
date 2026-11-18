@@ -471,9 +471,10 @@ pub(crate) async fn call_graph_action<P: serde::Serialize>(
         }
         "graph_edit" => {
             handler
-                .graph_edit(crate::daemon::params_extract::Parameters(GraphEditObject(
-                    object,
-                )))
+                .graph_edit(
+                    crate::daemon::params_extract::Parameters(GraphEditObject(object)),
+                    OptionalExtension(None),
+                )
                 .await
         }
         "graph_node" => {
@@ -542,9 +543,10 @@ pub(crate) async fn call_graph_action_value(
         }
         "graph_edit" => {
             handler
-                .graph_edit(crate::daemon::params_extract::Parameters(GraphEditObject(
-                    object,
-                )))
+                .graph_edit(
+                    crate::daemon::params_extract::Parameters(GraphEditObject(object)),
+                    OptionalExtension(None),
+                )
                 .await
         }
         "graph_node" => {
@@ -633,9 +635,10 @@ pub(crate) async fn call_resource_action_value(
         }
         "spec_edit" => {
             handler
-                .spec_edit(crate::daemon::params_extract::Parameters(SpecEditObject(
-                    object,
-                )))
+                .spec_edit(
+                    crate::daemon::params_extract::Parameters(SpecEditObject(object)),
+                    OptionalExtension(None),
+                )
                 .await
         }
         "queue" => {

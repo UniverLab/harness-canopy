@@ -46,6 +46,7 @@ async fn graph_engine_spec_committed_head_scoped_per_spec_not_shared() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     };
     db.insert_graph_spec(&spec_b).unwrap();
     db.insert_graph_node(&rights_node(
@@ -532,6 +533,7 @@ async fn graph_events_records_ordered_history_for_failing_spec() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     })
     .unwrap();
     // An `on_failed` command hook that itself fails, so the recorded
@@ -641,6 +643,7 @@ fn resolve_spec_start_retries_last_running_node() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     };
     let details = crate::domain::graphs::GraphSpecDetails {
         spec: spec.clone(),
@@ -740,6 +743,7 @@ fn resolve_spec_start_resumes_interrupted_spec_at_cursor() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     };
     let nodes = vec![
         GraphNode {
@@ -853,6 +857,7 @@ fn resolve_spec_start_restarts_interrupted_spec_on_loop_run() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     };
     let nodes = vec![
         GraphNode {
@@ -961,6 +966,7 @@ fn resolve_spec_start_resets_iterations_for_fresh_spec() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     };
     let details = crate::domain::graphs::GraphSpecDetails {
         spec: spec.clone(),
@@ -1045,6 +1051,7 @@ fn find_entry_node_picks_lowest_position_in_retry_cycle() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     };
     let node = |id: &str, position: i64| GraphNode {
         id: id.to_string(),
@@ -1141,6 +1148,7 @@ fn render_agent_prompt_includes_reporting_contract() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     };
     let node = GraphNode {
         id: "node-1".to_string(),
@@ -1227,6 +1235,7 @@ fn render_agent_prompt_places_spec_notes_before_reporting() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     };
     let node = GraphNode {
         id: "node-1".to_string(),
@@ -1319,6 +1328,7 @@ fn render_agent_prompt_adds_continuation_notice_only_when_spec_interrupted() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     };
     let node = GraphNode {
         id: "node-1".to_string(),
@@ -1511,6 +1521,7 @@ fn render_agent_prompt_elides_huge_previous_feedback() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     };
     let node = GraphNode {
         id: "node-1".to_string(),

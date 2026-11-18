@@ -40,6 +40,7 @@ fn backlog_spec(id: &str, name: &str) -> GraphSpec {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     }
 }
 

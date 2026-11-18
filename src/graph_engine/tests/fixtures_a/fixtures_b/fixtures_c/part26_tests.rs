@@ -513,6 +513,7 @@ async fn bound_specs_ignore_prompt_and_run_as_before() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     };
     db.insert_graph_spec(&spec).unwrap();
     db.insert_graph_node(&GraphNode {

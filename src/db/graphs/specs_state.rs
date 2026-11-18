@@ -85,7 +85,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT gs.id, gs.graph_id, gs.name, gs.description, gs.position, gs.parallelizable, gs.status, gs.started_at, gs.completed_at, gs.spec_start_head, gs.spec_start_dirty, gs.workdir, gs.completed_via, gs.completed_via_reason, gs.completed_via_at, gs.spec_committed_head, gs.spec_end_dirty, gs.spec_end_dirty_paths, gs.spec_type, gs.spec_scope, gs.spec_code, gs.intent, gs.review_state, gs.review_tier, gs.review_findings
+            "SELECT gs.id, gs.graph_id, gs.name, gs.description, gs.position, gs.parallelizable, gs.status, gs.started_at, gs.completed_at, gs.spec_start_head, gs.spec_start_dirty, gs.workdir, gs.completed_via, gs.completed_via_reason, gs.completed_via_at, gs.spec_committed_head, gs.spec_end_dirty, gs.spec_end_dirty_paths, gs.spec_type, gs.spec_scope, gs.spec_code, gs.intent, gs.review_state, gs.review_tier, gs.review_findings, gs.created_by_session
              FROM graph_specs gs
              LEFT JOIN graphs g ON g.id = gs.graph_id
              WHERE (g.workdir = ?1 OR gs.workdir = ?1)
@@ -123,7 +123,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         conn.query_row(
-            "SELECT gs.id, gs.graph_id, gs.name, gs.description, gs.position, gs.parallelizable, gs.status, gs.started_at, gs.completed_at, gs.spec_start_head, gs.spec_start_dirty, gs.workdir, gs.completed_via, gs.completed_via_reason, gs.completed_via_at, gs.spec_committed_head, gs.spec_end_dirty, gs.spec_end_dirty_paths, gs.spec_type, gs.spec_scope, gs.spec_code, gs.intent, gs.review_state, gs.review_tier, gs.review_findings
+            "SELECT gs.id, gs.graph_id, gs.name, gs.description, gs.position, gs.parallelizable, gs.status, gs.started_at, gs.completed_at, gs.spec_start_head, gs.spec_start_dirty, gs.workdir, gs.completed_via, gs.completed_via_reason, gs.completed_via_at, gs.spec_committed_head, gs.spec_end_dirty, gs.spec_end_dirty_paths, gs.spec_type, gs.spec_scope, gs.spec_code, gs.intent, gs.review_state, gs.review_tier, gs.review_findings, gs.created_by_session
              FROM graph_runs gr
              JOIN graph_specs gs ON gs.id = gr.spec_id
              WHERE gr.graph_id = ?1
@@ -154,14 +154,14 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT gs.id, gs.graph_id, gs.name, gs.description, gs.position, gs.parallelizable, gs.status, gs.started_at, gs.completed_at, gs.spec_start_head, gs.spec_start_dirty, gs.workdir, gs.completed_via, gs.completed_via_reason, gs.completed_via_at, gs.spec_committed_head, gs.spec_end_dirty, gs.spec_end_dirty_paths, gs.spec_type, gs.spec_scope, gs.spec_code, gs.intent, gs.review_state, gs.review_tier, gs.review_findings, g.workdir
+            "SELECT gs.id, gs.graph_id, gs.name, gs.description, gs.position, gs.parallelizable, gs.status, gs.started_at, gs.completed_at, gs.spec_start_head, gs.spec_start_dirty, gs.workdir, gs.completed_via, gs.completed_via_reason, gs.completed_via_at, gs.spec_committed_head, gs.spec_end_dirty, gs.spec_end_dirty_paths, gs.spec_type, gs.spec_scope, gs.spec_code, gs.intent, gs.review_state, gs.review_tier, gs.review_findings, gs.created_by_session, g.workdir
              FROM graph_specs gs
              LEFT JOIN graphs g ON g.id = gs.graph_id
              WHERE gs.status = 'interrupted' AND gs.spec_end_dirty IS NULL",
         )?;
         let rows = stmt.query_map([], |row| {
             let spec = map_graph_spec_row(row)?;
-            let graph_workdir: Option<String> = row.get(25)?;
+            let graph_workdir: Option<String> = row.get(26)?;
             Ok((spec, graph_workdir))
         })?;
         rows.map(|r| {

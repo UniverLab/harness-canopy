@@ -754,6 +754,7 @@ mod tests {
             review_state: crate::domain::graphs::SpecReviewState::Approved,
             review_tier: None,
             review_findings: None,
+            created_by_session: None,
         }
     }
 
@@ -947,6 +948,7 @@ mod tests {
             review_state: crate::domain::graphs::SpecReviewState::Approved,
             review_tier: None,
             review_findings: None,
+            created_by_session: None,
         };
         let ps2 = GraphSpec {
             intent: None,
@@ -974,6 +976,7 @@ mod tests {
             review_state: crate::domain::graphs::SpecReviewState::Approved,
             review_tier: None,
             review_findings: None,
+            created_by_session: None,
         };
         db.insert_graph_spec(&ps1).unwrap();
         db.insert_graph_spec(&ps2).unwrap();

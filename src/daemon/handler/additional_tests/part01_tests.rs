@@ -542,6 +542,7 @@ fn validate_spec_deletable_standalone_spec_ok() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     };
     assert!(validate_spec_deletable(&spec).is_ok());
 }
@@ -678,6 +679,7 @@ fn spec_summary_json_with_null_fields() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     };
     let json = spec_summary_json(&spec, true);
     assert!(json["graph_id"].is_null());

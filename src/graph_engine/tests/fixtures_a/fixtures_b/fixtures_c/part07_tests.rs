@@ -356,6 +356,7 @@ async fn e2big_resilience_path_elision_stdin_and_spawn_failure() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     };
     let node = GraphNode {
         id: "node-1".to_string(),

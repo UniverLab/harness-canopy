@@ -250,7 +250,7 @@ fn decode_graph_completion_hook(raw: &str) -> rusqlite::Result<GraphCompletionHo
     })
 }
 
-fn map_graph_spec_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GraphSpec> {
+pub(in crate::db) fn map_graph_spec_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GraphSpec> {
     use crate::domain::graphs::{SpecReviewFinding, SpecReviewState, SpecReviewTier};
     let review_findings: Option<Vec<SpecReviewFinding>> = row
         .get::<_, Option<String>>(24)?
@@ -298,6 +298,7 @@ fn map_graph_spec_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GraphSpec> {
             .as_deref()
             .and_then(SpecReviewTier::parse),
         review_findings,
+        created_by_session: row.get(25)?,
     })
 }
 
@@ -858,6 +859,7 @@ mod tests {
             review_state: crate::domain::graphs::SpecReviewState::Approved,
             review_tier: None,
             review_findings: None,
+            created_by_session: None,
         };
         db.insert_graph_spec(&spec).unwrap();
 
@@ -936,6 +938,7 @@ mod tests {
                 review_state: crate::domain::graphs::SpecReviewState::Approved,
                 review_tier: None,
                 review_findings: None,
+                created_by_session: None,
             }
         };
         // Completed shares the workdir but is never a candidate; the
@@ -1044,6 +1047,7 @@ mod tests {
             review_state: crate::domain::graphs::SpecReviewState::Approved,
             review_tier: None,
             review_findings: None,
+            created_by_session: None,
         })
         .unwrap();
         db.insert_graph_node(&crate::domain::graphs::GraphNode {
@@ -1136,6 +1140,7 @@ mod tests {
             review_state: crate::domain::graphs::SpecReviewState::Approved,
             review_tier: None,
             review_findings: None,
+            created_by_session: None,
         })
         .unwrap();
         db.insert_graph_node(&crate::domain::graphs::GraphNode {
@@ -1336,6 +1341,7 @@ mod tests {
             review_state: crate::domain::graphs::SpecReviewState::Approved,
             review_tier: None,
             review_findings: None,
+            created_by_session: None,
         })
         .unwrap();
         db.insert_graph_node(&GraphNode {

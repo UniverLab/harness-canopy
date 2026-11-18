@@ -605,6 +605,7 @@ mod check_command_tests {
             review_state: crate::domain::graphs::SpecReviewState::Approved,
             review_tier: None,
             review_findings: None,
+            created_by_session: None,
         })
         .unwrap();
         let node = GraphNode {
@@ -690,6 +691,7 @@ mod check_command_tests {
             review_state: crate::domain::graphs::SpecReviewState::Approved,
             review_tier: None,
             review_findings: None,
+            created_by_session: None,
         };
         let (scratch, path) = write_check_spec_file(&node, &spec).unwrap();
         assert_eq!(
@@ -779,6 +781,7 @@ mod check_command_tests {
                 review_state: crate::domain::graphs::SpecReviewState::Approved,
                 review_tier: None,
                 review_findings: None,
+                created_by_session: None,
             },
             nodes: vec![node("echo {{specnope}}", "spec-gate")],
             edges: vec![],

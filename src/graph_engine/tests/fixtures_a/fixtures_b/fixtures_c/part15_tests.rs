@@ -624,6 +624,7 @@ fn render_agent_prompt_refuses_template_with_unbindable_placeholder() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     };
     let node = GraphNode {
         id: "node-1".to_string(),
@@ -715,6 +716,7 @@ fn render_agent_prompt_spawns_with_an_escaped_unknown_marker() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     };
     let node = GraphNode {
         id: "node-1".to_string(),
@@ -807,6 +809,7 @@ fn render_agent_prompt_escape_wins_over_a_real_binding() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     };
     let node = GraphNode {
         id: "node-1".to_string(),
@@ -907,6 +910,7 @@ fn escaped_output_marker_stays_literal_while_unescaped_still_substitutes() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     };
     let node = GraphNode {
         id: "node-impl".to_string(),
@@ -1042,6 +1046,7 @@ fn render_agent_prompt_substitutes_named_output_marker() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     };
     let node = GraphNode {
         id: "node-impl".to_string(),
@@ -1136,6 +1141,7 @@ fn render_agent_prompt_accepts_output_marker_without_refusing() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     };
     let node = GraphNode {
         id: "node-impl".to_string(),
@@ -1220,6 +1226,7 @@ fn previous_feedback_still_works_without_named_outputs() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     };
     let node = GraphNode {
         id: "node-1".to_string(),

@@ -77,6 +77,7 @@ pub(crate) fn graph_fixture() -> Result<(TempDir, Arc<Database>, GraphEngine, St
             review_state: crate::domain::graphs::SpecReviewState::Approved,
             review_tier: None,
             review_findings: None,
+        created_by_session: None,
         };
 
     db.insert_graph(&lp)?;
@@ -279,6 +280,7 @@ fn graph_fixture_with_mock() -> Result<MockGraphFixture> {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     };
 
     db.insert_graph(&lp)?;
@@ -393,6 +395,7 @@ fn dirty_predecessor_spec(id: &str, workdir: &str, status: GraphSpecStatus) -> G
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     }
 }
 
@@ -880,6 +883,7 @@ fn second_spec(graph_id: &str, id: &str, position: i64) -> GraphSpec {
             review_state: crate::domain::graphs::SpecReviewState::Approved,
             review_tier: None,
             review_findings: None,
+        created_by_session: None,
         }
 }
 
@@ -953,6 +957,7 @@ fn standalone_spec(id: &str, position: i64) -> GraphSpec {
             review_state: crate::domain::graphs::SpecReviewState::Approved,
             review_tier: None,
             review_findings: None,
+        created_by_session: None,
         }
 }
 

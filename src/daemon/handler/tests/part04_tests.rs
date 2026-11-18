@@ -346,6 +346,7 @@ fn spec_summary_json_includes_required_fields() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     };
     let json = spec_summary_json(&spec, true);
     assert_eq!(json["id"], "spec-1");
@@ -387,6 +388,7 @@ fn spec_summary_json_includes_completed_via_when_set() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     };
     let json = spec_summary_json(&spec, true);
     assert_eq!(json["completed_via"], "graph_control");

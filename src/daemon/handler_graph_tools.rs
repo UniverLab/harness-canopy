@@ -7,9 +7,10 @@
 //! here; the logic is the old tools' own.
 
 use crate::daemon::actions::{action_params, resource_action_object, ActionSpec, ToolSpec};
-use crate::daemon::handler::TaskTriggerHandler;
+use crate::daemon::handler::{OptionalExtension, TaskTriggerHandler};
 use crate::daemon::params::*;
 use crate::daemon::params_extract::Parameters;
+use axum::http::request::Parts;
 use rmcp::model::CallToolResult;
 use rmcp::tool;
 use rmcp::tool_router;
@@ -486,6 +487,7 @@ impl TaskTriggerHandler {
     pub(crate) async fn graph_edit(
         &self,
         Parameters(params): Parameters<GraphEditObject>,
+        OptionalExtension(parts): OptionalExtension<Parts>,
     ) -> Result<CallToolResult, McpError> {
         let mut params = params.into_value();
         GraphEditObject::coerce(&mut params);
@@ -499,7 +501,7 @@ impl TaskTriggerHandler {
             "import" => self.graph_import_impl(action_params(&params, spec)?).await,
             "install" => self.graph_install_impl(action_params(&params, spec)?).await,
             "attach_spec" => {
-                self.graph_add_spec_impl(action_params(&params, spec)?)
+                self.graph_add_spec_impl(action_params(&params, spec)?, parts.as_ref())
                     .await
             }
             "detach_spec" => {
@@ -507,7 +509,7 @@ impl TaskTriggerHandler {
                     .await
             }
             "update_spec" => {
-                self.graph_update_spec_impl(action_params(&params, spec)?)
+                self.graph_update_spec_impl(action_params(&params, spec)?, parts.as_ref())
                     .await
             }
             _ => unreachable!("validated action"),

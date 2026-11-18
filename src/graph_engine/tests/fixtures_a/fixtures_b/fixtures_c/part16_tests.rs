@@ -191,6 +191,7 @@ fn render_agent_prompt_preserves_tagged_spec_body_verbatim() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     };
     let node = GraphNode {
         id: "node-1".to_string(),
@@ -505,6 +506,7 @@ async fn graph_hook_depth_cap_refuses_second_launch() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     };
     db.insert_graph_spec(&b_spec).unwrap();
 
@@ -821,6 +823,7 @@ fn graph_hook_spec_is_queryable() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     };
     db.insert_graph_spec(&spec).unwrap();
     let specs = db.list_graph_specs("test-graph").unwrap();
@@ -906,6 +909,7 @@ async fn graph_hook_runs_on_completion() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     };
     db.insert_graph_spec(&spec).unwrap();
 

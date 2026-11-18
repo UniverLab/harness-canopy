@@ -180,6 +180,7 @@ fn spec_with_status(graph_id: &str, id: &str, position: i64, status: GraphSpecSt
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     }
 }
 
@@ -251,6 +252,7 @@ fn standalone_spec(id: &str) -> GraphSpec {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     }
 }
 
@@ -661,6 +663,7 @@ fn insert_standalone_spec(db: &Database, id: &str) {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     })
     .unwrap();
 }

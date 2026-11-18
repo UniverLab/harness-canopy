@@ -20,7 +20,7 @@ use crate::db::Database;
 use crate::domain::graphs::{
     validate_spec_description_template, GraphSpec, GraphSpecStatus, SpecAdminStatusOutcome,
 };
-use crate::domain::spec_type::{check_subject, resolve_spec_naming};
+use crate::domain::spec_type::{check_subject, resolve_spec_naming, SpecNaming};
 use crate::domain::specs::{extract_spec_section, SpecSection, SpecSectionResult};
 use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::ErrorData as McpError;
@@ -29,17 +29,19 @@ impl TaskTriggerHandler {
     pub(crate) async fn graph_add_spec_impl(
         &self,
         params: GraphAddSpecParams,
+        parts: Option<&axum::http::request::Parts>,
     ) -> Result<CallToolResult, McpError> {
         let name = params.name.trim();
         if let Err(e) = validate_non_empty(name, "Graph spec name") {
             return Ok(error_result(&e));
         }
-        let Ok(Some(graph)) = self.db.get_graph(&match resolve_prefix_or_error(
+        let graph_resolved = resolve_prefix_or_error(
             &self.db,
             params.graph_id.trim(),
             Database::resolve_graph_id_by_prefix,
             "graph",
-        ) {
+        );
+        let Ok(Some(graph)) = self.db.get_graph(&match graph_resolved {
             Ok(id) => id,
             Err(e) => return Ok(e),
         }) else {
@@ -66,8 +68,7 @@ impl TaskTriggerHandler {
                 naming.name, graph.name
             )));
         }
-        // SPECCODE: the code counts against the graph's workdir and is
-        // never settable by callers.
+        // SPECCODE: the code counts against the graph's workdir and is never settable by callers.
         let code = match &naming.spec_type {
             Some(spec_type) => Some(
                 self.db
@@ -77,11 +78,10 @@ impl TaskTriggerHandler {
             None => None,
         };
 
-        let existing_specs = self
+        if self
             .db
             .list_graph_specs(&graph_id)
-            .map_err(internal_error)?;
-        if existing_specs
+            .map_err(internal_error)?
             .iter()
             .any(|spec| spec.position == params.position)
         {
@@ -100,19 +100,38 @@ impl TaskTriggerHandler {
         }
 
         let review_enabled = spec_review_enabled()?;
-        let review_state = if review_enabled {
-            crate::domain::graphs::SpecReviewState::Unreviewed
-        } else {
-            crate::domain::graphs::SpecReviewState::Approved
-        };
-        let spec = GraphSpec {
-            intent: None,
-            id: uuid::Uuid::new_v4().to_string(),
-            graph_id: Some(graph_id),
-            name: naming.name.clone(),
-            description: Some(description.to_string()),
+        let created_by_session = self.resolve_sync_agent_id(parts).ok();
+        let spec = Self::build_attached_spec(AttachedSpecInputs {
+            naming: &naming,
+            graph_id,
+            description,
             position: params.position,
             parallelizable: params.parallelizable,
+            code,
+            review_enabled,
+            created_by_session,
+        });
+
+        self.db.insert_graph_spec(&spec).map_err(internal_error)?;
+        if review_enabled {
+            crate::graph_engine::spec_review::wake_spec_review_worker();
+        }
+
+        Ok(build_id_result(&spec.id, "spec_id"))
+    }
+
+    /// Build the graph-bound spec row for `graph_add_spec_impl`: a pending
+    /// spec queued for review (or pre-approved while review is off),
+    /// attributed to the session that attached it.
+    fn build_attached_spec(inputs: AttachedSpecInputs<'_>) -> GraphSpec {
+        GraphSpec {
+            intent: None,
+            id: uuid::Uuid::new_v4().to_string(),
+            graph_id: Some(inputs.graph_id),
+            name: inputs.naming.name.clone(),
+            description: Some(inputs.description.to_string()),
+            position: inputs.position,
+            parallelizable: inputs.parallelizable,
             status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
@@ -125,25 +144,24 @@ impl TaskTriggerHandler {
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
-            spec_type: naming.spec_type,
-            spec_scope: naming.scope,
-            spec_code: code,
-            review_state,
+            spec_type: inputs.naming.spec_type,
+            spec_scope: inputs.naming.scope.clone(),
+            spec_code: inputs.code,
+            review_state: if inputs.review_enabled {
+                crate::domain::graphs::SpecReviewState::Unreviewed
+            } else {
+                crate::domain::graphs::SpecReviewState::Approved
+            },
             review_tier: None,
             review_findings: None,
-        };
-
-        self.db.insert_graph_spec(&spec).map_err(internal_error)?;
-        if review_enabled {
-            crate::graph_engine::spec_review::wake_spec_review_worker();
+            created_by_session: inputs.created_by_session,
         }
-
-        Ok(build_id_result(&spec.id, "spec_id"))
     }
 
     pub(crate) async fn graph_update_spec_impl(
         &self,
         params: GraphUpdateSpecParams,
+        parts: Option<&axum::http::request::Parts>,
     ) -> Result<CallToolResult, McpError> {
         let spec_id = match resolve_prefix_or_error(
             &self.db,
@@ -226,13 +244,34 @@ impl TaskTriggerHandler {
                 params.parallelizable,
             )
             .map_err(internal_error)?;
+        // Every successful update re-attributes the spec to its caller (NULL
+        // without a session), mirroring `spec_edit update`; the re-review
+        // below stays content-gated so position-only tweaks never reset it.
+        let created_by_session = self.resolve_sync_agent_id(parts).ok();
+        self.db
+            .set_graph_spec_created_by_session(&spec_id, created_by_session.as_deref())
+            .map_err(internal_error)?;
         if store_name.is_some() || description.is_some() {
             crate::daemon::handler_specs_helpers::mark_spec_dirty_for_review(&self.db, &spec_id)?;
         }
 
         Ok(build_spec_update_response(&spec_id))
     }
+}
 
+/// The validated `graph_add_spec_impl` row inputs, borrowed where possible.
+struct AttachedSpecInputs<'a> {
+    naming: &'a SpecNaming,
+    graph_id: String,
+    description: &'a str,
+    position: i64,
+    parallelizable: bool,
+    code: Option<String>,
+    review_enabled: bool,
+    created_by_session: Option<String>,
+}
+
+impl TaskTriggerHandler {
     /// SPECCODE: resolve a `graph_edit update_spec` name through the shared
     /// conventional-title parse, validate the stored subject, and write a
     /// newly-assigned type/scope/code. Returns the subject to store (`None`
@@ -327,6 +366,7 @@ impl TaskTriggerHandler {
     pub(crate) async fn spec_edit_create_impl(
         &self,
         params: SpecCreateParams,
+        parts: Option<&axum::http::request::Parts>,
     ) -> Result<CallToolResult, McpError> {
         let name = params.name.trim();
         if let Err(e) = validate_non_empty(name, "Spec name") {
@@ -379,6 +419,7 @@ impl TaskTriggerHandler {
         } else {
             crate::domain::graphs::SpecReviewState::Approved
         };
+        let created_by_session = self.resolve_sync_agent_id(parts).ok();
         let no_workdir = workdir.is_none();
         let spec = GraphSpec {
             intent,
@@ -406,6 +447,7 @@ impl TaskTriggerHandler {
             review_state,
             review_tier: None,
             review_findings: None,
+            created_by_session,
         };
         self.db.insert_graph_spec(&spec).map_err(internal_error)?;
         if review_enabled {

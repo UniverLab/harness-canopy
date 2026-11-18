@@ -86,7 +86,10 @@ pub(super) async fn run_http_startup_reconciliations(
     if let Err(e) = db.requeue_in_review_specs() {
         tracing::warn!("Failed to requeue in_review specs: {e}");
     }
-    crate::graph_engine::spec_review::start_worker(Arc::clone(db));
+    crate::graph_engine::spec_review::start_worker(
+        Arc::clone(db),
+        Arc::clone(&core.scheduled_prompt_notify),
+    );
     // CT28: drop live-output chunks whose run is finished — leftovers from a
     // crash, since completion paths delete their own chunks.
     if let Err(e) = db.delete_graph_run_output_for_non_running() {

@@ -672,6 +672,11 @@ pub struct GraphSpec {
     /// Findings reported by the reviewer (JSON list of severity/text).
     #[serde(default)]
     pub review_findings: Option<Vec<SpecReviewFinding>>,
+    /// Interactive session that created/last updated this spec, as resolved
+    /// by `resolve_sync_agent_id` at create/update time. `None` when the
+    /// caller had no session.
+    #[serde(default)]
+    pub created_by_session: Option<String>,
 }
 
 /// A node in either a spec's graph or a graph's top-level graph.

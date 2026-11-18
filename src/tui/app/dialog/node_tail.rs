@@ -560,6 +560,7 @@ mod tests {
             review_state: crate::domain::graphs::SpecReviewState::Approved,
             review_tier: None,
             review_findings: None,
+            created_by_session: None,
         })
         .unwrap();
         db.insert_graph_node(&GraphNode {
@@ -716,6 +717,7 @@ mod tests {
             review_state: crate::domain::graphs::SpecReviewState::Approved,
             review_tier: None,
             review_findings: None,
+            created_by_session: None,
         })
         .unwrap();
         for (i, id) in node_ids.iter().enumerate() {

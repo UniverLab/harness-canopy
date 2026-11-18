@@ -4,7 +4,8 @@ use rusqlite::Connection;
 use super::Database;
 
 impl Database {
-    /// Spec review: add `review_state`/`review_tier`/`review_findings`.
+    /// Spec review: add `review_state`/`review_tier`/`review_findings`/
+    /// `created_by_session`, and the per-session review-drain watermark table.
     /// Pre-existing rows default to `approved` (created while review was off).
     pub(in crate::db) fn migrate_spec_review_columns(conn: &Connection) -> Result<()> {
         for (column, ddl) in [
@@ -20,6 +21,10 @@ impl Database {
                 "review_findings",
                 "ALTER TABLE graph_specs ADD COLUMN review_findings TEXT",
             ),
+            (
+                "created_by_session",
+                "ALTER TABLE graph_specs ADD COLUMN created_by_session TEXT",
+            ),
         ] {
             let has: bool = conn
                 .query_row(
@@ -33,6 +38,14 @@ impl Database {
                     .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
             }
         }
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS spec_review_drains (
+                session_id TEXT PRIMARY KEY,
+                drained_at_ms INTEGER NOT NULL
+            )",
+            [],
+        )
+        .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         Ok(())
     }
 }

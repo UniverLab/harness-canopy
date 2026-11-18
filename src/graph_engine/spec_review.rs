@@ -31,6 +31,7 @@ pub type ReviewRunner = Arc<
 >;
 
 static SPEC_REVIEW_NOTIFY: OnceLock<Arc<Notify>> = OnceLock::new();
+static DELIVERY_NOTIFY: OnceLock<Arc<Notify>> = OnceLock::new();
 static STARTED: OnceLock<()> = OnceLock::new();
 static RUNNER_OVERRIDE: OnceLock<std::sync::RwLock<Option<ReviewRunner>>> = OnceLock::new();
 
@@ -42,6 +43,10 @@ pub fn spec_review_notify() -> Arc<Notify> {
 
 pub fn wake_spec_review_worker() {
     spec_review_notify().notify_one();
+}
+
+fn delivery_notify() -> Option<Arc<Notify>> {
+    DELIVERY_NOTIFY.get().cloned()
 }
 
 fn runner_override() -> &'static std::sync::RwLock<Option<ReviewRunner>> {
@@ -59,7 +64,8 @@ pub fn clear_review_runner_for_tests() {
     *runner_override().write().unwrap() = None;
 }
 
-pub fn start_worker(db: Arc<Database>) {
+pub fn start_worker(db: Arc<Database>, scheduled_prompt_notify: Arc<Notify>) {
+    let _ = DELIVERY_NOTIFY.set(scheduled_prompt_notify);
     if STARTED.set(()).is_err() {
         return;
     }
@@ -117,6 +123,7 @@ pub(crate) async fn review_one(
 ) -> Result<()> {
     let cfg = current_config();
     let prompt = build_prompt(&spec);
+    let session_id = spec.created_by_session.clone();
     let mut last_err: Option<String> = None;
     for _ in 0..3 {
         let runner = runner_override().read().unwrap().clone();
@@ -133,6 +140,11 @@ pub(crate) async fn review_one(
         match out.and_then(|text| parse_verdict(&text)) {
             Ok(v) => {
                 apply_verdict(&db, &spec.id, &v)?;
+                crate::graph_engine::spec_review_drain::drain_if_ready(
+                    &db,
+                    session_id.as_deref(),
+                    delivery_notify().as_ref(),
+                )?;
                 return Ok(());
             }
             Err(e) => last_err = Some(e.to_string()),
@@ -148,6 +160,11 @@ pub(crate) async fn review_one(
         SpecReviewState::ReviewError,
         None,
         Some(&findings),
+    )?;
+    crate::graph_engine::spec_review_drain::drain_if_ready(
+        &db,
+        session_id.as_deref(),
+        delivery_notify().as_ref(),
     )?;
     Ok(())
 }

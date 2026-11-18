@@ -494,6 +494,7 @@ impl TaskTriggerHandler {
     pub(crate) async fn spec_edit(
         &self,
         Parameters(params): Parameters<SpecEditObject>,
+        OptionalExtension(parts): OptionalExtension<Parts>,
     ) -> Result<CallToolResult, McpError> {
         let mut params = params.into_value();
         SpecEditObject::coerce(&mut params);
@@ -501,11 +502,11 @@ impl TaskTriggerHandler {
         let spec = SPEC_EDIT.action(action).expect("validated action");
         match action {
             "create" => {
-                self.spec_edit_create_impl(action_params(&params, spec)?)
+                self.spec_edit_create_impl(action_params(&params, spec)?, parts.as_ref())
                     .await
             }
             "update" => {
-                self.spec_edit_update_impl(action_params(&params, spec)?)
+                self.spec_edit_update_impl(action_params(&params, spec)?, parts.as_ref())
                     .await
             }
             "delete" => {

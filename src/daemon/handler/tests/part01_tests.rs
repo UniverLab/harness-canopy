@@ -408,6 +408,7 @@ fn validate_node_not_ensemble_owned_rejects_member_and_join_nodes() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     })
     .unwrap();
     let now = chrono::Utc::now();
@@ -743,6 +744,7 @@ fn graph_reset_blanket_preserves_admin_skipped_specs() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     })
     .unwrap();
     db.insert_graph_spec(&spec_with_status(
@@ -830,6 +832,7 @@ fn graph_reset_explicit_specs_resets_skipped_spec_and_clears_provenance() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     })
     .unwrap();
 
@@ -943,6 +946,7 @@ fn graph_reset_queue_run_resets_pending_queue_members_and_reports_count() {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     };
     db.insert_graph_spec(&standalone("queue-done", 1, GraphSpecStatus::Completed))
         .unwrap();

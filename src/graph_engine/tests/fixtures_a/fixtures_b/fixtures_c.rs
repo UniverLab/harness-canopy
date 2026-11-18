@@ -415,6 +415,7 @@ fn create_target_graph(db: &Database, id: &str, name: &str) -> Result<String> {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     };
     db.insert_graph_spec(&spec)?;
     Ok(id.to_string())
@@ -548,6 +549,7 @@ fn setup_graph_hook_source(
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     };
     db.insert_graph_spec(&spec)?;
     Ok(())
@@ -775,6 +777,7 @@ fn decision_spec(spec_id: &str) -> GraphSpec {
         review_state: crate::domain::graphs::SpecReviewState::Approved,
         review_tier: None,
         review_findings: None,
+        created_by_session: None,
     }
 }
 
