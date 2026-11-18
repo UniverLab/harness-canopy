@@ -1319,3 +1319,31 @@ fn graph_get_falls_back_to_run_reported_blocker_behind_row_text() {
     let list = build_graph_summary_json(&db, &lp).unwrap();
     assert_eq!(list["blocker"], serde_json::json!("guard: dirty tree"));
 }
+
+#[tokio::test]
+async fn queue_add_spec_refuses_non_approved_spec() {
+    use crate::domain::graphs::{SpecReviewFinding, SpecReviewState};
+
+    let (_dir, db, handler) = queue_test_handler();
+    let mut spec = standalone_spec("s1");
+    spec.name = "blocked-spec".to_string();
+    spec.review_state = SpecReviewState::Rejected;
+    spec.review_findings = Some(vec![SpecReviewFinding {
+        severity: "high".to_string(),
+        text: "bad".to_string(),
+    }]);
+    db.insert_graph_spec(&spec).unwrap();
+    insert_queue(&db, "queue-1");
+
+    let result = handler
+        .do_queue_add_spec("queue-1", "s1", None)
+        .await
+        .unwrap();
+    assert!(queue_is_err(&result), "{}", result_text(&result));
+    let msg = queue_raw_text(&result);
+    assert!(
+        msg.contains("spec 'blocked-spec' is rejected: review findings:"),
+        "{msg}"
+    );
+    assert!(msg.contains("bad"), "{msg}");
+}

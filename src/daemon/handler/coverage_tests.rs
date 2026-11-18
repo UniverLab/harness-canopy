@@ -35,12 +35,18 @@ fn standalone_spec(id: &str) -> GraphSpec {
         spec_type: None,
         spec_scope: None,
         spec_code: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     }
 }
 
 fn running_spec(id: &str) -> GraphSpec {
     let mut spec = standalone_spec(id);
     spec.status = GraphSpecStatus::Running;
+    spec.review_state = crate::domain::graphs::SpecReviewState::Approved;
+    spec.review_tier = None;
+    spec.review_findings = None;
     spec
 }
 

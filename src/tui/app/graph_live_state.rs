@@ -751,6 +751,9 @@ mod tests {
             spec_code: None,
             spec_scope: None,
             spec_type: None,
+            review_state: crate::domain::graphs::SpecReviewState::Approved,
+            review_tier: None,
+            review_findings: None,
         }
     }
 
@@ -941,6 +944,9 @@ mod tests {
             spec_code: None,
             spec_scope: None,
             spec_type: None,
+            review_state: crate::domain::graphs::SpecReviewState::Approved,
+            review_tier: None,
+            review_findings: None,
         };
         let ps2 = GraphSpec {
             intent: None,
@@ -965,6 +971,9 @@ mod tests {
             spec_code: None,
             spec_scope: None,
             spec_type: None,
+            review_state: crate::domain::graphs::SpecReviewState::Approved,
+            review_tier: None,
+            review_findings: None,
         };
         db.insert_graph_spec(&ps1).unwrap();
         db.insert_graph_spec(&ps2).unwrap();

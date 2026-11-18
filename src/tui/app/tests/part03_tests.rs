@@ -291,6 +291,9 @@ fn graph_live_enter_seeds_from_most_recent_run_on_finished_graph() {
         spec_code: None,
         spec_scope: None,
         spec_type: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     })
     .unwrap();
     for (position, id) in ["n1", "n2"].iter().enumerate() {

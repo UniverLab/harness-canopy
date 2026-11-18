@@ -621,6 +621,9 @@ fn render_agent_prompt_refuses_template_with_unbindable_placeholder() {
         spec_code: None,
         spec_scope: None,
         spec_type: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     };
     let node = GraphNode {
         id: "node-1".to_string(),
@@ -709,6 +712,9 @@ fn render_agent_prompt_spawns_with_an_escaped_unknown_marker() {
         spec_code: None,
         spec_scope: None,
         spec_type: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     };
     let node = GraphNode {
         id: "node-1".to_string(),
@@ -798,6 +804,9 @@ fn render_agent_prompt_escape_wins_over_a_real_binding() {
         spec_code: None,
         spec_scope: None,
         spec_type: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     };
     let node = GraphNode {
         id: "node-1".to_string(),
@@ -895,6 +904,9 @@ fn escaped_output_marker_stays_literal_while_unescaped_still_substitutes() {
         spec_code: None,
         spec_scope: None,
         spec_type: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     };
     let node = GraphNode {
         id: "node-impl".to_string(),
@@ -1027,6 +1039,9 @@ fn render_agent_prompt_substitutes_named_output_marker() {
         spec_code: None,
         spec_scope: None,
         spec_type: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     };
     let node = GraphNode {
         id: "node-impl".to_string(),
@@ -1118,6 +1133,9 @@ fn render_agent_prompt_accepts_output_marker_without_refusing() {
         spec_code: None,
         spec_scope: None,
         spec_type: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     };
     let node = GraphNode {
         id: "node-impl".to_string(),
@@ -1199,6 +1217,9 @@ fn previous_feedback_still_works_without_named_outputs() {
         spec_code: None,
         spec_scope: None,
         spec_type: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     };
     let node = GraphNode {
         id: "node-1".to_string(),

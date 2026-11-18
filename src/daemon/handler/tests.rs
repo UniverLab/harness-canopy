@@ -177,6 +177,9 @@ fn spec_with_status(graph_id: &str, id: &str, position: i64, status: GraphSpecSt
         spec_type: None,
         spec_scope: None,
         spec_code: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     }
 }
 
@@ -245,6 +248,9 @@ fn standalone_spec(id: &str) -> GraphSpec {
         spec_type: None,
         spec_scope: None,
         spec_code: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     }
 }
 
@@ -332,12 +338,18 @@ fn queue_is_err(result: &rmcp::model::CallToolResult) -> bool {
 fn running_spec(id: &str) -> GraphSpec {
     let mut spec = standalone_spec(id);
     spec.status = GraphSpecStatus::Running;
+    spec.review_state = crate::domain::graphs::SpecReviewState::Approved;
+    spec.review_tier = None;
+    spec.review_findings = None;
     spec
 }
 
 fn interrupted_spec(id: &str) -> GraphSpec {
     let mut spec = standalone_spec(id);
     spec.status = GraphSpecStatus::Interrupted;
+    spec.review_state = crate::domain::graphs::SpecReviewState::Approved;
+    spec.review_tier = None;
+    spec.review_findings = None;
     spec
 }
 
@@ -447,6 +459,9 @@ fn placeholder_spec(id: &str, graph_id: &str, status: GraphSpecStatus) -> GraphS
     spec.graph_id = Some(graph_id.to_string());
     spec.name = String::new();
     spec.status = status;
+    spec.review_state = crate::domain::graphs::SpecReviewState::Approved;
+    spec.review_tier = None;
+    spec.review_findings = None;
     spec
 }
 
@@ -462,6 +477,9 @@ fn named_spec(
     spec.name = name.to_string();
     spec.position = position;
     spec.status = status;
+    spec.review_state = crate::domain::graphs::SpecReviewState::Approved;
+    spec.review_tier = None;
+    spec.review_findings = None;
     spec
 }
 
@@ -640,6 +658,9 @@ fn insert_standalone_spec(db: &Database, id: &str) {
         spec_type: None,
         spec_scope: None,
         spec_code: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     })
     .unwrap();
 }

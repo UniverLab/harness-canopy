@@ -26,6 +26,7 @@ impl Database {
             conn.execute("ALTER TABLE graph_specs ADD COLUMN intent TEXT", [])
                 .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
+        Self::migrate_spec_review_columns(conn)?;
         Ok(())
     }
 }

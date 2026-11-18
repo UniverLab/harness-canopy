@@ -74,6 +74,9 @@ pub(crate) fn graph_fixture() -> Result<(TempDir, Arc<Database>, GraphEngine, St
             spec_code: None,
             spec_scope: None,
             spec_type: None,
+            review_state: crate::domain::graphs::SpecReviewState::Approved,
+            review_tier: None,
+            review_findings: None,
         };
 
     db.insert_graph(&lp)?;
@@ -273,6 +276,9 @@ fn graph_fixture_with_mock() -> Result<MockGraphFixture> {
         spec_code: None,
         spec_scope: None,
         spec_type: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     };
 
     db.insert_graph(&lp)?;
@@ -384,6 +390,9 @@ fn dirty_predecessor_spec(id: &str, workdir: &str, status: GraphSpecStatus) -> G
         spec_code: None,
         spec_scope: None,
         spec_type: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     }
 }
 
@@ -395,6 +404,9 @@ fn dirty_predecessor_spec_named(
 ) -> GraphSpec {
     let mut spec = dirty_predecessor_spec(id, workdir, status);
     spec.name = name.to_string();
+    spec.review_state = crate::domain::graphs::SpecReviewState::Approved;
+    spec.review_tier = None;
+    spec.review_findings = None;
     spec
 }
 
@@ -865,6 +877,9 @@ fn second_spec(graph_id: &str, id: &str, position: i64) -> GraphSpec {
             spec_code: None,
             spec_scope: None,
             spec_type: None,
+            review_state: crate::domain::graphs::SpecReviewState::Approved,
+            review_tier: None,
+            review_findings: None,
         }
 }
 
@@ -935,6 +950,9 @@ fn standalone_spec(id: &str, position: i64) -> GraphSpec {
             spec_code: None,
             spec_scope: None,
             spec_type: None,
+            review_state: crate::domain::graphs::SpecReviewState::Approved,
+            review_tier: None,
+            review_findings: None,
         }
 }
 

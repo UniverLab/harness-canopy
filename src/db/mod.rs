@@ -308,7 +308,10 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
                 -- free — millis make same-tick edits distinguishable where
                 -- seconds would tie. Legacy rows backfilled below hold
                 -- seconds-scale values and are always smaller.
-                updated_at INTEGER NOT NULL DEFAULT 0
+                updated_at INTEGER NOT NULL DEFAULT 0,
+                review_state TEXT NOT NULL DEFAULT 'approved',
+                review_tier TEXT,
+                review_findings TEXT
             );
 
             CREATE UNIQUE INDEX IF NOT EXISTS idx_graph_specs_position
@@ -684,7 +687,6 @@ impl Database {
         Self::migrate_spec_commit_evidence_columns(&conn)?;
         Self::migrate_spec_cross_run_attempts_column(&conn)?;
         Self::migrate_spec_type_columns(&conn)?;
-        Self::migrate_spec_intent_column(&conn)?;
         Self::migrate_intelligence_touch_columns(&conn)?;
         Self::migrate_ensemble_execution_columns(&conn)?;
         Self::migrate_graph_run_output_tails(&conn)?;
@@ -777,6 +779,7 @@ pub mod sandbox;
 pub mod scheduled_prompts;
 pub mod scheduled_prompts_agent;
 mod schema;
+mod schema_spec_review;
 pub mod seeds;
 pub mod session;
 pub mod session_finish;
@@ -789,9 +792,7 @@ pub mod sync;
 
 #[cfg(test)]
 pub use crate::application::ports::{AgentRepository, RunRepository, StateRepository};
-
 #[cfg(test)]
 mod agent_action_tests;
-
 #[cfg(test)]
 mod tests;

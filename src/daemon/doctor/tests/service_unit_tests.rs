@@ -760,6 +760,9 @@ fn report_orphan_joins_flags_orphans_and_stays_silent_when_healthy() {
         spec_code: None,
         spec_scope: None,
         spec_type: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     })
     .unwrap();
 

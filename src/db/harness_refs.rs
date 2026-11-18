@@ -256,6 +256,9 @@ mod tests {
             spec_type: None,
             spec_scope: None,
             spec_code: None,
+            review_state: crate::domain::graphs::SpecReviewState::Approved,
+            review_tier: None,
+            review_findings: None,
         }
     }
 

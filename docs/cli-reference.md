@@ -874,7 +874,11 @@ roster-wide entry. While the review is on, `spec_edit` `create` refuses a
 spec whose `intent` is empty and `spec_edit` `update` refuses one that would
 leave the spec without an intent; otherwise the `intent` stays optional and
 is capped at 500 characters. A pair that becomes unavailable after the review
-is on does not block writes to other settings.
+is on does not block writes to other settings. When the review is on, each
+spec carries `review_state` (`unreviewed`, `in_review`, `approved`,
+`rejected`, `review_error`), `review_tier` (`trivial` or `normal`, set when
+approved) and `review_findings` (`[{severity, text}]`). Only approved specs
+can run; a value router can read `spec_tier`.
 
 ## Spec queues
 

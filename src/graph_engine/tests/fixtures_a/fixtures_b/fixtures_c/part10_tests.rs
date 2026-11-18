@@ -932,6 +932,9 @@ async fn command_hook_on_spec_completed_runs_once_per_spec() {
             spec_code: None,
             spec_scope: None,
             spec_type: None,
+            review_state: crate::domain::graphs::SpecReviewState::Approved,
+            review_tier: None,
+            review_findings: None,
         };
     db.insert_graph_spec(&spec2).unwrap();
 

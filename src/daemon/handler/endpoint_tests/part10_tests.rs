@@ -953,6 +953,9 @@ async fn resolve_spec_id_by_prefix_tests() {
         spec_type: None,
         spec_scope: None,
         spec_code: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     };
     db.insert_graph_spec(&spec1).unwrap();
     let spec2 = GraphSpec {
@@ -978,6 +981,9 @@ async fn resolve_spec_id_by_prefix_tests() {
         spec_type: None,
         spec_scope: None,
         spec_code: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     };
     db.insert_graph_spec(&spec2).unwrap();
 
@@ -1399,6 +1405,9 @@ async fn run_from_node_code_starts_member_spec() {
         spec_type: None,
         spec_scope: None,
         spec_code: Some("FIX-4".to_string()),
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     };
     db.insert_graph_spec(&member).unwrap();
     let other = insert_standalone_spec(&db, "Member Two");

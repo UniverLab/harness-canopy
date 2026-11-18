@@ -171,6 +171,9 @@ async fn fire_due_autorun_graphs_resets_failed_graph_through_shared_path_and_res
             spec_code: None,
             spec_scope: None,
             spec_type: None,
+    review_state: crate::domain::graphs::SpecReviewState::Approved,
+    review_tier: None,
+    review_findings: None,
 })
         .unwrap();
     db.insert_graph_node(&GraphNode {
@@ -284,6 +287,9 @@ async fn fire_due_autorun_graphs_preserves_admin_skipped_specs() {
             spec_code: None,
             spec_scope: None,
             spec_type: None,
+    review_state: crate::domain::graphs::SpecReviewState::Approved,
+    review_tier: None,
+    review_findings: None,
 })
         .unwrap();
     // One admin-skipped spec — must survive the autorun reset.
@@ -310,6 +316,9 @@ async fn fire_due_autorun_graphs_preserves_admin_skipped_specs() {
         spec_code: None,
         spec_scope: None,
         spec_type: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     })
     .unwrap();
     db.insert_graph_node(&GraphNode {
@@ -423,6 +432,9 @@ async fn fire_due_autorun_graphs_fires_reconciliation_paused_graph() {
             spec_code: None,
             spec_scope: None,
             spec_type: None,
+    review_state: crate::domain::graphs::SpecReviewState::Approved,
+    review_tier: None,
+    review_findings: None,
 };
     db.insert_graph_spec(&spec).unwrap();
     db.update_graph_spec_status(&spec.id, GraphSpecStatus::Running, Some(Utc::now()), None)
@@ -628,6 +640,9 @@ async fn fire_due_autorun_graphs_never_fires_a_c19_blocked_graph() {
         spec_code: None,
         spec_scope: None,
         spec_type: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     })
     .unwrap();
     db.insert_graph_node(&GraphNode {
@@ -740,6 +755,9 @@ async fn fire_due_autorun_graphs_resumes_same_queue_after_failed_run() {
         spec_code: None,
         spec_scope: None,
         spec_type: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     };
     db.insert_graph_spec(&standalone("queue-done", 1, GraphSpecStatus::Completed))
         .unwrap();
@@ -868,6 +886,9 @@ async fn fire_due_autorun_graphs_refuses_dirty_predecessor_and_stays_cleared() {
         spec_code: None,
         spec_scope: None,
         spec_type: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     })
     .unwrap();
     std::fs::write(git_dir.path().join("dirty.txt"), "dirty").unwrap();
@@ -1081,7 +1102,10 @@ async fn fire_due_auto_continue_graphs_resumes_paused_graph_without_reset_or_rel
             spec_code: None,
             spec_scope: None,
             spec_type: None,
-})
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
+    })
         .unwrap();
     db.insert_graph_node(&GraphNode {
         id: "node-check".to_string(),
@@ -1200,6 +1224,9 @@ async fn fire_due_auto_continue_graphs_applies_skip_next_spec_action() {
         spec_code: None,
         spec_scope: None,
         spec_type: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     })
     .unwrap();
     db.schedule_graph_auto_continue(

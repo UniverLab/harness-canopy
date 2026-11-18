@@ -449,6 +449,9 @@ async fn idea_placeholder_spec_is_absent_from_spec_listings() {
         spec_type: None,
         spec_scope: None,
         spec_code: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     })
     .unwrap();
 
@@ -529,6 +532,9 @@ async fn graph_run_refuses_blank_bound_spec_and_leaves_graph_untouched() {
         spec_type: None,
         spec_scope: None,
         spec_code: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     })
     .unwrap();
 
@@ -643,6 +649,9 @@ async fn graph_run_with_queue_ignores_unrelated_blank_bound_spec() {
         spec_type: None,
         spec_scope: None,
         spec_code: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     })
     .unwrap();
 
@@ -669,6 +678,9 @@ async fn graph_run_with_queue_ignores_unrelated_blank_bound_spec() {
         spec_type: None,
         spec_scope: None,
         spec_code: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     };
     db.insert_graph_spec(&member).unwrap();
     let queue_id = uuid::Uuid::new_v4().to_string();
@@ -733,6 +745,9 @@ async fn graph_preflight_warns_for_blank_bound_spec_without_probe_targets() {
         spec_type: None,
         spec_scope: None,
         spec_code: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     })
     .unwrap();
 
@@ -800,6 +815,9 @@ async fn graph_preflight_includes_spec_warnings_alongside_probes() {
         spec_type: None,
         spec_scope: None,
         spec_code: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     })
     .unwrap();
     db.insert_graph_node(&GraphNode {

@@ -883,6 +883,9 @@ mod tests {
             spec_code: None,
             spec_scope: None,
             spec_type: None,
+            review_state: crate::domain::graphs::SpecReviewState::Approved,
+            review_tier: None,
+            review_findings: None,
         };
         db.insert_graph_spec(&spec).unwrap();
         let node = crate::domain::graphs::GraphNode {
@@ -924,6 +927,9 @@ mod tests {
             spec_code: None,
             spec_scope: None,
             spec_type: None,
+            review_state: crate::domain::graphs::SpecReviewState::Approved,
+            review_tier: None,
+            review_findings: None,
         })
         .unwrap();
 
@@ -1059,6 +1065,9 @@ mod tests {
             spec_code: None,
             spec_scope: None,
             spec_type: None,
+            review_state: crate::domain::graphs::SpecReviewState::Approved,
+            review_tier: None,
+            review_findings: None,
         };
         db.insert_graph_spec(&spec).unwrap();
         let node = crate::domain::graphs::GraphNode {
@@ -1366,6 +1375,9 @@ mod tests {
             spec_code: None,
             spec_scope: None,
             spec_type: None,
+            review_state: crate::domain::graphs::SpecReviewState::Approved,
+            review_tier: None,
+            review_findings: None,
         })
         .unwrap();
         db.insert_graph_spec(&crate::domain::graphs::GraphSpec {
@@ -1391,6 +1403,9 @@ mod tests {
             spec_code: None,
             spec_scope: None,
             spec_type: None,
+            review_state: crate::domain::graphs::SpecReviewState::Approved,
+            review_tier: None,
+            review_findings: None,
         })
         .unwrap();
         let queue = crate::domain::queues::Queue {

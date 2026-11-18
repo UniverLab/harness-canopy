@@ -42,6 +42,18 @@ pub(crate) fn spec_review_enabled() -> Result<bool, McpError> {
     Ok(CanopyConfig::load(&dir).spec_review.enabled)
 }
 
+/// Mark a spec dirty for review when review is enabled, else approved/no tier.
+pub(crate) fn mark_spec_dirty_for_review(db: &Database, spec_id: &str) -> Result<(), McpError> {
+    if spec_review_enabled()? {
+        db.mark_spec_unreviewed(spec_id).map_err(internal_error)?;
+        crate::graph_engine::spec_review::wake_spec_review_worker();
+    } else {
+        db.mark_spec_review_approved_no_tier(spec_id)
+            .map_err(internal_error)?;
+    }
+    Ok(())
+}
+
 /// Trim and size-check a caller-supplied intent. A blank value means "no
 /// intent" (`None`); with the review on that is refused with the exact
 /// message the spec pins.
@@ -76,9 +88,7 @@ pub(crate) fn validate_at_least_one_bool(updates: &[bool], field_name: &str) -> 
     }
 }
 
-/// Summary JSON for `spec list` — no run/blocker info, since a standalone
-/// (unassigned) spec has never run. Compare [`graph_spec_details_json`],
-/// which adds that runtime detail for specs already inside a graph.
+/// Summary JSON for `spec list` / `spec get`.
 pub(crate) fn spec_summary_json(spec: &GraphSpec, include_descriptions: bool) -> serde_json::Value {
     // SPECCODE: type/scope/code/commit_message are always surfaced (null
     // for a legacy spec with no type) — check nodes and agents build
@@ -98,6 +108,9 @@ pub(crate) fn spec_summary_json(spec: &GraphSpec, include_descriptions: bool) ->
             "position": spec.position,
             "parallelizable": spec.parallelizable,
             "status": spec.status.as_str(),
+            "review_state": spec.review_state.as_str(),
+            "review_tier": spec.review_tier.map(|t| t.as_str()),
+            "review_findings": spec.review_findings,
             "type": spec_type,
             "scope": spec.spec_scope,
             "code": spec.spec_code,
@@ -114,6 +127,9 @@ pub(crate) fn spec_summary_json(spec: &GraphSpec, include_descriptions: bool) ->
             "name": spec.name,
             "intent": spec.intent,
             "status": spec.status.as_str(),
+            "review_state": spec.review_state.as_str(),
+            "review_tier": spec.review_tier.map(|t| t.as_str()),
+            "review_findings": spec.review_findings,
             "workdir": spec.workdir,
             "type": spec_type,
             "scope": spec.spec_scope,
@@ -175,6 +191,14 @@ pub(crate) fn build_spec_run_info(
         cross_run_attempts,
         waiting_for,
     })
+}
+
+/// Insert spec-review fields into a details JSON object.
+pub(crate) fn insert_spec_review_detail_fields(out: &mut serde_json::Value, spec: &GraphSpec) {
+    out["intent"] = serde_json::json!(spec.intent);
+    out["review_state"] = serde_json::json!(spec.review_state.as_str());
+    out["review_tier"] = serde_json::json!(spec.review_tier.map(|t| t.as_str()));
+    out["review_findings"] = serde_json::json!(spec.review_findings);
 }
 
 #[cfg(test)]

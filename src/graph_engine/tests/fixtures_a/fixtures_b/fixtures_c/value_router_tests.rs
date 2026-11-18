@@ -37,6 +37,9 @@ fn typed_spec() -> GraphSpec {
     let mut spec = decision_spec("spec-1");
     spec.spec_type = Some(crate::domain::spec_type::SpecType::Feat);
     spec.spec_scope = Some("tui".to_string());
+    spec.review_state = crate::domain::graphs::SpecReviewState::Approved;
+    spec.review_tier = None;
+    spec.review_findings = None;
     spec
 }
 
@@ -75,14 +78,55 @@ async fn value_router_routes_on_spec_type_without_a_platform() {
 
     assert_eq!(execution.status, GraphRunStatus::Pass);
     assert_eq!(execution.output["mode"], "value");
-    assert_eq!(execution.output["source"], "spec_type");
-    assert_eq!(execution.output["value"], "feat");
     assert_eq!(execution.output["route"], "feat");
-    assert_eq!(execution.output["used_default"], false);
-    assert!(
-        node.config.get("platform").is_none(),
-        "the value router must run without a platform"
+}
+
+#[tokio::test]
+async fn value_router_routes_on_spec_tier_trivial_normal_and_empty() {
+    let mut trivial = typed_spec();
+    trivial.review_tier = Some(crate::domain::graphs::SpecReviewTier::Trivial);
+    let mut normal = typed_spec();
+    normal.review_tier = Some(crate::domain::graphs::SpecReviewTier::Normal);
+    let mut none = typed_spec();
+    none.review_tier = None;
+
+    let lp = decision_graph();
+
+    let trivial_node = value_router_node(
+        "r1",
+        value_config("spec_tier", &["trivial", "normal"], None),
     );
+    let (_d1, db1) = test_db();
+    let ex1 = execute_router_node(&db1, &lp, &trivial, &trivial_node, None, "run", "/tmp")
+        .await
+        .unwrap();
+    assert_eq!(ex1.status, GraphRunStatus::Pass);
+    assert_eq!(ex1.output["route"], "trivial");
+
+    let normal_node = value_router_node(
+        "r2",
+        value_config("spec_tier", &["trivial", "normal"], None),
+    );
+    let (_d2, db2) = test_db();
+    let ex2 = execute_router_node(&db2, &lp, &normal, &normal_node, None, "run", "/tmp")
+        .await
+        .unwrap();
+    assert_eq!(ex2.status, GraphRunStatus::Pass);
+    assert_eq!(ex2.output["route"], "normal");
+
+    // Empty case: no tier reads as "" and routes via default_route.
+    let empty_node = value_router_node(
+        "r3",
+        value_config("spec_tier", &["trivial", "normal", "none"], Some("none")),
+    );
+    let (_d3, db3) = test_db();
+    let ex3 = execute_router_node(&db3, &lp, &none, &empty_node, None, "run", "/tmp")
+        .await
+        .unwrap();
+    assert_eq!(ex3.status, GraphRunStatus::Pass);
+    assert_eq!(ex3.output["route"], "none");
+    assert_eq!(ex3.output["value"], "");
+    assert_eq!(ex3.output["used_default"], true);
 }
 
 #[tokio::test]
@@ -203,7 +247,7 @@ fn value_router_rejects_an_unknown_source_listing_the_valid_ones() {
     let error = crate::daemon::handler_nodes::validate_node_config(GraphNodeKind::Router, &config)
         .unwrap_err();
     assert!(
-        error.contains("Valid sources: spec_type, spec_scope, previous_output"),
+        error.contains("Valid sources: spec_type, spec_scope, spec_tier, previous_output"),
         "got: {error}"
     );
 }

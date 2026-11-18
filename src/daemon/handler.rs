@@ -170,12 +170,13 @@ const MISSING_SYNC_IDENTITY_MESSAGE: &str =
 /// number.
 pub(crate) const MCP_RESULT_BUDGET_BYTES: usize = 32_000;
 
-/// Measured serialised size of one compact `spec list` row in bytes: 339
-/// compact specs measured 55,605 characters on 2026-09-02, i.e. ~164
-/// bytes/row. Budgeted at 320 bytes/row so the default page keeps headroom
-/// against longer-than-average names and the always-surfaced `intent` key
-/// (null when unset, up to 500 chars when set).
-const SPEC_LIST_COMPACT_ROW_BYTES: usize = 320;
+/// Measured serialised size of one compact `spec list` row in bytes:
+/// pretty-printed compact rows now always surface review and type metadata
+/// (`intent`, `review_state`, `review_tier`, `review_findings`, `type`,
+/// `scope`, `code`, `commit_message`), measuring ~389 bytes/row on recent
+/// budget probes. Budgeted at 450 bytes/row so the default page stays inside
+/// `MCP_RESULT_BUDGET_BYTES` with headroom for longer ids/names.
+const SPEC_LIST_COMPACT_ROW_BYTES: usize = 450;
 
 /// Default `session_list` page derived from the MCP result budget. The
 /// compact row estimate leaves room for long names while keeping the default

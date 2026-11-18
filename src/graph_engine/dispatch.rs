@@ -197,6 +197,9 @@ impl GraphEngine {
                 }
             }
             None => {
+                crate::graph_engine::spec_review::bail_if_unqueued_specs_unapproved(
+                    &self.db, &graph_id,
+                )?;
                 self.run_unqueued_dispatch(&ctx, &graph_id, idea, sandbox, &mut completed_specs)
                     .await?;
                 return Ok(());
@@ -300,27 +303,6 @@ impl GraphEngine {
         Ok(())
     }
 
-    pub(crate) fn warn_stale_running_queue_members(
-        &self,
-        graph_id: &str,
-        queue_id: &str,
-    ) -> Result<()> {
-        for spec_id in self
-            .db
-            .queue_stale_running_members(queue_id, crate::system::boot_id().as_deref())?
-        {
-            tracing::warn!(
-                "Graph '{}' queue run against '{}': member spec '{}' is 'running' with no \
-                 live node run in this daemon's lifetime; leaving it as-is. Reset it via \
-                 graph_control reset to resume if it's genuinely stuck.",
-                graph_id,
-                queue_id,
-                spec_id
-            );
-        }
-        Ok(())
-    }
-
     /// The queue-driven half of [`Self::run_graph_dispatch`]: the stale
     /// still-`running` member warnings, the resumed spec, and the pick loop.
     /// Returns `Stop` when the dispatch must end here.
@@ -331,7 +313,9 @@ impl GraphEngine {
         queue_id: &str,
         completed_specs: &mut Vec<(String, String)>,
     ) -> Result<DispatchFlow> {
-        self.warn_stale_running_queue_members(graph_id, queue_id)?;
+        crate::graph_engine::spec_review::warn_queue_dispatch_review_gates(
+            &self.db, graph_id, queue_id,
+        )?;
         // Members still `running` at dispatch start — besides the
         // directed spec — are strays of a stale or inherited state.
         // The directed resume resets them to `Pending` and defers

@@ -115,6 +115,11 @@ fn apply_set(
     settings::writer::write_keys(canopy_dir, &[(key, stored)])?;
     config_watch::publish_revision(db, &[key.to_string()]);
 
+    if key == "spec_review.enabled" && !value.as_bool().unwrap_or(false) {
+        db.approve_pending_spec_reviews()?;
+        crate::graph_engine::spec_review::wake_spec_review_worker();
+    }
+
     let effective = CanopyConfig::load(canopy_dir);
     let mut result = json!({
         "key": key,

@@ -74,6 +74,9 @@ fn spec(id: &str) -> GraphSpec {
         spec_code: None,
         spec_scope: None,
         spec_type: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     }
 }
 

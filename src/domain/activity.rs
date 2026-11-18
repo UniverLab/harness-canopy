@@ -218,6 +218,9 @@ mod tests {
             spec_code: code.map(str::to_string),
             spec_scope: None,
             spec_type: None,
+            review_state: crate::domain::graphs::SpecReviewState::Approved,
+            review_tier: None,
+            review_findings: None,
         }
     }
 

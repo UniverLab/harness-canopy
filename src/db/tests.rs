@@ -147,6 +147,9 @@ fn sample_graph_spec(graph_id: &str, id: &str, position: i64) -> GraphSpec {
         spec_type: None,
         spec_scope: None,
         spec_code: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     }
 }
 
@@ -192,6 +195,9 @@ fn sample_standalone_spec(id: &str, workdir: Option<&str>) -> GraphSpec {
         spec_type: None,
         spec_scope: None,
         spec_code: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     }
 }
 

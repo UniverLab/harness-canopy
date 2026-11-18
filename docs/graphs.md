@@ -48,17 +48,16 @@ Graph
     }
     ```
 
-    `source` is one of `spec_type` and `spec_scope` (the spec's
-    Conventional Commits parts, empty when the spec has none) or
-    `previous_output` (the previous node's trimmed stdout for a check node,
-    or the same text a model router receives for any other node). A value
-    router declares 1–8 routes whose labels are the values that select them
-    (`description` is optional and unused), an optional `default_route`
-    naming one of those labels, and no `fallback`, `decision` or
-    `min_confidence` — those are model-router fields and are refused. Every
-    route needs exactly one outgoing edge. A value that matches no route
-    takes `default_route` or fails the node; no silent fallback and no
-    platform is required.
+    `source` is one of `spec_type`, `spec_scope`, `spec_tier` (the spec's
+    review tier, empty when none) and `previous_output` (the previous node's
+    trimmed stdout for a check node, or the same text a model router receives
+    for any other node). A value router declares 1–8 routes whose labels are
+    the values that select them (`description` is optional and unused), an
+    optional `default_route` naming one of those labels, and no `fallback`,
+    `decision` or `min_confidence` — those are model-router fields and are
+    refused. Every route needs exactly one outgoing edge. A value that
+    matches no route takes `default_route` or fails the node; no silent
+    fallback and no platform is required.
   - `quorum` — engine-managed node that closes an
     [ensemble](graphs-ensembles.md#ensembles), never created directly.
 - **Edges** — connect nodes with routing conditions: `pass`, `fail`,

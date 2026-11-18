@@ -334,6 +334,9 @@ fn duplicate_selected_graph_node_copies_config_and_opens_editor() {
         spec_code: None,
         spec_scope: None,
         spec_type: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     })
     .unwrap();
     db.insert_graph_node(&GraphNode {
@@ -1242,6 +1245,9 @@ fn save_graph_editor_dialog_rejects_unknown_config_key_in_node_config_mode() {
         spec_code: None,
         spec_scope: None,
         spec_type: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     })
     .unwrap();
     db.insert_graph_node(&GraphNode {

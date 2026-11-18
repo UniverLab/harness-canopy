@@ -135,6 +135,50 @@ pub(crate) fn validate_launch_guards(
             return Err(EarlyReturn::tool_error(&message));
         }
     }
+    if let Err(message) = validate_specs_approved_for_run(db, graph_id, queue_id) {
+        return Err(EarlyReturn::tool_error(&message));
+    }
+    Ok(())
+}
+
+/// Specs that would run must be review-approved (FR6). For queue runs only
+/// the members actually eligible to run are checked; for bound-spec runs the
+/// pending bound specs are checked.
+pub(crate) fn validate_specs_approved_for_run(
+    db: &Database,
+    graph_id: &str,
+    queue_id: Option<&str>,
+) -> Result<(), String> {
+    // Queue runs skip non-approved members during dispatch (and log each skip
+    // once), so the launch must not be refused here for them. Bound-spec runs
+    // (no queue) must refuse when a pending bound spec is not review-approved.
+    if queue_id.is_some() {
+        return Ok(());
+    }
+    let specs: Vec<crate::domain::graphs::GraphSpec> = db
+        .list_graph_specs(graph_id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|spec| {
+            spec.status == crate::domain::graphs::GraphSpecStatus::Pending
+                && !crate::graph_engine::is_no_spec_placeholder(spec)
+        })
+        .collect();
+    for spec in specs {
+        if !spec.review_state.is_runnable() {
+            let findings = spec
+                .review_findings
+                .as_ref()
+                .and_then(|f| serde_json::to_string(f).ok())
+                .unwrap_or_else(|| "[]".to_string());
+            return Err(format!(
+                "spec '{}' is {}: review findings: {}",
+                spec.name,
+                spec.review_state.as_str(),
+                findings
+            ));
+        }
+    }
     Ok(())
 }
 

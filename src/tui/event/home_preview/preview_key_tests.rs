@@ -224,6 +224,9 @@ fn seed_live_graph(db: &Database, node_ids: &[&str]) {
         spec_code: None,
         spec_scope: None,
         spec_type: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     })
     .unwrap();
     for (i, id) in node_ids.iter().enumerate() {
@@ -319,6 +322,9 @@ fn seed_completed_graph_with_nodes(db: &Database) {
         spec_code: None,
         spec_scope: None,
         spec_type: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     })
     .unwrap();
     for (position, id) in ["n1", "n2"].iter().enumerate() {

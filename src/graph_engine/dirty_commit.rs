@@ -345,6 +345,7 @@ pub(crate) fn ensemble_owning_node(node_id: &str, ensembles: &[EnsembleDetails])
 /// so `""` can never collide with one. Never created for a no-idea launch —
 /// those are refused before reaching the dispatch body.
 pub(crate) fn no_spec_placeholder(graph_id: &str) -> GraphSpec {
+    use crate::domain::graphs::SpecReviewState;
     GraphSpec {
         intent: None,
         id: uuid::Uuid::new_v4().to_string(),
@@ -368,6 +369,9 @@ pub(crate) fn no_spec_placeholder(graph_id: &str) -> GraphSpec {
         spec_code: None,
         spec_scope: None,
         spec_type: None,
+        review_state: SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     }
 }
 

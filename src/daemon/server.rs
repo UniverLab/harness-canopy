@@ -1,5 +1,4 @@
 use anyhow::Result;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use rmcp::ServiceExt;
@@ -21,8 +20,10 @@ use crate::scheduler::cron_scheduler::CronScheduler;
 use crate::watchers::WatcherEngine;
 
 mod personal_rag;
+mod startup;
 
 use personal_rag::startup_personal_rag;
+use startup::{build_http_core, run_http_startup_reconciliations};
 
 #[cfg(test)]
 use personal_rag::{
@@ -39,7 +40,6 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
     // CB83: one instant per daemon process; every MCP session's handler
     // inherits it so `agent_status` Uptime is the daemon's age.
     let daemon_start = std::time::Instant::now();
-
     let port = crate::resolve_port(port_override);
     let data_dir = crate::ensure_data_dir()?;
     let _daemon_lock = acquire_daemon_lock(&data_dir)?;
@@ -48,64 +48,15 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
     if let Err(e) = crate::domain::prompts::seed_builtin_prompt_presets(&data_dir) {
         tracing::warn!("Could not seed builtin prompt presets: {e}");
     }
-    let notification_service: Arc<dyn NotificationService> = Arc::new(DefaultNotificationService);
-    // Shared wake handle for scheduled sends: every successful daemon-side
-    // `insert_scheduled_prompt` notifies it, and the scheduler's dedicated
-    // delivery task waits on it.
-    let scheduled_prompt_notify = Arc::new(tokio::sync::Notify::new());
-    let executor = Arc::new(
-        Executor::new(Arc::clone(&db), Arc::clone(&notification_service))
-            .with_scheduled_prompt_notify(Arc::clone(&scheduled_prompt_notify)),
-    );
-    let canopy_config = crate::domain::canopy_config::CanopyConfig::load(&data_dir);
-    // CM51 (D12): remember what the running daemon loaded, so `config_list`
-    // can report `pending_restart`, and watch the file so a hand edit takes
-    // effect without a restart (D4).
-    crate::domain::settings::set_running_snapshot(canopy_config.clone());
-    crate::daemon::config_watch::spawn(data_dir.clone(), Arc::clone(&db));
-    let dynamic_skills = Arc::new(crate::dynamic_skills::SkillStore::from_config(
-        &data_dir,
-        &canopy_config.skills,
-    ));
-    // CB82: the process-wide shutdown flag — set first in graceful shutdown,
-    // before any node process is SIGTERMed, so the engine finalizes in-flight
-    // runs as interrupted instead of routing their fail edges.
-    let shutdown_flag = Arc::new(AtomicBool::new(false));
-    let graph_engine = Arc::new(
-        GraphEngine::new(Arc::clone(&db), Arc::clone(&notification_service))
-            .with_ensemble_concurrency_cap(canopy_config.ensemble_concurrency_cap)
-            .with_spec_attempt_limit(canopy_config.spec_attempt_limit)
-            .with_dynamic_skills(Arc::clone(&dynamic_skills))
-            .with_shutdown_flag(Arc::clone(&shutdown_flag))
-            .with_scheduled_prompt_notify(Arc::clone(&scheduled_prompt_notify)),
-    );
-    let watcher_engine = Arc::new(WatcherEngine::new(
-        Arc::clone(&db),
-        Arc::clone(&executor),
-        Arc::clone(&graph_engine),
-    ));
 
-    let ingestion = Arc::new(IngestionManager::new(Arc::clone(&db), data_dir.clone()));
-    let _ingestion_cancel = Arc::clone(&ingestion).start();
+    let core = build_http_core(&db, &data_dir);
+    let _ingestion_cancel = Arc::clone(&core.ingestion).start();
 
     announce_daemon_start(port);
     write_pid_file(&data_dir)?;
     write_startup_state(&db, port)?;
 
-    reconcile_orphaned_graphs_on_startup(&db, &data_dir);
-    reconcile_stranded_queue_specs_on_startup(&db);
-    reconcile_mutex_leases_on_startup(&db);
-    // CT28: drop live-output chunks whose run is finished — leftovers from a
-    // crash, since completion paths delete their own chunks.
-    if let Err(e) = db.delete_graph_run_output_for_non_running() {
-        tracing::error!("Failed to clean stale graph_run_output chunks: {}", e);
-    }
-    capture_interrupted_state(&graph_engine, &watcher_engine).await;
-
-    startup_personal_rag(Arc::clone(&ingestion), &data_dir).await;
-    // CB91: one maintenance pass at startup, after the reconciliations that
-    // `startup_personal_rag` runs; the periodic tick continues from `start()`.
-    ingestion.run_rag_maintenance().await;
+    run_http_startup_reconciliations(&db, &data_dir, &core).await;
 
     // The session endpoint's state comes up before anything serves: the hub
     // owns every PTY, so reconciliation has to respawn the previous daemon's
@@ -114,7 +65,7 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
     let sessions_state = crate::sessions::ws::SessionsState::ensure(
         &data_dir,
         Arc::clone(&db),
-        Arc::clone(&scheduled_prompt_notify),
+        Arc::clone(&core.scheduled_prompt_notify),
     )?;
     // The relay answers offers by bridging into the hub, so the hub exists
     // first.
@@ -128,11 +79,11 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
 
     let background = start_background_tasks(
         &db,
-        &executor,
-        &graph_engine,
-        &notification_service,
+        &core.executor,
+        &core.graph_engine,
+        &core.notification_service,
         &data_dir,
-        canopy_config.announcements_enabled,
+        core.canopy_config.announcements_enabled,
         &sessions_state,
     );
 
@@ -140,14 +91,14 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
     let router = build_mcp_router(
         HandlerDeps {
             db: Arc::clone(&db),
-            executor: Arc::clone(&executor),
-            watcher_engine: Arc::clone(&watcher_engine),
+            executor: Arc::clone(&core.executor),
+            watcher_engine: Arc::clone(&core.watcher_engine),
             scheduler_notify: Arc::clone(&background.scheduler_notify),
             scheduled_prompt_notify: Arc::clone(&background.scheduled_prompt_notify),
-            graph_engine: Arc::clone(&graph_engine),
-            notification_service: Arc::clone(&notification_service),
-            ingestion: Arc::clone(&ingestion),
-            dynamic_skills: Arc::clone(&dynamic_skills),
+            graph_engine: Arc::clone(&core.graph_engine),
+            notification_service: Arc::clone(&core.notification_service),
+            ingestion: Arc::clone(&core.ingestion),
+            dynamic_skills: Arc::clone(&core.dynamic_skills),
             shelf: sessions_state.shelf.clone(),
             start_time: daemon_start,
             port,
@@ -157,8 +108,14 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
     );
 
     bind_and_serve(router, port, ct).await?;
-
-    shutdown_http_server(background, watcher_engine, &db, &data_dir, &graph_engine).await;
+    shutdown_http_server(
+        background,
+        core.watcher_engine,
+        &db,
+        &data_dir,
+        &core.graph_engine,
+    )
+    .await;
 
     Ok(())
 }
@@ -1052,6 +1009,9 @@ mod hang_repro {
             spec_code: None,
             spec_scope: None,
             spec_type: None,
+            review_state: crate::domain::graphs::SpecReviewState::Approved,
+            review_tier: None,
+            review_findings: None,
         })
         .unwrap();
         db.insert_graph_node(&GraphNode {
@@ -1605,6 +1565,9 @@ mod stdio_startup_reconciliation_tests {
             spec_code: None,
             spec_scope: None,
             spec_type: None,
+            review_state: crate::domain::graphs::SpecReviewState::Approved,
+            review_tier: None,
+            review_findings: None,
         };
         let node = GraphNode {
             id: format!("node-stdio-startup-{suffix}"),

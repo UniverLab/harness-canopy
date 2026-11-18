@@ -418,7 +418,7 @@ impl Database {
         conn.query_row(
             "SELECT pm.spec_id FROM queue_members pm
              JOIN graph_specs ls ON ls.id = pm.spec_id
-             WHERE pm.queue_id = ?1 AND ls.status IN (?2, ?3)
+             WHERE pm.queue_id = ?1 AND ls.status IN (?2, ?3) AND ls.review_state = 'approved'
              ORDER BY pm.position ASC LIMIT 1",
             params![
                 queue_id,
@@ -457,6 +457,8 @@ impl Database {
     /// [`Self::queue_next_pending_spec_id`] finds no `pending` member to pick
     /// next but a member is nonetheless left non-terminal — e.g. `running`
     /// because a previous run crashed mid-spec and hasn't been reset yet.
+    /// Non-approved specs are not runnable and do not count as incomplete work
+    /// the engine can make progress on.
     pub fn queue_has_incomplete_members(&self, queue_id: &str) -> Result<bool> {
         let conn = self
             .conn
@@ -465,7 +467,11 @@ impl Database {
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM queue_members pm
              JOIN graph_specs ls ON ls.id = pm.spec_id
-             WHERE pm.queue_id = ?1 AND ls.status IN (?2, ?3, ?4)",
+             WHERE pm.queue_id = ?1
+               AND (
+                   ls.status = ?4
+                   OR (ls.status IN (?2, ?3) AND ls.review_state = 'approved')
+               )",
             params![
                 queue_id,
                 GraphSpecStatus::Pending.as_str(),

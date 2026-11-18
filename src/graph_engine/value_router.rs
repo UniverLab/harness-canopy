@@ -1,8 +1,8 @@
 use super::*;
 use crate::domain::graphs::validate_value_router_config;
 
-/// Read the text a `mode: "value"` router routes on. `spec_type` and
-/// `spec_scope` are the spec's Conventional Commits parts (empty when the
+/// Read the text a `mode: "value"` router routes on. `spec_type`,
+/// `spec_scope` and `spec_tier` read from the current spec (empty when the
 /// spec has none); `previous_output` is the previous node's output as the
 /// data a router reads: a check node's trimmed stdout, or — for any other
 /// node — the same text a model router receives as its input. All values are
@@ -22,6 +22,10 @@ pub(crate) fn read_value_source(
             .map(|spec_type| spec_type.as_str().to_string())
             .unwrap_or_default()),
         "spec_scope" => Ok(spec.spec_scope.clone().unwrap_or_default()),
+        "spec_tier" => Ok(spec
+            .review_tier
+            .map(|tier| tier.as_str().to_string())
+            .unwrap_or_default()),
         "previous_output" => Ok(previous_output_text(previous_output)),
         other => bail!("value router source '{other}' has no reader in the engine"),
     }

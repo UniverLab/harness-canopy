@@ -208,6 +208,19 @@ impl TaskTriggerHandler {
                 )));
             }
         }
+        if !spec.review_state.is_runnable() {
+            let findings = spec
+                .review_findings
+                .as_ref()
+                .map(|f| serde_json::to_string(f).unwrap_or_else(|_| "[]".to_string()))
+                .unwrap_or_else(|| "[]".to_string());
+            return Ok(error_result(&format!(
+                "spec '{}' is {}: review findings: {}",
+                spec.name,
+                spec.review_state.as_str(),
+                findings
+            )));
+        }
         let already_member = self
             .db
             .queue_has_member(queue_id, spec_id)

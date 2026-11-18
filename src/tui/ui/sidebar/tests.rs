@@ -257,6 +257,9 @@ fn seed_queue_driven_run(
         spec_code: None,
         spec_scope: None,
         spec_type: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     })
     .unwrap();
     db.insert_graph_node(&GraphNode {

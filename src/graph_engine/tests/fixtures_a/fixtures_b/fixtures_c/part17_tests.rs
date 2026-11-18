@@ -564,6 +564,9 @@ async fn no_verdict_block_is_resumable_via_retry_current_node() {
         intent: None,
         graph_id: Some(graph_id.clone()),
         name: "Implementer".to_string(),
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
         ..standalone_spec("spec-implementer", 2)
     };
     db.insert_graph_spec(&implementer).unwrap();

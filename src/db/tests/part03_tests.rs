@@ -175,6 +175,9 @@ fn legacy_queue_table_rename_is_a_noop_on_an_already_migrated_database() {
         spec_type: None,
         spec_scope: None,
         spec_code: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     })
     .unwrap();
     db.insert_queue(&Queue {

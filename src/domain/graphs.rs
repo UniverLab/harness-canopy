@@ -16,6 +16,7 @@ mod hooks;
 mod statuses;
 mod topology;
 
+pub use crate::domain::spec_review::{SpecReviewFinding, SpecReviewState, SpecReviewTier};
 pub use crew::{
     group_graph_crew_rows, summarize_graph_crew_rows, CrewRowKind, GraphCrewGroup, GraphCrewRow,
     GraphCrewSummary,
@@ -42,7 +43,8 @@ pub const ROUTER_MODES: &[&str] = &["model", "value"];
 
 /// Every source a deterministic (`mode: "value"`) router can read. One list,
 /// shared by config validation and by the engine's dispatch.
-pub const VALUE_ROUTER_SOURCES: &[&str] = &["spec_type", "spec_scope", "previous_output"];
+pub const VALUE_ROUTER_SOURCES: &[&str] =
+    &["spec_type", "spec_scope", "spec_tier", "previous_output"];
 
 /// Minimum number of routes a value router may declare. The model router's
 /// two-route minimum does not apply: one known value can be enough.
@@ -660,6 +662,16 @@ pub struct GraphSpec {
     /// and never part of the commit message.
     #[serde(default)]
     pub spec_code: Option<String>,
+    /// Adversarial spec-review state. Only the review worker and the
+    /// `spec_review.enabled` toggle write it.
+    #[serde(default)]
+    pub review_state: SpecReviewState,
+    /// Set when the reviewer approves a spec; `None` otherwise.
+    #[serde(default)]
+    pub review_tier: Option<SpecReviewTier>,
+    /// Findings reported by the reviewer (JSON list of severity/text).
+    #[serde(default)]
+    pub review_findings: Option<Vec<SpecReviewFinding>>,
 }
 
 /// A node in either a spec's graph or a graph's top-level graph.

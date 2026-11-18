@@ -3,3 +3,4 @@ mod fixtures_a;
 mod mutex_gate_tests;
 // Re-export helpers other modules reached as `graph_engine::tests::{…}`.
 pub(crate) use fixtures_a::{graph_fixture, insert_run_row, HomeGuard};
+mod spec_review_tests;

@@ -94,6 +94,12 @@ impl TaskTriggerHandler {
             return Ok(error_result(&error));
         }
 
+        let review_enabled = spec_review_enabled()?;
+        let review_state = if review_enabled {
+            crate::domain::graphs::SpecReviewState::Unreviewed
+        } else {
+            crate::domain::graphs::SpecReviewState::Approved
+        };
         let spec = GraphSpec {
             intent: None,
             id: uuid::Uuid::new_v4().to_string(),
@@ -117,9 +123,15 @@ impl TaskTriggerHandler {
             spec_type: naming.spec_type,
             spec_scope: naming.scope,
             spec_code: code,
+            review_state,
+            review_tier: None,
+            review_findings: None,
         };
 
         self.db.insert_graph_spec(&spec).map_err(internal_error)?;
+        if review_enabled {
+            crate::graph_engine::spec_review::wake_spec_review_worker();
+        }
 
         Ok(build_id_result(&spec.id, "spec_id"))
     }
@@ -227,6 +239,9 @@ impl TaskTriggerHandler {
                 params.parallelizable,
             )
             .map_err(internal_error)?;
+        if name.is_some() || description.is_some() {
+            crate::daemon::handler_specs_helpers::mark_spec_dirty_for_review(&self.db, &spec_id)?;
+        }
 
         Ok(build_spec_update_response(&spec_id))
     }
@@ -313,6 +328,12 @@ impl TaskTriggerHandler {
             ),
             None => None,
         };
+        let review_enabled = spec_review_enabled()?;
+        let review_state = if review_enabled {
+            crate::domain::graphs::SpecReviewState::Unreviewed
+        } else {
+            crate::domain::graphs::SpecReviewState::Approved
+        };
         let spec = GraphSpec {
             intent,
             id: uuid::Uuid::new_v4().to_string(),
@@ -336,8 +357,14 @@ impl TaskTriggerHandler {
             spec_type: naming.spec_type,
             spec_scope: naming.scope.clone(),
             spec_code: code,
+            review_state,
+            review_tier: None,
+            review_findings: None,
         };
         self.db.insert_graph_spec(&spec).map_err(internal_error)?;
+        if review_enabled {
+            crate::graph_engine::spec_review::wake_spec_review_worker();
+        }
         Ok(spec_create_result(&spec.id, &naming))
     }
 
@@ -505,6 +532,13 @@ impl TaskTriggerHandler {
         // spec already stored its subject in the adoption branch above; the
         // pass-through write below must not overwrite it with the full title
         // again (the commit message would repeat the type).
+        let changed = name.is_some()
+            || description.is_some()
+            || workdir.is_some()
+            || update_intent.is_some()
+            || params.spec_type.is_some()
+            || params.spec_scope.is_some()
+            || adopts_type_by_name;
         self.db
             .update_spec_tag_details(
                 &spec_id,
@@ -517,6 +551,9 @@ impl TaskTriggerHandler {
             self.db
                 .set_graph_spec_intent(&spec_id, intent.as_deref())
                 .map_err(internal_error)?;
+        }
+        if changed {
+            crate::daemon::handler_specs_helpers::mark_spec_dirty_for_review(&self.db, &spec_id)?;
         }
 
         Ok(build_spec_update_response(&spec_id))

@@ -1210,6 +1210,9 @@ fn graph_specs_migration_relaxes_graph_id_and_adds_workdir_and_is_idempotent() {
         spec_type: None,
         spec_scope: None,
         spec_code: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     })
     .unwrap();
     let standalone = db.get_graph_spec("standalone-spec").unwrap().unwrap();

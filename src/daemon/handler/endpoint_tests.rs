@@ -445,6 +445,9 @@ fn insert_test_spec(db: &Database, graph_id: &str, position: i64) -> GraphSpec {
         spec_type: None,
         spec_scope: None,
         spec_code: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     };
     db.insert_graph_spec(&spec).unwrap();
     spec
@@ -480,6 +483,9 @@ fn insert_named_spec(
         spec_type: None,
         spec_scope: None,
         spec_code: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     };
     db.insert_graph_spec(&spec).unwrap();
     spec
@@ -1010,6 +1016,9 @@ fn insert_standalone_spec(db: &Database, name: &str) -> GraphSpec {
         spec_type: None,
         spec_scope: None,
         spec_code: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     };
     db.insert_graph_spec(&spec).unwrap();
     spec

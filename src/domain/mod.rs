@@ -35,6 +35,7 @@ pub mod roster;
 pub mod sandbox;
 pub mod seeds;
 pub mod settings;
+pub mod spec_review;
 pub mod spec_type;
 pub mod specs;
 

@@ -690,6 +690,7 @@ pub(crate) fn graph_spec_details_json(
         "ensembles": ensembles,
         "runs": runs,
     });
+    crate::daemon::handler_specs_helpers::insert_spec_review_detail_fields(&mut out, &spec.spec);
     if !waiting_for.is_empty() {
         out["waiting_for"] = serde_json::json!(waiting_for);
     }

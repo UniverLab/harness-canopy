@@ -323,6 +323,9 @@ mod tests {
             spec_code: None,
             spec_scope: None,
             spec_type: None,
+            review_state: crate::domain::graphs::SpecReviewState::Approved,
+            review_tier: None,
+            review_findings: None,
         })
         .unwrap();
         let spec_ensemble = Ensemble {

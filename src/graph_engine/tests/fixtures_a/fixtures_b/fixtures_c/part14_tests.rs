@@ -787,6 +787,9 @@ async fn graph_b_full_lifecycle_never_touches_graph_a_in_a_different_workdir() {
         spec_code: None,
         spec_scope: None,
         spec_type: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     };
     let node_a = GraphNode {
         id: "node-graph-a".to_string(),
@@ -876,6 +879,9 @@ async fn graph_b_full_lifecycle_never_touches_graph_a_in_a_different_workdir() {
         spec_code: None,
         spec_scope: None,
         spec_type: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     };
     db.insert_graph(&graph_b).unwrap();
     db.insert_graph_spec(&spec_b).unwrap();
@@ -1031,6 +1037,9 @@ async fn pausing_graph_b_never_signals_or_mutates_graph_a_run() {
         spec_code: None,
         spec_scope: None,
         spec_type: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     };
     let node_a = GraphNode {
         id: "node-signal-a".to_string(),
@@ -1114,6 +1123,9 @@ async fn pausing_graph_b_never_signals_or_mutates_graph_a_run() {
         spec_code: None,
         spec_scope: None,
         spec_type: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     };
     db.insert_graph(&graph_b).unwrap();
     db.insert_graph_spec(&spec_b).unwrap();

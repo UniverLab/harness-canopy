@@ -104,6 +104,9 @@ async fn overlapping_tick_skips_while_run_in_flight() {
         spec_code: None,
         spec_scope: None,
         spec_type: None,
+        review_state: crate::domain::graphs::SpecReviewState::Approved,
+        review_tier: None,
+        review_findings: None,
     })
     .unwrap();
     db.insert_graph_run(&crate::domain::graphs::GraphNodeRun {

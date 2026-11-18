@@ -265,6 +265,7 @@ impl Database {
             )",
             [],
         )?;
+        Self::migrate_spec_intent_column(conn)?;
         Ok(())
     }
 
