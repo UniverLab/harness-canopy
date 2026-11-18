@@ -13,6 +13,9 @@ pub(crate) struct ParallelSpawnCtx<'a> {
     pub(crate) all_node_names: &'a [String],
     pub(crate) resumable_sessions: &'a HashMap<String, String>,
     pub(crate) straggler_minutes: u64,
+    /// Whether the ensemble holds commit rights (CM28): a committing
+    /// member never spawns on a malformed prebuilt message.
+    pub(crate) may_commit: bool,
 }
 
 impl GraphEngine {
@@ -124,6 +127,7 @@ impl GraphEngine {
             all_node_names,
             resumable_sessions,
             straggler_minutes,
+            may_commit: details.ensemble.commit_rights,
         };
         let mut set = self.spawn_parallel_members(&spawn_ctx)?;
 
@@ -214,6 +218,7 @@ impl GraphEngine {
                 iteration: ctx.iteration,
                 straggler_minutes: ctx.straggler_minutes,
                 mutex_resources,
+                may_commit: ctx.may_commit,
                 shutdown: Arc::clone(&self.shutdown),
             };
             set.spawn(run_parallel_member_task(task));

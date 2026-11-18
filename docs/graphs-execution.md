@@ -9,12 +9,10 @@ order: 10
 ## Commit rights
 
 Most graphs want exactly one node to land work in git — a committer at
-the end of the chain — while every earlier node leaves its changes
-uncommitted so the reviewers downstream have a real diff to review.
-Asking for that in the prompt does not hold: three different models
-have committed anyway against an explicit, capitalised "you have no
-commit rights" rule, and each time the reviewers that followed were
-handed an empty diff and the quality gate quietly became a no-op.
+the end of the chain — while earlier nodes leave changes uncommitted for
+reviewers to see. Asking for that in the prompt does not hold: models have
+committed anyway against an explicit "no commit rights" rule, and the
+reviewers downstream were handed an empty diff.
 
 So the engine enforces it. Mark the committer in its **node config**:
 
@@ -86,11 +84,10 @@ require_report: true
 With the flag set, an agent run that exits 0 but never calls
 `graph_complete_node` itself is recorded as a deterministic **fail**
 (`failure_kind: "no_report"`) and routes down the node's `fail` edge.
-It is re-dispatched exactly once with an explicit reporting instruction
-(the `# [REPORT REQUIRED]` nudge) rather than retried on the
-infra-crash budget, since nothing actually crashed; a second unreported
-exit fails the node as usual. An explicit self-report always wins
-regardless of this flag, pass or fail; `require_report` only judges the
+It is re-dispatched once with an explicit reporting instruction (the
+`# [REPORT REQUIRED]` nudge) rather than retried on the infra-crash
+budget; a second unreported exit fails the node as usual. An explicit
+self-report always wins, pass or fail; `require_report` only judges the
 case where none was ever made.
 
 Whether or not the flag is set, every agent run that finishes without calling `graph_complete_node` carries `"unreported": true` in its output — this is unconditional, so a resilience node downstream can always tell "the harness ran and chose not to report" apart from "the harness never ran," without needing `require_report` itself. Ensemble members are judged individually, exactly like a lone node.
@@ -318,15 +315,15 @@ as a quick reference and counts features and bugs.
    `code = <TYPE>-<n>` with TYPE upper-cased (`FEAT-12`, `FIX-7`, `DOCS-3`)
    and `n` the next number for that type among the specs tagged with the
    same workdir (counter persisted per workdir and type; never reused,
-   even after a spec is deleted). The code is immutable and never set by
-   callers. Setting `type` later on a legacy spec through `spec_edit` `update`
-   assigns its code at that moment; changing the type afterwards does not
-   renumber it.
+   even after a spec is deleted). Callers never set the code; setting `type`
+   later on a legacy spec through `spec_edit` `update` assigns it at that
+   moment, and changing the type afterwards does not renumber it. A typed
+   unbound, never-run spec is re-coded when its `workdir` is set or changed.
 
-2. **Conventional titles.** When `spec_edit` `create`/`graph_edit` `attach_spec` receive a
-   name of the form `<type>(<scope>)?!?: <subject>` and no explicit `type`,
-   canopy parses it and stores the subject as the name, with type and scope
-   extracted. An explicit `type` wins over the parsed one.
+2. **Conventional titles.** `spec_edit` `create`/`update` and `graph_edit`
+   `attach_spec`/`update_spec` parse a name of the form `<type>(<scope>)?!?: <subject>`
+   when no explicit `type` is given, storing the subject as the name with type
+   and scope extracted (an explicit `type` wins); a repeated header is refused.
 
 3. **Commit message.** Every spec exposes `CANOPY_SPEC_COMMIT_MESSAGE`
    to check nodes and `{{spec_commit_message}}` to agent prompts. The
@@ -334,12 +331,10 @@ as a quick reference and counts features and bugs.
    A deterministic commit node uses `$CANOPY_SPEC_COMMIT_MESSAGE` as the
    commit message and never guesses.
 
-4. **Opt-in enforcement.** A graph created or updated with
-   `require_spec_type: true` (default `false`) refuses a spec without a type
-   in `graph_edit` `attach_spec`, and `graph_control` `run` refuses a queue holding one, naming
-   the spec. `queue` `add_spec` refuses an untyped spec while any graph has the
-   setting on, because queues are not tied to a single graph. Legacy specs
-   keep working everywhere else.
+4. **Opt-in enforcement.** `require_spec_type: true` (default `false`)
+   makes `graph_edit` `attach_spec` and `graph_control` `run` refuse an
+   untyped spec, naming it; `queue` `add_spec` refuses one while any graph
+   has the setting on. Legacy specs keep working everywhere else.
 
 **Recipe: deterministic commit node**
 
@@ -355,9 +350,14 @@ Add a check node with `commit_rights: true` and use the prebuilt message:
 }
 ```
 
-When the spec has `type: fix` and `scope: tui`, and its name is
-`"open F1 from inside a session"`, the node commits with message
-`fix(tui): open F1 from inside a session`.
+A commit node (`commit_rights: true`, or a check command consuming
+`{{spec_commit_message}}` / `$CANOPY_SPEC_COMMIT_MESSAGE`) validates the
+prebuilt message before anything spawns: an empty, multi-line, or
+header-repeating subject (`fix(tui): fix(tui): ...`) fails with
+`failure_kind: "commit_subject_invalid"` and commits nothing. The
+failure is deterministic, so it settles without spending the infra-retry
+budget; a member's failure propagates through the ensemble verdict, and
+fixing the spec's name unblocks the node. Specs without a type are exempt.
 
 ## Spec notes
 

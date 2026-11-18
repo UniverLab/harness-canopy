@@ -18,6 +18,7 @@ impl GraphEngine {
         report_nudge: bool,
         node_outputs: &HashMap<String, Value>,
         all_node_names: &[String],
+        may_commit: bool,
     ) -> Result<NodeExecution> {
         match node.kind {
             GraphNodeKind::Check => {
@@ -49,6 +50,7 @@ impl GraphEngine {
                     self.dynamic_skills.as_ref(),
                     node_outputs,
                     all_node_names,
+                    may_commit,
                 )
                 .await
             }

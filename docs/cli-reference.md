@@ -240,8 +240,8 @@ canopy metrics host --at 2026-03-02T11:32:00+00:00
 | Command | Description |
 |---|---|
 | `canopy spec create --name <name> --description <text>` | Create a standalone spec (a backlog item) |
-| `canopy spec create ... --workdir <path>` | Tag the new spec with a workdir, for backlog filtering |
-| `canopy spec create ... --spec-type <type>` | Set the Conventional Commits type (`feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`). Optional — when omitted and the name is a conventional title, the type and scope are parsed from the name |
+| `canopy spec create ... --workdir <path>` | Tag the new spec with a workdir, for backlog filtering. Omitting it draws the code from the empty-workdir counter (and the CLI prints a `no workdir: ...` line); setting or changing the workdir on an unbound spec that has no run re-codes it from the new workdir's counter (the old number is never reused) so the code is final before queueing |
+| `canopy spec create ... --spec-type <type>` | Set the Conventional Commits type (`feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`). Optional — when omitted and the name is a conventional title, the type and scope are parsed from the name. The same parsing applies when a `spec_edit update` (or `graph_edit update_spec`) name is a conventional title: the stored name is the subject alone, an explicit type/scope wins, and the code never changes on a type change through the name. A subject that is empty, multi-line, or itself begins with a conventional header (the repeated `fix(tui): fix(tui): ...` prefix) is refused, naming the corrected subject |
 | `canopy spec create ... --spec-scope <scope>` | Set the optional scope (e.g. `tui`). Part of the deterministic commit message |
 | `canopy spec create ... --queue <queue-id>` | Also append the new spec to an existing queue |
 | `canopy spec create ... --queue <queue-id> --group <group>` | Add it to the queue within a context group |

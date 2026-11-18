@@ -4,7 +4,9 @@
 //! deterministic commit message from the stored fields. One parser, in the
 //! domain layer, so no surface invents its own regex.
 
+use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
 
 /// The Conventional Commits types a spec may carry. Stored in the DB as the
 /// lowercase label; serialized lowercase and accepted by `spec list`'s
@@ -82,6 +84,82 @@ impl std::fmt::Display for SpecType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
+}
+
+/// A conventional header prefix: `<type>(<scope>)?!?: ` where `<type>` is one
+/// of the eleven SPECCODE types. Shared by subject and message validation so
+/// every surface names the same repeated-prefix rule.
+static HEADER_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([^()\r\n]+\))?!?: ",
+    )
+    .expect("static regex must compile")
+});
+
+/// The full single-line commit message shape: the header above followed by a
+/// non-blank subject remainder, which is captured so validation never has to
+/// guess where the header ends (a scope may itself contain `": "`).
+static COMMIT_MESSAGE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([^()\r\n]+\))?!?: (\S.*)$")
+        .expect("static regex must compile")
+});
+
+/// Strip stacked conventional headers from the front of `subject`: each pass
+/// removes one `<type>(<scope>)?!?: ` prefix. Used only to compute the
+/// corrected subject a refusal message shows — never to silently accept.
+pub fn strip_header(subject: &str) -> String {
+    let mut rest = subject;
+    while let Some(header) = HEADER_PREFIX.find(rest) {
+        rest = &rest[header.end()..];
+    }
+    rest.to_string()
+}
+
+/// Whether `subject` still begins with a conventional header (the regex is
+/// anchored, so any match is a prefix).
+pub fn has_header_prefix(subject: &str) -> bool {
+    HEADER_PREFIX.is_match(subject)
+}
+
+/// Validate a stored subject after the type/scope have been parsed out.
+/// `spec_type` is `None` on a spec without a type: the name is used verbatim
+/// today, so only the empty and multi-line rules apply and the header rule is
+/// skipped. On a typed spec a subject that is empty, carries a line break, or
+/// still begins with a conventional header (the repeated prefix) is refused;
+/// the error names the rule and shows the corrected subject.
+pub fn check_subject(spec_type: Option<SpecType>, subject: &str) -> Result<(), String> {
+    if subject.trim().is_empty() {
+        return Err("spec subject must not be empty.".to_string());
+    }
+    if subject.contains('\n') || subject.contains('\r') {
+        return Err("spec subject must be a single line.".to_string());
+    }
+    if spec_type.is_some() && has_header_prefix(subject) {
+        return Err(format!(
+            "spec subject must not itself begin with a Conventional Commits header (repeated prefix): use '{}' instead.",
+            strip_header(subject)
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a fully-built commit message (`type(scope): subject`). A message
+/// that fails the single-line shape, or whose subject part still begins with
+/// a conventional header, is refused with the message and the offending
+/// string. A spec without a type is exempt, as today.
+pub fn check_message(message: &str) -> Result<(), String> {
+    let Some(captures) = COMMIT_MESSAGE.captures(message) else {
+        return Err(format!(
+            "commit message must be exactly one Conventional Commits header: '{message}'."
+        ));
+    };
+    let subject = captures.get(3).map_or("", |subject| subject.as_str());
+    if has_header_prefix(subject) {
+        return Err(format!(
+            "commit message subject must not itself begin with a Conventional Commits header (repeated prefix): '{message}'."
+        ));
+    }
+    Ok(())
 }
 
 /// A conventional title split into its deterministic parts.

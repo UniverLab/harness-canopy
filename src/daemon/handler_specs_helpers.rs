@@ -13,7 +13,15 @@ use rmcp::ErrorData as McpError;
 /// SPECCODE: create response for `spec_edit create` — an untyped, unconventional
 /// create succeeds but answers with a `warning` naming the consequence (no
 /// code, no prebuilt commit message) instead of silently dropping the data.
-pub(crate) fn spec_create_result(spec_id: &str, naming: &SpecNaming) -> CallToolResult {
+/// A create without a workdir additionally carries a `warning_workdir` line:
+/// the code was drawn from the empty-workdir counter, so it is not final
+/// until a workdir is set.
+pub(crate) fn spec_create_result(
+    spec_id: &str,
+    naming: &SpecNaming,
+    no_workdir: bool,
+) -> CallToolResult {
+    const NO_WORKDIR_LINE: &str = "no workdir: the code comes from the empty-workdir counter; set a workdir before queueing so the code is final";
     if naming.spec_type.is_none() {
         let mut map = serde_json::Map::new();
         map.insert("spec_id".to_string(), serde_json::json!(spec_id));
@@ -22,6 +30,20 @@ pub(crate) fn spec_create_result(spec_id: &str, naming: &SpecNaming) -> CallTool
             serde_json::json!(
                 "Spec created without a type: it will have no code (e.g. FIX-7) and no commit \nmessage. Pass a Conventional Commits type (feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert) or a conventional title like 'fix(tui): open F1 from inside a session'."
             ),
+        );
+        if no_workdir {
+            map.insert(
+                "warning_workdir".to_string(),
+                serde_json::json!(NO_WORKDIR_LINE),
+            );
+        }
+        build_json_result(&serde_json::Value::Object(map))
+    } else if no_workdir {
+        let mut map = serde_json::Map::new();
+        map.insert("spec_id".to_string(), serde_json::json!(spec_id));
+        map.insert(
+            "warning_workdir".to_string(),
+            serde_json::json!(NO_WORKDIR_LINE),
         );
         build_json_result(&serde_json::Value::Object(map))
     } else {

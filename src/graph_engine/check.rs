@@ -33,6 +33,30 @@ pub(crate) async fn execute_check_node(
     let spec_commit_message = spec
         .spec_type
         .map(|spec_type| commit_message(spec_type, spec.spec_scope.as_deref(), &spec.name));
+    // SPECCODE: a commit node (commit rights, or a command that consumes the
+    // prebuilt message) never runs on a malformed message: a hand-corrupted
+    // stored subject would otherwise be committed verbatim. Fail before
+    // anything spawns, so nothing is committed.
+    if let Some(ref message) = spec_commit_message {
+        if node.config.get("commit_rights").and_then(Value::as_bool) == Some(true)
+            || command_references_commit_message(raw_command)
+        {
+            if let Err(error) = crate::domain::spec_type::check_message(message) {
+                return Ok(commit_subject_invalid(
+                    db,
+                    &InvalidCommitCtx {
+                        run_id,
+                        lp,
+                        spec,
+                        node,
+                        raw_command,
+                        message,
+                        error: &error,
+                    },
+                ));
+            }
+        }
+    }
     let ctx = CheckCommandCtx {
         graph_id: &lp.id,
         graph_name: &lp.name,
@@ -103,6 +127,70 @@ pub(crate) async fn execute_check_node(
     }
 
     finalize_check_result(lp, spec, node, success_condition, result)
+}
+
+/// Whether a check command consumes the prebuilt commit message — either
+/// the `{{spec_commit_message}}` marker or the `CANOPY_SPEC_COMMIT_MESSAGE`
+/// env var. Only such commands (or commit-rights nodes, handled at the call
+/// site) are guard-gated: any other command never commits the message, so a
+/// corrupted subject is harmless display text on its row.
+fn command_references_commit_message(command: &str) -> bool {
+    command.contains("{{spec_commit_message}}") || command.contains("CANOPY_SPEC_COMMIT_MESSAGE")
+}
+
+/// The borrowed inputs of [`commit_subject_invalid`], bundled so the
+/// function stays within the repo's argument-count lint.
+struct InvalidCommitCtx<'a> {
+    run_id: &'a str,
+    lp: &'a crate::domain::graphs::Graph,
+    spec: &'a GraphSpec,
+    node: &'a GraphNode,
+    raw_command: &'a str,
+    message: &'a str,
+    error: &'a str,
+}
+
+/// SPECCODE: settle a check/commit node whose prebuilt message fails
+/// [`crate::domain::spec_type::check_message`] — a Fail verdict routed
+/// through the node's fail edge, with `failure_kind: "commit_subject_invalid"`.
+/// Nothing spawns and nothing is committed; the edit that fixes the stored
+/// subject unblocks the node.
+fn commit_subject_invalid(db: &Database, ctx: &InvalidCommitCtx<'_>) -> NodeExecution {
+    let InvalidCommitCtx {
+        run_id,
+        lp,
+        spec,
+        node,
+        raw_command,
+        message,
+        error,
+    } = ctx;
+    let output_json = serde_json::json!({
+        "failure_kind": "commit_subject_invalid",
+        "kind": "check",
+        "command": raw_command,
+        "message": message,
+        "error": error,
+        "graph_id": lp.id,
+        "spec_id": spec.id,
+        "node_id": node.id,
+    });
+    let _ = with_busy_retry("update_graph_run_result", || {
+        db.update_graph_run_result(
+            run_id,
+            GraphRunStatus::Fail,
+            Some(&output_json),
+            Some(chrono::Utc::now()),
+        )
+    });
+    NodeExecution {
+        status: GraphRunStatus::Fail,
+        output: output_json,
+        summary: format!(
+            "Check node '{}': invalid commit message: {error}.",
+            node.name
+        ),
+    }
 }
 
 /// CM38 FR3: settle a check node whose command carried an unbindable

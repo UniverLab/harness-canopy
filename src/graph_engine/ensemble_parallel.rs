@@ -151,6 +151,9 @@ pub(crate) struct ParallelMemberTask {
     /// Mutex set this member acquires ahead of every attempt: its node's own
     /// plus the ensemble's.
     pub(crate) mutex_resources: Vec<String>,
+    /// Whether the ensemble holds commit rights (CM28): a committing
+    /// member never spawns on a malformed prebuilt message.
+    pub(crate) may_commit: bool,
     /// The engine's shutdown flag — the task is spawned detached, so the flag
     /// travels in the task.
     pub(crate) shutdown: Arc<AtomicBool>,
@@ -338,6 +341,7 @@ async fn drive_parallel_member_attempts(
             task.dynamic_skills.as_ref(),
             &task.node_outputs,
             &task.all_node_names,
+            task.may_commit,
         )
         .await?;
         let run = task

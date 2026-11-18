@@ -1036,6 +1036,7 @@ async fn run_resume_agent_node(
         None,
         &HashMap::new(),
         &[],
+        false,
     )
     .await
     .unwrap();

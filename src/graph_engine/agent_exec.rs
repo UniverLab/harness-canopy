@@ -33,7 +33,11 @@ pub(crate) async fn execute_agent_node(
     dynamic_skills: Option<&Arc<crate::dynamic_skills::SkillStore>>,
     node_outputs: &HashMap<String, Value>,
     all_node_names: &[String],
+    may_commit: bool,
 ) -> Result<NodeExecution> {
+    if let Some(execution) = agent_commit_guard(spec, node, may_commit) {
+        return Ok(execution);
+    }
     let cli_name = node
         .config
         .get("platform")

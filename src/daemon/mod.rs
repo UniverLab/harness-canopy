@@ -70,6 +70,7 @@ pub(crate) mod handler_settings;
 pub(crate) mod handler_shelf;
 pub(crate) mod handler_specs;
 pub(crate) mod handler_specs_helpers;
+pub(crate) mod handler_specs_update;
 pub(crate) mod handler_sync;
 pub(crate) mod handler_templates;
 pub(crate) mod handler_transfer;

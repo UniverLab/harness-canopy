@@ -2,8 +2,8 @@
 //! and spec naming resolution.
 
 use crate::domain::spec_type::{
-    commit_message, parse_conventional_title, resolve_spec_naming, ConventionalTitle, SpecNaming,
-    SpecType,
+    check_message, check_subject, commit_message, has_header_prefix, parse_conventional_title,
+    resolve_spec_naming, strip_header, ConventionalTitle, SpecNaming, SpecType,
 };
 
 #[test]
@@ -164,4 +164,83 @@ fn test_resolve_spec_naming_explicit_overrides_partial() {
             scope: None,
         }
     );
+}
+
+#[test]
+fn subject_refuses_empty_and_whitespace() {
+    assert!(check_subject(Some(SpecType::Fix), "").is_err());
+    assert!(check_subject(Some(SpecType::Fix), "   ").is_err());
+    assert!(check_subject(None, "").is_err());
+    assert!(check_subject(None, "   ").is_err());
+}
+
+#[test]
+fn subject_refuses_multi_line() {
+    assert!(check_subject(Some(SpecType::Fix), "one\ntwo").is_err());
+    assert!(check_subject(Some(SpecType::Fix), "one\rtwo").is_err());
+    assert!(check_subject(None, "one\ntwo").is_err());
+}
+
+#[test]
+fn subject_refuses_repeated_header_on_typed_spec() {
+    let err = check_subject(Some(SpecType::Fix), "fix(tui): open F1").unwrap_err();
+    assert!(
+        err.contains("repeated prefix") && err.contains("open F1"),
+        "{err}"
+    );
+    assert!(check_subject(Some(SpecType::Feat), "feat: add x").is_err());
+    assert!(check_subject(Some(SpecType::Fix), "docs: other text").is_err());
+}
+
+#[test]
+fn subject_allows_plain_text_on_typed_spec() {
+    assert!(check_subject(Some(SpecType::Fix), "open F1").is_ok());
+}
+
+#[test]
+fn subject_allows_any_single_line_on_untyped_spec() {
+    // A spec without a type stores its name verbatim today.
+    assert!(check_subject(None, "fix(tui): open F1").is_ok());
+    assert!(check_subject(None, "just a name").is_ok());
+}
+
+#[test]
+fn strip_header_unstacks_repeated_prefixes() {
+    assert_eq!(strip_header("fix(tui): fix(tui): x"), "x");
+    assert_eq!(strip_header("open F1"), "open F1");
+}
+
+#[test]
+fn header_prefix_detects_conventional_start() {
+    assert!(has_header_prefix("fix(tui): x"));
+    assert!(has_header_prefix("feat!: x"));
+    assert!(!has_header_prefix("open F1"));
+}
+
+#[test]
+fn message_accepts_well_formed_shapes() {
+    assert!(check_message("fix(tui): open F1").is_ok());
+    assert!(check_message("feat: add x").is_ok());
+    assert!(check_message("fix(tui)!: urgent").is_ok());
+}
+
+#[test]
+fn message_refuses_repeated_prefix() {
+    assert!(check_message("fix(tui): fix(tui): x").is_err());
+    // A scope may itself contain ": ": the subject is the part after the
+    // header, so a doubled prefix hidden behind such a scope is still found.
+    assert!(check_message("fix(a: b): fix: x").is_err());
+}
+
+#[test]
+fn message_accepts_colon_inside_scope() {
+    assert!(check_message("fix(a: b): x").is_ok());
+}
+
+#[test]
+fn message_refuses_malformed_shapes() {
+    assert!(check_message("not a header").is_err());
+    assert!(check_message("fix: ").is_err());
+    assert!(check_message("fix(tui):").is_err());
+    assert!(check_message("unknown: x").is_err());
 }

@@ -33,6 +33,7 @@ pub(crate) async fn run_member_attempt(
             ctx.dynamic_skills.as_ref(),
             &ctx.node_outputs,
             &ctx.all_node_names,
+            ctx.may_commit,
         ),
     )
     .await;

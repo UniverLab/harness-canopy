@@ -150,16 +150,20 @@ fn create_spec(port_override: Option<u16>, spec: &NewSpec<'_>) -> Result<()> {
 
     args["action"] = serde_json::json!("create");
     let text = call_tool(port_override, "spec_edit", &args)?;
-    let spec_id = serde_json::from_str::<serde_json::Value>(&text)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("spec_id")
-                .and_then(|id| id.as_str())
-                .map(str::to_string)
-        })
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|_| anyhow!("Unexpected response from spec_edit create: {text}"))?;
+    let spec_id = value
+        .get("spec_id")
+        .and_then(|id| id.as_str())
+        .map(str::to_string)
         .ok_or_else(|| anyhow!("Unexpected response from spec_edit create: {text}"))?;
     println!("Spec '{spec_id}' created.");
+    // SPECCODE: a create without a workdir drew its code from the
+    // empty-workdir counter — print the line so the operator sets a workdir
+    // before queueing.
+    if let Some(line) = value.get("warning_workdir").and_then(|line| line.as_str()) {
+        println!("{line}");
+    }
 
     if let Some(queue_id) = spec.queue {
         let mut queue_args = serde_json::json!({ "queue_id": queue_id, "spec_id": spec_id });

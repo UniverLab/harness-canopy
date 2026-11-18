@@ -7,7 +7,7 @@ use crate::daemon::handler_formatting::{
 };
 use crate::daemon::handler_specs_helpers::{
     normalize_spec_intent, spec_create_result, spec_review_enabled, spec_summary_json,
-    validate_at_least_one_bool, INTENT_REQUIRED,
+    validate_at_least_one_bool,
 };
 use crate::daemon::handler_validate::{
     resolve_prefix_or_error, validate_non_empty, validate_position_conflict,
@@ -20,7 +20,7 @@ use crate::db::Database;
 use crate::domain::graphs::{
     validate_spec_description_template, GraphSpec, GraphSpecStatus, SpecAdminStatusOutcome,
 };
-use crate::domain::spec_type::{parse_conventional_title, resolve_spec_naming};
+use crate::domain::spec_type::{check_subject, resolve_spec_naming};
 use crate::domain::specs::{extract_spec_section, SpecSection, SpecSectionResult};
 use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::ErrorData as McpError;
@@ -53,6 +53,11 @@ impl TaskTriggerHandler {
         // type is parsed — type and scope come from the title, the name is
         // stored as the subject alone; explicit type/scope beat the title.
         let naming = resolve_spec_naming(params.spec_type, params.spec_scope, name);
+        // Every stored subject obeys the shared subject rule (a name that
+        // carries a header on a typed spec is refused either way).
+        if let Err(error) = check_subject(naming.spec_type, &naming.name) {
+            return Ok(error_result(&error));
+        }
         if graph.require_spec_type && naming.spec_type.is_none() {
             return Ok(error_result(&format!(
                 "Spec '{}' has no type: graph '{}' requires a spec type (one of feat, fix, \
@@ -182,39 +187,21 @@ impl TaskTriggerHandler {
             }
         }
 
-        // SPECCODE: graph_edit mirrors spec_edit update's type/scope flow,
-        // including the legacy-spec code assignment on first type.
-        if let Some(spec_type) = params.spec_type {
-            let code: Option<String> = if spec.spec_code.is_some() {
-                None
-            } else {
-                let key = self
-                    .db
-                    .spec_code_counter_key(&spec)
-                    .map_err(internal_error)?;
-                Some(
-                    self.db
-                        .next_spec_code(&key, spec_type)
-                        .map_err(internal_error)?,
-                )
-            };
-            let scope = params
-                .spec_scope
-                .as_deref()
-                .map(str::trim)
-                .filter(|scope| !scope.is_empty())
-                .map(str::to_string)
-                .or_else(|| spec.spec_scope.clone());
-            self.db
-                .set_graph_spec_type(&spec_id, spec_type, scope.as_deref(), code.as_deref())
-                .map_err(internal_error)?;
-        } else if let Some(scope) = params.spec_scope.as_deref().map(str::trim) {
-            if let Some(existing_type) = spec.spec_type {
-                self.db
-                    .set_graph_spec_type(&spec_id, existing_type, Some(scope), None)
-                    .map_err(internal_error)?;
-            }
-        }
+        // SPECCODE: a conventional title in `name` is parsed exactly like
+        // the other surfaces; the stored name is the subject alone; a type
+        // change through the name never re-codes a coded spec.
+        let store_name = match Self::apply_graph_spec_naming(
+            &self.db,
+            &spec_id,
+            &spec,
+            name,
+            params.spec_type,
+            &params.spec_scope,
+        ) {
+            Ok(Ok(store_name)) => store_name,
+            Ok(Err(e)) => return Ok(e),
+            Err(e) => return Err(e),
+        };
 
         if let Err(e) = validate_at_least_one_bool(
             &[
@@ -233,17 +220,71 @@ impl TaskTriggerHandler {
         self.db
             .update_graph_spec_details(
                 &spec_id,
-                name,
+                store_name.as_deref(),
                 description,
                 params.position,
                 params.parallelizable,
             )
             .map_err(internal_error)?;
-        if name.is_some() || description.is_some() {
+        if store_name.is_some() || description.is_some() {
             crate::daemon::handler_specs_helpers::mark_spec_dirty_for_review(&self.db, &spec_id)?;
         }
 
         Ok(build_spec_update_response(&spec_id))
+    }
+
+    /// SPECCODE: resolve a `graph_edit update_spec` name through the shared
+    /// conventional-title parse, validate the stored subject, and write a
+    /// newly-assigned type/scope/code. Returns the subject to store (`None`
+    /// when no name was given). A name carrying a header on a typed spec is
+    /// refused; an already-coded spec keeps its code on a type change.
+    fn apply_graph_spec_naming(
+        db: &Database,
+        spec_id: &str,
+        spec: &GraphSpec,
+        name: Option<&str>,
+        explicit_type: Option<crate::domain::graphs::SpecType>,
+        explicit_scope: &Option<String>,
+    ) -> Result<Result<Option<String>, CallToolResult>, McpError> {
+        let naming =
+            name.map(|raw| resolve_spec_naming(explicit_type, explicit_scope.clone(), raw));
+        let effective_type = naming
+            .as_ref()
+            .and_then(|naming| naming.spec_type)
+            .or(explicit_type)
+            .or(spec.spec_type);
+        let effective_scope = match explicit_scope {
+            Some(scope) => Some(scope.clone()),
+            None => naming
+                .as_ref()
+                .and_then(|naming| naming.scope.clone())
+                .or_else(|| spec.spec_scope.clone()),
+        };
+        let effective_name: &str = naming
+            .as_ref()
+            .map(|naming| naming.name.as_str())
+            .or(name)
+            .unwrap_or(&spec.name);
+        if let Err(error) = check_subject(effective_type, effective_name) {
+            return Ok(Err(error_result(&error)));
+        }
+        if let Some(spec_type) = effective_type {
+            if spec.spec_type.is_none() {
+                let key = db.spec_code_counter_key(spec).map_err(internal_error)?;
+                let code = db.next_spec_code(&key, spec_type).map_err(internal_error)?;
+                db.set_graph_spec_type(spec_id, spec_type, effective_scope.as_deref(), Some(&code))
+                    .map_err(internal_error)?;
+            } else if effective_type != spec.spec_type || effective_scope != spec.spec_scope {
+                db.set_graph_spec_type(spec_id, spec_type, effective_scope.as_deref(), None)
+                    .map_err(internal_error)?;
+            }
+        } else if let Some(scope) = explicit_scope.as_deref().map(str::trim) {
+            if let Some(existing_type) = spec.spec_type {
+                db.set_graph_spec_type(spec_id, existing_type, Some(scope), None)
+                    .map_err(internal_error)?;
+            }
+        }
+        Ok(Ok(naming.map(|naming| naming.name)))
     }
 
     pub(crate) async fn graph_remove_spec_impl(
@@ -315,9 +356,13 @@ impl TaskTriggerHandler {
         // SPECCODE: a conventional title (`fix(tui): ...`) without an
         // explicit type is parsed — type and scope come from the title and
         // the name is stored as the subject alone; an explicit type/scope
-        // beat the title. Untyped, non-conventional creates still succeed
-        // (never backfilled) but answer with a `warning`.
+        // beat the title.
         let naming = resolve_spec_naming(params.spec_type, params.spec_scope, name);
+        // Every stored subject obeys the shared subject rule (the header
+        // check is skipped on untyped specs, which store the name verbatim).
+        if let Err(error) = check_subject(naming.spec_type, &naming.name) {
+            return Ok(error_result(&error));
+        }
         // The code counts against the spec's own workdir tag (backlog specs
         // are not graph-bound yet), empty string when untagged.
         let code = match &naming.spec_type {
@@ -334,6 +379,7 @@ impl TaskTriggerHandler {
         } else {
             crate::domain::graphs::SpecReviewState::Approved
         };
+        let no_workdir = workdir.is_none();
         let spec = GraphSpec {
             intent,
             id: uuid::Uuid::new_v4().to_string(),
@@ -365,7 +411,7 @@ impl TaskTriggerHandler {
         if review_enabled {
             crate::graph_engine::spec_review::wake_spec_review_worker();
         }
-        Ok(spec_create_result(&spec.id, &naming))
+        Ok(spec_create_result(&spec.id, &naming, no_workdir))
     }
 
     pub(crate) async fn spec_list_impl(
@@ -442,194 +488,6 @@ impl TaskTriggerHandler {
         Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&spec_summary_json(&spec, true)).unwrap_or_default(),
         )]))
-    }
-
-    pub(crate) async fn spec_edit_update_impl(
-        &self,
-        params: SpecUpdateParams,
-    ) -> Result<CallToolResult, McpError> {
-        let spec_id = match resolve_prefix_or_error(
-            &self.db,
-            params.spec_id.trim(),
-            |db, id| db.resolve_spec_id_by_prefix(id, None),
-            "spec",
-        ) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        let spec = match validate_spec_exists(&self.db, &spec_id) {
-            Ok(spec) => spec,
-            Err(e) => return Ok(error_result(&e)),
-        };
-
-        let name = match params.name.as_deref().map(str::trim) {
-            Some("") => return Ok(error_result("Spec name must not be empty.")),
-            Some(value) => Some(value),
-            None => None,
-        };
-        let description = match params.description.as_deref().map(str::trim) {
-            Some("") => {
-                return Ok(error_result(
-                    "Spec description must not be empty and must follow the template.",
-                ))
-            }
-            Some(value) => {
-                if let Err(error) = validate_spec_description_template(value) {
-                    return Ok(error_result(&error));
-                }
-                Some(value)
-            }
-            None => None,
-        };
-        let workdir = match &params.workdir {
-            Some(Some(value)) => {
-                let trimmed = value.trim();
-                if let Err(e) = validate_spec_workdir(trimmed) {
-                    return Ok(error_result(&e));
-                }
-                Some(Some(trimmed))
-            }
-            Some(None) => Some(None),
-            None => None,
-        };
-        // Some(..) means "write it" (an empty value clears the column);
-        // None means "leave it unchanged". While the review is on, an update
-        // that would leave the spec without an intent is refused.
-        let review_enabled = spec_review_enabled()?;
-        let update_intent = match params.intent.as_deref() {
-            Some(raw) => match normalize_spec_intent(Some(raw), review_enabled) {
-                Ok(intent) => Some(intent),
-                Err(e) => return Ok(error_result(&e)),
-            },
-            None if review_enabled && spec.intent.is_none() => {
-                return Ok(error_result(INTENT_REQUIRED))
-            }
-            None => None,
-        };
-
-        self.apply_spec_type_update(&spec, &spec_id, &params, name)?;
-
-        let adopts_type_by_name = params.spec_type.is_none()
-            && params.spec_scope.is_none()
-            && spec.spec_type.is_none()
-            && name.is_some_and(|n| parse_conventional_title(n).is_some());
-        if let Err(e) = validate_at_least_one_bool(
-            &[
-                name.is_some(),
-                description.is_some(),
-                workdir.is_some(),
-                params.spec_type.is_some(),
-                params.spec_scope.is_some(),
-                adopts_type_by_name,
-                update_intent.is_some(),
-            ],
-            "spec_edit update",
-        ) {
-            return Ok(error_result(&e));
-        }
-
-        // A name-only update that adopted a conventional title on an untyped
-        // spec already stored its subject in the adoption branch above; the
-        // pass-through write below must not overwrite it with the full title
-        // again (the commit message would repeat the type).
-        let changed = name.is_some()
-            || description.is_some()
-            || workdir.is_some()
-            || update_intent.is_some()
-            || params.spec_type.is_some()
-            || params.spec_scope.is_some()
-            || adopts_type_by_name;
-        self.db
-            .update_spec_tag_details(
-                &spec_id,
-                if adopts_type_by_name { None } else { name },
-                description,
-                workdir,
-            )
-            .map_err(internal_error)?;
-        if let Some(intent) = &update_intent {
-            self.db
-                .set_graph_spec_intent(&spec_id, intent.as_deref())
-                .map_err(internal_error)?;
-        }
-        if changed {
-            crate::daemon::handler_specs_helpers::mark_spec_dirty_for_review(&self.db, &spec_id)?;
-        }
-
-        Ok(build_spec_update_response(&spec_id))
-    }
-
-    // SPECCODE: type/scope flow like every other updatable field. A type
-    // set on a legacy spec (no code yet) assigns its immutable code at
-    // this moment; a later type change keeps the existing code (never
-    // renumbered). Where the code counts: the bound graph's workdir,
-    // else the spec's own workdir tag, both else "".
-    fn apply_spec_type_update(
-        &self,
-        spec: &GraphSpec,
-        spec_id: &str,
-        params: &SpecUpdateParams,
-        name: Option<&str>,
-    ) -> Result<(), McpError> {
-        if let Some(spec_type) = params.spec_type {
-            let code: Option<String> = if spec.spec_code.is_some() {
-                None
-            } else {
-                let key = self
-                    .db
-                    .spec_code_counter_key(spec)
-                    .map_err(internal_error)?;
-                Some(
-                    self.db
-                        .next_spec_code(&key, spec_type)
-                        .map_err(internal_error)?,
-                )
-            };
-            let scope: Option<String> = match params.spec_scope.as_ref().and_then(|s| s.as_deref())
-            {
-                Some(scope) if !scope.trim().is_empty() => Some(scope.trim().to_string()),
-                _ => spec.spec_scope.as_ref().cloned(),
-            };
-            self.db
-                .set_graph_spec_type(spec_id, spec_type, scope.as_deref(), code.as_deref())
-                .map_err(internal_error)?;
-        } else if let Some(scope) = &params.spec_scope {
-            // Scope-only tweak: needs the existing type to keep the shape.
-            if let Some(existing_type) = spec.spec_type {
-                self.db
-                    .set_graph_spec_type(spec_id, existing_type, scope.as_deref(), None)
-                    .map_err(internal_error)?;
-            }
-        } else if let Some(new_name) = name {
-            // A conventional title adopted through a name-only update on an
-            // untyped spec: the title's type and scope land with it, and the
-            // stored name becomes the subject alone.
-            if spec.spec_type.is_none() {
-                let naming = resolve_spec_naming(None, None, new_name);
-                if let Some(spec_type) = naming.spec_type {
-                    let key = self
-                        .db
-                        .spec_code_counter_key(spec)
-                        .map_err(internal_error)?;
-                    let code = self
-                        .db
-                        .next_spec_code(&key, spec_type)
-                        .map_err(internal_error)?;
-                    self.db
-                        .set_graph_spec_type(
-                            spec_id,
-                            spec_type,
-                            naming.scope.as_deref(),
-                            Some(&code),
-                        )
-                        .map_err(internal_error)?;
-                    self.db
-                        .update_spec_tag_details(spec_id, Some(&naming.name), None, None)
-                        .map_err(internal_error)?;
-                }
-            }
-        }
-        Ok(())
     }
 
     pub(crate) async fn spec_edit_set_status_impl(

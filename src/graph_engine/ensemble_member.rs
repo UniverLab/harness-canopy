@@ -20,6 +20,9 @@ pub(crate) struct EnsembleMemberContext {
     /// CB82: the engine's shutdown flag — `drive_ensemble_member` is a static
     /// method with no `&GraphEngine`, so the flag travels in the context.
     pub(crate) shutdown: Arc<AtomicBool>,
+    /// Whether this member's ensemble holds commit rights (CM28): a
+    /// committing member never spawns on a malformed prebuilt message.
+    pub(crate) may_commit: bool,
     /// Mutex set this member run acquires ahead of every attempt: its node's
     /// own plus the ensemble's.
     pub(crate) mutex_resources: Vec<String>,
@@ -120,6 +123,7 @@ impl GraphEngine {
         initial_resume_candidate: Option<String>,
         resumable_sessions: &mut HashMap<String, String>,
         ensemble_mutex: &[String],
+        may_commit: bool,
     ) -> Result<(NodeExecution, bool)> {
         let bound_minutes = member_timeout_minutes
             .map(|minutes| minutes.max(0) as u64)
@@ -171,6 +175,7 @@ impl GraphEngine {
             bound_minutes,
             member_timeout_minutes,
             shutdown: Arc::clone(&self.shutdown),
+            may_commit,
             mutex_resources,
         };
 
@@ -404,6 +409,7 @@ impl GraphEngine {
                     candidate.clone(),
                     resumable_sessions,
                     &ensemble.mutex,
+                    details.ensemble.commit_rights,
                 )
                 .await?;
             let resumed_start_failed = cascade_is_resumed_start_failed(
@@ -527,6 +533,7 @@ impl GraphEngine {
                     resume_candidate,
                     resumable_sessions,
                     &ensemble.mutex,
+                    details.ensemble.commit_rights,
                 )
                 .await?;
             if member_had_no_verdict {
