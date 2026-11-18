@@ -163,14 +163,14 @@ filtered to the selected project's workdir.
 ## Spec queues
 
 A **queue** is an ordered list of existing specs decoupled from any one
-graph. When a graph runs against a queue, it drains the queue's pending
-specs (in queue order) through the graph instead of its own
-bound specs:
+graph. When a graph runs against a queue, it drains the queue's review-approved
+pending specs (in queue order) through the graph instead of its own
+bound specs; non-approved pending members are skipped and logged once:
 
 | Tool | Description |
 |---|---|
 | `queue` `create` | Create an empty queue |
-| `queue` `add_spec` | Append a spec to a queue — a grouped add lands after the group's last pending member |
+| `queue` `add_spec` | Append a spec to a queue — a grouped add lands after the group's last pending member and is refused if the spec is not review-approved |
 | `queue` `list` | List a queue's members (or all queues), each with its `intent` |
 | `queue` `remove_spec` | Remove a spec from a queue |
 | `queue` `reorder` | Full replacement of a queue's order |

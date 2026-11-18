@@ -298,10 +298,11 @@ specs and picks the first one still `pending`, instead of working through a
 list captured when the run started. A spec added with `graph_edit` `attach_spec`
 while the graph runs is therefore never left behind: one bound at a position
 after the current spec runs later, in position order, and one bound at an
-earlier position runs right after the current spec. `graph_completed` is
-emitted only when no bound spec is left runnable; if a run would settle
-with one still `pending` — or one left `running` or `interrupted` by a
-stale state — the graph fails instead, naming those spec ids in its
+earlier position runs right after the current spec. A bound-spec run (without a
+queue) refuses to start when a pending bound spec is not review-approved.
+`graph_completed` is emitted only when no bound spec is left runnable; if a run
+would settle with one still `pending` — or one left `running` or `interrupted`
+by a stale state — the graph fails instead, naming those spec ids in its
 `graph_failed` event, and `on_completed` hooks do not fire.
 `graph_control` `continue` then picks the pending spec up.
 
