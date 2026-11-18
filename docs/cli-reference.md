@@ -878,7 +878,11 @@ is on does not block writes to other settings. When the review is on, each
 spec carries `review_state` (`unreviewed`, `in_review`, `approved`,
 `rejected`, `review_error`), `review_tier` (`trivial` or `normal`, set when
 approved) and `review_findings` (`[{severity, text}]`). Only approved specs
-can run; a value router can read `spec_tier`.
+can run; a value router can read `spec_tier`. When the validation queue for
+a session drains — none of that session's specs still `unreviewed` or
+`in_review` — the session that created them receives exactly one message
+summarizing the verdict and findings of every spec reviewed since the last
+drain; specs with no recorded session produce no message.
 
 ## Spec queues
 
