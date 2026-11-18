@@ -134,7 +134,7 @@ a workdir for filtering:
 | `spec` `list` | List specs (filterable by workdir, status), each with its `intent` |
 | `spec` `get` | One spec with its full description and `intent` |
 | `spec_edit` `create` | Create a standalone spec, optionally with an `intent` |
-| `spec_edit` `update` | Update a spec's name, description, workdir tag, or `intent` |
+| `spec_edit` `update` | Update a spec's name, description, workdir tag, or `intent`. A conventional name is parsed like `create` (subject stored alone), and setting or changing the workdir of an unbound, never-run spec re-codes it from the new workdir's counter |
 | `spec_edit` `delete` | Delete an unbound spec |
 | `spec_edit` `set_status` | Admin transition: complete, skip, or reopen a standalone spec |
 | `spec` `section` | Extract one canonical section from a spec body |
