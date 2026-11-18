@@ -313,11 +313,12 @@ impl TaskTriggerHandler {
         let mut params = params.into_value();
         NodeObject::coerce(&mut params);
         let action = NODE.validate(&params)?;
+        let spec = NODE.action(action).expect("validated action");
         match action {
             "list" => self.node_list_impl().await,
-            "get" => self.node_get_impl(action_params(&params)?).await,
-            "install" => self.node_install_impl(action_params(&params)?).await,
-            "remove" => self.node_remove_impl(action_params(&params)?).await,
+            "get" => self.node_get_impl(action_params(&params, spec)?).await,
+            "install" => self.node_install_impl(action_params(&params, spec)?).await,
+            "remove" => self.node_remove_impl(action_params(&params, spec)?).await,
             _ => unreachable!("validated action"),
         }
     }
@@ -340,28 +341,32 @@ impl TaskTriggerHandler {
         let mut params = params.into_value();
         IntelligenceAdminObject::coerce(&mut params);
         let action = INTELLIGENCE_ADMIN.validate(&params)?;
+        let spec = INTELLIGENCE_ADMIN.action(action).expect("validated action");
         match action {
             "delete_node" => {
-                self.intelligence_admin_delete_node_impl(action_params(&params)?, parts.as_ref())
-                    .await
+                self.intelligence_admin_delete_node_impl(
+                    action_params(&params, spec)?,
+                    parts.as_ref(),
+                )
+                .await
             }
             "delete_relation" => {
                 self.intelligence_admin_delete_relation_impl(
-                    action_params(&params)?,
+                    action_params(&params, spec)?,
                     parts.as_ref(),
                 )
                 .await
             }
             "walk" => {
-                self.intelligence_admin_walk_impl(action_params(&params)?)
+                self.intelligence_admin_walk_impl(action_params(&params, spec)?)
                     .await
             }
             "list_projects" => {
-                self.intelligence_admin_list_projects_impl(action_params(&params)?)
+                self.intelligence_admin_list_projects_impl(action_params(&params, spec)?)
                     .await
             }
             "link_projects" => {
-                self.intelligence_admin_link_projects_impl(action_params(&params)?)
+                self.intelligence_admin_link_projects_impl(action_params(&params, spec)?)
                     .await
             }
             _ => unreachable!("validated action"),
@@ -384,11 +389,21 @@ impl TaskTriggerHandler {
         let mut params = params.into_value();
         ProjectObject::coerce(&mut params);
         let action = PROJECT.validate(&params)?;
+        let spec = PROJECT.action(action).expect("validated action");
         match action {
-            "register" => self.project_register_impl(action_params(&params)?).await,
-            "remap" => self.project_remap_impl(action_params(&params)?).await,
-            "search" => self.project_search_impl(action_params(&params)?).await,
-            "update" => self.project_update_impl(action_params(&params)?).await,
+            "register" => {
+                self.project_register_impl(action_params(&params, spec)?)
+                    .await
+            }
+            "remap" => self.project_remap_impl(action_params(&params, spec)?).await,
+            "search" => {
+                self.project_search_impl(action_params(&params, spec)?)
+                    .await
+            }
+            "update" => {
+                self.project_update_impl(action_params(&params, spec)?)
+                    .await
+            }
             _ => unreachable!("validated action"),
         }
     }
@@ -409,17 +424,18 @@ impl TaskTriggerHandler {
         let mut params = params.into_value();
         ScheduledPromptObject::coerce(&mut params);
         let action = SCHEDULED_PROMPTS.validate(&params)?;
+        let spec = SCHEDULED_PROMPTS.action(action).expect("validated action");
         match action {
             "create" => {
-                self.scheduled_prompt_create_impl(action_params(&params)?, parts.as_ref())
+                self.scheduled_prompt_create_impl(action_params(&params, spec)?, parts.as_ref())
                     .await
             }
             "list" => {
-                self.scheduled_prompt_list_impl(action_params(&params)?, parts.as_ref())
+                self.scheduled_prompt_list_impl(action_params(&params, spec)?, parts.as_ref())
                     .await
             }
             "cancel" => {
-                self.scheduled_prompt_cancel_impl(action_params(&params)?)
+                self.scheduled_prompt_cancel_impl(action_params(&params, spec)?)
                     .await
             }
             _ => unreachable!("validated action"),
@@ -440,9 +456,10 @@ impl TaskTriggerHandler {
         let mut params = params.into_value();
         SkillObject::coerce(&mut params);
         let action = SKILL.validate(&params)?;
+        let spec = SKILL.action(action).expect("validated action");
         match action {
             "list" => self.skill_list_impl().await,
-            "get" => self.skill_get_impl(action_params(&params)?).await,
+            "get" => self.skill_get_impl(action_params(&params, spec)?).await,
             _ => unreachable!("validated action"),
         }
     }
@@ -462,12 +479,16 @@ impl TaskTriggerHandler {
         let mut params = params.into_value();
         SubagentObject::coerce(&mut params);
         let action = SUBAGENT.validate(&params)?;
+        let spec = SUBAGENT.action(action).expect("validated action");
         match action {
             "spawn" => {
-                self.subagent_spawn_impl(action_params(&params)?, parts.as_ref())
+                self.subagent_spawn_impl(action_params(&params, spec)?, parts.as_ref())
                     .await
             }
-            "collect" => self.subagent_collect_impl(action_params(&params)?).await,
+            "collect" => {
+                self.subagent_collect_impl(action_params(&params, spec)?)
+                    .await
+            }
             _ => unreachable!("validated action"),
         }
     }
@@ -487,9 +508,10 @@ impl TaskTriggerHandler {
         let mut params = params.into_value();
         RagObject::coerce(&mut params);
         let action = RAG.validate(&params)?;
+        let spec = RAG.action(action).expect("validated action");
         match action {
             "search" => {
-                self.rag_search_impl(action_params(&params)?, parts.as_ref())
+                self.rag_search_impl(action_params(&params, spec)?, parts.as_ref())
                     .await
             }
             "compact" => self.rag_compact_impl().await,
@@ -515,19 +537,20 @@ impl TaskTriggerHandler {
         let mut params = params.into_value();
         IdentityObject::coerce(&mut params);
         let action = IDENTITY.validate(&params)?;
+        let spec = IDENTITY.action(action).expect("validated action");
         match action {
             "get" => self.identity_get_impl(parts.as_ref()).await,
             "evolve" => {
-                self.identity_evolve_impl(action_params(&params)?, parts.as_ref())
+                self.identity_evolve_impl(action_params(&params, spec)?, parts.as_ref())
                     .await
             }
             "list_seeds" => self.identity_list_seeds_impl().await,
             "create_seed" => {
-                self.identity_create_seed_impl(action_params(&params)?, parts.as_ref())
+                self.identity_create_seed_impl(action_params(&params, spec)?, parts.as_ref())
                     .await
             }
             "remove_seed" => {
-                self.identity_remove_seed_impl(action_params(&params)?)
+                self.identity_remove_seed_impl(action_params(&params, spec)?)
                     .await
             }
             _ => unreachable!("validated action"),
@@ -547,8 +570,12 @@ impl TaskTriggerHandler {
         let mut params = params.into_value();
         CatalogueObject::coerce(&mut params);
         let action = CATALOGUE.validate(&params)?;
+        let spec = CATALOGUE.action(action).expect("validated action");
         match action {
-            "search" => self.catalogue_search_impl(action_params(&params)?).await,
+            "search" => {
+                self.catalogue_search_impl(action_params(&params, spec)?)
+                    .await
+            }
             _ => unreachable!("validated action"),
         }
     }

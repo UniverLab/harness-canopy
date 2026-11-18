@@ -77,11 +77,15 @@ impl TaskTriggerHandler {
         let mut params = params.into_value();
         SandboxObject::coerce(&mut params);
         let action = SANDBOX.validate(&params)?;
+        let spec = SANDBOX.action(action).expect("validated action");
         match action {
-            "list" => self.sandbox_list_impl(action_params(&params)?),
-            "get" => self.sandbox_get_impl(&action_params(&params)?),
-            "land" => self.sandbox_land_impl(action_params(&params)?).await,
-            "discard" => self.sandbox_discard_impl(action_params(&params)?).await,
+            "list" => self.sandbox_list_impl(action_params(&params, spec)?),
+            "get" => self.sandbox_get_impl(&action_params(&params, spec)?),
+            "land" => self.sandbox_land_impl(action_params(&params, spec)?).await,
+            "discard" => {
+                self.sandbox_discard_impl(action_params(&params, spec)?)
+                    .await
+            }
             _ => unreachable!("validated action"),
         }
     }

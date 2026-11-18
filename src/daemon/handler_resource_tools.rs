@@ -470,11 +470,12 @@ impl TaskTriggerHandler {
         let mut params = params.into_value();
         SpecObject::coerce(&mut params);
         let action = SPEC.validate(&params)?;
+        let spec = SPEC.action(action).expect("validated action");
         match action {
-            "list" => self.spec_list_impl(action_params(&params)?).await,
-            "get" => self.spec_get_impl(action_params(&params)?).await,
-            "section" => self.spec_section_impl(action_params(&params)?).await,
-            "notes" => self.spec_notes_impl(action_params(&params)?).await,
+            "list" => self.spec_list_impl(action_params(&params, spec)?).await,
+            "get" => self.spec_get_impl(action_params(&params, spec)?).await,
+            "section" => self.spec_section_impl(action_params(&params, spec)?).await,
+            "notes" => self.spec_notes_impl(action_params(&params, spec)?).await,
             _ => unreachable!("validated action"),
         }
     }
@@ -497,16 +498,26 @@ impl TaskTriggerHandler {
         let mut params = params.into_value();
         SpecEditObject::coerce(&mut params);
         let action = SPEC_EDIT.validate(&params)?;
+        let spec = SPEC_EDIT.action(action).expect("validated action");
         match action {
-            "create" => self.spec_edit_create_impl(action_params(&params)?).await,
-            "update" => self.spec_edit_update_impl(action_params(&params)?).await,
-            "delete" => self.spec_edit_delete_impl(action_params(&params)?).await,
+            "create" => {
+                self.spec_edit_create_impl(action_params(&params, spec)?)
+                    .await
+            }
+            "update" => {
+                self.spec_edit_update_impl(action_params(&params, spec)?)
+                    .await
+            }
+            "delete" => {
+                self.spec_edit_delete_impl(action_params(&params, spec)?)
+                    .await
+            }
             "set_status" => {
-                self.spec_edit_set_status_impl(action_params(&params)?)
+                self.spec_edit_set_status_impl(action_params(&params, spec)?)
                     .await
             }
             "note_write" => {
-                self.spec_edit_note_write_impl(action_params(&params)?)
+                self.spec_edit_note_write_impl(action_params(&params, spec)?)
                     .await
             }
             _ => unreachable!("validated action"),
@@ -531,13 +542,23 @@ impl TaskTriggerHandler {
         let mut params = params.into_value();
         QueueObject::coerce(&mut params);
         let action = QUEUE.validate(&params)?;
+        let spec = QUEUE.action(action).expect("validated action");
         match action {
-            "create" => self.queue_create_impl(action_params(&params)?).await,
-            "list" => self.queue_list_impl(action_params(&params)?).await,
-            "add_spec" => self.queue_add_spec_impl(action_params(&params)?).await,
-            "remove_spec" => self.queue_remove_spec_impl(action_params(&params)?).await,
-            "reorder" => self.queue_reorder_impl(action_params(&params)?).await,
-            "set_group" => self.queue_set_group_impl(action_params(&params)?).await,
+            "create" => self.queue_create_impl(action_params(&params, spec)?).await,
+            "list" => self.queue_list_impl(action_params(&params, spec)?).await,
+            "add_spec" => {
+                self.queue_add_spec_impl(action_params(&params, spec)?)
+                    .await
+            }
+            "remove_spec" => {
+                self.queue_remove_spec_impl(action_params(&params, spec)?)
+                    .await
+            }
+            "reorder" => self.queue_reorder_impl(action_params(&params, spec)?).await,
+            "set_group" => {
+                self.queue_set_group_impl(action_params(&params, spec)?)
+                    .await
+            }
             _ => unreachable!("validated action"),
         }
     }
@@ -558,10 +579,11 @@ impl TaskTriggerHandler {
         let mut params = params.into_value();
         AgentObject::coerce(&mut params);
         let action = AGENT.validate(&params)?;
+        let spec = AGENT.action(action).expect("validated action");
         match action {
             "list" => self.agent_list_impl().await,
-            "get" => self.agent_get_impl(action_params(&params)?).await,
-            "logs" => self.agent_logs_impl(action_params(&params)?).await,
+            "get" => self.agent_get_impl(action_params(&params, spec)?).await,
+            "logs" => self.agent_logs_impl(action_params(&params, spec)?).await,
             "status" => self.agent_status_impl().await,
             _ => unreachable!("validated action"),
         }
@@ -589,24 +611,40 @@ impl TaskTriggerHandler {
         let mut params = params.into_value();
         AgentEditObject::coerce(&mut params);
         let action = AGENT_EDIT.validate(&params)?;
+        let spec = AGENT_EDIT.action(action).expect("validated action");
         match action {
             "add" => {
-                self.agent_edit_add_impl(action_params(&params)?, parts.as_ref())
+                self.agent_edit_add_impl(action_params(&params, spec)?, parts.as_ref())
                     .await
             }
             "watch" => {
-                self.agent_edit_watch_impl(action_params(&params)?, parts.as_ref())
+                self.agent_edit_watch_impl(action_params(&params, spec)?, parts.as_ref())
                     .await
             }
             "update" => {
-                self.agent_edit_update_impl(action_params(&params)?, parts.as_ref())
+                self.agent_edit_update_impl(action_params(&params, spec)?, parts.as_ref())
                     .await
             }
-            "remove" => self.agent_edit_remove_impl(action_params(&params)?).await,
-            "enable" => self.agent_edit_enable_impl(action_params(&params)?).await,
-            "disable" => self.agent_edit_disable_impl(action_params(&params)?).await,
-            "schedule" => self.agent_edit_schedule_impl(action_params(&params)?).await,
-            "run" => self.agent_edit_run_impl(action_params(&params)?).await,
+            "remove" => {
+                self.agent_edit_remove_impl(action_params(&params, spec)?)
+                    .await
+            }
+            "enable" => {
+                self.agent_edit_enable_impl(action_params(&params, spec)?)
+                    .await
+            }
+            "disable" => {
+                self.agent_edit_disable_impl(action_params(&params, spec)?)
+                    .await
+            }
+            "schedule" => {
+                self.agent_edit_schedule_impl(action_params(&params, spec)?)
+                    .await
+            }
+            "run" => {
+                self.agent_edit_run_impl(action_params(&params, spec)?)
+                    .await
+            }
             _ => unreachable!("validated action"),
         }
     }
@@ -631,22 +669,32 @@ impl TaskTriggerHandler {
         let mut params = params.into_value();
         HarnessObject::coerce(&mut params);
         let action = HARNESS.validate(&params)?;
+        let spec = HARNESS.action(action).expect("validated action");
         match action {
-            "models" => self.harness_models_impl(action_params(&params)?).await,
-            "probe" => self.harness_probe_impl(action_params(&params)?).await,
+            "models" => {
+                self.harness_models_impl(action_params(&params, spec)?)
+                    .await
+            }
+            "probe" => self.harness_probe_impl(action_params(&params, spec)?).await,
             "probe_recent" => {
-                self.harness_probe_recent_impl(action_params(&params)?)
+                self.harness_probe_recent_impl(action_params(&params, spec)?)
                     .await
             }
             "refresh_registry" => self.harness_refresh_registry_impl().await,
-            "roster_list" => self.harness_roster_list_impl(action_params(&params)?).await,
-            "roster_set" => self.harness_roster_set_impl(action_params(&params)?).await,
+            "roster_list" => {
+                self.harness_roster_list_impl(action_params(&params, spec)?)
+                    .await
+            }
+            "roster_set" => {
+                self.harness_roster_set_impl(action_params(&params, spec)?)
+                    .await
+            }
             "roster_clear" => {
-                self.harness_roster_clear_impl(action_params(&params)?)
+                self.harness_roster_clear_impl(action_params(&params, spec)?)
                     .await
             }
             "roster_check" => {
-                self.harness_roster_check_impl(action_params(&params)?)
+                self.harness_roster_check_impl(action_params(&params, spec)?)
                     .await
             }
             _ => unreachable!("validated action"),
@@ -670,11 +718,12 @@ impl TaskTriggerHandler {
         let mut params = params.into_value();
         ConfigObject::coerce(&mut params);
         let action = CONFIG.validate(&params)?;
+        let spec = CONFIG.action(action).expect("validated action");
         match action {
-            "get" => self.config_get_impl(action_params(&params)?).await,
-            "list" => self.config_list_impl(action_params(&params)?).await,
-            "set" => self.config_set_impl(action_params(&params)?).await,
-            "reset" => self.config_reset_impl(action_params(&params)?).await,
+            "get" => self.config_get_impl(action_params(&params, spec)?).await,
+            "list" => self.config_list_impl(action_params(&params, spec)?).await,
+            "set" => self.config_set_impl(action_params(&params, spec)?).await,
+            "reset" => self.config_reset_impl(action_params(&params, spec)?).await,
             _ => unreachable!("validated action"),
         }
     }
@@ -697,13 +746,17 @@ impl TaskTriggerHandler {
         let mut params = params.into_value();
         CrewObject::coerce(&mut params);
         let action = CREW.validate(&params)?;
+        let spec = CREW.action(action).expect("validated action");
         match action {
             "list" => self.crew_list_impl().await,
-            "get" => self.crew_get_impl(action_params(&params)?).await,
-            "create" => self.crew_create_impl(action_params(&params)?).await,
-            "update" => self.crew_update_impl(action_params(&params)?).await,
-            "delete" => self.crew_delete_impl(action_params(&params)?).await,
-            "assignments" => self.crew_assignments_impl(action_params(&params)?).await,
+            "get" => self.crew_get_impl(action_params(&params, spec)?).await,
+            "create" => self.crew_create_impl(action_params(&params, spec)?).await,
+            "update" => self.crew_update_impl(action_params(&params, spec)?).await,
+            "delete" => self.crew_delete_impl(action_params(&params, spec)?).await,
+            "assignments" => {
+                self.crew_assignments_impl(action_params(&params, spec)?)
+                    .await
+            }
             _ => unreachable!("validated action"),
         }
     }

@@ -445,18 +445,25 @@ impl TaskTriggerHandler {
         let mut params = params.into_value();
         GraphObject::coerce(&mut params);
         let action = GRAPH.validate(&params)?;
+        let spec = GRAPH.action(action).expect("validated action");
         match action {
-            "list" => self.graph_list_impl(action_params(&params)?).await,
-            "get" => self.graph_get_impl(action_params(&params)?).await,
-            "export" => self.graph_export_impl(action_params(&params)?).await,
-            "validate" => self.graph_validate_impl(action_params(&params)?).await,
-            "audit" => self.graph_audit_node_configs_impl().await,
-            "events" => self.graph_events_impl(action_params(&params)?).await,
-            "node_runs" => {
-                self.graph_node_runs_list_impl(action_params(&params)?)
+            "list" => self.graph_list_impl(action_params(&params, spec)?).await,
+            "get" => self.graph_get_impl(action_params(&params, spec)?).await,
+            "export" => self.graph_export_impl(action_params(&params, spec)?).await,
+            "validate" => {
+                self.graph_validate_impl(action_params(&params, spec)?)
                     .await
             }
-            "node_run" => self.graph_node_run_get_impl(action_params(&params)?).await,
+            "audit" => self.graph_audit_node_configs_impl().await,
+            "events" => self.graph_events_impl(action_params(&params, spec)?).await,
+            "node_runs" => {
+                self.graph_node_runs_list_impl(action_params(&params, spec)?)
+                    .await
+            }
+            "node_run" => {
+                self.graph_node_run_get_impl(action_params(&params, spec)?)
+                    .await
+            }
             _ => unreachable!("validated action"),
         }
     }
@@ -483,16 +490,26 @@ impl TaskTriggerHandler {
         let mut params = params.into_value();
         GraphEditObject::coerce(&mut params);
         let action = GRAPH_EDIT.validate(&params)?;
+        let spec = GRAPH_EDIT.action(action).expect("validated action");
         match action {
-            "create" => self.graph_create_impl(action_params(&params)?).await,
-            "update" => self.graph_update_impl(action_params(&params)?).await,
-            "archive" => self.graph_archive_impl(action_params(&params)?).await,
-            "restore" => self.graph_restore_impl(action_params(&params)?).await,
-            "import" => self.graph_import_impl(action_params(&params)?).await,
-            "install" => self.graph_install_impl(action_params(&params)?).await,
-            "attach_spec" => self.graph_add_spec_impl(action_params(&params)?).await,
-            "detach_spec" => self.graph_remove_spec_impl(action_params(&params)?).await,
-            "update_spec" => self.graph_update_spec_impl(action_params(&params)?).await,
+            "create" => self.graph_create_impl(action_params(&params, spec)?).await,
+            "update" => self.graph_update_impl(action_params(&params, spec)?).await,
+            "archive" => self.graph_archive_impl(action_params(&params, spec)?).await,
+            "restore" => self.graph_restore_impl(action_params(&params, spec)?).await,
+            "import" => self.graph_import_impl(action_params(&params, spec)?).await,
+            "install" => self.graph_install_impl(action_params(&params, spec)?).await,
+            "attach_spec" => {
+                self.graph_add_spec_impl(action_params(&params, spec)?)
+                    .await
+            }
+            "detach_spec" => {
+                self.graph_remove_spec_impl(action_params(&params, spec)?)
+                    .await
+            }
+            "update_spec" => {
+                self.graph_update_spec_impl(action_params(&params, spec)?)
+                    .await
+            }
             _ => unreachable!("validated action"),
         }
     }
@@ -514,11 +531,24 @@ impl TaskTriggerHandler {
         let mut params = params.into_value();
         GraphNodeObject::coerce(&mut params);
         let action = GRAPH_NODE.validate(&params)?;
+        let spec = GRAPH_NODE.action(action).expect("validated action");
         match action {
-            "add" => self.graph_add_node_impl(action_params(&params)?).await,
-            "update" => self.graph_update_node_impl(action_params(&params)?).await,
-            "delete" => self.graph_delete_node_impl(action_params(&params)?).await,
-            "copy" => self.graph_copy_node_impl(action_params(&params)?).await,
+            "add" => {
+                self.graph_add_node_impl(action_params(&params, spec)?)
+                    .await
+            }
+            "update" => {
+                self.graph_update_node_impl(action_params(&params, spec)?)
+                    .await
+            }
+            "delete" => {
+                self.graph_delete_node_impl(action_params(&params, spec)?)
+                    .await
+            }
+            "copy" => {
+                self.graph_copy_node_impl(action_params(&params, spec)?)
+                    .await
+            }
             _ => unreachable!("validated action"),
         }
     }
@@ -538,10 +568,20 @@ impl TaskTriggerHandler {
         let mut params = params.into_value();
         GraphEdgeObject::coerce(&mut params);
         let action = GRAPH_EDGE.validate(&params)?;
+        let spec = GRAPH_EDGE.action(action).expect("validated action");
         match action {
-            "add" => self.graph_add_edge_impl(action_params(&params)?).await,
-            "update" => self.graph_update_edge_impl(action_params(&params)?).await,
-            "delete" => self.graph_delete_edge_impl(action_params(&params)?).await,
+            "add" => {
+                self.graph_add_edge_impl(action_params(&params, spec)?)
+                    .await
+            }
+            "update" => {
+                self.graph_update_edge_impl(action_params(&params, spec)?)
+                    .await
+            }
+            "delete" => {
+                self.graph_delete_edge_impl(action_params(&params, spec)?)
+                    .await
+            }
             _ => unreachable!("validated action"),
         }
     }
@@ -562,17 +602,24 @@ impl TaskTriggerHandler {
         let mut params = params.into_value();
         GraphEnsembleObject::coerce(&mut params);
         let action = GRAPH_ENSEMBLE.validate(&params)?;
+        let spec = GRAPH_ENSEMBLE.action(action).expect("validated action");
         match action {
-            "add" => self.graph_add_ensemble_impl(action_params(&params)?).await,
+            "add" => {
+                self.graph_add_ensemble_impl(action_params(&params, spec)?)
+                    .await
+            }
             "update" => {
-                self.graph_update_ensemble_impl(action_params(&params)?)
+                self.graph_update_ensemble_impl(action_params(&params, spec)?)
                     .await
             }
             "delete" => {
-                self.graph_delete_ensemble_impl(action_params(&params)?)
+                self.graph_delete_ensemble_impl(action_params(&params, spec)?)
                     .await
             }
-            "copy" => self.graph_copy_ensemble_impl(action_params(&params)?).await,
+            "copy" => {
+                self.graph_copy_ensemble_impl(action_params(&params, spec)?)
+                    .await
+            }
             _ => unreachable!("validated action"),
         }
     }
@@ -596,18 +643,25 @@ impl TaskTriggerHandler {
         let mut params = params.into_value();
         GraphControlObject::coerce(&mut params);
         let action = GRAPH_CONTROL.validate(&params)?;
+        let spec = GRAPH_CONTROL.action(action).expect("validated action");
         match action {
-            "run" => self.graph_run_impl(action_params(&params)?).await,
-            "pause" => self.graph_pause_impl(action_params(&params)?).await,
-            "continue" => self.graph_continue_impl(action_params(&params)?).await,
-            "reset" => self.graph_reset_impl(action_params(&params)?).await,
-            "preflight" => self.graph_preflight_impl(action_params(&params)?).await,
+            "run" => self.graph_run_impl(action_params(&params, spec)?).await,
+            "pause" => self.graph_pause_impl(action_params(&params, spec)?).await,
+            "continue" => {
+                self.graph_continue_impl(action_params(&params, spec)?)
+                    .await
+            }
+            "reset" => self.graph_reset_impl(action_params(&params, spec)?).await,
+            "preflight" => {
+                self.graph_preflight_impl(action_params(&params, spec)?)
+                    .await
+            }
             "schedule_continue" => {
-                self.graph_schedule_continue_impl(action_params(&params)?)
+                self.graph_schedule_continue_impl(action_params(&params, spec)?)
                     .await
             }
             "schedule_autorun" => {
-                self.graph_schedule_autorun_impl(action_params(&params)?)
+                self.graph_schedule_autorun_impl(action_params(&params, spec)?)
                     .await
             }
             _ => unreachable!("validated action"),

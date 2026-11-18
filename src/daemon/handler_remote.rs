@@ -96,23 +96,24 @@ impl TaskTriggerHandler {
         let mut params = params.into_value();
         RemoteObject::coerce(&mut params);
         let action = REMOTE.validate(&params)?;
+        let spec = REMOTE.action(action).expect("validated action");
         match action {
             "status" => self.remote_status_impl(),
             "pair" => remote_pair_impl(),
             "set_enabled" => {
-                let params: RemoteSetEnabledParams = action_params(&params)?;
+                let params: RemoteSetEnabledParams = action_params(&params, spec)?;
                 remote_set_enabled_impl(params.enabled)
             }
             "revoke" => {
-                let params: RemoteRevokeParams = action_params(&params)?;
+                let params: RemoteRevokeParams = action_params(&params, spec)?;
                 self.remote_revoke_impl(params.device_id.trim())
             }
             "disconnect" => {
-                let params: RemoteDisconnectParams = action_params(&params)?;
+                let params: RemoteDisconnectParams = action_params(&params, spec)?;
                 self.remote_disconnect_impl(params.device_id.trim())
             }
             "trust_add" => {
-                let params: RemoteTrustAddParams = action_params(&params)?;
+                let params: RemoteTrustAddParams = action_params(&params, spec)?;
                 let sessions = params.sessions.unwrap_or_default();
                 let upload = params.upload.unwrap_or(false);
                 self.remote_trust_add_impl(
@@ -123,7 +124,7 @@ impl TaskTriggerHandler {
                 )
             }
             "trust_remove" => {
-                let params: RemoteTrustRemoveParams = action_params(&params)?;
+                let params: RemoteTrustRemoveParams = action_params(&params, spec)?;
                 self.remote_trust_remove_impl(params.login.trim())
             }
             _ => unreachable!("validated action"),

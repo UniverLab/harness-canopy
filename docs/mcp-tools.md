@@ -23,7 +23,8 @@ and is listed in the tool description (and in every refusal message). As a
 tolerance for clients that stringify arguments, a string that parses to a
 declared object, array, integer, number or boolean (e.g. `"5"` for a
 `limit`) is coerced back to that type before validation; anything else is
-refused with the usual per-field error.
+refused with the usual per-field error. A null value for a parameter an
+action does not declare is ignored.
 
 Graph-node sessions (agent and ensemble nodes launched by the graph engine) get
 a fixed node profile of 12 tools in `tools/list` (`CANOPY_MCP_PROFILE=node`), so

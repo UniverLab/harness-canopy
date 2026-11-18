@@ -132,6 +132,7 @@ impl ToolSpec {
             .map(String::as_str)
             .filter(|key| *key != "action")
             .filter(|key| !spec.required.contains(key) && !spec.optional.contains(key))
+            .filter(|key| !object.get(*key).is_some_and(Value::is_null))
             .collect();
         if !undeclared.is_empty() {
             return Err(self.refusal(&format!(
@@ -171,17 +172,39 @@ impl ToolSpec {
 /// struct: `action` is the dispatch key and is removed before deserialization
 /// (a struct field named `action` would otherwise always receive the
 /// dispatch value — the reason `GraphContinueParams` renamed its own to
-/// `mode`). Shapes and enrichment (field path, received value, minimal
-/// example) come from the same `deserialize_params` every typed tool uses.
+/// `mode`). Undeclared `null` keys are stripped first (see
+/// [`strip_undeclared_nulls`]), so the typed struct never sees the unused
+/// nulls some models send on every call. Shapes and enrichment (field path,
+/// received value, minimal example) come from the same
+/// `deserialize_params` every typed tool uses.
 pub(crate) fn action_params<T: DeserializeOwned + rmcp::schemars::JsonSchema>(
     params: &Value,
+    action: &ActionSpec,
 ) -> Result<T, McpError> {
+    let mut stripped = strip_undeclared_nulls(params, action);
+    if let Value::Object(map) = &mut stripped {
+        map.remove("action");
+    }
+    crate::daemon::params_extract::deserialize_params(&stripped)
+}
+
+/// Drop every `null`-valued key the validated action does not declare, so a
+/// per-action typed struct never sees the unused nulls some models send on
+/// every call. Declared parameters are untouched: a declared optional `null`
+/// keeps its current meaning, and a required `null` is still reported
+/// missing by [`ToolSpec::validate`].
+pub(crate) fn strip_undeclared_nulls(params: &Value, action: &ActionSpec) -> Value {
     let mut map = match params {
         Value::Object(map) => map.clone(),
         _ => Map::new(),
     };
-    map.remove("action");
-    crate::daemon::params_extract::deserialize_params(&Value::Object(map))
+    map.retain(|key, value| key == "action" || is_declared(action, key) || !value.is_null());
+    Value::Object(map)
+}
+
+/// A parameter name the action declares as required or optional.
+fn is_declared(action: &ActionSpec, key: &str) -> bool {
+    action.required.contains(&key) || action.optional.contains(&key)
 }
 
 // ── Typed per-tool input schemas (FR1) ───────────────────────────────
@@ -572,7 +595,8 @@ mod tests {
             id: String,
         }
         let params = json!({ "action": "get", "id": "x" });
-        let parsed: Demo = action_params(&params).expect("deserializes");
+        let get = TOOL.action("get").expect("get declared");
+        let parsed: Demo = action_params(&params, get).expect("deserializes");
         assert_eq!(parsed.id, "x");
     }
 
@@ -746,18 +770,25 @@ mod tests {
     fn macro_newtype_deserializes_into_action_params_structs() {
         // Reading every demo field here keeps the fixtures honest and pins
         // the newtype still dispatches into the same typed structs.
-        let list: DemoListParams =
-            action_params(&json!({ "action": "list", "workdir": "/w", "limit": 3 }))
-                .expect("list params");
+        let list_action = TOOL.action("list").expect("list declared");
+        let list: DemoListParams = action_params(
+            &json!({ "action": "list", "workdir": "/w", "limit": 3 }),
+            list_action,
+        )
+        .expect("list params");
         assert_eq!(list.workdir.as_deref(), Some("/w"));
         assert_eq!(list.limit, Some(3));
+        let get_action = TOOL.action("get").expect("get declared");
         let get: DemoGetParams =
-            action_params(&json!({ "action": "get", "id": "x" })).expect("get params");
+            action_params(&json!({ "action": "get", "id": "x" }), get_action).expect("get params");
         assert_eq!(get.id, "x");
         assert!(!get.compact.unwrap_or(false));
-        let rename: DemoRenameParams =
-            action_params(&json!({ "action": "rename", "id": "y", "name": "z" }))
-                .expect("rename params");
+        let rename_action = TOOL.action("rename").expect("rename declared");
+        let rename: DemoRenameParams = action_params(
+            &json!({ "action": "rename", "id": "y", "name": "z" }),
+            rename_action,
+        )
+        .expect("rename params");
         assert_eq!(rename.id.as_deref(), Some("y"));
         assert_eq!(rename.name, "z");
     }
@@ -772,5 +803,148 @@ mod tests {
             params.as_object().cloned().expect("object"),
         )));
         assert_eq!(parsed["limit"], json!(5));
+    }
+
+    // ── undeclared null tolerance (FR1/FR2) ──────────────────────
+
+    /// Every ToolSpec static in the daemon, so the table test below covers
+    /// all multi-action tools, not just the fifteen named in the spec.
+    fn all_tool_specs() -> Vec<&'static ToolSpec> {
+        vec![
+            &crate::daemon::handler_graph_tools::GRAPH,
+            &crate::daemon::handler_graph_tools::GRAPH_EDIT,
+            &crate::daemon::handler_graph_tools::GRAPH_NODE,
+            &crate::daemon::handler_graph_tools::GRAPH_EDGE,
+            &crate::daemon::handler_graph_tools::GRAPH_ENSEMBLE,
+            &crate::daemon::handler_graph_tools::GRAPH_CONTROL,
+            &crate::daemon::handler_resource_tools::SPEC,
+            &crate::daemon::handler_resource_tools::SPEC_EDIT,
+            &crate::daemon::handler_resource_tools::QUEUE,
+            &crate::daemon::handler_resource_tools::AGENT,
+            &crate::daemon::handler_resource_tools::AGENT_EDIT,
+            &crate::daemon::handler_resource_tools::HARNESS,
+            &crate::daemon::handler_resource_tools::CONFIG,
+            &crate::daemon::handler_resource_tools::CREW,
+            &crate::daemon::handler_resource_tools_final::NODE,
+            &crate::daemon::handler_resource_tools_final::INTELLIGENCE_ADMIN,
+            &crate::daemon::handler_resource_tools_final::PROJECT,
+            &crate::daemon::handler_resource_tools_final::SCHEDULED_PROMPTS,
+            &crate::daemon::handler_resource_tools_final::SKILL,
+            &crate::daemon::handler_resource_tools_final::SUBAGENT,
+            &crate::daemon::handler_resource_tools_final::RAG,
+            &crate::daemon::handler_resource_tools_final::IDENTITY,
+            &crate::daemon::handler_resource_tools_final::CATALOGUE,
+            &crate::daemon::handler_sandbox::SANDBOX,
+            &crate::daemon::handler_remote::REMOTE,
+        ]
+    }
+
+    /// Every parameter name any action of this tool declares.
+    fn tool_param_names(tool: &ToolSpec) -> Vec<&'static str> {
+        let mut names: Vec<&'static str> = tool
+            .actions
+            .iter()
+            .flat_map(|action| action.required.iter().chain(action.optional.iter()))
+            .copied()
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        names
+    }
+
+    /// A valid call for one action: its required params set to placeholders,
+    /// plus every other tool-wide param as null. Required placeholders stay
+    /// meaningful (a null required param is still missing).
+    fn base_call_with_tool_nulls(tool: &ToolSpec, action: &ActionSpec) -> Value {
+        let mut map = Map::new();
+        map.insert("action".to_string(), Value::String(action.name.to_string()));
+        for name in tool_param_names(tool) {
+            if action.required.contains(&name) {
+                map.insert(name.to_string(), Value::String("x".to_string()));
+            } else {
+                map.insert(name.to_string(), Value::Null);
+            }
+        }
+        Value::Object(map)
+    }
+
+    #[test]
+    fn undeclared_null_params_validate_for_every_action() {
+        for tool in all_tool_specs() {
+            for action in tool.actions {
+                let params = base_call_with_tool_nulls(tool, action);
+                assert!(
+                    tool.validate(&params).is_ok(),
+                    "tool `{}` action `{}` with tool-wide nulls must validate: {}",
+                    tool.name,
+                    action.name,
+                    params
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn undeclared_non_null_param_is_still_refused() {
+        for tool in all_tool_specs() {
+            for action in tool.actions {
+                let mut params = base_call_with_tool_nulls(tool, action);
+                params
+                    .as_object_mut()
+                    .expect("object")
+                    .insert("__bogus__".to_string(), json!(1));
+                match tool.validate(&params) {
+                    Ok(_) => panic!(
+                        "tool `{}` action `{}` must refuse undeclared `__bogus__`",
+                        tool.name, action.name
+                    ),
+                    Err(err) => assert!(
+                        err.message.contains("__bogus__"),
+                        "tool `{}` action `{}` refusal must name `__bogus__`: {}",
+                        tool.name,
+                        action.name,
+                        err.message
+                    ),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn null_required_param_is_still_reported_missing() {
+        let tool = &crate::daemon::handler_resource_tools::SPEC_EDIT;
+        let params = json!({ "action": "note_write", "body": null, "spec_id": "s" });
+        match tool.validate(&params) {
+            Ok(action) => panic!("expected a missing-required refusal, got Ok({action})"),
+            Err(err) => assert!(
+                err.message.contains("missing required parameter(s): body"),
+                "null required param must read as missing: {}",
+                err.message
+            ),
+        }
+    }
+
+    #[test]
+    fn spec_edit_note_write_ignores_undeclared_nulls() {
+        use crate::daemon::params::SpecNoteWriteParams;
+        let tool = &crate::daemon::handler_resource_tools::SPEC_EDIT;
+        let params = json!({
+            "action": "note_write",
+            "body": "b",
+            "spec_id": "s",
+            "reason": null,
+            "status": null,
+        });
+        assert_eq!(
+            tool.validate(&params)
+                .expect("note_write with nulls validates"),
+            "note_write"
+        );
+        let action = tool.action("note_write").expect("note_write declared");
+        let parsed: SpecNoteWriteParams =
+            action_params(&params, action).expect("note_write deserializes");
+        assert_eq!(parsed.body, "b");
+        assert_eq!(parsed.spec_id.as_deref(), Some("s"));
+        assert!(parsed.run_id.is_none());
     }
 }
