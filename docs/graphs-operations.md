@@ -160,7 +160,7 @@ retry budgets and caps. Each keeps its default until you set it.
 | `graphs.infra_backoff_seconds` | 30 | Backoff between infra retries. |
 | `graphs.straggler_timeout_minutes` | 30 | Default timeout (1–480) for a **new** ensemble; existing ensembles keep theirs. |
 | `graphs.ensemble_max_members_parallel` | 8 (range 2–16) | Largest member count a `parallel` ensemble may have. Lowering it never edits an existing ensemble. |
-| `graphs.ensemble_max_members_sequential` | 16 (range 2–32) | Largest member count for a `cascade`/`round_robin` ensemble, and the largest crew. |
+| `graphs.ensemble_max_members_sequential` | 16 (range 2–32) | Largest member count for a `cascade`/`round_robin`/`random` ensemble, and the largest crew. |
 | `graphs.check_output_max_kib` | 64 (range 16–4096) | Check-output tail kept, in KiB. |
 | `graphs.verdict_grace_seconds` | 15 (range 0–300) | Seconds an agent has to exit after filing its verdict before canopy terminates it. 0 disables the shutdown. |
 | `graphs.catalogue_url` | `https://graphs.univerlab.org` | Base URL of the catalogue `canopy graph install` and `canopy node install` fetch from. |

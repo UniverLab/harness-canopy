@@ -41,6 +41,7 @@ mod ensemble_exec;
 mod ensemble_member;
 mod ensemble_member_settle;
 mod ensemble_parallel;
+mod ensemble_random;
 mod gate_router;
 mod hooks_fire;
 mod hooks_graph;
@@ -88,6 +89,8 @@ pub(crate) use ensemble_exec::*;
 #[allow(unused_imports)]
 pub(crate) use ensemble_member::*;
 pub(crate) use ensemble_parallel::*;
+#[allow(unused_imports)]
+pub(crate) use ensemble_random::*;
 pub(crate) use gate_router::*;
 #[allow(unused_imports)]
 pub(crate) use hooks_fire::*;
@@ -129,6 +132,7 @@ impl GraphEngine {
             ) as usize)),
             dynamic_skills: None,
             spec_attempt_limit: crate::domain::settings::default_int("spec_attempt_limit") as usize,
+            random_seed: None,
             shutdown: Arc::new(AtomicBool::new(false)),
             canopy_dir: crate::domain::prompts::canopy_dir(),
             scheduled_prompt_notify: Arc::new(Notify::new()),
@@ -159,6 +163,14 @@ impl GraphEngine {
     /// very first genuine failure.
     pub fn with_spec_attempt_limit(mut self, limit: usize) -> Self {
         self.spec_attempt_limit = limit.max(1);
+        self
+    }
+
+    /// Fix the `random` ensemble kind's draws to a seed (tests only): every
+    /// dispatch then replays the same draw order.
+    #[cfg(test)]
+    pub(crate) fn with_random_seed(mut self, seed: u64) -> Self {
+        self.random_seed = Some(seed);
         self
     }
 
@@ -233,6 +245,10 @@ pub struct GraphEngine {
     /// Cross-run attempt budget (C19) — see the settings registry key
     /// `spec_attempt_limit`.
     spec_attempt_limit: usize,
+    /// Test-only seed for the `random` ensemble kind's dispatch draws.
+    /// Production leaves it `None`, so each dispatch seeds a fresh `StdRng`
+    /// from the thread RNG; a test sets it to replay a fixed draw order.
+    random_seed: Option<u64>,
     /// Process-wide daemon-shutdown flag (CB82): set once, as the first step
     /// of graceful shutdown, before any node process is SIGTERMed. Guards in
     /// `run_spec`/`spec_step`/ensemble loops check it before routing any edge

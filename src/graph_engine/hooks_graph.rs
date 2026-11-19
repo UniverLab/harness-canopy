@@ -229,6 +229,7 @@ impl GraphEngine {
         let ensemble_concurrency = Arc::clone(&self.ensemble_concurrency);
         let dynamic_skills = self.dynamic_skills.clone();
         let spec_attempt_limit = self.spec_attempt_limit;
+        let random_seed = self.random_seed;
         let shutdown = Arc::clone(&self.shutdown);
         let canopy_dir = self.canopy_dir.clone();
         let scheduled_prompt_notify = Arc::clone(&self.scheduled_prompt_notify);
@@ -240,6 +241,7 @@ impl GraphEngine {
                 ensemble_concurrency,
                 dynamic_skills,
                 spec_attempt_limit,
+                random_seed,
                 shutdown,
                 canopy_dir,
                 scheduled_prompt_notify,

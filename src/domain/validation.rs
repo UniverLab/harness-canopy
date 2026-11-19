@@ -123,7 +123,7 @@ fn ensure_ensemble_membership_bounds(details: &EnsembleDetails) -> Result<(), St
 
     let min_members = match ensemble.kind {
         EnsembleKind::Parallel => 2,
-        EnsembleKind::Cascade | EnsembleKind::RoundRobin => 1,
+        EnsembleKind::Cascade | EnsembleKind::RoundRobin | EnsembleKind::Random => 1,
     };
     if details.members.len() < min_members {
         return Err(format!("{label} has fewer than {min_members} members."));

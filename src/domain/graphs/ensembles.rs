@@ -25,6 +25,10 @@ use crate::domain::graphs::GraphEdgeCondition;
 ///   run. Quota savings is the reason this type exists.
 /// - `RoundRobin`: invocations rotate across members by position, spreading
 ///   quota consumption. Requires persistent state (`round_robin_index`).
+/// - `Random`: each dispatch draws one member uniformly at random; a member
+///   that fails (infra crash or a real failure verdict) falls through to the
+///   next candidate drawn from the members not yet tried, until one passes or
+///   all were tried. No persistent state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EnsembleKind {
@@ -32,6 +36,7 @@ pub enum EnsembleKind {
     Parallel,
     Cascade,
     RoundRobin,
+    Random,
 }
 
 impl EnsembleKind {
@@ -40,6 +45,7 @@ impl EnsembleKind {
             EnsembleKind::Parallel => "parallel",
             EnsembleKind::Cascade => "cascade",
             EnsembleKind::RoundRobin => "round_robin",
+            EnsembleKind::Random => "random",
         }
     }
 
@@ -48,6 +54,7 @@ impl EnsembleKind {
             "parallel" => Some(EnsembleKind::Parallel),
             "cascade" => Some(EnsembleKind::Cascade),
             "round_robin" => Some(EnsembleKind::RoundRobin),
+            "random" => Some(EnsembleKind::Random),
             _ => None,
         }
     }
@@ -88,13 +95,15 @@ impl Default for MemberCaps {
 
 /// Per-kind member-count bounds. `parallel` runs every member concurrently,
 /// so it has its own cap (`graphs.ensemble_max_members_parallel`, default 8);
-/// `cascade` and `round_robin` dispatch one member at a time, so a longer
-/// list only adds rotation/fallback depth, and they share the sequential cap
-/// (`graphs.ensemble_max_members_sequential`, default 16).
+/// `cascade`, `round_robin` and `random` dispatch one member at a time, so a
+/// longer list only adds rotation/fallback depth, and they share the
+/// sequential cap (`graphs.ensemble_max_members_sequential`, default 16).
 pub fn member_bounds(kind: EnsembleKind, caps: MemberCaps) -> (usize, usize) {
     match kind {
         EnsembleKind::Parallel => (ENSEMBLE_MIN_MEMBERS, caps.parallel),
-        EnsembleKind::Cascade | EnsembleKind::RoundRobin => (ENSEMBLE_MIN_MEMBERS, caps.sequential),
+        EnsembleKind::Cascade | EnsembleKind::RoundRobin | EnsembleKind::Random => {
+            (ENSEMBLE_MIN_MEMBERS, caps.sequential)
+        }
     }
 }
 
@@ -102,7 +111,7 @@ pub fn member_bounds(kind: EnsembleKind, caps: MemberCaps) -> (usize, usize) {
 pub fn member_cap_key(kind: EnsembleKind) -> &'static str {
     match kind {
         EnsembleKind::Parallel => "graphs.ensemble_max_members_parallel",
-        EnsembleKind::Cascade | EnsembleKind::RoundRobin => {
+        EnsembleKind::Cascade | EnsembleKind::RoundRobin | EnsembleKind::Random => {
             "graphs.ensemble_max_members_sequential"
         }
     }
@@ -288,6 +297,7 @@ mod member_caps_tests {
         assert_eq!(member_bounds(EnsembleKind::Parallel, caps), (2, 4));
         assert_eq!(member_bounds(EnsembleKind::Cascade, caps), (2, 3));
         assert_eq!(member_bounds(EnsembleKind::RoundRobin, caps), (2, 3));
+        assert_eq!(member_bounds(EnsembleKind::Random, caps), (2, 3));
     }
 
     #[test]
@@ -298,6 +308,10 @@ mod member_caps_tests {
         );
         assert_eq!(
             member_bounds(EnsembleKind::Cascade, MemberCaps::default()),
+            (2, 16)
+        );
+        assert_eq!(
+            member_bounds(EnsembleKind::Random, MemberCaps::default()),
             (2, 16)
         );
     }
@@ -315,6 +329,20 @@ mod member_caps_tests {
         assert_eq!(
             member_cap_key(EnsembleKind::RoundRobin),
             "graphs.ensemble_max_members_sequential"
+        );
+        assert_eq!(
+            member_cap_key(EnsembleKind::Random),
+            "graphs.ensemble_max_members_sequential"
+        );
+    }
+
+    #[test]
+    fn random_kind_round_trips_through_str_and_serde() {
+        assert_eq!(EnsembleKind::Random.as_str(), "random");
+        assert_eq!(EnsembleKind::from_str("random"), Some(EnsembleKind::Random));
+        assert_eq!(
+            serde_json::to_string(&EnsembleKind::Random).unwrap(),
+            "\"random\""
         );
     }
 

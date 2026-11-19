@@ -1,6 +1,6 @@
 ---
 title: Ensembles
-description: Parallel, cascade and round-robin member groups, crews, and availability.
+description: Parallel, cascade, round-robin and random member groups, crews, and availability.
 order: 9
 ---
 
@@ -9,9 +9,9 @@ order: 9
 An **ensemble** is a group of `agent` nodes that receive the same prompt,
 plus a quorum that waits for every member before routing onward. A
 `parallel` ensemble runs 2–8 members at once by default (up to 16 if you
-raise `graphs.ensemble_max_members_parallel`). A `cascade` or `round_robin`
-ensemble runs its members one at a time, so it takes 2–16 by default (up to
-32 with `graphs.ensemble_max_members_sequential`). Both caps are listed in
+raise `graphs.ensemble_max_members_parallel`). A `cascade`, `round_robin` or
+`random` ensemble runs its members one at a time, so it takes 2–16 by default
+(up to 32 with `graphs.ensemble_max_members_sequential`). Both caps are listed in
 [Tuning the engine](graphs-operations.md#tuning-the-engine). It replaces what would otherwise be N member
 nodes, N prompts, and 2N+2 edges wired by hand — `graph_ensemble` `add`
 creates the whole unit in one call:
@@ -98,16 +98,28 @@ keeps the wait-for-all behaviour.
 
 `straggler_timeout_minutes` and `quorum_grace_minutes` are both
 **parallel-only** — `graph_ensemble` `add`/`graph_ensemble` `update` refuse
-to set either on a `cascade` or `round_robin` ensemble, and switching
-an ensemble's `kind` to one of those clears both fields automatically.
-The reason: a **cascade** or **round_robin** ensemble runs its members
-one at a time, never concurrently, so there is no "quorum" to wait for
-stragglers around and no ensemble-wide deadline is ever armed. Each
-member attempt there is bounded only by its own effective timeout —
-its own `timeout_minutes` override, or else the ensemble's shared
+to set either on a `cascade`, `round_robin` or `random` ensemble, and
+switching an ensemble's `kind` to one of those clears both fields
+automatically. The reason: a **cascade**, **round_robin** or **random**
+ensemble runs its members one at a time, never concurrently, so there is no
+"quorum" to wait for stragglers around and no ensemble-wide deadline is ever
+armed. Each member attempt there is bounded only by its own effective
+timeout — its own `timeout_minutes` override, or else the ensemble's shared
 `timeout_minutes` — timed from that attempt's own start, and every
 infra retry of that attempt gets that same timeout fresh. A member that
 hangs can never eat into a later member's (or its own retry's) budget.
+
+A **random** ensemble picks its first member uniformly at random from the
+members the roster leaves available, runs it, and on failure draws the next
+candidate from the members it has not tried yet — until one passes or every
+candidate was tried. Both an infrastructure crash and a real `fail` verdict
+fall through; unlike a cascade, a member that files a failure is not the
+ensemble's verdict when another member might still pass. Each dispatch draws
+afresh, including a bounce back into the ensemble: there is no rotation index
+and no resumed walk start. When every candidate fails, the join fails and its
+output carries a `members` entry with a cause for each tried member (an
+`error` alongside them when at least one member filed a real verdict, or
+`no_verdict` when they all crashed).
 
 Members are agent nodes only, and nested ensembles (an ensemble wired
 into another ensemble's members or quorum) are rejected. A bounce back
@@ -118,7 +130,8 @@ failed, including a terminated straggler, cold-starts); a round-robin
 bounce after a pass re-invokes the same member resumed, and after a
 failure moves on to the next member cold and stays there for the rest of
 the spec; a cascade bounce resumes the member that last passed, falling
-through to the next member cold only if the resumed one fails again. A
+through to the next member cold only if the resumed one fails again; a
+random bounce draws a fresh order with no resumed counterpart. A
 member's own `resume: false` still forces a cold start. The TUI graph view renders an ensemble
 collapsed as one box (`name [N models]` + quorum) with live per-member
 state while running, expandable on inspect.
@@ -130,7 +143,8 @@ The roster (`harness` `roster_set`, or `canopy roster set` — see the
 platform/model pair — or a whole platform — out for a while. At dispatch an
 ensemble simply skips members whose pair is effectively unavailable: a
 `parallel` quorum spawns (and counts) only the available members, a
-`cascade` falls through them in order, and a `round_robin` rotation steps
+`cascade` falls through them in order, a `random` ensemble draws only from
+them, and a `round_robin` rotation steps
 over them without leaving the full member list's index space, so a member
 that comes back is picked up where the rotation already is. Nothing is
 edited — the member list stays as written, the filter is re-evaluated at
@@ -169,6 +183,8 @@ field) in one update. A bound ensemble renders the shared
 `prompt_template` for every member. Binding replaces the member rows through
 the one sync path and clamps `min_pass` to the crew size. Member order is
 meaningful: `cascade` tries it in order, `round_robin` rotates through it,
+a `random` ensemble draws from it uniformly (order only sets the tie-break
+of the draw, not a preference),
 and a crew-bound `agent` node takes the first member the roster reports
 available.
 
@@ -182,7 +198,7 @@ binding.
 
 ## No-verdict blocks
 
-A parallel or round-robin ensemble that exits with no verdict and no
+A parallel, round-robin or random ensemble that exits with no verdict and no
 outgoing `Error` edge cannot route — every member infra-failed or walked
 off without filing a verdict. Rather than failing the spec, the graph
 pauses with a blocker that names the ensemble and the member reasons,

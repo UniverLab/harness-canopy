@@ -43,7 +43,7 @@ no external services, no cloud account.
 - [Intelligence & Sync](intelligence-and-sync.md) — knowledge graph and multi-agent coordination.
 - [Graphs](graphs.md) — the DAG graph engine: overview and structure.
 - [Template Variables](graphs-templates.md) — placeholders in agent prompts and check commands.
-- [Ensembles](graphs-ensembles.md) — parallel, cascade and round-robin member groups, crews, availability.
+- [Ensembles](graphs-ensembles.md) — parallel, cascade, round-robin and random member groups, crews, availability.
 - [Execution](graphs-execution.md) — commit rights, self-reports, retries, the execution limit, lifecycle, deterministic commits, spec notes.
 - [Isolation](graphs-isolation.md) — sandboxes, concurrency, and named mutexes.
 - [Hooks and Queues](graphs-hooks-and-queues.md) — event-keyed hooks, the spec backlog, and spec queues.

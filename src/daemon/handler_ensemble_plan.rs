@@ -530,8 +530,9 @@ pub(crate) fn parse_ensemble_kind(
         Some("parallel") => Ok(Some(EnsembleKind::Parallel)),
         Some("cascade") => Ok(Some(EnsembleKind::Cascade)),
         Some("round_robin") => Ok(Some(EnsembleKind::RoundRobin)),
+        Some("random") => Ok(Some(EnsembleKind::Random)),
         Some(other) => Err(error_result(&format!(
-            "Invalid ensemble kind '{other}'. Must be one of: parallel, cascade, round_robin."
+            "Invalid ensemble kind '{other}'. Must be one of: parallel, cascade, round_robin, random."
         ))),
         None => Ok(None),
     }

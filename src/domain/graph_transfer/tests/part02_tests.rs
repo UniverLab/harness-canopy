@@ -658,6 +658,74 @@ fn import_restores_each_ensemble_kind() {
     let plan = import_kind_fixture(Some("round_robin"));
     assert_eq!(plan.ensembles[0].ensemble.kind, EnsembleKind::RoundRobin);
     assert_eq!(plan.ensembles[0].ensemble.round_robin_index, Some(0));
+    let plan = import_kind_fixture(Some("random"));
+    assert_eq!(plan.ensembles[0].ensemble.kind, EnsembleKind::Random);
+    assert_eq!(plan.ensembles[0].ensemble.round_robin_index, None);
+}
+
+/// A `random` ensemble survives export (its kind is written as `random`,
+/// not omitted like `parallel`) and import.
+#[test]
+fn random_ensemble_round_trips_through_export_and_import() {
+    let lp = make_graph("random-roundtrip");
+    let nodes = vec![
+        make_node(
+            "kickoff",
+            "kickoff",
+            GraphNodeKind::Check,
+            serde_json::json!({"command": "true"}),
+            1,
+        ),
+        make_node(
+            "rm1",
+            "Random [1]",
+            GraphNodeKind::Agent,
+            serde_json::json!({"platform": "claude", "prompt_template": "go", "timeout_minutes": 30}),
+            2,
+        ),
+        make_node(
+            "rm2",
+            "Random [2]",
+            GraphNodeKind::Agent,
+            serde_json::json!({"platform": "copilot", "prompt_template": "go", "timeout_minutes": 30}),
+            3,
+        ),
+        make_node(
+            "rj",
+            "Random (quorum)",
+            GraphNodeKind::Join,
+            serde_json::json!({"ensemble_id": "ens1"}),
+            4,
+        ),
+        make_node(
+            "final",
+            "final",
+            GraphNodeKind::Check,
+            serde_json::json!({"command": "true"}),
+            5,
+        ),
+    ];
+    let edges = vec![
+        make_edge("e1", "kickoff", "rm1", GraphEdgeCondition::Always),
+        make_edge("e2", "kickoff", "rm2", GraphEdgeCondition::Always),
+        make_edge("e3", "rm1", "rj", GraphEdgeCondition::Always),
+        make_edge("e4", "rm2", "rj", GraphEdgeCondition::Always),
+        make_edge("e5", "rj", "final", GraphEdgeCondition::Pass),
+    ];
+    let mut details = make_ensemble_details("ens1", "rj", "kickoff", "final", &["rm1", "rm2"]);
+    details.ensemble.kind = EnsembleKind::Random;
+    details.ensemble.min_pass = 1;
+
+    let doc = build_export_document(&lp, &nodes, &edges, &[details]).unwrap();
+    assert_eq!(
+        doc.ensembles[0].kind.as_deref(),
+        Some("random"),
+        "random must be written, unlike the parallel default"
+    );
+
+    let plan = build_import_plan(&doc, "graph-2").unwrap();
+    assert_eq!(plan.ensembles[0].ensemble.kind, EnsembleKind::Random);
+    assert_eq!(plan.ensembles[0].ensemble.round_robin_index, None);
 }
 
 #[test]

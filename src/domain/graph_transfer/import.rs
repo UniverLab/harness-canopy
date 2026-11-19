@@ -396,7 +396,7 @@ pub(super) fn parse_import_ensemble_kind(
         None => Ok(EnsembleKind::Parallel),
         Some(value) => EnsembleKind::from_str(value).ok_or_else(|| {
             format!(
-                "Ensemble '{}' has unknown kind '{value}'. Expected one of: parallel, cascade, round_robin.",
+                "Ensemble '{}' has unknown kind '{value}'. Expected one of: parallel, cascade, round_robin, random.",
                 doc_ensemble.name
             )
         }),

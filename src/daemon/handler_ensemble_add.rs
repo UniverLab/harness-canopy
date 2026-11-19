@@ -90,8 +90,9 @@ pub(crate) fn resolve_ensemble_kind(
         Some("parallel") => Ok(EnsembleKind::Parallel),
         Some("cascade") => Ok(EnsembleKind::Cascade),
         Some("round_robin") => Ok(EnsembleKind::RoundRobin),
+        Some("random") => Ok(EnsembleKind::Random),
         Some(other) => Err(EarlyReturn::tool_error(&format!(
-            "Invalid ensemble kind '{other}'. Must be one of: parallel, cascade, round_robin."
+            "Invalid ensemble kind '{other}'. Must be one of: parallel, cascade, round_robin, random."
         ))),
         None => match node_config {
             Some(config) => match config.strategy() {

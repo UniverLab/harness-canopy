@@ -34,7 +34,8 @@ pub struct EnsembleNodeMember {
 #[serde(deny_unknown_fields)]
 pub struct EnsembleNodeConfig {
     pub prompt_template: String,
-    /// Execution strategy: `parallel` (default), `cascade`, `round_robin`.
+    /// Execution strategy: `parallel` (default), `cascade`, `round_robin`,
+    /// `random`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     pub members: Vec<EnsembleNodeMember>,
@@ -77,7 +78,7 @@ impl EnsembleNodeConfig {
             None | Some("") => Ok(EnsembleKind::Parallel),
             Some(raw) => EnsembleKind::from_str(raw).ok_or_else(|| {
                 format!(
-                    "Ensemble node document kind '{raw}' is invalid; must be one of: parallel, cascade, round_robin."
+                    "Ensemble node document kind '{raw}' is invalid; must be one of: parallel, cascade, round_robin, random."
                 )
             }),
         }

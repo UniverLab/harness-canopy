@@ -71,7 +71,7 @@ Graph
 
 - [Template Variables](graphs-templates.md) — the placeholders agent prompts and
   check commands expand.
-- [Ensembles](graphs-ensembles.md) — parallel, cascade and round-robin member
+- [Ensembles](graphs-ensembles.md) — parallel, cascade, round-robin and random member
   groups, crews, and availability at dispatch.
 - [Execution](graphs-execution.md) — commit rights, the self-report
   requirement, the infra-retry budget, the execution limit, lifecycle,

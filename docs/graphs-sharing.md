@@ -60,8 +60,8 @@ thing to check before running an imported graph:
 `nodes_missing_platform` in the MCP response, or the same list
 printed by the CLI.
 
-An ensemble's `kind` is carried in the document for `cascade` and
-`round_robin`; export omits it for `parallel`, which is what an
+An ensemble's `kind` is carried in the document for `cascade`,
+`round_robin` and `random`; export omits it for `parallel`, which is what an
 absent `kind` means on import. Import refuses a `kind` value it does
 not know — naming the ensemble and the value — and refuses a document
 that carries any field it does not know how to restore, as part of

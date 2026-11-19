@@ -25,9 +25,9 @@ impl GraphEngine {
     ///
     /// `available_members` is the roster verdict for this dispatch (CM48):
     /// the members whose platform/model pair is effectively unavailable right
-    /// now. `parallel` and `cascade` dispatch only those; `round_robin` walks
-    /// the full `details` list and steps over the rest, so the rotation's
-    /// index space never changes with availability.
+    /// now. `parallel`, `cascade` and `random` dispatch only those;
+    /// `round_robin` walks the full `details` list and steps over the rest, so
+    /// the rotation's index space never changes with availability.
     ///
     /// Every member receives the exact same `previous_output` (the same
     /// input, in parallel — the defining shape of an ensemble). Concurrency
@@ -50,9 +50,24 @@ impl GraphEngine {
         resumable_sessions: &mut HashMap<String, String>,
         round_robin_pins: &mut HashMap<String, i64>,
     ) -> Result<NodeExecution> {
-        let ensemble = &details.ensemble;
-        match ensemble.kind {
-            EnsembleKind::Parallel => {}
+        match details.ensemble.kind {
+            EnsembleKind::Parallel => {
+                return self
+                    .execute_ensemble_parallel(
+                        lp,
+                        spec,
+                        details,
+                        available_members,
+                        previous_output,
+                        iteration,
+                        workdir,
+                        enforce_commit_rights,
+                        node_outputs,
+                        all_node_names,
+                        resumable_sessions,
+                    )
+                    .await;
+            }
             EnsembleKind::Cascade => {
                 // CM48: the cascade walks only the available members, in
                 // member order.
@@ -93,7 +108,49 @@ impl GraphEngine {
                     )
                     .await;
             }
+            EnsembleKind::Random => {
+                // A fresh draw per dispatch (no persistent cursor), seeded
+                // only by a test; every dispatch walks the available members
+                // in a uniformly shuffled order.
+                let mut rng = random_source(self.random_seed);
+                return self
+                    .execute_ensemble_random(
+                        lp,
+                        spec,
+                        details,
+                        available_members,
+                        previous_output,
+                        iteration,
+                        workdir,
+                        enforce_commit_rights,
+                        node_outputs,
+                        all_node_names,
+                        resumable_sessions,
+                        &mut rng,
+                    )
+                    .await;
+            }
         }
+    }
+
+    /// Run a `parallel` ensemble dispatch: spawn every available member
+    /// concurrently, wait for the whole quorum, and consolidate the results.
+    #[expect(clippy::too_many_arguments)]
+    async fn execute_ensemble_parallel(
+        &self,
+        lp: &crate::domain::graphs::Graph,
+        spec: &GraphSpec,
+        details: &EnsembleDetails,
+        available_members: &[EnsembleMember],
+        previous_output: Option<&Value>,
+        iteration: usize,
+        workdir: &str,
+        enforce_commit_rights: bool,
+        node_outputs: &HashMap<String, Value>,
+        all_node_names: &[String],
+        resumable_sessions: &mut HashMap<String, String>,
+    ) -> Result<NodeExecution> {
+        let ensemble = &details.ensemble;
         // CM48: the parallel quorum spawns only the available members.
         let dispatch = EnsembleDetails {
             ensemble: details.ensemble.clone(),

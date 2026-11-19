@@ -37,16 +37,17 @@ pub struct GraphAddEnsembleParams {
     pub graph_id: Option<String>,
     /// Human-readable ensemble name.
     pub name: String,
-    /// Ensemble execution strategy: "parallel" (default), "cascade", or
-    /// "round_robin". Parallel runs all members concurrently and counts
-    /// passes against min_pass. Cascade tries members in order; the first
-    /// usable result wins. Round_robin rotates across members.
+    /// Ensemble execution strategy: "parallel" (default), "cascade",
+    /// "round_robin", or "random". Parallel runs all members concurrently and
+    /// counts passes against min_pass. Cascade tries members in order; the
+    /// first usable result wins. Round_robin rotates across members. Random
+    /// draws members uniformly, falling through to untried ones on failure.
     pub kind: Option<String>,
     /// The one shared prompt every member renders — supports the same
     /// placeholders as an agent node's `prompt_template`. Required unless a
     /// `node` document supplies one.
     pub prompt_template: Option<String>,
-    /// Members (2–8 for parallel, 2–16 for cascade/round_robin): proposer/
+    /// Members (2–8 for parallel, 2–16 for cascade/round_robin/random): proposer/
     /// reviewer variants that differ by
     /// platform/model and, optionally, per-member `prompt_override`.
     /// Always required: a `node` document carries no harnesses, so pass a
