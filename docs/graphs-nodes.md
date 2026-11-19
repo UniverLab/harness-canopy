@@ -148,11 +148,16 @@ parameter outright: `graph_node` and `graph_ensemble` `add` take `node`,
 
 ## Read-only nodes
 
-An agent node can be declared read-only in its **node config**:
+An agent node can be declared read-only in its **node config** — set
+`read_only` through `graph_node` `add`/`update` config or in a node
+document's `config`:
 
 ```
 read_only: true
 ```
+
+`graph` `get`/`export` and `graph_edit` `import` carry the setting with
+the node or ensemble.
 
 The engine fingerprints the working tree when the run starts and compares
 it when the run ends, before routing. A read-only node that changes the
