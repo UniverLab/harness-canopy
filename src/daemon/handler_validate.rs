@@ -359,10 +359,12 @@ pub(crate) fn resolve_owning_graph_status(
 /// ensemble's member set) from the database at each dispatch
 /// (`GraphEngine::run_spec`), so a `graph_node` / `graph_ensemble`
 /// config edit takes effect on that node's next dispatch within the same running
-/// spec. Topology is different: a node's `kind`/`position`, the ensemble `kind`,
-/// and entry/exit wiring (edges) are resolved once from the per-run snapshot and
-/// never re-read, so an edit to them mid-run would make execution and routing
-/// disagree — those are refused here.
+/// spec. Topology is different: a node's `kind`/`position` and entry/exit
+/// wiring (edges, including an ensemble's entry/exit edges) are resolved once
+/// from the per-run snapshot and never re-read, so an edit to them mid-run
+/// would make execution and routing disagree — those are refused here. An
+/// ensemble's own `kind` and crew binding ARE re-read at each dispatch, so
+/// they are live changes, not topology, and are not refused here.
 pub(crate) fn validate_topology_mutation_allowed(
     db: &Database,
     spec_id: Option<&str>,

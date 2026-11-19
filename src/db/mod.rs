@@ -707,6 +707,7 @@ impl Database {
         Self::migrate_ensemble_mutex_column(&conn)?;
         Self::migrate_graph_events_mutex_kinds(&conn)?;
         Self::migrate_graph_events_pause_kinds(&conn)?;
+        Self::migrate_graph_events_ensemble_changed_kind(&conn)?;
         Self::migrate_drop_blueprint_tables(&conn)?;
         Self::migrate_sandbox_intelligence_attribution(&conn)?;
         Self::migrate_shelf_files(&conn)?;
@@ -717,37 +718,7 @@ impl Database {
     }
 }
 
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct SubagentRunRecord {
-    pub id: String,
-    pub platform: String,
-    pub model: Option<String>,
-    pub prompt: String,
-    pub workdir: String,
-    pub mcp_surface: Option<String>,
-    pub status: String,
-    pub exit_code: Option<i32>,
-    pub stdout: Option<String>,
-    pub stderr: Option<String>,
-    pub started_at: String,
-    pub finished_at: Option<String>,
-    pub collected_at: Option<String>,
-    pub expires_at: String,
-}
-
-/// Parameters for [`Database::insert_subagent_run`]: bundled so the insert
-/// stays within the argument-count lint without changing the row it writes.
-#[derive(Debug, Clone, Copy)]
-pub struct NewSubagentRun<'a> {
-    pub id: &'a str,
-    pub platform: &'a str,
-    pub model: Option<&'a str>,
-    pub prompt: &'a str,
-    pub workdir: &'a str,
-    pub started_at: &'a str,
-    pub expires_at: &'a str,
-}
+pub use subagent_runs::{NewSubagentRun, SubagentRunRecord};
 
 pub mod achievements;
 pub mod activity_log;

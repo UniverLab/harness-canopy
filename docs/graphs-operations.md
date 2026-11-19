@@ -50,7 +50,7 @@ table — the engine writes one row per event as the run happens:
 | Node | `node_started`, `node_finished` (payload: `verdict`, `platform`, `model`, `duration_s`) |
 | Mutex | `mutex_waiting` (payload: `resources`, `waiting_for`), `mutex_acquired` (payload: `resources`) |
 | Hooks | `hook_fired` (payload: `event`, `mode`, `ok`, `error`) |
-| Config | `config_changed` (a node, ensemble or hook edit made while the graph runs) |
+| Config | `config_changed` (a node, ensemble or hook edit made while the graph runs), `ensemble_changed` (payload: `old_kind`, `new_kind`, `old_crew`, `new_crew`) |
 | Notes | `note` (reserved for the CM47 spec-note mechanism; payload: `owner_name`, `chars`) |
 
 Read it from the CLI:

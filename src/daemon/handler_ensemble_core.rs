@@ -44,6 +44,13 @@ impl TaskTriggerHandler {
             Err(e) => return Ok(error_result(&e)),
         };
         let wiring = or_early_return!(resolve_ensemble_wiring(&self.db, &params));
+        if let Err(e) = validate_topology_mutation_allowed(
+            &self.db,
+            wiring.spec_id.as_deref(),
+            wiring.graph_id.as_deref(),
+        ) {
+            return Ok(error_result(&e));
+        }
         let exits = exit_row_targets(&wiring.on_pass_target, &wiring.on_fail_target);
         let commit_rights = params
             .commit_rights

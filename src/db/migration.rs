@@ -3,6 +3,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use super::{Database, SCHEMA_VERSION};
 
+mod ensemble_kind_schema;
 mod late;
 mod mutex_schema;
 mod pause_kinds_schema;
@@ -496,7 +497,8 @@ impl Database {
                         'config_changed',
                         'note',
                         'mutex_waiting','mutex_acquired',
-                        'pause_requested','pause_cancelled'
+                        'pause_requested','pause_cancelled',
+                        'ensemble_changed'
                     )),
                 message TEXT NOT NULL,
                 payload TEXT,

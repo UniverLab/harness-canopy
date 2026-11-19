@@ -1302,6 +1302,8 @@ async fn cm15_running_graph_pins_ensemble_kind_accepts_member_replacement() {
     db.update_graph_status(&lp.id, GraphStatus::Running, None, None)
         .unwrap();
 
+    // A kind change is a live change: accepted while running, and it lands
+    // in the DB for the next dispatch.
     let kind_res = call_graph_action(
         &handler,
         "graph_ensemble",
@@ -1313,8 +1315,15 @@ async fn cm15_running_graph_pins_ensemble_kind_accepts_member_replacement() {
     )
     .await
     .unwrap();
-    assert!(is_err(&kind_res));
-    assert!(text(&kind_res).contains("running"), "{}", text(&kind_res));
+    assert!(!is_err(&kind_res), "{}", text(&kind_res));
+    assert_eq!(
+        db.get_ensemble_details(&ens)
+            .unwrap()
+            .unwrap()
+            .ensemble
+            .kind,
+        crate::domain::graphs::EnsembleKind::Cascade,
+    );
 
     // Exit wiring is topology too — retargeting it mid-run is refused,
     // not accepted-and-dropped.

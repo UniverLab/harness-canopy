@@ -305,15 +305,16 @@ impl GraphEngine {
         previous_output: Option<&Value>,
         iteration_value: usize,
     ) -> Result<SpecStepFlow> {
-        // CM15: the ensemble's MEMBER SET and shared prompt are read
-        // from the database HERE, once per dispatch of this ensemble
-        // step (NFR3: the whole set in one read, never member-by-member
-        // across an await), so a graph_ensemble applied between
-        // two dispatches lands on the second (FR2). The launch-time
-        // `ensembles` snapshot stays authoritative for the ensemble's
-        // WIRING (entry/exit edges, used by cursor_node_ids /
-        // select_next_step) and its `kind`, which graph_ensemble
-        // refuses to change while the graph is `running` (FR5).
+        // CM15: the ensemble's KIND, MEMBER SET, shared prompt and crew
+        // binding are read from the database HERE, once per dispatch of
+        // this ensemble step (NFR3: the whole set in one read, never
+        // member-by-member across an await), so a graph_ensemble applied
+        // between two dispatches lands on the second (FR2). The
+        // launch-time `ensembles` snapshot stays authoritative only for
+        // the ensemble's WIRING (entry/exit edges, used by cursor_node_ids
+        // / select_next_step), which graph_ensemble still refuses to
+        // change while the graph is `running` (FR5). A dispatch already
+        // in flight finishes with the configuration it started with.
         let details_fresh = self
             .db
             .get_ensemble_details(ensemble_id)

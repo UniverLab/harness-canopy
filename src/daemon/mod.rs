@@ -27,6 +27,7 @@ pub(crate) mod handler_edges;
 pub(crate) mod handler_ensemble_add;
 pub(crate) mod handler_ensemble_core;
 pub(crate) mod handler_ensemble_entry;
+pub(crate) mod handler_ensemble_events;
 pub(crate) mod handler_ensemble_exit;
 pub(crate) mod handler_ensemble_plan;
 pub(crate) mod handler_ensemble_update;

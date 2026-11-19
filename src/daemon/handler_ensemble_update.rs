@@ -12,9 +12,7 @@ use crate::daemon::handler_ensemble_plan::{
 };
 use crate::daemon::handler_formatting::internal_error;
 use crate::daemon::handler_helpers::record_config_change_if_running;
-use crate::daemon::handler_validate::{
-    resolve_prefix_or_error, validate_non_empty, validate_topology_mutation_allowed,
-};
+use crate::daemon::handler_validate::{resolve_prefix_or_error, validate_non_empty};
 use crate::daemon::helpers::{error_result, success_result, EarlyReturn};
 use crate::daemon::params::*;
 use crate::db::ensembles::EnsembleJoinConfigPatch;
@@ -59,6 +57,8 @@ impl TaskTriggerHandler {
             return Ok(result);
         }
 
+        let old_kind = details.ensemble.kind.as_str().to_string();
+        let old_crew = details.ensemble.crew_name.clone();
         let (new_kind, effective_kind) = or_early_return!(validate_ensemble_update_preamble(
             &self.db, &params, &details
         ));
@@ -82,7 +82,18 @@ impl TaskTriggerHandler {
         } else {
             String::new()
         };
-        record_ensemble_config_change(&self.db, &details.ensemble);
+        if new_kind.is_some() {
+            crate::daemon::handler_ensemble_events::record_ensemble_change_if_running(
+                &self.db,
+                &details.ensemble,
+                &old_kind,
+                effective_kind.as_str(),
+                old_crew.as_deref(),
+                details.ensemble.crew_name.as_deref(),
+            );
+        } else {
+            record_ensemble_config_change(&self.db, &details.ensemble);
+        }
         Ok(success_result(&format!(
             "Ensemble '{ensemble_id}' updated.{note}"
         )))
@@ -187,21 +198,14 @@ impl TaskTriggerHandler {
     ) -> Result<bool, McpError> {
         let mut cleared_grace_fields_for_kind_change = false;
         if let Some(kind) = new_kind {
-            let rri = if kind == EnsembleKind::RoundRobin {
-                Some(Some(details.ensemble.round_robin_index.unwrap_or(0)))
-            } else {
-                Some(None)
-            };
             self.db
-                .update_ensemble_kind(ensemble_id, Some(kind), rri)
+                .update_ensemble_kind(ensemble_id, Some(kind), None)
                 .map_err(internal_error)?;
             details.ensemble.kind = kind;
-            if kind == EnsembleKind::RoundRobin {
-                details.ensemble.round_robin_index =
-                    Some(details.ensemble.round_robin_index.unwrap_or(0));
-            } else {
-                details.ensemble.round_robin_index = None;
-            }
+            // The stored `round_robin_index` cursor is kept, not cleared, on
+            // a kind change: switching away from round_robin and back resumes
+            // the rotation where it left off. Other kinds ignore the cursor,
+            // and an in-flight dispatch keeps its own pins regardless.
 
             // CB67/FR3: switching to a sequential kind retires any stored
             // straggler_timeout_minutes/quorum_grace_minutes from this
@@ -430,7 +434,11 @@ impl TaskTriggerHandler {
 /// CM49: binding/unbinding a crew is its own operation — never mixed
 /// with a literal member list or any other field. Returns `Some` result
 /// when `params.crew` is set (`Some(name)` binds, `null` unbinds and
-/// keeps the current rows as literal members).
+/// keeps the current rows as literal members). A crew bind is a live
+/// change: the engine re-reads the member set at each dispatch, so it is
+/// allowed on a running graph; a crew whose size is outside the
+/// ensemble kind's bounds is refused by `bind_ensemble_to_crew` with the
+/// usual member-count message and changes nothing.
 fn crew_binding_update_result(
     db: &Database,
     ensemble_id: &str,
@@ -441,26 +449,37 @@ fn crew_binding_update_result(
     if let Err(e) = reject_crew_update_combination(params) {
         return Some(error_result(&e));
     }
+    let kind = details.ensemble.kind.as_str().to_string();
+    let old_crew = details.ensemble.crew_name.clone();
     Some(match crew {
-        Some(name) => {
-            if let Err(e) = validate_topology_mutation_allowed(
-                db,
-                details.ensemble.spec_id.as_deref(),
-                details.ensemble.graph_id.as_deref(),
-            ) {
-                return Some(error_result(&e));
+        Some(name) => match db.bind_ensemble_to_crew(ensemble_id, name) {
+            Ok(_) => {
+                crate::daemon::handler_ensemble_events::record_ensemble_change_if_running(
+                    db,
+                    &details.ensemble,
+                    &kind,
+                    &kind,
+                    old_crew.as_deref(),
+                    Some(name.as_str()),
+                );
+                success_result(&format!("Ensemble '{ensemble_id}' bound to crew '{name}'."))
             }
-            match db.bind_ensemble_to_crew(ensemble_id, name) {
-                Ok(_) => {
-                    success_result(&format!("Ensemble '{ensemble_id}' bound to crew '{name}'."))
-                }
-                Err(e) => error_result(&e.to_string()),
-            }
-        }
+            Err(e) => error_result(&e.to_string()),
+        },
         None => match db.unbind_ensemble_crew(ensemble_id) {
-            Ok(()) => success_result(&format!(
-                "Ensemble '{ensemble_id}' unbound; its member rows are literal now."
-            )),
+            Ok(()) => {
+                crate::daemon::handler_ensemble_events::record_ensemble_change_if_running(
+                    db,
+                    &details.ensemble,
+                    &kind,
+                    &kind,
+                    old_crew.as_deref(),
+                    None,
+                );
+                success_result(&format!(
+                    "Ensemble '{ensemble_id}' unbound; its member rows are literal now."
+                ))
+            }
             Err(e) => error_result(&e.to_string()),
         },
     })
@@ -469,7 +488,7 @@ fn crew_binding_update_result(
 /// Static validations before any write, plus the parsed kind change and
 /// the kind it results in.
 fn validate_ensemble_update_preamble(
-    db: &Database,
+    _db: &Database,
     params: &GraphUpdateEnsembleParams,
     details: &EnsembleDetails,
 ) -> Result<(Option<EnsembleKind>, EnsembleKind), EarlyReturn> {
@@ -485,15 +504,10 @@ fn validate_ensemble_update_preamble(
     if let Err(e) = check_resulting_min_pass(params, details) {
         return Err(EarlyReturn::tool_error(&e));
     }
-    if params.kind.is_some() {
-        if let Err(e) = validate_topology_mutation_allowed(
-            db,
-            details.ensemble.spec_id.as_deref(),
-            details.ensemble.graph_id.as_deref(),
-        ) {
-            return Err(EarlyReturn::tool_error(&e));
-        }
-    }
+    // A kind change is a live change: the engine re-reads the ensemble's
+    // kind from the database at each dispatch, so it is allowed on a
+    // running graph — no `validate_topology_mutation_allowed` gate here.
+    // Entry/exit wiring stays topology-pinned and keeps its own gates.
     if let Some(prompt_template) = &params.prompt_template {
         if let Err(e) = validate_non_empty(prompt_template.trim(), "Ensemble prompt_template") {
             return Err(EarlyReturn::tool_error(&e));
@@ -504,17 +518,16 @@ fn validate_ensemble_update_preamble(
         Err(e) => return Err(EarlyReturn::ok(e)),
     };
     let effective_kind = new_kind.unwrap_or(details.ensemble.kind);
-    // FR3: a kind change may tighten the member-count ceiling (only
-    // switching TO parallel, max 8, can). Refuse before any write so a
-    // 12-member round_robin cannot silently become an over-cap parallel
-    // ensemble that only misbehaves at dispatch time. This checks the
-    // RESULTING member count (params.members when the call also resizes,
-    // else the stored count) against the effective kind — a combined
-    // shrink-to-8 plus switch-to-parallel is accepted, only an over-cap
-    // result is refused. A kind-only switch that leaves an over-cap
-    // count is refused here; a members-only resize to an over-cap count
-    // is refused below in `replace_ensemble_member_set` with the same
-    // message form.
+    // FR5: a kind or crew change may land outside the new kind's member
+    // bounds (switching to a kind with fewer members than the ensemble
+    // holds, or binding a crew of the wrong size). Refuse before any write
+    // with the usual member-count message so a rejected change leaves the
+    // ensemble exactly as it was. This checks the RESULTING member count
+    // (params.members when the call also resizes, else the stored count)
+    // against the effective kind's full bounds — a combined shrink plus
+    // kind switch is accepted, only an out-of-bounds result is refused.
+    // A members-only resize to an out-of-bounds count is refused below in
+    // `replace_ensemble_member_set` with the same message form.
     let resulting_member_count = params
         .members
         .as_ref()
@@ -524,8 +537,9 @@ fn validate_ensemble_update_preamble(
         &crate::domain::canopy_config::CanopyConfig::load(&crate::domain::prompts::canopy_dir())
             .graphs,
     );
-    let (_, max_for_effective) = crate::domain::graphs::member_bounds(effective_kind, caps);
-    if resulting_member_count > max_for_effective {
+    let (min_for_effective, max_for_effective) =
+        crate::domain::graphs::member_bounds(effective_kind, caps);
+    if resulting_member_count < min_for_effective || resulting_member_count > max_for_effective {
         return Err(EarlyReturn::tool_error(
             &crate::domain::graphs::member_count_message(
                 effective_kind,

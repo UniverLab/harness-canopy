@@ -7,7 +7,7 @@ use crate::daemon::handler_validate::{
     delete_graph_edge_checked, delete_graph_node_checked, resolve_prefix_or_error,
     retarget_graph_edge, validate_edge_condition_with_route, validate_edge_exists,
     validate_graph_exists, validate_node_not_ensemble_owned, validate_route_edge_target,
-    validate_spec_exists,
+    validate_spec_exists, validate_topology_mutation_allowed,
 };
 use crate::daemon::helpers::{error_result, success_result};
 use crate::daemon::params::*;
@@ -56,6 +56,9 @@ impl TaskTriggerHandler {
             Ok(target) => target,
             Err(e) => return Ok(error_result(&e)),
         };
+        if let Err(e) = validate_target_not_running(&self.db, &target) {
+            return Ok(error_result(&e));
+        }
 
         let nodes = match &target {
             GraphTarget::Spec(spec_id) => {
@@ -271,6 +274,23 @@ pub(crate) fn resolve_graph_target(
             Ok(GraphTarget::Graph(full_id.to_string()))
         }
     }
+}
+
+/// Refuse to ADD a node or edge to a running graph: additions are topology
+/// the same as deletions or retargets — the running engine routes from a
+/// per-run snapshot and never re-reads them mid-run, so an addition would
+/// silently fail to affect execution. The shared gate used by the add paths
+/// (`graph_add_node_impl`, `graph_add_edge_impl`, `graph_add_ensemble_impl`),
+/// so adds and deletes refuse with the same message.
+pub(crate) fn validate_target_not_running(
+    db: &Database,
+    target: &GraphTarget,
+) -> Result<(), String> {
+    let (spec_id, graph_id) = match target {
+        GraphTarget::Spec(spec_id) => (Some(spec_id.as_str()), None),
+        GraphTarget::Graph(graph_id) => (None, Some(graph_id.as_str())),
+    };
+    validate_topology_mutation_allowed(db, spec_id, graph_id)
 }
 
 /// A graph target split into `(spec_id, graph_id, existing_nodes)` — exactly one

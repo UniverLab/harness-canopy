@@ -69,6 +69,19 @@ with the source and member counts before `graph_control` `run` spends probe quot
 ensemble as one unit (`ensemble_id`, members, quorum config, every entry
 source) alongside its expanded nodes.
 
+An ensemble's `kind` and crew binding are live changes: `graph_ensemble`
+`update` accepts them while the graph runs, with no pause, and they apply
+at the ensemble's next dispatch — a dispatch already in flight finishes
+with the configuration it started with. Each accepted live change writes
+one `ensemble_changed` event (payload: `old_kind`, `new_kind`, `old_crew`,
+`new_crew`) plus one activity-log line. The round-robin cursor survives a
+kind change away and back (switching to `random` or `cascade` simply
+ignores it). A change that lands outside the new kind's member bounds is
+refused with the usual member-count message and changes nothing. Still
+refused while running, with the pause-first message: adding or removing
+nodes or edges, changing an ensemble's entry wiring, and changing a node's
+kind or position.
+
 `on_fail_to = null` (the default when an ensemble is created without one)
 ends the spec when the quorum fails: a member that reports FAIL — even with
 partial work — leaves the quorum with nowhere to route, so the run stops
@@ -179,7 +192,10 @@ literal.
 
 An ensemble binds to a crew with `graph_ensemble` `add` (`crew`) or
 `graph_ensemble` `update` (`crew: "name"`); `crew: null` unbinds and keeps the
-current member rows as literal members. A crew change is its own call — it
+current member rows as literal members. Binding or unbinding while the
+graph runs is allowed and takes effect at the next dispatch; a crew whose
+size is outside the ensemble kind's bounds is refused with the usual
+member-count message. A crew change is its own call — it
 is never combined with a literal `members` list (or any other ensemble
 field) in one update. A bound ensemble renders the shared
 `prompt_template` for every member. Binding replaces the member rows through

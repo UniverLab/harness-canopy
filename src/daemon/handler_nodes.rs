@@ -2,7 +2,7 @@
 //! Moved verbatim; tool names, schemas, and behaviour unchanged.
 
 use crate::daemon::handler::TaskTriggerHandler;
-use crate::daemon::handler_edges::resolve_graph_target;
+use crate::daemon::handler_edges::{resolve_graph_target, validate_target_not_running};
 use crate::daemon::handler_formatting::{
     build_id_result, build_node_update_response_with_changes, internal_error,
 };
@@ -44,6 +44,9 @@ impl TaskTriggerHandler {
             Ok(target) => target,
             Err(e) => return Ok(error_result(&e)),
         };
+        if let Err(e) = validate_target_not_running(&self.db, &target) {
+            return Ok(error_result(&e));
+        }
 
         let (kind, config) = match resolve_add_node_kind_config(
             params.node.as_deref(),

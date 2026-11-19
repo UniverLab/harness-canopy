@@ -45,6 +45,10 @@ pub enum GraphEventKind {
     /// A pending pause was cancelled by a resume while node(s) were still
     /// running; the graph keeps running.
     PauseCancelled,
+    /// An ensemble's kind or crew binding changed while its graph runs.
+    /// The change applies at the ensemble's next dispatch; the dispatch in
+    /// flight keeps the configuration it started with.
+    EnsembleChanged,
 }
 
 impl GraphEventKind {
@@ -69,6 +73,7 @@ impl GraphEventKind {
             Self::MutexAcquired => "mutex_acquired",
             Self::PauseRequested => "pause_requested",
             Self::PauseCancelled => "pause_cancelled",
+            Self::EnsembleChanged => "ensemble_changed",
         }
     }
 

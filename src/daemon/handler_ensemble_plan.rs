@@ -486,18 +486,16 @@ pub(crate) fn refuse_ensemble_kind_change(
     params: &GraphUpdateEnsembleParams,
     effective_kind: EnsembleKind,
 ) -> Result<(), String> {
-    // CM15 / FR5: the ensemble's execution strategy (`kind`) selects the
-    // fan-out path (`execute_ensemble` match on `ensemble.kind`) from the
-    // per-run snapshot and is not re-read mid-run. Its members, shared
-    // prompt and quorum config ARE read fresh per dispatch, so those stay
-    // editable on a running graph — repairing a dead member mid-run is the
-    // whole point. `kind` is refused here; entry and exit wiring (also
-    // topology, also snapshot-pinned) are refused further down, each next
-    // to the code that applies it. Every refusal names the graph's state.
+    // CM15 / FR5: the ensemble's KIND, member set, shared prompt, crew
+    // binding and quorum config are all re-read from the database at each
+    // dispatch, so they stay editable on a running graph — repairing a
+    // dead member mid-run is the whole point, and a kind/crew change lands
+    // on the next dispatch. Entry and exit wiring (topology,
+    // snapshot-pinned) are refused further down, each next to the code
+    // that applies it. Every refusal names the graph's state.
     //
-    // A `kind` change itself is refused later in the tool body, once the
-    // running-graph topology check has run — this helper only guards the
-    // kind-dependent scalar fields below, so it takes the *effective* kind
+    // This helper only guards the kind-dependent scalar fields below, so
+    // it takes the *effective* kind
     // (the value that would result after the update) rather than the raw
     // `params.kind` Option.
 
