@@ -70,6 +70,33 @@ pub(crate) fn spec_current_node(db: &Database, spec_id: &str) -> Result<Option<S
     Ok(runs.last().map(|run| run.node_id.clone()))
 }
 
+/// The node argument a `retry_current_node` restarts at: the raw current node,
+/// unless that node is an ensemble member or join — the caller of a retry
+/// names no node, so the retry targets the ensemble by name, exactly as a
+/// directed run targeted at the ensemble would. `resolve_directed_target`
+/// matches ensembles by name only, so the ensemble id would not resolve.
+pub(crate) fn retry_target_node_arg(
+    db: &Database,
+    graph_id: &str,
+    spec_id: &str,
+    node_id: &str,
+) -> Result<String, McpError> {
+    let details = db.get_graph_spec_details(spec_id).map_err(internal_error)?;
+    let ensembles = if details.map(|d| !d.nodes.is_empty()).unwrap_or(false) {
+        db.list_ensembles_for_spec(spec_id)
+            .map_err(internal_error)?
+    } else {
+        db.list_ensembles_for_graph(graph_id)
+            .map_err(internal_error)?
+    };
+    if let Some(found) = ensembles.iter().find(|d| {
+        d.ensemble.join_node_id == node_id || d.members.iter().any(|m| m.node_id == node_id)
+    }) {
+        return Ok(found.ensemble.name.clone());
+    }
+    Ok(node_id.to_string())
+}
+
 /// The directed restart a `retry_current_node` becomes: on a `failed` graph,
 /// the failed spec at the node it failed on (FR6); on a `paused` graph whose
 /// current spec is `pending` with a recorded current node, that node (FR7).
@@ -89,7 +116,13 @@ pub(crate) fn retry_restart_target(
     if !restart {
         return Ok(None);
     }
-    Ok(spec_current_node(db, &spec.id)?.map(|node| (spec, node)))
+    match spec_current_node(db, &spec.id)? {
+        Some(node) => Ok(Some((
+            spec.clone(),
+            retry_target_node_arg(db, &lp.id, &spec.id, &node)?,
+        ))),
+        None => Ok(None),
+    }
 }
 
 /// Persist an explicit `graph_control continue` workdir for the resumed run

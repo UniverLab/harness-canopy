@@ -1487,3 +1487,206 @@ async fn guard_pause_stores_blocker_and_fires_on_blocked_once() {
         "resume clears the blocker"
     );
 }
+
+/// Seed a failed graph whose spec stopped on `failed_node_id` (an ensemble
+/// member or join): a passing `kickoff` run first — the ensemble's upstream
+/// prerequisite, which `plan_directed_run` requires — then the failing run
+/// on `failed_node_id` as the latest run, so it is the spec's current node.
+fn seed_failed_on_ensemble_node(
+    db: &Database,
+    graph_id: &str,
+    spec_id: &str,
+    failed_node_id: &str,
+    failed_run_id: &str,
+) {
+    let t0 = chrono::Utc::now() - chrono::Duration::seconds(3);
+    for (run_id, node_id, status, started_at) in [
+        ("run-kickoff-seed", "kickoff", GraphRunStatus::Pass, t0),
+        (
+            failed_run_id,
+            failed_node_id,
+            GraphRunStatus::Fail,
+            t0 + chrono::Duration::seconds(2),
+        ),
+    ] {
+        db.insert_graph_run(&GraphNodeRun {
+            id: run_id.to_string(),
+            graph_id: graph_id.to_string(),
+            spec_id: spec_id.to_string(),
+            node_id: node_id.to_string(),
+            status,
+            input: None,
+            output: None,
+            started_at,
+            completed_at: None,
+            iteration: 1,
+            pid: None,
+            boot_id: None,
+            session_id: None,
+            executed_platform: None,
+            executed_model: None,
+        })
+        .unwrap();
+    }
+    db.update_graph_spec_status(spec_id, GraphSpecStatus::Failed, None, None)
+        .unwrap();
+    db.update_graph_status(graph_id, GraphStatus::Failed, None, None)
+        .unwrap();
+}
+
+/// FR1 (member): a retry on a failed graph whose current node is an ensemble
+/// member resolves to the ensemble by name and restarts the whole ensemble,
+/// instead of refusing with "belongs to ensemble".
+#[tokio::test]
+async fn retry_current_node_failed_graph_on_ensemble_member_retries_ensemble() {
+    let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+    let db_path = dir.path().join(TEST_DB_FILENAME);
+    let ok_a = write_self_reporting_member_script(
+        dir.path(),
+        "ok-a.sh",
+        "sleep 1",
+        &db_path,
+        "m-a",
+        "pass",
+        None,
+    );
+    let ok_b = write_self_reporting_member_script(
+        dir.path(),
+        "ok-b.sh",
+        "sleep 1",
+        &db_path,
+        "m-b",
+        "pass",
+        None,
+    );
+    let fake_home = setup_multi_cli_home(&[
+        ("member-ok-a", ok_a.as_str()),
+        ("member-ok-b", ok_b.as_str()),
+    ]);
+    insert_kind_ensemble(
+        &db,
+        &spec_id,
+        crate::domain::graphs::EnsembleKind::Parallel,
+        &[("m-a", "member-ok-a"), ("m-b", "member-ok-b")],
+    );
+    seed_failed_on_ensemble_node(&db, &graph_id, &spec_id, "m-a", "run-m-a-fail");
+
+    let lp = db.get_graph(&graph_id).unwrap().unwrap();
+    let (spec, node) = crate::daemon::handler_run_directive::retry_restart_target(&db, &lp)
+        .unwrap()
+        .expect("a failed graph with a current node restarts");
+    assert_eq!(
+        node, "Switched Ensemble",
+        "a member retry targets the ensemble"
+    );
+    assert_eq!(spec.id, spec_id);
+
+    let _home = HomeGuard::set(fake_home.path());
+    engine
+        .run_graph_dispatch(
+            graph_id.clone(),
+            None,
+            None,
+            DispatchMode::resume_from(DirectedStart {
+                spec_id: spec.id.clone(),
+                node_arg: node.clone(),
+            }),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    drop(_home);
+
+    assert_eq!(
+        db.get_graph_spec(&spec_id).unwrap().unwrap().status,
+        GraphSpecStatus::Completed,
+        "the restarted ensemble runs to completion"
+    );
+    assert_eq!(
+        join_run(&db, &spec_id, "join1").status,
+        GraphRunStatus::Pass,
+        "the join settles, so the dispatch fanned out via the ensemble"
+    );
+    assert!(
+        member_runs(&db, &spec_id, "done-pass")
+            .iter()
+            .any(|r| r.status == GraphRunStatus::Pass),
+        "the passing join routes onward on its Pass edge"
+    );
+}
+
+/// FR1 (join): the same remap when the latest run sits on the ensemble's
+/// join — an ensemble attempt's last recorded run is often the join.
+#[tokio::test]
+async fn retry_current_node_failed_graph_on_ensemble_join_retries_ensemble() {
+    let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+    let db_path = dir.path().join(TEST_DB_FILENAME);
+    let ok_a = write_self_reporting_member_script(
+        dir.path(),
+        "ok-a.sh",
+        "sleep 1",
+        &db_path,
+        "m-a",
+        "pass",
+        None,
+    );
+    let ok_b = write_self_reporting_member_script(
+        dir.path(),
+        "ok-b.sh",
+        "sleep 1",
+        &db_path,
+        "m-b",
+        "pass",
+        None,
+    );
+    let fake_home = setup_multi_cli_home(&[
+        ("member-ok-a", ok_a.as_str()),
+        ("member-ok-b", ok_b.as_str()),
+    ]);
+    insert_kind_ensemble(
+        &db,
+        &spec_id,
+        crate::domain::graphs::EnsembleKind::Parallel,
+        &[("m-a", "member-ok-a"), ("m-b", "member-ok-b")],
+    );
+    seed_failed_on_ensemble_node(&db, &graph_id, &spec_id, "join1", "run-join-fail");
+
+    let lp = db.get_graph(&graph_id).unwrap().unwrap();
+    let (spec, node) = crate::daemon::handler_run_directive::retry_restart_target(&db, &lp)
+        .unwrap()
+        .expect("a failed graph with a current node restarts");
+    assert_eq!(
+        node, "Switched Ensemble",
+        "a join retry targets the ensemble"
+    );
+    assert_eq!(spec.id, spec_id);
+
+    let _home = HomeGuard::set(fake_home.path());
+    engine
+        .run_graph_dispatch(
+            graph_id.clone(),
+            None,
+            None,
+            DispatchMode::resume_from(DirectedStart {
+                spec_id: spec.id.clone(),
+                node_arg: node.clone(),
+            }),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    drop(_home);
+
+    assert_eq!(
+        db.get_graph_spec(&spec_id).unwrap().unwrap().status,
+        GraphSpecStatus::Completed,
+        "the restarted ensemble runs to completion"
+    );
+    assert_eq!(
+        join_run(&db, &spec_id, "join1").status,
+        GraphRunStatus::Pass,
+        "the join settles, so the dispatch fanned out via the ensemble"
+    );
+}

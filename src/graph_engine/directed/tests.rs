@@ -794,9 +794,19 @@ fn directed_start_refuses_join_and_member() {
     let ensembles = vec![ensemble_details("ens", "ens-name", "A", &["m1", "m2"], "j")];
 
     let join_err = resolve_directed_target("j", &nodes, &edges, &ensembles).unwrap_err();
-    assert!(join_err.to_string().contains("ens-name"));
+    assert!(join_err
+        .to_string()
+        .contains("belongs to ensemble 'ens-name'"));
+    assert!(join_err
+        .to_string()
+        .contains("Target the ensemble by its name ('ens-name')"));
     let member_err = resolve_directed_target("M1", &nodes, &edges, &ensembles).unwrap_err();
-    assert!(member_err.to_string().contains("ens-name"));
+    assert!(member_err
+        .to_string()
+        .contains("belongs to ensemble 'ens-name'"));
+    assert!(member_err
+        .to_string()
+        .contains("Target the ensemble by its name ('ens-name')"));
 }
 
 #[test]
