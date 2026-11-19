@@ -711,12 +711,16 @@ fn resume_rename_notice<'a>(
 /// Launch args for an interactive agent: the dialog's base args, with the yolo
 /// flag appended when yolo mode is on.
 fn yolo_launch_args(dialog: &NewAgentDialog) -> Option<String> {
+    use crate::tui::app::session_resume::args_contain_flag;
     let base_args = dialog.selected_args();
     if !dialog.yolo_mode {
         return base_args;
     }
     match dialog.selected_yolo_flag() {
         Some(flag) => Some(match base_args {
+            // Resume args already carry the flag the session launched with;
+            // appending it again makes the harness refuse the launch.
+            Some(a) if args_contain_flag(&a, &flag) => a,
             Some(a) => format!("{a} {flag}"),
             None => flag,
         }),
@@ -892,6 +896,160 @@ mod tests {
         assert_eq!(
             resume_rename_notice(false, Some("paulownia"), "platanus"),
             None
+        );
+    }
+
+    fn yolo_dialog(cli: &str, base_args: Option<&str>, yolo: bool) -> NewAgentDialog {
+        use crate::domain::cli_config::CliConfig;
+        let mut dialog = NewAgentDialog::new(None);
+        dialog.available_clis = vec![Cli::new(cli)];
+        dialog.cli_configs = vec![Some(CliConfig {
+            name: cli.to_string(),
+            binary: cli.to_string(),
+            yolo_flag: Some("--yolo".to_string()),
+            interactive_args: base_args.map(str::to_string),
+            ..Default::default()
+        })];
+        dialog.cli_index = 0;
+        dialog.yolo_mode = yolo;
+        dialog
+    }
+
+    /// The Resume step for a row whose args already carry `--yolo` launches
+    /// `--yolo resume <uuid>` with exactly one `--yolo`, even with yolo mode
+    /// on: the recorded launch flag plus the dialog's append must not double
+    /// it (muse exits 2 on a repeated `--yolo`).
+    #[test]
+    fn resume_yolo_args_launch_the_flag_exactly_once_with_yolo_on() {
+        use crate::tui::app::dialog::new_agent::NewTaskMode;
+        let mut dialog = yolo_dialog("muse", None, false);
+        dialog.task_mode = NewTaskMode::Resume;
+        dialog.selected_resume_session = Some(ResumableSession {
+            id: "row-id".to_string(),
+            name: "platanus".to_string(),
+            cli: "muse".to_string(),
+            last_active: "2026-11-18T21:01:00Z".to_string(),
+            working_dir: "/tmp/proj".to_string(),
+            args: Some("--yolo".to_string()),
+            harness_conversation_id: Some("uuid-resume".to_string()),
+        });
+        dialog.cli_configs[0]
+            .as_mut()
+            .expect("cli config")
+            .session_resume_cmd = Some("resume".to_string());
+        dialog.yolo_mode = true;
+
+        let args = yolo_launch_args(&dialog).expect("launch args");
+        assert_eq!(args.matches("--yolo").count(), 1, "doubled flag: {args:?}");
+        assert_eq!(args, "--yolo resume uuid-resume");
+    }
+
+    /// Same resume with yolo mode off: the recorded flag still survives
+    /// through the resume rebuild, exactly once.
+    #[test]
+    fn resume_yolo_args_launch_the_flag_exactly_once_with_yolo_off() {
+        use crate::tui::app::dialog::new_agent::NewTaskMode;
+        let mut dialog = yolo_dialog("muse", None, false);
+        dialog.task_mode = NewTaskMode::Resume;
+        dialog.selected_resume_session = Some(ResumableSession {
+            id: "row-id".to_string(),
+            name: "platanus".to_string(),
+            cli: "muse".to_string(),
+            last_active: "2026-11-18T21:01:00Z".to_string(),
+            working_dir: "/tmp/proj".to_string(),
+            args: Some("--yolo".to_string()),
+            harness_conversation_id: Some("uuid-resume".to_string()),
+        });
+        dialog.cli_configs[0]
+            .as_mut()
+            .expect("cli config")
+            .session_resume_cmd = Some("resume".to_string());
+
+        let args = yolo_launch_args(&dialog).expect("launch args");
+        assert_eq!(args.matches("--yolo").count(), 1, "dropped flag: {args:?}");
+        assert_eq!(args, "--yolo resume uuid-resume");
+    }
+
+    /// A new muse session with yolo mode on gains the flag once.
+    #[test]
+    fn new_session_with_yolo_on_gains_the_flag_once() {
+        let dialog = yolo_dialog("muse", None, true);
+
+        let args = yolo_launch_args(&dialog).expect("launch args");
+        assert_eq!(args, "--yolo");
+    }
+
+    /// A stub harness whose binary rejects a repeated flag succeeds through
+    /// the Resume step: the launch line carries `--yolo` exactly once.
+    #[test]
+    fn stub_harness_rejecting_a_repeated_flag_succeeds_through_resume() {
+        use crate::sessions::hub_command::build_spawn_command;
+        use crate::sessions::{SessionKind, SpawnRequest};
+        let dir = tempdir().expect("stub dir");
+        let bin = dir.path().join("muse-stub");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\nseen=\nfor a in \"$@\"; do\n  if [ \"$a\" = \"--yolo\" ]; then\n    if [ -n \"$seen\" ]; then echo duplicate >&2; exit 2; fi\n    seen=1\n  fi\ndone\nexit 0\n",
+        )
+        .expect("stub harness");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+        let mut dialog = yolo_dialog("muse", None, true);
+        {
+            use crate::tui::app::dialog::new_agent::NewTaskMode;
+            dialog.task_mode = NewTaskMode::Resume;
+        }
+        dialog.cli_configs[0]
+            .as_mut()
+            .expect("cli config")
+            .session_resume_cmd = Some("resume".to_string());
+        dialog.selected_resume_session = Some(ResumableSession {
+            id: "row-id".to_string(),
+            name: "platanus".to_string(),
+            cli: "muse".to_string(),
+            last_active: "2026-11-18T21:01:00Z".to_string(),
+            working_dir: "/tmp/proj".to_string(),
+            args: Some("--yolo".to_string()),
+            harness_conversation_id: Some("uuid-resume".to_string()),
+        });
+        let launch_args = yolo_launch_args(&dialog).expect("launch args");
+        assert_eq!(launch_args.matches("--yolo").count(), 1);
+
+        let req = SpawnRequest {
+            kind: SessionKind::Agent,
+            cli: bin.to_string_lossy().to_string(),
+            model: None,
+            workdir: dir.path().to_string_lossy().to_string(),
+            name: Some("platanus".to_string()),
+            prompt: None,
+            interactive_args: Some(launch_args),
+            fallback_args: None,
+            model_flag: None,
+            id: None,
+            harness_conversation_id: None,
+            seed_id: None,
+            accent: None,
+            yolo: false,
+            preserve_args: false,
+        };
+        let (cmd, _) = build_spawn_command(&req, "sess-stub", "platanus");
+        let argv: Vec<String> = cmd
+            .get_argv()
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let out = std::process::Command::new(&bin)
+            .args(&argv[1..])
+            .current_dir(dir.path())
+            .output()
+            .expect("stub harness runs");
+        assert!(
+            out.status.success(),
+            "the stub harness rejects a repeated flag: {}",
+            String::from_utf8_lossy(&out.stderr)
         );
     }
 

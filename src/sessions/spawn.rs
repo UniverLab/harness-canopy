@@ -194,8 +194,8 @@ pub fn yolo_flag_for(cli: &str) -> Option<String> {
 }
 
 /// `interactive_args` with the harness's yolo flag appended (the New dialog's
-/// skip-approvals switch). Unconditional: an explicit arg string keeps its
-/// own flags and gains this one after them.
+/// skip-approvals switch). A base that already carries it as a whole argument
+/// keeps it once — a duplicate makes the harness refuse the launch.
 pub fn with_yolo(interactive_args: Option<&str>, yolo_flag: &str) -> String {
     let base = interactive_args.unwrap_or_default().trim();
     let flag = yolo_flag.trim();
@@ -203,6 +203,7 @@ pub fn with_yolo(interactive_args: Option<&str>, yolo_flag: &str) -> String {
         (true, true) => String::new(),
         (true, false) => flag.to_string(),
         (false, true) => base.to_string(),
+        (false, false) if base.split_whitespace().any(|arg| arg == flag) => base.to_string(),
         (false, false) => format!("{base} {flag}"),
     }
 }

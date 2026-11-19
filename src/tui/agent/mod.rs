@@ -32,6 +32,11 @@ pub mod screen;
 
 mod hub_spawn;
 
+#[cfg(test)]
+pub(crate) mod hub_spawn_for_test {
+    pub(crate) use super::hub_spawn::hub_spawn_for_test::*;
+}
+
 /// Status of an interactive agent.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum AgentStatus {
@@ -284,14 +289,46 @@ impl InteractiveAgent {
         cols: u16,
         rows: u16,
     ) -> Result<Self> {
-        let endpoint = with_active(|active| (active.url.clone(), active.token.clone()))
-            .ok_or_else(|| anyhow::anyhow!("not connected to the session hub"))?;
+        let endpoint = with_active(|active| (active.url.clone(), active.token.clone()));
+        if item.status == "exited" {
+            return Self::attach_failed_item(item, cli, accent_color, seed_id);
+        }
+        let endpoint =
+            endpoint.ok_or_else(|| anyhow::anyhow!("not connected to the session hub"))?;
         let (stream, rx) = SessionStream::open(&endpoint.0, &endpoint.1, &item.id)
             .map_err(|e| anyhow::anyhow!("cannot attach to session '{}': {e}", item.id))?;
         let mut agent = Self::from_item(item, cli, accent_color, seed_id, stream);
         agent.wait_for_snapshot(&rx)?;
         agent.spawn_stream_reader(rx);
         agent.resize(cols, rows);
+        Ok(agent)
+    }
+
+    /// Attach a session that already exited before the post-spawn `list`:
+    /// there is no stream to open — fold the recorded exit code and failure
+    /// detail into a card the sidebar retains (see
+    /// `crate::tui::app::session_hub`). Its stream write half points
+    /// nowhere; writes fail silently.
+    fn attach_failed_item(
+        item: &SessionItem,
+        cli: Cli,
+        accent_color: Color,
+        seed_id: Option<&str>,
+    ) -> Result<Self> {
+        let code = item.exit_code.unwrap_or(-1);
+        let stream = crate::sessions::client::SessionSend::detached_placeholder(&item.id);
+        let mut agent = Self::from_item(item, cli, accent_color, seed_id, stream);
+        agent.status = AgentStatus::Exited(code);
+        agent
+            .exit_code
+            .store(code, std::sync::atomic::Ordering::Relaxed);
+        agent.exit_detail = crate::sessions::client::with_active(|active| {
+            active.db.get_session_exit_detail(&item.id).ok().flatten()
+        })
+        .flatten();
+        agent
+            .connected
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         Ok(agent)
     }
 

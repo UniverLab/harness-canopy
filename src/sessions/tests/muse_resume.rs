@@ -373,6 +373,118 @@ fn output_tail_returns_the_newest_text_capped() {
     );
 }
 
+// ── exit detail: head plus omission plus tail ────────────────
+
+#[test]
+fn failing_detail_keeps_the_head_names_the_error_and_stays_capped() {
+    use crate::sessions::hub_command::format_exit_detail;
+    let lines: Vec<String> = (1..=60).map(|i| format!("line {i:02}")).collect();
+    let full = lines.join("\n");
+
+    let detail = format_exit_detail(&full);
+
+    let detail_lines: Vec<&str> = detail.lines().collect();
+    for i in 1..=10 {
+        assert!(
+            detail_lines
+                .iter()
+                .any(|line| *line == format!("line {i:02}")),
+            "the first 10 lines survive: {detail:?}"
+        );
+    }
+    for i in 41..=60 {
+        assert!(
+            detail_lines
+                .iter()
+                .any(|line| *line == format!("line {i:02}")),
+            "the last 20 lines survive: {detail:?}"
+        );
+    }
+    assert!(
+        detail.contains("[... 30 lines omitted ...]"),
+        "the omission line names the dropped count: {detail:?}"
+    );
+    assert!(
+        detail.len() <= super::super::hub::EXIT_DETAIL_MAX_BYTES,
+        "the detail stays capped: {} bytes",
+        detail.len()
+    );
+}
+
+#[test]
+fn short_failing_output_stays_whole_with_no_omission_line() {
+    use crate::sessions::hub_command::format_exit_detail;
+    let full = "error: the argument '--yolo' cannot be used multiple times\nusage: muse [OPTIONS]";
+
+    let detail = format_exit_detail(full);
+
+    assert_eq!(detail, full);
+    assert!(
+        !detail.contains("omitted"),
+        "short output keeps no omission line: {detail:?}"
+    );
+}
+
+#[test]
+fn long_single_lines_still_cap_at_bytes_with_the_head_surviving() {
+    use crate::sessions::hub_command::format_exit_detail;
+    let full = format!("{}\n{}", "e".repeat(3000), "tail-line");
+
+    let detail = format_exit_detail(&full);
+
+    assert!(
+        detail.starts_with('e'),
+        "the head — the error line — survives: {detail:?}"
+    );
+    assert!(
+        !detail.contains("tail-line"),
+        "capping cuts the tail, never the head: {detail:?}"
+    );
+    assert!(
+        detail.len() <= super::super::hub::EXIT_DETAIL_MAX_BYTES,
+        "the detail stays capped: {} bytes",
+        detail.len()
+    );
+}
+
+#[test]
+fn capped_long_output_keeps_the_whole_head_and_the_omission_line() {
+    use crate::sessions::hub_command::format_exit_detail;
+    let lines: Vec<String> = (1..=60)
+        .map(|i| format!("line {i:02} {}", "x".repeat(100)))
+        .collect();
+    let full = lines.join("\n");
+    assert!(
+        full.len() > super::super::hub::EXIT_DETAIL_MAX_BYTES,
+        "the fixture must actually exceed the byte cap"
+    );
+
+    let detail = format_exit_detail(&full);
+
+    let detail_lines: Vec<&str> = detail.lines().collect();
+    for i in 1..=10 {
+        assert!(
+            detail_lines
+                .iter()
+                .any(|line| line.starts_with(&format!("line {i:02} "))),
+            "every head line survives the byte cap: {detail:?}"
+        );
+    }
+    assert!(
+        detail.contains("[... 30 lines omitted ...]"),
+        "the omission line survives the byte cap: {detail:?}"
+    );
+    assert!(
+        detail_lines.iter().any(|line| line.starts_with("line 60 ")),
+        "the newest tail line survives the byte cap: {detail:?}"
+    );
+    assert!(
+        detail.len() <= super::super::hub::EXIT_DETAIL_MAX_BYTES,
+        "the detail stays capped: {} bytes",
+        detail.len()
+    );
+}
+
 // ── kill clears, natural failures record ─────────────────────────
 
 #[test]

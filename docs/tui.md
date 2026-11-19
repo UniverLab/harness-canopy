@@ -50,8 +50,10 @@ step instead of launching straight away:
     per harness and directory may take that fallback at a restart — the
     rest fail with an explanation instead of colliding on one
     conversation. A resume whose harness exits immediately keeps its
-    session row as an error card with the harness's output tail attached
-    until dismissed, so the failure is never silent. Closing a session
+    session row as an error card with the harness's failure detail attached
+    (the first lines naming the error, the last lines of output) until
+    dismissed, so the failure is never silent. A launch flag the session
+    already carries is never passed twice. Closing a session
     yourself never leaves such a card.
   - `↑↓` selects, `Enter` confirms, and `Esc` returns to the form with every
   value kept. **Background** and **Terminal** launch from the form as

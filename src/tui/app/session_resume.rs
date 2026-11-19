@@ -211,6 +211,49 @@ mod resume_picker_tests {
 
     // ── SessionResumePicker ─────────────────────────────────────
 
+    // ── append_flag_if_missing: never duplicate ────────────────
+    // (dedup lives in `append_flag_if_missing`; these pin its contract)
+
+    #[test]
+    fn append_flag_if_missing_never_duplicates_a_present_flag() {
+        assert_eq!(
+            append_flag_if_missing(Some("--provider echo --yolo"), Some("--yolo"), true).as_deref(),
+            Some("--provider echo --yolo"),
+            "a present flag stays exactly once"
+        );
+        assert_eq!(
+            append_flag_if_missing(Some("--yolo resume uuid-aaa"), Some("--yolo"), true).as_deref(),
+            Some("--yolo resume uuid-aaa"),
+            "a resume whose recorded args carry the flag launches it once"
+        );
+        assert_eq!(
+            append_flag_if_missing(Some("--provider echo --yolo2"), Some("--yolo"), true)
+                .as_deref(),
+            Some("--provider echo --yolo2 --yolo"),
+            "only a whole-argument match counts"
+        );
+        assert_eq!(
+            append_flag_if_missing(Some("--provider echo"), Some("--yolo"), true).as_deref(),
+            Some("--provider echo --yolo"),
+            "a missing flag is still appended once"
+        );
+        assert_eq!(
+            append_flag_if_missing(Some("--provider echo"), Some("--yolo"), false).as_deref(),
+            Some("--provider echo"),
+            "yolo mode off appends nothing"
+        );
+        assert_eq!(
+            append_flag_if_missing(None, Some("--yolo"), true).as_deref(),
+            Some("--yolo"),
+            "no base args still yields the flag alone"
+        );
+        assert_eq!(
+            append_flag_if_missing(Some("--provider echo"), None, true).as_deref(),
+            Some("--provider echo"),
+            "a harness without a yolo flag is unchanged"
+        );
+    }
+
     #[test]
     fn picker_selecting_second_row_yields_its_session_id() {
         let rows = vec![

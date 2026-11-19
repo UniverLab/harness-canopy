@@ -7,8 +7,9 @@
 //! receive snapshots plus the chunks after them.
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::sync::{Arc, Mutex};
+#[cfg(test)]
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -21,16 +22,6 @@ use crate::domain::models::Cli;
 
 #[cfg(unix)]
 use crate::tui::agent::pty::install_signal_handlers;
-
-/// Send `SIGHUP` to the child process group the way closing a session in
-/// the TUI does, so the shell and its children all observe the hangup.
-#[cfg(unix)]
-fn send_sighup_to_group(child: &mut dyn portable_pty::Child) {
-    let Some(pid) = child.process_id().map(|pid| pid as i32) else {
-        return;
-    };
-    let _ = crate::daemon::process::send_signal_to_group(pid, libc::SIGHUP);
-}
 
 use super::compose_guard::{ComposeState, Delivery};
 use super::protocol::SessionItem;
@@ -55,24 +46,8 @@ const DEFAULT_BROADCAST_CAPACITY: usize = 256;
 /// Hub lifecycle event broadcast capacity.
 const EVENT_BROADCAST_CAPACITY: usize = 128;
 
-/// How long `kill` waits for the child to exit before falling back.
-const KILL_WAIT_POLLS: u32 = 100;
-const KILL_WAIT_INTERVAL: Duration = Duration::from_millis(20);
-
-/// Bytes of harness output a failed session row keeps as its `exit_detail`.
-const EXIT_DETAIL_MAX_BYTES: usize = 2048;
-
-/// The last `max_bytes` of `text`, cut on a char boundary.
-fn tail_chars(text: &str, max_bytes: usize) -> String {
-    if text.len() <= max_bytes {
-        return text.to_string();
-    }
-    let start = text.len() - max_bytes;
-    let boundary = (start..=text.len())
-        .find(|at| text.is_char_boundary(*at))
-        .unwrap_or(text.len());
-    text[boundary..].to_string()
-}
+/// Bytes of a harness's output a failed session row keeps as its `exit_detail`.
+pub(crate) const EXIT_DETAIL_MAX_BYTES: usize = 2048;
 
 /// What a hub session runs: an AI CLI (`agent`) or a plain shell (`terminal`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -392,21 +367,15 @@ impl HubSession {
         }
     }
 
-    /// The failure detail a nonzero agent exit records: the harness's
-    /// stderr tail, or the bare exit code when the session died silent so
-    /// no failed row is ever unexplained.
+    /// This session's nonzero-exit detail: its output's head and tail,
+    /// or the bare code when it died silent (see the free function).
     fn exit_detail_text(&self, code: i32) -> String {
-        let tail = self.output_tail(EXIT_DETAIL_MAX_BYTES).unwrap_or_default();
-        if tail.trim().is_empty() {
-            format!("exited with code {code}")
-        } else {
-            tail
-        }
+        exit_detail_text(&self.state, code)
     }
 
-    /// The last `max_bytes` of the session's live screen as plain text (no
-    /// escape sequences): the harness's stderr tail at exit time. `None`
-    /// only when the output lock is poisoned.
+    /// Test pin for the tail helper (production detail goes through
+    /// `exit_detail_text`). `None` only when the output lock is poisoned.
+    #[cfg(test)]
     pub(crate) fn output_tail(&self, max_bytes: usize) -> Option<String> {
         self.state.lock().ok().map(|out| {
             let contents = out.parser.screen().contents();
@@ -427,6 +396,13 @@ impl HubSession {
 #[path = "hub_snapshot.rs"]
 mod snapshot;
 use snapshot::snapshot_locked;
+#[path = "hub_process.rs"]
+mod child;
+#[cfg(unix)]
+use child::send_sighup_to_group;
+#[cfg(test)]
+use child::tail_chars;
+use child::{exit_detail_text, spawn_reader_thread, wait_for_exit_code};
 #[cfg(test)]
 pub(crate) use snapshot::{scrollback_formatted, SNAPSHOT_SCROLLBACK_LINES};
 
@@ -754,46 +730,6 @@ impl SessionHub {
         self.inner.shelf.reap_and_emit(self);
         Some(code)
     }
-}
-
-/// PTY reader thread: ingest chunks until EOF, then wait for the child to
-/// exit and record the natural exit.
-fn spawn_reader_thread(
-    hub: SessionHub,
-    session: Arc<HubSession>,
-    mut reader: Box<dyn Read + Send>,
-) {
-    std::thread::spawn(move || {
-        let mut tmp = [0u8; 4096];
-        loop {
-            match reader.read(&mut tmp) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => session.ingest_chunk(&tmp[..n]),
-            }
-        }
-        let code = loop {
-            if let Some(code) = session.status().exit_code() {
-                break code;
-            }
-            if let Some(code) = session.poll_exit_code() {
-                break code;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        };
-        hub.record_natural_exit(&session, code);
-    });
-}
-
-/// Poll the child for its exit code up to the kill grace; `None` if it is
-/// somehow still alive afterwards.
-fn wait_for_exit_code(session: &HubSession) -> Option<i32> {
-    for _ in 0..KILL_WAIT_POLLS {
-        if let Some(code) = session.poll_exit_code() {
-            return Some(code);
-        }
-        std::thread::sleep(KILL_WAIT_INTERVAL);
-    }
-    session.poll_exit_code()
 }
 
 #[cfg(test)]

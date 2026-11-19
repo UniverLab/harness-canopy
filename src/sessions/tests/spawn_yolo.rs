@@ -254,12 +254,29 @@ async fn ws_refuses_a_missing_workdir() {
 }
 
 #[test]
-fn yolo_flag_composition_is_unconditional() {
-    // No registry needed: the helper pins the append the hub performs.
+fn yolo_flag_composition_deduplicates() {
+    // The hub path dedups through `with_yolo`: a base that already carries
+    // the flag keeps it exactly once — a duplicate makes the harness refuse
+    // the launch (`--yolo ... --yolo` is exit 2 on muse).
     assert_eq!(with_yolo(Some("--tui"), "--yolo"), "--tui --yolo");
     assert_eq!(with_yolo(None, "--yolo"), "--yolo");
     assert_eq!(with_yolo(Some(""), "--yolo"), "--yolo");
     assert_eq!(with_yolo(Some("  --tui  "), "  --yolo  "), "--tui --yolo");
+    assert_eq!(
+        with_yolo(Some("--tui --yolo"), "--yolo"),
+        "--tui --yolo",
+        "an explicit arg string that already carries the flag gains no second one"
+    );
+    assert_eq!(
+        with_yolo(Some("--tui --yolo resume uuid-aaa"), "--yolo"),
+        "--tui --yolo resume uuid-aaa",
+        "a resume whose recorded args carry the flag launches it exactly once"
+    );
+    assert_eq!(
+        with_yolo(Some("--tui --yolo2"), "--yolo"),
+        "--tui --yolo2 --yolo",
+        "only a whole-argument match counts: --yolo2 is a different flag"
+    );
     assert_eq!(
         with_yolo(Some("--tui"), "--agent auto-approve"),
         "--tui --agent auto-approve"
@@ -329,6 +346,20 @@ fn hub_appends_the_harness_yolo_flag() {
         args.as_deref(),
         Some(expected.as_str()),
         "yolo must append to the registry args when the frame sent none"
+    );
+
+    // A frame whose explicit args already carry the flag keeps it exactly
+    // once: a resume relaunch whose recorded args kept `--yolo` must not gain
+    // a second one through `yolo:true`.
+    let mut req = agent_spawn(&cli, &workdir.path().to_string_lossy());
+    req.interactive_args = Some(format!("--tui {flag} resume uuid-aaa"));
+    req.yolo = true;
+    let (_, args) = build_spawn_command(&req, "sess-resume", "resume-name");
+    let args = args.expect("agent args");
+    assert_eq!(
+        args.matches(&flag).count(),
+        1,
+        "an explicit flag must never be duplicated: {args:?}"
     );
 }
 

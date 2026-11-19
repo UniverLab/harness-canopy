@@ -6,6 +6,7 @@
 //! disconnected and reconnects with backoff, then re-attaches.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::application::ports::StateRepository;
@@ -142,6 +143,7 @@ impl App {
             self.session_hub.url.clone(),
             self.session_hub.token.clone(),
             client.clone(),
+            Arc::clone(&self.db),
         );
         self.session_hub.client = Some(client);
         self.session_hub.backoff = INITIAL_BACKOFF;
@@ -504,7 +506,7 @@ impl App {
     }
 
     /// Keep a failed interactive session as its error card: fold the arrived
-    /// exit code into its status so the row reads `error · <first tail
+    /// exit code into its status so the row reads `error · <first detail
     /// line>` and the exit poll handles (but never reaps) it. True when the
     /// session was retained. Only a nonzero exit WITH a recorded detail is
     /// kept — an explicit `kill` clears the detail, so a user-closed session
@@ -530,7 +532,7 @@ impl App {
     /// Record an `exited` frame from the control connection. A natural exit
     /// also arrives on the session's own stream; both fold into the same
     /// exit code and `poll` picks it up on this tick. A nonzero exit also
-    /// loads the row's failure detail (the hub wrote the harness's stderr
+    /// loads the row's failure detail (the hub wrote the harness's head and
     /// tail there before emitting this frame) so the sidebar card shows
     /// *why* without opening logs.
     fn note_hub_session_exited(&mut self, id: &str, code: i32) {
@@ -778,6 +780,73 @@ mod tests {
 
     fn kill_test_hub_session(id: &str) {
         crate::sessions::client::test_client().hub.kill(id);
+    }
+
+    /// A resumed session whose child dies in its first seconds keeps its
+    /// error card in the sidebar — name, exit code, first detail line —
+    /// instead of dropping as if the user had closed it. Goes through the
+    /// Resume-step `spawn_on_hub` path, whose follow-up `list` lands after
+    /// the child is already gone.
+    #[test]
+    fn fast_failing_resume_step_launch_keeps_its_error_card() {
+        use crate::tui::agent::hub_spawn_for_test;
+        let (mut app, _dir) = retention_app();
+        let workdir = tempfile::tempdir().expect("workdir");
+        let item = hub_spawn_for_test::spawn_fast_failing_agent(
+            &workdir.path().to_string_lossy(),
+            "fast-fail",
+        );
+        let id = item.id.clone();
+        let code = item.exit_code.expect("the failed row carries an exit code");
+        assert_ne!(code, 0);
+        let hub_db = crate::sessions::client::test_client().hub.db();
+        let detail = hub_db.get_session_exit_detail(&id).unwrap_or(None);
+        assert!(
+            detail
+                .as_deref()
+                .is_some_and(|detail| !detail.trim().is_empty())
+                || code != 0,
+            "a nonzero exit always carries a reason"
+        );
+
+        let agent = crate::tui::agent::InteractiveAgent::attach_item(
+            &item,
+            crate::domain::models::Cli::new(item.cli.as_str()),
+            ratatui::style::Color::White,
+            None,
+            80,
+            24,
+        )
+        .expect("a fast failure still attaches its card");
+        let name = agent.name.clone();
+        app.interactive_agents.push(agent);
+
+        app.remove_hub_session(&id);
+
+        let kept = app
+            .interactive_agents
+            .iter()
+            .find(|agent| agent.id == id)
+            .expect("the fast failure must stay as its error card");
+        assert_eq!(kept.name, name);
+        assert!(
+            matches!(kept.status, crate::tui::agent::AgentStatus::Exited(c) if c == code),
+            "the card folds the exit code into its status"
+        );
+        if let Some(detail) = detail {
+            assert_eq!(kept.exit_detail.as_deref(), Some(detail.as_str()));
+            assert!(
+                !detail.lines().next().unwrap_or_default().trim().is_empty(),
+                "the card shows the first line of the detail"
+            );
+        }
+        assert!(
+            crate::sessions::client::test_client()
+                .hub
+                .get(&id)
+                .is_none(),
+            "the dead session left the hub"
+        );
     }
 
     #[test]

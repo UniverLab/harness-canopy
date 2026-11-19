@@ -6,11 +6,14 @@
 //! per attached session carries output. Writes are fire-and-forget; reads
 //! are non-blocking polls, except [`HubClient::request`], which waits for
 //! the matching answer.
+//!
+//! The shared connection and the in-process test hub live in
+//! [`active`](crate::sessions::client::active).
 
 use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures::{SinkExt as _, StreamExt as _};
@@ -21,6 +24,13 @@ use super::protocol::{
     resize_frame, shelf_delete_frame, shelf_get_frame, shelf_list_frame, HostFrame, ShelfItem,
     PROTO_VERSION,
 };
+
+pub mod active;
+
+pub use active::{set_active, with_active};
+
+#[cfg(test)]
+pub use active::test_client;
 
 #[cfg(test)]
 mod tests;
@@ -449,6 +459,26 @@ impl SessionSend {
         }
     }
 
+    /// A write half that points at no session: every write fails silently.
+    /// Used for agents attached to an already-exited session, where there
+    /// is no stream to open. Test-visible: the TUI builds the failed card
+    /// this way in production too.
+    pub(crate) fn detached_placeholder(id: &str) -> Self {
+        let (tx, _rx) = unbounded_channel();
+        Self::detached(id, tx)
+    }
+
+    /// A write half over an explicit sender with no attached socket: every
+    /// write fails silently. The TUI hands its own sender so the half stays
+    /// alive without a per-call channel that drops immediately.
+    pub(crate) fn detached(id: &str, tx: UnboundedSender<String>) -> Self {
+        Self {
+            tx,
+            id: id.to_string(),
+            req_seq: Arc::new(AtomicU64::new(1)),
+        }
+    }
+
     /// Raw bytes for the session's PTY stdin.
     pub fn input(&self, data: &[u8]) {
         let _ = self.tx.send(input_frame(&self.id, data));
@@ -683,108 +713,5 @@ fn pump_session_text(
         // arrive, so they are dropped.
         HostFrame::Resized { .. } => false,
         _ => false,
-    }
-}
-
-// ── Global client ─────────────────────────────────────────────────────
-
-/// The TUI's shared control connection plus the endpoint that session
-/// streams dial. Spawns go through this so no call site changes.
-pub struct ActiveHub {
-    pub url: String,
-    pub token: String,
-    pub client: HubClient,
-}
-
-fn active_cell() -> &'static Mutex<Option<ActiveHub>> {
-    static ACTIVE: OnceLock<Mutex<Option<ActiveHub>>> = OnceLock::new();
-    ACTIVE.get_or_init(|| Mutex::new(None))
-}
-
-/// Install the shared control connection (replacing any previous one).
-pub fn set_active(url: String, token: String, client: HubClient) {
-    if let Ok(mut active) = active_cell().lock() {
-        *active = Some(ActiveHub { url, token, client });
-    }
-}
-
-/// Run `f` on the shared control connection. In tests the shared
-/// connection self-installs against the in-process hub, so existing
-/// spawn-based tests need no setup edits.
-pub fn with_active<R>(f: impl FnOnce(&ActiveHub) -> R) -> Option<R> {
-    #[cfg(test)]
-    ensure_test_active();
-    let active = active_cell().lock().ok()?;
-    let active = active.as_ref()?;
-    Some(f(active))
-}
-
-// ── In-process test hub ───────────────────────────────────────────────
-
-/// The in-process hub that tests spawn against: its endpoint plus the hub
-/// itself for assertions. One per test process.
-#[cfg(test)]
-pub struct TestHub {
-    pub url: String,
-    pub token: String,
-    pub hub: super::SessionHub,
-}
-
-/// Serve the hub on 127.0.0.1 with an ephemeral port. The server thread
-/// runs until the test process exits.
-#[cfg(test)]
-pub fn test_client() -> &'static TestHub {
-    static TEST_HUB: OnceLock<TestHub> = OnceLock::new();
-    TEST_HUB.get_or_init(|| {
-        let dir = Box::leak(Box::new(tempfile::tempdir().expect("test hub dir")));
-        let db = Arc::new(
-            crate::db::Database::new(&dir.path().join("test.db")).expect("test hub database"),
-        );
-        let hub = super::SessionHub::with_broadcast_capacity(db, "test-host".to_string(), 256);
-        let token = "test-token".to_string();
-        let state = super::ws::SessionsState::for_test(hub.clone(), token.clone());
-        let (addr_tx, addr_rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .expect("test hub runtime");
-            rt.block_on(async move {
-                let app = axum::Router::new()
-                    .route(
-                        "/sessions/ws",
-                        axum::routing::get(super::ws::sessions_ws_handler),
-                    )
-                    .with_state(state);
-                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-                    .await
-                    .expect("bind test hub");
-                let addr = listener.local_addr().expect("test hub addr");
-                addr_tx.send(addr).expect("test hub addr channel");
-                axum::serve(listener, app).await.expect("serve test hub");
-            });
-        });
-        let addr: std::net::SocketAddr = addr_rx.recv().expect("test hub address");
-        TestHub {
-            url: format!("ws://{addr}/sessions/ws"),
-            token,
-            hub,
-        }
-    })
-}
-
-/// Install the in-process hub as the shared connection, once.
-#[cfg(test)]
-fn ensure_test_active() {
-    let needs = active_cell()
-        .lock()
-        .map(|active| active.is_none())
-        .unwrap_or(false);
-    if !needs {
-        return;
-    }
-    let test = test_client();
-    if let Ok(client) = HubClient::connect(&test.url, &test.token) {
-        set_active(test.url.clone(), test.token.clone(), client);
     }
 }
