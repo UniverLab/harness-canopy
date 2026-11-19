@@ -301,6 +301,76 @@ fn reconcile_with_no_active_sessions_starts_nothing() {
     );
 }
 
+/// Writes captured tracing output into one shared buffer; clones share it,
+/// so the test can read what the subscriber wrote.
+#[derive(Clone)]
+struct LogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("log buffer").extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A stop leaves rows `active` with dead pids; the next start resumes each
+/// one and says how many it is bringing back.
+#[test]
+fn reconcile_resumes_rows_left_active_with_dead_pids_and_logs_the_count() {
+    let (db, dir) = test_db();
+    let current_boot = crate::system::boot_id();
+    for id in ["stopped-one", "stopped-two"] {
+        db.insert_interactive_session(
+            id,
+            id,
+            "sh",
+            "/tmp",
+            None,
+            Some(999_999_999),
+            "interactive",
+            current_boot.as_deref(),
+        )
+        .unwrap();
+    }
+
+    let log_buffer = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let writer = LogWriter(std::sync::Arc::clone(&log_buffer));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+
+    let hub = test_hub(&db);
+    {
+        let _guard = tracing::subscriber::set_default(subscriber);
+        reconcile_at_startup(&hub, dir.path());
+    }
+
+    for id in ["stopped-one", "stopped-two"] {
+        assert!(
+            hub.get(id).is_some(),
+            "each active row with a dead pid is relaunched"
+        );
+        assert_eq!(
+            db.get_interactive_session_status(id)
+                .expect("db read")
+                .as_deref(),
+            Some("active"),
+            "the resumed row stays active"
+        );
+        let _ = hub.kill(id);
+    }
+    let logs = String::from_utf8(log_buffer.lock().expect("log buffer").clone()).unwrap();
+    assert!(
+        logs.contains("Resuming 2 active session(s)"),
+        "the start must log how many sessions it resumes, got: {logs}"
+    );
+}
+
 // ── terminals open clean across a hub restart ──────────────────────
 
 #[test]

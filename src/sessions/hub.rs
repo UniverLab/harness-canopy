@@ -24,6 +24,7 @@ use crate::domain::models::Cli;
 use crate::tui::agent::pty::install_signal_handlers;
 
 use super::compose_guard::{ComposeState, Delivery};
+use super::hub_shutdown::HubShutdown;
 use super::protocol::SessionItem;
 use super::{preserve_rows_on_shrink, spawn_identity, write_submitted_prompt, VT_SCROLLBACK_LINES};
 
@@ -424,6 +425,9 @@ struct HubInner {
     /// the live store ([`super::muse_conversation::muse_store_dir`]). Tests
     /// point it at a scratch store.
     muse_store_override: std::sync::OnceLock<std::path::PathBuf>,
+    /// Set when the daemon's stop signal arrives: child exits from then on
+    /// keep their rows resumable instead of finishing them.
+    shutdown: Arc<HubShutdown>,
 }
 
 impl SessionHub {
@@ -446,8 +450,21 @@ impl SessionHub {
                 host_label,
                 shelf: super::hub_shelf::ShelfLink::default(),
                 muse_store_override: std::sync::OnceLock::new(),
+                shutdown: Arc::new(HubShutdown::new()),
             }),
         }
+    }
+
+    /// Mark the daemon as shutting down: a session child that exits from now
+    /// on keeps its row resumable (the next start brings it back) instead of
+    /// finishing it.
+    pub fn set_shutting_down(&self) {
+        self.inner.shutdown.set();
+    }
+
+    /// Whether the daemon's stop signal has arrived.
+    pub fn is_shutting_down(&self) -> bool {
+        self.inner.shutdown.is_set()
     }
     pub fn wire_shelf(&self, shelf: Arc<super::shelf::ShelfStore>) {
         self.inner.shelf.wire(self.inner.events.clone(), shelf);
@@ -683,7 +700,12 @@ impl SessionHub {
         if let Ok(mut sessions) = self.inner.sessions.lock() {
             sessions.remove(session.id.as_str());
         }
-        session.finish_db_row(&self.inner.db);
+        // During a daemon stop the child dies because the daemon is going
+        // away, not because the session ended: leave the row as it was so
+        // the next start resumes it (agent `active`, terminal `idle`).
+        if !self.is_shutting_down() {
+            session.finish_db_row(&self.inner.db);
+        }
         self.emit(HubEvent::Exited {
             id: session.id.clone(),
             code,

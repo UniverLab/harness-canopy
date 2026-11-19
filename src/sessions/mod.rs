@@ -16,6 +16,7 @@ pub mod hub;
 pub mod hub_command;
 pub mod hub_event;
 pub mod hub_shelf;
+pub mod hub_shutdown;
 pub mod muse_conversation;
 pub mod outbound;
 pub mod protocol;

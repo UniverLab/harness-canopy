@@ -100,7 +100,10 @@ step instead of launching straight away:
   (`canopy daemon restart`) does end its sessions — they are its children —
   but the new daemon respawns every session the database still lists as
   active as soon as it starts, under the same id and name, resuming the
-  harness conversation where the platform supports it. A terminal comes back
+  harness conversation where the platform supports it. That includes a
+  systemd stop or machine restart: every session comes back after the
+  restart in its own harness conversation, and `canopy setup` upgrades an
+  old unit file so the stop does not end them in the first place. A terminal comes back
   in its working directory with a clean pane and a fresh prompt — no stored
   output is replayed into it.
   While the TUI runs, a dropped daemon connection is retried on its own

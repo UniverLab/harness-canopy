@@ -107,7 +107,7 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
         Arc::clone(&sessions_state),
     );
 
-    bind_and_serve(router, port, ct).await?;
+    bind_and_serve(router, port, ct, &sessions_state).await?;
     shutdown_http_server(
         background,
         core.watcher_engine,
@@ -369,6 +369,7 @@ async fn bind_and_serve(
     router: axum::Router,
     port: u16,
     ct: tokio_util::sync::CancellationToken,
+    sessions: &crate::sessions::ws::SessionsState,
 ) -> Result<()> {
     let bind_addr = format!("127.0.0.1:{port}");
 
@@ -381,15 +382,32 @@ async fn bind_and_serve(
         bind_addr
     );
 
+    let hub = sessions.hub.clone();
     axum::serve(tcp_listener, router)
         .with_graceful_shutdown(async move {
-            shutdown_signal().await;
-            tracing::info!("Shutdown signal received");
-            ct.cancel();
+            await_shutdown(shutdown_signal(), &hub, &ct).await;
         })
         .await?;
 
     Ok(())
+}
+
+/// The stop sequence at the signal edge: mark the hub as shutting down,
+/// then cancel the serve loop. Setting the flag first is what keeps the PTY
+/// children that die during the drain from finishing their rows, so the next
+/// start resumes them. `signal` is a parameter so a test can drive the order
+/// with a stub instead of a real SIGTERM.
+async fn await_shutdown<F>(
+    signal: F,
+    hub: &crate::sessions::SessionHub,
+    ct: &tokio_util::sync::CancellationToken,
+) where
+    F: std::future::Future<Output = ()>,
+{
+    signal.await;
+    hub.set_shutting_down();
+    tracing::info!("Shutdown signal received");
+    ct.cancel();
 }
 
 /// The shutdown sequence, in order: cancel the scheduler, the health
@@ -1869,5 +1887,31 @@ mod stdio_startup_reconciliation_tests {
         let graph_engine2 = GraphEngine::new(Arc::clone(&db), Arc::clone(&notif));
         capture_interrupted_state(&graph_engine2, &watcher).await;
         let _ = dir.path().join("placeholder");
+    }
+
+    /// The stop signal marks the hub before the serve loop is cancelled:
+    /// `shutdown_http_server` only runs after cancellation, so a child that
+    /// dies during the drain finds the flag already set.
+    #[tokio::test]
+    async fn shutdown_signal_sets_the_hub_flag_before_cancelling() {
+        let dir = tempdir().unwrap();
+        let db = Arc::new(Database::new(&dir.path().join("shutdown.db")).unwrap());
+        let hub = crate::sessions::SessionHub::new(db, "test-host".to_string());
+        let ct = tokio_util::sync::CancellationToken::new();
+
+        let observed = hub.clone();
+        let signal = async move {
+            assert!(
+                !observed.is_shutting_down(),
+                "the flag is set by the signal future, not before it fires"
+            );
+        };
+        await_shutdown(signal, &hub, &ct).await;
+
+        assert!(hub.is_shutting_down(), "the stop signal marks the hub");
+        assert!(
+            ct.is_cancelled(),
+            "the flag is set before the serve loop is cancelled (and thus before shutdown_http_server)"
+        );
     }
 }

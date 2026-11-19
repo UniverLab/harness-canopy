@@ -18,6 +18,7 @@ mod roundtrip;
 mod scheduled;
 mod shelf;
 mod shelf_upload;
+mod shutdown;
 mod snapshot;
 mod spawn_yolo;
 

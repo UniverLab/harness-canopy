@@ -69,15 +69,20 @@ pub(crate) fn reconcile_message(old: Option<&Path>, new: &Path) -> String {
     )
 }
 
-/// CB75 FR1: make the unit at `unit_path` point at `exe`.
+/// CB75 FR1: make the unit at `unit_path` point at `exe`, or migrate a unit
+/// that predates `KillMode=mixed`.
 ///
 /// `Some(..)` when the unit was rewritten (and the manager reloaded and its
 /// failed state cleared), `None` when there is no unit file, when it already
-/// pointed at `exe`, or when it names no binary to compare.
+/// points at `exe` with `KillMode=mixed`, or when it names no binary to
+/// compare.
 ///
-/// The rewrite goes through `service_install::write_systemd_unit`, so the
+/// An `ExecStart` drift re-renders the whole unit through
+/// `service_install::write_systemd_unit`, so the
 /// PATH/BROWSER/DISPLAY/WAYLAND_DISPLAY reconciliation is exactly the one
-/// `daemon install-service` uses — there is no second renderer to drift.
+/// `daemon install-service` uses — there is no second renderer to drift. A
+/// missing `KillMode=mixed` alone is inserted surgically instead: re-rendering
+/// would clobber every line the user hand-edited.
 pub(crate) fn reconcile_unit_binary(
     runner: &dyn CommandRunner,
     unit_path: &Path,
@@ -88,16 +93,22 @@ pub(crate) fn reconcile_unit_binary(
         return Ok(None);
     };
     let named = unit_exec_start_binary(&unit_content);
-    if !exec_start_needs_update(named.as_deref(), exe) {
+    let reloaded = if exec_start_needs_update(named.as_deref(), exe) {
+        service_install::write_systemd_unit(exe, port, unit_path)?;
+        false
+    } else if service_install::ensure_kill_mode_mixed_with(runner, unit_path)? {
+        // The migration already reloaded systemd.
+        true
+    } else {
         return Ok(None);
-    }
-
-    service_install::write_systemd_unit(exe, port, unit_path)?;
+    };
 
     // A unit that has already hit its start limit stays `failed` until it is
     // cleared, and a rewritten `ExecStart` is only re-read after a reload —
     // without both, the very next `start` fails again for the old reason.
-    let _ = runner.run("systemctl", &["--user", "daemon-reload"]);
+    if !reloaded {
+        let _ = runner.run("systemctl", &["--user", "daemon-reload"]);
+    }
     let _ = runner.run("systemctl", &["--user", "reset-failed", SYSTEMD_UNIT_NAME]);
 
     let outcome = UnitReconcile {
@@ -420,7 +431,10 @@ mod tests {
         let exe = tmp.path().join("canopy");
         std::fs::write(&exe, "x").unwrap();
         let unit_path = tmp.path().join("canopy.service");
-        let content = format!("[Service]\nExecStart={} serve --port 7755\n", exe.display());
+        let content = format!(
+            "[Service]\nKillMode=mixed\nTimeoutStopSec=30\nExecStart={} serve --port 7755\n",
+            exe.display()
+        );
         std::fs::write(&unit_path, &content).unwrap();
         let runner = RecordingRunner::new(None);
         let outcome = reconcile_unit_binary(&runner, &unit_path, &exe, 7755).unwrap();
@@ -553,5 +567,54 @@ mod tests {
         assert!(msg.contains("did not open port 7755 within 10s"));
         assert!(msg.contains("not executable or missing: /gone/canopy"));
         assert!(msg.contains("journalctl --user -u canopy.service"));
+    }
+
+    /// A unit whose `ExecStart` is already right but lacks `KillMode=mixed`
+    /// is migrated in place: the directive is added and every line the user
+    /// hand-edited survives.
+    #[test]
+    fn reconcile_migrates_a_unit_that_lacks_kill_mode_without_clobbering_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let unit_path = tmp.path().join("canopy.service");
+        std::fs::write(
+            &unit_path,
+            "[Service]\nExecStart=/home/u/.local/bin/canopy serve --port 7755\nEnvironment=HAND=edited\n",
+        )
+        .unwrap();
+        let runner = RecordingRunner::new(None);
+        let outcome = reconcile_unit_binary(
+            &runner,
+            &unit_path,
+            Path::new("/home/u/.local/bin/canopy"),
+            7755,
+        )
+        .unwrap();
+        assert!(outcome.is_some(), "the migration is reported as a change");
+
+        let migrated = std::fs::read_to_string(&unit_path).unwrap();
+        assert!(migrated.contains("KillMode=mixed"));
+        assert!(migrated.contains("TimeoutStopSec=30"));
+        assert!(
+            migrated.contains("Environment=HAND=edited"),
+            "hand-edited lines must survive the surgical migration"
+        );
+        assert!(migrated.contains("ExecStart=/home/u/.local/bin/canopy serve --port 7755"));
+        assert_eq!(
+            runner.calls(),
+            vec![
+                (
+                    "systemctl".to_string(),
+                    vec!["--user".to_string(), "daemon-reload".to_string()]
+                ),
+                (
+                    "systemctl".to_string(),
+                    vec![
+                        "--user".to_string(),
+                        "reset-failed".to_string(),
+                        "canopy.service".to_string()
+                    ]
+                ),
+            ]
+        );
     }
 }

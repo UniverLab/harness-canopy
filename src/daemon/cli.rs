@@ -154,6 +154,13 @@ fn install_service_if_needed(_exe: &std::path::Path, _port: u16) {
         }
         let home = dirs::home_dir().expect("No home directory");
         let service_path = home.join(".config/systemd/user/canopy.service");
+        // An old unit without `KillMode=mixed` gets migrated in place here,
+        // whether or not it still needs installing/enabling below.
+        if service_path.exists() {
+            if let Err(e) = service_install::ensure_kill_mode_mixed(&service_path) {
+                eprintln!("  ⚠ Could not migrate the service unit: {e}");
+            }
+        }
         let needs_install = !service_path.exists() || !is_service_enabled();
         if !needs_install {
             return;

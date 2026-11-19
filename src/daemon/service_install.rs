@@ -161,6 +161,13 @@ fn install_systemd_service(exe: &std::path::Path, port: u16) -> Result<()> {
     reload_and_enable_service()
 }
 
+/// The `KillMode=mixed` unit migration lives in its own module to keep this
+/// file within the size guideline; re-exported here so every caller keeps
+/// using the `service_install` path.
+pub(crate) use crate::daemon::unit_kill_mode::{
+    ensure_kill_mode_mixed, ensure_kill_mode_mixed_with,
+};
+
 /// Render the systemd unit file contents.
 ///
 /// Includes `Environment=PATH=` so CLI binaries installed under a user's
@@ -191,6 +198,8 @@ Description=canopy daemon
 After=network.target
 
 [Service]
+KillMode=mixed
+TimeoutStopSec=30
 Type=simple
 ExecStart={exe_str} serve --port {port}
 Restart=on-failure
@@ -884,5 +893,20 @@ mod tests {
         assert_eq!(quota, 0);
         assert_eq!(note, None);
         assert_eq!(runner.call_count(), 0);
+    }
+
+    /// FR1: a fresh unit lets session children outlive the daemon.
+    #[test]
+    fn render_unit_includes_kill_mode_mixed_and_stop_timeout_in_service() {
+        let content = render_unit_content(
+            "/usr/bin/canopy",
+            4177,
+            "/usr/bin:/bin",
+            &std::collections::BTreeMap::new(),
+            0,
+        );
+        let service = service_section(&content);
+        assert_eq!(service.matches("KillMode=mixed").count(), 1);
+        assert_eq!(service.matches("TimeoutStopSec=30").count(), 1);
     }
 }
