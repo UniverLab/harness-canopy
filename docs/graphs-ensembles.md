@@ -7,9 +7,11 @@ order: 9
 # Ensembles
 
 An **ensemble** is a group of `agent` nodes that receive the same prompt,
-plus a quorum that waits for every member before routing onward. A
-`parallel` ensemble runs 2–8 members at once by default (up to 16 if you
-raise `graphs.ensemble_max_members_parallel`). A `cascade`, `round_robin` or
+plus a quorum that waits for every member before routing onward. Set `kind`
+on `graph_ensemble` `add` (or `update`) to choose the strategy: `parallel`
+(the default), `cascade`, `round_robin`, or `random`. A `parallel` ensemble
+runs 2–8 members at once by default (up to 16 if you raise
+`graphs.ensemble_max_members_parallel`). A `cascade`, `round_robin` or
 `random` ensemble runs its members one at a time, so it takes 2–16 by default
 (up to 32 with `graphs.ensemble_max_members_sequential`). Both caps are listed in
 [Tuning the engine](graphs-operations.md#tuning-the-engine). It replaces what would otherwise be N member
