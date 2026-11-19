@@ -109,6 +109,7 @@ fn insert_ensemble_unit_round_trips_member_prompt_override() {
     let ensemble = Ensemble {
         mutex: Vec::new(),
         commit_rights: false,
+        read_only: false,
         id: "ens1".to_string(),
         spec_id: Some("spec-1".to_string()),
         graph_id: None,
@@ -279,6 +280,7 @@ fn insert_ensemble_unit_round_trips_member_timeout_minutes() {
     let ensemble = Ensemble {
         mutex: Vec::new(),
         commit_rights: false,
+        read_only: false,
         id: "ens1".to_string(),
         spec_id: Some("spec-1".to_string()),
         graph_id: None,
@@ -420,6 +422,7 @@ fn update_ensemble_member_sets_and_clears_prompt_override() {
     let ensemble = Ensemble {
         mutex: Vec::new(),
         commit_rights: false,
+        read_only: false,
         id: "ens1".to_string(),
         spec_id: Some("spec-1".to_string()),
         graph_id: None,
@@ -554,6 +557,7 @@ fn update_ensemble_member_sets_and_clears_member_timeout() {
     let ensemble = Ensemble {
         mutex: Vec::new(),
         commit_rights: false,
+        read_only: false,
         id: "ens1".to_string(),
         spec_id: Some("spec-1".to_string()),
         graph_id: None,
@@ -665,6 +669,7 @@ fn insert_ensemble_unit_with_cascade_kind_persists_kind() {
     let ensemble = Ensemble {
         mutex: Vec::new(),
         commit_rights: false,
+        read_only: false,
         id: "ens1".to_string(),
         spec_id: Some(spec_id),
         graph_id: None,
@@ -771,6 +776,7 @@ fn insert_ensemble_unit_with_round_robin_kind_persists_index() {
     let ensemble = Ensemble {
         mutex: Vec::new(),
         commit_rights: false,
+        read_only: false,
         id: "ens1".to_string(),
         spec_id: Some(spec_id),
         graph_id: None,
@@ -877,6 +883,7 @@ fn update_ensemble_kind_changes_kind_and_clears_index() {
     let ensemble = Ensemble {
         mutex: Vec::new(),
         commit_rights: false,
+        read_only: false,
         id: "ens1".to_string(),
         spec_id: Some(spec_id),
         graph_id: None,
@@ -986,6 +993,7 @@ fn round_robin_index_advances_and_wraps() {
     let ensemble = Ensemble {
         mutex: Vec::new(),
         commit_rights: false,
+        read_only: false,
         id: "ens1".to_string(),
         spec_id: Some(spec_id),
         graph_id: None,

@@ -213,8 +213,8 @@ fn insert_ensemble_unit_tx(
 ) -> Result<()> {
     let ensemble = &ensemble_plan.ensemble;
     tx.execute(
-        "INSERT INTO ensembles (id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds, on_pass_to, on_fail_to, kind, round_robin_index, commit_rights, created_at, crew_id, crew_name, crew_version_applied, mutex)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
+        "INSERT INTO ensembles (id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds, on_pass_to, on_fail_to, kind, round_robin_index, commit_rights, read_only, created_at, crew_id, crew_name, crew_version_applied, mutex)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
         params![
             &ensemble.id,
             &ensemble.spec_id,
@@ -236,6 +236,7 @@ fn insert_ensemble_unit_tx(
             ensemble.kind.as_str(),
             ensemble.round_robin_index,
             ensemble.commit_rights,
+            ensemble.read_only,
             ensemble.created_at.timestamp(),
             crew_id,
             &ensemble.crew_name,
@@ -476,6 +477,7 @@ mod tests {
             ensembles: vec![GraphExportEnsemble {
                 mutex: Vec::new(),
                 commit_rights: false,
+                read_only: false,
                 name: "Proposers".to_string(),
                 kind: None,
                 prompt_template: "draft it".to_string(),
@@ -566,6 +568,7 @@ mod tests {
             ensembles: vec![GraphExportEnsemble {
                 mutex: vec!["skills-repo".to_string()],
                 commit_rights: false,
+                read_only: false,
                 name: "Proposers".to_string(),
                 kind: None,
                 prompt_template: "draft it".to_string(),
@@ -709,6 +712,7 @@ mod tests {
                 GraphExportEnsemble {
                     mutex: Vec::new(),
                     commit_rights: false,
+                    read_only: false,
                     name: "Cascade Team".to_string(),
                     kind: Some("cascade".to_string()),
                     prompt_template: "go".to_string(),
@@ -728,6 +732,7 @@ mod tests {
                 GraphExportEnsemble {
                     mutex: Vec::new(),
                     commit_rights: false,
+                    read_only: false,
                     name: "RR Team".to_string(),
                     kind: Some("round_robin".to_string()),
                     prompt_template: "go".to_string(),
@@ -809,6 +814,7 @@ mod tests {
             ensembles: vec![GraphExportEnsemble {
                 mutex: Vec::new(),
                 commit_rights: true,
+                read_only: false,
                 name: "Committer".to_string(),
                 kind: Some("cascade".to_string()),
                 prompt_template: "commit".to_string(),
@@ -954,6 +960,7 @@ mod tests {
                 GraphExportEnsemble {
                     mutex: Vec::new(),
                     commit_rights: true,
+                    read_only: false,
                     name: "Alpha".to_string(),
                     kind: Some("cascade".to_string()),
                     prompt_template: "go".to_string(),
@@ -993,6 +1000,7 @@ mod tests {
                 GraphExportEnsemble {
                     mutex: Vec::new(),
                     commit_rights: false,
+                    read_only: true,
                     name: "Beta".to_string(),
                     kind: Some("round_robin".to_string()),
                     prompt_template: "review".to_string(),
@@ -1048,6 +1056,10 @@ mod tests {
         assert_eq!(
             first_value["ensembles"], second_value["ensembles"],
             "CB62: every ensemble field must survive the DB round trip"
+        );
+        assert_eq!(
+            second_value["ensembles"][1]["read_only"], true,
+            "read_only must survive export/import"
         );
         assert_eq!(first_value["nodes"], second_value["nodes"]);
         assert_eq!(first_value["edges"], second_value["edges"]);
@@ -1167,6 +1179,7 @@ mod tests {
             ensembles: vec![GraphExportEnsemble {
                 mutex: Vec::new(),
                 commit_rights: false,
+                read_only: false,
                 name: "Proposers".to_string(),
                 kind: None,
                 prompt_template: "draft it".to_string(),
@@ -1345,6 +1358,7 @@ mod tests {
                 kind,
                 round_robin_index: (kind == EnsembleKind::RoundRobin).then_some(0),
                 commit_rights: false,
+                read_only: false,
                 created_at: now,
                 crew_id: None,
                 crew_name: Some("reviewers".to_string()),

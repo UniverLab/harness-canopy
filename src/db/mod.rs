@@ -430,7 +430,7 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
                 infra_backoff_seconds INTEGER,
                 on_pass_to TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE RESTRICT,
                 on_fail_to TEXT REFERENCES graph_nodes(id) ON DELETE RESTRICT,
-                commit_rights INTEGER NOT NULL DEFAULT 0,
+                commit_rights INTEGER NOT NULL DEFAULT 0, read_only INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL,
                 mutex TEXT,
                 CHECK ((spec_id IS NULL) <> (graph_id IS NULL))

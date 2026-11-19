@@ -1,6 +1,6 @@
 ---
 title: Node Documents
-description: "Reusable node documents: install, list, add, remove."
+description: "Reusable node documents: install, list, add, remove, and read-only enforcement."
 order: 14
 ---
 
@@ -27,7 +27,7 @@ whole graph, then added to any graph by name:
 document carries the ensemble shape in `config`: `prompt_template`,
 `members` (each **without** `platform`/`model`), `min_pass`, and the same
 fields `graph_ensemble` `add` accepts (`kind`, timeouts, infra budgets,
-`commit_rights`, `mutex`). A document never carries a harness — who runs a
+`commit_rights`, `read_only`, `mutex`). A document never carries a harness — who runs a
 node is the installer's decision, not the author's. `canopy graph validate
 <path>` checks a node document exactly as it checks a graph document
 (`ok` with `node_kind`, or every problem with its JSON path).
@@ -145,4 +145,38 @@ again afterwards.
 Node documents replaced the retired blueprint tools and the `blueprint`
 parameter outright: `graph_node` and `graph_ensemble` `add` take `node`,
 `kind` + `config`, or — for ensembles — a crew, and nothing else.
+
+## Read-only nodes
+
+An agent node can be declared read-only in its **node config**:
+
+```
+read_only: true
+```
+
+The engine fingerprints the working tree when the run starts and compares
+it when the run ends, before routing. A read-only node that changes the
+tree is a deterministic **fail** with result `read_only_violation`
+(routed through the `fail` edge like any other failure). The message
+lists up to 20 touched paths (added, modified, deleted) and states that
+the changes were left in place. The node's own output is kept, and the
+finding is visible in `graph_control`/`graph node_runs` output and the
+TUI node tail.
+
+The fingerprint hashes `git status --porcelain`, `git diff HEAD --binary`,
+and the path plus content hash of every untracked non-ignored file
+(`git ls-files -o --exclude-standard`). Paths the harness legitimately
+writes inside the project come from the registry's `project_paths` for
+that platform and are excluded before hashing.
+
+A tree that already holds uncommitted work when the node starts never
+fails by itself, and a read-only node that changes nothing passes on a
+dirty tree. In a non-git workdir the node runs unenforced and the run
+output says `read_only not enforced: not a git workdir`.
+
+`read_only: true` cannot be combined with `commit_rights: true` on the
+same node or ensemble; validation refuses the combination naming both.
+Ensembles accept `read_only` in `graph_ensemble` `add`/`update`, and
+every member run inherits it. See [Commit rights](graphs-execution.md#commit-rights)
+for the mirror rule.
 

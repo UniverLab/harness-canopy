@@ -426,6 +426,22 @@ impl GraphEngine {
         })
     }
 
+    /// Post-verdict enforcement, both before routing: commit rights first,
+    /// then the read-only fingerprint comparison.
+    pub(crate) async fn apply_post_verdict_guards(
+        &self,
+        ctx: &SpecStepCtx<'_>,
+        setup: &NodeAttemptSetup,
+        run_id: &str,
+        execution: NodeExecution,
+    ) -> Result<NodeExecution> {
+        let execution = self
+            .apply_commit_rights_violation(ctx, setup, run_id, execution)
+            .await?;
+        self.apply_read_only_violation(ctx, setup, run_id, execution)
+            .await
+    }
+
     pub(crate) async fn apply_commit_rights_violation(
         &self,
         ctx: &SpecStepCtx<'_>,
@@ -456,6 +472,60 @@ impl GraphEngine {
             "node without commit rights: HEAD moved during its run"
         );
         settle_node_verdict(&self.db, run_id, violation, "update_graph_run_result")
+    }
+
+    pub(crate) async fn apply_read_only_violation(
+        &self,
+        ctx: &SpecStepCtx<'_>,
+        setup: &NodeAttemptSetup,
+        run_id: &str,
+        execution: NodeExecution,
+    ) -> Result<NodeExecution> {
+        if let Some(watch) = setup.read_only_watch.as_ref() {
+            let platform = crate::graph_engine::read_only::node_platform_name(&setup.node);
+            if let Some(touched) = watch.violation(platform.as_deref(), ctx.workdir).await? {
+                let violation = crate::graph_engine::read_only::read_only_failure(
+                    &format!("Node '{}'", setup.node.name),
+                    &setup.node.id,
+                    &touched,
+                    execution.output,
+                );
+                tracing::warn!(
+                    node = %setup.node.name,
+                    touched = ?touched.iter().map(|(p, _)| p).collect::<Vec<_>>(),
+                    "read-only node changed the working tree"
+                );
+                return settle_node_verdict(&self.db, run_id, violation, "update_graph_run_result");
+            }
+            return Ok(execution);
+        }
+        if setup.read_only_unenforced_non_git {
+            let mut output = execution.output.clone();
+            if let Value::Object(map) = &mut output {
+                map.insert(
+                    "read_only".to_string(),
+                    Value::String(
+                        crate::graph_engine::read_only::read_only_not_enforced_message()
+                            .to_string(),
+                    ),
+                );
+            } else {
+                output = serde_json::json!({
+                    "node_output": execution.output,
+                    "read_only": crate::graph_engine::read_only::read_only_not_enforced_message(),
+                });
+            }
+            return settle_node_verdict(
+                &self.db,
+                run_id,
+                NodeExecution {
+                    output,
+                    ..execution
+                },
+                "update_graph_run_result",
+            );
+        }
+        Ok(execution)
     }
 
     pub(crate) async fn enforce_commit_ancestry(

@@ -701,6 +701,7 @@ async fn graph_delete_node_refuses_extra_entry_source() {
             add_entry_condition: None,
             remove_entry_from: None,
             commit_rights: None,
+            read_only: None,
 
             crew: None,
         }),
@@ -838,6 +839,7 @@ async fn after_remove_entry_from_primary_repoints_and_allows_deletion() {
             add_entry_condition: None,
             remove_entry_from: None,
             commit_rights: None,
+            read_only: None,
 
             crew: None,
         }),
@@ -871,6 +873,7 @@ async fn after_remove_entry_from_primary_repoints_and_allows_deletion() {
             add_entry_condition: None,
             remove_entry_from: Some(entry.clone()),
             commit_rights: None,
+            read_only: None,
 
             crew: None,
         }),

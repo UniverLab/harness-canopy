@@ -166,6 +166,29 @@ impl GraphEngine {
         Ok(next_reported)
     }
 
+    /// Settle a round-robin walk no member reported a verdict for.
+    pub(crate) async fn settle_round_robin_walk(
+        &self,
+        join_ctx: &EnsembleJoinCtx<'_>,
+        setup: &RoundRobinSetup<'_>,
+        details: &EnsembleDetails,
+        workdir: &str,
+        tried_no_verdict: &[(String, String, Value, String)],
+    ) -> Result<NodeExecution> {
+        self.settle_round_robin_no_verdict(
+            &RoundRobinWalkCtx {
+                join_ctx,
+                commit_watch: &setup.commit_watch,
+                workdir,
+                ensemble: &details.ensemble,
+            },
+            details,
+            tried_no_verdict,
+            setup.next_index,
+        )
+        .await
+    }
+
     /// Settle a round-robin walk that ran every member without a verdict.
     pub(crate) async fn settle_round_robin_no_verdict(
         &self,

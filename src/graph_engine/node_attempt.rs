@@ -9,6 +9,11 @@ pub(crate) struct NodeAttemptSetup {
     pub(crate) run_id: String,
     pub(crate) commit_watch: Option<CommitRightsWatch>,
     pub(crate) committer_head_before: Option<String>,
+    /// Read-only enforcement watch for agent nodes (and ensemble members).
+    pub(crate) read_only_watch: Option<crate::graph_engine::ReadOnlyWatch>,
+    /// A read-only node running in a non-git workdir runs unenforced and must
+    /// report that in its output.
+    pub(crate) read_only_unenforced_non_git: bool,
     /// CM49: the crew this node is bound to, if any, and the index of the
     /// member resolved at dispatch (the rotation's starting point on an
     /// infra retry).
@@ -205,6 +210,12 @@ impl GraphEngine {
             Some((crew, index)) => (Some(crew), Some(index)),
             None => (None, None),
         };
+
+        // Read-only enforcement: agent nodes only, per node run.
+        let (read_only_watch, read_only_unenforced_non_git) =
+            crate::graph_engine::read_only::begin_for_node(&node, ctx.ensembles, ctx.workdir)
+                .await?;
+
         Ok(NodeAttemptSetup {
             node,
             resume_candidate,
@@ -212,6 +223,8 @@ impl GraphEngine {
             run_id,
             commit_watch,
             committer_head_before,
+            read_only_watch,
+            read_only_unenforced_non_git,
             crew,
             crew_index,
         })

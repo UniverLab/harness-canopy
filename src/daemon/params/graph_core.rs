@@ -515,6 +515,8 @@ pub struct GraphUpdateEnsembleParams {
     pub remove_entry_from: Option<String>,
     /// New commit_rights value, or omit to leave unchanged.
     pub commit_rights: Option<bool>,
+    /// New read_only value, or omit to leave unchanged.
+    pub read_only: Option<bool>,
     /// New named mutex list (`["cpu"]`), `[]` to clear, or omit to leave
     /// unchanged. Each name must match `^[a-z][a-z0-9-]{0,31}$`.
     pub mutex: Option<Vec<String>>,

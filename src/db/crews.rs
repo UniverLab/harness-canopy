@@ -727,6 +727,7 @@ mod tests {
             kind: EnsembleKind::Parallel,
             round_robin_index: None,
             commit_rights: false,
+            read_only: false,
             created_at: now,
             crew_id: None,
             crew_name: None,

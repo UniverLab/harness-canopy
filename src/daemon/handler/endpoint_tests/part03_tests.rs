@@ -187,6 +187,7 @@ async fn graph_export_import_v2_round_trip_preserves_ensemble() {
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: None,
             graph_id: Some(graph_id.clone()),
             kind: None,
@@ -398,6 +399,7 @@ async fn graph_export_import_round_trip_preserves_all_ensemble_kinds() {
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: None,
             graph_id: Some(graph_id.clone()),
             kind: Some("cascade".to_string()),
@@ -451,6 +453,7 @@ async fn graph_export_import_round_trip_preserves_all_ensemble_kinds() {
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: None,
             graph_id: Some(graph_id.clone()),
             kind: Some("round_robin".to_string()),
@@ -521,6 +524,7 @@ async fn graph_export_import_round_trip_preserves_all_ensemble_kinds() {
             add_entry_condition: None,
             remove_entry_from: None,
             commit_rights: None,
+            read_only: None,
 
             crew: None,
         }),
@@ -666,6 +670,7 @@ async fn graph_export_import_round_trip_preserves_ensemble_commit_rights() {
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: Some(true),
+            read_only: None,
             spec_id: None,
             graph_id: Some(graph_id.clone()),
             kind: None,
@@ -1279,6 +1284,7 @@ async fn graph_preflight_quiet_with_on_fail_to() {
             add_entry_condition: None,
             remove_entry_from: None,
             commit_rights: None,
+            read_only: None,
         }),
     )
     .await
@@ -1404,6 +1410,7 @@ async fn graph_preflight_warns_spec_quorum_without_fail_exit() {
             on_pass_to: arbiter.id.clone(),
             on_fail_to: None,
             commit_rights: None,
+            read_only: None,
             crew: None,
         }),
     )

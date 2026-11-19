@@ -16,6 +16,7 @@ async fn graph_update_ensemble_switching_to_cascade_clears_stale_straggler_and_g
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Ensemble".to_string(),
@@ -68,6 +69,7 @@ async fn graph_update_ensemble_switching_to_cascade_clears_stale_straggler_and_g
         params_id(GraphUpdateEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             ensemble_id: ensemble_id.clone(),
             kind: Some("cascade".to_string()),
             prompt_template: None,
@@ -124,6 +126,7 @@ async fn graph_update_ensemble_can_change_kind() {
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Ensemble".to_string(),
@@ -176,6 +179,7 @@ async fn graph_update_ensemble_can_change_kind() {
         params_id(GraphUpdateEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             ensemble_id: ensemble_id.clone(),
             kind: Some("cascade".to_string()),
             prompt_template: None,
@@ -239,6 +243,7 @@ async fn graph_update_ensemble_refuses_round_robin_to_parallel_above_eight() {
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Wide".to_string(),
@@ -324,6 +329,7 @@ async fn graph_update_ensemble_kind_plus_shrink_uses_resulting_count() {
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Wide".to_string(),

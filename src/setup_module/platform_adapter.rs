@@ -552,6 +552,7 @@ mod tests {
 
             provider: None,
             tool_name: None,
+            project_paths: Vec::new(),
         }
     }
 

@@ -411,6 +411,7 @@ async fn corrupt_subject_fails_committing_ensemble_member() {
             &mut HashMap::new(),
             &[],
             true,
+            false,
         )
         .await
         .unwrap();
@@ -467,6 +468,7 @@ async fn corrupt_subject_fails_member_with_own_commit_rights() {
             None,
             &mut HashMap::new(),
             &[],
+            false,
             false,
         )
         .await

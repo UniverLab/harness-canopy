@@ -1308,6 +1308,7 @@ mod tests {
         let ensemble = Ensemble {
             mutex: Vec::new(),
             commit_rights: false,
+            read_only: false,
             id: "ens1".to_string(),
             spec_id: Some(spec_id.to_string()),
             graph_id: None,

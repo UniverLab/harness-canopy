@@ -95,6 +95,17 @@ impl TaskTriggerHandler {
         details: &mut EnsembleDetails,
         new_kind: Option<EnsembleKind>,
     ) -> Result<bool, EarlyReturn> {
+        // Refuse the combined rights before writing anything: a rejected
+        // update must leave the ensemble exactly as it was.
+        let next_commit_rights = params
+            .commit_rights
+            .unwrap_or(details.ensemble.commit_rights);
+        let next_read_only = params.read_only.unwrap_or(details.ensemble.read_only);
+        if next_commit_rights && next_read_only {
+            return Err(EarlyReturn::tool_error(
+                "Ensemble cannot set both 'read_only' and 'commit_rights' to true.",
+            ));
+        }
         let effective_kind = new_kind.unwrap_or(details.ensemble.kind);
         let cleared_grace_fields_for_kind_change = self
             .apply_ensemble_kind_change(ensemble_id, params, &mut *details, new_kind)
@@ -107,6 +118,12 @@ impl TaskTriggerHandler {
                 .update_ensemble_commit_rights(ensemble_id, commit_rights)
                 .map_err(internal_error)?;
             details.ensemble.commit_rights = commit_rights;
+        }
+        if let Some(read_only) = params.read_only {
+            self.db
+                .update_ensemble_read_only(ensemble_id, read_only)
+                .map_err(internal_error)?;
+            details.ensemble.read_only = read_only;
         }
         // `mutex` is CONFIG like `commit_rights` (read fresh at each member
         // dispatch) — editable on a running graph. `None` keeps, `[]` clears.

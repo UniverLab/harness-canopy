@@ -159,6 +159,7 @@ fn app_with_open_tail() -> App {
         stderr_lines: Vec::new(),
         status: Some(crate::domain::graphs::GraphRunStatus::Running),
         timed_out: false,
+        read_only_paths: None,
         started_at: Some(chrono::Utc::now()),
         scroll: 0,
         member_pos: None,

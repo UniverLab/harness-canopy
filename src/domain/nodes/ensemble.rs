@@ -55,6 +55,8 @@ pub struct EnsembleNodeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit_rights: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mutex: Option<Vec<String>>,
 }
 
@@ -64,7 +66,7 @@ impl EnsembleNodeConfig {
     pub fn from_value(document_name: &str, config: &Value) -> Result<Self, String> {
         serde_json::from_value(config.clone()).map_err(|error| {
             format!(
-                "Ensemble node document '{document_name}' has an invalid config: {error}. Its config accepts prompt_template, kind, members (each without platform/model), min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds, commit_rights, and mutex."
+                "Ensemble node document '{document_name}' has an invalid config: {error}. Its config accepts prompt_template, kind, members (each without platform/model), min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds, commit_rights, read_only, and mutex."
             )
         })
     }
@@ -139,6 +141,11 @@ impl EnsembleNodeConfig {
                 &format!("Ensemble node document '{document_name}'"),
                 Some(mutex),
             )?;
+        }
+        if self.read_only == Some(true) && self.commit_rights == Some(true) {
+            return Err(format!(
+                "Ensemble node document '{document_name}' cannot set both 'read_only' and 'commit_rights' to true."
+            ));
         }
         Ok(())
     }

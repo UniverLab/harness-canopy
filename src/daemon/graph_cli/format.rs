@@ -21,6 +21,29 @@ pub(super) fn commit_rights_note(output: Option<&serde_json::Value>) -> String {
     )
 }
 
+pub(super) fn read_only_note(output: Option<&serde_json::Value>) -> String {
+    if let Some(violation) = output.and_then(|o| o.get("read_only_violation")) {
+        let count = violation
+            .get("paths")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        return format!(
+            "  \x1b[31m(read-only violation — {} path{} changed)\x1b[0m",
+            count,
+            if count == 1 { "" } else { "s" }
+        );
+    }
+    if output
+        .and_then(|o| o.get("read_only"))
+        .and_then(|v| v.as_str())
+        == Some("read_only not enforced: not a git workdir")
+    {
+        return "  \x1b[33m(read_only not enforced: not a git workdir)\x1b[0m".to_string();
+    }
+    String::new()
+}
+
 /// The `graph info` annotation for a run cut short by a daemon restart/kill
 /// (B36), or an empty string for every other run — pairs with the distinct
 /// icon `run_status_icon` already gives it, so a `fail` here never reads as

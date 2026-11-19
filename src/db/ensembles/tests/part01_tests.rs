@@ -93,6 +93,7 @@ fn lowering_the_member_cap_leaves_an_existing_ensemble_untouched() {
     let ensemble = Ensemble {
         mutex: Vec::new(),
         commit_rights: false,
+        read_only: false,
         id: "ens-cap".to_string(),
         spec_id: Some("spec-cap".to_string()),
         graph_id: None,
@@ -246,6 +247,7 @@ fn insert_ensemble_unit_creates_join_and_member_nodes_with_correct_wiring() {
     let ensemble = Ensemble {
         mutex: Vec::new(),
         commit_rights: false,
+        read_only: false,
         id: "ens1".to_string(),
         spec_id: Some("spec-1".to_string()),
         graph_id: None,
@@ -747,6 +749,7 @@ fn update_ensemble_prompt_propagates_to_every_member_config() {
     let ensemble = Ensemble {
         mutex: Vec::new(),
         commit_rights: false,
+        read_only: false,
         id: "ens1".to_string(),
         spec_id: Some("spec-1".to_string()),
         graph_id: None,
@@ -910,6 +913,7 @@ fn update_ensemble_join_config_leaves_omitted_fields_unchanged() {
     let ensemble = Ensemble {
         mutex: Vec::new(),
         commit_rights: false,
+        read_only: false,
         id: "ens1".to_string(),
         spec_id: Some("spec-1".to_string()),
         graph_id: None,
@@ -1066,6 +1070,7 @@ fn remove_ensemble_member_cascades_node_and_edges() {
     let ensemble = Ensemble {
         mutex: Vec::new(),
         commit_rights: false,
+        read_only: false,
         id: "ens1".to_string(),
         spec_id: Some("spec-1".to_string()),
         graph_id: None,

@@ -147,6 +147,7 @@ mod ensemble_graph {
         let ensemble = Ensemble {
             mutex: Vec::new(),
             commit_rights: false,
+            read_only: false,
             id: "ens1".to_string(),
             spec_id: Some("spec".to_string()),
             graph_id: None,
@@ -260,6 +261,7 @@ mod ensemble_graph {
         let ensemble = Ensemble {
             mutex: Vec::new(),
             commit_rights: false,
+            read_only: false,
             id: "ens1".to_string(),
             spec_id: Some("spec".to_string()),
             graph_id: None,
@@ -340,6 +342,7 @@ mod ensemble_graph {
         let target = Ensemble {
             mutex: Vec::new(),
             commit_rights: false,
+            read_only: false,
             id: "ens2".to_string(),
             spec_id: Some("spec".to_string()),
             graph_id: None,
@@ -401,6 +404,7 @@ mod ensemble_graph {
         let target = Ensemble {
             mutex: Vec::new(),
             commit_rights: false,
+            read_only: false,
             id: "ens2".to_string(),
             spec_id: Some("spec".to_string()),
             graph_id: None,

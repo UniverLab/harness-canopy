@@ -472,6 +472,7 @@ fn graph_enforces_commit_rights_when_only_an_ensemble_carries_it() {
         kind: crate::domain::graphs::EnsembleKind::Parallel,
         round_robin_index: None,
         commit_rights: true,
+        read_only: false,
         created_at: chrono::Utc::now(),
 
         crew_id: None,

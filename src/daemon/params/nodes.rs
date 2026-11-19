@@ -96,6 +96,10 @@ pub struct GraphAddEnsembleParams {
     /// for that dispatch — never set per-member. Defaults to false, same as
     /// an ordinary node with no `commit_rights` key.
     pub commit_rights: Option<bool>,
+    /// Runs every member under read-only enforcement: the engine fingerprints
+    /// the workdir at the start and end of each member run and fails it with
+    /// `read_only_violation` if the tree changed. Defaults to false.
+    pub read_only: Option<bool>,
     /// CM49: a crew name to bind instead of `members` — mutually exclusive
     /// with `members`. The crew's ordered
     /// members become this ensemble's members, and later `crew update` calls

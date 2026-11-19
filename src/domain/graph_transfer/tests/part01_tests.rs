@@ -725,6 +725,7 @@ fn import_refuses_duplicate_extra_entry_source() {
         ensembles: vec![GraphExportEnsemble {
             mutex: Vec::new(),
             commit_rights: false,
+            read_only: false,
             name: "Committer".to_string(),
             kind: None,
             prompt_template: "review".to_string(),
@@ -795,6 +796,7 @@ fn import_refuses_extra_entry_source_naming_unknown_node() {
         ensembles: vec![GraphExportEnsemble {
             mutex: Vec::new(),
             commit_rights: false,
+            read_only: false,
             name: "Committer".to_string(),
             kind: None,
             prompt_template: "review".to_string(),
@@ -994,6 +996,7 @@ fn import_rejects_unknown_ensemble_target() {
         ensembles: vec![GraphExportEnsemble {
             mutex: Vec::new(),
             commit_rights: false,
+            read_only: false,
             name: "Reviewer 1".to_string(),
             kind: None,
             prompt_template: "review".to_string(),
@@ -1335,6 +1338,7 @@ fn import_plan_rejects_ensemble_with_too_few_members() {
         ensembles: vec![GraphExportEnsemble {
             mutex: Vec::new(),
             commit_rights: false,
+            read_only: false,
             name: "solo".to_string(),
             kind: None,
             prompt_template: "go".to_string(),

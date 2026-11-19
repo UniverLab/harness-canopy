@@ -179,6 +179,11 @@ pub struct Ensemble {
     /// per-member flag is deliberately never stored: the right belongs to
     /// the role (the ensemble), not to whichever CLI happens to fill it.
     pub commit_rights: bool,
+    /// A read-only ensemble runs every member under read-only enforcement: the
+    /// engine fingerprints the workdir at the start and end of each member run
+    /// and fails the run with `read_only_violation` if the tree changed.
+    #[serde(default)]
+    pub read_only: bool,
     /// Named mutexes (e.g. `["cpu"]`) held per member run: every member run
     /// acquires the union of these and its node's own `mutex` before it
     /// executes. Empty means none.

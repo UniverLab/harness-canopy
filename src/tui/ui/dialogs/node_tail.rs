@@ -95,6 +95,16 @@ fn tail_final_banner(dialog: &NodeTailDialog) -> Option<&'static str> {
     }
 }
 
+/// Line appended when read-only enforcement failed the run: the touched-path
+/// count, and that the changes stayed in the workdir.
+fn read_only_note(dialog: &NodeTailDialog) -> Option<String> {
+    let count = dialog.read_only_paths?;
+    Some(format!(
+        "read-only violation: {count} path{} changed (left in place)",
+        if count == 1 { "" } else { "s" }
+    ))
+}
+
 /// Body lines for the pane, capped at `max_body` content rows. Applies
 /// `dialog.scroll` and always keeps the tail.
 pub(crate) fn tail_visible_lines(dialog: &NodeTailDialog, max_body: usize) -> Vec<String> {
@@ -116,6 +126,9 @@ pub(crate) fn tail_visible_lines(dialog: &NodeTailDialog, max_body: usize) -> Ve
             all.push(String::new());
         }
         all.push(banner.to_string());
+    }
+    if let Some(note) = read_only_note(dialog) {
+        all.push(note);
     }
     if all.is_empty() {
         return Vec::new();
@@ -243,6 +256,7 @@ mod tests {
             stderr_lines: (0..stderr).map(|i| format!("err {i}")).collect(),
             status,
             timed_out: false,
+            read_only_paths: None,
             started_at: Some(Utc::now() - chrono::Duration::seconds(12)),
             scroll: 0,
             member_pos: None,
@@ -283,6 +297,17 @@ mod tests {
     #[test]
     fn strip_ansi_osc_ends_with_string_terminator() {
         assert_eq!(strip_ansi("a\x1b]0;title\x1b\\b"), "ab");
+    }
+
+    #[test]
+    fn read_only_violation_adds_a_note_after_the_banner() {
+        let mut dialog = test_dialog(Some(GraphRunStatus::Fail), 1, 0);
+        dialog.read_only_paths = Some(3);
+        let body = tail_visible_lines(&dialog, 20);
+        assert!(body.iter().any(|line| line == "■ failed"));
+        assert!(body
+            .iter()
+            .any(|line| { line == "read-only violation: 3 paths changed (left in place)" }));
     }
 
     #[test]

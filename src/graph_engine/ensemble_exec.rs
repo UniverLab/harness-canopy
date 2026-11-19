@@ -200,6 +200,12 @@ impl GraphEngine {
                 },
             );
             let mutex_resources = union_mutex_resources(&node, &ctx.details.ensemble.mutex);
+            let read_only_enforced = ctx.details.ensemble.read_only
+                || node
+                    .config
+                    .get("read_only")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true);
             let task = ParallelMemberTask {
                 db: Arc::clone(&self.db),
                 lp: ctx.lp.clone(),
@@ -220,6 +226,7 @@ impl GraphEngine {
                 mutex_resources,
                 may_commit: ctx.may_commit,
                 shutdown: Arc::clone(&self.shutdown),
+                read_only_enforced,
             };
             set.spawn(run_parallel_member_task(task));
         }

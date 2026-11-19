@@ -640,6 +640,7 @@ async fn ensemble_member_resume_false_forces_cold_start_on_bounce() {
     let ensemble = crate::domain::graphs::Ensemble {
         mutex: Vec::new(),
         commit_rights: false,
+        read_only: false,
         id: "ens1".to_string(),
         spec_id: Some(spec_id.clone()),
         graph_id: None,
@@ -1188,6 +1189,7 @@ async fn ensemble_execute_attributes_members_sharing_platform_by_prompt_override
     let ensemble = crate::domain::graphs::Ensemble {
         mutex: Vec::new(),
         commit_rights: false,
+        read_only: false,
         id: "ens1".to_string(),
         spec_id: Some(spec_id.clone()),
         graph_id: None,

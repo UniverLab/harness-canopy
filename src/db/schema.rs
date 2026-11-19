@@ -3,6 +3,9 @@ use rusqlite::Connection;
 
 use super::{Database, BASE_SCHEMA_BATCHES};
 
+#[path = "schema_read_only.rs"]
+mod read_only;
+
 impl Database {
     /// Shortens a `rusqlite` batch/statement failure to the SQLite error
     /// reason plus just the failing statement's first line. Without this,
@@ -633,6 +636,8 @@ impl Database {
             )
             .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
+
+        Self::migrate_ensemble_read_only_column(conn)?;
 
         // CM30: platform-level infra-retry override lives in config.toml's
         // CliConfig; these columns are the ensemble-level default and the

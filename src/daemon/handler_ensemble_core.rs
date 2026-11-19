@@ -45,6 +45,19 @@ impl TaskTriggerHandler {
         };
         let wiring = or_early_return!(resolve_ensemble_wiring(&self.db, &params));
         let exits = exit_row_targets(&wiring.on_pass_target, &wiring.on_fail_target);
+        let commit_rights = params
+            .commit_rights
+            .or_else(|| ensemble_node_config.and_then(|config| config.commit_rights))
+            .unwrap_or(false);
+        let read_only = params
+            .read_only
+            .or_else(|| ensemble_node_config.and_then(|config| config.read_only))
+            .unwrap_or(false);
+        if commit_rights && read_only {
+            return Ok(error_result(
+                "Ensemble cannot set both 'read_only' and 'commit_rights' to true.",
+            ));
+        }
         let built = build_ensemble_unit(&EnsembleUnitSpec {
             spec_id: wiring.spec_id,
             graph_id: wiring.graph_id,
@@ -66,10 +79,8 @@ impl TaskTriggerHandler {
             infra_backoff_seconds: plan.timeouts.infra_backoff_seconds,
             start_position: wiring.start_position,
             kind: plan.kind,
-            commit_rights: params
-                .commit_rights
-                .or_else(|| ensemble_node_config.and_then(|config| config.commit_rights))
-                .unwrap_or(false),
+            commit_rights,
+            read_only,
             mutex: plan.timeouts.mutex,
         });
         let () = or_early_return!(check_ensemble_templates(

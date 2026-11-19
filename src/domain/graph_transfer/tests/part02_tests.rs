@@ -48,6 +48,7 @@ fn import_plan_rejects_negative_quorum_grace() {
         ensembles: vec![GraphExportEnsemble {
             mutex: Vec::new(),
             commit_rights: false,
+            read_only: false,
             name: "team".to_string(),
             kind: None,
             prompt_template: "go".to_string(),
@@ -116,6 +117,7 @@ fn import_plan_round_trips_quorum_grace_minutes() {
         ensembles: vec![GraphExportEnsemble {
             mutex: Vec::new(),
             commit_rights: false,
+            read_only: false,
             name: "team".to_string(),
             kind: None,
             prompt_template: "go".to_string(),
@@ -182,6 +184,7 @@ fn import_plan_bakes_member_timeout_override_into_node_config() {
         ensembles: vec![GraphExportEnsemble {
             mutex: Vec::new(),
             commit_rights: false,
+            read_only: false,
             name: "team".to_string(),
             kind: None,
             prompt_template: "go".to_string(),
@@ -682,6 +685,7 @@ fn import_rejects_unknown_ensemble_kind() {
         ensembles: vec![GraphExportEnsemble {
             mutex: Vec::new(),
             commit_rights: false,
+            read_only: false,
             name: "Reviewers".to_string(),
             kind: Some("hyper".to_string()),
             prompt_template: "go".to_string(),

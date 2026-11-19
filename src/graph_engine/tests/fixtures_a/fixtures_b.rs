@@ -427,6 +427,7 @@ fn insert_test_ensemble(
     let ensemble = crate::domain::graphs::Ensemble {
         mutex: Vec::new(),
         commit_rights: false,
+        read_only: false,
         id: ensemble_id.to_string(),
         spec_id: Some(spec_id.to_string()),
         graph_id: None,
@@ -582,6 +583,7 @@ fn insert_bouncing_ensemble(
     let ensemble = crate::domain::graphs::Ensemble {
         mutex: Vec::new(),
         commit_rights: false,
+        read_only: false,
         id: "ens1".to_string(),
         spec_id: Some(spec_id.to_string()),
         graph_id: None,
@@ -818,6 +820,7 @@ fn insert_infra_ensemble(
     let ensemble = crate::domain::graphs::Ensemble {
         mutex: Vec::new(),
         commit_rights: false,
+        read_only: false,
         id: "ens1".to_string(),
         spec_id: Some(spec_id.to_string()),
         graph_id: None,
@@ -986,6 +989,7 @@ fn insert_kind_ensemble(
     let ensemble = crate::domain::graphs::Ensemble {
         mutex: Vec::new(),
         commit_rights: false,
+        read_only: false,
         id: "ens1".to_string(),
         spec_id: Some(spec_id.to_string()),
         graph_id: None,
@@ -1170,6 +1174,7 @@ fn insert_kind_ensemble_with_timeout(
     let ensemble = crate::domain::graphs::Ensemble {
         mutex: Vec::new(),
         commit_rights: false,
+        read_only: false,
         id: "ens1".to_string(),
         spec_id: Some(spec_id.to_string()),
         graph_id: None,

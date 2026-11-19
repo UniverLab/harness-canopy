@@ -57,7 +57,7 @@ new HEAD is recorded against this spec run, overwritten each time it
 commits again (e.g. a review/retry cycle). A downstream check node
 uses it to verify *this run's own committer* landed a commit, not
 merely that HEAD differs from wherever the spec started — see
-[Template variables](graphs-templates.md#template-variables).
+[Template variables](graphs-templates.md#template-variables). A node that must not change the tree at all is enforced read-only: see [Read-only nodes](graphs-nodes.md#read-only-nodes).
 
 **Editing the recommended check command text here does not retroactively
 touch any graph.** A node's `command` is whatever text was written into

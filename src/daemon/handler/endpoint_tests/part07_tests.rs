@@ -156,6 +156,7 @@ async fn graph_copy_ensemble_duplicates_members_and_quorum() {
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Source Ensemble".to_string(),
@@ -280,6 +281,7 @@ async fn graph_add_ensemble_member_prompt_override_replaces_shared_prompt_for_th
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Panel".to_string(),
@@ -424,6 +426,7 @@ async fn graph_update_ensemble_prompt_members_join_and_wiring() {
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Ensemble".to_string(),
@@ -476,6 +479,7 @@ async fn graph_update_ensemble_prompt_members_join_and_wiring() {
         params_id(GraphUpdateEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             ensemble_id: ensemble_id.clone(),
             kind: None,
             prompt_template: None,
@@ -510,6 +514,7 @@ async fn graph_update_ensemble_prompt_members_join_and_wiring() {
         params_id(GraphUpdateEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             ensemble_id: ensemble_id.clone(),
             kind: None,
             prompt_template: None,
@@ -545,6 +550,7 @@ async fn graph_update_ensemble_prompt_members_join_and_wiring() {
         params_id(GraphUpdateEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             ensemble_id: ensemble_id.clone(),
             kind: None,
             prompt_template: Some("New prompt".to_string()),
@@ -581,6 +587,7 @@ async fn graph_update_ensemble_prompt_members_join_and_wiring() {
         params_id(GraphUpdateEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             ensemble_id: ensemble_id.clone(),
             kind: None,
             prompt_template: None,
@@ -689,6 +696,7 @@ async fn graph_update_ensemble_prompt_members_join_and_wiring() {
         params_id(GraphUpdateEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             ensemble_id: ensemble_id.clone(),
             kind: None,
             prompt_template: None,
@@ -768,6 +776,7 @@ async fn graph_update_ensemble_prompt_members_join_and_wiring() {
         params_id(GraphUpdateEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             ensemble_id: ensemble_id.clone(),
             kind: None,
             prompt_template: None,
@@ -802,6 +811,7 @@ async fn graph_update_ensemble_prompt_members_join_and_wiring() {
         params_id(GraphUpdateEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             ensemble_id: ensemble_id.clone(),
             kind: None,
             prompt_template: None,
@@ -836,6 +846,7 @@ async fn graph_update_ensemble_prompt_members_join_and_wiring() {
         params_id(GraphUpdateEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             ensemble_id: ensemble_id.clone(),
             kind: None,
             prompt_template: None,
@@ -872,6 +883,7 @@ async fn graph_update_ensemble_prompt_members_join_and_wiring() {
         params_id(GraphUpdateEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             ensemble_id: ensemble_id.clone(),
             kind: None,
             prompt_template: None,
@@ -905,6 +917,7 @@ async fn graph_update_ensemble_prompt_members_join_and_wiring() {
         params_id(GraphUpdateEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             ensemble_id: "ghost-ensemble".to_string(),
             kind: None,
             prompt_template: Some("x".to_string()),
@@ -952,6 +965,7 @@ async fn graph_update_ensemble_sets_member_own_timeout() {
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Ensemble".to_string(),
@@ -1004,6 +1018,7 @@ async fn graph_update_ensemble_sets_member_own_timeout() {
         params_id(GraphUpdateEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             ensemble_id: ensemble_id.clone(),
             kind: None,
             prompt_template: None,
@@ -1131,6 +1146,7 @@ async fn graph_add_ensemble_infra_fields_round_trip_and_reject_negative() {
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Bad Member".to_string(),
@@ -1188,6 +1204,7 @@ async fn graph_add_ensemble_infra_fields_round_trip_and_reject_negative() {
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Bad Ensemble".to_string(),
@@ -1245,6 +1262,7 @@ async fn graph_add_ensemble_infra_fields_round_trip_and_reject_negative() {
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Infra Ensemble".to_string(),
@@ -1478,4 +1496,95 @@ async fn graph_update_ensemble_sets_propagates_and_clears_infra_defaults() {
         details.members.len(),
         "rejected update must not resize the member list"
     );
+}
+
+/// FR1: `read_only` is accepted by `graph_ensemble update` and persisted, and
+/// turning it on beside an existing `commit_rights` is refused without
+/// changing the ensemble.
+#[tokio::test]
+async fn graph_update_ensemble_sets_read_only_and_refuses_commit_rights() {
+    let (dir, db, handler) = endpoint_test_handler();
+    let lp = insert_test_graph(&db, dir.path());
+    let spec = insert_test_spec(&db, &lp.id, 1);
+    let entry = add_agent_node(&handler, &spec.id, "Entry").await;
+    let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
+    let member = |platform: &str| crate::daemon::params::EnsembleMemberParams {
+        platform: platform.to_string(),
+        model: None,
+        prompt_override: None,
+        timeout_minutes: None,
+        infra_retry_limit: None,
+        infra_crash_max_seconds: None,
+        infra_backoff_seconds: None,
+    };
+    let created = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
+            mutex: None,
+            commit_rights: None,
+            read_only: None,
+            spec_id: Some(spec.id.clone()),
+            graph_id: None,
+            name: "Readers".to_string(),
+            kind: None,
+            prompt_template: Some("Review".to_string()),
+            members: Some(vec![member("claude"), member("opencode")]),
+            node: None,
+            from_node: entry,
+            condition: "always".to_string(),
+            min_pass: None,
+            straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
+            timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+            on_pass_to: arbiter,
+            on_fail_to: None,
+            crew: None,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!is_err(&created), "{}", text(&created));
+    let ensemble_id = extract_id(&created, "ensemble_id");
+
+    let set_read_only = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "update",
+        params_id(GraphUpdateEnsembleParams {
+            ensemble_id: ensemble_id.clone(),
+            read_only: Some(true),
+            ..blank_ensemble_update(&ensemble_id)
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!is_err(&set_read_only), "{}", text(&set_read_only));
+    assert!(db.get_ensemble(&ensemble_id).unwrap().unwrap().read_only);
+
+    let refused = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "update",
+        params_id(GraphUpdateEnsembleParams {
+            ensemble_id: ensemble_id.clone(),
+            commit_rights: Some(true),
+            ..blank_ensemble_update(&ensemble_id)
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(is_err(&refused));
+    let message = text(&refused);
+    assert!(
+        message.contains("read_only") && message.contains("commit_rights"),
+        "{message}"
+    );
+    let unchanged = db.get_ensemble(&ensemble_id).unwrap().unwrap();
+    assert!(unchanged.read_only);
+    assert!(!unchanged.commit_rights, "rejected update must not commit");
 }

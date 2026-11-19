@@ -3,8 +3,8 @@ use chrono::Utc;
 
 use super::format::{
     commit_rights_note, current_running_run, distinct_spec_ids_in_order, format_dt, format_elapsed,
-    format_relative_duration, interrupted_note, no_verdict_note, run_status_icon, spec_status_icon,
-    status_icon,
+    format_relative_duration, interrupted_note, no_verdict_note, read_only_note, run_status_icon,
+    spec_status_icon, status_icon,
 };
 use super::resolve::resolve_graph;
 use crate::daemon::handler::{active_graph_spec_context, ActiveGraphSpec};
@@ -332,6 +332,7 @@ pub(super) fn print_graph_info_recent_runs(
         // by the engine, not by its own verdict — say so, otherwise the run
         // reads as an ordinary fail and the operator hunts the wrong cause.
         let commit_note = commit_rights_note(run.output.as_ref());
+        let read_only_note_str = read_only_note(run.output.as_ref());
         // B36: a run the daemon marked `fail` only because it was cut short
         // by a restart/kill must never read as "the node failed" — flag it
         // with its own icon and note, including how to recover any
@@ -339,13 +340,14 @@ pub(super) fn print_graph_info_recent_runs(
         let interrupted_note = interrupted_note(run.output.as_ref());
         let no_verdict = no_verdict_note(run.output.as_ref());
         println!(
-            " {} {}  {}{}{}{}{}{}",
+            " {} {}  {}{}{}{}{}{}{}",
             run_status_icon(run.status, run.output.as_ref()),
             node_name,
             format_dt(run.started_at),
             sid,
             group_note,
             commit_note,
+            read_only_note_str,
             interrupted_note,
             no_verdict
         );

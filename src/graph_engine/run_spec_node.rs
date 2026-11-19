@@ -109,14 +109,14 @@ impl GraphEngine {
             ctx.run_activity.agent_ran.store(true, Ordering::SeqCst);
         }
 
-        // B37: applied AFTER the node's own verdict is settled,
-        // so it overrides every way a node can report success —
-        // a clean exit code, or a `graph_complete_node` self-report
-        // of `pass`. A node that moved history without the right
-        // to fails, and the fail is persisted on the run row so
+        // B37 / read-only: applied AFTER the node's own verdict is settled,
+        // so they override every way a node can report success — a clean exit
+        // code, or a `graph_complete_node` self-report of `pass`. A node that
+        // moved history without the right to, or changed the tree while
+        // read-only, fails; the fail is persisted on the run row so
         // `canopy graph info` shows it.
         let execution = self
-            .apply_commit_rights_violation(ctx, &attempt_setup, &run_id, execution)
+            .apply_post_verdict_guards(ctx, &attempt_setup, &run_id, execution)
             .await?;
 
         // CB39: verify spec_start_head is still an ancestor of

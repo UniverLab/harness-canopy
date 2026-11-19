@@ -98,6 +98,7 @@ pub fn validate_ensembles_in_graph(
     edges: &[GraphEdge],
 ) -> Result<(), String> {
     for details in ensembles {
+        rights::ensure_ensemble_rights_not_conflicting(details, nodes)?;
         // CM49: a crew-bound ensemble's members are materialized by the sync
         // path (which runs before its first dispatch), so its member wiring is
         // not yet present at import time; its size is the crew's and is
@@ -776,6 +777,9 @@ fn ensure_router_route_coverage(
     }
     Ok(())
 }
+
+#[path = "validation_rights.rs"]
+mod rights;
 
 #[path = "stale_names.rs"]
 mod stale_names;

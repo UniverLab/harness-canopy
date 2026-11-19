@@ -304,6 +304,7 @@ pub(super) fn export_one_ensemble(
             Some(ensemble.kind.as_str().to_string())
         },
         commit_rights: ensemble.commit_rights,
+        read_only: ensemble.read_only,
         prompt_template: ensemble.prompt_template.clone(),
         entry_from_node: name_map.target(&ensemble.entry_from_node)?,
         entry_condition: ensemble.entry_condition.clone(),

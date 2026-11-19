@@ -1082,6 +1082,7 @@ async fn graph_add_ensemble_with_cascade_kind_rejects_single_member() {
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Cascade".to_string(),
@@ -1141,6 +1142,7 @@ async fn graph_add_ensemble_with_parallel_kind_rejects_single_member() {
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Parallel".to_string(),
@@ -1194,6 +1196,7 @@ async fn graph_add_ensemble_rejects_straggler_timeout_on_cascade() {
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Cascade".to_string(),
@@ -1263,6 +1266,7 @@ async fn graph_update_ensemble_rejects_quorum_grace_on_round_robin() {
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Ensemble".to_string(),
@@ -1315,6 +1319,7 @@ async fn graph_update_ensemble_rejects_quorum_grace_on_round_robin() {
         params_id(GraphUpdateEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             ensemble_id: ensemble_id.clone(),
             kind: None,
             prompt_template: None,

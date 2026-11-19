@@ -251,6 +251,7 @@ mod tests {
         let ensemble = Ensemble {
             mutex: Vec::new(),
             commit_rights: false,
+            read_only: false,
             id: "ens-dead".to_string(),
             spec_id: None,
             graph_id: Some("g1".to_string()),
@@ -332,6 +333,7 @@ mod tests {
         let spec_ensemble = Ensemble {
             mutex: Vec::new(),
             commit_rights: false,
+            read_only: false,
             id: "ens-spec".to_string(),
             spec_id: Some("spec-1".to_string()),
             graph_id: None,

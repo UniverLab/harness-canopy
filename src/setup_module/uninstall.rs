@@ -399,6 +399,7 @@ pub fn execute_uninstall(plan: &UninstallPlan, purge_data: bool) -> Result<()> {
 
             provider: None,
             tool_name: None,
+            project_paths: Vec::new(),
         };
         let removed =
             revert_platform_config(&platform, &edit.config_path, &edit.servers_to_remove)?;
@@ -562,6 +563,7 @@ mod tests {
 
             provider: None,
             tool_name: None,
+            project_paths: Vec::new(),
         }
     }
 
@@ -585,6 +587,7 @@ mod tests {
 
             provider: None,
             tool_name: None,
+            project_paths: Vec::new(),
         }
     }
 
@@ -608,6 +611,7 @@ mod tests {
 
             provider: None,
             tool_name: None,
+            project_paths: Vec::new(),
         }
     }
 

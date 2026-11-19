@@ -144,6 +144,7 @@ fn insert_ensemble(
         kind: EnsembleKind::Parallel,
         round_robin_index: None,
         commit_rights: false,
+        read_only: false,
         created_at: Utc::now(),
         crew_id: crew.map(|(id, _, _)| id.to_string()),
         crew_name: crew.map(|(_, name, _)| name.to_string()),

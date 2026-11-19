@@ -1,4 +1,4 @@
-use super::ensemble_member_settle::{member_at, RoundRobinSettle, RoundRobinWalkCtx};
+use super::ensemble_member_settle::{member_at, RoundRobinSettle};
 use super::*;
 
 /// Invariant inputs of a single ensemble-member run, gathered once by
@@ -26,6 +26,11 @@ pub(crate) struct EnsembleMemberContext {
     /// Mutex set this member run acquires ahead of every attempt: its node's
     /// own plus the ensemble's.
     pub(crate) mutex_resources: Vec<String>,
+    /// Read-only enforcement watch for this member run.
+    pub(crate) read_only_watch: Option<crate::graph_engine::read_only::ReadOnlyWatch>,
+    /// A read-only member running in a non-git workdir runs unenforced and
+    /// must report that in its output.
+    pub(crate) read_only_unenforced_non_git: bool,
 }
 
 /// Record one member's `node_started` event (CM46: one per member
@@ -77,16 +82,10 @@ async fn settle_ensemble_member_attempt(
     )
     .await?;
     let settled_session_id = run.session_id.clone();
-    let final_execution = if matches!(
+    let mut final_execution = if matches!(
         run.status,
         GraphRunStatus::Running | GraphRunStatus::Waiting
     ) {
-        let _ = ctx.db.update_graph_run_result(
-            member_run_id,
-            execution.status,
-            Some(&execution.output),
-            Some(chrono::Utc::now()),
-        );
         execution
     } else {
         // A self-reported member keeps its own output; carry the
@@ -103,6 +102,31 @@ async fn settle_ensemble_member_attempt(
             summary: execution.summary,
         }
     };
+    final_execution = crate::graph_engine::read_only::apply_to_execution(
+        &ctx.node,
+        &format!("Node '{}'", ctx.node.name),
+        &ctx.workdir,
+        ctx.read_only_watch.as_ref(),
+        ctx.read_only_unenforced_non_git,
+        final_execution,
+    )
+    .await?;
+    // Persist when this drive still owns the row, or when read-only
+    // enforcement produced a violation/unforced annotation that must be
+    // reflected on the run record.
+    if matches!(
+        run.status,
+        GraphRunStatus::Running | GraphRunStatus::Waiting
+    ) || final_execution.status == GraphRunStatus::Fail && ctx.read_only_watch.is_some()
+        || ctx.read_only_unenforced_non_git
+    {
+        let _ = ctx.db.update_graph_run_result(
+            member_run_id,
+            final_execution.status,
+            Some(&final_execution.output),
+            Some(chrono::Utc::now()),
+        );
+    }
     Ok((final_execution, member_had_no_verdict, settled_session_id))
 }
 
@@ -124,6 +148,7 @@ impl GraphEngine {
         resumable_sessions: &mut HashMap<String, String>,
         ensemble_mutex: &[String],
         may_commit: bool,
+        read_only_enforced: bool,
     ) -> Result<(NodeExecution, bool)> {
         let bound_minutes = member_timeout_minutes
             .map(|minutes| minutes.max(0) as u64)
@@ -161,6 +186,9 @@ impl GraphEngine {
 
         let member_run_id = run_id.clone();
         begin_ensemble_member_run(&self.db, lp, spec, node, workdir, &member_run_id);
+        let (read_only_watch, read_only_unenforced_non_git) =
+            crate::graph_engine::read_only::begin_for_run(read_only_enforced, node, workdir)
+                .await?;
         let ctx = EnsembleMemberContext {
             db: Arc::clone(&self.db),
             lp: lp.clone(),
@@ -177,6 +205,8 @@ impl GraphEngine {
             shutdown: Arc::clone(&self.shutdown),
             may_commit,
             mutex_resources,
+            read_only_watch,
+            read_only_unenforced_non_git,
         };
 
         let (result, member_had_no_verdict, settled_session_id) =
@@ -410,6 +440,7 @@ impl GraphEngine {
                     resumable_sessions,
                     &ensemble.mutex,
                     details.ensemble.commit_rights,
+                    crate::graph_engine::read_only::member_is_read_only(details, &node),
                 )
                 .await?;
             let resumed_start_failed = cascade_is_resumed_start_failed(
@@ -515,9 +546,10 @@ impl GraphEngine {
                 return Ok(self.shutdown_member_interruption(ensemble, member));
             }
             let node = ensemble_member_node(&setup.member_nodes, member)?;
-            let resume_candidate = (offset == 0)
-                .then(|| setup.initial_resume_candidate.clone())
-                .flatten();
+            let resume_candidate = setup
+                .initial_resume_candidate
+                .clone()
+                .filter(|_| offset == 0);
             let (execution, member_had_no_verdict) = self
                 .run_ensemble_member(
                     lp,
@@ -534,6 +566,7 @@ impl GraphEngine {
                     resumable_sessions,
                     &ensemble.mutex,
                     details.ensemble.commit_rights,
+                    crate::graph_engine::read_only::member_is_read_only(details, &node),
                 )
                 .await?;
             if member_had_no_verdict {
@@ -563,18 +596,8 @@ impl GraphEngine {
                 })
                 .await;
         }
-        self.settle_round_robin_no_verdict(
-            &RoundRobinWalkCtx {
-                join_ctx: &join_ctx,
-                commit_watch: &setup.commit_watch,
-                workdir,
-                ensemble,
-            },
-            details,
-            &tried_no_verdict,
-            setup.next_index,
-        )
-        .await
+        self.settle_round_robin_walk(&join_ctx, &setup, details, workdir, &tried_no_verdict)
+            .await
     }
 
     pub(crate) fn resolve_round_robin_start(

@@ -58,6 +58,9 @@ pub(crate) struct NodeTailShow {
     pub status: Option<GraphRunStatus>,
     pub started_at: Option<DateTime<Utc>>,
     pub timed_out: bool,
+    /// Number of touched paths when the finished run's output carries
+    /// `read_only_violation`; `None` for every other run.
+    pub read_only_paths: Option<usize>,
     pub node_name: String,
     pub member_pos: Option<(usize, usize)>,
 }
@@ -224,6 +227,14 @@ fn make_show(
                 .and_then(|v| v.get("error"))
                 .and_then(|v| v.as_str())
                 == Some("timed out")
+        }),
+        read_only_paths: latest.as_ref().and_then(|r| {
+            r.output
+                .as_ref()
+                .and_then(|v| v.get("read_only_violation"))
+                .and_then(|v| v.get("paths"))
+                .and_then(|v| v.as_array())
+                .map(Vec::len)
         }),
         node_name,
         member_pos,

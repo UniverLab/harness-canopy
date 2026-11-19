@@ -89,6 +89,7 @@ fn ensemble_straggler_timeout_defaults_to_member_timeout() {
     let ensemble = super::Ensemble {
         mutex: Vec::new(),
         commit_rights: false,
+        read_only: false,
         id: "ens1".to_string(),
         spec_id: Some("spec1".to_string()),
         graph_id: None,
@@ -128,6 +129,7 @@ fn ensemble_quorum_grace_none_by_default() {
     let ensemble = super::Ensemble {
         mutex: Vec::new(),
         commit_rights: false,
+        read_only: false,
         id: "ens1".to_string(),
         spec_id: Some("spec1".to_string()),
         graph_id: None,

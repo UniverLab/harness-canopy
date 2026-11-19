@@ -255,6 +255,7 @@ async fn graph_add_ensemble_crew_and_members_are_exclusive() {
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: None,
             graph_id: Some(graph_id.clone()),
             kind: None,

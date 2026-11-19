@@ -131,6 +131,7 @@ async fn graph_add_ensemble_happy_path_and_validation_errors() {
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Review Ensemble".to_string(),
@@ -165,6 +166,7 @@ async fn graph_add_ensemble_happy_path_and_validation_errors() {
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "No Prompt".to_string(),
@@ -199,6 +201,7 @@ async fn graph_add_ensemble_happy_path_and_validation_errors() {
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Bad Min Pass".to_string(),
@@ -233,6 +236,7 @@ async fn graph_add_ensemble_happy_path_and_validation_errors() {
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Bad Entry".to_string(),
@@ -267,6 +271,7 @@ async fn graph_add_ensemble_happy_path_and_validation_errors() {
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: Some(spec.id),
             graph_id: None,
             name: "Too Few".to_string(),
@@ -292,6 +297,64 @@ async fn graph_add_ensemble_happy_path_and_validation_errors() {
     .await
     .unwrap();
     assert!(is_err(&too_few_members));
+}
+
+#[tokio::test]
+async fn graph_add_ensemble_refuses_read_only_with_commit_rights() {
+    let (dir, db, handler) = endpoint_test_handler();
+    let lp = insert_test_graph(&db, dir.path());
+    let spec = insert_test_spec(&db, &lp.id, 1);
+    let entry = add_agent_node(&handler, &spec.id, "Entry").await;
+    let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
+    let member = |platform: &str| crate::daemon::params::EnsembleMemberParams {
+        platform: platform.to_string(),
+        model: None,
+        prompt_override: None,
+        timeout_minutes: None,
+        infra_retry_limit: None,
+        infra_crash_max_seconds: None,
+        infra_backoff_seconds: None,
+    };
+
+    let refused = call_graph_action(
+        &handler,
+        "graph_ensemble",
+        "add",
+        params_id(GraphAddEnsembleParams {
+            mutex: None,
+            commit_rights: Some(true),
+            read_only: Some(true),
+            spec_id: Some(spec.id.clone()),
+            graph_id: None,
+            name: "Contradictory".to_string(),
+            kind: None,
+            prompt_template: Some("Review".to_string()),
+            members: Some(vec![member("claude"), member("opencode")]),
+            node: None,
+            from_node: entry,
+            condition: "always".to_string(),
+            min_pass: None,
+            straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
+            timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+            on_pass_to: arbiter,
+            on_fail_to: None,
+
+            crew: None,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(is_err(&refused));
+    let message = text(&refused);
+    assert!(
+        message.contains("read_only") && message.contains("commit_rights"),
+        "{message}"
+    );
+    assert!(db.list_ensembles_for_spec(&spec.id).unwrap().is_empty());
 }
 
 /// CM35 FR2: an ensemble member naming an interactive-only platform is
@@ -328,6 +391,7 @@ async fn graph_add_ensemble_rejects_interactive_only_member() {
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Live Panel".to_string(),
@@ -388,6 +452,7 @@ async fn graph_add_ensemble_rejects_negative_quorum_grace() {
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Negative Grace".to_string(),
@@ -426,6 +491,7 @@ async fn graph_add_ensemble_rejects_negative_quorum_grace() {
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Immediate Grace".to_string(),
@@ -482,6 +548,7 @@ async fn graph_update_ensemble_sets_and_clears_quorum_grace() {
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Grace Update".to_string(),

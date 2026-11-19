@@ -15,7 +15,9 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::daemon::handler_nodes::validate_known_config_keys;
+use crate::daemon::handler_nodes::{
+    validate_known_config_keys, validate_read_only_commit_rights_conflict,
+};
 use crate::daemon::handler_templates::{check_node_templates, check_template_bindings};
 use crate::daemon::handler_validate::validate_node_mutex_config;
 use crate::domain::graph_transfer::{
@@ -530,6 +532,9 @@ fn validate_node_config(kind: GraphNodeKind, config: &Value, problems: &mut Vec<
         return;
     };
     if let Err(message) = validate_known_config_keys(kind, map) {
+        problems.push(problem("config", message));
+    }
+    if let Err(message) = validate_read_only_commit_rights_conflict(kind, map) {
         problems.push(problem("config", message));
     }
     if kind == GraphNodeKind::Router {

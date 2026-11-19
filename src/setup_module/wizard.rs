@@ -981,6 +981,7 @@ mod tests {
             provider: provider.map(str::to_string),
             tool_name: tool.map(str::to_string),
             cli: None,
+            project_paths: Vec::new(),
         }
     }
 

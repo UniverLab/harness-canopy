@@ -117,6 +117,7 @@ fn insert_kind_ensemble_with_member_timeouts(
     let ensemble = crate::domain::graphs::Ensemble {
         mutex: Vec::new(),
         commit_rights: false,
+        read_only: false,
         id: "ens1".to_string(),
         spec_id: Some(spec_id.to_string()),
         graph_id: None,
@@ -579,6 +580,7 @@ fn missing_member_details() -> EnsembleDetails {
             kind: EnsembleKind::Parallel,
             round_robin_index: None,
             commit_rights: false,
+            read_only: false,
             created_at: chrono::Utc::now(),
 
             crew_id: None,

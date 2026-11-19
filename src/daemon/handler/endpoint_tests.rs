@@ -348,6 +348,7 @@ async fn graph_with_unexited_quorum(
             on_pass_to: arbiter.id.clone(),
             on_fail_to: None,
             commit_rights: None,
+            read_only: None,
             crew: None,
         }),
     )
@@ -563,6 +564,7 @@ async fn add_cb52_ensemble(
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: Some(spec_id.to_string()),
             graph_id: None,
             name: name.to_string(),
@@ -716,6 +718,7 @@ async fn add_two_member_ensemble(
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: Some(spec_id.to_string()),
             graph_id: None,
             name: name.to_string(),
@@ -785,6 +788,7 @@ fn blank_ensemble_update(ensemble_id: &str) -> GraphUpdateEnsembleParams {
         add_entry_condition: None,
         remove_entry_from: None,
         commit_rights: None,
+        read_only: None,
 
         crew: None,
     }
@@ -821,6 +825,7 @@ async fn build_two_source_ensemble_graph(
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Proposers".to_string(),
@@ -1163,6 +1168,7 @@ async fn build_crew_ensemble(
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: None,
             graph_id: Some(graph_id.clone()),
             kind: None,
@@ -1276,6 +1282,7 @@ async fn build_literal_ensemble(
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: None,
             graph_id: Some(graph_id.clone()),
             kind: None,
@@ -1326,6 +1333,7 @@ fn ensemble_update_params(ensemble_id: &str) -> GraphUpdateEnsembleParams {
         add_entry_condition: None,
         remove_entry_from: None,
         commit_rights: None,
+        read_only: None,
     }
 }
 

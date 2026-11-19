@@ -334,6 +334,7 @@ fn ensemble_json_full() {
         ensemble: Ensemble {
             mutex: Vec::new(),
             commit_rights: false,
+            read_only: true,
             id: "ens1".into(),
             spec_id: Some("s1".into()),
             graph_id: None,
@@ -391,6 +392,7 @@ fn ensemble_json_full() {
     assert_eq!(json["min_pass"], 2);
     assert_eq!(json["effective_straggler_timeout_minutes"], 10);
     assert_eq!(json["on_fail_to"], "cleanup");
+    assert_eq!(json["read_only"], true);
     assert_eq!(json["members"].as_array().unwrap().len(), 2);
     let members = json["members"].as_array().unwrap();
     assert_eq!(members[0]["prompt_source"], "override");
@@ -408,6 +410,7 @@ fn ensemble_json_no_straggler() {
         ensemble: Ensemble {
             mutex: Vec::new(),
             commit_rights: false,
+            read_only: false,
             id: "ens2".into(),
             spec_id: None,
             graph_id: Some("l1".into()),
@@ -695,6 +698,7 @@ fn ensemble_unit_with_fail_to() {
         start_position: 1,
         kind: EnsembleKind::Parallel,
         commit_rights: false,
+        read_only: false,
     });
     assert_eq!(built.ensemble.on_fail_to.as_deref(), Some("cleanup"));
     assert_eq!(built.ensemble.straggler_timeout_minutes, Some(10));
@@ -732,6 +736,7 @@ fn ensemble_unit_no_fail_to() {
         start_position: 5,
         kind: EnsembleKind::Parallel,
         commit_rights: false,
+        read_only: false,
     });
     assert!(built.ensemble.on_fail_to.is_none());
     let fail_edges: Vec<_> = built
@@ -772,6 +777,7 @@ fn ensemble_unit_positions_sequential() {
         start_position: 10,
         kind: EnsembleKind::Parallel,
         commit_rights: false,
+        read_only: false,
     });
     for (i, member) in built.members.iter().enumerate() {
         assert_eq!(member.position, i as i64);

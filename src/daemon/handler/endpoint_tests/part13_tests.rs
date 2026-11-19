@@ -76,6 +76,7 @@ async fn part13_try_ensemble(
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: None,
             graph_id: Some(graph_id.to_string()),
             kind: None,
@@ -184,6 +185,7 @@ async fn add_ensemble_refuses_bad_override() {
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: None,
             graph_id: Some(graph_id.clone()),
             kind: None,
@@ -323,6 +325,7 @@ async fn update_ensemble_refuses_ensemble_output() {
             add_entry_condition: None,
             remove_entry_from: None,
             commit_rights: None,
+            read_only: None,
             crew: None,
         }),
     )

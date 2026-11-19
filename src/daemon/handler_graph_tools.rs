@@ -232,6 +232,7 @@ pub(crate) static GRAPH_ENSEMBLE: ToolSpec = ToolSpec {
                 "infra_backoff_seconds",
                 "on_fail_to",
                 "commit_rights",
+                "read_only",
                 "crew",
                 "mutex",
             ],
@@ -259,6 +260,7 @@ pub(crate) static GRAPH_ENSEMBLE: ToolSpec = ToolSpec {
                 "add_entry_condition",
                 "remove_entry_from",
                 "commit_rights",
+                "read_only",
                 "mutex",
             ],
         },
@@ -592,8 +594,8 @@ impl TaskTriggerHandler {
         name = "graph_ensemble",
         description = "Author multi-member ensembles (parallel, cascade, round_robin). Pass `action` plus the parameters listed for it. \
         Actions (required params; optional params): \
-        `add` (required: name, from_node, condition, on_pass_to; optional: spec_id, graph_id, kind, prompt_template, members, node, min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds, on_fail_to, commit_rights, crew, mutex) — add an ensemble wired from a node. \
-        `update` (required: ensemble_id; optional: kind, prompt_template, members, crew, min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds, on_pass_to, on_fail_to, from_node, condition, add_entry_from, add_entry_condition, remove_entry_from, commit_rights, mutex) — update an ensemble's config and wiring. \
+        `add` (required: name, from_node, condition, on_pass_to; optional: spec_id, graph_id, kind, prompt_template, members, node, min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds, on_fail_to, commit_rights, read_only, crew, mutex) — add an ensemble wired from a node. \
+        `update` (required: ensemble_id; optional: kind, prompt_template, members, crew, min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds, on_pass_to, on_fail_to, from_node, condition, add_entry_from, add_entry_condition, remove_entry_from, commit_rights, read_only, mutex) — update an ensemble's config and wiring. \
         `delete` (required: ensemble_id; optional: none) — delete an ensemble as one unit. \
         `copy` (required: source_ensemble_id; optional: spec_id, graph_id, name, prompt_template, members, min_pass, timeout_minutes, straggler_timeout_minutes, quorum_grace_minutes, from_node, condition, on_pass_to, on_fail_to) — copy an ensemble's config to a new ensemble."
     )]

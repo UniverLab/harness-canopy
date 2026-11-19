@@ -157,6 +157,8 @@ pub(crate) struct ParallelMemberTask {
     /// The engine's shutdown flag — the task is spawned detached, so the flag
     /// travels in the task.
     pub(crate) shutdown: Arc<AtomicBool>,
+    /// Read-only enforcement applies to this member run.
+    pub(crate) read_only_enforced: bool,
 }
 
 /// Outcome of one member's straggler-bounded retry sequence.
@@ -286,6 +288,90 @@ pub(crate) async fn run_parallel_member_task(task: ParallelMemberTask) -> Member
     )
 }
 
+/// Apply read-only enforcement to a settled member execution, persisting the
+/// result when the tree changed (or when the run is unenforced in a non-git
+/// workdir). Returns the execution and whether the run row was rewritten.
+async fn apply_member_read_only(
+    task: &ParallelMemberTask,
+    member_run_id: &str,
+    watch: &Option<ReadOnlyWatch>,
+    unenforced_non_git: bool,
+    persist_regardless: bool,
+    execution: NodeExecution,
+) -> Result<(NodeExecution, bool)> {
+    let execution = apply_to_execution(
+        &task.node,
+        &format!("Node '{}'", task.node.name),
+        &task.workdir,
+        watch.as_ref(),
+        unenforced_non_git,
+        execution,
+    )
+    .await?;
+    let persisted = persist_regardless
+        || unenforced_non_git
+        || (watch.is_some() && execution.status == GraphRunStatus::Fail);
+    if persisted {
+        let _ = task.db.update_graph_run_result(
+            member_run_id,
+            execution.status,
+            Some(&execution.output),
+            Some(chrono::Utc::now()),
+        );
+    }
+    Ok((execution, persisted))
+}
+
+/// End a member whose mutex wait was refused: settle its run as interrupted,
+/// then report it the way the caller's return tuple expects.
+async fn settle_member_mutex_refused(
+    task: &ParallelMemberTask,
+    member_run_id: &str,
+    watch: &Option<ReadOnlyWatch>,
+    unenforced_non_git: bool,
+) -> Result<(NodeExecution, GraphNodeRun, String, bool)> {
+    let run = task.db.get_graph_run(member_run_id)?.ok_or_else(|| {
+        anyhow!("Graph run '{member_run_id}' was deleted while waiting for its mutex.")
+    })?;
+    let execution = interrupted_execution(format!(
+        "Ensemble member '{}' stopped while waiting for its mutex.",
+        task.node.name
+    ));
+    let (execution, _) = apply_member_read_only(
+        task,
+        member_run_id,
+        watch,
+        unenforced_non_git,
+        false,
+        execution,
+    )
+    .await?;
+    Ok((execution, run, member_run_id.to_string(), true))
+}
+
+/// Start the next attempt for an infra-retry member and return its new run id.
+async fn retry_parallel_member(
+    task: &ParallelMemberTask,
+    member_run_id: &str,
+    execution: &NodeExecution,
+    chain: &AttemptChain,
+) -> Result<String> {
+    begin_infra_retry(
+        &task.db,
+        &task.lp,
+        &task.spec,
+        &task.node,
+        task.previous_output.as_ref(),
+        task.iteration as i64,
+        member_run_id,
+        &execution.output,
+        chain.attempt,
+        chain.backoff_secs,
+        &task.mutex_resources,
+    )
+    .await
+}
+
 /// Drive one member's infra-retry loop to a verdict: acquire the member's
 /// mutexes ahead of every attempt, execute, and retry infra crashes —
 /// returning `(execution, run, final_run_id, member_had_no_verdict)`. The
@@ -296,6 +382,8 @@ async fn drive_parallel_member_attempts(
     let mut chain = AttemptChain::from_node(&task.node);
     let mut member_run_id = task.run_id.clone();
     let mut resume_candidate: Option<String> = task.resume_candidate_seed.clone();
+    let (read_only_watch, read_only_unenforced_non_git) =
+        begin_for_run(task.read_only_enforced, &task.node, &task.workdir).await?;
     loop {
         // The mutex gate sits ahead of every member attempt, inside
         // the straggler window: the member's own agent timeout starts
@@ -314,18 +402,13 @@ async fn drive_parallel_member_attempts(
         )
         .await?
         {
-            let run = task.db.get_graph_run(&member_run_id)?.ok_or_else(|| {
-                anyhow!("Graph run '{member_run_id}' was deleted while waiting for its mutex.")
-            })?;
-            break Ok((
-                interrupted_execution(format!(
-                    "Ensemble member '{}' stopped while waiting for its mutex.",
-                    task.node.name
-                )),
-                run,
-                member_run_id.clone(),
-                true,
-            ));
+            return settle_member_mutex_refused(
+                task,
+                &member_run_id,
+                &read_only_watch,
+                read_only_unenforced_non_git,
+            )
+            .await;
         }
         let execution = execute_agent_node(
             &task.db,
@@ -363,24 +446,28 @@ async fn drive_parallel_member_attempts(
                     chain.crash_max_secs,
                 )
                 .await?;
+                let (execution, persisted) = apply_member_read_only(
+                    task,
+                    &member_run_id,
+                    &read_only_watch,
+                    read_only_unenforced_non_git,
+                    matches!(
+                        run.status,
+                        GraphRunStatus::Running | GraphRunStatus::Waiting
+                    ),
+                    execution,
+                )
+                .await?;
+                if persisted {
+                    run.status = execution.status;
+                    run.output = Some(execution.output.clone());
+                }
                 break Ok((execution, run, member_run_id.clone(), member_had_no_verdict));
             }
             kind => {
                 resume_candidate = run.session_id.clone();
-                member_run_id = begin_infra_retry(
-                    &task.db,
-                    &task.lp,
-                    &task.spec,
-                    &task.node,
-                    task.previous_output.as_ref(),
-                    task.iteration as i64,
-                    &member_run_id,
-                    &execution.output,
-                    chain.attempt,
-                    chain.backoff_secs,
-                    &task.mutex_resources,
-                )
-                .await?;
+                member_run_id =
+                    retry_parallel_member(task, &member_run_id, &execution, &chain).await?;
                 chain.advance(kind);
                 continue;
             }

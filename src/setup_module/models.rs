@@ -69,6 +69,11 @@ pub struct Platform {
     pub provider: Option<String>,
     #[serde(default)]
     pub tool_name: Option<String>,
+    /// Harness-owned paths inside a project workdir (directories end with `/`,
+    /// root files do not). Read-only enforcement excludes them so a harness
+    /// writing its own state does not trip a read-only violation.
+    #[serde(default)]
+    pub project_paths: Vec<String>,
     #[serde(default)]
     pub cli: Option<serde_json::Value>,
 }
@@ -276,6 +281,7 @@ mod tests {
 
             provider: None,
             tool_name: None,
+            project_paths: Vec::new(),
         };
 
         let result = platform.to_platform_with_cli();
@@ -311,6 +317,7 @@ mod tests {
 
             provider: None,
             tool_name: None,
+            project_paths: Vec::new(),
         };
 
         let result = platform.to_platform_with_cli();
@@ -339,6 +346,7 @@ mod tests {
 
             provider: None,
             tool_name: None,
+            project_paths: Vec::new(),
         };
 
         let result = platform.to_platform_with_cli();
@@ -366,6 +374,7 @@ mod tests {
             provider: Some("Mistral AI".to_string()),
             tool_name: Some("Vibe".to_string()),
             cli: Some(serde_json::json!({"binary": "vibe"})),
+            project_paths: Vec::new(),
         };
 
         let result = platform.to_platform_with_cli();
@@ -397,6 +406,7 @@ mod tests {
 
             provider: None,
             tool_name: None,
+            project_paths: Vec::new(),
         };
         assert!(is_platform_available(&platform));
     }
@@ -422,6 +432,7 @@ mod tests {
 
             provider: None,
             tool_name: None,
+            project_paths: Vec::new(),
         };
         assert!(!is_platform_available(&platform));
     }
@@ -447,6 +458,7 @@ mod tests {
 
             provider: None,
             tool_name: None,
+            project_paths: Vec::new(),
         };
         assert!(!is_platform_available(&platform));
     }
@@ -563,6 +575,7 @@ mod tests {
 
             provider: None,
             tool_name: None,
+            project_paths: Vec::new(),
         };
         let registry = RegistryRaw {
             platforms: vec![platform],

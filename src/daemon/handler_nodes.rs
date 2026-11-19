@@ -222,6 +222,7 @@ pub(crate) const AGENT_CONFIG_KEYS: &[&str] = &[
     "prompt_preset",
     "require_report",
     "commit_rights",
+    "read_only",
     "skills",
     "infra_retry_limit",
     "infra_crash_max_seconds",
@@ -334,6 +335,28 @@ pub(crate) fn validate_known_config_keys(
     ))
 }
 
+/// `read_only: true` and `commit_rights: true` cannot both hold on the same
+/// node: a read-only node is enforced to leave the tree untouched, while a
+/// committer is the node trusted to move git history.
+pub(crate) fn validate_read_only_commit_rights_conflict(
+    kind: GraphNodeKind,
+    map: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    if kind == GraphNodeKind::Agent
+        && map.get("read_only").and_then(serde_json::Value::as_bool) == Some(true)
+        && map
+            .get("commit_rights")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    {
+        return Err(
+            "Graph node config cannot set both 'read_only' and 'commit_rights' to true."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// Validate that a graph node's config is a JSON object with the fields its
 /// kind needs at execution time. This exists because a double-encoded config
 /// (e.g. `"{\"platform\": \"mimo\"}"` instead of `{"platform": "mimo"}`) used
@@ -357,6 +380,7 @@ pub(crate) fn validate_node_config(
     };
 
     validate_known_config_keys(kind, map)?;
+    validate_read_only_commit_rights_conflict(kind, map)?;
 
     let has_non_empty_str = |field: &str| {
         map.get(field)

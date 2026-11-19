@@ -783,6 +783,7 @@ mod tests {
 
             provider: None,
             tool_name: None,
+            project_paths: Vec::new(),
         }
     }
 
@@ -1279,6 +1280,7 @@ mod tests {
 
             provider: None,
             tool_name: None,
+            project_paths: Vec::new(),
         };
 
         std::fs::write(home.path().join(&old_platform.config_path), "").unwrap();
@@ -1309,6 +1311,7 @@ mod tests {
 
             provider: None,
             tool_name: None,
+            project_paths: Vec::new(),
         };
         let registry = registry_of(vec![new_platform]);
 
@@ -1351,6 +1354,7 @@ mod tests {
 
             provider: None,
             tool_name: None,
+            project_paths: Vec::new(),
         };
         std::fs::write(home.path().join(&platform.config_path), "").unwrap();
 
@@ -1406,6 +1410,7 @@ mod tests {
 
             provider: None,
             tool_name: None,
+            project_paths: Vec::new(),
         };
         std::fs::write(home.path().join(&platform.config_path), "").unwrap();
 
@@ -1441,6 +1446,7 @@ mod tests {
 
             provider: None,
             tool_name: None,
+            project_paths: Vec::new(),
         };
         std::fs::write(home.path().join(&platform.config_path), "").unwrap();
 
@@ -1483,6 +1489,7 @@ mod tests {
 
             provider: None,
             tool_name: None,
+            project_paths: Vec::new(),
         };
         std::fs::write(home.path().join(&old_platform.config_path), "").unwrap();
 
@@ -1513,6 +1520,7 @@ mod tests {
 
             provider: None,
             tool_name: None,
+            project_paths: Vec::new(),
         };
         let registry = registry_of(vec![new_platform]);
 

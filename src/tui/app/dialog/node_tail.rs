@@ -29,6 +29,9 @@ pub(crate) struct NodeTailDialog {
     pub status: Option<GraphRunStatus>,
     /// True when the finished run's output JSON carries `"error": "timed out"`.
     pub timed_out: bool,
+    /// Number of touched paths when the finished run's output carries
+    /// `read_only_violation`; `None` for every other run.
+    pub read_only_paths: Option<usize>,
     pub started_at: Option<DateTime<Utc>>,
     /// `(1-based index, count)` when the resolved run is an ensemble member.
     pub member_pos: Option<(usize, usize)>,
@@ -59,6 +62,7 @@ impl NodeTailDialog {
             stderr_lines: Vec::new(),
             status: None,
             timed_out: false,
+            read_only_paths: None,
             started_at: None,
             member_pos: None,
             platform: None,
@@ -244,6 +248,7 @@ impl App {
                 dialog.model = None;
                 dialog.started_at = None;
                 dialog.timed_out = false;
+                dialog.read_only_paths = None;
                 dialog.stdout_lines.clear();
                 dialog.stderr_lines.clear();
                 dialog.member_pos = None;
@@ -397,6 +402,14 @@ impl App {
                     .and_then(|v| v.as_str())
                     == Some("timed out")
             }),
+            read_only_paths: latest.as_ref().and_then(|r| {
+                r.output
+                    .as_ref()
+                    .and_then(|v| v.get("read_only_violation"))
+                    .and_then(|v| v.get("paths"))
+                    .and_then(|v| v.as_array())
+                    .map(Vec::len)
+            }),
             node_name,
             member_pos,
         })
@@ -414,6 +427,7 @@ struct ShowData {
     status: Option<GraphRunStatus>,
     started_at: Option<DateTime<Utc>>,
     timed_out: bool,
+    read_only_paths: Option<usize>,
     node_name: String,
     member_pos: Option<(usize, usize)>,
 }
@@ -452,6 +466,7 @@ fn node_tail_response_to_poll_data(
             status: show.status,
             started_at: show.started_at,
             timed_out: show.timed_out,
+            read_only_paths: show.read_only_paths,
             node_name: show.node_name,
             member_pos: show.member_pos,
         }),
@@ -481,6 +496,7 @@ fn apply_resolved_run(dialog: &mut NodeTailDialog, data: &ShowData) {
     dialog.status = data.status;
     dialog.started_at = data.started_at;
     dialog.timed_out = data.timed_out;
+    dialog.read_only_paths = data.read_only_paths;
     dialog.node_name = data.node_name.clone();
     dialog.member_pos = data.member_pos;
     if let Some((_, count)) = data.member_pos {

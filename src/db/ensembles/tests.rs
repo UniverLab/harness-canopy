@@ -137,6 +137,7 @@ fn insert_cb52_ensemble(db: &Database) {
     let ensemble = Ensemble {
         mutex: Vec::new(),
         commit_rights: false,
+        read_only: false,
         id: "ens1".to_string(),
         spec_id: Some("spec-1".to_string()),
         graph_id: None,

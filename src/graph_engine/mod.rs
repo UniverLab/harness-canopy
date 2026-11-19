@@ -56,6 +56,9 @@ mod node_dispatch;
 mod output_tee;
 mod progress;
 mod prompts;
+mod read_only;
+#[cfg(test)]
+mod read_only_tests;
 mod roster_filter;
 mod routing;
 mod run_spec;
@@ -105,6 +108,7 @@ pub(crate) use node_dispatch::*;
 #[allow(unused_imports)]
 pub(crate) use progress::*;
 pub(crate) use prompts::*;
+pub(crate) use read_only::*;
 pub(crate) use roster_filter::*;
 pub(crate) use routing::*;
 #[allow(unused_imports)]

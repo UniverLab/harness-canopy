@@ -176,6 +176,10 @@ pub struct GraphExportEnsemble {
     /// the graph's committer visible without cross-referencing nodes.
     #[serde(default)]
     pub commit_rights: bool,
+    /// Whether this ensemble is enforced read-only. Always written so an
+    /// export makes read-only enforcement visible.
+    #[serde(default)]
+    pub read_only: bool,
     pub prompt_template: String,
     pub entry_from_node: GraphExportEnsembleTarget,
     pub entry_condition: GraphEdgeCondition,

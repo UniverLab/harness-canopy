@@ -121,6 +121,18 @@ impl Database {
         Ok(rows > 0)
     }
 
+    pub fn update_ensemble_read_only(&self, ensemble_id: &str, read_only: bool) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let rows = conn.execute(
+            "UPDATE ensembles SET read_only = ?1 WHERE id = ?2",
+            params![read_only, ensemble_id],
+        )?;
+        Ok(rows > 0)
+    }
+
     /// Replace the ensemble's named mutex list. An empty list clears it (back
     /// to NULL). The caller decides keep-vs-write (`None` means keep, i.e.
     /// don't call this).

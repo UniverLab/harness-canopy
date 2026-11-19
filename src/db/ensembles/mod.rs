@@ -57,22 +57,7 @@ impl Database {
             ],
         )?;
 
-        for node in member_nodes {
-            tx.execute(
-                "INSERT INTO graph_nodes (id, spec_id, graph_id, name, kind, config, position, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    &node.id,
-                    &node.spec_id,
-                    &node.graph_id,
-                    &node.name,
-                    node.kind.as_str(),
-                    serde_json::to_string(&node.config)?,
-                    node.position,
-                    node.created_at.timestamp(),
-                ],
-            )?;
-        }
+        insert_ensemble_member_nodes(&tx, member_nodes)?;
 
         for edge in edges {
             tx.execute(
@@ -90,8 +75,8 @@ impl Database {
         }
 
         tx.execute(
-            "INSERT INTO ensembles (id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds, on_pass_to, on_fail_to, kind, round_robin_index, commit_rights, created_at, crew_id, crew_name, crew_version_applied, mutex)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
+            "INSERT INTO ensembles (id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds, on_pass_to, on_fail_to, kind, round_robin_index, commit_rights, read_only, created_at, crew_id, crew_name, crew_version_applied, mutex)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
             params![
                 &ensemble.id,
                 &ensemble.spec_id,
@@ -113,6 +98,7 @@ impl Database {
                 ensemble.kind.as_str(),
                 ensemble.round_robin_index,
                 ensemble.commit_rights,
+                ensemble.read_only,
                 ensemble.created_at.timestamp(),
                 &ensemble.crew_id,
                 &ensemble.crew_name,
@@ -150,7 +136,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds, on_pass_to, on_fail_to, kind, round_robin_index, commit_rights, created_at, crew_id, crew_name, crew_version_applied, mutex
+            "SELECT id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds, on_pass_to, on_fail_to, kind, round_robin_index, commit_rights, read_only, created_at, crew_id, crew_name, crew_version_applied, mutex
              FROM ensembles WHERE id = ?1",
         )?;
         stmt.query_row(params![ensemble_id], map_ensemble_row)
@@ -613,11 +599,12 @@ fn map_ensemble_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Ensemble> {
         kind,
         round_robin_index: row.get(18)?,
         commit_rights: row.get(19)?,
-        mutex: decode_ensemble_mutex(row.get::<_, Option<String>>(24).ok().flatten()),
-        created_at: from_timestamp(row.get(20)?)?,
-        crew_id: row.get(21)?,
-        crew_name: row.get(22)?,
-        crew_version_applied: row.get(23)?,
+        read_only: row.get(20)?,
+        mutex: decode_ensemble_mutex(row.get::<_, Option<String>>(25).ok().flatten()),
+        created_at: from_timestamp(row.get(21)?)?,
+        crew_id: row.get(22)?,
+        crew_name: row.get(23)?,
+        crew_version_applied: row.get(24)?,
     })
 }
 
@@ -678,6 +665,27 @@ fn from_timestamp(value: i64) -> rusqlite::Result<DateTime<Utc>> {
             )),
         )
     })
+}
+
+/// Insert the member nodes of a freshly built ensemble unit.
+fn insert_ensemble_member_nodes(tx: &rusqlite::Transaction<'_>, nodes: &[GraphNode]) -> Result<()> {
+    for node in nodes {
+        tx.execute(
+            "INSERT INTO graph_nodes (id, spec_id, graph_id, name, kind, config, position, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                &node.id,
+                &node.spec_id,
+                &node.graph_id,
+                &node.name,
+                node.kind.as_str(),
+                serde_json::to_string(&node.config)?,
+                node.position,
+                node.created_at.timestamp(),
+            ],
+        )?;
+    }
+    Ok(())
 }
 
 /// What [`Database::delete_ensemble_unit`] removed — member and quorum ids

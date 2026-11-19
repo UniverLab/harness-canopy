@@ -438,6 +438,7 @@ fn find_stale_2x_name_hits_scans_hook_commands_and_ensemble_prompts() {
             kind: EnsembleKind::Parallel,
             round_robin_index: None,
             commit_rights: false,
+            read_only: false,
             created_at: chrono::Utc::now(),
 
             crew_id: None,

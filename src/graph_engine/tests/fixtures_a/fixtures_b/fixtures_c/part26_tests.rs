@@ -405,6 +405,7 @@ async fn tick_ensemble_agent_run_blocks_idle_terminal() {
     let ensemble = crate::domain::graphs::Ensemble {
         mutex: Vec::new(),
         commit_rights: false,
+        read_only: false,
         id: "ens1".to_string(),
         spec_id: None,
         graph_id: Some(graph_id.clone()),

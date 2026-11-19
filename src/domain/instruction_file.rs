@@ -279,6 +279,7 @@ mod tests {
             instruction_precedence: precedence.into_iter().map(str::to_string).collect(),
             provider: None,
             tool_name: None,
+            project_paths: Vec::new(),
             cli: None,
         }
     }

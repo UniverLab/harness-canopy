@@ -48,7 +48,7 @@ no external services, no cloud account.
 - [Isolation](graphs-isolation.md) — sandboxes, concurrency, and named mutexes.
 - [Hooks and Queues](graphs-hooks-and-queues.md) — event-keyed hooks, the spec backlog, and spec queues.
 - [Sharing Graphs](graphs-sharing.md) — export and import, validate, and install from the catalogue.
-- [Node Documents](graphs-nodes.md) — reusable node documents.
+- [Node Documents](graphs-nodes.md) — reusable node documents and read-only nodes.
 - [Graph Operations](graphs-operations.md) — archive and restore, node run history, the event log, engine tuning.
 - [Graph patterns](https://graphs.univerlab.org/patterns) — the shapes a graph can take, and where each breaks.
 - [Graph catalogue](https://graphs.univerlab.org) — ready-made graphs to install.

@@ -335,6 +335,7 @@ mod tests {
             kind,
             round_robin_index: Some(0),
             commit_rights: false,
+            read_only: false,
             created_at: chrono::Utc::now(),
 
             crew_id: None,

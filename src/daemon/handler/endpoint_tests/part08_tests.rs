@@ -196,6 +196,7 @@ async fn graph_update_ensemble_shrink_below_min_pass_is_refused() {
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Shrink Ensemble".to_string(),
@@ -230,6 +231,7 @@ async fn graph_update_ensemble_shrink_below_min_pass_is_refused() {
         params_id(GraphUpdateEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             ensemble_id: ensemble_id.clone(),
             kind: None,
             prompt_template: None,
@@ -289,6 +291,7 @@ async fn graph_update_ensemble_raise_min_pass_above_count_is_refused() {
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Raise Ensemble".to_string(),
@@ -323,6 +326,7 @@ async fn graph_update_ensemble_raise_min_pass_above_count_is_refused() {
         params_id(GraphUpdateEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             ensemble_id: ensemble_id.clone(),
             kind: None,
             prompt_template: None,
@@ -382,6 +386,7 @@ async fn graph_update_ensemble_shrink_with_adjusted_min_pass_succeeds() {
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Adjust Ensemble".to_string(),
@@ -416,6 +421,7 @@ async fn graph_update_ensemble_shrink_with_adjusted_min_pass_succeeds() {
         params_id(GraphUpdateEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             ensemble_id: ensemble_id.clone(),
             kind: None,
             prompt_template: None,
@@ -472,6 +478,7 @@ async fn graph_preflight_reports_ensemble_with_invalid_min_pass() {
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Stale Ensemble".to_string(),
@@ -720,6 +727,7 @@ async fn graph_preflight_warns_on_stale_loop_complete_node_in_ensemble_prompt() 
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Stale Ensemble".to_string(),
@@ -1248,6 +1256,7 @@ async fn graph_preflight_refuses_partial_multi_source_ensemble() {
         params_id(GraphAddEnsembleParams {
             mutex: None,
             commit_rights: None,
+            read_only: None,
             spec_id: Some(spec.id.clone()),
             graph_id: None,
             name: "Proposers".to_string(),

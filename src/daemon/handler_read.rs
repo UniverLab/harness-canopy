@@ -535,6 +535,7 @@ pub(crate) fn ensemble_details_json(
         "name": ensemble.name,
         "kind": ensemble.kind.as_str(),
         "commit_rights": ensemble.commit_rights,
+        "read_only": ensemble.read_only,
         "mutex": ensemble.mutex,
         "prompt_template": ensemble.prompt_template,
         "join_node_id": ensemble.join_node_id,
