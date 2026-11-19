@@ -60,13 +60,10 @@ merely that HEAD differs from wherever the spec started — see
 [Template variables](graphs-templates.md#template-variables). A node that must not change the tree at all is enforced read-only: see [Read-only nodes](graphs-nodes.md#read-only-nodes).
 
 **Editing the recommended check command text here does not retroactively
-touch any graph.** A node's `command` is whatever text was written into
-its config when the graph was authored (`graph_node` `add`, or copied from
-a node document) — the engine reads it fresh at execution time but never
-rewrites it. A spec already using the old `{{spec_start_head}}`-only
-comparison keeps using it until someone explicitly runs
-`graph_node` `update` on it; only graphs authored or edited after adopting
-`{{spec_committed_head}}` get the stronger check.
+touch any graph.** A node's `command` is whatever was written when the graph
+was authored — the engine reads it fresh but never rewrites it. A spec using
+the old `{{spec_start_head}}`-only comparison keeps it until someone runs
+`graph_node` `update`; only newer graphs get the stronger check.
 
 ## Self-report requirement
 
@@ -378,7 +375,9 @@ can only write its own note: `spec_edit` `note_write` takes no owner argument.
 (`run_id`, `body`) — the engine resolves the owner from the active run and refuses a
 `run_id` that is no longer running. The body is at most 2 500 characters;
 longer writes are refused naming the limit. `spec_edit` `note_write` with
-(`spec_id`, `body`) and no `run_id` writes the `operator` note. Read with
+(`spec_id`, `body`) and no `run_id` writes the `operator` note; `spec_id` is
+for the operator only, so a caller bound to an active node run is refused and
+told to write its own note with `run_id`. Read with
 `spec` `notes` (`spec_id`) (newest first), or `canopy spec notes <spec-id>`.
 
 **Prompt injection.** Every agent-node prompt gets a `[SPEC NOTES]` section

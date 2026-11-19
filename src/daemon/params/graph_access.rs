@@ -277,7 +277,8 @@ pub struct SpecNoteWriteParams {
     /// The active run's id (from the [REPORTING] block). Refused when the run
     /// is no longer running. Mutually exclusive with `spec_id`.
     pub run_id: Option<String>,
-    /// Spec id for the `operator` note (no run). Mutually exclusive with `run_id`.
+    /// Spec id for the `operator` note (no run). For the operator only; a node
+    /// agent must pass `run_id`. Mutually exclusive with `run_id`.
     pub spec_id: Option<String>,
     /// Note body, at most 2500 characters. Replaces the caller's previous note.
     pub body: String,

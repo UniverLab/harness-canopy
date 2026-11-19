@@ -489,7 +489,7 @@ impl TaskTriggerHandler {
         While `spec_review.enabled` is true, create and update refuse a spec whose intent is empty; while it is off, intent stays optional. \
         `delete` (required: spec_id; optional: none) — delete a standalone spec; refused while it is bound to a graph. \
         `set_status` (required: spec_id, status, reason; optional: none) — administratively complete, skip, or reopen a standalone spec. \
-        `note_write` (required: body; optional: run_id, spec_id) — write or replace the caller's note; pass exactly one of run_id (your note) or spec_id (the operator note)."
+        `note_write` (required: body; optional: run_id, spec_id) — write or replace the caller's note; pass exactly one of run_id (your note) or spec_id (the operator note). `spec_id` is for the operator; a node agent must pass `run_id`."
     )]
     pub(crate) async fn spec_edit(
         &self,
@@ -518,7 +518,7 @@ impl TaskTriggerHandler {
                     .await
             }
             "note_write" => {
-                self.spec_edit_note_write_impl(action_params(&params, spec)?)
+                self.spec_edit_note_write_impl(action_params(&params, spec)?, parts.as_ref())
                     .await
             }
             _ => unreachable!("validated action"),

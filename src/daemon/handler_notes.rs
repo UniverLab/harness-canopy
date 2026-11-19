@@ -16,6 +16,8 @@ use crate::db::graphs::notes::{NewSpecNote, SPEC_NOTE_MAX_CHARS};
 use crate::db::Database;
 use crate::domain::activity::{self, GraphEvent, GraphEventKind};
 use crate::domain::graphs::GraphRunStatus;
+use crate::shared::sync_identity::graph_identity;
+use axum::http::request::Parts;
 use rmcp::model::CallToolResult;
 use rmcp::ErrorData as McpError;
 
@@ -101,6 +103,7 @@ impl TaskTriggerHandler {
     pub(crate) async fn spec_edit_note_write_impl(
         &self,
         params: SpecNoteWriteParams,
+        parts: Option<&Parts>,
     ) -> Result<CallToolResult, McpError> {
         match (params.run_id.as_deref(), params.spec_id.as_deref()) {
             (Some(_), Some(_)) => Ok(error_result("Pass exactly one of run_id or spec_id.")),
@@ -111,9 +114,36 @@ impl TaskTriggerHandler {
                 spec_note_write_from_run(&self.db, run_id, &params.body).map_err(internal_error)
             }
             (None, Some(spec_id)) => {
+                if let Some(message) = Self::active_node_run_spec_id_refusal(&self.db, parts)
+                    .map_err(internal_error)?
+                {
+                    return Ok(error_result(&message));
+                }
                 spec_note_write_operator(&self.db, spec_id, &params.body).map_err(internal_error)
             }
         }
+    }
+
+    fn active_node_run_spec_id_refusal(
+        db: &Database,
+        parts: Option<&Parts>,
+    ) -> anyhow::Result<Option<String>> {
+        let Some(identity) = graph_identity(parts) else {
+            return Ok(None);
+        };
+        let resolved_run_id = db
+            .resolve_run_id_by_prefix(identity.run_id.trim())?
+            .unwrap_or_else(|| identity.run_id.trim().to_string());
+        let Some(run) = db.get_graph_run(&resolved_run_id)? else {
+            return Ok(None);
+        };
+        if run.status != GraphRunStatus::Running {
+            return Ok(None);
+        }
+        Ok(Some(format!(
+        "the operator note belongs to the operator; write your note with run_id. The run id this process carries in CANOPY_NODE_RUN_ID is '{}'.",
+        identity.run_id
+    )))
     }
 
     pub(crate) async fn spec_notes_impl(

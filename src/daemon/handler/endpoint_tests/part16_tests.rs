@@ -1195,3 +1195,134 @@ async fn queue_listing_returns_spec_intent() {
     let body: serde_json::Value = serde_json::from_str(&raw_text(&listed)).unwrap();
     assert_eq!(body["queue"]["members"][0]["intent"], "Queue intent");
 }
+
+fn parts_with_graph_identity(
+    graph_id: &str,
+    node_id: &str,
+    run_id: &str,
+) -> axum::http::request::Parts {
+    axum::http::Request::builder()
+        .header(
+            crate::shared::sync_identity::CANOPY_GRAPH_ID_HEADER,
+            graph_id,
+        )
+        .header(crate::shared::sync_identity::CANOPY_NODE_ID_HEADER, node_id)
+        .header(
+            crate::shared::sync_identity::CANOPY_NODE_RUN_ID_HEADER,
+            run_id,
+        )
+        .body(())
+        .unwrap()
+        .into_parts()
+        .0
+}
+
+async fn call_spec_edit_note_write(
+    handler: &TaskTriggerHandler,
+    params: serde_json::Value,
+    parts: Option<axum::http::request::Parts>,
+) -> CallToolResult {
+    let mut params = params;
+    params["action"] = serde_json::Value::String("note_write".to_string());
+    let object =
+        crate::daemon::actions::ActionObject(params.as_object().cloned().expect("object params"));
+    handler
+        .spec_edit(
+            crate::daemon::params_extract::Parameters(
+                crate::daemon::handler_resource_tools::SpecEditObject(object),
+            ),
+            OptionalExtension(parts),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn spec_edit_note_write_spec_id_refused_for_running_node_run_caller() {
+    let (home, db, handler) = endpoint_test_handler();
+    let _home = HomeVar::set(home.path());
+
+    let created = create_spec(
+        &handler,
+        reviewed_spec("Operator note spec", Some("intent")),
+    )
+    .await;
+    assert!(!is_err(&created), "{}", text(&created));
+    let spec_id = created_spec_id(&db, "Operator note spec");
+
+    let wrote = call_spec_edit_note_write(
+        &handler,
+        json!({ "spec_id": spec_id.clone(), "body": "original-operator-note" }),
+        None,
+    )
+    .await;
+    assert!(!is_err(&wrote), "{}", text(&wrote));
+
+    let lp = insert_test_graph(&db, home.path());
+    let run = insert_running_node_run(&db, &lp.id);
+    let parts = parts_with_graph_identity(&lp.id, &run.node_id, &run.id);
+
+    let refused = call_spec_edit_note_write(
+        &handler,
+        json!({ "spec_id": spec_id.clone(), "body": "intruder" }),
+        Some(parts),
+    )
+    .await;
+    assert!(is_err(&refused), "{}", text(&refused));
+    let msg = raw_text(&refused);
+    assert!(
+        msg.contains("the operator note belongs to the operator; write your note with run_id"),
+        "{msg}"
+    );
+    assert!(msg.contains(&run.id), "{msg}");
+
+    let notes = db.spec_notes_get(&spec_id).unwrap();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].body, "original-operator-note");
+    assert_eq!(notes[0].owner_kind, "operator");
+}
+
+#[tokio::test]
+async fn spec_edit_note_write_spec_id_succeeds_for_operator_caller() {
+    let (home, db, handler) = endpoint_test_handler();
+    let _home = HomeVar::set(home.path());
+
+    let created = create_spec(&handler, reviewed_spec("Operator spec ok", Some("intent"))).await;
+    assert!(!is_err(&created), "{}", text(&created));
+    let spec_id = created_spec_id(&db, "Operator spec ok");
+
+    let wrote = call_spec_edit_note_write(
+        &handler,
+        json!({ "spec_id": spec_id.clone(), "body": "operator-context" }),
+        None,
+    )
+    .await;
+    assert!(!is_err(&wrote), "{}", text(&wrote));
+    let notes = db.spec_notes_get(&spec_id).unwrap();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].owner_kind, "operator");
+    assert_eq!(notes[0].body, "operator-context");
+}
+
+#[tokio::test]
+async fn spec_edit_note_write_run_id_succeeds_for_running_node_run_caller() {
+    let (home, db, handler) = endpoint_test_handler();
+    let _home = HomeVar::set(home.path());
+
+    let lp = insert_test_graph(&db, home.path());
+    let run = insert_running_node_run(&db, &lp.id);
+    let parts = parts_with_graph_identity(&lp.id, &run.node_id, &run.id);
+
+    let wrote = call_spec_edit_note_write(
+        &handler,
+        json!({ "run_id": run.id.clone(), "body": "my progress" }),
+        Some(parts),
+    )
+    .await;
+    assert!(!is_err(&wrote), "{}", text(&wrote));
+
+    let notes = db.spec_notes_get(&run.spec_id).unwrap();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].body, "my progress");
+    assert_eq!(notes[0].owner_kind, "node");
+}
