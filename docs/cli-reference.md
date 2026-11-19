@@ -529,8 +529,9 @@ files never, sorted case-insensitively, capped at 500 with
 `error{code:"not_found"}` and one that cannot be read answers
 `forbidden`. The `yolo` field (default `false`) launches the
 harness with its approval prompts off — the switch the TUI's New dialog
-offers — by appending that harness's registry `yolo_flag` after whatever
-interactive args the frame sent; a harness with no `yolo_flag` refuses it
+offers — by adding that harness's registry `yolo_flag` when it is not
+already present after whatever interactive args the frame sent; a harness
+with no `yolo_flag` refuses it
 with `spawn: harness '<cli>' has no yolo mode`, and a `terminal` spawn with
 `spawn: field 'yolo' is not allowed for kind 'terminal'`. Each `catalog` CLI
 row carries `yolo: true|false`, so the browser only offers the switch where
