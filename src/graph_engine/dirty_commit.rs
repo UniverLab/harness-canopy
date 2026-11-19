@@ -1,5 +1,4 @@
 use super::*;
-use std::collections::VecDeque;
 
 /// The workdir's current `git rev-parse HEAD`, or `None` if it isn't a git
 /// repo (or the command otherwise fails). Never errors the caller — a check
@@ -410,7 +409,7 @@ pub(crate) fn resolve_spec_start(
         // Only nodes upstream of the resolved cursor reuse recorded outputs.
         // The cursor's own node (and everything downstream) is executed
         // fresh, so its prior output/input is never seeded.
-        let upstream_ids = directed_upstream_node_ids(edges, &target.start_node_ids);
+        let upstream_ids = directed_upstream_node_ids(edges, &target.start_node_ids, &target.entry);
         check_upstream_prerequisites(
             nodes,
             edges,
@@ -468,32 +467,6 @@ pub(crate) fn resolve_spec_start(
         None,
         HashMap::new(),
     ))
-}
-
-/// Node ids upstream of a directed cursor's start nodes: every node that can
-/// reach one of the start nodes (walking edges backwards), excluding the
-/// start nodes themselves and everything downstream of them.
-pub(crate) fn directed_upstream_node_ids(
-    edges: &[GraphEdge],
-    start_node_ids: &[String],
-) -> HashSet<String> {
-    let start: HashSet<&str> = start_node_ids.iter().map(String::as_str).collect();
-    let mut can_reach_start: HashSet<String> = HashSet::new();
-    let mut back: VecDeque<String> = start_node_ids.iter().cloned().collect();
-    while let Some(id) = back.pop_front() {
-        if !can_reach_start.insert(id.clone()) {
-            continue;
-        }
-        for edge in edges.iter().filter(|e| e.to_node == id) {
-            if !can_reach_start.contains(&edge.from_node) {
-                back.push_back(edge.from_node.clone());
-            }
-        }
-    }
-    can_reach_start
-        .into_iter()
-        .filter(|id| !start.contains(id.as_str()))
-        .collect()
 }
 
 /// FR1/FR2: what a directed start judges an upstream `node` by. A plain node

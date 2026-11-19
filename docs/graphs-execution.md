@@ -246,11 +246,10 @@ spec; the start node and everything downstream of it always run again, and
 its own old output is never reused. If an upstream node's latest run is
 `failed`, `error` or `interrupted`, the directed run is refused and that node
 is named: a failed prerequisite is never treated as passed. An upstream
-`failed` or `error` is met when the graph's own edges route that status
-toward the start node — `fail`/`always` edges for a `failed` run, `error`
-edges only for an `error` run (`always` does not route it; the join node's
-edges for a quorum verdict);
-`interrupted` is never met this way. An upstream node
+`failed` or `error` is met when the graph's own edges route that status toward
+the start node — `fail`/`always` edges for a `failed` run, `error` edges only
+for an `error` run (`always` does not route it; the join node's edges for a
+quorum verdict); `interrupted` is never met this way. An upstream node
 that belongs to an ensemble is judged by the ensemble's quorum result — its
 join node's run for this spec — not by any member's own latest run: a member
 that failed while the quorum passed is a satisfied prerequisite, while a failed
@@ -272,10 +271,11 @@ per-node iteration counters restart at 1 (earlier attempts stay in the run
 history). A directed run accepts a `pending`, `running`, `interrupted`,
 `failed` or `completed` spec on a graph with no active run; a running
 graph refuses. An ensemble is targeted by its name; targeting the node the
-ensemble fans out from starts at that node itself, runs it, and fans out
-to the ensemble from there — the named node always runs first and is never
+ensemble fans out from starts at that node itself, runs it, and fans out to
+the ensemble from there — the named node always runs first and is never
 reported as skipped. A join node or a single ensemble member is refused,
-naming the ensemble.
+naming the ensemble. Only nodes on a path from the entry to the start are
+judged; an Auditor behind a back-edge is no prerequisite.
 On a graph that ran with an `idea` (a spec-less idea run), the directed run
 resumes *that* run: the graph remembers the idea it last ran with,
 `{{spec_content}}` renders the stored idea, and the failed run's

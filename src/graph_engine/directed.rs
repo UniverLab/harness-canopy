@@ -72,6 +72,7 @@ pub(crate) struct DirectedTarget {
     /// The node ids the cursor starts on: one for a node, members + join for an ensemble.
     pub(crate) start_node_ids: Vec<String>,
     pub(crate) skipped_nodes: Vec<String>,
+    pub(crate) entry: String,
 }
 
 /// The synchronous plan a handler reports to the operator.
@@ -99,7 +100,7 @@ pub(crate) fn resolve_directed_target(
 ) -> Result<DirectedTarget> {
     let arg = node_arg.trim();
     if let Some(details) = ensembles.iter().find(|d| d.ensemble.name == arg) {
-        return Ok(ensemble_target(details, nodes, edges));
+        return ensemble_target(details, nodes, edges);
     }
     let node = resolve_node(arg, nodes)
         .ok_or_else(|| anyhow!("{}", unknown_target_message(arg, nodes, ensembles)))?;
@@ -125,6 +126,7 @@ pub(crate) fn resolve_directed_target(
         label: format!("node '{}'", node.name),
         skipped_nodes: skipped_node_names(nodes, edges, &start_node_ids, &entry),
         start_node_ids,
+        entry,
     })
 }
 
@@ -132,18 +134,19 @@ fn ensemble_target(
     details: &EnsembleDetails,
     nodes: &[GraphNode],
     edges: &[GraphEdge],
-) -> DirectedTarget {
+) -> Result<DirectedTarget> {
     let mut start_node_ids: Vec<String> =
         details.members.iter().map(|m| m.node_id.clone()).collect();
     start_node_ids.push(details.ensemble.join_node_id.clone());
-    let entry = find_entry_node(nodes, edges, "directed").unwrap_or_default();
+    let entry = find_entry_node(nodes, edges, "directed")?;
     let skipped_nodes = skipped_node_names(nodes, edges, &start_node_ids, &entry);
-    DirectedTarget {
+    Ok(DirectedTarget {
         cursor: SpecCursor::Ensemble(details.ensemble.id.clone()),
         label: format!("ensemble '{}'", details.ensemble.name),
         start_node_ids,
         skipped_nodes,
-    }
+        entry,
+    })
 }
 
 /// Exact id, then exact name, then a unique id prefix — all scoped to `nodes`.
@@ -241,6 +244,54 @@ pub(crate) fn skipped_node_names(
                 && from_entry.contains(&n.id)
         })
         .map(|n| n.name.clone())
+        .collect()
+}
+
+/// Node ids upstream of a directed cursor's start nodes: every node that can
+/// reach one of the start nodes (walking edges backwards) *and* is reachable
+/// from the entry node on a path that never passes through a start node,
+/// excluding the start nodes themselves. A node the entry reaches only by
+/// passing through the start node — an Auditor behind a fail back-edge to
+/// the Implementer — is not upstream, whatever back-edges lead from it.
+pub(crate) fn directed_upstream_node_ids(
+    edges: &[GraphEdge],
+    start_node_ids: &[String],
+    entry: &str,
+) -> HashSet<String> {
+    let start: HashSet<&str> = start_node_ids.iter().map(String::as_str).collect();
+    let mut can_reach_start: HashSet<String> = HashSet::new();
+    let mut back: VecDeque<String> = start_node_ids.iter().cloned().collect();
+    while let Some(id) = back.pop_front() {
+        if !can_reach_start.insert(id.clone()) {
+            continue;
+        }
+        for edge in edges.iter().filter(|e| e.to_node == id) {
+            if !can_reach_start.contains(&edge.from_node) {
+                back.push_back(edge.from_node.clone());
+            }
+        }
+    }
+    let mut from_entry: HashSet<String> = HashSet::new();
+    let mut queue: VecDeque<String> = VecDeque::new();
+    if !start.contains(entry) {
+        queue.push_back(entry.to_string());
+    }
+    while let Some(id) = queue.pop_front() {
+        if !from_entry.insert(id.clone()) {
+            continue;
+        }
+        if start.contains(id.as_str()) {
+            continue; // never expand through the start
+        }
+        for edge in edges.iter().filter(|e| e.from_node == id) {
+            if !from_entry.contains(&edge.to_node) {
+                queue.push_back(edge.to_node.clone());
+            }
+        }
+    }
+    can_reach_start
+        .into_iter()
+        .filter(|id| !start.contains(id.as_str()) && from_entry.contains(id))
         .collect()
 }
 
@@ -349,9 +400,10 @@ pub(crate) fn reused_output_records(
     nodes: &[GraphNode],
     edges: &[GraphEdge],
     start_node_ids: &[String],
+    entry: &str,
     runs: &[GraphNodeRun],
 ) -> Vec<(String, String)> {
-    let upstream_ids = directed_upstream_node_ids(edges, start_node_ids);
+    let upstream_ids = directed_upstream_node_ids(edges, start_node_ids, entry);
     let mut latest: HashMap<String, String> = HashMap::new();
     for run in runs {
         if (run.status == GraphRunStatus::Pass || run.status == GraphRunStatus::Fail)
@@ -419,7 +471,8 @@ impl GraphEngine {
         let target = resolve_directed_target(node_arg, &nodes, &edges, &ensembles)
             .map_err(|e| e.to_string())?;
         // Validate unsafe upstream prerequisites synchronously, before dispatch.
-        let upstream_ids = directed_upstream_node_ids(&edges, &target.start_node_ids);
+        let upstream_ids =
+            directed_upstream_node_ids(&edges, &target.start_node_ids, &target.entry);
         check_upstream_prerequisites(
             &nodes,
             &edges,
@@ -458,7 +511,13 @@ impl GraphEngine {
             spec_name: spec.name,
             start_label: target.label,
             skipped_nodes: target.skipped_nodes,
-            reused_outputs: reused_output_records(&nodes, &edges, &target.start_node_ids, &runs),
+            reused_outputs: reused_output_records(
+                &nodes,
+                &edges,
+                &target.start_node_ids,
+                &target.entry,
+                &runs,
+            ),
             start_head,
         })
     }
