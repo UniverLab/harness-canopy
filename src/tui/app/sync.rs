@@ -727,7 +727,7 @@ mod tests {
         agent.remote_size = remote;
         let id = agent.id.clone();
         app.terminal_agents.push(agent);
-        app.agents = vec![AgentEntry::Terminal(0)];
+        app.reindex_sessions();
         app.selected = 0;
         (app, data_dir, id)
     }

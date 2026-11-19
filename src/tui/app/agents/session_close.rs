@@ -19,7 +19,7 @@ impl App {
         }
     }
 
-    pub(super) fn close_session_target(&mut self, target: SessionTarget, exit_code: i32) -> bool {
+    pub(crate) fn close_session_target(&mut self, target: SessionTarget, exit_code: i32) -> bool {
         match target {
             SessionTarget::Interactive(idx) => self.close_interactive_session_at(idx, exit_code),
             SessionTarget::Terminal(idx) => self.close_terminal_session_at(idx),
@@ -77,6 +77,7 @@ impl App {
 
     pub(super) fn finish_session_mutation(&mut self) {
         let _ = self.refresh_agents();
+        self.reindex_sessions();
         self.sync_selection_after_session_mutation();
         self.reset_focus_after_session_mutation();
     }
@@ -89,6 +90,7 @@ impl App {
 
     pub(super) fn finish_session_mutation_preserving(&mut self, anchor: Option<&str>) {
         let _ = self.refresh_agents();
+        self.reindex_sessions();
         let ids: Vec<String> = self
             .agents
             .iter()
@@ -158,40 +160,63 @@ impl App {
     }
 
     pub fn delete_selected(&mut self) -> anyhow::Result<()> {
-        let Some(selected) = self.selected_agent() else {
+        enum DeleteAction {
+            Agent(String),
+            Corrupt(String),
+            Group(usize),
+            Interactive(usize),
+            Terminal(usize),
+            Orphaned(usize),
+        }
+
+        let Some(action) = self.selected_agent().map(|selected| match selected {
+            AgentEntry::Agent(agent) => DeleteAction::Agent(agent.id.clone()),
+            AgentEntry::Corrupt(corrupt) => DeleteAction::Corrupt(corrupt.id.clone()),
+            AgentEntry::Group(idx) => DeleteAction::Group(*idx),
+            AgentEntry::Interactive(idx) => DeleteAction::Interactive(*idx),
+            AgentEntry::Terminal(idx) => DeleteAction::Terminal(*idx),
+            AgentEntry::Orphaned(idx) => DeleteAction::Orphaned(*idx),
+        }) else {
             return Ok(());
         };
 
-        match selected {
-            AgentEntry::Agent(agent) => {
+        match action {
+            DeleteAction::Agent(id) => {
                 use crate::application::ports::AgentRepository;
-                self.db.delete_agent(&agent.id)?;
+                self.db.delete_agent(&id)?;
             }
-            AgentEntry::Corrupt(corrupt) => {
+            DeleteAction::Corrupt(id) => {
                 // Deletes by id without parsing the stored row — a corrupt
                 // row must always be removable.
                 use crate::application::ports::AgentRepository;
-                self.db.delete_agent(&corrupt.id)?;
+                self.db.delete_agent(&id)?;
             }
-            AgentEntry::Group(idx) => {
-                if !self.delete_group_at(*idx) {
+            DeleteAction::Group(idx) => {
+                if !self.delete_group_at(idx) {
                     return Ok(());
                 }
             }
-            AgentEntry::Interactive(idx) => {
-                if !self.close_session_target(SessionTarget::Interactive(*idx), 0) {
+            DeleteAction::Interactive(idx) => {
+                if !self.close_session_target(SessionTarget::Interactive(idx), 0) {
                     return Ok(());
                 }
             }
-            AgentEntry::Terminal(idx) => {
-                if !self.close_session_target(SessionTarget::Terminal(*idx), 0) {
+            DeleteAction::Terminal(idx) => {
+                if !self.close_session_target(SessionTarget::Terminal(idx), 0) {
                     return Ok(());
                 }
             }
-            AgentEntry::Orphaned(idx) => {
+            DeleteAction::Orphaned(idx) => {
                 // Orphaned sessions are DB-only; just drop the entry.
-                self.orphaned_sessions.remove(*idx);
+                if self.orphaned_sessions.get(idx).is_none() {
+                    self.reindex_sessions();
+                    self.sync_selection_after_session_mutation();
+                    self.reset_focus_after_session_mutation();
+                    return Ok(());
+                }
+                self.orphaned_sessions.remove(idx);
                 self.finish_session_mutation();
+                return Ok(());
             }
         }
 
@@ -240,11 +265,14 @@ impl App {
     /// Revive a selected orphaned session by re-launching its CLI with stored
     /// args in its stored workdir.
     pub(crate) fn revive_selected_orphaned_session(&mut self) {
-        let Some(AgentEntry::Orphaned(idx)) = self.selected_agent() else {
-            return;
+        let idx = match self.selected_agent() {
+            Some(AgentEntry::Orphaned(idx)) => *idx,
+            _ => return,
         };
-        let idx = *idx;
         let Some(session) = self.orphaned_sessions.get(idx).cloned() else {
+            self.reindex_sessions();
+            self.sync_selection_after_session_mutation();
+            self.reset_focus_after_session_mutation();
             return;
         };
 
@@ -255,6 +283,7 @@ impl App {
 
         // Remove from orphaned list first.
         self.orphaned_sessions.remove(idx);
+        self.reindex_sessions();
         self.resume_interactive_session(
             &session,
             &canopy_config,
@@ -267,10 +296,16 @@ impl App {
 
     /// Dismiss (remove) a selected orphaned session without reviving it.
     pub(crate) fn dismiss_selected_orphaned_session(&mut self) {
-        let Some(AgentEntry::Orphaned(idx)) = self.selected_agent() else {
-            return;
+        let idx = match self.selected_agent() {
+            Some(AgentEntry::Orphaned(idx)) => *idx,
+            _ => return,
         };
-        let idx = *idx;
+        if self.orphaned_sessions.get(idx).is_none() {
+            self.reindex_sessions();
+            self.sync_selection_after_session_mutation();
+            self.reset_focus_after_session_mutation();
+            return;
+        }
         self.orphaned_sessions.remove(idx);
         self.finish_session_mutation();
     }

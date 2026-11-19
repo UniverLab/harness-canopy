@@ -203,8 +203,10 @@ pub fn insert_suggestion_into_terminal(app: &mut App, text: &str, is_cd: bool) {
             // the raw passthrough path performs for a real Enter key.
             let _ = agent.write_to_pty(b"\r");
             record_terminal_command(app, idx, &full_text);
-            if let Ok(mut buf) = app.terminal_agents[idx].input_buffer.lock() {
-                buf.clear();
+            if let Some(agent) = app.terminal_agents.get(idx) {
+                if let Ok(mut buf) = agent.input_buffer.lock() {
+                    buf.clear();
+                }
             }
         }
     }

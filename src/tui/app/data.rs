@@ -36,10 +36,20 @@ impl App {
     }
 
     pub(super) fn refresh_agents(&mut self) -> Result<()> {
-        let agents = self.db.list_agents()?;
-        // Corrupt rows (e.g. malformed trigger_config) never fail this
-        // refresh — they're shown as degraded cards instead.
-        let corrupt = self.db.list_corrupt_agents().unwrap_or_default();
+        let agents_result = self.db.list_agents();
+        let corrupt_result = agents_result
+            .as_ref()
+            .ok()
+            .map(|_| self.db.list_corrupt_agents())
+            .transpose();
+
+        let (agents, corrupt) = match (agents_result, corrupt_result) {
+            (Ok(agents), Ok(corrupt)) => (agents, corrupt.unwrap_or_default()),
+            (Err(e), _) | (Ok(_), Err(e)) => {
+                self.reindex_sessions();
+                return Err(e);
+            }
+        };
 
         self.agents.clear();
         // Background agents first (they are rendered at the top of the sidebar)
@@ -149,31 +159,25 @@ impl App {
 
         match agent {
             AgentEntry::Interactive(idx) => {
-                if *idx >= self.interactive_agents.len() {
+                let Some(agent) = self.interactive_agents.get(*idx) else {
                     self.log_content = String::from("Agent removed");
                     return;
-                }
-                let output = self.interactive_agents[*idx].output();
+                };
+                let output = agent.output();
                 self.log_content = if output.is_empty() {
-                    format!(
-                        "Agent '{}' — waiting for output...",
-                        self.interactive_agents[*idx].id
-                    )
+                    format!("Agent '{}' — waiting for output...", agent.id)
                 } else {
                     output
                 };
             }
             AgentEntry::Terminal(idx) => {
-                if *idx >= self.terminal_agents.len() {
+                let Some(agent) = self.terminal_agents.get(*idx) else {
                     self.log_content = String::from("Terminal removed");
                     return;
-                }
-                let output = self.terminal_agents[*idx].output();
+                };
+                let output = agent.output();
                 self.log_content = if output.is_empty() {
-                    format!(
-                        "Terminal '{}' — waiting for output...",
-                        self.terminal_agents[*idx].name
-                    )
+                    format!("Terminal '{}' — waiting for output...", agent.name)
                 } else {
                     output
                 };

@@ -16,12 +16,16 @@ pub fn draw_split_picker(frame: &mut Frame, app: &App, theme: &Theme) {
 
     let sessions = &app.split_picker_sessions;
     let current_name = match app.selected_agent() {
-        Some(crate::tui::app::types::AgentEntry::Interactive(idx)) => {
-            app.interactive_agents[*idx].name.clone()
-        }
-        Some(crate::tui::app::types::AgentEntry::Terminal(idx)) => {
-            app.terminal_agents[*idx].name.clone()
-        }
+        Some(crate::tui::app::types::AgentEntry::Interactive(idx)) => app
+            .interactive_agents
+            .get(*idx)
+            .map(|agent| agent.name.clone())
+            .unwrap_or_default(),
+        Some(crate::tui::app::types::AgentEntry::Terminal(idx)) => app
+            .terminal_agents
+            .get(*idx)
+            .map(|agent| agent.name.clone())
+            .unwrap_or_default(),
         _ => String::new(),
     };
 

@@ -29,7 +29,7 @@ pub(super) fn recent_output_snippet(agent: &InteractiveAgent, n: usize) -> Strin
 }
 
 #[derive(Clone, Copy)]
-pub(super) enum SessionTarget {
+pub(crate) enum SessionTarget {
     Interactive(usize),
     Terminal(usize),
 }
@@ -555,7 +555,10 @@ impl App {
 }
 
 mod exits;
+mod reindex;
 mod session_close;
+#[cfg(test)]
+mod session_reindex_tests;
 
 // ── Brain helpers ─────────────────────────────────────────────────
 

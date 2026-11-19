@@ -203,7 +203,7 @@ impl App {
         }
     }
 
-    fn handle_hub_frame(&mut self, frame: HostFrame) {
+    pub(crate) fn handle_hub_frame(&mut self, frame: HostFrame) {
         match frame {
             HostFrame::SessionAdded { item } => self.attach_hub_item(&item),
             HostFrame::SessionRemoved { id } => self.remove_hub_session(&id),
@@ -469,6 +469,7 @@ impl App {
                 } else {
                     self.interactive_agents.push(agent);
                 }
+                self.reindex_sessions();
                 self.slow_force = true;
             }
             Err(e) => tracing::warn!("Cannot attach to hub session '{}': {e}", item.name),
@@ -486,7 +487,7 @@ impl App {
     /// the failure and the `session_removed` frame that drops the card land
     /// in the same tick, and no failure is ever visible. Terminals always
     /// drop: their poll reaps every exited terminal anyway.
-    fn remove_hub_session(&mut self, id: &str) {
+    pub(crate) fn remove_hub_session(&mut self, id: &str) {
         if self.retain_failed_hub_session(id) {
             return;
         }
@@ -502,6 +503,7 @@ impl App {
         for name in &names {
             self.dissolve_groups_for_session(name);
         }
+        self.reindex_sessions();
         self.slow_force = true;
     }
 

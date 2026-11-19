@@ -170,6 +170,7 @@ impl App {
             ));
         }
         self.interactive_agents.push(agent);
+        self.reindex_sessions();
     }
 
     /// Reap bridge sidecar rows left `active` by a process that died without

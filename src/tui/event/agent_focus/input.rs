@@ -57,7 +57,14 @@ fn handle_interactive_input(app: &mut App, idx: usize, code: KeyCode, modifiers:
 }
 
 fn record_interactive_prompt(app: &mut App, idx: usize) {
-    if app.interactive_agents[idx].is_sensitive_input_active() {
+    let Some(sensitive) = app
+        .interactive_agents
+        .get(idx)
+        .map(|agent| agent.is_sensitive_input_active())
+    else {
+        return;
+    };
+    if sensitive {
         return;
     }
 
@@ -68,7 +75,9 @@ fn record_interactive_prompt(app: &mut App, idx: usize) {
         return;
     }
 
-    app.interactive_agents[idx].record_prompt(&captured);
+    if let Some(agent) = app.interactive_agents.get_mut(idx) {
+        agent.record_prompt(&captured);
+    }
 }
 
 fn handle_terminal_input(
@@ -82,7 +91,10 @@ fn handle_terminal_input(
         return Ok(true);
     }
 
-    if app.terminal_agents[idx].warp_mode {
+    let Some(warp_mode) = app.terminal_agents.get(idx).map(|agent| agent.warp_mode) else {
+        return Ok(false);
+    };
+    if warp_mode {
         return handle_terminal_warp_input(app, idx, code, modifiers);
     }
 
@@ -91,11 +103,14 @@ fn handle_terminal_input(
 }
 
 fn toggle_terminal_warp_mode(app: &mut App, idx: usize) {
-    app.terminal_agents[idx].warp_mode = !app.terminal_agents[idx].warp_mode;
-    app.terminal_agents[idx].warp_passthrough = false;
+    let Some(agent) = app.terminal_agents.get_mut(idx) else {
+        return;
+    };
+    agent.warp_mode = !agent.warp_mode;
+    agent.warp_passthrough = false;
     // Manual override in both directions: the automatic rule re-asserts on
     // the next submit or prompt return.
-    app.terminal_agents[idx].warp_command_running = false;
+    agent.warp_command_running = false;
 }
 
 fn handle_terminal_warp_input(
@@ -104,8 +119,12 @@ fn handle_terminal_warp_input(
     code: KeyCode,
     modifiers: KeyModifiers,
 ) -> Result<bool> {
-    app.terminal_agents[idx].refresh_warp_command_state();
-    if app.terminal_agents[idx].should_bypass_warp_input() {
+    let Some(agent) = app.terminal_agents.get_mut(idx) else {
+        return Ok(true);
+    };
+    agent.refresh_warp_command_state();
+    let bypass = agent.should_bypass_warp_input();
+    if bypass {
         handle_terminal_direct_pty_key(app, idx, code, modifiers)?;
         return Ok(true);
     }
@@ -226,11 +245,15 @@ mod warp_toggle_override_tests {
     }
 
     fn warp_active(app: &App) -> bool {
-        app.terminal_agents[0].warp_mode && !app.terminal_agents[0].should_bypass_warp_input()
+        app.terminal_agents
+            .first()
+            .is_some_and(|agent| agent.warp_mode && !agent.should_bypass_warp_input())
     }
 
     fn buffer_text(app: &App) -> String {
-        app.terminal_agents[0]
+        app.terminal_agents
+            .first()
+            .expect("terminal agent")
             .input_buffer
             .lock()
             .expect("lock input buffer")
@@ -263,30 +286,38 @@ mod warp_toggle_override_tests {
 
         // Submit latches; the box withdraws.
         {
-            let buf = app.terminal_agents[0].input_buffer.clone();
+            let agent = app.terminal_agents.first().expect("terminal agent");
+            let buf = agent.input_buffer.clone();
             buf.lock().expect("lock buffer").push_str("sleep 9");
-            app.terminal_agents[0].warp_cursor = 7;
+            app.terminal_agents
+                .first_mut()
+                .expect("terminal agent")
+                .warp_cursor = 7;
         }
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-        assert!(app.terminal_agents[0].warp_command_running);
+        assert!(
+            app.terminal_agents
+                .first()
+                .expect("terminal agent")
+                .warp_command_running
+        );
         assert!(!warp_active(&app));
 
         // Warp -> native clears the latch (override, direction one).
         ctrl_w(&mut app);
-        assert!(!app.terminal_agents[0].warp_mode);
-        assert!(!app.terminal_agents[0].warp_command_running);
+        let agent = app.terminal_agents.first().expect("terminal agent");
+        assert!(!agent.warp_mode);
+        assert!(!agent.warp_command_running);
 
         // A command is still running behind the native pane; toggling back
         // clears the latch again so the box comes back anyway (direction two).
-        app.terminal_agents[0].warp_command_running = true;
-        app.terminal_agents[0]
-            .vt
-            .lock()
-            .expect("lock vt")
-            .process(b"? Pick one: ");
+        let agent = app.terminal_agents.first_mut().expect("terminal agent");
+        agent.warp_command_running = true;
+        agent.vt.lock().expect("lock vt").process(b"? Pick one: ");
         ctrl_w(&mut app);
-        assert!(app.terminal_agents[0].warp_mode);
-        assert!(!app.terminal_agents[0].warp_command_running);
+        let agent = app.terminal_agents.first().expect("terminal agent");
+        assert!(agent.warp_mode);
+        assert!(!agent.warp_command_running);
         assert!(warp_active(&app), "box back despite the running command");
 
         // During the override keys go back to the box, not the PTY.
@@ -297,9 +328,17 @@ mod warp_toggle_override_tests {
 
         // The next submit re-asserts the automatic rule.
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-        assert!(app.terminal_agents[0].warp_command_running);
+        assert!(
+            app.terminal_agents
+                .first()
+                .expect("terminal agent")
+                .warp_command_running
+        );
         assert!(!warp_active(&app));
-        app.terminal_agents[0].kill();
+        app.terminal_agents
+            .first_mut()
+            .expect("terminal agent")
+            .kill();
     }
 
     #[test]
@@ -318,19 +357,24 @@ mod warp_toggle_override_tests {
         agent.test_sink = Some(Arc::clone(&written));
         let mut app = test_app(agent);
         // Latch staged as a submit would; the shell is already back.
-        app.terminal_agents[0].warp_command_running = true;
-        app.terminal_agents[0]
-            .vt
-            .lock()
-            .expect("lock vt")
-            .process(b"user@host:~$ ");
+        let agent = app.terminal_agents.first_mut().expect("terminal agent");
+        agent.warp_command_running = true;
+        agent.vt.lock().expect("lock vt").process(b"user@host:~$ ");
 
         press(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
 
-        assert!(!app.terminal_agents[0].warp_command_running);
+        assert!(
+            !app.terminal_agents
+                .first()
+                .expect("terminal agent")
+                .warp_command_running
+        );
         assert_eq!(buffer_text(&app), "x");
         assert!(written.lock().expect("lock sink").is_empty());
         assert!(warp_active(&app));
-        app.terminal_agents[0].kill();
+        app.terminal_agents
+            .first_mut()
+            .expect("terminal agent")
+            .kill();
     }
 }

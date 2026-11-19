@@ -30,7 +30,7 @@ pub(crate) fn append_log(path: &Path, text: &str) {
     }
 }
 
-/// `~/.canopy/logs/tui-panic.log`: panic payloads with backtraces.
+/// `~/.canopy/logs/tui-panic.log`: panic locations, payloads and backtraces.
 pub fn panic_log_path() -> PathBuf {
     canopy_logs_dir().join("tui-panic.log")
 }

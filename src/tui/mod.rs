@@ -115,6 +115,7 @@ pub fn run_tui() -> Result<()> {
     // Load orphaned sessions for TUI visibility
     if let Ok(orphaned) = app.db.get_orphaned_sessions() {
         app.orphaned_sessions = orphaned;
+        app.reindex_sessions();
     }
 
     // Setup terminal

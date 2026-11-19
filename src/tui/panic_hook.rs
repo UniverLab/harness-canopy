@@ -13,10 +13,10 @@ pub fn write_panic_log(path: &Path, text: &str) {
     append_log(path, text);
 }
 
-/// One panic report: timestamp, payload, backtrace.
-pub(crate) fn format_panic_report(payload: &str, backtrace: &str) -> String {
+/// One panic report: timestamp, location, payload, backtrace.
+pub(crate) fn format_panic_report(location: &str, payload: &str, backtrace: &str) -> String {
     format!(
-        "{}\npayload: {payload}\nbacktrace:\n{backtrace}",
+        "{}\nlocation: {location}\npayload: {payload}\nbacktrace:\n{backtrace}",
         chrono::Utc::now().to_rfc3339()
     )
 }
@@ -38,24 +38,27 @@ fn install_panic_hook_at(path: PathBuf) {
         let backtrace = std::backtrace::Backtrace::force_capture().to_string();
         write_panic_log(
             &path,
-            &format_panic_report(&panic_payload(info), &backtrace),
+            &format_panic_report(&panic_location(info), &panic_payload(info), &backtrace),
         );
         default(info);
     }));
 }
 
-/// The payload as text, or the location when it is not a string.
+/// The payload as text.
 fn panic_payload(info: &std::panic::PanicHookInfo<'_>) -> String {
     if let Some(text) = info.payload().downcast_ref::<&str>() {
         (*text).to_string()
     } else if let Some(text) = info.payload().downcast_ref::<String>() {
         text.clone()
     } else {
-        match info.location() {
-            Some(location) => format!("non-string panic at {location}"),
-            None => "non-string panic at unknown location".to_string(),
-        }
+        "non-string panic".to_string()
     }
+}
+
+fn panic_location(info: &std::panic::PanicHookInfo<'_>) -> String {
+    info.location()
+        .map(|location| location.to_string())
+        .unwrap_or_else(|| "unknown location".to_string())
 }
 
 /// Leave raw mode, alternate screen, mouse capture and bracketed paste.
@@ -91,7 +94,11 @@ mod tests {
 
     #[test]
     fn report_format_carries_payload_and_backtrace() {
-        let text = format_panic_report("boom-payload", "fake-backtrace");
+        let text = format_panic_report("src/tui/app.rs:10:5", "boom-payload", "fake-backtrace");
+        assert!(
+            text.contains("location: src/tui/app.rs:10:5"),
+            "report: {text}"
+        );
         assert!(text.contains("boom-payload"), "report: {text}");
         assert!(text.contains("fake-backtrace"), "report: {text}");
     }

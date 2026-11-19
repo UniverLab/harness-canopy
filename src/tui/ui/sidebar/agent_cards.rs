@@ -106,18 +106,13 @@ pub(super) fn draw_agent_list(
             break;
         }
 
+        let Some(agent) = app.agents.get(idx) else {
+            continue;
+        };
         let card_area = Rect::new(area.x, y, area.width, card_h);
         let selected = idx == app.selected && !app.agents_rag_focused;
         let hovered = app.hovered_row == Some(idx) && !selected;
-        draw_sidebar_card(
-            frame,
-            card_area,
-            &app.agents[idx],
-            app,
-            selected,
-            hovered,
-            theme,
-        );
+        draw_sidebar_card(frame, card_area, agent, app, selected, hovered, theme);
         app.sidebar_click_map.push((idx, y, y + card_h));
 
         let is_last_visible = scroll.start + rel_i >= indices.len() - 1;
@@ -248,99 +243,145 @@ pub(super) fn agent_card_meta<'a>(
     theme: &Theme,
 ) -> AgentCardMeta<'a> {
     match agent {
-        AgentEntry::Agent(agent) => AgentCardMeta {
-            accent: theme.header_color,
-            status_color: if !agent.enabled {
-                STATUS_DISABLED
-            } else if app.active_runs.contains_key(&agent.id) {
-                STATUS_RUNNING
-            } else if agent.last_run_ok == Some(false) {
-                STATUS_FAIL
-            } else {
-                STATUS_OK
-            },
-            agent_type: agent.trigger_type_label(),
-            // A send_to_session agent has no CLI (CM53) — name the target
-            // session instead of rendering an empty harness slot.
-            type_detail: if agent.is_send_to_session() {
-                agent
-                    .action
-                    .target_session_name()
-                    .or(agent.action.target_session_id())
-                    .unwrap_or("session")
-            } else {
-                agent.cli.as_str()
-            },
-            work_dir: agent.working_dir.as_deref().or_else(|| agent.watch_path()),
+        AgentEntry::Agent(agent) => meta_for_agent(agent, app, theme),
+        AgentEntry::Interactive(index) => meta_for_interactive(*index, app, theme),
+        AgentEntry::Terminal(index) => meta_for_terminal(*index, app, theme),
+        AgentEntry::Orphaned(index) => meta_for_orphaned(*index, app, theme),
+        AgentEntry::Group(_) => meta_for_group(theme),
+        AgentEntry::Corrupt(_) => meta_for_corrupt(theme),
+    }
+}
+
+fn meta_for_agent<'a>(
+    agent: &'a crate::domain::models::Agent,
+    app: &'a App,
+    theme: &Theme,
+) -> AgentCardMeta<'a> {
+    AgentCardMeta {
+        accent: theme.header_color,
+        status_color: if !agent.enabled {
+            STATUS_DISABLED
+        } else if app.active_runs.contains_key(&agent.id) {
+            STATUS_RUNNING
+        } else if agent.last_run_ok == Some(false) {
+            STATUS_FAIL
+        } else {
+            STATUS_OK
         },
-        AgentEntry::Interactive(index) => {
-            let agent = &app.interactive_agents[*index];
-            AgentCardMeta {
-                accent: agent.accent_color,
-                // Interactive agents pulse on recent output activity (unchanged).
-                status_color: hub_session_status_color(
-                    agent,
-                    pty_session_status_color(
-                        false,
-                        &agent.status,
-                        agent.has_recent_activity(),
-                        false,
-                        effective_animation_tick(app),
-                    ),
-                ),
-                agent_type: "pty",
-                type_detail: agent.cli.as_str(),
-                work_dir: Some(agent.working_dir.as_str()),
-            }
-        }
-        AgentEntry::Terminal(index) => {
-            let agent = &app.terminal_agents[*index];
-            AgentCardMeta {
-                accent: agent.accent_color,
-                // Terminal sessions pulse while a foreground command executes
-                // and go solid green at the prompt — output activity is
-                // deliberately ignored (a scrolled-by finished command must
-                // not keep pulsing; a `watch`/`tail -f` still counts as
-                // executing). Same source of truth warp uses to gate input.
-                status_color: hub_session_status_color(
-                    agent,
-                    pty_session_status_color(
-                        true,
-                        &agent.status,
-                        false,
-                        agent.foreground_app_active(),
-                        effective_animation_tick(app),
-                    ),
-                ),
-                agent_type: "term",
-                type_detail: agent.shell.as_str(),
-                work_dir: Some(agent.working_dir.as_str()),
-            }
-        }
-        AgentEntry::Orphaned(index) => {
-            let session = &app.orphaned_sessions[*index];
-            AgentCardMeta {
-                accent: theme.muted_text,
-                status_color: STATUS_FAIL,
-                agent_type: "orphan",
-                type_detail: session.cli.as_str(),
-                work_dir: Some(session.working_dir.as_str()),
-            }
-        }
-        AgentEntry::Group(_) => AgentCardMeta {
-            accent: theme.header_color,
-            status_color: STATUS_OK,
-            agent_type: "group",
+        agent_type: agent.trigger_type_label(),
+        // A send_to_session agent has no CLI (CM53) — name the target
+        // session instead of rendering an empty harness slot.
+        type_detail: if agent.is_send_to_session() {
+            agent
+                .action
+                .target_session_name()
+                .or(agent.action.target_session_id())
+                .unwrap_or("session")
+        } else {
+            agent.cli.as_str()
+        },
+        work_dir: agent.working_dir.as_deref().or_else(|| agent.watch_path()),
+    }
+}
+
+fn meta_for_interactive<'a>(index: usize, app: &'a App, theme: &Theme) -> AgentCardMeta<'a> {
+    let Some(agent) = app.interactive_agents.get(index) else {
+        return AgentCardMeta {
+            accent: theme.muted_text,
+            status_color: STATUS_DISABLED,
+            agent_type: "pty",
             type_detail: "",
             work_dir: None,
-        },
-        AgentEntry::Corrupt(_) => AgentCardMeta {
-            accent: theme.error,
+        };
+    };
+    AgentCardMeta {
+        accent: agent.accent_color,
+        // Interactive agents pulse on recent output activity (unchanged).
+        status_color: hub_session_status_color(
+            agent,
+            pty_session_status_color(
+                false,
+                &agent.status,
+                agent.has_recent_activity(),
+                false,
+                effective_animation_tick(app),
+            ),
+        ),
+        agent_type: "pty",
+        type_detail: agent.cli.as_str(),
+        work_dir: Some(agent.working_dir.as_str()),
+    }
+}
+
+fn meta_for_terminal<'a>(index: usize, app: &'a App, theme: &Theme) -> AgentCardMeta<'a> {
+    let Some(agent) = app.terminal_agents.get(index) else {
+        return AgentCardMeta {
+            accent: theme.muted_text,
+            status_color: STATUS_DISABLED,
+            agent_type: "term",
+            type_detail: "",
+            work_dir: None,
+        };
+    };
+    AgentCardMeta {
+        accent: agent.accent_color,
+        // Terminal sessions pulse while a foreground command executes
+        // and go solid green at the prompt — output activity is
+        // deliberately ignored (a scrolled-by finished command must
+        // not keep pulsing; a `watch`/`tail -f` still counts as
+        // executing). Same source of truth warp uses to gate input.
+        status_color: hub_session_status_color(
+            agent,
+            pty_session_status_color(
+                true,
+                &agent.status,
+                false,
+                agent.foreground_app_active(),
+                effective_animation_tick(app),
+            ),
+        ),
+        agent_type: "term",
+        type_detail: agent.shell.as_str(),
+        work_dir: Some(agent.working_dir.as_str()),
+    }
+}
+
+fn meta_for_orphaned<'a>(index: usize, app: &'a App, theme: &Theme) -> AgentCardMeta<'a> {
+    let Some(session) = app.orphaned_sessions.get(index) else {
+        return AgentCardMeta {
+            accent: theme.muted_text,
             status_color: STATUS_FAIL,
-            agent_type: "corrupt config",
+            agent_type: "orphan",
             type_detail: "",
             work_dir: None,
-        },
+        };
+    };
+    AgentCardMeta {
+        accent: theme.muted_text,
+        status_color: STATUS_FAIL,
+        agent_type: "orphan",
+        type_detail: session.cli.as_str(),
+        work_dir: Some(session.working_dir.as_str()),
+    }
+}
+
+fn meta_for_group(theme: &Theme) -> AgentCardMeta<'static> {
+    AgentCardMeta {
+        accent: theme.header_color,
+        status_color: STATUS_OK,
+        agent_type: "group",
+        type_detail: "",
+        work_dir: None,
+    }
+}
+
+fn meta_for_corrupt(theme: &Theme) -> AgentCardMeta<'static> {
+    AgentCardMeta {
+        accent: theme.error,
+        status_color: STATUS_FAIL,
+        agent_type: "corrupt config",
+        type_detail: "",
+        work_dir: None,
     }
 }
 
@@ -454,7 +495,10 @@ pub(super) fn agent_is_waiting(agent: &AgentEntry, app: &App, selected: bool) ->
     }
 
     match agent {
-        AgentEntry::Interactive(index) => app.interactive_agents[*index].is_waiting_for_input(),
+        AgentEntry::Interactive(index) => app
+            .interactive_agents
+            .get(*index)
+            .is_some_and(|agent| agent.is_waiting_for_input()),
         // Terminal sessions always have the cursor at the last row (shell prompt),
         // so is_waiting_for_input would generate constant false positives.
         AgentEntry::Terminal(_) => false,

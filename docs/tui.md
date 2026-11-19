@@ -133,8 +133,8 @@ step instead of launching straight away:
   notice for this run.
 - **Panic log** — if the TUI itself panics, the terminal is restored (raw
   mode off, alternate screen left, mouse capture and bracketed paste
-  disabled) and the panic, with its backtrace, is appended to
-  `~/.canopy/logs/tui-panic.log`.
+  disabled) and the panic, with its file:line:col location and its
+  backtrace, is appended to `~/.canopy/logs/tui-panic.log`.
 
 ## Terminal sessions
 

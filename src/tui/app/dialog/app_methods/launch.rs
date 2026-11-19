@@ -457,6 +457,7 @@ impl App {
         let spawned_name = agent.name.clone();
         let renamed_from = resume_rename_notice(is_resume, requested_name, &spawned_name);
         self.interactive_agents.push(agent);
+        self.reindex_sessions();
         self.whimsg.notify_event(WhimEvent::new(
             EventKind::AgentSpawned,
             spawned_name.clone(),
@@ -684,6 +685,7 @@ impl App {
         self.terminal_histories.insert(agent.name.clone(), hist);
         let spawned_name = agent.name.clone();
         self.terminal_agents.push(agent);
+        self.reindex_sessions();
         self.whimsg
             .notify_event(crate::tui::whimsg::events::WhimEvent::new(
                 crate::tui::whimsg::events::EventKind::AgentSpawned,

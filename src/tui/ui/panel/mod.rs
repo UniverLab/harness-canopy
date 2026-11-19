@@ -557,26 +557,37 @@ enum SessionRef {
 impl SessionRef {
     fn accent(self, app: &App) -> Color {
         match self {
-            SessionRef::Interactive(idx) => app.interactive_agents[idx].accent_color,
-            SessionRef::Terminal(idx) => app.terminal_agents[idx].accent_color,
+            SessionRef::Interactive(idx) => app
+                .interactive_agents
+                .get(idx)
+                .map(|agent| agent.accent_color)
+                .unwrap_or(Color::DarkGray),
+            SessionRef::Terminal(idx) => app
+                .terminal_agents
+                .get(idx)
+                .map(|agent| agent.accent_color)
+                .unwrap_or(Color::DarkGray),
         }
     }
 
     fn snapshot(self, app: &App) -> Option<ScreenSnapshot> {
         match self {
-            SessionRef::Interactive(idx) => app.interactive_agents[idx].screen_snapshot(),
-            SessionRef::Terminal(idx) => app.terminal_agents[idx].screen_snapshot(),
+            SessionRef::Interactive(idx) => app
+                .interactive_agents
+                .get(idx)
+                .and_then(|a| a.screen_snapshot()),
+            SessionRef::Terminal(idx) => app
+                .terminal_agents
+                .get(idx)
+                .and_then(|a| a.screen_snapshot()),
         }
     }
 
     fn warp_terminal_idx(self, app: &App) -> Option<usize> {
         match self {
-            SessionRef::Terminal(idx)
-                if app.terminal_agents[idx].warp_mode
-                    && !app.terminal_agents[idx].should_bypass_warp_input() =>
-            {
-                Some(idx)
-            }
+            SessionRef::Terminal(idx) => app.terminal_agents.get(idx).and_then(|agent| {
+                (agent.warp_mode && !agent.should_bypass_warp_input()).then_some(idx)
+            }),
             _ => None,
         }
     }
@@ -1929,7 +1940,9 @@ mod tests {
         app.sidebar_layer = SidebarLayer::Live;
         app.focus = Focus::Agent;
         app.log_content = "FALLBACK_MARKER_SHOULD_NOT_APPEAR".to_string();
-        app.interactive_agents[0]
+        app.interactive_agents
+            .first()
+            .expect("interactive agent")
             .vt
             .lock()
             .expect("lock vt")

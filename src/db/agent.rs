@@ -6,6 +6,14 @@ use crate::application::ports::AgentRepository;
 use crate::db::Database;
 use crate::domain::models::{Agent, AgentAction, Cli, CorruptAgent, Trigger};
 
+#[cfg(test)]
+static FAIL_LIST_AGENTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+pub(crate) fn set_fail_list_agents(fail: bool) {
+    FAIL_LIST_AGENTS.store(fail, std::sync::atomic::Ordering::SeqCst);
+}
+
 const AGENT_COLUMNS: &str = "id, prompt, trigger_type, trigger_config, cli, model, effort, working_dir, \
                              enabled, enable_at, created_at, log_path, timeout_minutes, expires_at, last_run_at, \
                              last_run_ok, last_triggered_at, trigger_count, action, target_session_id, \
@@ -88,6 +96,10 @@ impl AgentRepository for Database {
     }
 
     fn list_agents(&self) -> Result<Vec<Agent>> {
+        #[cfg(test)]
+        if FAIL_LIST_AGENTS.load(std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!("injected list_agents failure");
+        }
         self.list_agents_where("")
     }
 
