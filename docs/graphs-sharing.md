@@ -65,10 +65,11 @@ An ensemble's `kind` is carried in the document for `cascade`,
 absent `kind` means on import. Import refuses a `kind` value it does
 not know — naming the ensemble and the value — and refuses a document
 that carries any field it does not know how to restore, as part of
-its all-or-nothing contract. `format_version` 6 remains the newest
-accepted version (it also carries the bundled `prompt_presets`, below);
-1, 2, 3, 4 and 5 documents import unchanged (they carry
-fewer fields, never more).
+its all-or-nothing contract. `format_version` 7 remains the newest
+accepted version (it also carries the graph trigger lifecycle fields
+`enabled`, `enable_at` and `expires_at`); 1 through 6 documents
+import unchanged (they carry fewer fields, never more — a document
+without the fields imports with the trigger active and no schedules).
 
 A node's `prompt_preset` names a preset that must exist on the
 importing machine: a file `<canopy_dir>/prompts/<name>.md` (the same
