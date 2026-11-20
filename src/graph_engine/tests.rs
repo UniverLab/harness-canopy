@@ -1,4 +1,5 @@
 //! Graph-engine tests (split from `src/graph_engine/mod.rs`, pure move).
+mod deliver_tests;
 mod fixtures_a;
 mod mutex_gate_tests;
 // Re-export helpers other modules reached as `graph_engine::tests::{…}`.

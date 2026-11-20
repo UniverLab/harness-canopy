@@ -18,10 +18,15 @@ Graph
 ```
 
 - **Specs** — ordered units of work inside a graph.
-- **Nodes** — five kinds:
+- **Nodes** — six kinds:
   - `agent` — invokes a CLI tool with a prompt template.
   - `check` — executes a shell command.
   - `gate` — validates previous output (e.g. `output_contains`).
+  - `deliver` — hands a rendered prompt to a live interactive session,
+    the node form of a `send_to_session` background agent. Config is
+    exactly one of `target_session_name`/`target_session_id` plus a
+    non-empty `prompt_template` (router decision markers); no platform,
+    model or crew, no quota, and exactly one outgoing edge.
   - `router` — classifies and routes by token matching with fallback.
     With `"decision": true` in its config, a router instead asks the
     platform's decision model (a fast typed-choice classifier such as

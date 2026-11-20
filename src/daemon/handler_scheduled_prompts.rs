@@ -145,11 +145,7 @@ impl TaskTriggerHandler {
             } else {
                 ""
             };
-            let origin = match send.provenance.as_ref().map(|p| p.kind.as_str()) {
-                Some("agent") => " | origin: agent",
-                Some("hook") => " | origin: hook",
-                _ => "",
-            };
+            let origin = pending_send_origin(send.provenance.as_ref());
             format!(
                 "- id: {} | fire_at: {}{} | prompt: {}{}",
                 send.id,
@@ -184,5 +180,55 @@ impl TaskTriggerHandler {
             "Scheduled send '{}' cancelled.",
             id
         )))
+    }
+}
+
+/// The `| origin: <kind>` suffix a pending-list line carries for a
+/// provenance-bearing send — the same tag the send was enqueued with, so a
+/// `deliver` send is distinguishable from `hook`/`agent` ones at a glance.
+/// Provenance-free rows (promptbuilder sends and rows written before the
+/// column existed) carry no suffix.
+pub(crate) fn pending_send_origin(provenance: Option<&ScheduledPromptProvenance>) -> &'static str {
+    match provenance.map(|p| p.kind.as_str()) {
+        Some("agent") => " | origin: agent",
+        Some("hook") => " | origin: hook",
+        Some("deliver") => " | origin: deliver",
+        _ => "",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_origin_names_agent_hook_and_deliver() {
+        assert_eq!(
+            pending_send_origin(Some(&ScheduledPromptProvenance::agent("s1"))),
+            " | origin: agent"
+        );
+        assert_eq!(
+            pending_send_origin(Some(&ScheduledPromptProvenance::hook("g1", "on_failed"))),
+            " | origin: hook"
+        );
+        assert_eq!(
+            pending_send_origin(Some(&ScheduledPromptProvenance::deliver("g1", "n1", "r1"))),
+            " | origin: deliver"
+        );
+    }
+
+    #[test]
+    fn pending_origin_empty_without_provenance() {
+        assert_eq!(pending_send_origin(None), "");
+        assert_eq!(
+            pending_send_origin(Some(&ScheduledPromptProvenance::agent_trigger(
+                "a1", "cron"
+            ))),
+            ""
+        );
+        assert_eq!(
+            pending_send_origin(Some(&ScheduledPromptProvenance::spec_review())),
+            ""
+        );
     }
 }

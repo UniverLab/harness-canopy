@@ -123,6 +123,15 @@ or not a TUI is attached. A message whose target session is gone by
 then is not lost either — the prompt is preserved for recall and a
 notification reports that the session was not found.
 
+A `deliver` node ([Nodes](graphs-nodes.md)) enqueues through this same
+mechanism, with the same single-target rule and the same live-target
+resolution: a missing name fails the node with `session does not exist or
+is no longer live`, an ambiguous name fails it listing the matching ids,
+and nothing is enqueued in either case. Its provenance kind is `deliver`
+and carries the graph, node and run ids, so a pending send in
+`scheduled_prompts` `list` shows `| origin: deliver` and traces back to
+the exact node run that queued it.
+
 ## Standalone spec backlog
 
 Specs don't have to belong to a graph. The spec backlog lets you create,

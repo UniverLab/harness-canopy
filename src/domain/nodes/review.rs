@@ -130,11 +130,14 @@ pub fn review_graph(document: &GraphExportDocument, source: &str) -> InstallRevi
                 }
             }
             crate::domain::graphs::GraphNodeKind::Agent
-            | crate::domain::graphs::GraphNodeKind::Router => {
+            | crate::domain::graphs::GraphNodeKind::Router
+            | crate::domain::graphs::GraphNodeKind::Deliver => {
                 // A router's `prompt_template` steers its decision model
                 // (`gate_router::decision_instructions`), so it is an agent
                 // instruction like any agent node's — a document that hid
-                // steering text in a router node must still show it.
+                // steering text in a router node must still show it. A
+                // deliver node's template is injected verbatim into a live
+                // session, so it is shown for the same reason.
                 if let Some(template) = string_field(config, "prompt_template") {
                     prompts.push(prompt_review(label.clone(), template.to_string()));
                 }
@@ -492,6 +495,32 @@ mod tests {
             .collect();
         assert_eq!(router.len(), 1, "{:#?}", review.prompts);
         assert_eq!(router[0].text, "route wisely");
+    }
+
+    #[test]
+    fn graph_review_lists_a_deliver_prompt() {
+        // A deliver node's template is injected verbatim into a live session:
+        // the review must show it, exactly as it shows a router's steering
+        // prompt.
+        let mut doc = graph_doc();
+        doc.nodes
+            .push(crate::domain::graph_transfer::GraphExportNode {
+                name: "herald".to_string(),
+                kind: crate::domain::graphs::GraphNodeKind::Deliver,
+                position: 6,
+                config: serde_json::json!({
+                    "target_session_name": "orch",
+                    "prompt_template": "news for you: {{previous_output}}",
+                }),
+            });
+        let review = review_graph(&doc, "official");
+        let herald: Vec<&PromptReview> = review
+            .prompts
+            .iter()
+            .filter(|prompt| prompt.label == "node \"herald\"")
+            .collect();
+        assert_eq!(herald.len(), 1, "{:#?}", review.prompts);
+        assert_eq!(herald[0].text, "news for you: {{previous_output}}");
     }
 
     #[test]

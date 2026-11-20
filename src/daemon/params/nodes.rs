@@ -11,9 +11,9 @@ pub struct GraphAddNodeParams {
     pub graph_id: Option<String>,
     /// Human-readable node name.
     pub name: String,
-    /// Node kind: agent, check, or gate. Optional when `node` is given —
-    /// the document's own kind applies. Never pass it with `node`: the node
-    /// document already declares its kind.
+    /// Node kind: agent, check, gate, router, or deliver. Optional when `node`
+    /// is given — the document's own kind applies. Never pass it with `node`:
+    /// the node document already declares its kind.
     pub kind: Option<String>,
     /// Kind-specific configuration object. Alternative to `node`; provide
     /// exactly one of `config`/`node`.

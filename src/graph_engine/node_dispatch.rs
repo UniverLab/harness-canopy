@@ -66,6 +66,12 @@ impl GraphEngine {
                 execute_router_node(&self.db, lp, spec, node, previous_output, run_id, workdir)
                     .await
             }
+            // A deliver node hands its rendered prompt to a live session —
+            // deterministic, model-free, quota-free. Synchronous: resolving,
+            // rendering and enqueueing touch only the database.
+            GraphNodeKind::Deliver => {
+                self.execute_deliver_node(lp, spec, node, previous_output, run_id, workdir)
+            }
         }
     }
 

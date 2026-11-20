@@ -40,7 +40,7 @@ pub struct NodePreset {
 pub struct NodeDocument {
     pub format_version: i64,
     pub name: String,
-    /// `agent`, `check`, `gate`, `router`, or `ensemble`.
+    /// `agent`, `check`, `gate`, `router`, `deliver`, or `ensemble`.
     pub kind: String,
     /// Documentation only — the rules never read it.
     #[serde(default, skip_serializing_if = "Option::is_none")]

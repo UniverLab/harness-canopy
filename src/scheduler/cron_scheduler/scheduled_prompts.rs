@@ -710,6 +710,8 @@ mod tests {
             agent_id: None,
             trigger: None,
             target_session_name: None,
+            node_id: None,
+            run_id: None,
         };
         assert!(!notify_hook_delivery(&db, &send(Some(other))));
         assert!(!notify_hook_delivery(&db, &send(None)));

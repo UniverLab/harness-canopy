@@ -18,6 +18,14 @@ pub enum GraphNodeKind {
     /// never executes a router (see
     /// [`crate::graph_engine::GraphEngine::execute_node`]'s `Router` arm).
     Router,
+    /// Deliver a rendered prompt to a live interactive session, the node
+    /// form of a background agent with `AgentAction::SendToSession` (see
+    /// [`crate::domain::models::AgentAction`]). Holds no platform, model
+    /// or crew and counts for no quota; rendered with the router decision
+    /// vocabulary and enqueued as a due-now scheduled send with `deliver`
+    /// provenance (see [`crate::graph_engine::GraphEngine::execute_node`]'s
+    /// `Deliver` arm).
+    Deliver,
 }
 
 impl GraphNodeKind {
@@ -30,6 +38,7 @@ impl GraphNodeKind {
             Self::Gate => "gate",
             Self::Join => "join",
             Self::Router => "router",
+            Self::Deliver => "deliver",
         }
     }
 
@@ -50,6 +59,7 @@ impl GraphNodeKind {
             "gate" => Some(Self::Gate),
             "join" => Some(Self::Join),
             "router" => Some(Self::Router),
+            "deliver" => Some(Self::Deliver),
             _ => None,
         }
     }

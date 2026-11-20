@@ -245,6 +245,17 @@ pub(crate) const CHECK_CONFIG_KEYS: &[&str] = &[
 /// Every config key a `gate` node is read for — see `execute_gate_node`.
 pub(crate) const GATE_CONFIG_KEYS: &[&str] = &["evaluate", "value", "commit_rights", "mutex"];
 
+/// Every config key a `deliver` node is read for — see
+/// `graph_engine::execute_deliver_node`. Exactly the single target plus the
+/// prompt: no platform/model/cli/crew (it spawns nothing and counts for no
+/// quota), no mutex/commit_rights (it touches neither shared resources nor
+/// git history).
+pub(crate) const DELIVER_CONFIG_KEYS: &[&str] = &[
+    "target_session_name",
+    "target_session_id",
+    "prompt_template",
+];
+
 /// Every config key a `router` node is read for — see `parse_router_routes`,
 /// `parse_router_decision` and `mode: "value"`'s `source`/`default_route`.
 pub(crate) const ROUTER_CONFIG_KEYS: &[&str] = &[
@@ -276,6 +287,7 @@ pub(crate) fn allowed_config_keys(kind: GraphNodeKind) -> Option<&'static [&'sta
         GraphNodeKind::Check => Some(CHECK_CONFIG_KEYS),
         GraphNodeKind::Gate => Some(GATE_CONFIG_KEYS),
         GraphNodeKind::Router => Some(ROUTER_CONFIG_KEYS),
+        GraphNodeKind::Deliver => Some(DELIVER_CONFIG_KEYS),
         GraphNodeKind::Join => None,
     }
 }
@@ -468,9 +480,60 @@ pub(crate) fn validate_node_config(
                 validate_router_decision_config(map)?;
             }
         }
+        GraphNodeKind::Deliver => validate_deliver_config(map)?,
     }
 
     Ok(())
+}
+
+/// Validate a `deliver` node's config: exactly one target — the node form
+/// of a `SendToSession` background agent, so the single-target rule
+/// (exactly one of name/id, blanks unset) is enforced by the same
+/// constructor the agent path uses and the two can never disagree — plus a
+/// non-empty `prompt_template` with no unbindable markers. Harness keys
+/// are already refused by the `DELIVER_CONFIG_KEYS` allowlist before this
+/// runs.
+fn validate_deliver_config(map: &serde_json::Map<String, serde_json::Value>) -> Result<(), String> {
+    let target = |field: &str| {
+        map.get(field)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    };
+    if crate::domain::models::AgentAction::send_to_session(
+        target("target_session_name"),
+        target("target_session_id"),
+    )
+    .is_err()
+    {
+        return Err(
+            "Graph node config for kind 'deliver' needs exactly one target: pass \
+             'target_session_name' or 'target_session_id' (not both, not neither; \
+             blank strings count as unset)."
+                .to_string(),
+        );
+    }
+    if !map
+        .get("prompt_template")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|template| !template.trim().is_empty())
+    {
+        return Err(
+            "Graph node config for kind 'deliver' must include a non-empty \
+             'prompt_template' field."
+                .to_string(),
+        );
+    }
+    let template = map
+        .get("prompt_template")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    crate::graph_engine::refuse_unbindable_template(
+        "deliver node",
+        template,
+        crate::graph_engine::ROUTER_DECISION_BINDINGS,
+        None,
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// CM49: when a router node enables decision mode (`decision: true`), verify

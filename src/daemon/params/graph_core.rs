@@ -349,7 +349,7 @@ pub struct GraphUpdateNodeParams {
     pub node_id: String,
     /// New human-readable node name.
     pub name: Option<String>,
-    /// New node kind: agent, check, or gate.
+    /// New node kind: agent, check, gate, router, or deliver.
     pub kind: Option<String>,
     /// Config payload. By default merges with the stored config (partial update):
     /// keys present are changed, keys absent are left as-is.

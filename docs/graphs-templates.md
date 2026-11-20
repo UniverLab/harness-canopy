@@ -37,7 +37,10 @@ accepted when escaped as `\{{...}}`. A `prompt_preset` is a file name, not
 text, so it keeps its spawn-time check. A `router`'s `prompt_template` binds
 only `{{previous_feedback}}`, `{{previous_output}}`, `{{spec_content}}`
 and `{{spec_name}}`: it reads no node output, so an `{{output:…}}` marker
-there is refused as well.
+there is refused as well. A `deliver` node's `prompt_template` binds that
+same four-marker vocabulary — `{{previous_output}}` is the previous node's
+output as pretty-printed JSON (bounded like `previous_feedback`, `(none)`
+when absent) — and likewise refuses `{{output:…}}`.
 
 A template stored before this validation is reported by `graph_control` `preflight`
 in `graph_warnings`, one entry per offending placeholder naming the node or

@@ -748,6 +748,7 @@ pub mod remote_trust;
 pub(crate) mod roster_entries;
 pub mod run;
 pub mod sandbox;
+pub mod scheduled_prompt_provenance;
 pub mod scheduled_prompts;
 pub mod scheduled_prompts_agent;
 mod schema;

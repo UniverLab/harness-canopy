@@ -228,6 +228,19 @@ fn node_template_entries(
                 ));
             }
         }
+        // A deliver prompt renders through the same router decision
+        // vocabulary as a router decision prompt (see
+        // `graph_engine::execute_deliver_node`) — never the check-node
+        // marker set, and never with node outputs in scope.
+        GraphNodeKind::Deliver => {
+            if let Some(template) = config.get("prompt_template").and_then(Value::as_str) {
+                entries.push((
+                    "prompt_template",
+                    template,
+                    crate::graph_engine::ROUTER_DECISION_BINDINGS,
+                ));
+            }
+        }
         GraphNodeKind::Check | GraphNodeKind::Gate | GraphNodeKind::Join => {}
     }
     entries
@@ -249,7 +262,10 @@ pub(crate) fn check_node_templates(
     let empty_ensembles: &[(String, Option<String>)] = &[];
     for (field, template, supported) in node_template_entries(kind, config) {
         let (names, ensemble_list) = match kind {
-            GraphNodeKind::Router => (empty_names, empty_ensembles),
+            // Neither a router decision prompt nor a deliver prompt binds
+            // node outputs at spawn time, so any `{{output:...}}` is
+            // refused — exactly as the spawn path refuses it.
+            GraphNodeKind::Router | GraphNodeKind::Deliver => (empty_names, empty_ensembles),
             _ => (node_names, ensembles),
         };
         let owner = if field == "prompt_template" {
@@ -403,8 +419,11 @@ fn scope_template_warnings(nodes: &[GraphNode], ensembles: &[EnsembleDetails]) -
         let empty_names: &[String] = &[];
         let empty_ensembles: &[(String, Option<String>)] = &[];
         for (field, template, supported) in node_template_entries(node.kind, &node.config) {
+            // A deliver prompt binds no node outputs at run time, exactly like
+            // a router decision prompt — keep this warning in step with
+            // `check_node_templates`, which refuses `{{output:...}}` there.
             let (names, ensemble_list) = match node.kind {
-                GraphNodeKind::Router => (empty_names, empty_ensembles),
+                GraphNodeKind::Router | GraphNodeKind::Deliver => (empty_names, empty_ensembles),
                 _ => (scope.nodes.as_slice(), scope.ensembles.as_slice()),
             };
             for hit in unbindable_hits(template, supported, names, ensemble_list) {

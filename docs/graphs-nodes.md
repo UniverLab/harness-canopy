@@ -23,11 +23,18 @@ whole graph, then added to any graph by name:
 }
 ```
 
-`kind` is `agent`, `check`, `gate`, `router`, or `ensemble`. An `ensemble`
+`kind` is `agent`, `check`, `gate`, `router`, `deliver`, or `ensemble`. An `ensemble`
 document carries the ensemble shape in `config`: `prompt_template`,
 `members` (each **without** `platform`/`model`), `min_pass`, and the same
 fields `graph_ensemble` `add` accepts (`kind`, timeouts, infra budgets,
-`commit_rights`, `read_only`, `mutex`). A document never carries a harness — who runs a
+`commit_rights`, `read_only`, `mutex`). A `deliver` document hands a rendered
+prompt to a live interactive session — the node form of a `send_to_session`
+background agent. Its config is exactly one target plus the prompt:
+`target_session_name` or `target_session_id` (exactly one, blanks unset)
+and a non-empty `prompt_template` rendered with the router decision
+markers (`previous_feedback`, `previous_output`, `spec_content`,
+`spec_name`). A deliver node holds no platform, model or crew, counts for
+no quota, and must have exactly one outgoing edge. A document never carries a harness — who runs a
 node is the installer's decision, not the author's. `canopy graph validate
 <path>` checks a node document exactly as it checks a graph document
 (`ok` with `node_kind`, or every problem with its JSON path).

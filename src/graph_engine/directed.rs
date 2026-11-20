@@ -324,6 +324,14 @@ fn node_templates(
                 templates.push(t.to_string());
             }
         }
+        // A deliver prompt renders with the router decision vocabulary —
+        // no `{{output:...}}` can survive write-time validation, so this
+        // only matters for template-shape audits, never for output gating.
+        GraphNodeKind::Deliver => {
+            if let Some(t) = node.config.get("prompt_template").and_then(Value::as_str) {
+                templates.push(t.to_string());
+            }
+        }
         GraphNodeKind::Gate | GraphNodeKind::Join | GraphNodeKind::Router => {}
     }
     if let Some(details) = ensembles

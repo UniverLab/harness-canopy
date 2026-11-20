@@ -30,6 +30,7 @@ mod check_render;
 mod commit_guard;
 mod crew_resolve;
 mod decision;
+mod deliver;
 mod directed;
 mod dirty_commit;
 mod dispatch;
@@ -78,6 +79,8 @@ pub(crate) use check::*;
 pub(crate) use check_render::*;
 pub(crate) use commit_guard::*;
 pub(crate) use decision::*;
+#[allow(unused_imports)]
+pub(crate) use deliver::*;
 pub(crate) use directed::*;
 pub(crate) use dirty_commit::*;
 #[allow(unused_imports)]

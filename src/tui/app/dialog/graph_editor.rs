@@ -176,6 +176,7 @@ impl App {
     ) -> crate::tui::app::types::GraphEditorDialog {
         match node.kind {
             GraphNodeKind::Agent => self.build_agent_prompt_dialog(node),
+            GraphNodeKind::Deliver => self.build_deliver_prompt_dialog(node),
             GraphNodeKind::Router => self.build_router_routes_dialog(node),
             _ => self.build_node_config_dialog(node),
         }
@@ -194,6 +195,47 @@ impl App {
             node.id.clone(),
             node.name.clone(),
             format!(" Graph Prompt · {} ", node.name),
+            "Ctrl+S save  ·  Enter newline  ·  Esc cancel".to_string(),
+            prompt.to_string(),
+            crate::tui::app::types::GraphEditorMode::AgentPrompt,
+        )
+    }
+
+    /// A deliver node's prompt editor: the same free-text `prompt_template`
+    /// buffer as an agent prompt — the target (`target_session_name` or
+    /// `target_session_id`) is named in the title so the operator sees
+    /// where the message will land, and is preserved untouched on save
+    /// (retargeting goes through `graph_node` update, like an agent's
+    /// harness). Save reuses the `AgentPrompt` path, so
+    /// `validate_node_config`'s deliver arm still enforces the
+    /// single-target rule and the template bindings.
+    fn build_deliver_prompt_dialog(
+        &self,
+        node: &crate::domain::graphs::GraphNode,
+    ) -> crate::tui::app::types::GraphEditorDialog {
+        let prompt = node
+            .config
+            .get("prompt_template")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let target = node
+            .config
+            .get("target_session_name")
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| format!("name '{s}'"))
+            .or_else(|| {
+                node.config
+                    .get("target_session_id")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
+                    .map(|s| format!("id '{s}'"))
+            })
+            .unwrap_or_else(|| "(no target)".to_string());
+        crate::tui::app::types::GraphEditorDialog::new(
+            node.id.clone(),
+            node.name.clone(),
+            format!(" Deliver Prompt · {} → {} ", node.name, target),
             "Ctrl+S save  ·  Enter newline  ·  Esc cancel".to_string(),
             prompt.to_string(),
             crate::tui::app::types::GraphEditorMode::AgentPrompt,

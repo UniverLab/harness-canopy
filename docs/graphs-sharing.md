@@ -257,7 +257,7 @@ name as the config's `prompt_preset` when both are present.
 On success the report carries `ok`, the kind, the name, the
 node/edge/ensemble counts, and the agent nodes that will still need a
 harness (`needs_harness`); a node document also carries `node_kind`
-(`agent`, `check`, `gate`, `router`) and reports one node, no edges and
+(`agent`, `check`, `gate`, `router`, `deliver`) and reports one node, no edges and
 no ensembles. On failure it carries every problem found — not only the
 first — each with a JSON path (`nodes[3].config.prompt_preset`) and a
 message. The CLI exits 0 on success and 1 on failure; `--json` prints

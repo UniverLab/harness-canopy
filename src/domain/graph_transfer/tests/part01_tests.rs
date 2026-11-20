@@ -1036,6 +1036,61 @@ fn import_rejects_unknown_ensemble_target() {
     assert!(error.contains("unknown ensemble") && error.contains("Ghost"));
 }
 
+/// A deliver node survives export → import → export field for field: its
+/// kind, single target and prompt template travel through the kind string
+/// and the config object, so a graph carrying one round-trips like any
+/// other node.
+#[test]
+fn deliver_node_round_trips_through_export_import_export() {
+    let lp = make_graph("news-graph");
+    let kick = make_node(
+        "kick",
+        "kick",
+        GraphNodeKind::Check,
+        serde_json::json!({"command": "true"}),
+        1,
+    );
+    let herald = make_node(
+        "herald",
+        "herald",
+        GraphNodeKind::Deliver,
+        serde_json::json!({
+            "target_session_name": "orch",
+            "prompt_template": "news for {{spec_name}}: {{previous_output}}",
+        }),
+        2,
+    );
+    let done = make_node(
+        "done",
+        "done",
+        GraphNodeKind::Check,
+        serde_json::json!({"command": "true"}),
+        3,
+    );
+    let nodes = vec![kick, herald, done];
+    let edges = vec![
+        make_edge("e1", "kick", "herald", GraphEdgeCondition::Always),
+        make_edge("e2", "herald", "done", GraphEdgeCondition::Always),
+    ];
+
+    let first_export = build_export_document(&lp, &nodes, &edges, &[]).unwrap();
+    let exported = first_export
+        .nodes
+        .iter()
+        .find(|node| node.name == "herald")
+        .expect("herald node exported");
+    assert_eq!(exported.kind, GraphNodeKind::Deliver);
+    assert_eq!(exported.config["target_session_name"], "orch");
+
+    let plan = build_import_plan(&first_export, "graph-2").unwrap();
+    let mut lp2 = make_graph("news-graph");
+    lp2.id = "graph-2".to_string();
+    let second_export = build_export_document(&lp2, &plan.nodes, &plan.edges, &[]).unwrap();
+
+    assert_eq!(first_export.nodes, second_export.nodes);
+    assert_eq!(first_export.edges, second_export.edges);
+}
+
 /// Requirement 5's full statement: export -> import -> export again
 /// produces an identical document except for the name, for a plain
 /// (non-ensemble) graph too.

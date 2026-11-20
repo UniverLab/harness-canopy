@@ -248,8 +248,9 @@ pub(crate) fn validate_route_edge_target(
 }
 
 pub(crate) fn validate_node_kind(kind: &str) -> Result<GraphNodeKind, String> {
-    GraphNodeKind::from_str(kind.trim())
-        .ok_or_else(|| "Graph node kind must be one of: agent, check, gate, router.".to_string())
+    GraphNodeKind::from_str(kind.trim()).ok_or_else(|| {
+        "Graph node kind must be one of: agent, check, gate, router, deliver.".to_string()
+    })
 }
 
 /// `graph_node`/`graph_node`'s `kind: "join"` guard — a quorum node is

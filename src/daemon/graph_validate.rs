@@ -112,6 +112,7 @@ fn validate_graph_document(value: &Value) -> Value {
     let mut problems = Vec::new();
     validate_graph_node_configs(&document, &mut problems);
     validate_graph_value_router_edges(&document, &mut problems);
+    validate_deliver_edges(&document, &mut problems);
     validate_bundled_preset_entries(&document, &mut problems);
     validate_shared_presets(&document, &mut problems);
 
@@ -212,6 +213,37 @@ fn validate_graph_value_router_edges(document: &GraphExportDocument, problems: &
         );
         if let Err(message) = coverage {
             problems.push(problem(format!("nodes[{index}].config.routes"), message));
+        }
+    }
+}
+
+/// A deliver node routes exactly one step onward — the document must wire
+/// each one to exactly one outgoing edge carrying a verdict (`error` edges
+/// never do, so they do not count). The same invariant the shared graph
+/// validator enforces on live graphs (see
+/// `domain::validation`'s deliver rule, surfaced through the import plan
+/// below) — reported here at the node's own path.
+fn validate_deliver_edges(document: &GraphExportDocument, problems: &mut Vec<Problem>) {
+    for (index, node) in document.nodes.iter().enumerate() {
+        if node.kind != GraphNodeKind::Deliver {
+            continue;
+        }
+        let count = document
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.from_node == node.name
+                    && edge.condition != crate::domain::graphs::GraphEdgeCondition::Error
+            })
+            .count();
+        if count != 1 {
+            problems.push(problem(
+                format!("nodes[{index}]"),
+                format!(
+                    "Deliver node '{}' must have exactly one outgoing edge, got {}.",
+                    node.name, count
+                ),
+            ));
         }
     }
 }
@@ -485,7 +517,7 @@ fn validate_node_kind(raw: &str, problems: &mut Vec<Problem>) -> Option<GraphNod
             problems.push(problem(
                 "kind",
                 format!(
-                    "Node document has unknown kind '{raw}'. Expected one of: agent, check, gate, router, ensemble."
+                    "Node document has unknown kind '{raw}'. Expected one of: agent, check, gate, router, deliver, ensemble."
                 ),
             ));
             None
@@ -1158,5 +1190,122 @@ mod tests {
             .map(|p| p["path"].as_str().expect("path"))
             .collect();
         assert_eq!(paths, vec!["name", "kind"]);
+    }
+
+    fn valid_deliver_graph() -> Value {
+        json!({
+            "format_version": 6,
+            "name": "news",
+            "nodes": [
+                {"name": "kick", "kind": "check", "position": 1,
+                 "config": {"command": "true"}},
+                {"name": "herald", "kind": "deliver", "position": 2,
+                 "config": {"target_session_name": "orch",
+                            "prompt_template": "news {{spec_name}}"}},
+                {"name": "done", "kind": "check", "position": 3,
+                 "config": {"command": "true"}},
+            ],
+            "edges": [
+                {"from_node": "kick", "to_node": "herald", "condition": "always"},
+                {"from_node": "herald", "to_node": "done", "condition": "always"},
+            ],
+            "ensembles": [],
+        })
+    }
+
+    #[test]
+    fn deliver_graph_validates_platformless_with_one_edge() {
+        let report = validate_document_value(&valid_deliver_graph());
+        assert_eq!(report["ok"], true);
+        assert_eq!(report["needs_harness"], json!([]));
+    }
+
+    #[test]
+    fn deliver_node_without_outgoing_edge_reports_node() {
+        let mut doc = valid_deliver_graph();
+        doc["edges"] = json!([
+            {"from_node": "kick", "to_node": "herald", "condition": "always"},
+        ]);
+        let report = validate_document_value(&doc);
+        assert_eq!(report["ok"], false);
+        assert_eq!(first_path(&report), "nodes[1]");
+        let message = report["problems"][0]["message"].as_str().expect("message");
+        assert!(
+            message.contains("exactly one outgoing edge"),
+            "got: {message}"
+        );
+    }
+
+    #[test]
+    fn deliver_node_with_two_outgoing_edges_reports_node() {
+        let mut doc = valid_deliver_graph();
+        doc["edges"] = json!([
+            {"from_node": "kick", "to_node": "herald", "condition": "always"},
+            {"from_node": "herald", "to_node": "done", "condition": "always"},
+            {"from_node": "herald", "to_node": "done", "condition": "fail"},
+        ]);
+        let report = validate_document_value(&doc);
+        assert_eq!(report["ok"], false);
+        assert_eq!(first_path(&report), "nodes[1]");
+        let message = report["problems"][0]["message"].as_str().expect("message");
+        assert!(
+            message.contains("exactly one outgoing edge"),
+            "got: {message}"
+        );
+    }
+
+    #[test]
+    fn deliver_node_with_unbindable_marker_reports_config() {
+        let mut doc = valid_deliver_graph();
+        doc["nodes"][1]["config"]["prompt_template"] = json!("news {{bogus}}");
+        let report = validate_document_value(&doc);
+        assert_eq!(report["ok"], false);
+        assert_eq!(first_path(&report), "nodes[1].config");
+    }
+
+    #[test]
+    fn deliver_node_with_harness_key_reports_config() {
+        let mut doc = valid_deliver_graph();
+        doc["nodes"][1]["config"]["platform"] = json!("claude");
+        let report = validate_document_value(&doc);
+        assert_eq!(report["ok"], false);
+        assert_eq!(first_path(&report), "nodes[1].config");
+    }
+
+    #[test]
+    fn deliver_document_round_trips_through_kind_string() {
+        let report = validate_document_value(&valid_deliver_graph());
+        assert_eq!(report["ok"], true);
+        let document =
+            crate::domain::graph_transfer::parse_export_document_value(&valid_deliver_graph())
+                .expect("valid deliver document parses");
+        let herald = document
+            .nodes
+            .iter()
+            .find(|node| node.name == "herald")
+            .expect("herald node");
+        assert_eq!(herald.kind, GraphNodeKind::Deliver);
+        let raw = serde_json::to_value(&document).expect("document serializes");
+        assert_eq!(raw["nodes"][1]["kind"], json!("deliver"));
+    }
+
+    fn valid_deliver_node() -> Value {
+        json!({
+            "format_version": 1,
+            "name": "herald",
+            "kind": "deliver",
+            "description": "Hands the news to the agent session.",
+            "config": {"target_session_name": "orch",
+                       "prompt_template": "news {{spec_name}}"},
+        })
+    }
+
+    #[test]
+    fn deliver_node_document_validates_with_kind() {
+        let report = validate_document_value(&valid_deliver_node());
+        assert_eq!(report["ok"], true);
+        assert_eq!(report["kind"], "node");
+        assert_eq!(report["node_kind"], "deliver");
+        assert_eq!(report["needs_harness"], json!([]));
     }
 }

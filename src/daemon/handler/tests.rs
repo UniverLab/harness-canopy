@@ -113,7 +113,9 @@ const EXPECTED_TOOL_NAMES: &[&str] = &[
 /// `graph_edit` rows were re-pinned again when their `install` actions gained
 /// the optional `as`/`replace` params. The `graph_ensemble` row was re-pinned
 /// when its description and the `kind`/`members` field docs began listing the
-/// `random` ensemble kind (field docs are part of the input schema).
+/// `random` ensemble kind (field docs are part of the input schema). The
+/// `graph_node` row was re-pinned when the `kind` field docs began listing
+/// the `deliver` node kind.
 const EXPECTED_TOOL_ROWS: &[&str] = &[
     "agent|d8f9c6d2e27d78721e0e68301793b430eb079a49d68e003c0a36062ade4326c2|d713589e444e00e203c10fb39b668774212540a62cec84a04d9f2b34b7c386b1",
     "agent_edit|9f9d97739be8934e8023b86d6ed35d9acf9209d18d42a8cafd8ffc99154965cf|eb0e7e1757828c2db9669176f36f437dc1cfc1797eacee875d69ff61ae80b271",
@@ -128,7 +130,7 @@ const EXPECTED_TOOL_ROWS: &[&str] = &[
     "graph_edge|dc837b1ca327d911a1f60b27d4546747dcb70411b35c7a51d4954256e73987de|78b3584a55307259ba886f8371e49efad61a12b996a821c014343fd545196f47",
     "graph_edit|8249beac55595850ee6e3331bfe612da04fcd03e6b367a2e0606e3ce5d416ee9|fe818b3aea21d24f7df037ab64f7178ee8619fe4bd033c8b98703796c3db83fc",
     "graph_ensemble|1c9c84765b0a409ab2783c1e12cdb3ebb182fd644235385f71590a8e236ffa0f|3934ae9e96d5af8057171c7f5db3168637b1b218d1c75dde94c37fab86ff4bee",
-    "graph_node|7fce2b505b0d7e9dc1256d68c5ded89516a89bbbbcd5ea128cc35d360793141c|2216ae95d00d2978c711101c9113ed1051d4691fa6a6bfea8bff67260a71dd1d",
+    "graph_node|7fce2b505b0d7e9dc1256d68c5ded89516a89bbbbcd5ea128cc35d360793141c|c503f664891f4b251eb4e0f5316b7e0a85e96c400505b32f83931980eadf515f",
     "graph_report_blocker|0af53e5791486ff4aacdfd49ff7e2a12171ff71ba4825fe03147683c8bea8d95|55366b14da2aae0cf6af2fb6f92900d8db343c7051e7d01dc025f8196b8bf599",
     "harness|059ab2d487f4740c696909f05886053ef5816f6c49458ce59f8d0362fff7e278|de6b2f650a2856d775016bb47953eabfdf66b5994061dd2f863e322ca3c9710f",
     "identity|a180db61cb53b2cc3122327c72750ea7c43b9933ea1890d49cba8a1e07418915|63113bdd51ed6a53e3c24f0e81e1dd8cf17078780108dcef88922136c85973f6",
