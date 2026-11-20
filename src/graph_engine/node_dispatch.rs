@@ -1,6 +1,16 @@
 use super::*;
 use crate::db::connection::{is_busy_error, with_busy_retry};
 
+#[derive(Clone, Copy)]
+pub(crate) struct GraphFailure<'a> {
+    pub dispatch_started_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub spec_name: Option<&'a str>,
+    pub spec_id: Option<&'a str>,
+    pub summary: &'a str,
+    pub completed_specs: &'a [(String, String)],
+    pub daemon_trigger: Option<crate::graph_engine::graph_run_log::GraphRunTrigger>,
+}
+
 impl GraphEngine {
     #[expect(clippy::too_many_arguments)]
     pub(crate) async fn execute_node(
@@ -167,16 +177,8 @@ impl GraphEngine {
         crate::domain::sandbox::teardown_sandbox_at_end(&self.db, &row, &reason).await;
     }
 
-    pub(crate) async fn fail_graph(
-        &self,
-        graph_id: &str,
-        dispatch_started_at: Option<chrono::DateTime<chrono::Utc>>,
-        spec_name: Option<&str>,
-        spec_id: Option<&str>,
-        summary: &str,
-        completed_specs: &[(String, String)],
-    ) -> Result<()> {
-        if let Some(expected) = dispatch_started_at {
+    pub(crate) async fn fail_graph(&self, graph_id: &str, failure: GraphFailure<'_>) -> Result<()> {
+        if let Some(expected) = failure.dispatch_started_at {
             if self.dispatch_is_stale(graph_id, expected)? {
                 return Ok(());
             }
@@ -189,11 +191,17 @@ impl GraphEngine {
             Some(chrono::Utc::now()),
         )?;
         if let Ok(Some(lp)) = self.db.get_graph(graph_id) {
-            self.record_failed_activity(graph_id, &lp, spec_id, spec_name, summary);
+            self.record_failed_activity(
+                graph_id,
+                &lp,
+                failure.spec_id,
+                failure.spec_name,
+                failure.summary,
+            );
         }
         // Resolve the human-readable ending node name BEFORE sweeping the
         // running runs below — afterwards there is nothing left to resolve.
-        let ending_node = self.ending_node_name(graph_id, spec_name);
+        let ending_node = self.ending_node_name(graph_id, failure.spec_name);
         // B12 catch-all: whatever hard-error path got us here (a node
         // timeout already kills its own process before bubbling up, but a
         // DB error or any other error class reaching this point wouldn't
@@ -212,8 +220,21 @@ impl GraphEngine {
 
         // Fire `on_failed` hooks if any are registered.
         if let Ok(Some(lp)) = self.db.get_graph(graph_id) {
-            self.fire_on_failed_hooks(&lp, spec_id, ending_node.clone(), summary, completed_specs)
-                .await;
+            self.fire_on_failed_hooks(
+                &lp,
+                failure.spec_id,
+                ending_node.clone(),
+                failure.summary,
+                failure.completed_specs,
+            )
+            .await;
+        }
+
+        if let Some(trigger) = failure.daemon_trigger {
+            let started_at = failure.dispatch_started_at.unwrap_or_else(chrono::Utc::now);
+            let _ = crate::graph_engine::graph_run_log::append_graph_run_block(
+                &self.db, graph_id, trigger, started_at,
+            );
         }
 
         let graph_name = self
@@ -224,7 +245,7 @@ impl GraphEngine {
         self.notification_service.notify_graph_finished(
             &graph_name,
             GraphFinishOutcome::Failed {
-                spec_name: spec_name.unwrap_or(summary),
+                spec_name: failure.spec_name.unwrap_or(failure.summary),
             },
         );
         // A failed graph never tears down its sandbox automatically,
@@ -236,8 +257,9 @@ impl GraphEngine {
             let _ = self.db.set_sandbox_cleanup_error(
                 &sb.id,
                 &format!(
-                    "{}: failed: {summary}: kept for the operator",
-                    sb.worktree_path.display()
+                    "{}: failed: {}: kept for the operator",
+                    sb.worktree_path.display(),
+                    failure.summary
                 ),
             );
         }
@@ -382,6 +404,7 @@ impl GraphEngine {
         graph_id: &str,
         dispatch_started_at: Option<chrono::DateTime<chrono::Utc>>,
         blocker: &str,
+        daemon_trigger: Option<crate::graph_engine::graph_run_log::GraphRunTrigger>,
     ) -> Result<()> {
         if let Some(expected) = dispatch_started_at {
             let current_started_at = self.db.get_graph(graph_id)?.and_then(|lp| lp.started_at);
@@ -409,6 +432,11 @@ impl GraphEngine {
         // the TUI show WHY the graph paused. Stored unprefixed — the
         // `GraphBlocked` event below adds the "Blocked: " prefix itself.
         self.db.set_graph_blocker(graph_id, Some(blocker))?;
+        if let (Some(trigger), Some(started_at)) = (daemon_trigger, dispatch_started_at) {
+            let _ = crate::graph_engine::graph_run_log::append_graph_run_block(
+                &self.db, graph_id, trigger, started_at,
+            );
+        }
         if let Ok(Some(lp)) = self.db.get_graph(graph_id) {
             activity::record(
                 &self.db,

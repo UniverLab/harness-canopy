@@ -63,6 +63,9 @@ fn insert_test_graph(db: &Database, id: &str) {
         auto_continue_action: None,
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     })
     .unwrap();
 }

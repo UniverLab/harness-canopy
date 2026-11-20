@@ -174,7 +174,7 @@ fn entry_router_reads_an_empty_previous_output() {
 
 #[test]
 fn every_declared_value_source_has_a_reader() {
-    for source in crate::domain::graphs::VALUE_ROUTER_SOURCES {
+    for source in crate::domain::graphs::router::VALUE_ROUTER_SOURCES {
         assert!(
             read_value_source(source, &typed_spec(), None).is_ok(),
             "declared source '{source}' has no read_value_source arm"

@@ -144,6 +144,9 @@ async fn fire_due_autorun_graphs_resets_failed_graph_through_shared_path_and_res
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     })
     .unwrap();
     db.insert_graph_spec(&GraphSpec {
@@ -260,6 +263,9 @@ async fn fire_due_autorun_graphs_preserves_admin_skipped_specs() {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     })
     .unwrap();
     // One failed spec — will be reset and resumed.
@@ -612,6 +618,9 @@ async fn fire_due_autorun_graphs_never_fires_a_c19_blocked_graph() {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     })
     .unwrap();
 
@@ -734,6 +743,9 @@ async fn fire_due_autorun_graphs_resumes_same_queue_after_failed_run() {
         active_run_queue_id: Some("queue-1".to_string()),
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     })
     .unwrap();
 
@@ -1080,6 +1092,9 @@ async fn fire_due_auto_continue_graphs_resumes_paused_graph_without_reset_or_rel
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     })
     .unwrap();
     db.insert_graph_spec(&GraphSpec {
@@ -1207,6 +1222,9 @@ async fn fire_due_auto_continue_graphs_applies_skip_next_spec_action() {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     })
     .unwrap();
     db.insert_graph_spec(&GraphSpec {
@@ -1337,6 +1355,82 @@ fn next_sleep_duration_wakes_for_pending_auto_continue_at() {
         dur <= std::time::Duration::from_secs(6),
         "expected to wake in ~5s for the pending auto_continue_at, got {:?}",
         dur
+    );
+}
+
+fn sample_cron_graph(id: &str) -> crate::domain::graphs::Graph {
+    let mut lp = sample_graph(id, crate::domain::graphs::GraphStatus::Draft);
+    lp.trigger = Some(crate::domain::models::Trigger::Cron {
+        schedule_expr: "* * * * *".to_string(),
+    });
+    lp
+}
+
+#[test]
+fn next_sleep_duration_wakes_for_pending_enable_graph() {
+    let (db, scheduler) = test_scheduler_with_graphs();
+    let mut lp = sample_cron_graph("soon-enable-graph");
+    lp.enabled = false;
+    lp.enable_at = Some(Utc::now() + chrono::Duration::seconds(5));
+    db.insert_graph(&lp).unwrap();
+
+    let dur = scheduler.next_sleep_duration();
+    assert!(
+        dur <= std::time::Duration::from_secs(6),
+        "expected to wake in ~5s for pending graph enable_at, got {:?}",
+        dur
+    );
+}
+
+#[tokio::test]
+async fn fire_due_enable_graphs_enables_clears_and_records_due_graph() {
+    let (db, scheduler) = test_scheduler_with_graphs();
+    let mut lp = sample_cron_graph("past-enable-graph");
+    lp.enabled = false;
+    lp.enable_at = Some(Utc::now() - chrono::Duration::minutes(1));
+    db.insert_graph(&lp).unwrap();
+
+    scheduler.fire_due_enable_graphs(Utc::now()).await.unwrap();
+
+    let lp = db.get_graph("past-enable-graph").unwrap().unwrap();
+    assert!(lp.enabled, "past-due enable_at must enable the graph");
+    assert!(lp.enable_at.is_none(), "activation must clear enable_at");
+}
+
+#[tokio::test]
+async fn disabled_cron_graph_does_not_fire() {
+    let (db, scheduler) = test_scheduler_with_graphs();
+    let mut lp = sample_cron_graph("disabled-no-fire");
+    lp.enabled = false;
+    db.insert_graph(&lp).unwrap();
+
+    let before = db.list_running_graph_runs(&lp.id).unwrap().len();
+    scheduler
+        .try_fire_graph(&lp, chrono::Local::now())
+        .await
+        .unwrap();
+    let after = db.list_running_graph_runs(&lp.id).unwrap().len();
+    assert_eq!(before, after, "disabled trigger graph must not fire");
+}
+
+#[tokio::test]
+async fn expired_cron_graph_does_not_fire_and_is_disabled() {
+    let (db, scheduler) = test_scheduler_with_graphs();
+    let mut lp = sample_cron_graph("expired-no-fire");
+    lp.expires_at = Some(Utc::now() - chrono::Duration::minutes(1));
+    db.insert_graph(&lp).unwrap();
+
+    scheduler
+        .try_fire_graph(&lp, chrono::Local::now())
+        .await
+        .unwrap();
+    scheduler.disable_expired_graphs().await.unwrap();
+
+    let stored = db.get_graph("expired-no-fire").unwrap().unwrap();
+    assert!(!stored.enabled, "expired trigger graph must be disabled");
+    assert!(
+        db.list_running_graph_runs(&lp.id).unwrap().is_empty(),
+        "expired trigger graph must not fire"
     );
 }
 

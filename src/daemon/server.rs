@@ -77,15 +77,16 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
     crate::sessions::resume::reconcile_at_startup(&sessions_state.hub, &data_dir);
     reconcile_stale_sessions_on_startup(&db);
 
-    let background = start_background_tasks(
-        &db,
-        &core.executor,
-        &core.graph_engine,
-        &core.notification_service,
-        &data_dir,
-        core.canopy_config.announcements_enabled,
-        &sessions_state,
-    );
+    let background = start_background_tasks(&BackgroundTaskInputs {
+        db: &db,
+        executor: &core.executor,
+        graph_engine: &core.graph_engine,
+        watcher_engine: &core.watcher_engine,
+        notification_service: &core.notification_service,
+        data_dir: &data_dir,
+        announcements_enabled: core.canopy_config.announcements_enabled,
+        sessions: &sessions_state,
+    });
 
     let ct = tokio_util::sync::CancellationToken::new();
     let router = build_mcp_router(
@@ -238,44 +239,51 @@ struct HttpBackgroundTasks {
     announcements_cancel: Option<tokio_util::sync::CancellationToken>,
 }
 
-fn start_background_tasks(
-    db: &Arc<Database>,
-    executor: &Arc<Executor>,
-    graph_engine: &Arc<GraphEngine>,
-    notification_service: &Arc<dyn NotificationService>,
-    data_dir: &std::path::Path,
+struct BackgroundTaskInputs<'a> {
+    db: &'a Arc<Database>,
+    executor: &'a Arc<Executor>,
+    graph_engine: &'a Arc<GraphEngine>,
+    watcher_engine: &'a Arc<WatcherEngine>,
+    notification_service: &'a Arc<dyn NotificationService>,
+    data_dir: &'a std::path::Path,
     announcements_enabled: bool,
-    sessions: &crate::sessions::ws::SessionsState,
-) -> HttpBackgroundTasks {
+    sessions: &'a crate::sessions::ws::SessionsState,
+}
+
+fn start_background_tasks(inputs: &BackgroundTaskInputs<'_>) -> HttpBackgroundTasks {
     let cron_scheduler = Arc::new(
         CronScheduler::with_graphs(
-            Arc::clone(db),
-            Arc::clone(executor),
-            Arc::clone(graph_engine),
+            Arc::clone(inputs.db),
+            Arc::clone(inputs.executor),
+            Arc::clone(inputs.graph_engine),
         )
-        .with_hub(sessions.hub.clone())
-        .with_scheduled_prompt_notify(Arc::clone(&sessions.scheduled_prompt_notify))
+        .with_watcher_engine(Arc::clone(inputs.watcher_engine))
+        .with_hub(inputs.sessions.hub.clone())
+        .with_scheduled_prompt_notify(Arc::clone(&inputs.sessions.scheduled_prompt_notify))
         .with_retry(crate::scheduler::cron_scheduler::RetryPolicy::from_config(
-            &crate::domain::canopy_config::CanopyConfig::load(data_dir).scheduler,
+            &crate::domain::canopy_config::CanopyConfig::load(inputs.data_dir).scheduler,
         )),
     );
     let scheduler_notify = cron_scheduler.notifier();
     let scheduled_prompt_notify = cron_scheduler.scheduled_prompt_notifier();
     let scheduler_cancel = Arc::clone(&cron_scheduler).start();
 
-    let health_routine = Arc::new(HealthRoutine::new(Arc::clone(db), data_dir.to_path_buf()));
+    let health_routine = Arc::new(HealthRoutine::new(
+        Arc::clone(inputs.db),
+        inputs.data_dir.to_path_buf(),
+    ));
     let health_routine_cancel = health_routine.start();
 
     crate::system::host_metrics_recorder::spawn(
-        Arc::clone(db),
-        sessions.hub.clone(),
-        data_dir.to_path_buf(),
+        Arc::clone(inputs.db),
+        inputs.sessions.hub.clone(),
+        inputs.data_dir.to_path_buf(),
     );
 
-    let announcements_cancel = if announcements_enabled {
+    let announcements_cancel = if inputs.announcements_enabled {
         let client = Arc::new(crate::daemon::announcements::AnnouncementsClient::new(
-            Arc::clone(db),
-            Arc::clone(notification_service),
+            Arc::clone(inputs.db),
+            Arc::clone(inputs.notification_service),
         ));
         Some(client.start())
     } else {
@@ -694,6 +702,7 @@ async fn stdio_server_startup(db: Arc<Database>, data_dir: &std::path::Path) -> 
             Arc::clone(&executor),
             Arc::clone(&graph_engine),
         )
+        .with_watcher_engine(Arc::clone(&watcher_engine))
         .with_scheduled_prompt_notify(Arc::clone(&scheduled_prompt_notify))
         .with_retry(crate::scheduler::cron_scheduler::RetryPolicy::from_config(
             &canopy_config.scheduler,
@@ -1002,6 +1011,9 @@ mod hang_repro {
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         })
         .unwrap();
         db.insert_graph_spec(&GraphSpec {
@@ -1560,6 +1572,9 @@ mod stdio_startup_reconciliation_tests {
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         };
         let spec = GraphSpec {
             intent: None,

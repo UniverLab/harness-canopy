@@ -160,5 +160,8 @@ fn graph_fixture(id: &str) -> Graph {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     }
 }

@@ -22,4 +22,28 @@ impl Database {
         }
         Ok(())
     }
+
+    /// Trigger-graph lifecycle fields: `enabled` (default 1), `enable_at`,
+    /// `expires_at`. Mirrors the agent trigger columns so cron/watch graphs
+    /// can be disabled, delayed, and expired. Idempotent per column.
+    pub(in crate::db) fn migrate_graph_enabled_columns(conn: &Connection) -> Result<()> {
+        for (column, ddl) in [
+            ("enabled", "INTEGER NOT NULL DEFAULT 1"),
+            ("enable_at", "INTEGER"),
+            ("expires_at", "INTEGER"),
+        ] {
+            let has_column: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('graphs') WHERE name = ?1",
+                    [column],
+                    |row| Ok(row.get::<_, i32>(0)? > 0),
+                )
+                .unwrap_or(false);
+            if !has_column {
+                conn.execute(&format!("ALTER TABLE graphs ADD COLUMN {column} {ddl}"), [])
+                    .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+            }
+        }
+        Ok(())
+    }
 }

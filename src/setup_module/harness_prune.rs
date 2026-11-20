@@ -366,6 +366,9 @@ mod tests {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         })
         .unwrap();
         db.insert_graph_spec(&GraphSpec {
@@ -442,6 +445,9 @@ mod tests {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         };
         graph.hooks.insert(
             GraphHookEvent::OnCompleted,

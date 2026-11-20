@@ -763,6 +763,9 @@ async fn graph_b_full_lifecycle_never_touches_graph_a_in_a_different_workdir() {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let spec_a = GraphSpec {
         intent: None,
@@ -856,6 +859,9 @@ async fn graph_b_full_lifecycle_never_touches_graph_a_in_a_different_workdir() {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let spec_b = GraphSpec {
         intent: None,
@@ -1015,6 +1021,9 @@ async fn pausing_graph_b_never_signals_or_mutates_graph_a_run() {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let spec_a = GraphSpec {
         intent: None,
@@ -1102,6 +1111,9 @@ async fn pausing_graph_b_never_signals_or_mutates_graph_a_run() {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let spec_b = GraphSpec {
         intent: None,

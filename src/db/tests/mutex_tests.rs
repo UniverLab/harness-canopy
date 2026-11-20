@@ -10,7 +10,7 @@ fn insert_waiting_run(db: &Database, tag: &str) -> String {
     let node_id = format!("node-{tag}");
     let run_id = format!("run-{tag}");
     let mut graph = sample_graph(&graph_id);
-    graph.name = format!("Graph {tag}");
+    graph.name = format!("Mutex {tag}");
     db.insert_graph(&graph).unwrap();
     db.insert_graph_spec(&sample_graph_spec(&graph_id, &spec_id, 1))
         .unwrap();

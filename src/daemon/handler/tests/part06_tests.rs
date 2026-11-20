@@ -57,6 +57,9 @@ fn spec_ids_test_db() -> (tempfile::TempDir, std::sync::Arc<Database>, String) {
         auto_continue_action: None,
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     })
     .unwrap();
     for (position, spec) in ["spec-alpha", "spec-beta"].iter().enumerate() {

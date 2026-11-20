@@ -195,6 +195,9 @@ async fn build_simple_graph(
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await
@@ -417,6 +420,9 @@ fn insert_test_graph(db: &Database, workdir: &std::path::Path) -> Graph {
         auto_continue_action: None,
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     db.insert_graph(&lp).unwrap();
     lp
@@ -1122,6 +1128,9 @@ async fn build_crew_ensemble(
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await
@@ -1216,6 +1225,9 @@ async fn build_literal_ensemble(
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await

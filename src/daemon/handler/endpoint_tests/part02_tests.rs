@@ -1008,6 +1008,9 @@ async fn graph_create_and_update_round_trip() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await
@@ -1032,6 +1035,9 @@ async fn graph_create_and_update_round_trip() {
             infra_node_id: None,
             allow_dirty_start: None,
             require_spec_type: None,
+            enabled: None,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await
@@ -1041,6 +1047,132 @@ async fn graph_create_and_update_round_trip() {
         db.get_graph(&graph_id).unwrap().unwrap().name,
         "Renamed Graph"
     );
+}
+
+fn timestamp_of(value: &str) -> i64 {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .unwrap()
+        .timestamp()
+}
+
+fn rfc3339_seconds(json: &serde_json::Value, key: &str) -> i64 {
+    timestamp_of(
+        json[key]
+            .as_str()
+            .unwrap_or_else(|| panic!("missing RFC3339 field '{key}' in {json}")),
+    )
+}
+
+/// `graph_edit create/update` accept the trigger lifecycle fields, and both
+/// `graph get` and `graph list` report them with the derived log path.
+#[tokio::test]
+async fn graph_trigger_lifecycle_fields_round_trip_through_create_update_and_get() {
+    let (dir, db, handler) = endpoint_test_handler();
+    let workdir = dir.path().to_string_lossy().to_string();
+    let enable_at = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+    let expires_at = (chrono::Utc::now() + chrono::Duration::hours(2)).to_rfc3339();
+
+    let created = call_graph_action(
+        &handler,
+        "graph_edit",
+        "create",
+        params_id(GraphCreateParams {
+            name: "Lifecycle Graph".to_string(),
+            description: None,
+            workdir,
+            trigger: None,
+            trigger_prompt: None,
+            infra_node_id: None,
+            allow_dirty_start: false,
+            require_spec_type: false,
+            enabled: false,
+            enable_at: Some(enable_at.clone()),
+            expires_at: Some(expires_at.clone()),
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!is_err(&created), "{}", text(&created));
+    let graph_id = extract_id(&created, "graph_id");
+
+    let got = call_graph_action(
+        &handler,
+        "graph",
+        "get",
+        params_id(GraphGetParams {
+            graph_id: graph_id.clone(),
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!is_err(&got), "{}", text(&got));
+    let details: serde_json::Value = serde_json::from_str(&raw_text(&got)).unwrap();
+    assert_eq!(details["enabled"], serde_json::json!(false));
+    assert_eq!(
+        rfc3339_seconds(&details, "enable_at"),
+        timestamp_of(&enable_at)
+    );
+    assert_eq!(
+        rfc3339_seconds(&details, "expires_at"),
+        timestamp_of(&expires_at)
+    );
+    assert!(details["log_path"]
+        .as_str()
+        .unwrap()
+        .ends_with(&format!("graph-{graph_id}.log")));
+    assert!(details["last_run_at"].is_null());
+    assert!(details["last_run_ok"].is_null());
+
+    let listed = call_graph_action(
+        &handler,
+        "graph",
+        "list",
+        params_id(GraphListParams {
+            workdir: None,
+            include_archived: None,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!is_err(&listed), "{}", text(&listed));
+    let list: serde_json::Value = serde_json::from_str(&raw_text(&listed)).unwrap();
+    let entry = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == serde_json::json!(graph_id))
+        .expect("created graph must appear in the list");
+    assert_eq!(entry["enabled"], serde_json::json!(false));
+    assert_eq!(
+        rfc3339_seconds(entry, "enable_at"),
+        timestamp_of(&enable_at)
+    );
+    assert_eq!(
+        rfc3339_seconds(entry, "expires_at"),
+        timestamp_of(&expires_at)
+    );
+    assert!(entry["log_path"].is_string());
+
+    // Explicit nulls (not the typed `None`, which the ported helper drops as
+    // "omit") clear the one-shot fields; `enabled` turns the trigger back on.
+    let updated = call_graph_action_value(
+        &handler,
+        "graph_edit",
+        "update",
+        serde_json::json!({
+            "graph_id": graph_id.clone(),
+            "enabled": true,
+            "enable_at": serde_json::Value::Null,
+            "expires_at": serde_json::Value::Null,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!is_err(&updated), "{}", text(&updated));
+    let stored = db.get_graph(&graph_id).unwrap().unwrap();
+    assert!(stored.enabled);
+    assert!(stored.enable_at.is_none(), "update must clear enable_at");
+    assert!(stored.expires_at.is_none(), "update must clear expires_at");
 }
 
 #[tokio::test]
@@ -1060,6 +1192,9 @@ async fn graph_update_response_names_remaining_events_when_run_active() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await
@@ -1114,6 +1249,9 @@ async fn graph_update_response_names_remaining_events_when_run_active() {
             infra_node_id: None,
             allow_dirty_start: None,
             require_spec_type: None,
+            enabled: None,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await
@@ -1142,6 +1280,9 @@ async fn graph_update_response_has_no_hook_note_without_active_run() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await
@@ -1186,6 +1327,9 @@ async fn graph_update_response_has_no_hook_note_without_active_run() {
             infra_node_id: None,
             allow_dirty_start: None,
             require_spec_type: None,
+            enabled: None,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await
@@ -1211,6 +1355,9 @@ async fn graph_update_rejects_unknown_hook_placeholder_before_persisting() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await
@@ -1254,6 +1401,9 @@ async fn graph_update_rejects_unknown_hook_placeholder_before_persisting() {
             infra_node_id: None,
             allow_dirty_start: None,
             require_spec_type: None,
+            enabled: None,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await
@@ -1298,6 +1448,9 @@ async fn graph_update_rejects_unknown_hook_placeholder_before_persisting() {
             infra_node_id: None,
             allow_dirty_start: None,
             require_spec_type: None,
+            enabled: None,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await
@@ -1332,6 +1485,9 @@ async fn graph_create_rejects_empty_name_and_relative_workdir() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await
@@ -1351,6 +1507,9 @@ async fn graph_create_rejects_empty_name_and_relative_workdir() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await
@@ -1392,7 +1551,7 @@ async fn graph_export_always_includes_platform_and_model() {
     .unwrap();
     assert!(!is_err(&exported), "{}", text(&exported));
     let doc: serde_json::Value = serde_json::from_str(&raw_text(&exported)).unwrap();
-    assert_eq!(doc["format_version"], 6);
+    assert_eq!(doc["format_version"], 7);
     let implementer = doc["nodes"]
         .as_array()
         .unwrap()
@@ -1426,6 +1585,9 @@ async fn graph_export_rejects_duplicate_node_names() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await

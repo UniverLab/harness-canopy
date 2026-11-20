@@ -326,6 +326,9 @@ fn find_stale_2x_name_hits_lists_a_stale_graph_prompt_and_a_stale_agent_prompt()
         active_run_queue_id: None,
         hooks,
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     })
     .unwrap();
     db.insert_graph_node(&GraphNode {
@@ -527,6 +530,9 @@ fn stale_name_report_groups_several_nodes_in_one_graph() {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     })
     .unwrap();
     for i in 0..3 {

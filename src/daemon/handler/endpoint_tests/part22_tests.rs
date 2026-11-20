@@ -38,6 +38,9 @@ fn blank_update(graph_id: &str) -> GraphUpdateParams {
         infra_node_id: None,
         allow_dirty_start: None,
         require_spec_type: None,
+        enabled: None,
+        enable_at: None,
+        expires_at: None,
     }
 }
 
@@ -59,6 +62,9 @@ async fn graph_create_prompt_without_trigger_is_rejected() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await
@@ -89,6 +95,9 @@ async fn graph_create_prompt_with_watch_trigger_is_rejected() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await
@@ -120,6 +129,9 @@ async fn graph_create_cron_prompt_round_trips_through_get() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await
@@ -161,6 +173,9 @@ async fn graph_update_prompt_on_manual_graph_is_rejected() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await
@@ -198,6 +213,9 @@ async fn graph_update_prompt_on_watch_graph_is_rejected() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await
@@ -236,6 +254,9 @@ async fn graph_update_cannot_switch_to_watch_while_prompt_set() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await
@@ -274,6 +295,9 @@ async fn graph_update_cannot_drop_cron_while_prompt_set() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await
@@ -348,6 +372,9 @@ async fn graph_import_leaves_trigger_prompt_unset() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await

@@ -1647,6 +1647,9 @@ mod tests {
             active_run_queue_id: None,
             hooks,
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }
     }
 

@@ -387,6 +387,9 @@ async fn graph_add_node_from_a_node_document_carries_the_overrides() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await
@@ -447,6 +450,9 @@ async fn graph_add_node_from_a_node_document_without_harness_is_refused() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await
@@ -499,6 +505,9 @@ async fn graph_add_ensemble_from_ensemble_proposers() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await
@@ -837,6 +846,9 @@ async fn node_install_as_installs_both_and_each_resolves_in_a_graph() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await

@@ -818,6 +818,9 @@ async fn ensemble_runs_end_to_end_through_a_queue_dispatch() {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     db.insert_graph(&lp).unwrap();
     let engine = GraphEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));

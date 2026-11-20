@@ -298,6 +298,9 @@ impl TaskTriggerHandler {
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
             require_spec_type: false,
+            enabled: document.enabled,
+            enable_at: document.enable_at,
+            expires_at: document.expires_at,
         };
 
         let missing_crews = match self.db.import_graph(&lp, &plan) {

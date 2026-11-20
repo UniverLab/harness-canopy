@@ -329,6 +329,9 @@ async fn e2big_resilience_path_elision_stdin_and_spawn_failure() {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let spec = GraphSpec {
         intent: None,
@@ -1249,11 +1252,14 @@ async fn fail_graph_from_stale_dispatch_never_touches_a_newer_dispatchs_runs() {
     engine
         .fail_graph(
             &graph_id,
-            Some(claim_a),
-            Some("spec"),
-            None,
-            "dispatch A's late failure",
-            &[],
+            crate::graph_engine::GraphFailure {
+                dispatch_started_at: Some(claim_a),
+                spec_name: Some("spec"),
+                spec_id: None,
+                summary: "dispatch A's late failure",
+                completed_specs: &[],
+                daemon_trigger: None,
+            },
         )
         .await
         .unwrap();
@@ -1314,11 +1320,14 @@ async fn fail_graph_from_current_dispatch_still_flips_status_and_sweeps() {
     engine
         .fail_graph(
             &graph_id,
-            Some(claim),
-            Some("spec"),
-            None,
-            "genuine failure",
-            &[],
+            crate::graph_engine::GraphFailure {
+                dispatch_started_at: Some(claim),
+                spec_name: Some("spec"),
+                spec_id: None,
+                summary: "genuine failure",
+                completed_specs: &[],
+                daemon_trigger: None,
+            },
         )
         .await
         .unwrap();

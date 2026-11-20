@@ -62,6 +62,9 @@ fn make_graph(
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     }
 }
 
@@ -206,6 +209,9 @@ fn seed_plain_edge_graph(db: &Database) {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     })
     .unwrap();
     db.insert_graph_spec(&GraphSpec {
@@ -306,6 +312,9 @@ fn seed_router_graph(db: &Database) {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     })
     .unwrap();
     db.insert_graph_spec(&GraphSpec {

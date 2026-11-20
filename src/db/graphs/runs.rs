@@ -1,6 +1,37 @@
 use super::*;
 
 impl Database {
+    /// Most recent run per graph: `(graph_id, started_at, ok)` where `ok`
+    /// reflects the newest node run's status. Derived from `graph_runs`.
+    /// Same-second node runs tie on `started_at` (second precision), so the
+    /// newest row wins by `iteration`, then `rowid` — the same tiebreak the
+    /// newest-run query below uses — instead of an arbitrary tied row.
+    pub fn list_graph_last_run_info(&self) -> Result<Vec<(String, DateTime<Utc>, bool)>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let mut stmt = conn.prepare(
+            "SELECT r.graph_id, r.started_at, r.status
+             FROM graph_runs r
+             WHERE r.rowid = (
+                 SELECT r2.rowid FROM graph_runs r2
+                 WHERE r2.graph_id = r.graph_id
+                 ORDER BY r2.started_at DESC, r2.iteration DESC, r2.rowid DESC
+                 LIMIT 1
+             )",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let graph_id: String = row.get(0)?;
+            let started_at = from_timestamp(row.get(1)?)?;
+            let status: String = row.get(2)?;
+            let ok = matches!(GraphRunStatus::from_str(&status), GraphRunStatus::Pass);
+            Ok((graph_id, started_at, ok))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
     /// Newest run of `graph_id` without its output JSON: the id, node, status
     /// and a `has_blocker` flag computed in SQL. TUI list paths that only need
     /// the tail of a graph's history use this instead of
@@ -744,5 +775,178 @@ impl Database {
             params![stdout_tail, stderr_tail, run_id],
         )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod last_run_info_tests {
+    use super::*;
+    use crate::domain::graphs::{
+        Graph, GraphNode, GraphNodeKind, GraphNodeRun, GraphRunStatus, GraphSpec, GraphSpecStatus,
+        GraphStatus,
+    };
+    use chrono::{Duration, Utc};
+    use tempfile::tempdir;
+
+    fn graph(id: &str) -> Graph {
+        Graph {
+            trigger_prompt: None,
+            id: id.to_string(),
+            name: id.to_string(),
+            description: None,
+            workdir: "/tmp".to_string(),
+            status: GraphStatus::Draft,
+            trigger: None,
+            created_at: Utc::now(),
+            started_at: None,
+            completed_at: None,
+            autorun_at: None,
+            auto_continue_at: None,
+            auto_continue_action: None,
+            active_run_queue_id: None,
+            hooks: std::collections::BTreeMap::new(),
+            archived: false,
+            paused_by_reconciliation: false,
+            infra_node_id: None,
+            allow_dirty_start: false,
+            require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
+        }
+    }
+
+    fn seed_spec_and_node(db: &Database) {
+        db.insert_graph_spec(&GraphSpec {
+            intent: None,
+            id: "s".to_string(),
+            graph_id: Some("g".to_string()),
+            name: "s".to_string(),
+            description: None,
+            position: 0,
+            parallelizable: false,
+            status: GraphSpecStatus::Pending,
+            started_at: None,
+            completed_at: None,
+            spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
+            spec_committed_head: None,
+            workdir: None,
+            completed_via: None,
+            completed_via_reason: None,
+            completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
+            review_state: crate::domain::graphs::SpecReviewState::Approved,
+            review_tier: None,
+            review_findings: None,
+            created_by_session: None,
+        })
+        .unwrap();
+        db.insert_graph_node(&GraphNode {
+            id: "n".to_string(),
+            spec_id: Some("s".to_string()),
+            graph_id: None,
+            name: "n".to_string(),
+            kind: GraphNodeKind::Agent,
+            config: serde_json::json!({}),
+            position: 0,
+            created_at: Utc::now(),
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn list_graph_last_run_info_uses_newest_run_any_source() {
+        let dir = tempdir().unwrap();
+        let db = Database::new(&dir.path().join("t.db")).unwrap();
+        db.insert_graph(&graph("g")).unwrap();
+        seed_spec_and_node(&db);
+        let t1 = Utc::now();
+        let t2 = t1 + Duration::seconds(5);
+        db.insert_graph_run(&GraphNodeRun {
+            id: "r1".to_string(),
+            graph_id: "g".to_string(),
+            spec_id: "s".to_string(),
+            node_id: "n".to_string(),
+            status: GraphRunStatus::Fail,
+            input: None,
+            output: None,
+            started_at: t1,
+            completed_at: Some(t1),
+            iteration: 1,
+            pid: None,
+            boot_id: None,
+            session_id: None,
+            executed_platform: None,
+            executed_model: None,
+        })
+        .unwrap();
+        db.insert_graph_run(&GraphNodeRun {
+            id: "r2".to_string(),
+            graph_id: "g".to_string(),
+            spec_id: "s".to_string(),
+            node_id: "n".to_string(),
+            status: GraphRunStatus::Pass,
+            input: None,
+            output: None,
+            started_at: t2,
+            completed_at: Some(t2),
+            iteration: 2,
+            pid: None,
+            boot_id: None,
+            session_id: None,
+            executed_platform: None,
+            executed_model: None,
+        })
+        .unwrap();
+
+        let info = db.list_graph_last_run_info().unwrap();
+        assert_eq!(info.len(), 1);
+        assert_eq!(info[0].0, "g");
+        assert_eq!(info[0].1.timestamp(), t2.timestamp());
+        assert!(info[0].2, "newest run should determine last_run_ok");
+    }
+
+    #[test]
+    fn list_graph_last_run_info_breaks_same_second_ties_by_iteration() {
+        // Node runs persist second-precision timestamps, so two nodes in one
+        // dispatch tie: the higher iteration (later node) must win, not an
+        // arbitrary tied row.
+        let dir = tempdir().unwrap();
+        let db = Database::new(&dir.path().join("t.db")).unwrap();
+        db.insert_graph(&graph("g")).unwrap();
+        seed_spec_and_node(&db);
+        let at = Utc::now();
+        for (id, iteration, status) in [
+            ("r1", 1, GraphRunStatus::Fail),
+            ("r2", 2, GraphRunStatus::Pass),
+        ] {
+            db.insert_graph_run(&GraphNodeRun {
+                id: id.to_string(),
+                graph_id: "g".to_string(),
+                spec_id: "s".to_string(),
+                node_id: "n".to_string(),
+                status,
+                input: None,
+                output: None,
+                started_at: at,
+                completed_at: Some(at),
+                iteration,
+                pid: None,
+                boot_id: None,
+                session_id: None,
+                executed_platform: None,
+                executed_model: None,
+            })
+            .unwrap();
+        }
+
+        let info = db.list_graph_last_run_info().unwrap();
+        assert_eq!(info.len(), 1);
+        assert!(info[0].2, "tied newest run (higher iteration) is a pass");
     }
 }

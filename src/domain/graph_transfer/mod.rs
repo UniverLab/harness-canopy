@@ -51,11 +51,15 @@ pub use validation::*;
 /// The latest `format_version` this build writes. `graph_edit` accepts `1`
 /// (members with no binding), `2` (bindings included), `3` (graph/error
 /// vocabulary, `break` still read as `error` on import), `4` (every ensemble
-/// entry source), `5`, and `6` (current: ensemble `mutex` plus the bundled
-/// `prompt_presets` every custom preset the document's agent nodes
-/// reference travels with). An unrecognized or missing version is a
-/// refusal, never a best-effort parse (decision 6).
-pub const GRAPH_EXPORT_FORMAT_VERSION: i64 = 6;
+/// entry source), `5`, `6` (ensemble `mutex` plus bundled `prompt_presets`),
+/// and `7` (current: graph trigger lifecycle fields `enabled`, `enable_at`,
+/// `expires_at`). An unrecognized or missing version is a refusal, never a
+/// best-effort parse (decision 6).
+pub const GRAPH_EXPORT_FORMAT_VERSION: i64 = 7;
+
+fn default_export_enabled() -> bool {
+    true
+}
 
 // Ensemble member count bounds live in `member_bounds` (the single shared
 // definition both this domain layer and the daemon's authoring-time
@@ -91,6 +95,16 @@ pub struct GraphExportDocument {
     /// that name exists locally (see [`presets`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prompt_presets: Vec<GraphExportPromptPreset>,
+    /// Whether the graph's automatic trigger is active. Defaults to true for
+    /// documents written before v7.
+    #[serde(default = "default_export_enabled")]
+    pub enabled: bool,
+    /// One-shot enable schedule for a disabled trigger graph.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Trigger expiry: after this time cron/watch triggers must not fire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// One bundled custom prompt preset: the name an agent node's

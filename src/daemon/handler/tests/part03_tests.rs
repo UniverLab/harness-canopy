@@ -240,6 +240,9 @@ fn graph_copy_node_auto_wires_error_edge_when_graph_has_infra_node() {
         auto_continue_action: None,
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     })
     .unwrap();
     db.insert_graph_node(&u10_agent(

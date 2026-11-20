@@ -48,6 +48,9 @@ pub(crate) fn graph_fixture() -> Result<(TempDir, Arc<Database>, GraphEngine, St
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let spec = crate::domain::graphs::GraphSpec {
         intent: None,
@@ -253,6 +256,9 @@ fn graph_fixture_with_mock() -> Result<MockGraphFixture> {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let spec = crate::domain::graphs::GraphSpec {
         intent: None,
@@ -917,6 +923,9 @@ fn bare_graph_fixture() -> Result<(TempDir, Arc<Database>, GraphEngine, String)>
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     db.insert_graph(&lp)?;
     Ok((

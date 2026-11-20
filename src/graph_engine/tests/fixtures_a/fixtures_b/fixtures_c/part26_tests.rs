@@ -33,6 +33,9 @@ fn tick_graph(db: &Database, workdir: &str, prompt: &str) -> String {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     })
     .unwrap();
     graph_id
@@ -585,4 +588,50 @@ async fn tick_check_with_fail_edge_to_failing_node_still_fails() {
 
     let lp = db.get_graph(&graph_id).unwrap().unwrap();
     assert_eq!(lp.status, GraphStatus::Failed);
+}
+
+/// Manual run of a disabled trigger graph still works and never appends to the log.
+#[tokio::test]
+async fn manual_run_of_disabled_trigger_graph_works_without_log_append() {
+    let (dir, db, engine, _seed_graph, _seed_spec) = graph_fixture().unwrap();
+    let workdir = dir.path().to_string_lossy().to_string();
+    let graph_id = tick_graph(&db, &workdir, TICK_PROMPT);
+    tick_check_node(&db, &graph_id, "exit 0", 1);
+    db.update_graph_lifecycle(&graph_id, Some(false), None, None)
+        .unwrap();
+
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let prev_home = std::env::var_os("HOME");
+    std::env::set_var("HOME", &home);
+
+    engine
+        .run_graph(
+            graph_id.clone(),
+            None,
+            None,
+            Some(TICK_PROMPT.to_string()),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let lp = db.get_graph(&graph_id).unwrap().unwrap();
+    assert_eq!(
+        lp.status,
+        GraphStatus::Completed,
+        "manual run must work when disabled"
+    );
+    let log_path = lp.log_path();
+    assert!(
+        !std::path::Path::new(&log_path).exists(),
+        "manual run/continue must never append to the per-graph log"
+    );
+
+    if let Some(prev) = prev_home {
+        std::env::set_var("HOME", prev);
+    } else {
+        std::env::remove_var("HOME");
+    }
 }

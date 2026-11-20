@@ -138,6 +138,9 @@ async fn graph_export_import_v2_round_trip_preserves_ensemble() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await
@@ -315,6 +318,9 @@ async fn graph_export_import_round_trip_preserves_all_ensemble_kinds() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await
@@ -621,6 +627,9 @@ async fn graph_export_import_round_trip_preserves_ensemble_commit_rights() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await
@@ -779,6 +788,9 @@ async fn graph_preflight_rejects_unknown_named_output_reference() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await
@@ -880,6 +892,9 @@ async fn graph_preflight_reports_graph_validation_errors() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await
@@ -965,6 +980,9 @@ async fn graph_preflight_reports_unknown_marker_in_check_command() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await
@@ -1033,6 +1051,9 @@ async fn graph_preflight_accepts_every_known_check_command_marker() {
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await
@@ -1453,6 +1474,9 @@ async fn graph_update_rejects_unknown_graph_and_requires_a_field() {
             infra_node_id: None,
             allow_dirty_start: None,
             require_spec_type: None,
+            enabled: None,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await
@@ -1476,6 +1500,9 @@ async fn graph_update_rejects_unknown_graph_and_requires_a_field() {
             infra_node_id: None,
             allow_dirty_start: None,
             require_spec_type: None,
+            enabled: None,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await

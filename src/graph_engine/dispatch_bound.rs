@@ -1,6 +1,47 @@
 //! Bound-spec advance loop, split from `dispatch.rs` (FR1/FR2 live read).
 use super::*;
 
+/// Action to take after handling a spec execution outcome.
+/// Used by `run_graph_dispatch` to reduce nesting and duplication.
+pub(crate) enum SpecOutcomeAction {
+    Continue,
+    Pause,
+}
+/// Immutable inputs shared by every dispatch helper.
+pub(crate) struct DispatchCtx<'a> {
+    pub(crate) lp: &'a Graph,
+    pub(crate) graph_id: &'a str,
+    pub(crate) workdir: &'a str,
+    pub(crate) is_resume: bool,
+    /// When set, the first spec this run executes starts at this node
+    /// instead of at Start.
+    pub(crate) directed: Option<&'a DirectedStart>,
+    pub(crate) claimed_at: chrono::DateTime<chrono::Utc>,
+    /// FR5: this run was started by a cron tick of a spec-less graph, so a
+    /// check-failure dead end with no agent run is an *idle* completion
+    /// rather than a failure. `false` for every other dispatch, including a
+    /// manual run of the same graph.
+    pub(crate) idle_run: bool,
+    /// FR5: agent/Fail-edge activity accumulated across every spec this
+    /// dispatch runs — the idle rule is run-scoped, not per-spec.
+    pub(crate) run_activity: RunActivity,
+    /// Daemon trigger source for run logging; `None` for manual run/continue.
+    pub(crate) daemon_trigger: Option<crate::graph_engine::graph_run_log::GraphRunTrigger>,
+}
+/// What a bound-spec loop learned beyond its flow: whether an idle tick
+/// terminal produced the completion (FR5) and whether any agent node ran.
+pub(crate) struct BoundLoopResult {
+    pub(crate) flow: DispatchFlow,
+    pub(crate) idle: bool,
+    pub(crate) agent_ran: bool,
+}
+/// Whether a dispatch helper wants the main loop to keep going or stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DispatchFlow {
+    Continue,
+    Stop,
+}
+
 impl GraphEngine {
     /// FR1/FR2: run the graph's bound specs to completion, deciding the next
     /// one from a **live** read of the graph at every advance — never from a
@@ -51,14 +92,7 @@ impl GraphEngine {
                 _ => {}
             }
             let action = self
-                .handle_spec_outcome(
-                    outcome,
-                    &spec,
-                    ctx.lp,
-                    ctx.graph_id,
-                    ctx.claimed_at,
-                    completed_specs,
-                )
+                .handle_spec_outcome(outcome, &spec, ctx, completed_specs)
                 .await?;
             match action {
                 SpecOutcomeAction::Continue => continue,

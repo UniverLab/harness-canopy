@@ -36,6 +36,9 @@ fn doc_with_agent_preset(preset: &str) -> GraphExportDocument {
         ensembles: vec![],
         infra_node: None,
         hooks: Default::default(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     }
 }
 
@@ -176,6 +179,9 @@ fn nodes_without_a_preset_are_not_checked() {
         ensembles: vec![],
         infra_node: None,
         hooks: Default::default(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
 
     build_import_plan_with_prompts(&doc, "g", dir.path()).expect("no preset referenced");

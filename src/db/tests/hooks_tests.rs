@@ -47,6 +47,9 @@ fn graph_with_hooks(id: &str, hooks: BTreeMap<GraphHookEvent, Vec<GraphCompletio
         auto_continue_action: None,
         active_run_queue_id: None,
         hooks,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     }
 }
 

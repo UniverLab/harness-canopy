@@ -135,6 +135,9 @@ pub fn build_export_document_with_pending_and_prompts(
         infra_node,
         hooks: lp.hooks.clone(),
         prompt_presets,
+        enabled: lp.enabled,
+        enable_at: lp.enable_at,
+        expires_at: lp.expires_at,
     })
 }
 
@@ -459,7 +462,7 @@ pub(super) fn edge_sort_key(edge: &GraphExportEdge) -> String {
 /// (decision 6).
 pub fn parse_export_document_value(value: &Value) -> Result<GraphExportDocument, String> {
     match value.get("format_version").and_then(Value::as_i64) {
-        Some(version) if (1..=6).contains(&version) => {}
+        Some(version) if (1..=GRAPH_EXPORT_FORMAT_VERSION).contains(&version) => {}
         Some(other) => {
             return Err(format!(
                 "Graph export document has format_version {other}, but this build only supports 1 through {GRAPH_EXPORT_FORMAT_VERSION}."

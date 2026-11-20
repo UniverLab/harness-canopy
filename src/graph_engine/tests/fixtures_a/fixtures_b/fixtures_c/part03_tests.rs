@@ -1121,6 +1121,9 @@ fn render_agent_prompt_includes_reporting_contract() {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let spec = GraphSpec {
         intent: None,
@@ -1208,6 +1211,9 @@ fn render_agent_prompt_places_spec_notes_before_reporting() {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let spec = GraphSpec {
         intent: None,
@@ -1301,6 +1307,9 @@ fn render_agent_prompt_adds_continuation_notice_only_when_spec_interrupted() {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let mut spec = GraphSpec {
         intent: None,
@@ -1494,6 +1503,9 @@ fn render_agent_prompt_elides_huge_previous_feedback() {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let spec = GraphSpec {
         intent: None,

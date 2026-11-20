@@ -597,6 +597,9 @@ fn render_agent_prompt_refuses_template_with_unbindable_placeholder() {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let spec = GraphSpec {
         intent: None,
@@ -689,6 +692,9 @@ fn render_agent_prompt_spawns_with_an_escaped_unknown_marker() {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let spec = GraphSpec {
         intent: None,
@@ -782,6 +788,9 @@ fn render_agent_prompt_escape_wins_over_a_real_binding() {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let spec = GraphSpec {
         intent: None,
@@ -883,6 +892,9 @@ fn escaped_output_marker_stays_literal_while_unescaped_still_substitutes() {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let spec = GraphSpec {
         intent: None,
@@ -1019,6 +1031,9 @@ fn render_agent_prompt_substitutes_named_output_marker() {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let spec = GraphSpec {
         intent: None,
@@ -1114,6 +1129,9 @@ fn render_agent_prompt_accepts_output_marker_without_refusing() {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let spec = GraphSpec {
         intent: None,
@@ -1199,6 +1217,9 @@ fn previous_feedback_still_works_without_named_outputs() {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let spec = GraphSpec {
         intent: None,

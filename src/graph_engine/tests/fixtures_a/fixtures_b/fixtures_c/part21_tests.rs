@@ -96,7 +96,17 @@ async fn fail_graph_keeps_sandbox_with_uncommitted_work() {
     );
 
     engine
-        .fail_graph(&graph_id, None, Some("Spec"), None, "hook refused", &[])
+        .fail_graph(
+            &graph_id,
+            crate::graph_engine::GraphFailure {
+                dispatch_started_at: None,
+                spec_name: Some("Spec"),
+                spec_id: None,
+                summary: "hook refused",
+                completed_specs: &[],
+                daemon_trigger: None,
+            },
+        )
         .await
         .expect("fail graph");
 
@@ -484,6 +494,7 @@ async fn a_pending_bound_spec_is_never_reported_as_a_completed_graph() {
         claimed_at,
         idle_run: false,
         run_activity: RunActivity::default(),
+        daemon_trigger: None,
     };
     engine
         .finish_dispatch(&ctx, None, None, &[], false, false)
@@ -566,6 +577,7 @@ async fn the_completion_message_never_reports_fewer_done_than_total() {
         claimed_at: chrono::Utc::now(),
         idle_run: false,
         run_activity: RunActivity::default(),
+        daemon_trigger: None,
     };
     engine
         .finish_dispatch(&ctx, None, None, &[], false, false)

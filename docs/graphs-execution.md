@@ -99,6 +99,10 @@ to the environment's run (the reply says `Corrected ...`); any other
 unknown id fails naming the run id the environment carries, and an
 explicit id naming a different, still-running run is honored as before.
 
+## Trigger lifecycle and run logs
+
+A cron/watch trigger graph carries `enabled` (default `true`), one-shot `enable_at` (the scheduler enables the graph and clears the field when due) and `expires_at` (expired trigger graphs are disabled and never fire; the watcher loader and cron scheduler skip disabled/expired graphs). Manual `graph_control run`/`continue` ignore `enabled`/expiry. Every daemon-initiated run (`cron`, `watch`, `autorun`, `auto-continue`) appends one block at settle to `~/.canopy/logs/graph-<graph id>.log` — header `--- [trigger <kind>] <graph-id> <RFC3339> ---`, one `<node name>: <status>` line per node run, blank line — created/appended under the process umask and rotated at 5 MB to one `.log.old`; human-initiated runs never append. `graph get`/`list` return the derived `log_path` and the newest run's `last_run_at`/`last_run_ok` (any launch source).
+
 ## Infra-retry budget
 
 An agent attempt that never files a verdict (no `graph_complete_node`,
@@ -190,8 +194,7 @@ If the daemon stops while a node is running — a graceful shutdown or a
 crash — the killed run is finalized as interrupted and routes no edge
 (in particular, never its fail edge). On the next start the graph is
 reconciled to `Paused` with the spec `Interrupted`, and
-`graph_control` `continue` with `mode: retry_current_node` re-runs the interrupted node itself with
-the same input it had (the same command for a check node, the same
+`graph_control` `continue` with `mode: retry_current_node` re-runs the interrupted node itself with the same input it had (the same command for a check node, the same
 `previous_feedback` for an ensemble member) — not whichever node an
 edge would have led to.
 
@@ -220,11 +223,7 @@ left on its own, `"terminated"` when canopy ended it — readable via
 
 A spec interrupted by a no-verdict ensemble block (see
 [No-verdict blocks](graphs-ensembles.md#no-verdict-blocks)) is resumed the same way:
-`graph_control` `continue` with `mode: retry_current_node` re-enters the blocked ensemble with its
-current member list, without re-running nodes or specs that already
-passed, and `graph_control` `continue` with `mode: skip_next_spec` marks that blocked spec
-`skipped` and moves on to the next one. `graph_control` `reset` still restarts
-the blocked spec from its entry node.
+`graph_control` `continue` with `mode: retry_current_node` re-enters the blocked ensemble with its current member list, without re-running nodes or specs that already passed, and `graph_control` `continue` with `mode: skip_next_spec` marks that blocked spec `skipped` and moves on to the next one. `graph_control` `reset` still restarts the blocked spec from its entry node.
 
 When the work up to some node is already done and good — after a crash,
 a rewired ensemble, or a hand fix — a **directed run** starts a spec at

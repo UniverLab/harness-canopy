@@ -18,6 +18,9 @@ async fn part13_graph(handler: &TaskTriggerHandler, workdir: &str, name: &str) -
             infra_node_id: None,
             allow_dirty_start: false,
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }),
     )
     .await

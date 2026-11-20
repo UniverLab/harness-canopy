@@ -163,6 +163,9 @@ fn render_agent_prompt_preserves_tagged_spec_body_verbatim() {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let tagged_body = "<spec>\n  <objective>Ship it.</objective>\n  <functional_requirements>Does thing.</functional_requirements>\n  <non_functional_requirements>Fast.</non_functional_requirements>\n  <constraints>None.</constraints>\n  <guidelines>Style.</guidelines>\n  <in_scope>This.</in_scope>\n  <out_of_scope>Nothing.</out_of_scope>\n</spec>";
     let spec = GraphSpec {
@@ -465,6 +468,9 @@ async fn graph_hook_depth_cap_refuses_second_launch() {
         active_run_queue_id: None,
         hooks: b_hooks,
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     db.insert_graph(&lp_b).unwrap();
     // Add a Check node so graph B can actually run specs.
@@ -795,6 +801,9 @@ fn graph_hook_spec_is_queryable() {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     db.insert_graph(&lp).unwrap();
     let spec = crate::domain::graphs::GraphSpec {
@@ -879,6 +888,9 @@ async fn graph_hook_runs_on_completion() {
         active_run_queue_id: None,
         hooks,
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     db.insert_graph(&lp).unwrap();
 

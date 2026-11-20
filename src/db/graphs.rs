@@ -173,6 +173,15 @@ fn map_graph_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Graph> {
         allow_dirty_start: row.get(19)?,
         require_spec_type: row.get(20)?,
         trigger_prompt: row.get(21)?,
+        enabled: row.get::<_, i64>(22)? != 0,
+        enable_at: row
+            .get::<_, Option<i64>>(23)?
+            .map(from_timestamp)
+            .transpose()?,
+        expires_at: row
+            .get::<_, Option<i64>>(24)?
+            .map(from_timestamp)
+            .transpose()?,
     })
 }
 
@@ -496,6 +505,9 @@ mod tests {
             active_run_queue_id: None,
             hooks: BTreeMap::new(),
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }
     }
 
@@ -1112,6 +1124,9 @@ mod tests {
             active_run_queue_id: None,
             hooks: BTreeMap::new(),
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         })
         .unwrap();
         db.insert_graph_spec(&crate::domain::graphs::GraphSpec {

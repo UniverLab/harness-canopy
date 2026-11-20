@@ -375,6 +375,9 @@ fn create_target_graph(db: &Database, id: &str, name: &str) -> Result<String> {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     db.insert_graph(&lp)?;
     // Add a Check node so the graph can actually run specs.
@@ -444,6 +447,9 @@ fn create_target_graph_no_specs(db: &Database, id: &str, name: &str) -> Result<S
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     db.insert_graph(&lp)?;
     let node = crate::domain::graphs::GraphNode {
@@ -509,6 +515,9 @@ fn setup_graph_hook_source(
         active_run_queue_id: None,
         hooks,
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     db.insert_graph(&lp)?;
     // Add a graph node so the graph can actually run specs.
@@ -807,6 +816,9 @@ fn decision_graph() -> crate::domain::graphs::Graph {
         infra_node_id: None,
         allow_dirty_start: false,
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     }
 }
 

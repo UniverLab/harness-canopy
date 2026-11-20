@@ -755,6 +755,9 @@ mod tests {
             paused_by_reconciliation: false,
             allow_dirty_start: false,
             infra_node_id: None,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }
     }
 

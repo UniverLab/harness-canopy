@@ -8,7 +8,7 @@ use crate::domain::graphs::validate_value_router_config;
 /// node — the same text a model router receives as its input. All values are
 /// trimmed; an entry router (no previous output) reads the empty string.
 ///
-/// The source set is [`crate::domain::graphs::VALUE_ROUTER_SOURCES`]; adding
+/// The source set is [`crate::domain::graphs::router::VALUE_ROUTER_SOURCES`]; adding
 /// one there without a read here is an error rather than a silent empty
 /// value (which would route on `""` instead of the new source).
 pub(crate) fn read_value_source(

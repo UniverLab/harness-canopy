@@ -658,6 +658,9 @@ mod tests {
             allow_dirty_start: false,
             infra_node_id: None,
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }
     }
 

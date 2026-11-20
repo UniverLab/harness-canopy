@@ -38,6 +38,9 @@ fn doc_with_preset(preset: &str, version: i64) -> GraphExportDocument {
         infra_node: None,
         hooks: Default::default(),
         prompt_presets: Vec::new(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     }
 }
 

@@ -1,8 +1,17 @@
 use super::*;
 
 impl GraphEngine {
-    pub fn start_background(self: Arc<Self>, graph_id: String) {
-        Arc::clone(&self).start_background_run(graph_id, None, None, None, None, None);
+    /// Daemon-initiated background start with an explicit trigger source for logging.
+    pub fn start_background_with_trigger(
+        self: Arc<Self>,
+        graph_id: String,
+        trigger: Option<GraphRunTrigger>,
+    ) {
+        let mode = match trigger {
+            Some(trigger) => DispatchMode::fresh().with_daemon_trigger(trigger),
+            None => DispatchMode::fresh(),
+        };
+        self.spawn_dispatch(graph_id, None, None, None, None, mode);
     }
 
     /// Same as [`Self::start_background`], but optionally drives the graph's
@@ -54,6 +63,7 @@ impl GraphEngine {
         sandbox: Option<Sandbox>,
         mode: DispatchMode,
     ) {
+        let trigger = mode.daemon_trigger;
         tokio::spawn(async move {
             if let Err(error) = self
                 .run_graph_mode(
@@ -74,7 +84,17 @@ impl GraphEngine {
                 } else {
                     tracing::error!("Graph '{}' failed to run: {error:#}", graph_id);
                     let _ = self
-                        .fail_graph(&graph_id, None, None, None, &error.to_string(), &[])
+                        .fail_graph(
+                            &graph_id,
+                            GraphFailure {
+                                dispatch_started_at: None,
+                                spec_name: None,
+                                spec_id: None,
+                                summary: &error.to_string(),
+                                completed_specs: &[],
+                                daemon_trigger: trigger,
+                            },
+                        )
                         .await;
                 }
             }
@@ -316,6 +336,7 @@ impl GraphEngine {
         sandbox: Option<Sandbox>,
         mode: DispatchMode,
     ) -> Result<()> {
+        let trigger = mode.daemon_trigger;
         let engine = self.clone();
         let dispatch_graph_id = graph_id.clone();
         let result = run_guarded(async move {
@@ -335,6 +356,15 @@ impl GraphEngine {
         // pause, block, etc.). This must happen here, not in run_graph_dispatch,
         // because that function has multiple early returns.
         let _ = self.db.clear_graph_hook_launched(&graph_id);
+        if let (Some(trigger), Ok(())) = (trigger, &result) {
+            if let Ok(Some(graph)) = self.db.get_graph(&graph_id) {
+                if let Some(started_at) = graph.started_at {
+                    let _ = crate::graph_engine::graph_run_log::append_graph_run_block(
+                        &self.db, &graph_id, trigger, started_at,
+                    );
+                }
+            }
+        }
         result
     }
 
@@ -377,6 +407,17 @@ impl GraphEngine {
     }
 
     pub fn resume_background(self: Arc<Self>, graph_id: String, directed: Option<DirectedStart>) {
+        self.resume_background_with_trigger(graph_id, directed, None);
+    }
+
+    /// Resume a graph in the background, optionally marking the dispatch as a
+    /// daemon-initiated trigger for run logging.
+    pub fn resume_background_with_trigger(
+        self: Arc<Self>,
+        graph_id: String,
+        directed: Option<DirectedStart>,
+        trigger: Option<GraphRunTrigger>,
+    ) {
         let queue_id = self
             .db
             .get_graph(&graph_id)
@@ -394,16 +435,29 @@ impl GraphEngine {
                 tokio::spawn(async move {
                     tracing::error!("Graph '{graph_id}' resume refused: {msg}");
                     let _ = self
-                        .fail_graph(&graph_id, None, None, None, &msg, &[])
+                        .fail_graph(
+                            &graph_id,
+                            GraphFailure {
+                                dispatch_started_at: None,
+                                spec_name: None,
+                                spec_id: None,
+                                summary: &msg,
+                                completed_specs: &[],
+                                daemon_trigger: trigger,
+                            },
+                        )
                         .await;
                 });
                 return;
             }
         };
-        let mode = match directed {
+        let mut mode = match directed {
             Some(d) => DispatchMode::resume_from(d),
             None => DispatchMode::resume(),
         };
+        if let Some(trigger) = trigger {
+            mode = mode.with_daemon_trigger(trigger);
+        }
         tokio::spawn(async move {
             let engine = Arc::clone(&self);
             let dispatch_graph_id = graph_id.clone();
@@ -421,7 +475,17 @@ impl GraphEngine {
                 } else {
                     tracing::error!("Graph '{}' failed to run: {error:#}", graph_id);
                     let _ = self
-                        .fail_graph(&graph_id, None, None, None, &error.to_string(), &[])
+                        .fail_graph(
+                            &graph_id,
+                            GraphFailure {
+                                dispatch_started_at: None,
+                                spec_name: None,
+                                spec_id: None,
+                                summary: &error.to_string(),
+                                completed_specs: &[],
+                                daemon_trigger: trigger,
+                            },
+                        )
                         .await;
                 }
             }
@@ -676,7 +740,7 @@ mod tests {
 
         let mut engine = engine;
         engine.panic_at_dispatch = Some(|| panic!("boom-x"));
-        Arc::new(engine).start_background(graph_id.clone());
+        Arc::new(engine).start_background_with_trigger(graph_id.clone(), None);
         wait_for_status(&db, &graph_id, GraphStatus::Failed).await;
 
         let events = db

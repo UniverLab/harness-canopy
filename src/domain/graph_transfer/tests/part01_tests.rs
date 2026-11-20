@@ -163,7 +163,9 @@ fn format_version_first_key_in_serialized_json() {
     let doc = build_export_document(&lp, &nodes, &edges, &[]).unwrap();
     let raw = serde_json::to_string(&doc).unwrap();
     // struct field order drives serde_json's key order.
-    assert!(raw.starts_with("{\"format_version\":6"));
+    assert!(raw.starts_with(&format!(
+        "{{\"format_version\":{GRAPH_EXPORT_FORMAT_VERSION}"
+    )));
 }
 
 #[test]
@@ -185,8 +187,8 @@ fn import_rejects_unsupported_format_version() {
 }
 
 #[test]
-fn import_accepts_format_versions_1_through_6() {
-    for version in [1, 2, 3, 4, 5, 6] {
+fn import_accepts_format_versions_1_through_7() {
+    for version in [1, 2, 3, 4, 5, 6, 7] {
         let value = serde_json::json!({
             "format_version": version, "name": "x", "nodes": [], "edges": [], "ensembles": []
         });
@@ -251,7 +253,7 @@ fn import_v2_break_condition_is_error() {
         ..document
     })
     .unwrap();
-    assert_eq!(exported["format_version"], 6);
+    assert_eq!(exported["format_version"], GRAPH_EXPORT_FORMAT_VERSION);
     assert_eq!(exported["edges"][0]["condition"], "error");
 }
 
@@ -277,6 +279,9 @@ fn import_plan_rejects_edge_naming_nonexistent_node() {
         infra_node: None,
 
         hooks: Default::default(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let err = build_import_plan(&doc, "new-graph").unwrap_err();
     assert!(err.contains("ghost"));
@@ -300,6 +305,9 @@ fn import_plan_rejects_join_kind_node() {
         infra_node: None,
 
         hooks: Default::default(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let err = build_import_plan(&doc, "new-graph").unwrap_err();
     assert!(err.contains("join"));
@@ -364,6 +372,9 @@ fn agent_nodes_missing_platform_reports_unbound_v1_nodes() {
         infra_node: None,
 
         hooks: Default::default(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let plan = build_import_plan(&doc, "graph-2").unwrap();
     let missing = agent_nodes_missing_platform(&plan);
@@ -761,6 +772,9 @@ fn import_refuses_duplicate_extra_entry_source() {
         infra_node: None,
 
         hooks: Default::default(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
 
     let error = build_import_plan(&document, "graph-1").unwrap_err();
@@ -832,6 +846,9 @@ fn import_refuses_extra_entry_source_naming_unknown_node() {
         infra_node: None,
 
         hooks: Default::default(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
 
     let error = build_import_plan(&document, "graph-1").unwrap_err();
@@ -1031,6 +1048,9 @@ fn import_rejects_unknown_ensemble_target() {
         infra_node: None,
 
         hooks: Default::default(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let error = build_import_plan(&document, "graph-1").unwrap_err();
     assert!(error.contains("unknown ensemble") && error.contains("Ghost"));
@@ -1237,6 +1257,9 @@ fn import_v2_with_unconfigured_platform_succeeds() {
         infra_node: None,
 
         hooks: Default::default(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let plan =
         build_import_plan(&doc, "new-graph").expect("unconfigured platform must import, not error");
@@ -1418,6 +1441,9 @@ fn import_plan_rejects_ensemble_with_too_few_members() {
         infra_node: None,
 
         hooks: Default::default(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let err = build_import_plan(&doc, "new-graph").unwrap_err();
     assert!(err.contains("2-8 members"));
@@ -1440,4 +1466,49 @@ fn import_parallel_rejects_9_members() {
     let err = build_import_plan(&doc, "g").unwrap_err();
     assert!(err.contains("2-8 members"), "{err}");
     assert!(err.contains("parallel"), "{err}");
+}
+
+#[test]
+fn export_import_round_trips_trigger_graph_lifecycle_fields() {
+    let (mut lp, nodes, edges) = simple_graph();
+    lp.enabled = false;
+    lp.enable_at = Some(
+        chrono::DateTime::parse_from_rfc3339("2026-11-20T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc),
+    );
+    lp.expires_at = Some(
+        chrono::DateTime::parse_from_rfc3339("2026-11-21T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc),
+    );
+
+    let doc = build_export_document(&lp, &nodes, &edges, &[]).unwrap();
+    assert_eq!(doc.format_version, GRAPH_EXPORT_FORMAT_VERSION);
+    assert!(!doc.enabled);
+    assert_eq!(doc.enable_at, lp.enable_at);
+    assert_eq!(doc.expires_at, lp.expires_at);
+
+    let raw = serde_json::to_value(&doc).unwrap();
+    assert_eq!(raw["enabled"], serde_json::json!(false));
+    assert_eq!(raw["enable_at"], serde_json::json!("2026-11-20T12:00:00Z"));
+    assert_eq!(raw["expires_at"], serde_json::json!("2026-11-21T12:00:00Z"));
+
+    let parsed = parse_export_document_value(&raw).unwrap();
+    assert!(!parsed.enabled);
+    assert_eq!(parsed.enable_at, lp.enable_at);
+    assert_eq!(parsed.expires_at, lp.expires_at);
+
+    // Older documents default enabled and omit schedule/expiry fields.
+    let legacy = serde_json::json!({
+        "format_version": 6,
+        "name": "legacy",
+        "nodes": [],
+        "edges": [],
+        "ensembles": []
+    });
+    let legacy = parse_export_document_value(&legacy).unwrap();
+    assert!(legacy.enabled);
+    assert!(legacy.enable_at.is_none());
+    assert!(legacy.expires_at.is_none());
 }

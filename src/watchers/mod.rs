@@ -104,7 +104,7 @@ async fn fire_watch_agent(
 }
 
 /// Launch a watch-triggered graph fire-and-forget, skipping graphs that are
-/// already running/paused so an event does not double-launch.
+/// disabled/expired or already running/paused so an event does not double-launch.
 fn fire_watch_graph(
     graph_id: String,
     db: &Database,
@@ -113,7 +113,7 @@ fn fire_watch_graph(
     evt_str: &str,
 ) {
     match db.get_graph(&graph_id) {
-        Ok(Some(lp)) if lp.is_fireable() => {
+        Ok(Some(lp)) if lp.enabled && !lp.is_expired() && lp.is_fireable() => {
             launch_watch_graph(graph_engine, graph_id, evt_str, file_path);
         }
         Ok(Some(_)) => trace_watch_graph_already_running(&graph_id),
@@ -135,7 +135,8 @@ fn launch_watch_graph(
         evt_str,
         file_path
     );
-    graph_engine.start_background(graph_id);
+    graph_engine
+        .start_background_with_trigger(graph_id, Some(crate::graph_engine::GraphRunTrigger::Watch));
 }
 
 /// Log that the watched graph exists but is not fireable right now.
@@ -207,6 +208,9 @@ impl WatcherEngine {
             graphs.len()
         );
         for lp in graphs {
+            if !lp.enabled || lp.is_expired() {
+                continue;
+            }
             if let Err(e) = self.start_graph_watcher(&lp).await {
                 tracing::error!("Failed to start watcher for graph '{}': {}", lp.id, e);
             }
@@ -263,6 +267,9 @@ impl WatcherEngine {
     /// Start watching for a watch-triggered graph. On a matching event the graph
     /// engine launches the graph (unless it is already running).
     pub async fn start_graph_watcher(&self, lp: &Graph) -> Result<()> {
+        if !lp.enabled || lp.is_expired() {
+            return Ok(());
+        }
         let Some(Trigger::Watch {
             path,
             events,
@@ -820,6 +827,9 @@ mod tests {
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         };
         db.insert_graph(&paused).unwrap();
 
@@ -831,5 +841,76 @@ mod tests {
             crate::domain::graphs::GraphStatus::Paused,
             "an unfireable graph must not be launched by a watch event"
         );
+    }
+
+    fn watch_graph(id: &str) -> Graph {
+        Graph {
+            trigger_prompt: None,
+            archived: false,
+            paused_by_reconciliation: false,
+            allow_dirty_start: false,
+            infra_node_id: None,
+            id: id.to_string(),
+            name: id.to_string(),
+            description: None,
+            workdir: "/tmp/watch-graph-test".to_string(),
+            status: crate::domain::graphs::GraphStatus::Draft,
+            trigger: None,
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            completed_at: None,
+            autorun_at: None,
+            auto_continue_at: None,
+            auto_continue_action: None,
+            active_run_queue_id: None,
+            hooks: std::collections::BTreeMap::new(),
+            require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
+        }
+    }
+
+    /// Disabled and expired watch graphs take the "event ignored" arm: no
+    /// launch, no status change, no runs — even though they are fireable.
+    #[tokio::test]
+    async fn fire_watch_graph_refuses_disabled_and_expired_graphs() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::new(&dir.path().join("test.db")).unwrap());
+        let graph_engine = Arc::new(GraphEngine::new(
+            Arc::clone(&db),
+            Arc::new(crate::application::notification_service::DefaultNotificationService),
+        ));
+        let mut disabled = watch_graph("disabled-watch-graph");
+        disabled.enabled = false;
+        db.insert_graph(&disabled).unwrap();
+        let mut expired = watch_graph("expired-watch-graph");
+        expired.expires_at = Some(chrono::Utc::now() - chrono::Duration::minutes(1));
+        db.insert_graph(&expired).unwrap();
+
+        fire_watch_graph(
+            disabled.id.clone(),
+            &db,
+            Arc::clone(&graph_engine),
+            "/tmp/a.md",
+            "modify",
+        );
+        fire_watch_graph(expired.id.clone(), &db, graph_engine, "/tmp/b.md", "modify");
+        // A removed guard would launch asynchronously: wait, then assert
+        // nothing started.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        for id in ["disabled-watch-graph", "expired-watch-graph"] {
+            let after = db.get_graph(id).unwrap().unwrap();
+            assert_eq!(
+                after.status,
+                crate::domain::graphs::GraphStatus::Draft,
+                "a disabled/expired graph must not be launched by a watch event"
+            );
+            assert!(
+                db.list_graph_runs_for_graph(id).unwrap().is_empty(),
+                "a disabled/expired graph must record no runs"
+            );
+        }
     }
 }

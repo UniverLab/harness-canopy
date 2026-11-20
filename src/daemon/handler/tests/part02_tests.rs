@@ -706,6 +706,9 @@ fn graph_get_response_includes_graph_level_graph_alongside_specs() {
         auto_continue_action: None,
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     })
     .unwrap();
     db.insert_graph_node(&GraphNode {
@@ -952,6 +955,9 @@ fn graph_get_response_surfaces_pinned_skills_on_a_node() {
         auto_continue_action: None,
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     })
     .unwrap();
     db.insert_graph_node(&GraphNode {
@@ -1008,6 +1014,9 @@ fn graph_get_response_exposes_autorun_at_so_agents_never_need_sql() {
         auto_continue_action: None,
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     })
     .unwrap();
 

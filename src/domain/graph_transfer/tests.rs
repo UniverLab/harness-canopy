@@ -24,6 +24,9 @@ fn make_graph(name: &str) -> Graph {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     }
 }
 
@@ -192,6 +195,9 @@ fn make_twelve_member_doc(kind: Option<&str>) -> GraphExportDocument {
         infra_node: None,
 
         hooks: Default::default(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     }
 }
 
@@ -252,6 +258,9 @@ fn import_kind_fixture(kind: Option<&str>) -> GraphImportPlan {
         infra_node: None,
 
         hooks: Default::default(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     build_import_plan(&doc, "new-graph").unwrap()
 }

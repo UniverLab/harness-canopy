@@ -124,7 +124,7 @@ async fn graph_engine_on_blocked_fires_once_with_node_name() {
 
     let _home = HomeGuard::set(fake_home.path());
     engine
-        .block_graph(&graph_id, None, "needs human ruling")
+        .block_graph(&graph_id, None, "needs human ruling", None)
         .await
         .unwrap();
     drop(_home);

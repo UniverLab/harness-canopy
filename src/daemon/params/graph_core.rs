@@ -50,6 +50,20 @@ pub struct GraphCreateParams {
     /// a type, named. Default false — never enforced until asked.
     #[serde(default)]
     pub require_spec_type: bool,
+    /// Whether this graph's automatic trigger is active. Defaults to true.
+    #[serde(default = "default_graph_create_enabled")]
+    pub enabled: bool,
+    /// One-shot enable schedule (RFC3339). When set while `enabled` is false,
+    /// the scheduler enables the graph and clears this field once due.
+    #[serde(default)]
+    pub enable_at: Option<String>,
+    /// Trigger expiry (RFC3339). After this time cron/watch triggers must not fire.
+    #[serde(default)]
+    pub expires_at: Option<String>,
+}
+
+fn default_graph_create_enabled() -> bool {
+    true
 }
 
 /// Config for a graph hook — an agent-node-style payload
@@ -185,6 +199,14 @@ pub struct GraphUpdateParams {
     /// (graph_edit attach_spec, queue add_spec) and graph_control run refuse a spec without
     /// a type, named. Default false — never enforced until asked.
     pub require_spec_type: Option<bool>,
+    /// Whether this graph's automatic trigger is active. Omit to leave unchanged.
+    pub enabled: Option<bool>,
+    /// One-shot enable schedule (RFC3339), or null to clear. Omit to leave unchanged.
+    #[serde(default, deserialize_with = "double_option")]
+    pub enable_at: Option<Option<String>>,
+    /// Trigger expiry (RFC3339), or null to clear. Omit to leave unchanged.
+    #[serde(default, deserialize_with = "double_option")]
+    pub expires_at: Option<Option<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]

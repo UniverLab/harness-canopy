@@ -26,6 +26,9 @@ fn insert_running_graph_with_node(db: &Database, id: &str, workdir: &str) {
         auto_continue_action: None,
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     })
     .unwrap();
     let mut spec = standalone_spec(&format!("{id}-spec"));
@@ -95,6 +98,9 @@ fn insert_bare_graph(db: &Database, id: &str, workdir: &str, status: GraphStatus
         auto_continue_action: None,
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     })
     .unwrap();
 }

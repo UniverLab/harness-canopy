@@ -40,6 +40,18 @@ pub(crate) fn normalize_trigger_prompt(
     }
     Ok(Some(prompt.to_string()))
 }
+
+pub(crate) fn parse_optional_rfc3339(
+    value: Option<&str>,
+    field: &str,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, String> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|dt| Some(dt.with_timezone(&chrono::Utc)))
+        .map_err(|_| format!("Invalid {field} timestamp '{value}': expected RFC3339."))
+}
 use crate::graph_engine::GRAPH_HOOK_BINDINGS;
 use rmcp::model::CallToolResult;
 use rmcp::tool_router;
@@ -73,6 +85,15 @@ impl TaskTriggerHandler {
                 Err(e) => return Ok(error_result(&e)),
             };
 
+        let enable_at = match parse_optional_rfc3339(params.enable_at.as_deref(), "enable_at") {
+            Ok(value) => value,
+            Err(e) => return Ok(error_result(&e)),
+        };
+        let expires_at = match parse_optional_rfc3339(params.expires_at.as_deref(), "expires_at") {
+            Ok(value) => value,
+            Err(e) => return Ok(error_result(&e)),
+        };
+
         let lp = Graph {
             trigger_prompt,
             archived: false,
@@ -82,6 +103,9 @@ impl TaskTriggerHandler {
                 .filter(|value| !value.trim().is_empty()),
             allow_dirty_start: params.allow_dirty_start,
             require_spec_type: params.require_spec_type,
+            enabled: params.enabled,
+            enable_at,
+            expires_at,
             id: uuid::Uuid::new_v4().to_string(),
             name: name.to_string(),
             description: params.description.filter(|value| !value.trim().is_empty()),
@@ -177,6 +201,9 @@ impl TaskTriggerHandler {
                 parsed.infra_node_id.is_some(),
                 params.allow_dirty_start.is_some(),
                 params.require_spec_type.is_some(),
+                parsed.enabled.is_some(),
+                parsed.enable_at.is_some(),
+                parsed.expires_at.is_some(),
             ],
             "graph_edit",
         ) {
@@ -214,14 +241,20 @@ impl TaskTriggerHandler {
 impl TaskTriggerHandler {
     /// Reconcile a graph's live trigger wiring after create/update: wake the
     /// cron scheduler for cron graphs, and start the file watcher for watch
-    /// graphs. Manual graphs need no wiring.
+    /// graphs when the trigger is currently active. Manual graphs need no wiring.
     pub(crate) async fn activate_graph_trigger(&self, lp: &Graph) {
         if lp.is_cron() {
             self.scheduler_notify.notify_one();
         } else if lp.is_watch() {
-            if let Err(e) = self.watcher_engine.start_graph_watcher(lp).await {
-                tracing::warn!("Graph '{}' saved but watcher failed to start: {}", lp.id, e);
+            if lp.enabled && !lp.is_expired() {
+                if let Err(e) = self.watcher_engine.start_graph_watcher(lp).await {
+                    tracing::warn!("Graph '{}' saved but watcher failed to start: {}", lp.id, e);
+                }
+            } else {
+                let _ = self.watcher_engine.stop_graph_watcher(&lp.id).await;
             }
+        } else {
+            self.scheduler_notify.notify_one();
         }
     }
 }

@@ -4,7 +4,8 @@
 use crate::daemon::handler::TaskTriggerHandler;
 use crate::daemon::handler_formatting::internal_error;
 use crate::daemon::handler_graphs::{
-    build_graph_completion_hook, build_graph_trigger, TRIGGER_PROMPT_NEEDS_CRON,
+    build_graph_completion_hook, build_graph_trigger, parse_optional_rfc3339,
+    TRIGGER_PROMPT_NEEDS_CRON,
 };
 use crate::daemon::handler_helpers::record_config_change_if_running;
 use crate::daemon::handler_validate::validate_absolute_dir;
@@ -110,6 +111,11 @@ pub(crate) struct ParsedGraphUpdate<'a> {
     pub completion_hook: Option<Option<GraphCompletionHook>>,
     pub hooks: Option<std::collections::BTreeMap<GraphHookEvent, Vec<GraphCompletionHook>>>,
     pub infra_node_id: Option<Option<String>>,
+    pub enabled: Option<bool>,
+    /// `None` = leave unchanged; `Some(None)` = clear; `Some(Some(t))` = set.
+    pub enable_at: Option<Option<chrono::DateTime<chrono::Utc>>>,
+    /// `None` = leave unchanged; `Some(None)` = clear; `Some(Some(t))` = set.
+    pub expires_at: Option<Option<chrono::DateTime<chrono::Utc>>>,
 }
 
 pub(crate) fn parse_graph_update_fields(
@@ -171,6 +177,23 @@ pub(crate) fn parse_graph_update_fields(
             }
         }
     };
+    let enabled = params.enabled;
+    let enable_at = match &params.enable_at {
+        None => None,
+        Some(None) => Some(None),
+        Some(Some(value)) => match parse_optional_rfc3339(Some(value.as_str()), "enable_at") {
+            Ok(parsed) => Some(parsed),
+            Err(e) => return Err(error_result(&e)),
+        },
+    };
+    let expires_at = match &params.expires_at {
+        None => None,
+        Some(None) => Some(None),
+        Some(Some(value)) => match parse_optional_rfc3339(Some(value.as_str()), "expires_at") {
+            Ok(parsed) => Some(parsed),
+            Err(e) => return Err(error_result(&e)),
+        },
+    };
     Ok(ParsedGraphUpdate {
         name,
         description,
@@ -180,6 +203,9 @@ pub(crate) fn parse_graph_update_fields(
         completion_hook,
         hooks: None,
         infra_node_id: None,
+        enabled,
+        enable_at,
+        expires_at,
     })
 }
 
@@ -326,10 +352,26 @@ impl TaskTriggerHandler {
         allow_dirty_start: Option<bool>,
         require_spec_type: Option<bool>,
     ) -> Result<(bool, bool), McpError> {
+        let lifecycle_changed =
+            update.enabled.is_some() || update.enable_at.is_some() || update.expires_at.is_some();
+        let trigger_changed = update.trigger.is_some();
         self.db
             .update_graph_details(graph_id, update.name, update.description, update.workdir)
             .map_err(internal_error)?;
-        if let Some(trigger) = update.trigger {
+        // Lifecycle first: the trigger reconciliation below re-reads the graph
+        // to decide whether its watcher may run, so `enabled`/`expires_at`
+        // from this same update must already be persisted.
+        if lifecycle_changed {
+            self.db
+                .update_graph_lifecycle(
+                    graph_id,
+                    update.enabled,
+                    update.enable_at,
+                    update.expires_at,
+                )
+                .map_err(internal_error)?;
+        }
+        if let Some(trigger) = update.trigger.as_ref() {
             self.db
                 .update_graph_trigger(graph_id, trigger.as_ref())
                 .map_err(internal_error)?;
@@ -380,6 +422,13 @@ impl TaskTriggerHandler {
             self.db
                 .update_graph_require_spec_type(graph_id, value)
                 .map_err(internal_error)?;
+        }
+        if lifecycle_changed && !trigger_changed {
+            let _ = self.watcher_engine.stop_graph_watcher(graph_id).await;
+            if let Ok(Some(lp)) = self.db.get_graph(graph_id) {
+                self.activate_graph_trigger(&lp).await;
+            }
+            self.scheduler_notify.notify_one();
         }
         Ok((hooks_changed, infra_node_changed))
     }

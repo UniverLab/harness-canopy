@@ -19,6 +19,7 @@ use crate::db::Database;
 use crate::executor::Executor;
 use crate::graph_engine::GraphEngine;
 use crate::sessions::SessionHub;
+use crate::watchers::WatcherEngine;
 
 use autorun::{launch_due_autorun, warn_blocked_operator_paused_autorun};
 use retry::run_with_retry;
@@ -53,6 +54,9 @@ pub struct CronScheduler {
     /// Optional graph engine — when set, the scheduler also evaluates graphs
     /// whose trigger is `Cron` and launches them alongside agents.
     graph_engine: Option<Arc<GraphEngine>>,
+    /// Optional watcher engine — when set, enable_at/expiry transitions for
+    /// watch-triggered graphs can start/stop their file watchers.
+    watcher_engine: Option<Arc<WatcherEngine>>,
     /// Optional session hub — when set, `start` also spawns the dedicated
     /// delivery task that delivers due scheduled sends to hub sessions, so
     /// a schedule fires with no TUI attached.
@@ -98,6 +102,7 @@ impl CronScheduler {
             cancel: CancellationToken::new(),
             notify: Arc::new(Notify::new()),
             graph_engine: None,
+            watcher_engine: None,
             hub: None,
             scheduled_prompt_notify: Arc::new(Notify::new()),
             last_fired: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -124,6 +129,13 @@ impl CronScheduler {
             graph_engine: Some(graph_engine),
             ..Self::new(db, executor)
         }
+    }
+
+    /// Attach a watcher engine so enable_at/expiry transitions for watch
+    /// graphs can reconcile active watchers.
+    pub fn with_watcher_engine(mut self, watcher_engine: Arc<WatcherEngine>) -> Self {
+        self.watcher_engine = Some(watcher_engine);
+        self
     }
 
     /// Attach the hub the dedicated delivery task delivers due scheduled
@@ -275,14 +287,14 @@ impl CronScheduler {
             return;
         };
         for lp in &graphs {
-            if !lp.is_fireable() {
+            if !lp.enabled || lp.is_expired() || !lp.is_fireable() {
                 continue;
             }
             fold_earliest(earliest, lp.schedule_expr(), now_local);
         }
     }
 
-    /// Fold every pending one-shot schedule into `earliest`: agent
+    /// Fold every pending one-shot schedule into `earliest`: agent/graph
     /// `enable_at`, then graph `autorun_at`, then graph `auto_continue_at` —
     /// each gated on the graph engine exactly where its query sits.
     fn fold_pending_one_shot_wakeups(&self, earliest: &mut Option<chrono::DateTime<Utc>>) {
@@ -291,6 +303,13 @@ impl CronScheduler {
         if let Ok(pending) = self.db.list_pending_enable_agents() {
             for agent in pending {
                 fold_earliest_instant(earliest, agent.enable_at);
+            }
+        }
+        if self.graph_engine.is_some() {
+            if let Ok(pending) = self.db.list_pending_enable_graphs() {
+                for lp in pending {
+                    fold_earliest_instant(earliest, lp.enable_at);
+                }
             }
         }
 
@@ -362,9 +381,11 @@ impl CronScheduler {
             for lp in &graphs {
                 self.try_fire_graph(lp, now_local).await?;
             }
+            self.disable_expired_graphs().await?;
         }
 
         self.fire_due_enable_at(now_utc)?;
+        self.fire_due_enable_graphs(now_utc).await?;
         self.fire_due_autorun_graphs(now_utc).await?;
         self.fire_due_auto_continue_graphs(now_utc)?;
 
@@ -381,6 +402,61 @@ impl CronScheduler {
             if agent.enable_at.is_some_and(|at| now_utc >= at) {
                 tracing::info!("Agent '{}' reached its enable_at time; enabling", agent.id);
                 self.db.activate_scheduled_enable(&agent.id)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// One-shot `enable_at` for trigger graphs: enable and clear `enable_at`
+    /// once due, mirroring agents. When a watch graph becomes active, reconcile
+    /// its watcher.
+    async fn fire_due_enable_graphs(&self, now_utc: chrono::DateTime<Utc>) -> anyhow::Result<()> {
+        if self.graph_engine.is_none() {
+            return Ok(());
+        }
+        let pending = self.db.list_pending_enable_graphs()?;
+        for lp in &pending {
+            if lp.enable_at.is_some_and(|at| now_utc >= at) {
+                tracing::info!("Graph '{}' reached its enable_at time; enabling", lp.id);
+                self.db.set_graph_enabled(&lp.id)?;
+                self.reload_watch_for_enabled_graph(&lp.id).await;
+            }
+        }
+        Ok(())
+    }
+
+    async fn reload_watch_for_enabled_graph(&self, graph_id: &str) {
+        let Some(watcher_engine) = &self.watcher_engine else {
+            return;
+        };
+        let Ok(Some(graph)) = self.db.get_graph(graph_id) else {
+            return;
+        };
+        if graph.is_watch() && graph.enabled && !graph.is_expired() {
+            let _ = watcher_engine.start_graph_watcher(&graph).await;
+        }
+    }
+
+    /// Disable expired trigger graphs and stop their watchers so they no longer fire.
+    async fn disable_expired_graphs(&self) -> anyhow::Result<()> {
+        let mut expired_watch_ids = Vec::new();
+        for lp in self
+            .db
+            .list_cron_graphs()?
+            .into_iter()
+            .chain(self.db.list_watch_graphs()?)
+        {
+            if lp.enabled && lp.is_expired() {
+                self.db
+                    .update_graph_lifecycle(&lp.id, Some(false), None, None)?;
+                if lp.is_watch() {
+                    expired_watch_ids.push(lp.id.clone());
+                }
+            }
+        }
+        if let Some(watcher_engine) = &self.watcher_engine {
+            for id in expired_watch_ids {
+                let _ = watcher_engine.stop_graph_watcher(&id).await;
             }
         }
         Ok(())
@@ -501,7 +577,11 @@ impl CronScheduler {
             lp.id,
             action
         );
-        Arc::clone(graph_engine).resume_background(lp.id.clone(), None);
+        Arc::clone(graph_engine).resume_background_with_trigger(
+            lp.id.clone(),
+            None,
+            Some(crate::graph_engine::GraphRunTrigger::AutoContinue),
+        );
     }
 
     /// Evaluate a single cron graph and launch it via the graph engine if due.
@@ -560,12 +640,13 @@ impl CronScheduler {
         self.launch_due_graph(graph_engine, lp)
     }
 
-    /// A graph already running/paused must not be relaunched by its trigger.
-    /// Returns `true` when the tick is skipped. FR4: a tick never starts a
-    /// second run while the previous one is still running. `is_fireable` is
-    /// also false for paused graphs, so only log when a run is genuinely in
-    /// flight — paused graphs keep skipping silently.
+    /// A graph not eligible for automatic firing (disabled, expired, or
+    /// already running/paused/pausing) must not be relaunched by its trigger.
+    /// Returns `true` when the tick is skipped.
     fn skip_unfireable_graph(&self, lp: &crate::domain::graphs::Graph) -> anyhow::Result<bool> {
+        if !lp.enabled || lp.is_expired() {
+            return Ok(true);
+        }
         if lp.is_fireable() {
             return Ok(false);
         }
@@ -598,7 +679,10 @@ impl CronScheduler {
             Arc::clone(graph_engine).start_background_tick(lp.id.clone(), idea);
             return Ok(());
         }
-        Arc::clone(graph_engine).start_background(lp.id.clone());
+        Arc::clone(graph_engine).start_background_with_trigger(
+            lp.id.clone(),
+            Some(crate::graph_engine::GraphRunTrigger::Cron),
+        );
         Ok(())
     }
 

@@ -1057,6 +1057,9 @@ async fn resolve_graph_id_by_prefix_tests() {
         allow_dirty_start: false,
         require_spec_type: false,
         infra_node_id: None,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     db.insert_graph(&lp2).unwrap();
 

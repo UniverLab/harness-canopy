@@ -643,6 +643,9 @@ mod tests {
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         })
         .unwrap();
     }
@@ -1047,6 +1050,9 @@ mod tests {
             .into_iter()
             .collect(),
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         })
         .unwrap();
         db.crew_create("hooked", None, &[member("claude")]).unwrap();

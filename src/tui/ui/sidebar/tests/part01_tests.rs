@@ -56,6 +56,9 @@ fn sidebar_brain_reaches_the_right_edge_of_its_area() {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     })
     .unwrap();
     let data_dir = tempfile::tempdir().unwrap();

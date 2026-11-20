@@ -77,6 +77,9 @@ fn graph_with_status(status: crate::domain::graphs::GraphStatus) -> crate::domai
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     }
 }
 
@@ -200,6 +203,9 @@ fn seed_live_graph(db: &Database, node_ids: &[&str]) {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     })
     .unwrap();
     db.insert_graph_spec(&crate::domain::graphs::GraphSpec {
@@ -299,6 +305,9 @@ fn seed_completed_graph_with_nodes(db: &Database) {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     })
     .unwrap();
     db.insert_graph_spec(&crate::domain::graphs::GraphSpec {

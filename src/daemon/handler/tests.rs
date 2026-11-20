@@ -115,7 +115,9 @@ const EXPECTED_TOOL_NAMES: &[&str] = &[
 /// when its description and the `kind`/`members` field docs began listing the
 /// `random` ensemble kind (field docs are part of the input schema). The
 /// `graph_node` row was re-pinned when the `kind` field docs began listing
-/// the `deliver` node kind.
+/// the `deliver` node kind. The `graph_edit` row was re-pinned when
+/// `create`/`update` gained the optional `enabled`/`enable_at`/`expires_at`
+/// params (field docs are part of the input schema).
 const EXPECTED_TOOL_ROWS: &[&str] = &[
     "agent|d8f9c6d2e27d78721e0e68301793b430eb079a49d68e003c0a36062ade4326c2|d713589e444e00e203c10fb39b668774212540a62cec84a04d9f2b34b7c386b1",
     "agent_edit|9f9d97739be8934e8023b86d6ed35d9acf9209d18d42a8cafd8ffc99154965cf|eb0e7e1757828c2db9669176f36f437dc1cfc1797eacee875d69ff61ae80b271",
@@ -128,7 +130,7 @@ const EXPECTED_TOOL_ROWS: &[&str] = &[
     "graph_complete_node|cd65852e0bb702902c8fc61858fb514f0f75d749de39d9014f2ae037d39a5a24|174f4383731a376d4ffd07080c26cbc61bd66839093939ea3f6defaebd64cd5e",
     "graph_control|c5d15f5253e8a81c6a2a6510e9994bb11be889d767fdfd943b9b80219344f6ee|5c16b4e016c6d8de3d68dabd607e3a29cc777b8a2a6f11b5504d74e61113ea12",
     "graph_edge|dc837b1ca327d911a1f60b27d4546747dcb70411b35c7a51d4954256e73987de|78b3584a55307259ba886f8371e49efad61a12b996a821c014343fd545196f47",
-    "graph_edit|8249beac55595850ee6e3331bfe612da04fcd03e6b367a2e0606e3ce5d416ee9|fe818b3aea21d24f7df037ab64f7178ee8619fe4bd033c8b98703796c3db83fc",
+    "graph_edit|8249beac55595850ee6e3331bfe612da04fcd03e6b367a2e0606e3ce5d416ee9|eb49917fd1b38c160714a29f13c49df3bc8277583851b2bf605bdd73bb455d4e",
     "graph_ensemble|1c9c84765b0a409ab2783c1e12cdb3ebb182fd644235385f71590a8e236ffa0f|3934ae9e96d5af8057171c7f5db3168637b1b218d1c75dde94c37fab86ff4bee",
     "graph_node|7fce2b505b0d7e9dc1256d68c5ded89516a89bbbbcd5ea128cc35d360793141c|c503f664891f4b251eb4e0f5316b7e0a85e96c400505b32f83931980eadf515f",
     "graph_report_blocker|0af53e5791486ff4aacdfd49ff7e2a12171ff71ba4825fe03147683c8bea8d95|55366b14da2aae0cf6af2fb6f92900d8db343c7051e7d01dc025f8196b8bf599",
@@ -213,6 +215,9 @@ fn graph_reset_fixture(status: GraphStatus) -> (tempfile::TempDir, Database, Str
         auto_continue_action: None,
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     })
     .unwrap();
     (dir, db, graph_id)
@@ -382,6 +387,9 @@ fn insert_test_graph(db: &Database, id: &str) {
         auto_continue_action: None,
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     })
     .unwrap();
 }
@@ -457,6 +465,9 @@ fn cb30_test_graph(id: &str, status: GraphStatus) -> Graph {
         auto_continue_action: None,
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     }
 }
 
@@ -545,6 +556,9 @@ fn autorun_test_graph(graph_id: &str, workdir: &str, status: GraphStatus) -> Gra
         auto_continue_action: None,
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     }
 }
 
@@ -697,6 +711,9 @@ fn make_graph_with_trigger(trigger: Option<Trigger>) -> Graph {
         auto_continue_action: None,
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     }
 }
 

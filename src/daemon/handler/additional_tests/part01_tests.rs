@@ -1226,6 +1226,9 @@ fn graph_trigger_json_manual() {
         auto_continue_action: None,
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let json = graph_trigger_json(&lp);
     assert_eq!(json["type"], "manual");
@@ -1257,6 +1260,9 @@ fn graph_trigger_json_cron() {
         auto_continue_action: None,
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let json = graph_trigger_json(&lp);
     assert_eq!(json["type"], "cron");

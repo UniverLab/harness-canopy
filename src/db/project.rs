@@ -546,6 +546,9 @@ mod tests {
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         })
         .unwrap();
         db.insert_graph_spec(&crate::domain::graphs::GraphSpec {
@@ -776,6 +779,9 @@ mod tests {
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         })
         .unwrap();
 

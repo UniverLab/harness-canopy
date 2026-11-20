@@ -44,6 +44,7 @@ mod ensemble_member_settle;
 mod ensemble_parallel;
 mod ensemble_random;
 mod gate_router;
+mod graph_run_log;
 mod hooks_fire;
 mod hooks_graph;
 mod hooks_interactive;
@@ -85,6 +86,7 @@ pub(crate) use directed::*;
 pub(crate) use dirty_commit::*;
 #[allow(unused_imports)]
 pub(crate) use dispatch::*;
+pub(crate) use dispatch_bound::*;
 pub(crate) use ensemble_attempt::*;
 pub(crate) use ensemble_cascade::*;
 #[allow(unused_imports)]
@@ -95,6 +97,7 @@ pub(crate) use ensemble_parallel::*;
 #[allow(unused_imports)]
 pub(crate) use ensemble_random::*;
 pub(crate) use gate_router::*;
+pub(crate) use graph_run_log::GraphRunTrigger;
 #[allow(unused_imports)]
 pub(crate) use hooks_fire::*;
 #[allow(unused_imports)]

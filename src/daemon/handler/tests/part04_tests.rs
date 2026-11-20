@@ -1113,6 +1113,9 @@ fn insert_paused_graph(db: &Database, id: &str, workdir: &str) {
         auto_continue_action: None,
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     })
     .unwrap();
     // The paused-mid-spec state: a spec left `running`, no active run.

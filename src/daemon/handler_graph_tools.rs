@@ -84,6 +84,9 @@ pub(crate) static GRAPH_EDIT: ToolSpec = ToolSpec {
                 "infra_node_id",
                 "allow_dirty_start",
                 "require_spec_type",
+                "enabled",
+                "enable_at",
+                "expires_at",
             ],
         },
         ActionSpec {
@@ -100,6 +103,9 @@ pub(crate) static GRAPH_EDIT: ToolSpec = ToolSpec {
                 "infra_node_id",
                 "allow_dirty_start",
                 "require_spec_type",
+                "enabled",
+                "enable_at",
+                "expires_at",
             ],
         },
         ActionSpec {

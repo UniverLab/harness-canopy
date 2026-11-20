@@ -271,7 +271,10 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
                 on_completed TEXT,
                 auto_continue_at INTEGER,
                 auto_continue_action TEXT,
-                hooks TEXT
+                hooks TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                enable_at INTEGER,
+                expires_at INTEGER
             );
 
             CREATE INDEX IF NOT EXISTS idx_graphs_workdir_created
@@ -711,6 +714,7 @@ impl Database {
         Self::migrate_drop_blueprint_tables(&conn)?;
         Self::migrate_sandbox_intelligence_attribution(&conn)?;
         Self::migrate_shelf_files(&conn)?;
+        Self::migrate_graph_enabled_columns(&conn)?;
 
         Self::set_schema_version(&conn)?;
 

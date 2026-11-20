@@ -5,7 +5,7 @@ use super::*;
 /// A missing/unsupported `format_version` is refused with its own clear
 /// message rather than falling through to a generic serde error (decision 6).
 pub(super) fn ensure_import_format_version(document: &GraphExportDocument) -> Result<(), String> {
-    if !matches!(document.format_version, 1..=6) {
+    if !matches!(document.format_version, 1..=GRAPH_EXPORT_FORMAT_VERSION) {
         return Err(format!(
             "Graph export document has format_version {}, but this build only supports 1 through {}.",
             document.format_version, GRAPH_EXPORT_FORMAT_VERSION

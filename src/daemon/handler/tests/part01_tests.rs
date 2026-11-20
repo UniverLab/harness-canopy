@@ -918,6 +918,9 @@ fn graph_reset_queue_run_resets_pending_queue_members_and_reports_count() {
         auto_continue_action: None,
         active_run_queue_id: Some("queue-1".to_string()),
         hooks: std::collections::BTreeMap::new(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     })
     .unwrap();
 

@@ -55,11 +55,14 @@ impl GraphEngine {
         let blocker = format!("Queue run failed: {blocker}");
         self.fail_graph(
             ctx.graph_id,
-            Some(ctx.claimed_at),
-            None,
-            None,
-            &blocker,
-            completed_specs,
+            GraphFailure {
+                dispatch_started_at: Some(ctx.claimed_at),
+                spec_name: None,
+                spec_id: None,
+                summary: &blocker,
+                completed_specs,
+                daemon_trigger: ctx.daemon_trigger,
+            },
         )
         .await?;
         Ok(true)
@@ -111,11 +114,14 @@ impl GraphEngine {
         );
         self.fail_graph(
             ctx.graph_id,
-            Some(ctx.claimed_at),
-            None,
-            None,
-            &blocker,
-            completed_specs,
+            GraphFailure {
+                dispatch_started_at: Some(ctx.claimed_at),
+                spec_name: None,
+                spec_id: None,
+                summary: &blocker,
+                completed_specs,
+                daemon_trigger: ctx.daemon_trigger,
+            },
         )
         .await?;
         Ok(true)
@@ -197,6 +203,14 @@ impl GraphEngine {
         }
         self.teardown_sandbox_after_final_status(sandbox, "completed".into())
             .await;
+        if let Some(trigger) = ctx.daemon_trigger {
+            let _ = crate::graph_engine::graph_run_log::append_graph_run_block(
+                &self.db,
+                ctx.graph_id,
+                trigger,
+                ctx.claimed_at,
+            );
+        }
         Ok(())
     }
 }

@@ -23,44 +23,48 @@ pub(crate) struct DispatchMode {
     /// Only the scheduler's tick path sets this — a manual `graph_control`
     /// run of the same graph keeps failing exactly as today.
     pub(crate) tick: bool,
+    /// Daemon-initiated trigger source for per-graph run logging. `None` for
+    /// manual launches (run/continue) which must never append a log block.
+    pub(crate) daemon_trigger: Option<crate::graph_engine::graph_run_log::GraphRunTrigger>,
 }
 
 impl DispatchMode {
     pub(crate) fn fresh() -> Self {
-        Self {
-            is_resume: false,
-            directed: None,
-            tick: false,
-        }
+        Self::default()
     }
     pub(crate) fn resume() -> Self {
         Self {
             is_resume: true,
-            directed: None,
-            tick: false,
+            ..Self::default()
         }
     }
     pub(crate) fn fresh_from(directed: DirectedStart) -> Self {
         Self {
-            is_resume: false,
             directed: Some(directed),
-            tick: false,
+            ..Self::default()
         }
     }
     pub(crate) fn resume_from(directed: DirectedStart) -> Self {
         Self {
             is_resume: true,
             directed: Some(directed),
-            tick: false,
+            ..Self::default()
         }
     }
     /// A fresh dispatch launched by a cron tick (never a resume).
     pub(crate) fn tick() -> Self {
         Self {
-            is_resume: false,
-            directed: None,
             tick: true,
+            daemon_trigger: Some(crate::graph_engine::graph_run_log::GraphRunTrigger::Cron),
+            ..Self::default()
         }
+    }
+    pub(crate) fn with_daemon_trigger(
+        mut self,
+        trigger: crate::graph_engine::graph_run_log::GraphRunTrigger,
+    ) -> Self {
+        self.daemon_trigger = Some(trigger);
+        self
     }
 }
 

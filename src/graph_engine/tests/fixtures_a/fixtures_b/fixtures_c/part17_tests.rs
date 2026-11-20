@@ -1003,6 +1003,9 @@ fn resolve_dispatch_workdir_prefers_sandbox_then_override_then_graph() {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     assert_eq!(
         GraphEngine::resolve_dispatch_workdir(&lp, None, &None),

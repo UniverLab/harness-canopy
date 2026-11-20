@@ -14,8 +14,8 @@ impl Database {
         )?;
         let hooks = encode_graph_hooks(&lp.hooks)?;
         conn.execute(
-            "INSERT INTO graphs (id, name, description, workdir, status, trigger_type, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start, require_spec_type, trigger_prompt)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+            "INSERT INTO graphs (id, name, description, workdir, status, trigger_type, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start, require_spec_type, trigger_prompt, enabled, enable_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
             params![
                 &lp.id,
                 &lp.name,
@@ -39,6 +39,9 @@ impl Database {
                 lp.allow_dirty_start,
                 lp.require_spec_type,
                 &lp.trigger_prompt,
+                lp.enabled,
+                lp.enable_at.map(|value| value.timestamp()),
+                lp.expires_at.map(|value| value.timestamp()),
             ],
         )?;
         Ok(())
@@ -81,7 +84,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, description, workdir, status, trigger_type, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start, require_spec_type, trigger_prompt
+            "SELECT id, name, description, workdir, status, trigger_type, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start, require_spec_type, trigger_prompt, enabled, enable_at, expires_at
              FROM graphs WHERE id = ?1",
         )?;
 
@@ -110,12 +113,12 @@ impl Database {
         };
         let sql = if workdir.is_some() {
             format!(
-                "SELECT id, name, description, workdir, status, trigger_type, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start, require_spec_type, trigger_prompt
+                "SELECT id, name, description, workdir, status, trigger_type, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start, require_spec_type, trigger_prompt, enabled, enable_at, expires_at
                  FROM graphs WHERE workdir = ?1{archived_clause} ORDER BY created_at DESC"
             )
         } else {
             format!(
-                "SELECT id, name, description, workdir, status, trigger_type, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start, require_spec_type, trigger_prompt
+                "SELECT id, name, description, workdir, status, trigger_type, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start, require_spec_type, trigger_prompt, enabled, enable_at, expires_at
                  FROM graphs WHERE 1=1{archived_clause} ORDER BY created_at DESC"
             )
         };
@@ -313,6 +316,72 @@ impl Database {
         Ok(rows > 0)
     }
 
+    /// Disabled trigger graphs with a pending one-shot `enable_at` schedule.
+    pub fn list_pending_enable_graphs(&self) -> Result<Vec<Graph>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let mut stmt = conn.prepare(
+            "SELECT id, name, description, workdir, status, trigger_type, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start, require_spec_type, trigger_prompt, enabled, enable_at, expires_at
+              FROM graphs WHERE enabled = 0 AND enable_at IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], map_graph_row)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    /// Enable a trigger graph and clear its one-shot `enable_at`, mirroring
+    /// `activate_scheduled_enable` for agents.
+    pub fn set_graph_enabled(&self, graph_id: &str) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let rows = conn.execute(
+            "UPDATE graphs SET enabled = 1, enable_at = NULL WHERE id = ?1",
+            params![graph_id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Persist trigger lifecycle fields (`enabled`, `enable_at`, `expires_at`).
+    pub fn update_graph_lifecycle(
+        &self,
+        graph_id: &str,
+        enabled: Option<bool>,
+        enable_at: Option<Option<DateTime<Utc>>>,
+        expires_at: Option<Option<DateTime<Utc>>>,
+    ) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let mut changed = false;
+        if let Some(enabled) = enabled {
+            conn.execute(
+                "UPDATE graphs SET enabled = ?1 WHERE id = ?2",
+                params![enabled, graph_id],
+            )?;
+            changed = true;
+        }
+        if let Some(enable_at) = enable_at {
+            conn.execute(
+                "UPDATE graphs SET enable_at = ?1 WHERE id = ?2",
+                params![enable_at.map(|v| v.timestamp()), graph_id],
+            )?;
+            changed = true;
+        }
+        if let Some(expires_at) = expires_at {
+            conn.execute(
+                "UPDATE graphs SET expires_at = ?1 WHERE id = ?2",
+                params![expires_at.map(|v| v.timestamp()), graph_id],
+            )?;
+            changed = true;
+        }
+        Ok(changed)
+    }
+
     /// Replace a graph's `on_completed` hook config (N2). Passing `None`
     /// clears it, making the graph's completion behave exactly as it did
     /// before N2 (no hook). Writes both the legacy `on_completed` column
@@ -396,7 +465,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, description, workdir, status, trigger_type, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start, require_spec_type, trigger_prompt
+            "SELECT id, name, description, workdir, status, trigger_type, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start, require_spec_type, trigger_prompt, enabled, enable_at, expires_at
               FROM graphs WHERE trigger_type = ?1 ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map(params![trigger_type], map_graph_row)?;

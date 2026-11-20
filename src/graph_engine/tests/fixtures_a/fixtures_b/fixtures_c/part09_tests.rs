@@ -921,6 +921,9 @@ async fn render_completion_hook_prompt_substitutes_all_placeholders() {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let completed_specs = vec![
         ("Spec-A".to_string(), "summary A".to_string()),
@@ -965,6 +968,9 @@ async fn render_completion_hook_prompt_empty_specs_shows_none() {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
 
     let result =

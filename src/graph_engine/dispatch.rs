@@ -1,44 +1,5 @@
 use super::*;
 
-/// Action to take after handling a spec execution outcome.
-/// Used by `run_graph_dispatch` to reduce nesting and duplication.
-pub(crate) enum SpecOutcomeAction {
-    Continue,
-    Pause, // return Ok(()) from the dispatch
-}
-/// Immutable inputs shared by every dispatch helper.
-pub(crate) struct DispatchCtx<'a> {
-    pub(crate) lp: &'a Graph,
-    pub(crate) graph_id: &'a str,
-    pub(crate) workdir: &'a str,
-    pub(crate) is_resume: bool,
-    /// When set, the first spec this run executes starts at this node
-    /// instead of at Start.
-    pub(crate) directed: Option<&'a DirectedStart>,
-    pub(crate) claimed_at: chrono::DateTime<chrono::Utc>,
-    /// FR5: this run was started by a cron tick of a spec-less graph, so a
-    /// check-failure dead end with no agent run is an *idle* completion
-    /// rather than a failure. `false` for every other dispatch, including a
-    /// manual run of the same graph.
-    pub(crate) idle_run: bool,
-    /// FR5: agent/Fail-edge activity accumulated across every spec this
-    /// dispatch runs — the idle rule is run-scoped, not per-spec.
-    pub(crate) run_activity: RunActivity,
-}
-/// What a bound-spec loop learned beyond its flow: whether an idle tick
-/// terminal produced the completion (FR5) and whether any agent node ran.
-pub(crate) struct BoundLoopResult {
-    pub(crate) flow: DispatchFlow,
-    pub(crate) idle: bool,
-    pub(crate) agent_ran: bool,
-}
-/// Whether a dispatch helper wants the main loop to keep going or stop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DispatchFlow {
-    Continue,
-    Stop,
-}
-
 impl GraphEngine {
     /// Core of [`Self::run_graph`], plus the one bit `run_graph`'s public
     /// signature can't carry: whether this call is *resuming* an
@@ -60,15 +21,13 @@ impl GraphEngine {
         &self,
         outcome: SpecExecutionOutcome,
         spec: &GraphSpec,
-        lp: &Graph,
-        graph_id: &str,
-        claimed_at: chrono::DateTime<chrono::Utc>,
+        ctx: &DispatchCtx<'_>,
         completed_specs: &mut Vec<(String, String)>,
     ) -> Result<SpecOutcomeAction> {
         match outcome {
             SpecExecutionOutcome::Completed { summary, .. } => {
                 completed_specs.push((spec.name.clone(), summary));
-                self.fire_on_spec_completed_hooks(lp, spec).await;
+                self.fire_on_spec_completed_hooks(ctx.lp, spec).await;
                 Ok(SpecOutcomeAction::Continue)
             }
             // FR5: an idle tick run's check found nothing to do. The spec row is
@@ -77,7 +36,7 @@ impl GraphEngine {
             // `outcome: idle` at finish.
             SpecExecutionOutcome::Idle { summary } => {
                 completed_specs.push((spec.name.clone(), summary));
-                self.fire_on_spec_completed_hooks(lp, spec).await;
+                self.fire_on_spec_completed_hooks(ctx.lp, spec).await;
                 Ok(SpecOutcomeAction::Continue)
             }
             SpecExecutionOutcome::Paused | SpecExecutionOutcome::Superseded => {
@@ -85,19 +44,27 @@ impl GraphEngine {
             }
             SpecExecutionOutcome::Failed(summary) => {
                 self.fail_graph(
-                    graph_id,
-                    Some(claimed_at),
-                    Some(&spec.name),
-                    Some(&spec.id),
-                    &summary,
-                    &[],
+                    ctx.graph_id,
+                    GraphFailure {
+                        dispatch_started_at: Some(ctx.claimed_at),
+                        spec_name: Some(&spec.name),
+                        spec_id: Some(&spec.id),
+                        summary: &summary,
+                        completed_specs: &[],
+                        daemon_trigger: ctx.daemon_trigger,
+                    },
                 )
                 .await?;
                 Ok(SpecOutcomeAction::Pause) // returns early anyway
             }
             SpecExecutionOutcome::Blocked(blocker) => {
-                self.block_graph(graph_id, Some(claimed_at), &blocker)
-                    .await?;
+                self.block_graph(
+                    ctx.graph_id,
+                    Some(ctx.claimed_at),
+                    &blocker,
+                    ctx.daemon_trigger,
+                )
+                .await?;
                 Ok(SpecOutcomeAction::Pause) // returns early anyway
             }
         }
@@ -185,6 +152,7 @@ impl GraphEngine {
             claimed_at,
             idle_run: mode.tick,
             run_activity: RunActivity::default(),
+            daemon_trigger: mode.daemon_trigger,
         };
         match &queue_id {
             Some(queue_id) => {
@@ -371,14 +339,7 @@ impl GraphEngine {
         };
         let outcome = self.run_spec(ctx, &spec, Some(queue_id)).await?;
         let action = self
-            .handle_spec_outcome(
-                outcome,
-                &spec,
-                ctx.lp,
-                ctx.graph_id,
-                ctx.claimed_at,
-                completed_specs,
-            )
+            .handle_spec_outcome(outcome, &spec, ctx, completed_specs)
             .await?;
         match action {
             SpecOutcomeAction::Continue => Ok(DispatchFlow::Continue),
@@ -510,14 +471,7 @@ impl GraphEngine {
             }
             let outcome = self.run_spec(ctx, &spec, Some(queue_id)).await?;
             let action = self
-                .handle_spec_outcome(
-                    outcome,
-                    &spec,
-                    ctx.lp,
-                    ctx.graph_id,
-                    ctx.claimed_at,
-                    completed_specs,
-                )
+                .handle_spec_outcome(outcome, &spec, ctx, completed_specs)
                 .await?;
             match action {
                 SpecOutcomeAction::Continue => continue,
@@ -555,8 +509,13 @@ impl GraphEngine {
         }
         let blocker =
             super::launch_check::dirty_advance_blocker(&spec.name, &notice.message, &notice.paths);
-        self.block_graph(ctx.graph_id, Some(ctx.claimed_at), &blocker)
-            .await?;
+        self.block_graph(
+            ctx.graph_id,
+            Some(ctx.claimed_at),
+            &blocker,
+            ctx.daemon_trigger,
+        )
+        .await?;
         Ok(true)
     }
 
@@ -599,14 +558,34 @@ impl GraphEngine {
         }
         let Some(idea_text) = idea.as_ref() else {
             let message = self.empty_spec_set_message(ctx.lp, None)?;
-            self.fail_graph(graph_id, Some(ctx.claimed_at), None, None, &message, &[])
-                .await?;
+            self.fail_graph(
+                graph_id,
+                GraphFailure {
+                    dispatch_started_at: Some(ctx.claimed_at),
+                    spec_name: None,
+                    spec_id: None,
+                    summary: &message,
+                    completed_specs: &[],
+                    daemon_trigger: ctx.daemon_trigger,
+                },
+            )
+            .await?;
             return Err(EmptySpecSetError(message).into());
         };
         if idea_text.trim().is_empty() {
             let message = self.empty_spec_set_message(ctx.lp, None)?;
-            self.fail_graph(graph_id, Some(ctx.claimed_at), None, None, &message, &[])
-                .await?;
+            self.fail_graph(
+                graph_id,
+                GraphFailure {
+                    dispatch_started_at: Some(ctx.claimed_at),
+                    spec_name: None,
+                    spec_id: None,
+                    summary: &message,
+                    completed_specs: &[],
+                    daemon_trigger: ctx.daemon_trigger,
+                },
+            )
+            .await?;
             return Err(EmptySpecSetError(message).into());
         }
         let mut placeholder = no_spec_placeholder(graph_id);

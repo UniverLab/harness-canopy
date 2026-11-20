@@ -76,7 +76,7 @@ impl Database {
 
         let orphaned: Vec<Graph> = {
             let mut stmt = tx.prepare(
-                "SELECT id, name, description, workdir, status, trigger_type, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start, require_spec_type, trigger_prompt
+                "SELECT id, name, description, workdir, status, trigger_type, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start, require_spec_type, trigger_prompt, enabled, enable_at, expires_at
                  FROM graphs WHERE status IN (?1, ?2)",
             )?;
             // CB31: a graph caught mid-`Pausing` (wait-for-completion pause

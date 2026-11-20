@@ -49,6 +49,9 @@ fn graph_row(id: &str, status: GraphStatus, workdir: &str) -> Graph {
         infra_node_id: None,
         allow_dirty_start: false,
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     }
 }
 
@@ -865,6 +868,9 @@ fn graph_frames_round_trip_through_both_parsers() {
         infra_node: None,
         hooks: BTreeMap::new(),
         prompt_presets: Vec::new(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let state = GraphState {
         status: "running".to_string(),

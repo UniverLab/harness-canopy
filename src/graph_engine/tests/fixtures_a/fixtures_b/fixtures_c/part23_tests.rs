@@ -329,6 +329,9 @@ async fn dirty_start_check_ignores_other_graphs_overlapping_dirty_record() {
         infra_node_id: None,
         allow_dirty_start: false,
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     })
     .unwrap();
     let mut spec_a =

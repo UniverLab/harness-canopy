@@ -367,6 +367,9 @@ mod tests {
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }
     }
 
@@ -400,6 +403,9 @@ mod tests {
             infra_node: None,
 
             hooks: Default::default(),
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }
     }
 
@@ -510,6 +516,9 @@ mod tests {
             infra_node: None,
 
             hooks: Default::default(),
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         };
         let lp = draft_graph("graph-1", "ensemble-graph", "/tmp/project");
         let plan = build_import_plan(&document, &lp.id).unwrap();
@@ -601,6 +610,9 @@ mod tests {
             infra_node: None,
 
             hooks: Default::default(),
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         };
         let lp = draft_graph("graph-1", "mutex-graph", "/tmp/project");
         let plan = build_import_plan(&document, &lp.id).unwrap();
@@ -652,6 +664,9 @@ mod tests {
             infra_node: Some("B".to_string()),
 
             hooks: Default::default(),
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         };
         let mut lp = draft_graph("graph-1", "infra-graph", "/tmp/project");
         let plan = build_import_plan(&document, &lp.id).unwrap();
@@ -753,6 +768,9 @@ mod tests {
             infra_node: None,
 
             hooks: Default::default(),
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         };
         let lp = draft_graph("graph-1", "kinds-graph", "/tmp/project");
         let plan = build_import_plan(&document, &lp.id).unwrap();
@@ -852,6 +870,9 @@ mod tests {
             infra_node: None,
 
             hooks: Default::default(),
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         };
         let lp = draft_graph("graph-1", "cb71-committer", "/tmp/project");
         let plan = build_import_plan(&document, &lp.id).unwrap();
@@ -1034,6 +1055,9 @@ mod tests {
             infra_node: Some("final".to_string()),
 
             hooks: Default::default(),
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         };
         let lp = draft_graph("graph-1", "cb62-full", "/tmp/project");
         let plan = build_import_plan(&doc, &lp.id).unwrap();
@@ -1198,6 +1222,9 @@ mod tests {
             infra_node: None,
 
             hooks: Default::default(),
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }
     }
 
@@ -1237,6 +1264,9 @@ mod tests {
                 idea: None,
             }],
         );
+        document.enabled = true;
+        document.enable_at = None;
+        document.expires_at = None;
         document
     }
 

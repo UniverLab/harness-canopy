@@ -1134,6 +1134,9 @@ mod tests {
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
             require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
         }
     }
 
@@ -1998,7 +2001,7 @@ mod tests {
 
         let raw = std::fs::read_to_string(&out_path).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(doc["format_version"], 6);
+        assert_eq!(doc["format_version"], 7);
         assert_eq!(doc["name"], "my-graph");
         assert_eq!(doc["nodes"][0]["config"]["platform"], "claude");
         // No model stored (platform default): exported as explicit null.

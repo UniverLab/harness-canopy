@@ -11,8 +11,8 @@ use crate::daemon::helpers::error_result;
 use crate::daemon::params::*;
 use crate::db::Database;
 use crate::domain::graphs::{
-    Graph, GraphDetails, GraphEdge, GraphNode, GraphNodeKind, GraphRunStatus, GraphSpec,
-    GraphSpecStatus, GraphStatus,
+    Graph, GraphDetails, GraphEdge, GraphNode, GraphNodeKind, GraphRunStatus, GraphSpecStatus,
+    GraphStatus,
 };
 use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::tool_router;
@@ -71,6 +71,41 @@ pub(crate) fn build_graph_summary_json(
     db: &Database,
     lp: &Graph,
 ) -> Result<serde_json::Value, McpError> {
+    build_graph_summary_json_with_last_run(
+        db,
+        lp,
+        graph_last_run_for(lp, db).map_err(internal_error)?,
+    )
+}
+
+fn graph_last_run_for(
+    lp: &Graph,
+    db: &Database,
+) -> anyhow::Result<Option<(chrono::DateTime<chrono::Utc>, bool)>> {
+    Ok(db
+        .list_graph_last_run_info()?
+        .into_iter()
+        .find_map(|(id, at, ok)| if id == lp.id { Some((at, ok)) } else { None }))
+}
+
+fn set_graph_lifecycle_json(
+    out: &mut serde_json::Value,
+    lp: &Graph,
+    last_run: Option<(chrono::DateTime<chrono::Utc>, bool)>,
+) {
+    out["enabled"] = serde_json::json!(lp.enabled);
+    out["enable_at"] = serde_json::json!(lp.enable_at.map(|t| t.to_rfc3339()));
+    out["expires_at"] = serde_json::json!(lp.expires_at.map(|t| t.to_rfc3339()));
+    out["log_path"] = serde_json::json!(lp.log_path());
+    out["last_run_at"] = serde_json::json!(last_run.as_ref().map(|(at, _)| at.to_rfc3339()));
+    out["last_run_ok"] = serde_json::json!(last_run.as_ref().map(|(_, ok)| *ok));
+}
+
+fn build_graph_summary_json_with_last_run(
+    db: &Database,
+    lp: &Graph,
+    last_run: Option<(chrono::DateTime<chrono::Utc>, bool)>,
+) -> Result<serde_json::Value, McpError> {
     // CB30: one helper decides "what spec is this graph on" — never the
     // raw bound list, whose queue/idea runs read as a nameless placeholder.
     let current_spec = match active_graph_spec_context(db, lp).map_err(internal_error)? {
@@ -104,6 +139,7 @@ pub(crate) fn build_graph_summary_json(
         "workdir": lp.workdir,
         "archived": lp.archived,
     });
+    set_graph_lifecycle_json(&mut out, lp, last_run);
     set_pause_pending_json(db, &mut out, lp).map_err(internal_error)?;
     set_run_workdir_json(db, &mut out, &lp.id, &lp.workdir).map_err(internal_error)?;
     // CB30: when the graph draws from a queue, say so and name it, so the
@@ -161,148 +197,21 @@ pub(crate) fn build_graph_list_json(
     db: &Database,
     graphs: &[Graph],
 ) -> Result<Vec<serde_json::Value>, McpError> {
+    let last_runs: std::collections::HashMap<String, (chrono::DateTime<chrono::Utc>, bool)> = db
+        .list_graph_last_run_info()
+        .map_err(internal_error)?
+        .into_iter()
+        .map(|(id, at, ok)| (id, (at, ok)))
+        .collect();
     graphs
         .iter()
-        .map(|lp| build_graph_summary_json(db, lp))
+        .map(|lp| build_graph_summary_json_with_last_run(db, lp, last_runs.get(&lp.id).copied()))
         .collect()
 }
 
-/// What a graph is actually working on (CB30).
-///
-/// `list_graph_specs` returns the graph's *bound* specs, which for a queue or
-/// idea run is the blank-name placeholder row the engine inserts as
-/// `graph_runs.spec_id` bookkeeping — never the work itself. Every display
-/// surface must go through [`active_graph_spec_context`] instead of reading
-/// the bound list directly, so `graph`, `graph list` and `canopy graph
-/// info` agree on the answer.
-#[derive(Debug)]
-pub(crate) enum ActiveGraphSpec {
-    /// A normal bound spec (never a placeholder).
-    Bound(GraphSpec),
-    /// A queue member spec currently in flight.
-    QueueMember {
-        spec: GraphSpec,
-        queue_id: String,
-        queue_name: String,
-    },
-    /// An idea-driven run: a placeholder exists but must not be shown.
-    Idea { placeholder_id: String },
-    /// Nothing running (all done, or nothing queued yet).
-    None,
-}
-
-/// The single answer to "what spec is this graph on", shared by `graph`
-/// ([`graph_details_json`]), `graph list` ([`build_graph_summary_json`]) and
-/// `canopy graph info` (`handle_graph_info` in `daemon/graph_cli.rs`).
-///
-/// The placeholder is hidden, never relabelled: a fabricated name would
-/// replace a confusing answer with a false one.
-pub(crate) fn active_graph_spec_context(
-    db: &Database,
-    lp: &Graph,
-) -> anyhow::Result<ActiveGraphSpec> {
-    if let Some(queue_id) = lp.active_run_queue_id.as_deref() {
-        if let Some(queue_name) = db.get_queue(queue_id)?.map(|queue| queue.name) {
-            if let Some(active) = queue_active_graph_spec(db, queue_id, &queue_name)? {
-                return Ok(active);
-            }
-            // Queue drained (or empty): fall through to the bound/idea
-            // logic so a finished queue graph reports `None` rather than a
-            // stale member. Callers still render the queue link itself from
-            // `active_run_queue_id`.
-        }
-    }
-    bound_active_graph_spec(db, &lp.id, lp.active_run_queue_id.is_some())
-}
-
-/// The spec dispatch is on inside `queue_id`, or `None` when the queue holds
-/// nothing runnable: a `Running` member anywhere beats an earlier pending one
-/// (dispatch is sequential, so a running member means everything before it
-/// already completed); with nothing running, the first runnable — or stalled —
-/// member in queue order is the one to report.
-pub(crate) fn queue_active_graph_spec(
-    db: &Database,
-    queue_id: &str,
-    queue_name: &str,
-) -> anyhow::Result<Option<ActiveGraphSpec>> {
-    let mut running: Option<GraphSpec> = None;
-    let mut pending: Option<GraphSpec> = None;
-    for spec_id in db.list_queue_member_spec_ids(queue_id)? {
-        let Some(spec) = db.get_graph_spec(&spec_id)? else {
-            continue;
-        };
-        if spec.status == GraphSpecStatus::Running {
-            if running.is_none() {
-                running = Some(spec);
-            }
-        // Same fallback shape as `build_graph_summary_json`'s
-        // bound-spec search: the next runnable (or stalled)
-        // member in queue order when nothing is `Running`.
-        } else if pending.is_none()
-            && matches!(
-                spec.status,
-                GraphSpecStatus::Pending | GraphSpecStatus::Interrupted | GraphSpecStatus::Failed
-            )
-        {
-            pending = Some(spec);
-        }
-    }
-    let Some(spec) = running.or(pending) else {
-        return Ok(None);
-    };
-    Ok(Some(ActiveGraphSpec::QueueMember {
-        spec,
-        queue_id: queue_id.to_string(),
-        queue_name: queue_name.to_string(),
-    }))
-}
-
-/// The bound spec dispatch is on — the first non-terminal real spec in
-/// position order, the same pick `build_graph_summary_json` historically
-/// made — or the idea placeholder when that's all the graph has. The
-/// placeholder is hidden, never relabelled: a fabricated name would
-/// replace a confusing answer with a false one.
-pub(crate) fn bound_active_graph_spec(
-    db: &Database,
-    graph_id: &str,
-    has_active_queue: bool,
-) -> anyhow::Result<ActiveGraphSpec> {
-    let mut placeholder_id: Option<String> = None;
-    let mut current: Option<GraphSpec> = None;
-    for spec in db.list_graph_specs(graph_id)? {
-        if crate::graph_engine::is_no_spec_placeholder(&spec) {
-            if placeholder_id.is_none() {
-                placeholder_id = Some(spec.id.clone());
-            }
-            continue;
-        }
-        if current.is_none()
-            && matches!(
-                spec.status,
-                GraphSpecStatus::Running
-                    | GraphSpecStatus::Pending
-                    | GraphSpecStatus::Interrupted
-                    | GraphSpecStatus::Failed
-            )
-        {
-            current = Some(spec);
-        }
-    }
-    if let Some(spec) = current {
-        return Ok(ActiveGraphSpec::Bound(spec));
-    }
-    if let Some(placeholder_id) = placeholder_id {
-        // CB30: a completed queue-driven graph still has `active_run_queue_id`
-        // set (B31 keeps it as last-run context) and only the placeholder in
-        // its bound specs. Without this guard, we'd report `Idea` for a
-        // finished queue — replacing one false answer with another.
-        if has_active_queue {
-            return Ok(ActiveGraphSpec::None);
-        }
-        return Ok(ActiveGraphSpec::Idea { placeholder_id });
-    }
-    Ok(ActiveGraphSpec::None)
-}
+#[path = "handler_read_context.rs"]
+mod context;
+pub(crate) use context::{active_graph_spec_context, ActiveGraphSpec};
 
 /// CB52 FR4: one `orphan_join_warnings` entry for a join node with no
 /// ensemble row. Shared by `graph` (advisory, always reported) and
@@ -384,50 +293,17 @@ pub(crate) fn graph_details_json(
     let mut specs = lp
         .specs
         .iter()
-        // Skip the blank-name placeholder an idea-driven run binds to the
-        // graph to carry `{{spec_content}}`: it's engine bookkeeping (purged
-        // once terminal on the next dispatch) and must not read as work.
-        // Trimmed to match the engine's bookkeeping sentinel.
         .filter(|spec| !spec.spec.name.trim().is_empty())
         .map(|spec| graph_spec_details_json(db, spec, lp.lp.status))
         .collect::<anyhow::Result<Vec<_>>>()?;
-    // CB30: while the graph draws from a queue, the bound list above is just
-    // the placeholder — name the queue spec actually running instead, so
-    // this surface agrees with `graph`.
     let ctx = active_graph_spec_context(db, &lp.lp)?;
-    match &ctx {
-        ActiveGraphSpec::QueueMember { spec, .. } => {
-            if !specs
-                .iter()
-                .any(|s| s.get("id").and_then(|v| v.as_str()) == Some(spec.id.as_str()))
-            {
-                let details = crate::domain::graphs::GraphSpecDetails {
-                    nodes: db.list_graph_nodes(&spec.id)?,
-                    edges: db.list_graph_edges(&spec.id)?,
-                    spec: spec.clone(),
-                };
-                specs.push(graph_spec_details_json(db, &details, lp.lp.status)?);
-            }
-        }
-        // The placeholder id is engine bookkeeping (a bound row like any
-        // other); it is read here only to assert the sentinel invariant —
-        // the row itself is never rendered.
-        ActiveGraphSpec::Idea { placeholder_id } => {
-            debug_assert!(!placeholder_id.is_empty());
-        }
-        ActiveGraphSpec::Bound(_) | ActiveGraphSpec::None => {}
-    }
+    include_active_queue_spec(db, &mut specs, &ctx, lp.lp.status)?;
     let ensembles = db
         .list_ensembles_for_graph(&lp.lp.id)?
         .iter()
         .map(|details| ensemble_details_json(details, &lp.graph_edges))
         .collect::<Vec<_>>();
-
     let orphan_join_warnings = orphan_join_warnings_json(db, lp)?;
-
-    // Row first, current-spec run output second — the same decision
-    // `build_graph_summary_json` makes, so `graph get` and `graph list`
-    // agree on both pause flavors.
     let blocker = db
         .graph_blocker(&lp.lp.id)?
         .or(current_spec_blocker(db, &ctx)?);
@@ -462,19 +338,54 @@ pub(crate) fn graph_details_json(
                 "hooks": hooks.iter().map(graph_completion_hook_json).collect::<Vec<_>>(),
             })
         }).collect::<Vec<_>>(),
-        "completion_hook_runs": lp
-            .completion_hook_runs
-            .iter()
-            .map(graph_completion_hook_run_json)
-            .collect::<Vec<_>>(),
+        "completion_hook_runs": lp.completion_hook_runs.iter().map(graph_completion_hook_run_json).collect::<Vec<_>>(),
         "orphan_join_warnings": orphan_join_warnings,
     });
+    let last_run = db
+        .list_graph_last_run_info()?
+        .into_iter()
+        .find_map(|(id, at, ok)| (id == lp.lp.id).then_some((at, ok)));
+    set_graph_lifecycle_json(&mut out, &lp.lp, last_run);
     set_pause_pending_json(db, &mut out, &lp.lp)?;
     set_run_workdir_json(db, &mut out, &lp.lp.id, &lp.lp.workdir)?;
-    // CB30: when the graph draws from a queue, say so and name it; when it
-    // runs a loose idea, say that instead of leaving an empty `specs` to be
-    // misread as "nothing running".
-    match &ctx {
+    finalize_graph_details_json(db, &mut out, &lp.lp, &ctx)?;
+    Ok(out)
+}
+
+fn include_active_queue_spec(
+    db: &Database,
+    specs: &mut Vec<serde_json::Value>,
+    ctx: &ActiveGraphSpec,
+    graph_status: GraphStatus,
+) -> anyhow::Result<()> {
+    match ctx {
+        ActiveGraphSpec::QueueMember { spec, .. } => {
+            if specs
+                .iter()
+                .any(|s| s.get("id").and_then(|v| v.as_str()) == Some(spec.id.as_str()))
+            {
+                return Ok(());
+            }
+            let details = crate::domain::graphs::GraphSpecDetails {
+                nodes: db.list_graph_nodes(&spec.id)?,
+                edges: db.list_graph_edges(&spec.id)?,
+                spec: spec.clone(),
+            };
+            specs.push(graph_spec_details_json(db, &details, graph_status)?);
+        }
+        ActiveGraphSpec::Idea { placeholder_id } => debug_assert!(!placeholder_id.is_empty()),
+        ActiveGraphSpec::Bound(_) | ActiveGraphSpec::None => {}
+    }
+    Ok(())
+}
+
+fn finalize_graph_details_json(
+    db: &Database,
+    out: &mut serde_json::Value,
+    lp: &Graph,
+    ctx: &ActiveGraphSpec,
+) -> anyhow::Result<()> {
+    match ctx {
         ActiveGraphSpec::QueueMember {
             queue_id,
             queue_name,
@@ -483,25 +394,21 @@ pub(crate) fn graph_details_json(
             out["queue"] = serde_json::json!({ "id": queue_id, "name": queue_name });
         }
         ActiveGraphSpec::Bound(_) | ActiveGraphSpec::Idea { .. } | ActiveGraphSpec::None => {
-            if let Some(queue_id) = lp.lp.active_run_queue_id.as_deref() {
+            if let Some(queue_id) = lp.active_run_queue_id.as_deref() {
                 if let Some(queue) = db.get_queue(queue_id)? {
                     out["queue"] = serde_json::json!({ "id": queue.id, "name": queue.name });
                 }
             }
         }
     }
-    let consistency_warning = running_graph_consistency_warning(db, &lp.lp);
+    let consistency_warning = running_graph_consistency_warning(db, lp);
     out["consistency_warning"] = serde_json::json!(consistency_warning);
     out["consistency_warnings"] = serde_json::json!(consistency_warning.iter().collect::<Vec<_>>());
-    // CB42 follow-up: a sandboxed last run must say which sandbox holds its
-    // work and what became of it (`kept`, `merged`, `discarded`, …), so an
-    // agent can land or discard it through the `sandbox` tool without
-    // guessing an id from `canopy sandbox list`.
-    out["sandbox"] = graph_sandbox_json(db, &lp.lp.id)?;
+    out["sandbox"] = graph_sandbox_json(db, &lp.id)?;
     if matches!(ctx, ActiveGraphSpec::Idea { .. }) && out.get("queue").is_none() {
         out["mode"] = serde_json::json!("idea");
     }
-    Ok(out)
+    Ok(())
 }
 
 /// The sandbox holding this graph's newest run's work: `{id, status}` as the

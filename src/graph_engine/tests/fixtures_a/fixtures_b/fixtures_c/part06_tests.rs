@@ -1010,6 +1010,9 @@ async fn graph_engine_run_workdir_override_is_used_as_check_node_cwd() {
         active_run_queue_id: None,
         hooks: std::collections::BTreeMap::new(),
         require_spec_type: false,
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     db.insert_graph(&lp).unwrap();
     let spec = standalone_spec("bound-spec", 1);

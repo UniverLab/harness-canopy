@@ -190,7 +190,7 @@ pub struct TaskReportParams {
 /// `null` straight to `None` before the inner `Option` is ever consulted.
 /// Routing the present value through here wraps it: `null` becomes
 /// `Some(None)` (clear) and a value becomes `Some(Some(v))` (set).
-pub(super) fn double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+pub(crate) fn double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
     T: Deserialize<'de>,
     D: serde::Deserializer<'de>,

@@ -81,6 +81,9 @@ fn import_plan_rejects_negative_quorum_grace() {
         infra_node: None,
 
         hooks: Default::default(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let err = build_import_plan(&doc, "new-graph").unwrap_err();
     assert!(
@@ -150,6 +153,9 @@ fn import_plan_round_trips_quorum_grace_minutes() {
         infra_node: None,
 
         hooks: Default::default(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let plan = build_import_plan(&doc, "new-graph").unwrap();
     assert_eq!(plan.ensembles[0].ensemble.quorum_grace_minutes, Some(0));
@@ -217,6 +223,9 @@ fn import_plan_bakes_member_timeout_override_into_node_config() {
         infra_node: None,
 
         hooks: Default::default(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let plan = build_import_plan(&doc, "new-graph").unwrap();
     let ensemble_plan = &plan.ensembles[0];
@@ -276,6 +285,9 @@ fn import_plan_rejects_unreachable_node() {
         infra_node: None,
 
         hooks: Default::default(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let err = build_import_plan(&doc, "new-graph").unwrap_err();
     assert!(err.contains('C'), "err should name C: {err}");
@@ -322,6 +334,9 @@ fn import_plan_rejects_multiple_entry_points() {
         infra_node: None,
 
         hooks: Default::default(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let err = build_import_plan(&doc, "new-graph").unwrap_err();
     assert!(err.to_lowercase().contains("entry"), "err: {err}");
@@ -361,6 +376,9 @@ fn import_plan_accepts_agent_missing_fail_edge_as_terminal() {
         infra_node: None,
 
         hooks: Default::default(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let plan =
         build_import_plan(&doc, "new-graph").expect("missing fail is a terminal, not an error");
@@ -394,6 +412,9 @@ fn build_import_plan_rejects_unknown_node_reference() {
         infra_node: None,
 
         hooks: Default::default(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let err = build_import_plan(&doc, "new-graph").unwrap_err();
     assert!(
@@ -458,6 +479,9 @@ fn build_import_plan_accepts_valid_node_reference() {
         infra_node: None,
 
         hooks: Default::default(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let result = build_import_plan(&doc, "new-graph");
     assert!(
@@ -786,6 +810,9 @@ fn import_rejects_unknown_ensemble_kind() {
         infra_node: None,
 
         hooks: Default::default(),
+        enabled: true,
+        enable_at: None,
+        expires_at: None,
     };
     let err = build_import_plan(&doc, "new-graph").unwrap_err();
     assert!(err.contains("kind"), "err must name the field: {err}");
@@ -962,7 +989,6 @@ fn round_trip_keeps_mutex() {
 
     let doc = build_export_document(&lp, &nodes, &edges, &[details]).unwrap();
     assert_eq!(doc.format_version, GRAPH_EXPORT_FORMAT_VERSION);
-    assert_eq!(doc.format_version, 6);
     let exported_node = doc.nodes.iter().find(|n| n.name == "kickoff").unwrap();
     assert_eq!(exported_node.config["mutex"], serde_json::json!(["cpu"]));
     assert_eq!(doc.ensembles.len(), 1);
