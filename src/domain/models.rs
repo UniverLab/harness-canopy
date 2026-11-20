@@ -222,6 +222,10 @@ impl Agent {
         }
     }
 
+    /// Legacy agent cron accessor: agents fire through their backing graphs
+    /// (which carry the schedule), so the scheduler no longer reads this.
+    /// Kept for the repository filter tests and model tests.
+    #[allow(dead_code)]
     pub fn schedule_expr(&self) -> Option<&str> {
         match &self.trigger {
             Some(Trigger::Cron { schedule_expr }) => Some(schedule_expr),

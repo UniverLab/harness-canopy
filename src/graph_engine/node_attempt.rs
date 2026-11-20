@@ -286,6 +286,7 @@ impl GraphEngine {
                     &state.node_outputs,
                     ctx.all_node_names,
                     node_has_commit_rights(node, ctx.ensembles),
+                    &ctx.fire,
                 )
                 .await?;
             let run = self.db.get_graph_run(&retry.run_id)?.ok_or_else(|| {

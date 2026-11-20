@@ -2,6 +2,10 @@
 //! Moved verbatim; tool names, schemas, and behaviour unchanged.
 
 use crate::application::ports::{AgentRepository, RunRepository};
+use crate::daemon::agent_graph_migration::{
+    remove_agent_backing_graph, sync_agent_backing, sync_backing_after_update,
+    with_backing_run_stats,
+};
 use crate::daemon::cpu_quota;
 use crate::daemon::handler::{TaskTriggerHandler, SESSION_LIST_DEFAULT_LIMIT};
 use crate::daemon::handler_formatting::{
@@ -90,6 +94,7 @@ impl TaskTriggerHandler {
         agent.expires_at = prepared.expires_at;
 
         self.db.upsert_agent(&agent).map_err(internal_error)?;
+        sync_agent_backing(&self.db, &agent);
         if let Some(workdir) = agent.working_dir.as_deref() {
             if crate::domain::project::should_auto_register(std::path::Path::new(workdir)) {
                 if let Err(e) = self.db.register_project_path(std::path::Path::new(workdir)) {
@@ -156,8 +161,15 @@ impl TaskTriggerHandler {
         });
 
         self.db.upsert_agent(&agent).map_err(internal_error)?;
+        sync_agent_backing(&self.db, &agent);
 
-        if let Err(e) = self.watcher_engine.start_watcher(&agent).await {
+        // Watch agents fire through their backing graph (id == agent id).
+        let backing = self
+            .db
+            .get_graph(&agent.id)
+            .map_err(internal_error)?
+            .ok_or_else(|| internal_error(format!("Agent '{}' backing graph missing", agent.id)))?;
+        if let Err(e) = self.watcher_engine.start_graph_watcher(&backing).await {
             tracing::warn!("Watcher '{}' saved but failed to start: {}", agent.id, e);
             return Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                 "Watcher '{}' registered but could not start watching '{}': {}. It will be retried on daemon restart.",
@@ -197,7 +209,8 @@ impl TaskTriggerHandler {
         )];
 
         for a in &agents {
-            let mut info = format_agent_info(a);
+            let a = with_backing_run_stats(&self.db, a.clone());
+            let mut info = format_agent_info(&a);
 
             if a.is_watch() {
                 let runtime_active = self.watcher_engine.is_active(&a.id).await;
@@ -232,6 +245,7 @@ impl TaskTriggerHandler {
         let Some(agent) = self.db.get_agent(&id).map_err(internal_error)? else {
             return Ok(error_result(&format!("agent '{}' not found", id)));
         };
+        let agent = with_backing_run_stats(&self.db, agent);
         let notify = self
             .db
             .agent_notify_on_success(&id)
@@ -310,6 +324,10 @@ impl TaskTriggerHandler {
             return Ok(error_result(&format!("No agent found with ID '{}'", id)));
         }
 
+        if let Err(e) = remove_agent_backing_graph(&self.db, &id) {
+            tracing::warn!("Agent '{id}' backing graph removal skipped: {e:#}");
+        }
+
         self.scheduler_notify.notify_one();
         Ok(success_result(&format!("Agent '{}' removed", id)))
     }
@@ -340,10 +358,17 @@ impl TaskTriggerHandler {
             .update_agent_enabled(&id, true)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
+        if let Ok(Some(refreshed)) = self.db.get_agent(&id) {
+            sync_agent_backing(&self.db, &refreshed);
+        }
+
         self.scheduler_notify.notify_one();
 
         if existing.is_watch() {
-            let _ = self.watcher_engine.start_watcher(&existing).await;
+            // Watch agents fire through their backing graph.
+            if let Ok(Some(backing)) = self.db.get_graph(&id) {
+                let _ = self.watcher_engine.start_graph_watcher(&backing).await;
+            }
         }
 
         Ok(success_result(&format!("Agent '{}' enabled", id)))
@@ -377,6 +402,10 @@ impl TaskTriggerHandler {
             .schedule_agent_enable(&id, at)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
+        if let Ok(Some(refreshed)) = self.db.get_agent(&id) {
+            sync_agent_backing(&self.db, &refreshed);
+        }
+
         self.scheduler_notify.notify_one();
 
         Ok(success_result(&format!(
@@ -403,6 +432,10 @@ impl TaskTriggerHandler {
         self.db
             .update_agent_enabled(&id, false)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        if let Ok(Some(refreshed)) = self.db.get_agent(&id) {
+            sync_agent_backing(&self.db, &refreshed);
+        }
 
         if existing.is_watch() {
             let _ = self.watcher_engine.stop_watcher(&id).await;
@@ -632,6 +665,7 @@ impl TaskTriggerHandler {
         }
 
         self.db.upsert_agent(&agent).map_err(internal_error)?;
+        sync_backing_after_update(&self.db, &params.id, params.new_id.as_deref(), &agent);
         // Success-notification opt-in (B27) lives outside the agent row's
         // upserted columns, so set it separately when the caller provided it.
         if let Some(notify_on_success) = params.notify_on_success {
@@ -717,13 +751,20 @@ impl TaskTriggerHandler {
 
         // The watcher for a renamed agent may already have been stopped
         // under the old id before the rename; stopping it again here is a
-        // harmless no-op.
+        // harmless no-op. Backing graphs are keyed by agent id.
         let _ = self.watcher_engine.stop_watcher(&params.id).await;
+        let _ = self.watcher_engine.stop_graph_watcher(&agent.id).await;
         if !agent.enabled {
             return Ok(None);
         }
 
-        let Err(e) = self.watcher_engine.start_watcher(agent).await else {
+        let Some(backing) = self.db.get_graph(&agent.id).map_err(internal_error)? else {
+            return Ok(Some(CallToolResult::success(vec![ContentBlock::text(format!(
+                "Agent '{}' updated but watcher failed to restart: backing graph missing. It will be retried on daemon restart.",
+                agent.id
+            ))])));
+        };
+        let Err(e) = self.watcher_engine.start_graph_watcher(&backing).await else {
             return Ok(Some(success_result(&format!(
                 "Agent '{}' updated successfully. Watcher restarted with new configuration.",
                 agent.id

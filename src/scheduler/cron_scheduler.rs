@@ -14,7 +14,7 @@ use cron::Schedule;
 use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
 
-use crate::application::ports::{AgentRepository, RunRepository};
+use crate::daemon::handler_run_exec::find_in_flight_run;
 use crate::db::Database;
 use crate::executor::Executor;
 use crate::graph_engine::GraphEngine;
@@ -22,18 +22,12 @@ use crate::sessions::SessionHub;
 use crate::watchers::WatcherEngine;
 
 use autorun::{launch_due_autorun, warn_blocked_operator_paused_autorun};
-use retry::run_with_retry;
 use schedule_math::{
-    agent_due_tick, due_fire_local, earliest_duration_before, fold_earliest, fold_earliest_instant,
-    to_7field_cron,
+    due_fire_local, earliest_duration_before, fold_earliest, fold_earliest_instant, to_7field_cron,
 };
 
 #[cfg(test)]
 use crate::domain::graphs::GraphStatus;
-#[cfg(test)]
-use retry::{run_outcome_is_failure, should_retry, wait_retry_delay};
-#[cfg(test)]
-use schedule_math::next_fire_utc;
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
@@ -47,6 +41,7 @@ pub(crate) mod scheduled_prompts;
 /// The internal cron scheduler that runs as a tokio background_agent.
 pub struct CronScheduler {
     db: Arc<Database>,
+    #[allow(dead_code)]
     executor: Arc<Executor>,
     cancel: CancellationToken,
     /// Wakes the scheduler to recalculate the next fire time.
@@ -66,8 +61,7 @@ pub struct CronScheduler {
     /// next cron tick.
     scheduled_prompt_notify: Arc<Notify>,
     /// Tick idempotency: the most recent *scheduled* tick already fired per
-    /// schedulable (agents keyed by their id; graphs by [`graph_key`] to avoid
-    /// colliding with an agent that happens to share the same id).
+    /// schedulable (graphs keyed by [`graph_key`]).
     ///
     /// The stored value is the matched fire time itself (what
     /// [`due_fire_local`] returned), not the wall-clock instant the
@@ -79,13 +73,9 @@ pub struct CronScheduler {
     /// evaluation happened to take, which is what let two evaluations of one
     /// tick slip past a time-window check and both spawn.
     last_fired: Arc<Mutex<std::collections::HashMap<String, chrono::DateTime<Utc>>>>,
-    /// Per-agent in-flight guard: agents currently spawned and not yet
-    /// finalized. A fire for an agent already in this set is SKIPPED and
-    /// logged at info — never queued behind, never spawned in parallel.
-    /// This is the single choke point every firing path (scheduled, watch,
-    /// manual) routes through at the scheduler level.
-    in_flight: Arc<Mutex<std::collections::HashSet<String>>>,
-    /// Failure-retry policy applied to scheduled runs.
+    /// Failure-retry policy for scheduled runs (kept for API stability;
+    /// agent retries now run through the graph engine).
+    #[allow(dead_code)]
     retry: RetryPolicy,
 }
 
@@ -106,7 +96,6 @@ impl CronScheduler {
             hub: None,
             scheduled_prompt_notify: Arc::new(Notify::new()),
             last_fired: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            in_flight: Arc::new(Mutex::new(std::collections::HashSet::new())),
             retry: RetryPolicy::default(),
         }
     }
@@ -165,26 +154,6 @@ impl CronScheduler {
         Arc::clone(&self.scheduled_prompt_notify)
     }
 
-    /// Seed the tick-idempotency map from the database so a restart doesn't
-    /// immediately re-fire a tick whose run is still recorded from before
-    /// the restart. `last_run_at` is a completion timestamp, not a scheduled
-    /// tick, so this is a conservative approximation: it only suppresses a
-    /// re-fire when the next candidate tick is not newer than the last
-    /// recorded run. The [`try_start_run`](crate::application::ports::RunRepository::try_start_run)
-    /// in-flight guard is what actually prevents a concurrent duplicate
-    /// execution; this seed is just about not re-spawning a tick that was
-    /// already handled moments before the restart.
-    async fn initialize_last_fired(&self) {
-        let mut last_fired = self.last_fired.lock().await;
-        if let Ok(agents) = self.db.list_cron_agents() {
-            for agent in agents {
-                if let Some(last_run_at) = agent.last_run_at {
-                    last_fired.insert(agent.id, last_run_at);
-                }
-            }
-        }
-    }
-
     /// Start the scheduler graph as a background tokio task.
     ///
     /// Returns a `CancellationToken` that can be used to stop the scheduler.
@@ -194,8 +163,6 @@ impl CronScheduler {
 
         tokio::spawn(async move {
             tracing::info!("Internal cron scheduler started");
-            // Initialize from database to prevent duplicate executions after restart
-            scheduler.initialize_last_fired().await;
             scheduler.run_graph().await;
             tracing::info!("Internal cron scheduler stopped");
         });
@@ -216,7 +183,7 @@ impl CronScheduler {
         cancel
     }
 
-    /// The main scheduler graph. Sleeps until the next agent is due,
+    /// The main scheduler graph. Sleeps until the next graph tick is due,
     /// or wakes early on cancel/notify.
     async fn run_graph(&self) {
         loop {
@@ -239,14 +206,12 @@ impl CronScheduler {
         }
     }
 
-    /// Compute how long to sleep until the nearest agent fires.
-    /// Falls back to 60 s if there are no active agents or on parse errors.
+    /// Compute how long to sleep until the nearest cron-triggered graph fires.
+    /// Falls back to 60 s if there are no active graphs or on parse errors.
+    /// Agents fire through their backing graphs since the agent-to-graph
+    /// migration; there is no separate agent schedule to fold in.
     fn next_sleep_duration(&self) -> std::time::Duration {
         const FALLBACK: std::time::Duration = std::time::Duration::from_secs(60);
-
-        let Ok(agents) = self.db.list_cron_agents() else {
-            return FALLBACK;
-        };
 
         // Cron expressions are authored in the user's local timezone (a user
         // who types `0 9 * * *` expects 9 AM on their wall clock, not 9 AM
@@ -257,13 +222,6 @@ impl CronScheduler {
         let now_local = Local::now();
         let now_utc = Utc::now();
         let mut earliest: Option<chrono::DateTime<Utc>> = None;
-
-        for agent in &agents {
-            if !agent.enabled || agent.is_expired() {
-                continue;
-            }
-            fold_earliest(&mut earliest, agent.schedule_expr(), now_local);
-        }
 
         self.fold_fireable_graph_schedules(&mut earliest, now_local);
         self.fold_pending_one_shot_wakeups(&mut earliest);
@@ -294,17 +252,11 @@ impl CronScheduler {
         }
     }
 
-    /// Fold every pending one-shot schedule into `earliest`: agent/graph
-    /// `enable_at`, then graph `autorun_at`, then graph `auto_continue_at` —
-    /// each gated on the graph engine exactly where its query sits.
+    /// Fold every pending one-shot schedule into `earliest`: graph
+    /// `enable_at`, then graph `autorun_at`, then graph `auto_continue_at`.
+    /// Agent one-shots fire through their backing graphs since the
+    /// agent-to-graph migration.
     fn fold_pending_one_shot_wakeups(&self, earliest: &mut Option<chrono::DateTime<Utc>>) {
-        // One-shot `enable_at` schedules also need a wakeup, independent of
-        // any cron expression on the agent.
-        if let Ok(pending) = self.db.list_pending_enable_agents() {
-            for agent in pending {
-                fold_earliest_instant(earliest, agent.enable_at);
-            }
-        }
         if self.graph_engine.is_some() {
             if let Ok(pending) = self.db.list_pending_enable_graphs() {
                 for lp in pending {
@@ -336,44 +288,18 @@ impl CronScheduler {
         }
     }
 
-    /// Quarantine any agent whose row failed to decode (e.g. a `trigger_config`
-    /// written directly to SQLite by an external tool, not the JSON shape
-    /// canopy expects): disable it and warn once, then leave it alone.
-    ///
-    /// Once disabled, the row is excluded from `list_cron_agents` (which
-    /// filters `enabled = 1`), so subsequent ticks never see it as still
-    /// enabled and never re-warn — this is what keeps a single corrupt row
-    /// from producing a repeating per-tick error. The row itself is never
-    /// touched or reinterpreted; only `enabled` changes.
-    fn quarantine_corrupt_agents(&self) -> anyhow::Result<()> {
-        for corrupt in self.db.list_corrupt_agents()? {
-            if !corrupt.enabled {
-                continue;
-            }
-            tracing::warn!(
-                "Agent '{}' has a corrupt trigger_config and cannot be scheduled ({}); \
-                 quarantining (disabling) it",
-                corrupt.id,
-                corrupt.error
-            );
-            self.db.update_agent_enabled(&corrupt.id, false)?;
-        }
-        Ok(())
-    }
-
-    /// Fire all agents whose next cron time is now (within a 1-second tolerance).
+    /// Fire all cron-triggered graphs whose next cron time is now. Agents
+    /// fire through their backing graphs since the agent-to-graph migration:
+    /// the legacy agent tick (`try_fire_agent`), the agent one-shot
+    /// `enable_at` fire and the per-tick corrupt-row quarantine are deleted.
+    /// Corrupt agent rows are quarantined once by the daemon-start migration
+    /// (`migrate_all_agents_to_graphs`); the row itself is never deleted.
     async fn fire_due_tasks(&self) -> anyhow::Result<()> {
-        self.quarantine_corrupt_agents()?;
-        let agents = self.db.list_cron_agents()?;
         // Evaluate schedules in the user's local timezone. `now_utc` is only
         // used for the persisted `last_fired` comparison (which is stored in
         // UTC), and `now_local` for the cron-field match.
         let now_local = Local::now();
         let now_utc = Utc::now();
-
-        for agent in &agents {
-            self.try_fire_agent(agent, now_local).await?;
-        }
 
         // Cron-triggered graphs are evaluated in the same local frame.
         if self.graph_engine.is_some() {
@@ -384,26 +310,10 @@ impl CronScheduler {
             self.disable_expired_graphs().await?;
         }
 
-        self.fire_due_enable_at(now_utc)?;
         self.fire_due_enable_graphs(now_utc).await?;
         self.fire_due_autorun_graphs(now_utc).await?;
         self.fire_due_auto_continue_graphs(now_utc)?;
 
-        Ok(())
-    }
-
-    /// One-shot `enable_at`: for each disabled agent with a pending
-    /// `enable_at` in the past, enable it and clear the schedule. Unlike
-    /// cron agents (`list_cron_agents` filters `enabled = 1`), these are
-    /// disabled by definition, hence the dedicated query.
-    fn fire_due_enable_at(&self, now_utc: chrono::DateTime<Utc>) -> anyhow::Result<()> {
-        let pending = self.db.list_pending_enable_agents()?;
-        for agent in &pending {
-            if agent.enable_at.is_some_and(|at| now_utc >= at) {
-                tracing::info!("Agent '{}' reached its enable_at time; enabling", agent.id);
-                self.db.activate_scheduled_enable(&agent.id)?;
-            }
-        }
         Ok(())
     }
 
@@ -637,12 +547,25 @@ impl CronScheduler {
             last_fired.insert(key, scheduled_tick);
         }
 
+        if self.skip_unfireable_graph(lp)? {
+            // Overlap suppression on the agent-backed graph: a busy backing
+            // graph records `Missed` against its agent and skips the tick —
+            // running only, no staleness. Non-agent graphs skip silently.
+            let _ = self.db.record_agent_backing_missed(
+                &lp.id,
+                crate::domain::models::TriggerType::Scheduled,
+            )?;
+            return Ok(());
+        }
+
         self.launch_due_graph(graph_engine, lp)
     }
 
     /// A graph not eligible for automatic firing (disabled, expired, or
     /// already running/paused/pausing) must not be relaunched by its trigger.
-    /// Returns `true` when the tick is skipped.
+    /// Returns `true` when the tick is skipped. The busy check reuses the
+    /// in-flight run lookup on the backing graph ([`find_in_flight_run`]):
+    /// pending/in_progress only, no stale threshold.
     fn skip_unfireable_graph(&self, lp: &crate::domain::graphs::Graph) -> anyhow::Result<bool> {
         if !lp.enabled || lp.is_expired() {
             return Ok(true);
@@ -650,7 +573,10 @@ impl CronScheduler {
         if lp.is_fireable() {
             return Ok(false);
         }
-        if !self.db.list_running_graph_runs(&lp.id)?.is_empty() {
+        if find_in_flight_run(&self.db, &lp.id)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .is_some()
+        {
             tracing::info!("Graph '{}' tick skipped: previous run still running", lp.id);
         }
         Ok(true)
@@ -671,9 +597,17 @@ impl CronScheduler {
         tracing::info!("Cron graph '{}' is due; launching", lp.id);
         if let Some(idea) = graph_engine.trigger_prompt_idea(lp)? {
             // FR4: re-check under the tick — the run may have started
-            // between the fireability check above and this launch.
-            if !self.db.list_running_graph_runs(&lp.id)?.is_empty() {
+            // between the fireability check above and this launch. Busy
+            // reuses [`find_in_flight_run`] (pending/in_progress, no stale).
+            if find_in_flight_run(&self.db, &lp.id)
+                .map_err(|e| anyhow::anyhow!("{e}"))?
+                .is_some()
+            {
                 tracing::info!("Graph '{}' tick skipped: previous run still running", lp.id);
+                let _ = self.db.record_agent_backing_missed(
+                    &lp.id,
+                    crate::domain::models::TriggerType::Scheduled,
+                )?;
                 return Ok(());
             }
             Arc::clone(graph_engine).start_background_tick(lp.id.clone(), idea);
@@ -684,108 +618,6 @@ impl CronScheduler {
             Some(crate::graph_engine::GraphRunTrigger::Cron),
         );
         Ok(())
-    }
-
-    /// Evaluate a single agent and spawn it if it is due. Returns early on
-    /// disabled/expired/parse-error conditions.
-    async fn try_fire_agent(
-        &self,
-        agent: &crate::domain::models::Agent,
-        now_local: chrono::DateTime<Local>,
-    ) -> anyhow::Result<()> {
-        if !agent.enabled {
-            return Ok(());
-        }
-
-        if agent.is_expired() {
-            tracing::info!("Agent '{}' has expired, disabling", agent.id);
-            self.db.update_agent_enabled(&agent.id, false)?;
-            return Ok(());
-        }
-
-        let Some(scheduled_tick) = agent_due_tick(agent, now_local) else {
-            return Ok(());
-        };
-
-        // Tick idempotency: dedupe by the scheduled tick itself (in UTC, so
-        // it lines up with the rest of the system — DB schema, `last_run_at`,
-        // daemon JSON), not by when this evaluation happened to run. Two
-        // evaluations of the same tick — the regular tick graph firing twice,
-        // or a second evaluation path racing it — compute the identical
-        // `scheduled_tick`, so this is an exact key, not a time-window guess.
-        {
-            let mut last_fired = self.last_fired.lock().await;
-            if last_fired
-                .get(&agent.id)
-                .is_some_and(|last| *last >= scheduled_tick)
-            {
-                tracing::info!(
-                    "Agent '{}' tick {} already fired; skipping duplicate evaluation",
-                    agent.id,
-                    scheduled_tick
-                );
-                return Ok(());
-            }
-            last_fired.insert(agent.id.clone(), scheduled_tick);
-        }
-
-        if !self.claim_in_flight_slot(agent).await {
-            return Ok(());
-        }
-        self.spawn_scheduled_agent_run(agent);
-        Ok(())
-    }
-
-    /// Per-agent in-flight guard: if this agent is already running
-    /// (spawned but not yet finalized), skip this fire. This is the
-    /// single choke point at the scheduler level — all firing paths
-    /// (scheduled tick, notify wake-up) go through it.
-    /// Returns `true` when the slot was newly claimed.
-    async fn claim_in_flight_slot(&self, agent: &crate::domain::models::Agent) -> bool {
-        let mut in_flight = self.in_flight.lock().await;
-        if !in_flight.insert(agent.id.clone()) {
-            tracing::info!(
-                "Agent '{}' is already running; skipping this fire",
-                agent.id
-            );
-            // Record a Missed run so the skip is visible in execution
-            // history, distinguishing "skipped: already running" from
-            // "never fired".
-            let now = Utc::now();
-            let missed = crate::domain::models::RunLog {
-                id: uuid::Uuid::new_v4().to_string(),
-                background_agent_id: agent.id.clone(),
-                status: crate::domain::models::RunStatus::Missed,
-                trigger_type: crate::domain::models::TriggerType::Scheduled,
-                summary: Some("Skipped: already running (scheduler in-flight guard)".to_string()),
-                started_at: now,
-                finished_at: Some(now),
-                exit_code: None,
-                timeout_at: None,
-                // CB43: nothing executed on a skipped run — no pair.
-                executed_platform: None,
-                executed_model: None,
-            };
-            let _ = self.db.insert_run(&missed);
-            return false;
-        }
-        true
-    }
-
-    fn spawn_scheduled_agent_run(&self, agent: &crate::domain::models::Agent) {
-        let executor = Arc::clone(&self.executor);
-        let agent = agent.clone();
-        let retry = self.retry;
-        let cancel = self.cancel.clone();
-        let in_flight = Arc::clone(&self.in_flight);
-        let agent_id = agent.id.clone();
-        tokio::spawn(async move {
-            run_with_retry(executor, agent, retry, cancel).await;
-            // Remove from in-flight set when the run completes (including
-            // retries). This must happen unconditionally so a failed run
-            // doesn't permanently block future fires.
-            in_flight.lock().await.remove(&agent_id);
-        });
     }
 
     /// Stop the scheduler.

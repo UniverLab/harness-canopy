@@ -1268,6 +1268,7 @@ async fn shutdown_check_kill_traverses_no_edge_and_marks_interrupted() {
         spec_group: None,
         idle_run: false,
         run_activity: &run_activity,
+        fire: FireCtx::default(),
     };
     let mut state = SpecRunState {
         cursor: SpecCursor::Node("check-a".to_string()),

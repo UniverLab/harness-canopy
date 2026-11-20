@@ -83,6 +83,7 @@ pub(super) async fn run_http_startup_reconciliations(
     super::reconcile_orphaned_graphs_on_startup(db, data_dir);
     super::reconcile_stranded_queue_specs_on_startup(db);
     super::reconcile_mutex_leases_on_startup(db);
+    migrate_agents_to_backing_graphs(db);
     if let Err(e) = db.requeue_in_review_specs() {
         tracing::warn!("Failed to requeue in_review specs: {e}");
     }
@@ -101,4 +102,28 @@ pub(super) async fn run_http_startup_reconciliations(
     // CB91: one maintenance pass at startup, after the reconciliations that
     // `startup_personal_rag` runs; the periodic tick continues from `start()`.
     core.ingestion.run_rag_maintenance().await;
+}
+
+/// One graph per background agent: every agent row gets its spec-less
+/// backing graph before the scheduler and the watchers start, so the graph
+/// triggers own every future fire. Idempotent; failures leave the row
+/// unmigrated (never fired — the legacy firing paths are deleted) and are
+/// reported, never fatal.
+fn migrate_agents_to_backing_graphs(db: &Arc<Database>) {
+    match super::super::agent_graph_migration::migrate_all_agents_to_graphs(db) {
+        Ok(report) if !report.failed.is_empty() => {
+            tracing::warn!(
+                "Agent-to-graph migration left {} agent(s) unmigrated: {}",
+                report.failed.len(),
+                report
+                    .failed
+                    .iter()
+                    .map(|(id, _)| id.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        Ok(_) => {}
+        Err(e) => tracing::error!("Agent-to-graph migration failed: {e:#}"),
+    }
 }

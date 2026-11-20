@@ -34,6 +34,7 @@ pub(crate) async fn execute_agent_node(
     node_outputs: &HashMap<String, Value>,
     all_node_names: &[String],
     may_commit: bool,
+    fire: &FireCtx,
 ) -> Result<NodeExecution> {
     if let Some(execution) = agent_commit_guard(spec, node, may_commit) {
         return Ok(execution);
@@ -99,23 +100,22 @@ pub(crate) async fn execute_agent_node(
         node,
         &crate::domain::prompts::prompts_dir(&crate::domain::prompts::canopy_dir()),
     );
-    // CM47: the spec's working-memory notes travel with every cold start,
-    // before `[REPORTING]`.
-    let spec_notes_section = build_spec_notes_section(db, lp, spec, node);
-    let prompt = match render_agent_prompt(
+    let render = ColdStartRender {
+        db,
         lp,
         spec,
         node,
-        &prompt_template,
+        template: &prompt_template,
         previous_output,
         workdir,
         run_id,
         node_outputs,
         all_node_names,
-        &spec_notes_section,
-    ) {
+        fire,
+    };
+    let prompt = match render.prompt() {
         Ok(p) => p,
-        Err(e) => return Ok(invalid_template_execution(node, &e)),
+        Err(e) => return Ok(e),
     };
     let prompt = append_pinned_skills(prompt, node, dynamic_skills).await;
     let prompt = with_report_nudge(prompt, report_nudge, run_id, &node.id);
@@ -156,56 +156,6 @@ fn resume_template_for(node: &GraphNode, crosses_spec: bool) -> &str {
     }
 }
 
-/// The node execution for a prompt template that could not be rendered.
-fn invalid_template_execution(node: &GraphNode, error: &anyhow::Error) -> NodeExecution {
-    NodeExecution {
-        status: GraphRunStatus::Fail,
-        output: serde_json::json!({
-            "failure_kind": "invalid_template",
-            "error": error.to_string(),
-        }),
-        summary: format!(
-            "Agent node '{}' prompt template is invalid: {error}",
-            node.name
-        ),
-    }
-}
-
-/// CM47: build the `[SPEC NOTES]` section for a cold-start prompt. Fetches
-/// the spec's notes, resolves the caller's owner (ensemble when the node is
-/// a member, else the node — the same `daemon::handler_notes` ownership the
-/// write path enforces) and the Designer, then composes the section. A
-/// notes-fetch failure degrades to notes-free (instructions-only) rather
-/// than failing the node — notes are working memory, not a gate.
-pub(crate) fn build_spec_notes_section(
-    db: &Arc<Database>,
-    lp: &crate::domain::graphs::Graph,
-    spec: &GraphSpec,
-    node: &GraphNode,
-) -> String {
-    let notes = db.spec_notes_get(&spec.id).unwrap_or_default();
-    let views: Vec<SpecNoteView<'_>> = notes
-        .iter()
-        .map(|note| SpecNoteView {
-            owner_kind: note.owner_kind.as_str(),
-            owner_id: note.owner_id.as_str(),
-            owner_name: note.owner_name.as_str(),
-            body: note.body.as_str(),
-            updated_at: note.updated_at.as_str(),
-        })
-        .collect();
-    let caller = crate::daemon::handler_notes::resolve_owner(db, &node.id)
-        .ok()
-        .flatten()
-        .map(|owner| (owner.kind, owner.id));
-    let designer = designer_owner_for_prompt(db, lp, spec);
-    let caller_ref = caller.as_ref().map(|(kind, id)| (*kind, id.as_str()));
-    let designer_ref = designer
-        .as_ref()
-        .map(|(kind, id)| (kind.as_str(), id.as_str()));
-    compose_spec_notes_section(&views, caller_ref, designer_ref)
-}
-
 /// CM47: the spec's own graph when it has one, else the top-level graph —
 /// the same precedence `GraphEngine::load_spec_graph` uses. Returns the
 /// nodes/edges the Designer's DFS walks, plus member→ensemble ids.
@@ -242,7 +192,7 @@ fn spec_graph_scope(
     Some((nodes, edges, member_to_ensemble))
 }
 
-fn designer_owner_for_prompt(
+pub(crate) fn designer_owner_for_prompt(
     db: &Arc<Database>,
     lp: &crate::domain::graphs::Graph,
     spec: &GraphSpec,

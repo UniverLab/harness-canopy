@@ -29,6 +29,7 @@ impl GraphEngine {
         node_outputs: &HashMap<String, Value>,
         all_node_names: &[String],
         may_commit: bool,
+        fire: &FireCtx,
     ) -> Result<NodeExecution> {
         match node.kind {
             GraphNodeKind::Check => {
@@ -61,6 +62,7 @@ impl GraphEngine {
                     node_outputs,
                     all_node_names,
                     may_commit,
+                    fire,
                 )
                 .await
             }
@@ -80,7 +82,13 @@ impl GraphEngine {
             // deterministic, model-free, quota-free. Synchronous: resolving,
             // rendering and enqueueing touch only the database.
             GraphNodeKind::Deliver => {
-                self.execute_deliver_node(lp, spec, node, previous_output, run_id, workdir)
+                let input = DeliverInput {
+                    previous_output,
+                    run_id,
+                    workdir,
+                    fire,
+                };
+                self.execute_deliver_node(lp, spec, node, &input)
             }
         }
     }

@@ -1,8 +1,7 @@
 //! `tests` tests (split from `src/scheduler/cron_scheduler.rs`, pure move).
 use super::*;
 use crate::application::notification_service::DefaultNotificationService;
-use crate::application::ports::{AgentRepository, RunRepository};
-use crate::domain::models::{Agent, Cli, Trigger};
+use crate::domain::models::{Agent, Cli};
 
 fn manual_agent(id: &str, enabled: bool) -> Agent {
     Agent {

@@ -209,6 +209,7 @@ impl GraphEngine {
             spec_group: spec_group.as_deref(),
             idle_run,
             run_activity: &ctx.run_activity,
+            fire: dispatch_fire_ctx(ctx),
         };
 
         self.run_spec_loop(&ctx, &mut state).await

@@ -22,28 +22,27 @@ impl GraphEngine {
         lp: &Graph,
         spec: &GraphSpec,
         node: &GraphNode,
-        previous_output: Option<&Value>,
-        run_id: &str,
-        workdir: &str,
+        input: &DeliverInput<'_>,
     ) -> Result<NodeExecution> {
         let (target, target_name) = match self.resolve_deliver_target(node) {
             Ok(resolved) => resolved,
             Err(failure) => return Ok(failure),
         };
-        let rendered = match Self::render_deliver_prompt(spec, node, previous_output) {
-            Ok(prompt) => prompt,
-            Err(failure) => return Ok(failure),
-        };
+        let rendered =
+            match Self::render_deliver_prompt(lp, spec, node, input.previous_output, input.fire) {
+                Ok(prompt) => prompt,
+                Err(failure) => return Ok(failure),
+            };
         if let Err(failure) = self.verify_live_deliver_target(node, &target) {
             return Ok(failure);
         }
         let enqueue = DeliverEnqueue {
-            workdir,
+            workdir: input.workdir,
             target: &target,
             target_name,
             rendered: &rendered,
         };
-        Ok(self.enqueue_deliver_send(lp, node, run_id, &enqueue))
+        Ok(self.enqueue_deliver_send(lp, node, input.run_id, &enqueue))
     }
 
     /// Resolve the node's single target: exactly one of
@@ -124,10 +123,17 @@ impl GraphEngine {
     /// output as bounded pretty-printed JSON (`"(none)"` when absent),
     /// `spec_content` is the spec description or name, and unbound markers
     /// are refused against [`ROUTER_DECISION_BINDINGS`].
+    ///
+    /// A migrated legacy agent's deliver node (`legacy_agent_id` set) takes
+    /// the two-pass legacy render instead: the agent prompt verbatim through
+    /// legacy substitution then the three router bindings, plus the watch
+    /// block on non-manual watch fires.
     fn render_deliver_prompt(
+        lp: &Graph,
         spec: &GraphSpec,
         node: &GraphNode,
         previous_output: Option<&Value>,
+        fire: &FireCtx,
     ) -> Result<String, NodeExecution> {
         let template = node
             .config
@@ -135,6 +141,24 @@ impl GraphEngine {
             .and_then(Value::as_str)
             .filter(|s| !s.trim().is_empty())
             .unwrap_or("{{previous_output}}");
+        if let Some(agent_id) = legacy_agent_id(node) {
+            if let Err(error) = refuse_unbindable_legacy_template(&node.name, template) {
+                return Err(NodeExecution {
+                    status: GraphRunStatus::Fail,
+                    output: serde_json::json!({
+                        "error": error.to_string(),
+                    }),
+                    summary: format!("Deliver node '{}' prompt is invalid: {error}", node.name),
+                });
+            }
+            return Ok(render_legacy_migrated_prompt(
+                template,
+                &agent_id,
+                &lp.log_path(),
+                fire,
+                legacy_watch_append(node),
+            ));
+        }
         if let Err(error) =
             refuse_unbindable_template(&node.name, template, ROUTER_DECISION_BINDINGS, None)
         {
@@ -270,6 +294,16 @@ impl GraphEngine {
             ),
         }
     }
+}
+
+/// One deliver execution's per-run inputs: the previous node's output, the
+/// run id, the run workdir, and the legacy fire context. A struct (not four
+/// loose arguments) keeps the call within the argument-count lint.
+pub(crate) struct DeliverInput<'a> {
+    pub(crate) previous_output: Option<&'a Value>,
+    pub(crate) run_id: &'a str,
+    pub(crate) workdir: &'a str,
+    pub(crate) fire: &'a FireCtx,
 }
 
 /// What [`GraphEngine::enqueue_deliver_send`] queues: the resolved target

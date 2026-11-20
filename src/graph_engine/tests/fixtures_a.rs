@@ -1052,6 +1052,7 @@ async fn run_resume_agent_node(
         &HashMap::new(),
         &[],
         false,
+        &FireCtx::default(),
     )
     .await
     .unwrap();

@@ -34,6 +34,7 @@ pub(crate) async fn run_member_attempt(
             &ctx.node_outputs,
             &ctx.all_node_names,
             ctx.may_commit,
+            &FireCtx::default(),
         ),
     )
     .await;

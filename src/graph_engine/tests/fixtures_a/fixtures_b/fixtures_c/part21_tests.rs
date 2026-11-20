@@ -495,6 +495,7 @@ async fn a_pending_bound_spec_is_never_reported_as_a_completed_graph() {
         idle_run: false,
         run_activity: RunActivity::default(),
         daemon_trigger: None,
+        watch_fire: None,
     };
     engine
         .finish_dispatch(&ctx, None, None, &[], false, false)
@@ -578,6 +579,7 @@ async fn the_completion_message_never_reports_fewer_done_than_total() {
         idle_run: false,
         run_activity: RunActivity::default(),
         daemon_trigger: None,
+        watch_fire: None,
     };
     engine
         .finish_dispatch(&ctx, None, None, &[], false, false)

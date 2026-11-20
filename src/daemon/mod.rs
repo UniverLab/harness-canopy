@@ -5,6 +5,7 @@
 
 pub(crate) mod actions;
 pub(crate) mod agent_cli;
+pub(crate) mod agent_graph_migration;
 pub(crate) mod announcements;
 pub(crate) mod bridge;
 pub(crate) mod clean_cli;

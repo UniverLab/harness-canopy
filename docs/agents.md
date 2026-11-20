@@ -37,6 +37,12 @@ They support configurable timeouts, automatic retries, execution logging
 variables: `{{TIMESTAMP}}`, `{{TASK_ID}}`, `{{LOG_PATH}}`,
 `{{FILE_PATH}}`, `{{EVENT_TYPE}}`.
 
+Execution runs on the graph engine: each background agent owns one
+spec-less graph (named after the agent) with the same trigger, so
+scheduled and event-driven work share one execution path. The agent
+tools, CLI and TUI are unchanged — the backing graph is an
+implementation detail, and `agent list`/`get` report run data from it.
+
 Background agents are managed from the TUI or by other agents through the
 [agent MCP tools](mcp-tools.md) (`agent_edit` `add`, `agent_edit` `watch`,
 `agent_edit` `run`, `agent` `status`, …).

@@ -104,15 +104,25 @@ impl AgentRepository for Database {
     }
 
     fn list_cron_agents(&self) -> Result<Vec<Agent>> {
-        self.list_agents_where("WHERE trigger_type = 'cron' AND enabled = 1")
+        // Migrated rows belong to their backing graph now: the graph trigger
+        // fires them, never this path.
+        self.list_agents_where(
+            "WHERE trigger_type = 'cron' AND enabled = 1 AND migrated_to_graph = 0",
+        )
     }
 
     fn list_watch_agents(&self) -> Result<Vec<Agent>> {
-        self.list_agents_where("WHERE trigger_type = 'watch' AND enabled = 1")
+        // Same ownership rule as `list_cron_agents`: migrated rows fire
+        // through their backing graph's watch trigger.
+        self.list_agents_where(
+            "WHERE trigger_type = 'watch' AND enabled = 1 AND migrated_to_graph = 0",
+        )
     }
 
     fn list_pending_enable_agents(&self) -> Result<Vec<Agent>> {
-        self.list_agents_where("WHERE enabled = 0 AND enable_at IS NOT NULL")
+        self.list_agents_where(
+            "WHERE enabled = 0 AND enable_at IS NOT NULL AND migrated_to_graph = 0",
+        )
     }
 
     fn delete_agent(&self, id: &str) -> Result<bool> {
@@ -285,7 +295,7 @@ impl Database {
     /// `trigger_config` (or other fields) fails to decode. Healthy agents are
     /// never affected; a corrupt row is simply absent here — callers that
     /// need visibility into corrupt rows use [`AgentRepository::list_corrupt_agents`].
-    fn list_agents_where(&self, where_clause: &str) -> Result<Vec<Agent>> {
+    pub(in crate::db) fn list_agents_where(&self, where_clause: &str) -> Result<Vec<Agent>> {
         let conn = self
             .conn
             .lock()

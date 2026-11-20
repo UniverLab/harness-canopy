@@ -63,6 +63,9 @@ impl App {
         };
 
         self.db.upsert_agent(&agent)?;
+        // Agents fire through their backing graphs: create the backing graph
+        // (best-effort; the daemon startup migration repairs misses).
+        let _ = crate::daemon::agent_graph_migration::sync_agent_backing_graph(&self.db, &agent);
         Ok(())
     }
 }

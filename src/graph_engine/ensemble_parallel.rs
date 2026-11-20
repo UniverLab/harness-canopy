@@ -425,6 +425,7 @@ async fn drive_parallel_member_attempts(
             &task.node_outputs,
             &task.all_node_names,
             task.may_commit,
+            &FireCtx::default(),
         )
         .await?;
         let run = task

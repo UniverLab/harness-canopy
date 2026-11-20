@@ -33,7 +33,7 @@ fn deliver_config(pairs: &[(&str, &str)]) -> serde_json::Value {
 /// Temp graph + spec plus an engine whose scheduled-prompt notify the test
 /// owns. The spec carries a known description/name in memory so rendering
 /// assertions are exact (nothing is re-persisted).
-fn deliver_fixture() -> (
+pub(super) fn deliver_fixture() -> (
     tempfile::TempDir,
     Arc<Database>,
     GraphEngine,
@@ -51,7 +51,22 @@ fn deliver_fixture() -> (
     (_dir, db, engine, notify, lp, spec)
 }
 
-fn live_session(db: &Database, id: &str, name: &str) {
+/// One deliver execution's inputs for tests: the previous output, run id,
+/// `"/tmp"` workdir, and the given fire context.
+pub(super) fn run_input<'a>(
+    previous_output: Option<&'a Value>,
+    run_id: &'a str,
+    fire: &'a FireCtx,
+) -> DeliverInput<'a> {
+    DeliverInput {
+        previous_output,
+        run_id,
+        workdir: "/tmp",
+        fire,
+    }
+}
+
+pub(super) fn live_session(db: &Database, id: &str, name: &str) {
     db.insert_interactive_session(
         id,
         name,
@@ -200,7 +215,12 @@ async fn deliver_to_live_session_enqueues_send() {
     let previous = serde_json::json!({"verdict": "pass"});
 
     let execution = engine
-        .execute_deliver_node(&lp, &spec, &node, Some(&previous), "run-1", "/tmp")
+        .execute_deliver_node(
+            &lp,
+            &spec,
+            &node,
+            &run_input(Some(&previous), "run-1", &FireCtx::default()),
+        )
         .unwrap();
     assert_eq!(execution.status, GraphRunStatus::Pass);
     assert_eq!(
@@ -274,7 +294,12 @@ async fn deliver_to_live_session_by_id() {
     );
 
     let execution = engine
-        .execute_deliver_node(&lp, &spec, &node, None, "run-9", "/tmp")
+        .execute_deliver_node(
+            &lp,
+            &spec,
+            &node,
+            &run_input(None, "run-9", &FireCtx::default()),
+        )
         .unwrap();
     assert_eq!(execution.status, GraphRunStatus::Pass);
     assert_eq!(
@@ -309,7 +334,12 @@ fn deliver_missing_name_target_fails_without_enqueue() {
     );
 
     let execution = engine
-        .execute_deliver_node(&lp, &spec, &node, None, "run-2", "/tmp")
+        .execute_deliver_node(
+            &lp,
+            &spec,
+            &node,
+            &run_input(None, "run-2", &FireCtx::default()),
+        )
         .unwrap();
     assert_eq!(execution.status, GraphRunStatus::Fail);
     let error = execution
@@ -348,7 +378,12 @@ fn deliver_ambiguous_name_fails_listing_ids() {
     );
 
     let execution = engine
-        .execute_deliver_node(&lp, &spec, &node, None, "run-3", "/tmp")
+        .execute_deliver_node(
+            &lp,
+            &spec,
+            &node,
+            &run_input(None, "run-3", &FireCtx::default()),
+        )
         .unwrap();
     assert_eq!(execution.status, GraphRunStatus::Fail);
     let error = execution
@@ -389,7 +424,12 @@ fn deliver_dead_id_target_fails_without_enqueue() {
     );
 
     let execution = engine
-        .execute_deliver_node(&lp, &spec, &node, None, "run-4", "/tmp")
+        .execute_deliver_node(
+            &lp,
+            &spec,
+            &node,
+            &run_input(None, "run-4", &FireCtx::default()),
+        )
         .unwrap();
     assert_eq!(execution.status, GraphRunStatus::Fail);
     let error = execution
@@ -425,7 +465,12 @@ async fn deliver_renders_none_for_missing_previous_output() {
     );
 
     engine
-        .execute_deliver_node(&lp, &spec, &node, None, "run-5", "/tmp")
+        .execute_deliver_node(
+            &lp,
+            &spec,
+            &node,
+            &run_input(None, "run-5", &FireCtx::default()),
+        )
         .unwrap();
     let pending = db
         .list_pending_scheduled_prompts_for_session("sess-1")
@@ -453,7 +498,12 @@ async fn deliver_bounds_large_previous_output() {
     let big = serde_json::json!({"log": "x".repeat(64 * 1024)});
 
     engine
-        .execute_deliver_node(&lp, &spec, &node, Some(&big), "run-6", "/tmp")
+        .execute_deliver_node(
+            &lp,
+            &spec,
+            &node,
+            &run_input(Some(&big), "run-6", &FireCtx::default()),
+        )
         .unwrap();
     let pending = db
         .list_pending_scheduled_prompts_for_session("sess-2")

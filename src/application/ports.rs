@@ -10,9 +10,16 @@ pub trait AgentRepository {
     fn upsert_agent(&self, agent: &Agent) -> Result<()>;
     fn get_agent(&self, id: &str) -> Result<Option<Agent>>;
     fn list_agents(&self) -> Result<Vec<Agent>>;
+    /// Legacy per-agent schedule queries: agents fire through their backing
+    /// graphs since the migration, so the scheduler/watchers no longer
+    /// consume these. Kept for the repository contract and its filter tests
+    /// (migrated rows are excluded).
+    #[allow(dead_code)]
     fn list_cron_agents(&self) -> Result<Vec<Agent>>;
+    #[allow(dead_code)]
     fn list_watch_agents(&self) -> Result<Vec<Agent>>;
     /// Agents currently disabled with a pending one-shot `enable_at`.
+    #[allow(dead_code)]
     fn list_pending_enable_agents(&self) -> Result<Vec<Agent>>;
     /// Agent rows that failed to decode (e.g. malformed `trigger_config`
     /// written directly to SQLite by an external tool). Never errors the
@@ -26,6 +33,8 @@ pub trait AgentRepository {
     /// Leave the agent disabled but set a one-shot `enable_at` time.
     fn schedule_agent_enable(&self, id: &str, at: DateTime<Utc>) -> Result<()>;
     /// Enable the agent and clear its `enable_at`, firing the one-shot schedule.
+    /// Legacy agent one-shot path: agents enable through their backing graph.
+    #[allow(dead_code)]
     fn activate_scheduled_enable(&self, id: &str) -> Result<()>;
     fn update_agent_last_run(&self, id: &str, success: bool) -> Result<()>;
     fn update_agent_triggered(&self, id: &str) -> Result<()>;

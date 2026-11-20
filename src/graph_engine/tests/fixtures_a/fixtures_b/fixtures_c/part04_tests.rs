@@ -205,6 +205,7 @@ async fn execute_node_injects_pinned_skill_into_composed_prompt_end_to_end() {
             &HashMap::new(),
             &[],
             false,
+            &FireCtx::default(),
         )
         .await
         .unwrap();

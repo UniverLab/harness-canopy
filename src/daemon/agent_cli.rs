@@ -7,6 +7,7 @@ use anyhow::Result;
 use clap::Subcommand;
 
 use crate::application::ports::AgentRepository;
+use crate::daemon::agent_graph_migration::with_backing_run_stats;
 use crate::daemon::handler_formatting::agent_detail_json;
 use crate::db::Database;
 use crate::domain::db_paths::database_path;
@@ -37,6 +38,9 @@ fn handle_agent_show(db: &Database, id: &str, json: bool) -> Result<()> {
     let agent = db
         .get_agent(id)?
         .ok_or_else(|| anyhow::anyhow!("agent '{id}' not found"))?;
+    // Same read-through as the `agent get` MCP tool, so `--json` stays
+    // byte-identical to it for migrated agents.
+    let agent = with_backing_run_stats(db, agent);
     let notify = db.agent_notify_on_success(id)?;
     if json {
         println!(

@@ -142,7 +142,11 @@ pub(crate) fn resolve_log_path(db: &Database, id: &str) -> Result<String, McpErr
     let Some(agent) = db.get_agent(id).map_err(internal_error)? else {
         return default_log_path(id);
     };
-    Ok(agent.log_path)
+    // Migrated agents append run output to their backing graph's log file,
+    // so `agent logs` must read that file to stay live.
+    Ok(crate::daemon::agent_graph_migration::backing_log_path(
+        db, &agent,
+    ))
 }
 
 fn default_log_path(id: &str) -> Result<String, McpError> {

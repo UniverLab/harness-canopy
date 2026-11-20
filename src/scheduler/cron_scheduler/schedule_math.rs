@@ -39,33 +39,10 @@ pub(super) fn fold_earliest_instant(
     }
 }
 
-/// Parse the agent's cron schedule and resolve its due tick (UTC), or `None`
-/// when there is no schedule, it doesn't parse, or it isn't due yet.
-pub(super) fn agent_due_tick(
-    agent: &crate::domain::models::Agent,
-    now_local: DateTime<Local>,
-) -> Option<DateTime<Utc>> {
-    let schedule_expr = agent.schedule_expr()?;
-    let cron_7field = to_7field_cron(schedule_expr);
-    let schedule = match Schedule::from_str(&cron_7field) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(
-                "Agent '{}' has invalid cron expression '{}': {}",
-                agent.id,
-                schedule_expr,
-                e
-            );
-            return None;
-        }
-    };
-
-    // 1-minute lookback so a scheduler hiccup doesn't skip a fire that
-    // was scheduled to happen just before "now" (in local time).
-    let due_local = due_fire_local(&schedule, now_local)?;
-    Some(due_local.with_timezone(&Utc))
-}
-
+/// Legacy agent due-tick math (`agent_due_tick`) is deleted: agents fire
+/// through their backing graphs since the agent-to-graph migration, and the
+/// graph tick resolves due ticks from the graph's own schedule. The shared
+/// `due_fire_local` helper it wrapped stays (graph path + unit tests).
 /// Compute the next fire instant (in UTC) for a cron schedule, evaluated
 /// against the user's local wall clock.
 ///
@@ -86,7 +63,6 @@ pub(super) fn next_fire_utc(
 
 /// Parse `schedule_expr` and, if it yields a nearer next fire than `earliest`,
 /// update `earliest`. A `None` expression or an unparseable one is skipped.
-/// Shared by agents and cron graphs so both walk fire times identically.
 pub(super) fn fold_earliest(
     earliest: &mut Option<DateTime<Utc>>,
     schedule_expr: Option<&str>,

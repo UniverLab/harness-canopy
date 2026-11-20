@@ -327,6 +327,55 @@ impl Database {
 }
 
 /// Insert a run row on an already-locked connection. Shared by `insert_run`
+impl Database {
+    /// Overlap suppression for a migrated agent's backing graph: when the
+    /// graph with `graph_id` is the backing graph of a migrated agent and
+    /// that graph is enabled, unexpired and busy, record a `Missed` run
+    /// against the agent and report busy so the caller skips the fire.
+    /// Busy reuses the in-flight run lookup on the backing graph
+    /// (`find_in_flight_run`, i.e. `list_running_graph_runs` non-empty:
+    /// `running`/`waiting` only, no stale threshold) — the graph equivalent
+    /// of the `try_start_run` contract — so a finished or idle graph never
+    /// records a skip. Returns whether a `Missed` was recorded.
+    pub fn record_agent_backing_missed(
+        &self,
+        graph_id: &str,
+        trigger_type: TriggerType,
+    ) -> Result<bool> {
+        use crate::application::ports::RunRepository;
+        let Some(agent_id) = self.agent_backing_id_for_graph(graph_id)? else {
+            return Ok(false);
+        };
+        let Some(graph) = self.get_graph(graph_id)? else {
+            return Ok(false);
+        };
+        if !graph.enabled || graph.is_expired() {
+            return Ok(false);
+        }
+        if self.list_running_graph_runs(graph_id)?.is_empty() {
+            return Ok(false);
+        }
+        tracing::info!(
+            "Graph '{graph_id}' (agent '{agent_id}') is already running; skipping this fire"
+        );
+        let now = Utc::now();
+        self.insert_run(&RunLog {
+            id: uuid::Uuid::new_v4().to_string(),
+            background_agent_id: agent_id,
+            status: crate::domain::models::RunStatus::Missed,
+            trigger_type,
+            summary: Some("Skipped: already running (backing graph in flight)".to_string()),
+            started_at: now,
+            finished_at: Some(now),
+            exit_code: None,
+            timeout_at: None,
+            executed_platform: None,
+            executed_model: None,
+        })?;
+        Ok(true)
+    }
+}
+
 /// and `try_start_run` so the INSERT itself stays single-sourced.
 fn insert_run_row(conn: &rusqlite::Connection, run: &RunLog) -> Result<()> {
     conn.execute(

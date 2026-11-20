@@ -329,6 +329,9 @@ impl Executor {
     }
 
     /// Execute a watcher-triggered agent with specific file path and event info.
+    /// Legacy watch-fire entry: watch agents fire through their backing graphs
+    /// since the migration. Kept for the executor plumbing tests.
+    #[allow(dead_code)]
     pub async fn execute_agent_with_context(
         &self,
         agent: &Agent,

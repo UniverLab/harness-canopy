@@ -70,7 +70,8 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
                 last_run_ok BOOLEAN,
                 last_triggered_at TEXT,
                 trigger_count INTEGER NOT NULL DEFAULT 0,
-                notify_on_success BOOLEAN NOT NULL DEFAULT 0
+                notify_on_success BOOLEAN NOT NULL DEFAULT 0,
+                migrated_to_graph BOOLEAN NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS runs (
@@ -670,6 +671,7 @@ impl Database {
         Self::migrate_interactive_harness_column(&conn)?;
         Self::migrate_interactive_exit_detail_column(&conn)?;
         Self::migrate_agent_optin_columns(&conn)?;
+        Self::migrate_agent_migrated_to_graph_column(&conn)?;
         Self::migrate_graph_trigger_columns(&conn)?;
         Self::migrate_graph_trigger_prompt_column(&conn)?;
         Self::migrate_graph_schedule_columns(&conn)?;
@@ -727,6 +729,7 @@ pub use subagent_runs::{NewSubagentRun, SubagentRunRecord};
 pub mod achievements;
 pub mod activity_log;
 pub mod agent;
+pub mod agent_backing;
 pub mod clean;
 pub(crate) mod connection;
 pub mod crew_binding;

@@ -2,6 +2,7 @@
 //! `trigger_prompt` (FR3/FR4) — a due tick launches the idea run, and an
 //! overlapping tick skips while a run is still in flight.
 use super::*;
+use crate::domain::models::Trigger;
 
 /// A spec-less cron graph with a `trigger_prompt` and one top-level
 /// check node running `command`.

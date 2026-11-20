@@ -26,6 +26,59 @@ pub(crate) struct DispatchMode {
     /// Daemon-initiated trigger source for per-graph run logging. `None` for
     /// manual launches (run/continue) which must never append a log block.
     pub(crate) daemon_trigger: Option<crate::graph_engine::graph_run_log::GraphRunTrigger>,
+    /// Watch-fire context for this dispatch: the triggering path and event.
+    /// `Some` only on the watchers' watch-fire path (or a manual replay of
+    /// it); cron ticks and manual runs leave this `None` so legacy
+    /// `{{FILE_PATH}}`/`{{EVENT_TYPE}}` markers stay literally substituted
+    /// the way the legacy watcher left them.
+    pub(crate) watch_fire: Option<WatchFireCtx>,
+}
+
+/// The file-system event that fired a watch dispatch: the changed path and
+/// the event kind, exactly as the legacy watcher passed them to
+/// `execute_agent_with_context` and `render_send_prompt`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct WatchFireCtx {
+    pub(crate) file_path: String,
+    pub(crate) event_type: String,
+}
+
+/// What a node render needs to reproduce the legacy agent firing: the
+/// daemon trigger (manual when `None`) plus the watch-fire context when
+/// this dispatch is a watch fire.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FireCtx {
+    pub(crate) trigger: Option<crate::graph_engine::graph_run_log::GraphRunTrigger>,
+    pub(crate) file_path: Option<String>,
+    pub(crate) event_type: Option<String>,
+}
+
+impl FireCtx {
+    pub(crate) fn is_manual(&self) -> bool {
+        self.trigger.is_none()
+    }
+
+    /// The fire context for a dispatch from its daemon trigger plus the
+    /// watchers' watch-fire context (`None` on every other path, so legacy
+    /// markers stay literally substituted the way the legacy paths left
+    /// them).
+    pub(crate) fn from_dispatch(
+        trigger: Option<crate::graph_engine::graph_run_log::GraphRunTrigger>,
+        watch: Option<&WatchFireCtx>,
+    ) -> Self {
+        Self {
+            trigger,
+            file_path: watch.map(|fire| fire.file_path.clone()),
+            event_type: watch.map(|fire| fire.event_type.clone()),
+        }
+    }
+}
+
+/// The fire context for a dispatch: build it from the dispatch's daemon
+/// trigger and watch-fire context. Lives here (not on `DispatchCtx`) so
+/// `run_spec` stays within its line budget.
+pub(crate) fn dispatch_fire_ctx(ctx: &crate::graph_engine::DispatchCtx<'_>) -> FireCtx {
+    FireCtx::from_dispatch(ctx.daemon_trigger, ctx.watch_fire.as_ref())
 }
 
 impl DispatchMode {

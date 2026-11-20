@@ -153,6 +153,7 @@ impl GraphEngine {
             idle_run: mode.tick,
             run_activity: RunActivity::default(),
             daemon_trigger: mode.daemon_trigger,
+            watch_fire: mode.watch_fire.clone(),
         };
         match &queue_id {
             Some(queue_id) => {
@@ -756,5 +757,29 @@ impl GraphEngine {
                 Ok(message)
             }
         }
+    }
+}
+
+impl GraphEngine {
+    /// Watch-fire start: like [`Self::start_background_with_trigger`] with a
+    /// watch trigger, plus the triggering path/event and the watch graph's
+    /// `trigger_prompt` as the run's idea (a spec-less graph cannot launch
+    /// on an empty idea). Migrated watch agents render `{{FILE_PATH}}` and
+    /// `{{EVENT_TYPE}}` and the watch block from this context. Lives here
+    /// rather than in `lifecycle.rs` so that file stays under the 800-line
+    /// gate.
+    pub fn start_background_watch_fire(
+        self: Arc<Self>,
+        graph_id: String,
+        idea: Option<String>,
+        file_path: String,
+        event_type: String,
+    ) {
+        let mut mode = DispatchMode::fresh().with_daemon_trigger(GraphRunTrigger::Watch);
+        mode.watch_fire = Some(WatchFireCtx {
+            file_path,
+            event_type,
+        });
+        self.spawn_dispatch(graph_id, None, None, idea, None, mode);
     }
 }

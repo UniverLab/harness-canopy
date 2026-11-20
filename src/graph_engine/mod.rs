@@ -23,10 +23,12 @@ use crate::domain::sandbox::Sandbox;
 use crate::domain::spec_type::{commit_message, SpecType};
 
 mod agent_exec;
+mod agent_legacy;
 mod agent_spawn;
 mod check;
 mod check_command;
 mod check_render;
+mod cold_start;
 mod commit_guard;
 mod crew_resolve;
 mod decision;
@@ -53,6 +55,8 @@ mod idea_run;
 mod infra;
 mod launch_check;
 mod lifecycle;
+#[cfg(test)]
+mod lifecycle_tests;
 mod mutex_gate;
 mod node_attempt;
 mod node_dispatch;
@@ -75,9 +79,11 @@ mod value_router;
 mod verdict_shutdown;
 
 pub(crate) use agent_exec::*;
+pub(crate) use agent_legacy::*;
 pub(crate) use agent_spawn::*;
 pub(crate) use check::*;
 pub(crate) use check_render::*;
+pub(crate) use cold_start::*;
 pub(crate) use commit_guard::*;
 pub(crate) use decision::*;
 #[allow(unused_imports)]
@@ -422,6 +428,10 @@ pub(crate) struct SpecStepCtx<'a> {
     /// FR5: run-scoped activity shared across every spec of this dispatch
     /// (see [`RunActivity`]). Only consulted when `idle_run` is set.
     run_activity: &'a RunActivity,
+    /// What a node render needs to reproduce a migrated legacy agent
+    /// firing: the daemon trigger (manual when `None`) plus the watch
+    /// context of a watch fire.
+    fire: FireCtx,
 }
 /// Mutable cursor/loop state carried across spec iterations.
 pub(crate) struct SpecRunState {

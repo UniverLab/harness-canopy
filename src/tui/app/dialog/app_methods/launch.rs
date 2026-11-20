@@ -309,6 +309,9 @@ impl App {
         };
         apply_scheduled_edit(&mut agent, dialog, model);
         self.db.upsert_agent(&agent)?;
+        // Agents fire through their backing graphs: keep the backing graph
+        // in sync (best-effort; the daemon startup migration repairs misses).
+        let _ = crate::daemon::agent_graph_migration::sync_agent_backing_graph(&self.db, &agent);
         Ok(())
     }
 
@@ -326,6 +329,9 @@ impl App {
         };
         apply_watcher_edit(&mut agent, dialog, model);
         self.db.upsert_agent(&agent)?;
+        // Agents fire through their backing graphs: keep the backing graph
+        // in sync (best-effort; the daemon startup migration repairs misses).
+        let _ = crate::daemon::agent_graph_migration::sync_agent_backing_graph(&self.db, &agent);
         Ok(())
     }
 
@@ -596,6 +602,9 @@ impl App {
             action: crate::domain::models::AgentAction::Headless,
         };
         self.db.upsert_agent(&agent)?;
+        // Agents fire through their backing graphs: create the backing graph
+        // (best-effort; the daemon startup migration repairs misses).
+        let _ = crate::daemon::agent_graph_migration::sync_agent_backing_graph(&self.db, &agent);
         if let Some(workdir) = agent.working_dir.as_deref() {
             if crate::domain::project::should_auto_register(Path::new(workdir)) {
                 let _ = self.db.register_project_path(Path::new(workdir));
@@ -650,6 +659,9 @@ impl App {
             action: crate::domain::models::AgentAction::Headless,
         };
         self.db.upsert_agent(&agent)?;
+        // Agents fire through their backing graphs: create the backing graph
+        // (best-effort; the daemon startup migration repairs misses).
+        let _ = crate::daemon::agent_graph_migration::sync_agent_backing_graph(&self.db, &agent);
         Ok(())
     }
 

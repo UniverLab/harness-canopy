@@ -12,6 +12,7 @@ use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::ErrorData as McpError;
 
 use crate::application::ports::AgentRepository;
+use crate::daemon::agent_graph_migration::sync_agent_backing_graph;
 use crate::daemon::handler::TaskTriggerHandler;
 use crate::daemon::handler_formatting::{internal_error, make_log_path};
 use crate::daemon::handler_helpers::parse_schedule_and_expiry;
@@ -187,6 +188,9 @@ impl TaskTriggerHandler {
         agent.expires_at = expires_at;
 
         self.db.upsert_agent(&agent).map_err(internal_error)?;
+        if let Err(e) = sync_agent_backing_graph(&self.db, &agent) {
+            tracing::warn!("Agent '{}' backing graph sync skipped: {e:#}", agent.id);
+        }
         self.scheduler_notify.notify_one();
 
         Ok(success_result(&format!(
@@ -247,8 +251,17 @@ impl TaskTriggerHandler {
 
         // Save before starting the watcher, same as the headless path.
         self.db.upsert_agent(&agent).map_err(internal_error)?;
+        if let Err(e) = sync_agent_backing_graph(&self.db, &agent) {
+            tracing::warn!("Agent '{}' backing graph sync skipped: {e:#}", agent.id);
+        }
 
-        if let Err(e) = self.watcher_engine.start_watcher(&agent).await {
+        // Watch agents fire through their backing graph (id == agent id).
+        let backing = self
+            .db
+            .get_graph(&agent.id)
+            .map_err(internal_error)?
+            .ok_or_else(|| internal_error(format!("Agent '{}' backing graph missing", agent.id)))?;
+        if let Err(e) = self.watcher_engine.start_graph_watcher(&backing).await {
             tracing::warn!("Watcher '{}' saved but failed to start: {}", agent.id, e);
             return Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                 "Watcher '{}' for session '{}' registered but could not start watching '{}': {}. It will be retried on daemon restart.",

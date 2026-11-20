@@ -263,6 +263,7 @@ async fn corrupt_subject_fails_committing_agent_before_spawn() {
         &HashMap::new(),
         &[],
         true,
+        &FireCtx::default(),
     )
     .await
     .unwrap();
@@ -356,6 +357,7 @@ async fn corrupt_subject_passes_through_for_non_committing_agent() {
         &HashMap::new(),
         &[],
         false,
+        &FireCtx::default(),
     )
     .await
     .unwrap();

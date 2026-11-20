@@ -27,6 +27,9 @@ pub(crate) struct DispatchCtx<'a> {
     pub(crate) run_activity: RunActivity,
     /// Daemon trigger source for run logging; `None` for manual run/continue.
     pub(crate) daemon_trigger: Option<crate::graph_engine::graph_run_log::GraphRunTrigger>,
+    /// Watch-fire context for this dispatch; `Some` only on the watchers'
+    /// watch-fire path. Cron ticks and manual runs leave this `None`.
+    pub(crate) watch_fire: Option<WatchFireCtx>,
 }
 /// What a bound-spec loop learned beyond its flow: whether an idle tick
 /// terminal produced the completion (FR5) and whether any agent node ran.

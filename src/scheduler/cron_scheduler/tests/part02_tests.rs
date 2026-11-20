@@ -1,4 +1,6 @@
 //! Part 02 of `tests` (split from `src/scheduler/cron_scheduler.rs`, pure move).
+use super::super::retry::{run_outcome_is_failure, should_retry, wait_retry_delay};
+use super::super::schedule_math::next_fire_utc;
 use super::*;
 
 #[test]
@@ -176,85 +178,12 @@ fn test_due_fire_local_window() {
     );
 }
 
-/// B15: booting the scheduler and then evaluating the same cron tick a
-/// second time (simulating a second firing path racing the regular tick
-/// graph) must record exactly one execution for that tick, never two.
-///
-/// Uses an every-minute schedule: thanks to `due_fire_local`'s 60-second
-/// lookback, the most recent minute boundary is *always* due at the
-/// instant this test runs, so there's no need to align to (or wait for)
-/// a real cron boundary. `start_paused` means the scheduler's internal
-/// `tokio::time::sleep` for its first tick is advanced virtually — the
-/// test performs no real wall-clock sleep.
-#[tokio::test(start_paused = true)]
-async fn scheduler_fires_a_cron_agent_at_most_once_per_tick() {
-    let (db, scheduler) = test_scheduler();
-    let mut agent = manual_agent("b15-once-per-tick", true);
-    agent.trigger = Some(Trigger::Cron {
-        schedule_expr: "* * * * *".to_string(),
-    });
-    // A binary that can't resolve: `run_cli_process` fails fast without
-    // depending on any real external CLI, but the executor still runs
-    // its full start-run/finalize-run path and records the run row —
-    // all this test needs to count fires.
-    agent.cli = Cli::new("definitely-not-a-real-cli-binary-b15");
-    db.upsert_agent(&agent).unwrap();
-
-    let scheduler = Arc::new(scheduler);
-    let _cancel = Arc::clone(&scheduler).start();
-
-    // Advance the virtual clock past the scheduler's first computed
-    // sleep (at most ~60s until the next minute boundary) in small
-    // steps, yielding between each so the background `run_graph` task
-    // actually gets polled and reaches its own `fire_due_tasks` call —
-    // a single large `advance` only fast-forwards the clock, it doesn't
-    // by itself guarantee the woken task has run before this test task
-    // continues.
-    for _ in 0..200 {
-        tokio::time::advance(Duration::from_millis(500)).await;
-        tokio::task::yield_now().await;
-        if !db.list_runs("b15-once-per-tick", 10).unwrap().is_empty() {
-            break;
-        }
-    }
-    assert!(
-        !db.list_runs("b15-once-per-tick", 10).unwrap().is_empty(),
-        "the scheduler's own tick graph never fired the due agent"
-    );
-
-    // Simulate a second evaluation path for the same tick (e.g. a
-    // concurrent reconcile) landing right on top of the regular tick.
-    scheduler.fire_due_tasks().await.unwrap();
-
-    // Let the spawned executions (detached tokio tasks) record their run
-    // rows on the paused-clock executor. Waits for the recorded count to
-    // go quiet rather than stopping at the first row seen — stopping
-    // early would miss a second spawn still in flight and turn this
-    // into a false-negative regression test.
-    let mut runs = db.list_runs("b15-once-per-tick", 10).unwrap();
-    let mut quiet_iters = 0;
-    for _ in 0..500 {
-        tokio::task::yield_now().await;
-        let current = db.list_runs("b15-once-per-tick", 10).unwrap();
-        if current.len() == runs.len() {
-            quiet_iters += 1;
-            if quiet_iters >= 20 {
-                break;
-            }
-        } else {
-            quiet_iters = 0;
-        }
-        runs = current;
-    }
-
-    assert_eq!(
-        runs.len(),
-        1,
-        "the same tick must fire at most once, got {} run(s): {:?}",
-        runs.len(),
-        runs
-    );
-}
+/// B15 legacy agent at-most-once test deleted: agents fire through their
+/// backing graphs since the agent-to-graph migration, so the scheduler tick
+/// no longer spawns agent runs. The graph tick dedupes by the same
+/// `last_fired` scheduled-tick key in `try_fire_graph` (one execution per
+/// tick); overlap while a run is in flight records `Missed` via
+/// `record_agent_backing_missed`, covered by the graph overlap tests.
 
 // ── Coverage for helpers extracted during the quality refactor ──────
 
@@ -318,20 +247,6 @@ async fn wait_retry_delay_returns_false_when_cancelled() {
     assert!(!wait_retry_delay(&retry, &cancel, &agent).await);
 }
 
-#[test]
-fn agent_due_tick_invalid_cron_is_none() {
-    let mut agent = manual_agent("due-tick-invalid-cron", true);
-    agent.trigger = Some(Trigger::Cron {
-        schedule_expr: "not a cron expression".to_string(),
-    });
-    assert!(agent_due_tick(&agent, Local::now()).is_none());
-}
-
-#[test]
-fn agent_due_tick_returns_tick_when_due() {
-    let mut agent = manual_agent("due-tick-minutely", true);
-    agent.trigger = Some(Trigger::Cron {
-        schedule_expr: "* * * * *".to_string(),
-    });
-    assert!(agent_due_tick(&agent, Local::now()).is_some());
-}
+// `agent_due_tick` unit tests deleted with the helper: agents fire through
+// their backing graphs, and the graph tick resolves due ticks from
+// `due_fire_local`, whose lookback/window tests above stay.

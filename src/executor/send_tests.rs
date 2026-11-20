@@ -62,29 +62,11 @@ fn pending(db: &Database, session_id: &str) -> Vec<crate::db::scheduled_prompts:
         .unwrap()
 }
 
-#[tokio::test]
-async fn cron_fire_enqueues_one_send_with_agent_trigger_provenance() {
-    let db = Arc::new(test_db());
-    add_session(&db, "orch-id", "orch");
-    let log_dir = tempfile::tempdir().unwrap();
-    let agent = send_agent("nudger", "orch", &log_dir.path().join("a.log"));
-    db.upsert_agent(&agent).unwrap();
-    let exec = executor(&db);
-
-    let before = Utc::now();
-    let code = exec.execute_agent(&agent, false).await.unwrap();
-    assert_eq!(code, 0);
-
-    let sends = pending(&db, "orch-id");
-    assert_eq!(sends.len(), 1);
-    let prov = sends[0].provenance.as_ref().unwrap();
-    assert_eq!(prov.kind, "agent_trigger");
-    assert_eq!(prov.agent_id.as_deref(), Some("nudger"));
-    assert_eq!(prov.trigger.as_deref(), Some("cron"));
-    assert!(sends[0].fire_at <= before + chrono::Duration::seconds(2));
-    assert_eq!(sends[0].workdir.as_deref(), Some("/tmp/proj"));
-}
-
+/// Legacy cron-fire provenance test (`cron_fire_enqueues_one_send_with_...`)
+/// moved to its graph equivalent: migrated agents fire through their backing
+/// graph and sends carry `deliver` provenance with graph, node and run ids.
+/// See `migrated_cron_send_delivers_substituted_prompt_with_deliver_provenance`
+/// in `src/graph_engine/tests/deliver_tests.rs`.
 #[tokio::test]
 async fn watch_fire_carries_changed_path_and_event() {
     let db = Arc::new(test_db());
