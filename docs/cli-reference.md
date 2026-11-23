@@ -401,7 +401,10 @@ remote disconnect <device_id>` closes the live connection the same way
 but keeps the pairing, printing `disconnected <device_id>` and refusing
 an unknown id the same way. `pair`, `on` and `revoke` ask
 `Type 'yes' to confirm` first — pass `--yes` in scripts, where stdin is
-not a terminal and the command refuses without it. Re-pairing the
+not a terminal and the command refuses without it. All three go through
+the running daemon, so when it is down they fail with `the daemon is not
+running: start it with 'canopy daemon start'` and there is no local
+fallback. Re-pairing the
 same browser updates its label, `paired_at` and `last_seen` instead of
 adding a row.
 
