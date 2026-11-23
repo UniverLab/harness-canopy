@@ -318,10 +318,18 @@ mod tests {
     /// bare requests are test-only probes asserting the 401 above. This file
     /// is allowlisted too: its own `/mcp` + `reqwest` hits are the
     /// gated-server test probes below (no-header / wrong-token / right-token
-    /// / rotation), not production callers.
+    /// / rotation), not production callers. `src/daemon/admin_remote.rs` is
+    /// allowlisted for the same reason: it serves `/admin/remote` behind
+    /// this layer, and its `reqwest` hits are test-only probes of that
+    /// route — its production callers (the CLI and the TUI) build their
+    /// header through `daemon_auth_header` in `remote::admin_client`.
     #[test]
     fn every_mcp_http_caller_uses_daemon_auth_header() {
-        const ALLOWLISTED: &[&str] = &["src/daemon/server.rs", "src/daemon/mcp_auth.rs"];
+        const ALLOWLISTED: &[&str] = &[
+            "src/daemon/server.rs",
+            "src/daemon/mcp_auth.rs",
+            "src/daemon/admin_remote.rs",
+        ];
         let mut offenders = Vec::new();
         let mut stack = vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")];
         while let Some(dir) = stack.pop() {

@@ -6,12 +6,6 @@ use qrcode::{Color, QrCode};
 /// Modules of quiet zone around the symbol.
 const QUIET: usize = 2;
 
-/// Render `text` as a QR code with `▀`, `▄` and `█` (two module rows per
-/// terminal line), at medium error correction.
-pub fn render(text: &str) -> Result<String> {
-    render_level(text, qrcode::EcLevel::M)
-}
-
 /// Render `text` as a QR code at one error-correction level. The Remote
 /// panel uses `L`: for a pairing link that is 33×17 terminal cells, while
 /// `M` is 37×19 and no longer fits the 80×24 overlay.
@@ -53,7 +47,11 @@ mod tests {
 
     #[test]
     fn renders_a_square_symbol_with_half_blocks_and_quiet_zone() {
-        let rendered = render("https://remote.example/pair#7K3QH-M9P2X").expect("qr");
+        let rendered = render_level(
+            "https://remote.example/pair#7K3QH-M9P2X",
+            qrcode::EcLevel::M,
+        )
+        .expect("qr");
         let lines: Vec<&str> = rendered.lines().collect();
         assert!(!lines.is_empty());
         assert!(lines
@@ -78,7 +76,7 @@ mod tests {
             "33 wide: {low}"
         );
 
-        let medium = render(link).expect("level M");
+        let medium = render_level(link, qrcode::EcLevel::M).expect("level M");
         let medium_lines: Vec<&str> = medium.lines().collect();
         assert_eq!(medium_lines.len(), 19, "M is one version up: {medium}");
         assert!(

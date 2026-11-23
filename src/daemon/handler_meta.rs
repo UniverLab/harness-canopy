@@ -532,7 +532,7 @@ fn tool_map_entries() -> Vec<&'static str> {
         "project — register, remap, search, update; manage the project registry",
         "queue — create, list, add_spec, remove_spec, reorder, set_group; author ordered spec queues",
         "rag — search, compact; semantic search over indexed content and vector-store maintenance",
-        "remote — status, pair, set_enabled, revoke; remote control of this hub from the browser",
+        "remote — status, disconnect, trust_remove; remote control of this hub from the browser",
         "sandbox — list, get, land, discard; deal with the worktrees sandboxed graph runs leave behind",
         "scheduled_prompts — create, list, cancel; schedule a prompt for future delivery, list and cancel pending scheduled sends",
         "session_list — list live interactive sessions",

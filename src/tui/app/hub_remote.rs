@@ -129,39 +129,33 @@ fn fetch_remote_view(port: &str) -> Result<RemoteView, String> {
 }
 
 fn set_remote_enabled(port: &str, enabled: bool) -> Result<bool, String> {
-    match crate::tui::mcp_client::call_daemon_tool(
+    let body = crate::remote::admin_client::admin_remote_post(
         port,
-        "remote",
-        &serde_json::json!({ "action": "set_enabled", "enabled": enabled }),
-    ) {
-        Ok(outcome) if !outcome.is_error => Ok(enabled),
-        Ok(outcome) => Err(outcome.text),
-        Err(error) => Err(format!("{error:#}")),
-    }
+        &serde_json::json!({ "action": "set_enabled", "enabled": enabled, "confirm": true }),
+    )?;
+    body.get("enabled")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| "set_enabled: expected the enabled JSON".to_string())
 }
 
 fn fetch_pair_view(port: &str) -> Result<PairView, String> {
-    match crate::tui::mcp_client::call_daemon_tool(
+    let body = crate::remote::admin_client::admin_remote_post(
         port,
-        "remote",
-        &serde_json::json!({ "action": "pair" }),
-    ) {
-        Ok(outcome) if !outcome.is_error => parse_pair_view(&outcome.text),
-        Ok(outcome) => Err(outcome.text),
-        Err(error) => Err(format!("{error:#}")),
-    }
+        &serde_json::json!({ "action": "pair", "confirm": true }),
+    )?;
+    let text = serde_json::to_string(&body).map_err(|error| format!("remote_pair: {error}"))?;
+    parse_pair_view(&text)
 }
 
 fn revoke_device(port: &str, device_id: &str) -> Result<String, String> {
-    match crate::tui::mcp_client::call_daemon_tool(
+    let body = crate::remote::admin_client::admin_remote_post(
         port,
-        "remote",
-        &serde_json::json!({ "action": "revoke", "device_id": device_id }),
-    ) {
-        Ok(outcome) if !outcome.is_error => Ok(device_id.to_string()),
-        Ok(outcome) => Err(outcome.text),
-        Err(error) => Err(format!("{error:#}")),
-    }
+        &serde_json::json!({ "action": "revoke", "device_id": device_id, "confirm": true }),
+    )?;
+    body.get("revoked")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| "revoke: expected the revoked JSON".to_string())
 }
 
 fn disconnect_device(port: &str, device_id: &str) -> Result<String, String> {
@@ -183,21 +177,21 @@ fn trust_add_profile(
     sessions: &[String],
     upload: bool,
 ) -> Result<String, String> {
-    match crate::tui::mcp_client::call_daemon_tool(
+    let body = crate::remote::admin_client::admin_remote_post(
         port,
-        "remote",
         &serde_json::json!({
             "action": "trust_add",
             "login": login,
             "all_sessions": all_sessions,
             "sessions": sessions,
             "upload": upload,
+            "confirm": true,
         }),
-    ) {
-        Ok(outcome) if !outcome.is_error => Ok(login.to_string()),
-        Ok(outcome) => Err(outcome.text),
-        Err(error) => Err(format!("{error:#}")),
-    }
+    )?;
+    body.get("login")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| "trust_add: expected the trusted profile JSON".to_string())
 }
 
 fn trust_remove_profile(port: &str, login: &str) -> Result<String, String> {

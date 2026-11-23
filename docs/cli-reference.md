@@ -346,10 +346,10 @@ WebSocket — the CLI never writes the shelf itself. `file_id` is the
 | `canopy remote login` | Sign in to GitHub with the OAuth device flow (identity only, no scopes) |
 | `canopy remote logout` | Delete the stored GitHub identity |
 | `canopy remote status [--json]` | Show the sign-in state, whether remote is enabled, the relay URL, the last relay error and reconnect time, and a `config invalid, ...; config.toml: <reason>` line while `config.toml` fails to parse (the last valid config stays live, and `enabled`/`relay_url` show those effective values); `--json` prints `{signed_in, login, enabled, relay_url, last_error, last_reconnect}` plus `config_fault` when invalid (`last_error`/`last_reconnect` are `null` when unrecorded; `config_fault` is omitted while the file parses; a successful reconnect clears `last_error`) |
-| `canopy remote on` / `off` | Turn the relay connection on or off (`[remote] enabled`); the daemon picks the change up without a restart |
-| `canopy remote pair` | Create a one-time code, print it with its `<relay_url>/pair#<code>` link and expiry, and draw the link as a terminal QR code |
+| `canopy remote on [--yes]` / `off` | Turn the relay connection on or off (`[remote] enabled`); the daemon picks the change up without a restart. `on` goes through the running daemon and asks `Type 'yes' to confirm` unless `--yes` is passed (for scripts); `off` stays local |
+| `canopy remote pair [--yes]` | Create a one-time code, print it with its `<relay_url>/pair#<code>` link and expiry, and draw the link as a terminal QR code. Asks `Type 'yes' to confirm` unless `--yes` is passed |
 | `canopy remote devices [--json]` | List paired browsers (`id`, `label`, `paired_at`, `last_seen`) |
-| `canopy remote revoke <device_id>` | Delete a paired browser and close its live connection at once |
+| `canopy remote revoke <device_id> [--yes]` | Delete a paired browser and close its live connection at once. Asks `Type 'yes' to confirm` unless `--yes` is passed |
 | `canopy remote disconnect <device_id>` | Close a paired browser's live connection at once, keeping the pairing so it may reconnect |
 | `canopy remote invite <login> [--days N]` | Issue a single-use guest invite code for a GitHub login, printed once with its guest link and expiry (default 7 days; stored as a hash only) |
 | `canopy remote invites [--json]` | List guest invites (`login`, expiry, `live`/`used`/`expired`) |
@@ -387,7 +387,7 @@ remote is on. A failed exchange tells the browser only `no_code`,
 `expired` or `bad_code`: run `canopy remote pair` again for a fresh code.
 A guest browser — one signed in as a GitHub login other than the owner's —
 pairs only while that login holds a trust grant (add one from the TUI
-Remote tab with `t`, or with the `remote` tool's `trust_add`); without it
+Remote tab with `t`); without it
 the exchange fails as `bad_code`, so trust the profile before handing out
 the code.
 
@@ -399,7 +399,9 @@ connection within a second, printing `revoked <device_id>`, and refuses
 an unknown id with `no paired device with id <device_id>`. `canopy
 remote disconnect <device_id>` closes the live connection the same way
 but keeps the pairing, printing `disconnected <device_id>` and refusing
-an unknown id the same way. Re-pairing the
+an unknown id the same way. `pair`, `on` and `revoke` ask
+`Type 'yes' to confirm` first — pass `--yes` in scripts, where stdin is
+not a terminal and the command refuses without it. Re-pairing the
 same browser updates its label, `paired_at` and `last_seen` instead of
 adding a row.
 
@@ -439,8 +441,8 @@ A host with no host key yet (never paired or connected) prints the code
 with a hint instead of the link: turn remote on, let the daemon connect,
 and invite again. A note follows when remote is off, or when the login
 holds no trust grant: the code alone does not admit the guest, the login
-must also hold one (add it from the TUI Remote tab with `t`, or with the
-`remote` tool's `trust_add`), or its offer is refused. The host publishes
+must also hold one (add it from the TUI Remote tab with `t`),
+or its offer is refused. The host publishes
 only hashes to the room, and the first accepted guest offer burns every
 live invite for that login, so a shared code opens nothing afterwards —
 nor does it reopen the door for the same guest: once that guest's relay

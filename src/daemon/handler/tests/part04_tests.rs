@@ -1021,6 +1021,23 @@ async fn call_remote(
         .expect("the tool call succeeds")
 }
 
+/// Call the `remote` tool with an arbitrary action object, returning the
+/// refusal when validation rejects it.
+async fn call_remote_raw(
+    handler: &TaskTriggerHandler,
+    params: serde_json::Value,
+) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+    use crate::daemon::actions::ActionObject;
+    use crate::daemon::handler_remote::RemoteObject;
+    use crate::daemon::params_extract::Parameters;
+
+    handler
+        .remote(Parameters(RemoteObject(ActionObject(
+            params.as_object().expect("object params").clone(),
+        ))))
+        .await
+}
+
 fn pair_remote_device(db: &Database, label: &str) -> String {
     crate::remote::devices::RemoteDevices::new(db.clone())
         .pair(
@@ -1033,28 +1050,71 @@ fn pair_remote_device(db: &Database, label: &str) -> String {
         .id
 }
 
+/// The four privileged actions left the MCP surface: `pair`,
+/// `set_enabled`, `revoke` and `trust_add` are refused by the existing
+/// `REMOTE.validate` unknown-action error — no custom message, just the
+/// action table. Revoking now happens through `POST /admin/remote`.
 #[tokio::test]
-async fn remote_revoke_deletes_the_row_and_answers_revoked() {
-    let (_dir, db, handler) = queue_test_handler();
-    let id = pair_remote_device(&db, "laptop");
+async fn remote_privileged_actions_are_rejected_over_mcp() {
+    let (_dir, _db, handler) = queue_test_handler();
+    for (action, params) in [
+        ("pair", serde_json::json!({})),
+        ("set_enabled", serde_json::json!({ "enabled": true })),
+        (
+            "revoke",
+            serde_json::json!({ "device_id": "bfcba2b742a807bb" }),
+        ),
+        (
+            "trust_add",
+            serde_json::json!({ "login": "octocat", "all_sessions": true }),
+        ),
+    ] {
+        let mut object = params.as_object().expect("object params").clone();
+        object.insert(
+            "action".to_string(),
+            serde_json::Value::String(action.to_string()),
+        );
+        let error = call_remote_raw(&handler, serde_json::Value::Object(object))
+            .await
+            .expect_err(&format!("{action} must be refused over MCP"));
+        assert!(
+            error
+                .message
+                .contains(&format!("Unknown action '{action}'")),
+            "the refusal names the action: {}",
+            error.message
+        );
+    }
+}
 
-    let result = call_remote(&handler, "revoke", &id).await;
+/// `status`, `disconnect` and `trust_remove` stay on the MCP tool: a paired
+/// device disconnects through it, and an unknown login is still refused as
+/// a tool-level error (not a validation error).
+#[tokio::test]
+async fn remote_disconnect_and_trust_remove_still_work_over_mcp() {
+    let (_dir, db, handler) = queue_test_handler();
+    let id = pair_remote_device(&db, "phone");
+
+    let result = call_remote(&handler, "disconnect", &id).await;
     assert!(!result.is_error.unwrap_or(false), "{:?}", result.content);
     let body: serde_json::Value =
         serde_json::from_str(&queue_raw_text(&result)).expect("json body");
-    assert_eq!(body, serde_json::json!({ "revoked": id }));
-    assert!(
-        crate::remote::devices::RemoteDevices::new(db.as_ref().clone())
-            .list()
-            .expect("list")
-            .is_empty(),
-        "the row is gone"
-    );
+    assert_eq!(body, serde_json::json!({ "disconnected": id }));
 
-    let result = call_remote(&handler, "revoke", "missingdevice0000").await;
-    assert!(result.is_error.unwrap_or(false), "unknown id errors");
+    let status = call_remote_raw(&handler, serde_json::json!({ "action": "status" }))
+        .await
+        .expect("status still dispatches");
+    assert!(!status.is_error.unwrap_or(false), "{:?}", status.content);
+
+    let result = call_remote_raw(
+        &handler,
+        serde_json::json!({ "action": "trust_remove", "login": "octocat" }),
+    )
+    .await
+    .expect("trust_remove still dispatches");
+    assert!(result.is_error.unwrap_or(false), "unknown login errors");
     assert!(
-        queue_raw_text(&result).contains("no paired device"),
+        queue_raw_text(&result).contains("no trusted profile"),
         "the error names the problem: {}",
         queue_raw_text(&result)
     );

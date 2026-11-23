@@ -319,6 +319,7 @@ fn build_mcp_router(
     sessions: Arc<crate::sessions::ws::SessionsState>,
     data_dir: &std::path::Path,
 ) -> axum::Router {
+    let admin_router = super::admin_remote::admin_remote_router(data_dir, &deps);
     let HandlerDeps {
         db: handler_db,
         executor: handler_executor,
@@ -378,6 +379,7 @@ fn build_mcp_router(
         .route("/mcp", authed_mcp.clone())
         .route("/mcp/", authed_mcp.clone())
         .route("/mcp/{*rest}", authed_mcp)
+        .merge(admin_router)
         .route(
             "/sessions/ws",
             axum::routing::get(crate::sessions::ws::sessions_ws_handler),

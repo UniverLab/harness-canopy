@@ -13,9 +13,6 @@ use serde_json::json;
 use super::auth::{self, RemoteEndpoints};
 use super::devices::RemoteDevices;
 use super::hostkey::HostKey;
-use super::pairing::PairingState;
-use super::qr;
-use super::relay;
 use crate::db::Database;
 use crate::domain::canopy_config::CanopyConfig;
 
@@ -33,11 +30,19 @@ pub enum RemoteAction {
         json: bool,
     },
     /// Enable the relay connection (`[remote] enabled = true`).
-    On,
+    On {
+        /// Skip the `Type 'yes' to confirm` prompt (for scripts).
+        #[arg(long)]
+        yes: bool,
+    },
     /// Disable the relay connection (`[remote] enabled = false`).
     Off,
     /// Create a one-time pairing code, its link and a terminal QR code.
-    Pair,
+    Pair {
+        /// Skip the `Type 'yes' to confirm` prompt (for scripts).
+        #[arg(long)]
+        yes: bool,
+    },
     /// List paired browsers.
     Devices {
         /// Print the list as JSON.
@@ -48,6 +53,9 @@ pub enum RemoteAction {
     Revoke {
         /// Device id (first 16 hex chars of SHA-256 over the browser key).
         device_id: String,
+        /// Skip the `Type 'yes' to confirm` prompt (for scripts).
+        #[arg(long)]
+        yes: bool,
     },
     /// Disconnect a paired browser by device id, keeping the pairing.
     Disconnect {
@@ -82,11 +90,11 @@ pub async fn handle_remote_action(action: RemoteAction) -> Result<()> {
         RemoteAction::Login => handle_login().await,
         RemoteAction::Logout => handle_logout(),
         RemoteAction::Status { json } => handle_status(json),
-        RemoteAction::On => handle_switch(true),
-        RemoteAction::Off => handle_switch(false),
-        RemoteAction::Pair => handle_pair(),
+        RemoteAction::On { yes } => handle_switch(true, yes),
+        RemoteAction::Off => handle_switch(false, false),
+        RemoteAction::Pair { yes } => handle_pair(yes),
         RemoteAction::Devices { json } => handle_devices(json),
-        RemoteAction::Revoke { device_id } => handle_revoke(&device_id),
+        RemoteAction::Revoke { device_id, yes } => handle_revoke(&device_id, yes),
         RemoteAction::Disconnect { device_id } => handle_disconnect(&device_id),
         RemoteAction::Invite { login, days } => handle_invite(&login, days).await,
         RemoteAction::Invites { json } => handle_invites(json),
@@ -156,31 +164,78 @@ fn handle_status(json: bool) -> Result<()> {
     Ok(())
 }
 
-fn handle_switch(enabled: bool) -> Result<()> {
-    let data_dir = crate::ensure_data_dir()?;
-    crate::domain::settings::writer::write_keys(
-        &data_dir,
-        &[("remote.enabled", Some(toml_edit::Value::from(enabled)))],
+/// `off` stays local (it only reduces access); `on` goes through the
+/// daemon's admin route so the human confirmation is on record.
+fn handle_switch(enabled: bool, yes: bool) -> Result<()> {
+    if !enabled {
+        let data_dir = crate::ensure_data_dir()?;
+        crate::domain::settings::writer::write_keys(
+            &data_dir,
+            &[("remote.enabled", Some(toml_edit::Value::from(false)))],
+        )?;
+        println!("remote: off");
+        return Ok(());
+    }
+    confirm_privileged(yes, "switch remote on")?;
+    let _ = admin_post(
+        &serde_json::json!({ "action": "set_enabled", "enabled": true, "confirm": true }),
     )?;
-    println!("remote: {}", if enabled { "on" } else { "off" });
+    println!("remote: on");
     Ok(())
 }
 
-fn handle_pair() -> Result<()> {
-    let data_dir = crate::ensure_data_dir()?;
-    let config = CanopyConfig::load(&data_dir);
-    let host = HostKey::load_or_create(&data_dir)?;
-    let state = PairingState::new(&data_dir);
-    let created = state.create(&host.host_id(), chrono::Utc::now().timestamp())?;
-    let link = relay::pair_link(&config.remote.relay_url, &created.code);
-    let expires = chrono::DateTime::<chrono::Utc>::from_timestamp(created.expires_at, 0)
+/// POST one body to the daemon's admin route, mapping its refusal onto the
+/// CLI's error shape (message printed, non-zero exit).
+fn admin_post(body: &serde_json::Value) -> Result<serde_json::Value> {
+    super::admin_client::admin_remote_post(&crate::resolve_port(None).to_string(), body)
+        .map_err(anyhow::Error::msg)
+}
+
+fn handle_pair(yes: bool) -> Result<()> {
+    confirm_privileged(yes, "create a pairing code")?;
+    let body = admin_post(&serde_json::json!({ "action": "pair", "confirm": true }))?;
+    let pair: super::panel::PairView = serde_json::from_value(body).map_err(|error| {
+        anyhow::Error::msg(format!("daemon returned an unreadable pairing: {error}"))
+    })?;
+    let expires = chrono::DateTime::<chrono::Utc>::from_timestamp(pair.expires_at, 0)
         .map(|at| at.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-        .unwrap_or_else(|| created.expires_at.to_string());
-    println!("Pairing code: {}", created.code);
-    println!("Link: {link}");
+        .unwrap_or_else(|| pair.expires_at.to_string());
+    println!("Pairing code: {}", pair.code);
+    println!("Link: {}", pair.link);
     println!("Expires: {expires}");
-    print!("{}", qr::render(&link)?);
+    print!("{}", pair.qr);
     Ok(())
+}
+
+/// Ask `Type 'yes' to confirm` on a terminal. With `--yes` there is no
+/// prompt; when stdin is not a terminal the command refuses without
+/// `--yes` (scripts must pass it).
+fn confirm_privileged(yes: bool, what: &str) -> Result<()> {
+    confirm_privileged_on(
+        yes,
+        what,
+        std::io::IsTerminal::is_terminal(&std::io::stdin()),
+    )
+}
+
+/// The testable gate: `terminal` stands in for stdin being a terminal.
+fn confirm_privileged_on(yes: bool, what: &str, terminal: bool) -> Result<()> {
+    if yes {
+        return Ok(());
+    }
+    if !terminal {
+        bail!("refusing to {what} without --yes: stdin is not a terminal");
+    }
+    use std::io::Write as _;
+    print!("Type 'yes' to confirm {what}: ");
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    if line.trim() == "yes" {
+        Ok(())
+    } else {
+        bail!("cancelled")
+    }
 }
 
 fn handle_devices(json_output: bool) -> Result<()> {
@@ -218,15 +273,16 @@ fn handle_devices(json_output: bool) -> Result<()> {
     Ok(())
 }
 
-fn handle_revoke(device_id: &str) -> Result<()> {
-    let data_dir = crate::ensure_data_dir()?;
-    let db = open_db(&data_dir)?;
-    // The daemon reads the queued id on its next tick and closes the
-    // device's live connection at once.
-    if !super::panel::revoke(&db, device_id)? {
-        bail!("no paired device with id {device_id}");
-    }
-    println!("revoked {device_id}");
+fn handle_revoke(device_id: &str, yes: bool) -> Result<()> {
+    confirm_privileged(yes, &format!("revoke device {device_id}"))?;
+    let body = admin_post(
+        &serde_json::json!({ "action": "revoke", "device_id": device_id, "confirm": true }),
+    )?;
+    let revoked = body
+        .get("revoked")
+        .and_then(|revoked| revoked.as_str())
+        .unwrap_or(device_id);
+    println!("revoked {revoked}");
     Ok(())
 }
 
@@ -295,7 +351,7 @@ async fn handle_invite(login: &str, days: i64) -> Result<()> {
     {
         println!(
             "Note: {login} holds no trust grant, so the host refuses the guest: add one from \
-             the TUI Remote tab (t) or with the remote tool's trust_add."
+             the TUI Remote tab (t)."
         );
     }
     Ok(())
@@ -418,7 +474,13 @@ mod tests {
     fn on_off_pair_parse() {
         assert!(matches!(
             TestCli::try_parse_from(["test", "on"]).expect("on").action,
-            RemoteAction::On
+            RemoteAction::On { yes: false }
+        ));
+        assert!(matches!(
+            TestCli::try_parse_from(["test", "on", "--yes"])
+                .expect("on yes")
+                .action,
+            RemoteAction::On { yes: true }
         ));
         assert!(matches!(
             TestCli::try_parse_from(["test", "off"])
@@ -430,7 +492,13 @@ mod tests {
             TestCli::try_parse_from(["test", "pair"])
                 .expect("pair")
                 .action,
-            RemoteAction::Pair
+            RemoteAction::Pair { yes: false }
+        ));
+        assert!(matches!(
+            TestCli::try_parse_from(["test", "pair", "--yes"])
+                .expect("pair yes")
+                .action,
+            RemoteAction::Pair { yes: true }
         ));
     }
 
@@ -440,15 +508,30 @@ mod tests {
         assert!(matches!(cli.action, RemoteAction::Devices { json: true }));
         let cli = TestCli::try_parse_from(["test", "revoke", "bfcba2b742a807bb"]).expect("revoke");
         match cli.action {
-            RemoteAction::Revoke { device_id } => assert_eq!(device_id, "bfcba2b742a807bb"),
+            RemoteAction::Revoke { device_id, yes } => {
+                assert_eq!(device_id, "bfcba2b742a807bb");
+                assert!(!yes);
+            }
             _ => panic!("expected revoke"),
         }
+        let cli = TestCli::try_parse_from(["test", "revoke", "bfcba2b742a807bb", "--yes"])
+            .expect("revoke yes");
+        assert!(matches!(cli.action, RemoteAction::Revoke { yes: true, .. }));
         let cli = TestCli::try_parse_from(["test", "disconnect", "bfcba2b742a807bb"])
             .expect("disconnect");
         match cli.action {
             RemoteAction::Disconnect { device_id } => assert_eq!(device_id, "bfcba2b742a807bb"),
             _ => panic!("expected disconnect"),
         }
+    }
+
+    #[test]
+    fn privileged_gate_refuses_without_yes_off_a_terminal() {
+        assert!(confirm_privileged_on(false, "switch remote on", false)
+            .expect_err("non-terminal stdin refuses without --yes")
+            .to_string()
+            .contains("--yes"));
+        assert!(confirm_privileged_on(true, "switch remote on", false).is_ok());
     }
 
     #[test]

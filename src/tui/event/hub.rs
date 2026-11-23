@@ -698,10 +698,13 @@ mod tests {
     }
 
     /// `r` on a device row arms the revoke, `n`/Esc cancel it, `y` revokes
-    /// through the daemon — and nothing else acts mid-confirm.
+    /// through the admin route — and nothing else acts mid-confirm.
     #[test]
     fn remote_revoke_runs_behind_a_y_n_confirmation() {
-        let fake = crate::tui::mcp_client::test_support::spawn_fake_daemon(ok_result());
+        let fake = crate::remote::admin_client::test_support::spawn_fake_admin(
+            200,
+            r#"{"revoked":"bfcba2b742a807bb"}"#,
+        );
         let mut app = test_app();
         app.db.set_state("port", &fake.port).unwrap();
         app.open_hub();
@@ -736,12 +739,19 @@ mod tests {
             app.poll_remote_write();
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        let calls = fake.recorded_calls();
-        assert_eq!(calls.len(), 1, "{calls:?}");
-        assert_eq!(calls[0]["name"], "remote");
+        let requests = fake.recorded();
+        assert_eq!(requests.len(), 1, "{requests:?}");
+        assert_eq!(requests[0].request_line, "POST /admin/remote HTTP/1.1");
+        let sent: serde_json::Value =
+            serde_json::from_str(&requests[0].body).expect("the admin body is JSON");
         assert_eq!(
-            calls[0]["arguments"],
-            serde_json::json!({ "action": "revoke", "device_id": "bfcba2b742a807bb" })
+            sent,
+            serde_json::json!({
+                "action": "revoke",
+                "device_id": "bfcba2b742a807bb",
+                "confirm": true,
+            }),
+            "the revoke carries confirm:true"
         );
     }
 

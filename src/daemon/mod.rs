@@ -4,6 +4,7 @@
 //! with `Parameters<T>` for proper MCP protocol compliance.
 
 pub(crate) mod actions;
+pub(crate) mod admin_remote;
 pub(crate) mod agent_cli;
 pub(crate) mod agent_graph_migration;
 pub(crate) mod announcements;

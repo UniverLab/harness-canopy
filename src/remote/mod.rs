@@ -6,6 +6,7 @@
 //! revoke|invite|invites|uninvite` surface plus the daemon's relay client;
 //! trusted GitHub profiles grant guests some or all of the hub's sessions.
 
+pub mod admin_client;
 pub mod auth;
 pub mod bridge;
 pub mod cli;

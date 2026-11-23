@@ -29,29 +29,9 @@ pub(crate) static REMOTE: ToolSpec = ToolSpec {
             optional: &[],
         },
         ActionSpec {
-            name: "pair",
-            required: &[],
-            optional: &[],
-        },
-        ActionSpec {
-            name: "set_enabled",
-            required: &["enabled"],
-            optional: &[],
-        },
-        ActionSpec {
-            name: "revoke",
-            required: &["device_id"],
-            optional: &[],
-        },
-        ActionSpec {
             name: "disconnect",
             required: &["device_id"],
             optional: &[],
-        },
-        ActionSpec {
-            name: "trust_add",
-            required: &["login", "all_sessions"],
-            optional: &["sessions", "upload"],
         },
         ActionSpec {
             name: "trust_remove",
@@ -67,10 +47,7 @@ resource_action_object!(
     RemoteObject,
     REMOTE,
     [
-        ("set_enabled", RemoteSetEnabledParams),
-        ("revoke", RemoteRevokeParams),
         ("disconnect", RemoteDisconnectParams),
-        ("trust_add", RemoteTrustAddParams),
         ("trust_remove", RemoteTrustRemoveParams),
     ]
 );
@@ -82,12 +59,9 @@ impl TaskTriggerHandler {
         description = "Remote control of this hub from the browser. Pass `action` plus the parameters listed for it. \
         Actions (required params; optional params): \
         `status` (required: none; optional: none) — sign-in state, whether remote is enabled, the relay URL, the relay phase (connected, connecting, token rejected: sign in again, relay rejected: see remote status, off), the live device ids and every paired device with its live flag. \
-        `pair` (required: none; optional: none) — create a one-time pairing code with its link, expiry and QR, replacing any live one; the same code `canopy remote pair` prints. \
-        `set_enabled` (required: enabled; optional: none) — turn the relay connection on or off (`[remote] enabled`); the daemon picks the change up without a restart. \
-        `revoke` (required: device_id; optional: none) — revoke a paired device: delete the row and close its live connection at once. \
         `disconnect` (required: device_id; optional: none) — disconnect a paired device: close its live peer at once, keeping the pairing so it may reconnect. \
-        `trust_add` (required: login, all_sessions; optional: sessions, upload) — trust a GitHub profile with every session or a named set, optionally letting it upload files into those sessions; narrowing kicks its live guest peers. \
-        `trust_remove` (required: login; optional: none) — forget a GitHub profile and kick its live guest peers at once."
+        `trust_remove` (required: login; optional: none) — forget a GitHub profile and kick its live guest peers at once. \
+        Pairing, trusting, revoking and switching remote on are not agent actions: use the CLI or the TUI."
     )]
     pub(crate) async fn remote(
         &self,
@@ -99,29 +73,9 @@ impl TaskTriggerHandler {
         let spec = REMOTE.action(action).expect("validated action");
         match action {
             "status" => self.remote_status_impl(),
-            "pair" => remote_pair_impl(),
-            "set_enabled" => {
-                let params: RemoteSetEnabledParams = action_params(&params, spec)?;
-                remote_set_enabled_impl(params.enabled)
-            }
-            "revoke" => {
-                let params: RemoteRevokeParams = action_params(&params, spec)?;
-                self.remote_revoke_impl(params.device_id.trim())
-            }
             "disconnect" => {
                 let params: RemoteDisconnectParams = action_params(&params, spec)?;
                 self.remote_disconnect_impl(params.device_id.trim())
-            }
-            "trust_add" => {
-                let params: RemoteTrustAddParams = action_params(&params, spec)?;
-                let sessions = params.sessions.unwrap_or_default();
-                let upload = params.upload.unwrap_or(false);
-                self.remote_trust_add_impl(
-                    params.login.trim(),
-                    params.all_sessions,
-                    &sessions,
-                    upload,
-                )
             }
             "trust_remove" => {
                 let params: RemoteTrustRemoveParams = action_params(&params, spec)?;
@@ -142,7 +96,7 @@ impl TaskTriggerHandler {
         }
     }
 
-    fn remote_revoke_impl(&self, device_id: &str) -> Result<CallToolResult, McpError> {
+    pub(crate) fn remote_revoke_impl(&self, device_id: &str) -> Result<CallToolResult, McpError> {
         match panel::revoke(&self.db, device_id) {
             Ok(true) => to_json(&json!({ "revoked": device_id })),
             Ok(false) => Ok(error_result(&format!(
@@ -162,7 +116,7 @@ impl TaskTriggerHandler {
         }
     }
 
-    fn remote_trust_add_impl(
+    pub(crate) fn remote_trust_add_impl(
         &self,
         login: &str,
         all_sessions: bool,
@@ -184,7 +138,7 @@ impl TaskTriggerHandler {
     }
 }
 
-fn remote_pair_impl() -> Result<CallToolResult, McpError> {
+pub(crate) fn remote_pair_impl() -> Result<CallToolResult, McpError> {
     let dir = data_dir()?;
     match panel::create_pairing(&dir) {
         Ok(pair) => to_json(&pair),
@@ -192,7 +146,7 @@ fn remote_pair_impl() -> Result<CallToolResult, McpError> {
     }
 }
 
-fn remote_set_enabled_impl(enabled: bool) -> Result<CallToolResult, McpError> {
+pub(crate) fn remote_set_enabled_impl(enabled: bool) -> Result<CallToolResult, McpError> {
     let dir = data_dir()?;
     match panel::set_enabled(&dir, enabled) {
         Ok(()) => to_json(&json!({ "enabled": enabled })),
