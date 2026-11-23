@@ -55,8 +55,11 @@ canopy setup
 The interactive wizard detects installed AI CLI platforms from a
 GitHub-hosted registry, configures binary paths, model flags, headless
 modes, environment variables and temperature units, and generates
-`~/.canopy/config.toml`. Running `canopy` with no arguments triggers
-setup automatically if it has never run.
+`~/.canopy/config.toml`. It also rewrites legacy unauthenticated
+canopy MCP entries (the old URL form, with or without headers) to the
+stdio `canopy bridge` form, creating a one-time `<config>.canopy-bak`
+backup before the first rewrite of a file. Running `canopy` with no
+arguments triggers setup automatically if it has never run.
 
 If no supported platform is on `PATH`, setup is meant to say so, list
 what it supports, and finish with zero platforms configured. It currently

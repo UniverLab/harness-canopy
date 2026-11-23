@@ -17,7 +17,10 @@ with no header, a wrong token or a malformed header get `401` with
 `{"error":"missing or invalid daemon token"}` — the body is never read
 before authentication. `canopy bridge`, the TUI and the `canopy graph` /
 `canopy spec` CLI paths send the header automatically; external MCP
-clients configured over HTTP must add it themselves.
+clients configured over HTTP must add it themselves. Existing harness MCP
+configs that still use the old unauthenticated URL form are rewritten to
+the stdio `canopy bridge` form by `canopy setup` and `canopy mcp`, with a
+one-time `<config>.canopy-bak` backup before the first rewrite.
 
 Writes wait up to 5 seconds for a concurrent writer. If the database is still
 busy after that, the call fails with `<tool>: database busy after 5 s — nothing

@@ -60,6 +60,8 @@ Plain `canopy update` exits 2 on the same lookup errors.
 | `canopy doctor` | Full health diagnostics (installed harnesses list with versions; an uninstalled harness stays silent unless something still references it) |
 | `canopy doctor --verbose` | Same, plus the searched PATH for missing harnesses (hidden otherwise) |
 
+Both `canopy setup` and `canopy mcp` also rewrite legacy unauthenticated canopy MCP entries (the old URL form, with or without headers) to the stdio `canopy bridge` form, so existing harness configs keep working with the authenticated daemon. Before the first rewrite of a file, canopy creates a one-time `<config>.canopy-bak` backup; already-current bridge entries, missing files and unparsable files are left untouched.
+
 ## Platform registry
 
 | Command | Description |

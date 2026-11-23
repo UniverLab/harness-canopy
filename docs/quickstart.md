@@ -22,7 +22,9 @@ canopy setup
 ```
 
 Choose your AI CLI platforms (Claude Code, and others from the registry),
-model flags, temperature units and RAG settings.
+model flags, temperature units and RAG settings. Setup also rewrites any
+legacy unauthenticated canopy MCP entry (the old URL form) to the stdio
+`canopy bridge` form, keeping a one-time `<config>.canopy-bak` backup.
 
 ## 3. Launch the TUI
 
