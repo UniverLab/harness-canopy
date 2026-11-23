@@ -38,6 +38,7 @@ use daemon::cli::{handle_daemon_action, DaemonAction};
 use daemon::crew_cli::{handle_crew_action, CrewAction};
 use daemon::doctor::run_doctor;
 use daemon::graph_cli::{handle_graph_action, GraphAction};
+use daemon::harness_metrics_cli::handle_harnesses_action;
 use daemon::missions_cli::handle_missions_action;
 use daemon::models_cli::{handle_models_action, ModelsAction};
 use daemon::mutex_cli::{handle_mutex_action, MutexAction};
@@ -322,6 +323,12 @@ enum MetricsAction {
         #[arg(long)]
         json: bool,
     },
+    /// Harness launch counts with last use, plus mission totals.
+    Harnesses {
+        /// Print the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[tokio::main]
@@ -530,6 +537,7 @@ async fn handle_metrics_action(action: MetricsAction, port: Option<u16>) -> Resu
             }
             Ok(())
         }
+        MetricsAction::Harnesses { json } => handle_harnesses_action(json).await,
     }
 }
 

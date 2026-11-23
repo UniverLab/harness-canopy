@@ -15,6 +15,9 @@ pub struct CliUsage {
     pub counts: HashMap<String, u64>,
     /// RFC 3339 timestamp of the first time Canopy was run.
     pub first_run_at: Option<String>,
+    /// Map of harness name → RFC 3339 timestamp of its last recorded launch.
+    #[serde(default)]
+    pub last_used: HashMap<String, String>,
 }
 
 /// Outcome of [`CliUsage::load_with_status`], distinguishing "nothing to
@@ -123,9 +126,11 @@ impl CliUsage {
         }
     }
 
-    /// Increment the counter for a CLI by name.
+    /// Increment the counter for a CLI by name, stamping its last-used time.
     pub fn record(&mut self, cli_name: &str) {
         *self.counts.entry(cli_name.to_string()).or_insert(0) += 1;
+        self.last_used
+            .insert(cli_name.to_string(), chrono::Utc::now().to_rfc3339());
     }
 
     /// Get the usage count for a CLI, defaulting to 0.
@@ -604,5 +609,47 @@ mod tests {
 
         let (_, status) = CliUsage::load_with_status(dir.path());
         assert_eq!(status, UsageLoadStatus::MissingUnexpectedly);
+    }
+
+    // ── last_used ──────────────────────────────────────────────────────
+
+    #[test]
+    fn record_stamps_last_used_and_increments_counts() {
+        let mut usage = CliUsage::default();
+        usage.record("opencode");
+        usage.record("opencode");
+
+        assert_eq!(usage.get("opencode"), 2);
+        let stamped = usage
+            .last_used
+            .get("opencode")
+            .expect("record must stamp last_used");
+        chrono::DateTime::parse_from_rfc3339(stamped)
+            .expect("last_used must be a valid RFC 3339 timestamp");
+    }
+
+    #[test]
+    fn legacy_file_without_last_used_loads_and_saves_counts() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("usage.toml"),
+            "first_run_at = \"2024-01-01T00:00:00Z\"\n\n[counts]\nkiro = 3\n",
+        )
+        .unwrap();
+
+        let loaded = CliUsage::load(dir.path());
+        assert_eq!(loaded.get("kiro"), 3);
+        assert!(
+            loaded.last_used.is_empty(),
+            "a legacy file without [last_used] must load it as empty"
+        );
+
+        loaded.save(dir.path()).unwrap();
+        let reloaded = CliUsage::load(dir.path());
+        assert_eq!(reloaded.get("kiro"), 3);
+        assert_eq!(
+            reloaded.first_run_at.as_deref(),
+            Some("2024-01-01T00:00:00Z")
+        );
     }
 }

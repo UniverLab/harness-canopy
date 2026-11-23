@@ -257,6 +257,26 @@ canopy metrics graphs --graph my-graph --by model --json
 
 <!-- RETIRED-VOCAB-END -->
 
+### Harness metrics
+
+Read-only harness launch counts from `~/.canopy/usage.toml` (no daemon
+required, writes nothing). One row per harness in the file — the union of
+the `[counts]` and `[last_used]` tables — sorted by launch count descending
+with ties broken by harness name ascending. `launches` is `0` when the key
+is only in `[last_used]`; `last_used` is null when never recorded.
+`first_run_at` is null when unset, and `missions` holds the `unlocked` /
+`total` mission counts from the same source as `canopy missions`.
+
+| Command | Description |
+|---|---|
+| `canopy metrics harnesses` | Table of `HARNESS`, `LAUNCHES` and `LAST_USED` (`never` when unrecorded), then `first run: <ts\|unknown>` and `<unlocked> / <total> unlocked` |
+| `canopy metrics harnesses --json` | Print `{harnesses:[{harness,launches,last_used}],first_run_at,missions:{unlocked,total}}` |
+
+```sh
+canopy metrics harnesses
+canopy metrics harnesses --json
+```
+
 ## Spec backlog
 
 | Command | Description |

@@ -77,6 +77,7 @@ pub(crate) mod handler_sync;
 pub(crate) mod handler_templates;
 pub(crate) mod handler_transfer;
 pub(crate) mod handler_validate;
+pub(crate) mod harness_metrics_cli;
 pub(crate) mod health_routine;
 pub(crate) mod helpers;
 pub(crate) mod install_confirm;
