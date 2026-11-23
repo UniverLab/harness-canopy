@@ -1476,11 +1476,14 @@ async fn delivery_loop_delivers_due_send_while_fire_due_tasks_is_blocked() {
 
     let notify = Arc::new(tokio::sync::Notify::new());
     let cancel = tokio_util::sync::CancellationToken::new();
+    // Window 0: this test covers delivery running off the serial tick, not
+    // merging (covered through the windowed entry point).
     let delivery = tokio::spawn(super::super::scheduled_prompts::run_delivery_loop(
         Arc::clone(&db),
         hub.clone(),
         Arc::clone(&notify),
         cancel.clone(),
+        0,
     ));
 
     db.insert_scheduled_prompt(

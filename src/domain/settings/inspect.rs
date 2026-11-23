@@ -278,13 +278,7 @@ pub fn config_value(config: &CanopyConfig, key: &str) -> Value {
                 .parse::<f64>()
                 .unwrap_or(config.similarity_threshold as f64),
         ),
-        "rag_personal_dirs" => {
-            let mut array = toml_edit::Array::new();
-            for dir in &config.rag_personal_dirs {
-                array.push(dir.clone());
-            }
-            Value::Array(array)
-        }
+        "rag_personal_dirs" => rag_dirs_value(&config.rag_personal_dirs),
         "rag_personal_root" => Value::from(config.rag_personal_root.clone()),
         "embeddings_idle_unload_secs" => Value::from(config.embeddings_idle_unload_secs as i64),
         "ensemble_concurrency_cap" => Value::from(config.ensemble_concurrency_cap as i64),
@@ -312,9 +306,10 @@ pub fn config_value(config: &CanopyConfig, key: &str) -> Value {
                 .clone()
                 .unwrap_or_else(|| "auto".to_string()),
         ),
-        "scheduler.retry_enabled" => Value::from(config.scheduler.retry_enabled),
-        "scheduler.retry_delay_minutes" => Value::from(config.scheduler.retry_delay_minutes as i64),
-        "scheduler.retry_max" => Value::from(config.scheduler.retry_max as i64),
+        "scheduler.retry_enabled"
+        | "scheduler.retry_delay_minutes"
+        | "scheduler.retry_max"
+        | "scheduler.delivery_merge_window_s" => scheduler_value(&config.scheduler, key),
         "graphs.max_iterations_per_node" => {
             Value::from(config.graphs.max_iterations_per_node as i64)
         }
@@ -359,6 +354,30 @@ pub fn config_value(config: &CanopyConfig, key: &str) -> Value {
         "remote.host_label" => Value::from(config.remote.host_label.clone()),
         "remote.shelf_max_file_mb" => Value::from(config.remote.shelf_max_file_mb as i64),
         "daemon.cpu_quota_percent" => Value::from(config.daemon.cpu_quota_percent as i64),
+        _ => Value::from(String::new()),
+    }
+}
+
+/// Rendered `rag_personal_dirs` for `config list`.
+fn rag_dirs_value(dirs: &[String]) -> Value {
+    let mut array = toml_edit::Array::new();
+    for dir in dirs {
+        array.push(dir.clone());
+    }
+    Value::Array(array)
+}
+
+/// Rendered `[scheduler]` value for `config list`, by registry key.
+fn scheduler_value(scheduler: &crate::domain::canopy_config::SchedulerConfig, key: &str) -> Value {
+    match key {
+        "scheduler.retry_enabled" => Value::from(scheduler.retry_enabled),
+        "scheduler.retry_delay_minutes" => Value::from(scheduler.retry_delay_minutes as i64),
+        "scheduler.retry_max" => Value::from(scheduler.retry_max as i64),
+        "scheduler.delivery_merge_window_s" => {
+            Value::from(scheduler.delivery_merge_window_s as i64)
+        }
+        // Unreachable: the caller only routes the four `[scheduler]` keys
+        // above here. Mirrors the outer fallback.
         _ => Value::from(String::new()),
     }
 }

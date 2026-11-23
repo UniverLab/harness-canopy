@@ -295,6 +295,15 @@ pub static REGISTRY: &[SettingDef] = &[
         wizard: false,
     },
     SettingDef {
+        key: "scheduler.delivery_merge_window_s",
+        kind: Kind::Int { min: 0, max: 300 },
+        default: DefaultValue::Literal("60"),
+        group: Group::GraphsEngine,
+        description: "Seconds a due scheduled send waits for later sends to the same session so they arrive as one message (0 disables merging).",
+        apply: Apply::NextRun,
+        wizard: false,
+    },
+    SettingDef {
         key: "graphs.max_iterations_per_node",
         kind: Kind::Int { min: 1, max: 20 },
         default: DefaultValue::Literal("5"),
@@ -576,7 +585,7 @@ mod tests {
 
     #[test]
     fn registry_has_one_entry_per_setting_and_they_are_unique() {
-        assert_eq!(REGISTRY.len(), 58);
+        assert_eq!(REGISTRY.len(), 59);
         for def in REGISTRY {
             assert_eq!(find(def.key).map(|d| d.key), Some(def.key));
         }

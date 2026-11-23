@@ -30,6 +30,9 @@ pub fn drain_if_ready(
         return Ok(());
     }
     let prompt = format_review_message(&specs);
+    // The merged-delivery origin line names the reviewed graph (FR3), so the
+    // send carries the drained specs' graph id; empty when they have none.
+    let graph_id = specs.iter().find_map(|spec| spec.graph_id.clone());
     let Some(workdir) = db.get_session_workdir(session_id)? else {
         // Session row gone before we could resolve workdir: preserve as
         // dead-target delivery by inserting with no workdir? insert_failed
@@ -40,7 +43,14 @@ pub fn drain_if_ready(
         // failed prompt record would require different handling. However the
         // send must go through scheduled-send path; insert with no workdir.
         // Delivery will see target not alive and preserve with workdir None.
-        enqueue_review_send(db, session_id, None, &prompt, scheduled_prompt_notify)?;
+        enqueue_review_send(
+            db,
+            session_id,
+            None,
+            &prompt,
+            graph_id.as_deref(),
+            scheduled_prompt_notify,
+        )?;
         return Ok(());
     };
     enqueue_review_send(
@@ -48,6 +58,7 @@ pub fn drain_if_ready(
         session_id,
         Some(&workdir),
         &prompt,
+        graph_id.as_deref(),
         scheduled_prompt_notify,
     )?;
     Ok(())
@@ -58,9 +69,14 @@ fn enqueue_review_send(
     session_id: &str,
     workdir: Option<&str>,
     prompt: &str,
+    graph_id: Option<&str>,
     scheduled_prompt_notify: Option<&Arc<Notify>>,
 ) -> Result<()> {
     let id = uuid::Uuid::new_v4().to_string();
+    let mut provenance = ScheduledPromptProvenance::spec_review();
+    if let Some(graph_id) = graph_id {
+        provenance.graph_id = graph_id.to_string();
+    }
     db.insert_scheduled_prompt(
         &id,
         prompt,
@@ -68,7 +84,7 @@ fn enqueue_review_send(
         workdir,
         Utc::now(),
         None,
-        Some(&ScheduledPromptProvenance::spec_review()),
+        Some(&provenance),
     )?;
     if let Some(notify) = scheduled_prompt_notify {
         notify.notify_one();

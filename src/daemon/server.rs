@@ -262,7 +262,12 @@ fn start_background_tasks(inputs: &BackgroundTaskInputs<'_>) -> HttpBackgroundTa
         .with_scheduled_prompt_notify(Arc::clone(&inputs.sessions.scheduled_prompt_notify))
         .with_retry(crate::scheduler::cron_scheduler::RetryPolicy::from_config(
             &crate::domain::canopy_config::CanopyConfig::load(inputs.data_dir).scheduler,
-        )),
+        ))
+        .with_delivery_merge_window_s(
+            crate::domain::canopy_config::CanopyConfig::load(inputs.data_dir)
+                .scheduler
+                .delivery_merge_window_s,
+        ),
     );
     let scheduler_notify = cron_scheduler.notifier();
     let scheduled_prompt_notify = cron_scheduler.scheduled_prompt_notifier();
@@ -706,7 +711,8 @@ async fn stdio_server_startup(db: Arc<Database>, data_dir: &std::path::Path) -> 
         .with_scheduled_prompt_notify(Arc::clone(&scheduled_prompt_notify))
         .with_retry(crate::scheduler::cron_scheduler::RetryPolicy::from_config(
             &canopy_config.scheduler,
-        )),
+        ))
+        .with_delivery_merge_window_s(canopy_config.scheduler.delivery_merge_window_s),
     );
     let scheduler_notify = cron_scheduler.notifier();
     let scheduler_cancel = Arc::clone(&cron_scheduler).start();

@@ -12,6 +12,55 @@ pub(crate) fn hold_sleep() -> Duration {
 /// How long a send stays held before the user gets one desktop notification.
 const HELD_NOTIFY_AFTER: Duration = Duration::from_secs(60);
 
+/// Per-session merge windows: for each target session, when its window
+/// closes. Seeded fresh every delivery pass from that session's earliest due
+/// `fire_at` (`close = earliest + window`); a window never needs to survive
+/// a pass because its anchor — the still-queued earliest send — does.
+#[derive(Debug, Default)]
+pub(crate) struct MergeWindows {
+    close: HashMap<String, chrono::DateTime<chrono::Utc>>,
+}
+
+impl MergeWindows {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Seed this pass's windows: one close per session from its earliest due
+    /// `fire_at`. Clears last pass first, so a session with nothing due
+    /// never keeps a stale window.
+    pub(crate) fn seed(
+        &mut self,
+        earliest_per_session: &HashMap<String, chrono::DateTime<chrono::Utc>>,
+        window: Duration,
+    ) {
+        self.close.clear();
+        for (session_id, earliest) in earliest_per_session {
+            let close = *earliest + chrono::Duration::from_std(window).unwrap_or_default();
+            self.close.insert(session_id.clone(), close);
+        }
+    }
+
+    /// True while `now` is still inside the session's window: its due sends
+    /// wait for later ones instead of delivering.
+    pub(crate) fn is_open(&self, session_id: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
+        self.close.get(session_id).is_some_and(|close| now < *close)
+    }
+
+    /// How long until the earliest still-open window closes, so the delivery
+    /// task can wake exactly then instead of polling past it.
+    pub(crate) fn until_earliest_close(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<Duration> {
+        self.close
+            .values()
+            .filter(|close| **close > now)
+            .map(|close| (*close - now).to_std().unwrap_or(Duration::ZERO))
+            .min()
+    }
+}
+
 /// Per-send hold state: when each held send was first held, and whether its
 /// overdue notification already fired.
 #[derive(Debug, Default)]
@@ -79,6 +128,50 @@ mod tests {
     fn unknown_send_is_never_overdue() {
         let mut tracker = HeldTracker::new();
         assert!(!tracker.held_overdue_after("missing", Duration::ZERO));
+    }
+
+    #[test]
+    fn merge_window_opens_at_earliest_fire_at_plus_window() {
+        let mut windows = MergeWindows::new();
+        let earliest = chrono::Utc::now() - chrono::Duration::seconds(10);
+        windows.seed(
+            &HashMap::from([("sess".to_string(), earliest)]),
+            Duration::from_secs(60),
+        );
+        assert!(windows.is_open("sess", chrono::Utc::now()));
+        assert!(!windows.is_open("sess", earliest + chrono::Duration::seconds(61)));
+        assert!(!windows.is_open("other", chrono::Utc::now()));
+    }
+
+    #[test]
+    fn merge_window_reseed_drops_sessions_with_nothing_due() {
+        let mut windows = MergeWindows::new();
+        let earliest = chrono::Utc::now();
+        windows.seed(
+            &HashMap::from([("sess".to_string(), earliest)]),
+            Duration::from_secs(60),
+        );
+        windows.seed(&HashMap::new(), Duration::from_secs(60));
+        assert!(!windows.is_open("sess", chrono::Utc::now()));
+        assert_eq!(windows.until_earliest_close(chrono::Utc::now()), None);
+    }
+
+    #[test]
+    fn merge_window_wake_is_the_earliest_open_close() {
+        let mut windows = MergeWindows::new();
+        let now = chrono::Utc::now();
+        windows.seed(
+            &HashMap::from([
+                ("far".to_string(), now),
+                ("near".to_string(), now - chrono::Duration::seconds(50)),
+            ]),
+            Duration::from_secs(60),
+        );
+        let wake = windows
+            .until_earliest_close(now)
+            .expect("an open window sets the wake");
+        assert!(wake <= Duration::from_secs(10), "got {wake:?}");
+        assert!(wake > Duration::ZERO, "got {wake:?}");
     }
 
     #[test]

@@ -887,6 +887,7 @@ it came from. **Apply** says when a change takes effect: `applied` (at once),
 | `scheduler.retry_enabled` | `true` | bool | next run | Retry a failed scheduled run after a delay |
 | `scheduler.retry_delay_minutes` | 60 | 1–1440 | next run | Wait before a scheduled run is retried |
 | `scheduler.retry_max` | 3 | 0–20 | next run | Retries of a failed scheduled run |
+| `scheduler.delivery_merge_window_s` | 60 | 0–300 s | next run | Seconds a due scheduled send waits for later sends to the same session so they arrive as one message (`0` disables merging) |
 | `spec_attempt_limit` | 3 | 1–20 | restart the daemon | Separate graph executions a spec may fail with a verdict before it is blocked |
 | `spec_review.enabled` | `false` | bool | next run | Switch on the built-in adversarial spec review; while on, `spec_edit` requires a non-empty `intent` |
 | `spec_review.platform` | empty | — | next run | Platform the spec review uses; enabling the review requires a platform from the platform registry |
@@ -907,6 +908,20 @@ it came from. **Apply** says when a change takes effect: `applied` (at once),
 
 `scheduler.retry_*`, `spec_attempt_limit` and `spec_review.*` are not in
 `graphs.*`, which is why they are listed here.
+
+When two or more scheduled sends (graph hooks and prompt-builder sends)
+become due for the same session within `scheduler.delivery_merge_window_s`
+seconds of each other, the session receives one message gathering them in
+`fire_at` order instead of several messages back to back. The window opens
+when the session's first pending send becomes due and closes that many
+seconds later; a lone send is delivered when its window closes, and `0`
+restores one-message-per-send. Each part keeps its prompt text unchanged,
+preceded by `--- delivery <n> of <total> ---` and one origin line (`from:
+graph hook <graph> (<event>)`, `from: session <name>`, `from: background
+agent <agent> (<trigger>)`, `from: spec review (graph <graph>)`, `from:
+deliver (graph <graph>)`, or `from: you (scheduled <fire_at>)`). One merged
+message holds at most 20 parts and 64 KiB; the rest follows in consecutive
+messages, and a single part over 64 KiB goes alone, never split.
 
 `spec_review.*` configures the built-in adversarial spec review, off by
 default. Enabling it is refused while `spec_review.platform` is empty, names

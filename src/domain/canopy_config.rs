@@ -212,6 +212,11 @@ pub struct SchedulerConfig {
     pub retry_delay_minutes: u64,
     #[serde(default = "default_retry_max")]
     pub retry_max: u32,
+    /// Seconds a due scheduled send waits for later sends to the same
+    /// session so they arrive as one message. `CANOPY_DELIVERY_MERGE_WINDOW_S`
+    /// still overrides this when set.
+    #[serde(default = "default_delivery_merge_window_s")]
+    pub delivery_merge_window_s: u64,
 }
 
 impl Default for SchedulerConfig {
@@ -220,6 +225,7 @@ impl Default for SchedulerConfig {
             retry_enabled: default_retry_enabled(),
             retry_delay_minutes: default_retry_delay_minutes(),
             retry_max: default_retry_max(),
+            delivery_merge_window_s: default_delivery_merge_window_s(),
         }
     }
 }
@@ -234,6 +240,10 @@ fn default_retry_delay_minutes() -> u64 {
 
 fn default_retry_max() -> u32 {
     settings::default_int("scheduler.retry_max") as u32
+}
+
+fn default_delivery_merge_window_s() -> u64 {
+    settings::default_int("scheduler.delivery_merge_window_s") as u64
 }
 
 /// Settings for the graph engine. Read from the `[graphs]` table in

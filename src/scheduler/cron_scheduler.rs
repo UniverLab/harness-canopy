@@ -34,6 +34,7 @@ const RECONCILE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 pub use retry::RetryPolicy;
 
 mod autorun;
+mod delivery_merge;
 pub(crate) mod held_sends;
 mod retry;
 mod schedule_math;
@@ -77,6 +78,9 @@ pub struct CronScheduler {
     /// agent retries now run through the graph engine).
     #[allow(dead_code)]
     retry: RetryPolicy,
+    /// Seconds a due scheduled send waits for later sends to the same
+    /// session so they arrive as one message (`0` disables merging).
+    delivery_merge_window_s: u64,
 }
 
 /// Namespace a graph id in the shared `last_fired` map.
@@ -97,6 +101,7 @@ impl CronScheduler {
             scheduled_prompt_notify: Arc::new(Notify::new()),
             last_fired: Arc::new(Mutex::new(std::collections::HashMap::new())),
             retry: RetryPolicy::default(),
+            delivery_merge_window_s: delivery_merge::default_merge_window_s(),
         }
     }
 
@@ -105,6 +110,13 @@ impl CronScheduler {
     /// the registry defaults.
     pub fn with_retry(mut self, retry: RetryPolicy) -> Self {
         self.retry = retry;
+        self
+    }
+
+    /// Take the scheduled-send merge window from the loaded config's
+    /// `[scheduler]` table, the same snapshot pattern as [`Self::with_retry`].
+    pub fn with_delivery_merge_window_s(mut self, window_s: u64) -> Self {
+        self.delivery_merge_window_s = window_s;
         self
     }
 
@@ -175,8 +187,16 @@ impl CronScheduler {
             let db = Arc::clone(&self.db);
             let notify = Arc::clone(&self.scheduled_prompt_notify);
             let delivery_cancel = self.cancel.clone();
+            let merge_window_s = self.delivery_merge_window_s;
             tokio::spawn(async move {
-                scheduled_prompts::run_delivery_loop(db, hub, notify, delivery_cancel).await;
+                scheduled_prompts::run_delivery_loop(
+                    db,
+                    hub,
+                    notify,
+                    delivery_cancel,
+                    merge_window_s,
+                )
+                .await;
             });
         }
 

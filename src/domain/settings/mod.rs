@@ -265,6 +265,8 @@ pub const ENV_RETRY_ENABLED: &str = "CANOPY_RETRY_ENABLED";
 pub const ENV_RETRY_DELAY_MINUTES: &str = "CANOPY_RETRY_DELAY_MINUTES";
 /// Environment variable overriding `scheduler.retry_max`.
 pub const ENV_RETRY_MAX: &str = "CANOPY_RETRY_MAX";
+/// Environment variable overriding `scheduler.delivery_merge_window_s`.
+pub const ENV_DELIVERY_MERGE_WINDOW_S: &str = "CANOPY_DELIVERY_MERGE_WINDOW_S";
 
 /// The environment variable overriding `key`, if any.
 pub fn env_name_for(key: &str) -> Option<&'static str> {
@@ -272,6 +274,7 @@ pub fn env_name_for(key: &str) -> Option<&'static str> {
         "scheduler.retry_enabled" => Some(ENV_RETRY_ENABLED),
         "scheduler.retry_delay_minutes" => Some(ENV_RETRY_DELAY_MINUTES),
         "scheduler.retry_max" => Some(ENV_RETRY_MAX),
+        "scheduler.delivery_merge_window_s" => Some(ENV_DELIVERY_MERGE_WINDOW_S),
         _ => None,
     }
 }
@@ -293,6 +296,7 @@ pub fn env_override_applies(key: &str, env: &dyn Fn(&str) -> Option<String>) -> 
         "scheduler.retry_enabled" => parse_env_bool(raw).is_some(),
         "scheduler.retry_delay_minutes" => raw.parse::<u64>().is_ok(),
         "scheduler.retry_max" => raw.parse::<u32>().is_ok(),
+        "scheduler.delivery_merge_window_s" => raw.parse::<u64>().is_ok(),
         _ => false,
     }
 }
@@ -323,6 +327,12 @@ pub fn apply_env_overrides(config: &mut CanopyConfig, env: &dyn Fn(&str) -> Opti
         .and_then(|v| v.trim().parse::<u32>().ok())
     {
         config.scheduler.retry_max = raw;
+    }
+    if let Some(raw) = env(ENV_DELIVERY_MERGE_WINDOW_S)
+        .as_deref()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+    {
+        config.scheduler.delivery_merge_window_s = raw;
     }
 }
 

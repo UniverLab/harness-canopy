@@ -610,6 +610,32 @@ async fn reupdate_after_drain_opens_new_set_without_resending_old() {
     assert!(sends2[0].prompt.contains("1 reviewed"));
 }
 
+/// The drain send carries the reviewed specs' graph id, so a merged delivery
+/// can name it in the `from: spec review (graph ...)` origin line.
+#[tokio::test]
+async fn drain_send_carries_the_specs_graph_id() {
+    let (_dir, db) = test_db();
+    insert_session(&db, "sess-g", "/tmp/proj");
+    db.insert_graph(&sample_graph("g-9")).unwrap();
+    let mut spec = make_spec_for_session("s9", "ninth", Some("i"), "sess-g");
+    spec.graph_id = Some("g-9".to_string());
+    spec.review_state = SpecReviewState::Approved;
+    db.insert_graph_spec(&spec).unwrap();
+
+    crate::graph_engine::spec_review_drain::drain_if_ready(&db, Some("sess-g"), None).unwrap();
+
+    let sends = db
+        .list_pending_scheduled_prompts_for_session("sess-g")
+        .unwrap();
+    assert_eq!(sends.len(), 1);
+    let provenance = sends[0]
+        .provenance
+        .as_ref()
+        .expect("drain send carries provenance");
+    assert_eq!(provenance.kind, "spec_review");
+    assert_eq!(provenance.graph_id, "g-9");
+}
+
 fn reviewed_spec(id: &str, state: SpecReviewState, tier: Option<SpecReviewTier>) -> GraphSpec {
     let mut spec = make_spec(id, id, Some("i"));
     spec.review_state = state;

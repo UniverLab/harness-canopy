@@ -130,3 +130,5 @@ fn init_git_repo(path: &std::path::Path) {
 mod part01_tests;
 mod part02_tests;
 mod part03_tests;
+mod part04_delivery_merge_tests;
+mod part05_scheduled_prompts_tests;
