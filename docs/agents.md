@@ -59,7 +59,12 @@ list that canopy has never seen starts a fresh session with a new id and a
 new generated name (see
 [Graphs](graphs-hooks-and-queues.md#event-keyed-hooks)). Every time the agent's cron or watch
 trigger fires, canopy enqueues the prompt as a scheduled send to that session,
-and the daemon delivers it within seconds of its fire time. Delivery does not
+and the daemon delivers it within seconds of its fire time. When two or more
+sends become due for the same session close together, they arrive as one
+message in `fire_at` order, each part preceded by its origin, instead of
+several messages back to back (see
+[Settings reference](cli-reference.md#settings-reference) for the window setting,
+layout, and size caps). Delivery does not
 need a TUI: a message that fires while nobody is watching still reaches a live
 session. If the target session is gone by the time it is due, the prompt is
 preserved for recall in that project (the same recall the schedule dialog
@@ -69,7 +74,8 @@ target, a new fire replaces that message rather than piling up a second one.
 
 If the user is typing in the target session when the send fires, delivery
 waits until they submit or clear the line instead of cutting into what they
-typed; sends held this way stay queued in fire time order. A send held for
+typed; a held group stays unsplit and keeps collecting later sends until
+typing clears. A send held for
 over a minute raises one `Scheduled send held` notification naming the
 session.
 

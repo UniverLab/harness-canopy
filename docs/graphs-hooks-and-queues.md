@@ -119,7 +119,10 @@ history, can tell both that it came from a hook and which session actually
 received it, without that origin being buried in the prompt text.
 
 A message is delivered by the daemon within seconds of being enqueued, whether
-or not a TUI is attached. A message whose target session is gone by
+or not a TUI is attached — or, when another send for the same session falls
+due inside the delivery window, as part of one merged message (see
+[Settings reference](cli-reference.md#settings-reference)). A message whose
+target session is gone by
 then is not lost either — the prompt is preserved for recall and a
 notification reports that the session was not found.
 
