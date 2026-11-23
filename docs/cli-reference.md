@@ -244,7 +244,7 @@ in `running` and is excluded from durations.
 | `canopy metrics graphs` | Run, pass/fail, and duration metrics for the last 7 days, grouped by graph |
 | `canopy metrics graphs --since <duration\|RFC3339>` | Window start (`7d`, `30m`, `6h`, `1d`, or an RFC 3339 instant). Defaults to `7d` |
 | `canopy metrics graphs --graph <name\|id>` | Narrow to one graph (exact id, unambiguous prefix, or exact name) |
-| `canopy metrics graphs --by <graph\|node\|model>` | Group by `graph` (default), `node` (`<graph>/<node>`), or `model` (`<platform>/<model>`; missing platform/model render as `unknown`) |
+| `canopy metrics graphs --by <graph\|node\|model>` | Group by `graph` (default), `node` (`<graph>/<node>`), or `model` (`<platform>/<model>`; a missing platform or model renders as `unknown`) |
 | `canopy metrics graphs --json` | Print `{window:{since,until}, by, groups:[{key,runs,passed,failed,interrupted,waiting,error,running,pass_rate,duration_s:{avg,p95,max}}]}` |
 
 `pass_rate` is `passed / (passed+failed+interrupted+error)`, or `null` when no
