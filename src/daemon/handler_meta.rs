@@ -514,7 +514,7 @@ fn tool_map_entries() -> Vec<&'static str> {
         "config — get, list, set, reset; read and change canopy settings",
         "crew — list, get, create, update, delete, assignments; manage crews and read harness/model assignments",
         "get_tools — this map: the right tools and protocol per scope",
-        "graph — list, get, export, validate, audit, events, node_runs, node_run; read graphs, specs, runs, events",
+        "graph — list, get, export, validate, audit, events, node_runs, node_run, metrics; read graphs, specs, runs, events, metrics",
         "graph_complete_node — complete an active graph node",
         "graph_control — run, pause, continue, reset, preflight, schedule_continue, schedule_autorun; run and manage graph execution",
         "graph_edge — add, update, delete; wire graph nodes",

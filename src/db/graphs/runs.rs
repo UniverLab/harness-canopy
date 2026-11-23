@@ -950,3 +950,350 @@ mod last_run_info_tests {
         assert!(info[0].2, "tied newest run (higher iteration) is a pass");
     }
 }
+
+#[cfg(test)]
+mod metrics_tests {
+    use super::super::metrics::GRAPH_METRICS_SQL;
+    use super::super::*;
+    use crate::domain::graphs::{
+        Graph, GraphNode, GraphNodeKind, GraphNodeRun, GraphRunStatus, GraphSpec, GraphSpecStatus,
+        GraphStatus,
+    };
+    use chrono::{Duration, Utc};
+    use tempfile::tempdir;
+
+    fn graph(id: &str, name: &str) -> Graph {
+        Graph {
+            trigger_prompt: None,
+            id: id.to_string(),
+            name: name.to_string(),
+            description: None,
+            workdir: "/tmp".to_string(),
+            status: GraphStatus::Draft,
+            trigger: None,
+            created_at: Utc::now(),
+            started_at: None,
+            completed_at: None,
+            autorun_at: None,
+            auto_continue_at: None,
+            auto_continue_action: None,
+            active_run_queue_id: None,
+            hooks: std::collections::BTreeMap::new(),
+            archived: false,
+            paused_by_reconciliation: false,
+            infra_node_id: None,
+            allow_dirty_start: false,
+            require_spec_type: false,
+            enabled: true,
+            enable_at: None,
+            expires_at: None,
+        }
+    }
+
+    fn seed(db: &Database, graph_id: &str, spec_id: &str, node_id: &str) {
+        db.insert_graph_spec(&GraphSpec {
+            intent: None,
+            id: spec_id.to_string(),
+            graph_id: Some(graph_id.to_string()),
+            name: spec_id.to_string(),
+            description: None,
+            position: 0,
+            parallelizable: false,
+            status: GraphSpecStatus::Pending,
+            started_at: None,
+            completed_at: None,
+            spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
+            spec_committed_head: None,
+            workdir: None,
+            completed_via: None,
+            completed_via_reason: None,
+            completed_via_at: None,
+            spec_type: None,
+            spec_scope: None,
+            spec_code: None,
+            review_state: crate::domain::graphs::SpecReviewState::Approved,
+            review_tier: None,
+            review_findings: None,
+            created_by_session: None,
+        })
+        .unwrap();
+        db.insert_graph_node(&GraphNode {
+            id: node_id.to_string(),
+            spec_id: Some(spec_id.to_string()),
+            graph_id: None,
+            name: node_id.to_string(),
+            kind: GraphNodeKind::Agent,
+            config: serde_json::json!({}),
+            position: 0,
+            created_at: Utc::now(),
+        })
+        .unwrap();
+    }
+
+    #[derive(Clone, Copy)]
+    struct RunSeed<'a> {
+        id: &'a str,
+        graph_id: &'a str,
+        spec_id: &'a str,
+        node_id: &'a str,
+        status: GraphRunStatus,
+        started_at: chrono::DateTime<Utc>,
+        completed_at: Option<chrono::DateTime<Utc>>,
+        platform: Option<&'a str>,
+        model: Option<&'a str>,
+    }
+
+    fn insert_run(db: &Database, s: RunSeed<'_>) {
+        db.insert_graph_run(&GraphNodeRun {
+            id: s.id.to_string(),
+            graph_id: s.graph_id.to_string(),
+            spec_id: s.spec_id.to_string(),
+            node_id: s.node_id.to_string(),
+            status: s.status,
+            input: Some(serde_json::json!({"big":"input"})),
+            output: Some(serde_json::json!({"big":"output"})),
+            started_at: s.started_at,
+            completed_at: s.completed_at,
+            iteration: 1,
+            pid: None,
+            boot_id: None,
+            session_id: None,
+            executed_platform: s.platform.map(str::to_string),
+            executed_model: s.model.map(str::to_string),
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn graph_metrics_sql_has_no_input_output() {
+        let upper = GRAPH_METRICS_SQL.to_uppercase();
+        assert!(!upper.contains("INPUT"));
+        assert!(!upper.contains("OUTPUT"));
+        assert!(upper.contains("GRAPH_ID"));
+        assert!(upper.contains("EXECUTED_PLATFORM"));
+    }
+
+    #[test]
+    fn list_graph_metrics_rows_window_and_graph_filter() {
+        let dir = tempdir().unwrap();
+        let db = Database::new(&dir.path().join("t.db")).unwrap();
+        db.insert_graph(&graph("g1", "G1")).unwrap();
+        db.insert_graph(&graph("g2", "G2")).unwrap();
+        seed(&db, "g1", "s1", "n1");
+        seed(&db, "g2", "s2", "n2");
+
+        let now = Utc::now();
+        let in_window = now - Duration::hours(1);
+        let old = now - Duration::days(30);
+
+        insert_run(
+            &db,
+            RunSeed {
+                id: "r1",
+                graph_id: "g1",
+                spec_id: "s1",
+                node_id: "n1",
+                status: GraphRunStatus::Pass,
+                started_at: in_window,
+                completed_at: Some(in_window + Duration::seconds(5)),
+                platform: Some("opencode"),
+                model: Some("m1"),
+            },
+        );
+        insert_run(
+            &db,
+            RunSeed {
+                id: "r2",
+                graph_id: "g2",
+                spec_id: "s2",
+                node_id: "n2",
+                status: GraphRunStatus::Fail,
+                started_at: in_window,
+                completed_at: Some(in_window + Duration::seconds(3)),
+                platform: Some("claude"),
+                model: Some("m2"),
+            },
+        );
+        insert_run(
+            &db,
+            RunSeed {
+                id: "r_old",
+                graph_id: "g1",
+                spec_id: "s1",
+                node_id: "n1",
+                status: GraphRunStatus::Pass,
+                started_at: old,
+                completed_at: Some(old + Duration::seconds(1)),
+                platform: None,
+                model: None,
+            },
+        );
+
+        let since = (now - Duration::days(7)).timestamp();
+        let until = (now + Duration::seconds(1)).timestamp();
+        let all = db.list_graph_metrics_rows(since, until, None).unwrap();
+        assert_eq!(all.len(), 2, "old run excluded by window");
+
+        let g1_only = db
+            .list_graph_metrics_rows(since, until, Some("g1"))
+            .unwrap();
+        assert_eq!(g1_only.len(), 1);
+        assert_eq!(g1_only[0].graph_id, "g1");
+    }
+
+    #[test]
+    fn list_graph_metrics_rows_seeded_statuses_sum_to_runs() {
+        let dir = tempdir().unwrap();
+        let db = Database::new(&dir.path().join("t.db")).unwrap();
+        db.insert_graph(&graph("g1", "G1")).unwrap();
+        seed(&db, "g1", "s1", "n1");
+        let now = Utc::now();
+        let t = now - Duration::minutes(10);
+        let cases = [
+            ("p", GraphRunStatus::Pass, Some(t + Duration::seconds(10))),
+            ("f", GraphRunStatus::Fail, Some(t + Duration::seconds(10))),
+            (
+                "i",
+                GraphRunStatus::Interrupted,
+                Some(t + Duration::seconds(10)),
+            ),
+            ("w", GraphRunStatus::Waiting, None),
+            ("e", GraphRunStatus::Error, Some(t + Duration::seconds(10))),
+            ("r", GraphRunStatus::Running, None),
+        ];
+        for (id, status, completed) in cases {
+            insert_run(
+                &db,
+                RunSeed {
+                    id,
+                    graph_id: "g1",
+                    spec_id: "s1",
+                    node_id: "n1",
+                    status,
+                    started_at: t,
+                    completed_at: completed,
+                    platform: None,
+                    model: None,
+                },
+            );
+        }
+        // unknown legacy status written directly
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO graph_runs (id, graph_id, spec_id, node_id, status, started_at, iteration) VALUES ('legacy','g1','s1','n1','bogus',?1,1)",
+                rusqlite::params![t.timestamp()],
+            )
+            .unwrap();
+        }
+
+        let rows = db
+            .list_graph_metrics_rows(
+                (now - Duration::days(1)).timestamp(),
+                (now + Duration::seconds(1)).timestamp(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 7);
+
+        use std::collections::HashMap;
+        let mut names = HashMap::new();
+        names.insert("g1".to_string(), "G1".to_string());
+        let groups = crate::daemon::handler_run_history::aggregate_graph_metrics(
+            &rows,
+            "graph",
+            &names,
+            &HashMap::new(),
+        );
+        let g = &groups[0];
+        let runs = g["runs"].as_u64().unwrap();
+        let sum = g["passed"].as_u64().unwrap()
+            + g["failed"].as_u64().unwrap()
+            + g["interrupted"].as_u64().unwrap()
+            + g["waiting"].as_u64().unwrap()
+            + g["error"].as_u64().unwrap()
+            + g["running"].as_u64().unwrap();
+        assert_eq!(runs, sum);
+        assert_eq!(g["running"].as_u64().unwrap(), 2); // running + legacy
+    }
+
+    #[test]
+    fn list_graph_metrics_rows_grouping_by_each_key() {
+        let dir = tempdir().unwrap();
+        let db = Database::new(&dir.path().join("t.db")).unwrap();
+        db.insert_graph(&graph("g1", "Alpha")).unwrap();
+        db.insert_graph(&graph("g2", "Beta")).unwrap();
+        seed(&db, "g1", "s1", "n1");
+        seed(&db, "g2", "s2", "n2");
+        let now = Utc::now();
+        let t = now - Duration::minutes(5);
+        insert_run(
+            &db,
+            RunSeed {
+                id: "r1",
+                graph_id: "g1",
+                spec_id: "s1",
+                node_id: "n1",
+                status: GraphRunStatus::Pass,
+                started_at: t,
+                completed_at: Some(t + Duration::seconds(10)),
+                platform: Some("opencode"),
+                model: Some("m1"),
+            },
+        );
+        insert_run(
+            &db,
+            RunSeed {
+                id: "r2",
+                graph_id: "g2",
+                spec_id: "s2",
+                node_id: "n2",
+                status: GraphRunStatus::Fail,
+                started_at: t,
+                completed_at: Some(t + Duration::seconds(20)),
+                platform: Some("claude"),
+                model: Some("m2"),
+            },
+        );
+        let rows = db
+            .list_graph_metrics_rows(
+                (now - Duration::hours(1)).timestamp(),
+                (now + Duration::seconds(1)).timestamp(),
+                None,
+            )
+            .unwrap();
+        let mut graph_names = std::collections::HashMap::new();
+        graph_names.insert("g1".to_string(), "Alpha".to_string());
+        graph_names.insert("g2".to_string(), "Beta".to_string());
+        let mut node_names = std::collections::HashMap::new();
+        node_names.insert("n1".to_string(), "N1".to_string());
+        node_names.insert("n2".to_string(), "N2".to_string());
+
+        let by_graph = crate::daemon::handler_run_history::aggregate_graph_metrics(
+            &rows,
+            "graph",
+            &graph_names,
+            &node_names,
+        );
+        assert_eq!(by_graph.len(), 2);
+        let by_node = crate::daemon::handler_run_history::aggregate_graph_metrics(
+            &rows,
+            "node",
+            &graph_names,
+            &node_names,
+        );
+        assert!(by_node.iter().any(|g| g["key"] == "Alpha/N1"));
+        assert!(by_node.iter().any(|g| g["key"] == "Beta/N2"));
+        let by_model = crate::daemon::handler_run_history::aggregate_graph_metrics(
+            &rows,
+            "model",
+            &graph_names,
+            &node_names,
+        );
+        assert!(by_model.iter().any(|g| g["key"] == "opencode/m1"));
+        assert!(by_model.iter().any(|g| g["key"] == "claude/m2"));
+    }
+}

@@ -68,6 +68,11 @@ pub(crate) static GRAPH: ToolSpec = ToolSpec {
             required: &["run_id"],
             optional: &[],
         },
+        ActionSpec {
+            name: "metrics",
+            required: &[],
+            optional: &["since", "graph_id", "by"],
+        },
     ],
 };
 
@@ -351,6 +356,7 @@ resource_action_object!(
         ("events", GraphEventsParams),
         ("node_runs", GraphNodeRunsListParams),
         ("node_run", GraphNodeRunGetParams),
+        ("metrics", GraphMetricsParams),
     ]
 );
 
@@ -435,7 +441,7 @@ pub(crate) fn graph_edit_action(name: &str) -> Option<&'static crate::daemon::ac
 impl TaskTriggerHandler {
     #[tool(
         name = "graph",
-        description = "Read graphs, specs, node runs, and events. Pass `action` plus the parameters listed for it. \
+        description = "Read graphs, specs, node runs, events, and metrics. Pass `action` plus the parameters listed for it. \
         Actions (required params; optional params): \
         `list` (required: none; optional: workdir, include_archived) — list graphs, optionally filtered by workdir. \
         `get` (required: graph_id; optional: none) — return a graph with its ordered specs, nodes, and edges. \
@@ -445,6 +451,7 @@ impl TaskTriggerHandler {
         `events` (required: graph_id; optional: since_id, since_ts, spec_id, kinds, limit, include_payload) — read the graph's durable event log. \
         `node_runs` (required: graph_id; optional: spec_id, node_id, limit, offset, compact) — list the graph's node runs. \
         `node_run` (required: run_id; optional: none) — read one node run in full. \
+        `metrics` (required: none; optional: since, graph_id, by) — aggregate run counts, pass rate, and durations by graph, node, or model. \
         Hooks are not retroactive — a hook registered after its event has already happened does not fire."
     )]
     pub(crate) async fn graph(
@@ -473,6 +480,7 @@ impl TaskTriggerHandler {
                 self.graph_node_run_get_impl(action_params(&params, spec)?)
                     .await
             }
+            "metrics" => self.graph_metrics_impl(action_params(&params, spec)?).await,
             _ => unreachable!("validated action"),
         }
     }

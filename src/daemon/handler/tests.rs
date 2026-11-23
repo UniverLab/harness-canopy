@@ -117,7 +117,8 @@ const EXPECTED_TOOL_NAMES: &[&str] = &[
 /// `graph_node` row was re-pinned when the `kind` field docs began listing
 /// the `deliver` node kind. The `graph_edit` row was re-pinned when
 /// `create`/`update` gained the optional `enabled`/`enable_at`/`expires_at`
-/// params (field docs are part of the input schema).
+/// params (field docs are part of the input schema). The `graph` row was
+/// re-pinned when it gained the `metrics` read action.
 const EXPECTED_TOOL_ROWS: &[&str] = &[
     "agent|d8f9c6d2e27d78721e0e68301793b430eb079a49d68e003c0a36062ade4326c2|d713589e444e00e203c10fb39b668774212540a62cec84a04d9f2b34b7c386b1",
     "agent_edit|9f9d97739be8934e8023b86d6ed35d9acf9209d18d42a8cafd8ffc99154965cf|eb0e7e1757828c2db9669176f36f437dc1cfc1797eacee875d69ff61ae80b271",
@@ -126,7 +127,7 @@ const EXPECTED_TOOL_ROWS: &[&str] = &[
     "config|eb46212a6d527f698017c0360b099c7ae3d4b01e690fcd3c879ab8764368ee63|9c61b49e03def9786bddde303a06fa926bc59590ec475298d0422eb795af9d4b",
     "crew|886ff7c084a09bd0b3b7927447619bde9e91ee322e31e828a10ca6b14630d563|88f5e7ff9d44dbf81716852b19df5fe0764a848aab616b3cb7ea8bb2f5c2d113",
     "get_tools|1e7a235797cc4043ef72fbe9821989c7fdf78c19dfb4afa2f97dec22b28ad2b9|8d1085667f9f7b280bc979a52911ce87934bee573c8dd9a35175afad22365c8f",
-    "graph|d430e133b8f3fb2f69fa901969a339a14191f3cd2da796bfccd5887a44709d82|6023bdf911453dad5fc39d06fb2dcec120580102864eb673be3e0952fdba2921",
+    "graph|3dd7c5b0c1fbde713211136e183fd86a8457362ef9e043ae105f778f201340ca|c0412aec6b6164038ba74825566c62bcfa04ee808303b5f915fc260b4c87981e",
     "graph_complete_node|cd65852e0bb702902c8fc61858fb514f0f75d749de39d9014f2ae037d39a5a24|174f4383731a376d4ffd07080c26cbc61bd66839093939ea3f6defaebd64cd5e",
     "graph_control|c5d15f5253e8a81c6a2a6510e9994bb11be889d767fdfd943b9b80219344f6ee|5c16b4e016c6d8de3d68dabd607e3a29cc777b8a2a6f11b5504d74e61113ea12",
     "graph_edge|dc837b1ca327d911a1f60b27d4546747dcb70411b35c7a51d4954256e73987de|78b3584a55307259ba886f8371e49efad61a12b996a821c014343fd545196f47",

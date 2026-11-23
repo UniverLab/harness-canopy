@@ -233,6 +233,28 @@ canopy metrics host --since 6h
 canopy metrics host --at 2026-03-02T11:32:00+00:00
 ```
 
+### Graph metrics
+
+Read-only graph run metrics from the daemon's graph surface (no SQLite access
+from the CLI). The window filters on `started_at`; a run still `running` counts
+in `running` and is excluded from durations.
+
+| Command | Description |
+|---|---|
+| `canopy metrics graphs` | Run, pass/fail, and duration metrics for the last 7 days, grouped by graph |
+| `canopy metrics graphs --since <duration\|RFC3339>` | Window start (`7d`, `30m`, `6h`, `1d`, or an RFC 3339 instant). Defaults to `7d` |
+| `canopy metrics graphs --graph <name\|id>` | Narrow to one graph (exact id, unambiguous prefix, or exact name) |
+| `canopy metrics graphs --by <graph\|node\|model>` | Group by `graph` (default), `node` (`<graph>/<node>`), or `model` (`<platform>/<model>`; missing platform/model render as `unknown`) |
+| `canopy metrics graphs --json` | Print `{window:{since,until}, by, groups:[{key,runs,passed,failed,interrupted,waiting,error,running,pass_rate,duration_s:{avg,p95,max}}]}` |
+
+`pass_rate` is `passed / (passed+failed+interrupted+error)`, or `null` when no
+runs completed. Durations use integer seconds; `p95` is nearest-rank.
+
+```sh
+canopy metrics graphs --since 30d --by node
+canopy metrics graphs --graph my-graph --by model --json
+```
+
 <!-- RETIRED-VOCAB-END -->
 
 ## Spec backlog

@@ -290,3 +290,14 @@ pub struct SpecNotesGetParams {
     /// Spec ID (or unambiguous id prefix) whose notes to read.
     pub spec_id: String,
 }
+
+#[derive(Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GraphMetricsParams {
+    /// Window start: RFC 3339 instant or duration like `7d`, `30m`.
+    /// Defaults to `7d`.
+    pub since: Option<String>,
+    /// Narrow to one graph (name or id/prefix).
+    pub graph_id: Option<String>,
+    /// Grouping: `graph` (default), `node`, or `model`.
+    pub by: Option<String>,
+}
