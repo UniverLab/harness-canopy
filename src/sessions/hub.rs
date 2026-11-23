@@ -337,11 +337,12 @@ impl HubSession {
     /// Mark this session's database row finished, the way the TUI does when
     /// a session of the same kind ends. The status flip and the failure
     /// detail commit in one update: a reader polling the row can never
-    /// observe `error` ahead of its explanation.
-    fn finish_db_row(&self, db: &Database) {
+    /// observe `error` ahead of its explanation. The caller passes the exit
+    /// code it transitioned the status with while holding the status lock,
+    /// so the recorded code always matches the transition.
+    fn finish_db_row(&self, db: &Database, code: i32) {
         match self.kind {
             SessionKind::Agent => {
-                let code = self.status().exit_code().unwrap_or(-1);
                 let detail = (code != 0).then(|| self.exit_detail_text(code));
                 let _ =
                     db.finish_interactive_session_with_detail(&self.id, code, detail.as_deref());
@@ -355,11 +356,13 @@ impl HubSession {
     /// Mark this session's database row finished after an explicit `kill`:
     /// the user closed it, so no failure detail is recorded or kept — a
     /// killed session reads as closed, never as a failure with a tail, and
-    /// the TUI drops it instead of retaining an error card for it.
-    fn finish_db_row_killed(&self, db: &Database) {
+    /// the TUI drops it instead of retaining an error card for it. The
+    /// caller passes the exit code while holding the status lock, so a
+    /// concurrent natural exit cannot interleave a failure tail after this
+    /// clear (see `record_natural_exit`).
+    fn finish_db_row_killed(&self, db: &Database, code: i32) {
         match self.kind {
             SessionKind::Agent => {
-                let code = self.status().exit_code().unwrap_or(-1);
                 let _ = db.finish_interactive_session_with_detail(&self.id, code, None);
             }
             SessionKind::Terminal => {
@@ -687,7 +690,13 @@ impl SessionHub {
     /// Record a natural child exit: mark the session exited and its row
     /// finished, tell attached connections, drop it from the list, and tell
     /// every connection it is gone. A no-op when `kill` already recorded
-    /// the exit, so the events are sent once.
+    /// the exit, so the events are sent once. The status lock is held across
+    /// the transition AND the row finish so a concurrent `kill` — which
+    /// finishes the same row with no detail under this same lock — strictly
+    /// orders with this write: the transition winner finishes its row
+    /// before the loser observes the status, and `kill` always finishes
+    /// with no detail, so a killed session can never keep a failure tail
+    /// written after the kill's clear.
     pub(crate) fn record_natural_exit(&self, session: &HubSession, code: i32) {
         let Ok(mut status) = session.status.lock() else {
             return;
@@ -696,16 +705,19 @@ impl SessionHub {
             return;
         }
         *status = SessionStatus::Exited(code);
-        drop(status);
-        if let Ok(mut sessions) = self.inner.sessions.lock() {
-            sessions.remove(session.id.as_str());
-        }
         // During a daemon stop the child dies because the daemon is going
         // away, not because the session ended: leave the row as it was so
         // the next start resumes it (agent `active`, terminal `idle`).
         if !self.is_shutting_down() {
-            session.finish_db_row(&self.inner.db);
+            session.finish_db_row(&self.inner.db, code);
         }
+        // Drop from the list only after the row write commits: a concurrent
+        // `kill` that finds no session still clears the failure tail, and
+        // that clear must land after this write, never before it.
+        if let Ok(mut sessions) = self.inner.sessions.lock() {
+            sessions.remove(session.id.as_str());
+        }
+        drop(status);
         self.emit(HubEvent::Exited {
             id: session.id.clone(),
             code,
@@ -734,15 +746,24 @@ impl SessionHub {
         }
         let code = match session.status() {
             SessionStatus::Exited(code) => code,
-            SessionStatus::Running => {
-                let code = wait_for_exit_code(&session).unwrap_or(-9);
-                if let Ok(mut status) = session.status.lock() {
-                    *status = SessionStatus::Exited(code);
-                }
-                code
-            }
+            SessionStatus::Running => wait_for_exit_code(&session).unwrap_or(-9),
         };
-        session.finish_db_row_killed(&self.inner.db);
+        // Finish under the same status lock `record_natural_exit` holds
+        // across its transition and row write: the lock is held across this
+        // path's transition AND its row write too, so the two writes are
+        // strictly ordered and this path — which always finishes with no
+        // detail — wins whenever it raced a natural exit. The wait above
+        // stays outside the lock; the reader thread needs the lock to make
+        // progress while this waits for the child.
+        if let Ok(mut status) = session.status.lock() {
+            if *status == SessionStatus::Running {
+                *status = SessionStatus::Exited(code);
+            }
+            let final_code = status.exit_code().unwrap_or(code);
+            session.finish_db_row_killed(&self.inner.db, final_code);
+        } else {
+            session.finish_db_row_killed(&self.inner.db, code);
+        }
         self.emit(HubEvent::Exited {
             id: id.to_string(),
             code,

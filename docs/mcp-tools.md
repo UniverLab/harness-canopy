@@ -9,6 +9,16 @@ order: 17
 The daemon exposes **36 MCP tools** over Streamable HTTP (port 7755) and
 stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 
+Every HTTP request under `/mcp` must present the daemon token as an
+`Authorization: Bearer <token>` header, where the token is the content of
+`~/.canopy/daemon.token` (created at daemon start, mode 0600). Requests
+with no header, a wrong token or a malformed header get `401` with
+`WWW-Authenticate: Bearer realm="canopy"` and the body
+`{"error":"missing or invalid daemon token"}` — the body is never read
+before authentication. `canopy bridge`, the TUI and the `canopy graph` /
+`canopy spec` CLI paths send the header automatically; external MCP
+clients configured over HTTP must add it themselves.
+
 Writes wait up to 5 seconds for a concurrent writer. If the database is still
 busy after that, the call fails with `<tool>: database busy after 5 s — nothing
 was written, retry`. Nothing changed, so retry the same call.

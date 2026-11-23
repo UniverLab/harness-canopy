@@ -27,6 +27,7 @@ use anyhow::{Context, Result};
 use reqwest::Client;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+use super::bridge_auth::{bridge_token, init_bridge_token, with_daemon_auth};
 use crate::application::ports::StateRepository;
 use crate::db::Database;
 use crate::domain::db_paths::database_path;
@@ -289,6 +290,7 @@ enum ServeError {
 
 async fn run_proxy_graph(port: u16, agent_id: &str) -> Result<()> {
     let endpoint = format!("http://127.0.0.1:{port}/mcp");
+    init_bridge_token();
     let client = Client::new();
     let seed_id = non_empty_env(CANOPY_SEED_ID_ENV);
 
@@ -431,6 +433,7 @@ async fn forward_request(
     if let Some(sid) = session_id {
         request = request.header(MCP_SESSION_HEADER, sid);
     }
+    request = with_daemon_auth(request, bridge_token());
 
     let response = match request.send().await {
         Ok(response) => response,
@@ -513,12 +516,15 @@ async fn close_daemon_session(client: &Client, endpoint: &str, session_id: Optio
     let Some(sid) = session_id else {
         return;
     };
-    let _ = client
-        .delete(endpoint)
-        .header(MCP_SESSION_HEADER, sid)
-        .timeout(Duration::from_secs(2))
-        .send()
-        .await;
+    let _ = with_daemon_auth(
+        client
+            .delete(endpoint)
+            .header(MCP_SESSION_HEADER, sid)
+            .timeout(Duration::from_secs(2)),
+        bridge_token(),
+    )
+    .send()
+    .await;
 }
 
 fn build_jsonrpc_transport_error(raw_request: &str, message: &str) -> String {
@@ -1160,6 +1166,73 @@ mod tests {
             !saw_client_name_header.load(Ordering::SeqCst),
             "forward_request must not send x-canopy-client-name; the daemon \
              resolves the display name from the session itself"
+        );
+
+        server.abort();
+    }
+
+    /// The bridge attaches the daemon token it read at startup to every
+    /// forwarded `/mcp` request, via the shared helper — without it the
+    /// gate answers 401. The fake daemon records the header it receives.
+    /// (The token cell is process-wide: setting it here is one-way, and
+    /// the other fakes ignore the extra header, so no test interferes.)
+    #[tokio::test]
+    async fn forward_request_sends_daemon_bearer_token() {
+        use axum::extract::Request;
+        use axum::response::IntoResponse;
+        use std::sync::Arc;
+
+        crate::daemon::bridge_auth::set_bridge_token("bridge-test-token".to_string());
+
+        let seen: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let flag = Arc::clone(&seen);
+
+        async fn handle_mcp(
+            axum::extract::State(flag): axum::extract::State<Arc<Mutex<Option<String>>>>,
+            request: Request,
+        ) -> axum::response::Response {
+            let authorization = request
+                .headers()
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            *flag.lock().unwrap() = authorization;
+            (
+                axum::http::StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                r#"{"jsonrpc":"2.0","id":1,"result":{}}"#,
+            )
+                .into_response()
+        }
+
+        let router = axum::Router::new()
+            .route("/mcp", axum::routing::post(handle_mcp))
+            .with_state(flag);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let endpoint = format!("http://127.0.0.1:{port}/mcp");
+        let client = Client::new();
+        forward_request(
+            &client,
+            &endpoint,
+            "sess-boletus",
+            None,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+            None,
+        )
+        .await
+        .expect("forward_request should succeed against the fake daemon");
+
+        let expected = ["Bearer", "bridge-test-token"].join(" ");
+        assert_eq!(
+            seen.lock().unwrap().as_deref(),
+            Some(expected.as_str()),
+            "forward_request must send the daemon bearer token via the shared helper"
         );
 
         server.abort();

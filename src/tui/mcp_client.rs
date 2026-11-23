@@ -15,6 +15,8 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 
+use crate::sessions::auth::{daemon_auth_header, token_path};
+
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -136,9 +138,45 @@ struct HttpResponse {
     body: String,
 }
 
+/// The daemon token when its file already exists. Best-effort and
+/// read-only: unlike the daemon's own startup (or the bridge), a TUI/CLI
+/// caller never creates the file — when the daemon is up it already exists,
+/// and when it is down there is nothing to authenticate against yet. The
+/// file is re-read on every request so a rotated token takes effect without
+/// a restart. Never logged.
+fn daemon_token() -> Option<String> {
+    let data_dir = dirs::home_dir().map(|home| home.join(".canopy"))?;
+    let token = std::fs::read_to_string(token_path(&data_dir))
+        .ok()?
+        .trim()
+        .to_string();
+    (!token.is_empty()).then_some(token)
+}
+
 fn http_post(port: &str, session: Option<&str>, body: &str) -> Result<HttpResponse> {
+    http_post_with_token(port, session, body, daemon_token().as_deref())
+}
+
+/// POST to `/mcp` with an explicit token: the seam the header test drives
+/// without touching `$HOME`. Production callers go through [`http_post`],
+/// which supplies [`daemon_token`]. A `None` token (daemon down, no file
+/// yet) sends no header — best-effort, never a fabricated credential.
+fn http_post_with_token(
+    port: &str,
+    session: Option<&str>,
+    body: &str,
+    token: Option<&str>,
+) -> Result<HttpResponse> {
     let session_header = session
         .map(|s| format!("Mcp-Session-Id: {s}\r\n"))
+        .unwrap_or_default();
+    // The daemon's `/mcp` gate requires the bearer token; without it the
+    // daemon answers 401. Built via the shared helper, never logged.
+    let auth_header = token
+        .map(|token| {
+            let (name, value) = daemon_auth_header(token);
+            format!("{name}: {}\r\n", value.to_str().unwrap_or("Bearer invalid"))
+        })
         .unwrap_or_default();
     let request = format!(
         "POST /mcp HTTP/1.1\r\n\
@@ -146,7 +184,7 @@ fn http_post(port: &str, session: Option<&str>, body: &str) -> Result<HttpRespon
          Content-Type: application/json\r\n\
          Accept: application/json, text/event-stream\r\n\
          Connection: close\r\n\
-         {session_header}Content-Length: {}\r\n\
+         {auth_header}{session_header}Content-Length: {}\r\n\
          \r\n\
          {body}",
         body.len()
@@ -320,11 +358,19 @@ pub(crate) mod test_support {
         pub requests: Arc<Mutex<usize>>,
         /// Number of `initialize` handshakes received.
         pub initializes: Arc<Mutex<usize>>,
+        /// The `Authorization` header of every request received, in order
+        /// (`None` when the caller sent none). Lets the header test prove
+        /// the client authenticates without standing up a real daemon.
+        pub auth_headers: Arc<Mutex<Vec<Option<String>>>>,
     }
 
     impl FakeDaemon {
         pub fn recorded_calls(&self) -> Vec<serde_json::Value> {
             self.calls.lock().unwrap().clone()
+        }
+
+        pub fn authorization_headers(&self) -> Vec<Option<String>> {
+            self.auth_headers.lock().unwrap().clone()
         }
 
         pub fn request_count(&self) -> usize {
@@ -348,6 +394,8 @@ pub(crate) mod test_support {
         let calls_bg = Arc::clone(&calls);
         let requests_bg = Arc::clone(&requests);
         let initializes_bg = Arc::clone(&initializes);
+        let auth_bg: Arc<Mutex<Vec<Option<String>>>> = Arc::default();
+        let auth_headers = Arc::clone(&auth_bg);
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { break };
@@ -356,6 +404,7 @@ pub(crate) mod test_support {
                     &calls_bg,
                     &requests_bg,
                     &initializes_bg,
+                    &auth_bg,
                     &tool_result,
                 );
             }
@@ -365,6 +414,7 @@ pub(crate) mod test_support {
             calls,
             requests,
             initializes,
+            auth_headers,
         }
     }
 
@@ -379,12 +429,14 @@ pub(crate) mod test_support {
         calls: &CallLog,
         requests: &Arc<Mutex<usize>>,
         initializes: &Arc<Mutex<usize>>,
+        auth_headers: &Arc<Mutex<Vec<Option<String>>>>,
         tool_result: &serde_json::Value,
     ) {
-        let Some((request_line, body)) = read_request(stream) else {
+        let Some((request_line, head, body)) = read_request(stream) else {
             return;
         };
         *requests.lock().unwrap() += 1;
+        auth_headers.lock().unwrap().push(authorization(&head));
         if request_line.starts_with("DELETE") {
             respond_accepted(stream);
             return;
@@ -411,7 +463,8 @@ pub(crate) mod test_support {
         }
     }
 
-    fn read_request(stream: &mut TcpStream) -> Option<(String, String)> {
+    /// The request line, the raw head and the body of one HTTP request.
+    fn read_request(stream: &mut TcpStream) -> Option<(String, String, String)> {
         let mut raw = Vec::new();
         let mut buf = [0u8; 1024];
         loop {
@@ -430,7 +483,7 @@ pub(crate) mod test_support {
                     let body = String::from_utf8_lossy(&raw[split + 4..split + 4 + content_length])
                         .into_owned();
                     let request_line = head.lines().next().unwrap_or_default().to_string();
-                    return Some((request_line, body));
+                    return Some((request_line, head, body));
                 }
             }
             let n = stream.read(&mut buf).ok()?;
@@ -439,6 +492,16 @@ pub(crate) mod test_support {
             }
             raw.extend_from_slice(&buf[..n]);
         }
+    }
+
+    /// The `Authorization` header of a raw request head, if the caller sent
+    /// one. Never logged beyond the recording the header test asserts on.
+    fn authorization(head: &str) -> Option<String> {
+        head.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("authorization")
+                .then(|| value.trim().to_string())
+        })
     }
 
     fn respond_sse(
@@ -596,5 +659,46 @@ mod tests {
             "three refreshes must reuse one MCP session"
         );
         assert_eq!(fake.recorded_calls().len(), 3);
+    }
+
+    /// Every POST to the daemon's `/mcp` endpoint carries the daemon token
+    /// as `Authorization: Bearer <token>`, built via the shared
+    /// `daemon_auth_header` helper. Without it the daemon's gate answers
+    /// 401. Removing the header (or hand-rolling it) fails here instead of
+    /// at runtime against the real daemon.
+    #[test]
+    fn http_post_sends_daemon_bearer_token() {
+        let fake = spawn_fake_daemon(serde_json::json!({
+            "content": [{"type": "text", "text": "ok"}],
+            "isError": false
+        }));
+
+        http_post_with_token(&fake.port, None, "{}", Some("client-test-token"))
+            .expect("post against the fake daemon");
+
+        assert_eq!(
+            fake.authorization_headers(),
+            vec![Some("Bearer client-test-token".to_string())],
+            "the /mcp POST must carry the daemon bearer token"
+        );
+    }
+
+    /// With no token on disk (daemon down) the client sends no header —
+    /// best-effort, never a fabricated credential. The daemon answers 401
+    /// either way; the request simply stays honest about having no token.
+    #[test]
+    fn http_post_without_token_sends_no_authorization_header() {
+        let fake = spawn_fake_daemon(serde_json::json!({
+            "content": [{"type": "text", "text": "ok"}],
+            "isError": false
+        }));
+
+        http_post_with_token(&fake.port, None, "{}", None).expect("post against the fake daemon");
+
+        assert_eq!(
+            fake.authorization_headers(),
+            vec![None],
+            "no token must mean no Authorization header, not a placeholder"
+        );
     }
 }

@@ -74,6 +74,20 @@ pub fn bearer_token(header: &str) -> Option<&str> {
     header.strip_prefix("Bearer ").filter(|t| !t.is_empty())
 }
 
+/// Build the `Authorization` header value a daemon HTTP caller sends: the
+/// daemon token as a bearer credential. The only sanctioned way to call
+/// `/mcp` — every in-repo caller (bridge, TUI, CLI) goes through this so a
+/// missing header is a compile-time omission, not a runtime surprise. Never
+/// logged by either side.
+pub fn daemon_auth_header(token: &str) -> (axum::http::HeaderName, axum::http::HeaderValue) {
+    let value: axum::http::HeaderValue = format!("Bearer {token}").parse().unwrap_or_else(|_| {
+        // A corrupt token is never sent raw (it could split the header);
+        // the daemon rejects the fixed invalid credential with 401 instead.
+        axum::http::HeaderValue::from_static("Bearer invalid")
+    });
+    (axum::http::header::AUTHORIZATION, value)
+}
+
 /// Constant-time token comparison. Callers must never log either side.
 pub fn token_valid(provided: &str, expected: &str) -> bool {
     let a = provided.as_bytes();

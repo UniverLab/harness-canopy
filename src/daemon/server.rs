@@ -106,6 +106,7 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
         },
         &ct,
         Arc::clone(&sessions_state),
+        &data_dir,
     );
 
     bind_and_serve(router, port, ct, &sessions_state).await?;
@@ -316,6 +317,7 @@ fn build_mcp_router(
     deps: HandlerDeps,
     ct: &tokio_util::sync::CancellationToken,
     sessions: Arc<crate::sessions::ws::SessionsState>,
+    data_dir: &std::path::Path,
 ) -> axum::Router {
     let HandlerDeps {
         db: handler_db,
@@ -366,8 +368,16 @@ fn build_mcp_router(
         },
     );
 
+    // Bearer-token gate on the `/mcp` routes only (never router-wide:
+    // that would double-gate `/sessions/ws`). Three routes because
+    // `{*rest}` matches neither `/mcp` nor `/mcp/`. See `super::mcp_auth`.
+    let authed_mcp =
+        super::mcp_auth::authed_mcp_route(axum::routing::any_service(service), data_dir);
+
     axum::Router::new()
-        .nest_service("/mcp", service)
+        .route("/mcp", authed_mcp.clone())
+        .route("/mcp/", authed_mcp.clone())
+        .route("/mcp/{*rest}", authed_mcp)
         .route(
             "/sessions/ws",
             axum::routing::get(crate::sessions::ws::sessions_ws_handler),
