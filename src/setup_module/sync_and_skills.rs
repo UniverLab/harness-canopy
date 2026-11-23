@@ -1,4 +1,5 @@
-use crate::setup_module::models::{CanonicalServers, Platform};
+use crate::setup_module::mcp_migrate::{migrate_canopy_entries, MigrationOutcome};
+use crate::setup_module::models::{resolve_config_path, CanonicalServers, Platform};
 use crate::setup_module::platform_adapter::{
     extract_all_mcp_configs, print_mcp_matrix, run_install_our_servers,
 };
@@ -23,6 +24,7 @@ pub(crate) fn run_sync_step(
     println!();
 
     run_install_our_servers(home, selected, canonical)?;
+    report_migration_results(home, selected);
 
     let all_configs = extract_all_mcp_configs(home, selected);
     if !all_configs.is_empty() {
@@ -30,6 +32,25 @@ pub(crate) fn run_sync_step(
     }
 
     Ok(Some("\x1b[32m✓\x1b[0m MCP servers updated".to_string()))
+}
+
+fn report_migration_results(home: &Path, selected: &[&Platform]) {
+    for (platform, outcome) in selected.iter().zip(migrate_canopy_entries(home, selected)) {
+        let path = resolve_config_path(home, &platform.config_path);
+        match outcome {
+            MigrationOutcome::Legacy => println!(
+                "  {}: rewritten to canopy bridge (backup {}.canopy-bak)",
+                platform.name,
+                path.display()
+            ),
+            MigrationOutcome::Unparsable => println!(
+                "  {}: needs attention: cannot parse {}",
+                platform.name,
+                path.display()
+            ),
+            MigrationOutcome::Current | MigrationOutcome::NoEntry => {}
+        }
+    }
 }
 
 /// Download the UniverLab Essential Skills pack and create platform symlinks.

@@ -394,7 +394,7 @@ pub(crate) fn clear_wizard_screen() -> Result<()> {
 
 // ── Output ───────────────────────────────────────────────────────────────────
 
-fn apply_upsert_to_platform(
+pub(crate) fn apply_upsert_to_platform(
     platform: &Platform,
     config_path: &Path,
     server_name: &str,

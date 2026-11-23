@@ -88,6 +88,7 @@ pub fn run_mcp_wizard() -> Result<()> {
     }
 
     print_detected_platforms(&detected);
+    report_migration_results(&home, &detected);
     let pre_configs = collect_all_platform_configs(&home, &detected);
     print_mcp_table(&detected, &pre_configs);
 
@@ -132,6 +133,27 @@ fn print_no_supported_platforms(platforms: &[Platform]) {
             .collect::<Vec<_>>()
             .join(", ")
     );
+}
+
+fn report_migration_results(home: &Path, detected: &[&Platform]) {
+    let outcomes = crate::setup_module::mcp_migrate::migrate_canopy_entries(home, detected);
+    for (platform, outcome) in detected.iter().zip(outcomes) {
+        let path = platform_config::resolve_platform_config_path(home, platform);
+        match outcome {
+            crate::setup_module::mcp_migrate::MigrationOutcome::Legacy => println!(
+                "  {}: rewritten to canopy bridge (backup {}.canopy-bak)",
+                platform.name,
+                path.display()
+            ),
+            crate::setup_module::mcp_migrate::MigrationOutcome::Unparsable => println!(
+                "  {}: needs attention: cannot parse {}",
+                platform.name,
+                path.display()
+            ),
+            crate::setup_module::mcp_migrate::MigrationOutcome::Current
+            | crate::setup_module::mcp_migrate::MigrationOutcome::NoEntry => {}
+        }
+    }
 }
 
 fn print_detected_platforms(detected: &[&Platform]) {
