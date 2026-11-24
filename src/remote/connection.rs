@@ -34,11 +34,26 @@ pub enum Control {
     Ice(IceCandidate),
 }
 
+/// What a guest peer was opened with: the identity and grant snapshot the
+/// reaper rechecks while the peer is live.
+#[derive(Debug, Clone)]
+pub struct GuestMeta {
+    /// The tracked, normalized login.
+    pub login: String,
+    /// The grant resolved when the offer verified.
+    pub grant: Grant,
+    /// The upload flag resolved when the offer verified.
+    pub upload: bool,
+}
+
 struct PeerHandle {
     /// Relay connection id this peer answers `ice`/`bye` from.
     from: String,
     token: Arc<CancellationToken>,
     control: mpsc::UnboundedSender<Control>,
+    /// `Some` for guest peers, `None` for owner devices (never touched by
+    /// the guest recheck).
+    meta: Option<GuestMeta>,
 }
 
 /// Live device peers, keyed by `device_id`.
@@ -83,21 +98,93 @@ impl DevicePeers {
         token: Arc<CancellationToken>,
         control: mpsc::UnboundedSender<Control>,
     ) -> bool {
+        self.register_inner(device_id, from, token, control, None)
+    }
+
+    /// Register one guest peer. Same slot cap and reconnect-replace as
+    /// [`Self::register`], storing the grant snapshot for the recheck.
+    pub fn register_guest(
+        &self,
+        key: &str,
+        from: &str,
+        token: Arc<CancellationToken>,
+        control: mpsc::UnboundedSender<Control>,
+        meta: GuestMeta,
+    ) -> bool {
+        self.register_inner(key, from, token, control, Some(meta))
+    }
+
+    /// One slot-capped reconnect-replace insert: owner peers carry no grant
+    /// snapshot (`None`), guest peers carry `Some` of what the offer opened
+    /// with for the reaper's recheck.
+    fn register_inner(
+        &self,
+        key: &str,
+        from: &str,
+        token: Arc<CancellationToken>,
+        control: mpsc::UnboundedSender<Control>,
+        meta: Option<GuestMeta>,
+    ) -> bool {
         let Ok(mut map) = self.inner.lock() else {
             return false;
         };
-        if map.len() >= MAX_DEVICE_PEERS && !map.contains_key(device_id) {
+        if map.len() >= MAX_DEVICE_PEERS && !map.contains_key(key) {
             return false;
         }
         map.insert(
-            device_id.to_string(),
+            key.to_string(),
             PeerHandle {
                 from: from.to_string(),
                 token,
                 control,
+                meta,
             },
         );
         true
+    }
+
+    /// The key and grant snapshot of every live guest peer.
+    pub fn guest_snapshot(&self) -> Vec<(String, GuestMeta)> {
+        self.inner
+            .lock()
+            .map(|map| {
+                map.iter()
+                    .filter_map(|(key, handle)| handle.meta.clone().map(|meta| (key.clone(), meta)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Close every live guest peer of `login` (normalized) with a revoked
+    /// mark plus cancel, so the guest hears `error{code:"revoked"}` before
+    /// its channel closes — the same farewell [`Self::close_revoked`]
+    /// gives owner devices. Returns how many closed. Owner peers (no
+    /// meta) are never matched.
+    pub fn close_guests_of(&self, login: &str) -> usize {
+        let login = super::trust::normalize_login(login);
+        let keys: Vec<String> = self
+            .inner
+            .lock()
+            .map(|map| {
+                map.iter()
+                    .filter(|(_, handle)| {
+                        handle.meta.as_ref().is_some_and(|meta| meta.login == login)
+                    })
+                    .map(|(key, _)| key.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut closed = 0;
+        for key in keys {
+            if let (Ok(map), Ok(mut revoked)) = (self.inner.lock(), self.revoked.lock()) {
+                if let Some(handle) = map.get(&key) {
+                    revoked.insert(key.clone());
+                    handle.token.cancel();
+                    closed += 1;
+                }
+            }
+        }
+        closed
     }
 
     /// Route one control body to the peer that answers on relay connection

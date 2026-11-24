@@ -46,6 +46,9 @@ pub struct GuestOffer {
     pub grant: Grant,
     /// Whether this guest holds the `upload` grant.
     pub upload: bool,
+    /// The tracked, normalized login — from the tracked identity, never the
+    /// client-writable body.
+    pub login: String,
 }
 
 /// The `from` of the relay's own notices (`device_identity`, `device_left`).
@@ -190,6 +193,7 @@ impl GuestConns {
             sdp: sdp.to_string(),
             grant,
             upload,
+            login: trust::normalize_login(&tracked.login),
         })
     }
 }

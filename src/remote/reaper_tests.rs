@@ -16,11 +16,13 @@ use crate::daemon::TaskTriggerHandler;
 use crate::db::Database;
 use crate::domain::canopy_config::CanopyConfig;
 use crate::remote::auth::{self, GitHubIdentity};
-use crate::remote::connection::DevicePeers;
+use crate::remote::connection::{DevicePeers, GuestMeta};
 use crate::remote::devices::RemoteDevices;
 use crate::remote::hostkey::HostKey;
-use crate::remote::relay::{queue_revocation, ConnectionRegistry};
+use crate::remote::relay::{queue_revocation, queue_trust_revocation, ConnectionRegistry};
 use crate::remote::signaling::{verify_offer, Refusal};
+use crate::remote::trust::Grant;
+use std::collections::HashSet;
 
 /// One scratch dir holding both the config/identity files and the database.
 fn scratch() -> (tempfile::TempDir, Database) {
@@ -331,5 +333,283 @@ fn revoked_device_offer_is_refused_as_unknown_device() {
         verify_offer(&devices, &host.host_id(), &unknown, now).err(),
         Some(Refusal::UnknownDevice),
         "a revoked device's offer is refused: it cannot re-attach"
+    );
+}
+
+/// Register a live guest peer for `key` with the grant snapshot it opened
+/// with, and return its token, cancelled on close.
+fn live_guest(
+    peers: &DevicePeers,
+    key: &str,
+    login: &str,
+    grant: Grant,
+    upload: bool,
+) -> Arc<CancellationToken> {
+    let token = Arc::new(CancellationToken::new());
+    let (control, _inbox) = tokio::sync::mpsc::unbounded_channel();
+    assert!(
+        peers.register_guest(
+            key,
+            &format!("d:{key}"),
+            Arc::clone(&token),
+            control,
+            GuestMeta {
+                login: crate::remote::trust::normalize_login(login),
+                grant,
+                upload,
+            },
+        ),
+        "a fresh guest peer registers"
+    );
+    token
+}
+
+/// Store a scoped trust row for `login`.
+fn trust_scoped(db: &Database, login: &str, sessions: &[&str]) {
+    crate::remote::panel::trust_add(
+        db,
+        login,
+        false,
+        &sessions.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        false,
+    )
+    .expect("trust row");
+}
+
+fn sessions_grant(names: &[&str]) -> Grant {
+    Grant::Sessions(
+        names
+            .iter()
+            .map(ToString::to_string)
+            .collect::<HashSet<_>>(),
+    )
+}
+
+/// `Grant::covers`: `All` covers anything, `Sessions` covers only its
+/// subsets, and never `All`.
+#[test]
+fn grant_covers_truth_table() {
+    let all = Grant::All;
+    let pair = sessions_grant(&["a", "b"]);
+    assert!(all.covers(&all));
+    assert!(all.covers(&pair));
+    assert!(all.covers(&sessions_grant(&[])));
+    assert!(pair.covers(&pair));
+    assert!(pair.covers(&sessions_grant(&["a"])));
+    assert!(pair.covers(&sessions_grant(&[])));
+    assert!(!pair.covers(&all));
+    assert!(!pair.covers(&sessions_grant(&["a", "c"])));
+    assert!(!sessions_grant(&[]).covers(&sessions_grant(&["a"])));
+    assert!(sessions_grant(&[]).covers(&sessions_grant(&[])));
+}
+
+/// `trust_remove` drains through the queue and closes the login's guest
+/// peer at once with a revoked farewell, while an owner peer stays open.
+#[test]
+fn trust_remove_queue_closes_the_guest_peer_with_a_revoked_farewell() {
+    let (_dir, db) = scratch();
+    trust_scoped(&db, "bob", &["a"]);
+    let peers = DevicePeers::default();
+    let connections = ConnectionRegistry::default();
+    let guest = live_guest(&peers, "guest-101", "bob", sessions_grant(&["a"]), false);
+    let owner_token = live_peer(&peers, "owner-device");
+    assert!(crate::remote::panel::trust_remove(&db, "bob").expect("removed"));
+    assert_eq!(drain_queues(&db, &peers, &connections), 1);
+    assert!(guest.is_cancelled());
+    assert!(peers.take_revoked("guest-101"));
+    assert!(
+        !owner_token.is_cancelled(),
+        "an owner peer is never matched by a trust revocation"
+    );
+}
+
+/// A queued trust revocation lands on the next one-second tick: the guest
+/// hears `revoked` and its channel closes within the tick.
+#[tokio::test]
+async fn trust_remove_closes_a_registered_guest_within_the_tick() {
+    let (dir, db) = scratch();
+    test_config(&dir, true);
+    test_identity(&dir);
+    trust_scoped(&db, "bob", &["a"]);
+    let peers = DevicePeers::default();
+    let connections = ConnectionRegistry::default();
+    let guest = live_guest(&peers, "guest-202", "bob", sessions_grant(&["a"]), false);
+    let owner_token = live_peer(&peers, "owner-device");
+    queue_trust_revocation(&db, "bob");
+    let reaper = tokio::spawn(run(
+        dir.path().to_path_buf(),
+        db.clone(),
+        peers.clone(),
+        connections,
+    ));
+    wait_cancelled(&guest, Duration::from_millis(1500), "a trust removal").await;
+    reaper.abort();
+    assert!(
+        peers.take_revoked("guest-202"),
+        "the guest hears the revoked frame first"
+    );
+    assert!(
+        !owner_token.is_cancelled(),
+        "an owner peer survives a trust removal"
+    );
+}
+
+/// A narrowing `trust_add` (all to scoped) queues the login, and the next
+/// tick closes the guest; a widened grant queues nothing and stays open.
+#[tokio::test]
+async fn narrowing_trust_add_closes_the_guest_widening_keeps_it() {
+    let (dir, db) = scratch();
+    test_config(&dir, true);
+    test_identity(&dir);
+    crate::remote::panel::trust_add(&db, "narrow", true, &[], false).expect("full grant");
+    crate::remote::panel::trust_add(&db, "wide", false, &["a".to_string()], false)
+        .expect("scoped grant");
+    let peers = DevicePeers::default();
+    let connections = ConnectionRegistry::default();
+    let narrowed = live_guest(&peers, "guest-301", "narrow", Grant::All, false);
+    let widened = live_guest(&peers, "guest-302", "wide", sessions_grant(&["a"]), false);
+    let reaper = tokio::spawn(run(
+        dir.path().to_path_buf(),
+        db.clone(),
+        peers.clone(),
+        connections,
+    ));
+    crate::remote::panel::trust_add(&db, "narrow", false, &["a".to_string()], false)
+        .expect("narrowed");
+    crate::remote::panel::trust_add(&db, "wide", true, &[], false).expect("widened");
+    wait_cancelled(&narrowed, Duration::from_secs(2), "a narrowed grant").await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    reaper.abort();
+    assert!(peers.take_revoked("guest-301"));
+    assert!(!widened.is_cancelled(), "a widened grant closes nothing");
+}
+
+/// Withdrawing `upload` narrows the grant: the queued login closes the
+/// guest on the next tick even though its sessions did not change.
+#[test]
+fn upload_withdrawn_closes_the_guest_peer() {
+    let (_dir, db) = scratch();
+    crate::remote::panel::trust_add(&db, "camper", false, &["a".to_string()], true)
+        .expect("upload granted");
+    let peers = DevicePeers::default();
+    let connections = ConnectionRegistry::default();
+    let guest = live_guest(&peers, "guest-401", "camper", sessions_grant(&["a"]), true);
+    crate::remote::panel::trust_add(&db, "camper", false, &["a".to_string()], false)
+        .expect("upload withdrawn");
+    assert_eq!(drain_queues(&db, &peers, &connections), 1);
+    assert!(guest.is_cancelled());
+    assert!(peers.take_revoked("guest-401"));
+}
+
+/// A trust row deleted directly (no queue entry) closes the guest on the
+/// next five-second sweep — the case the recheck exists for.
+#[tokio::test]
+async fn direct_trust_delete_closes_the_guest_within_five_seconds() {
+    let (dir, db) = scratch();
+    test_config(&dir, true);
+    test_identity(&dir);
+    trust_scoped(&db, "ghost", &["a"]);
+    let peers = DevicePeers::default();
+    let connections = ConnectionRegistry::default();
+    let guest = live_guest(&peers, "guest-501", "ghost", sessions_grant(&["a"]), false);
+    let owner = pair_owned(&db, "steady laptop");
+    let owner_token = live_peer(&peers, &owner);
+    db.remove_trust("ghost").expect("direct row delete");
+    let reaper = tokio::spawn(run(
+        dir.path().to_path_buf(),
+        db.clone(),
+        peers.clone(),
+        connections,
+    ));
+    wait_cancelled(
+        &guest,
+        Duration::from_secs(6),
+        "a directly deleted trust row",
+    )
+    .await;
+    reaper.abort();
+    assert!(peers.take_revoked("guest-501"));
+    assert!(
+        !owner_token.is_cancelled(),
+        "an owner peer survives the trust sweep"
+    );
+}
+
+/// A guest whose grant is unchanged stays open across several recheck
+/// passes, and so does an owner peer beside it.
+#[tokio::test]
+async fn unchanged_grant_survives_rechecks_and_owner_stays_open() {
+    let (dir, db) = scratch();
+    test_config(&dir, true);
+    test_identity(&dir);
+    trust_scoped(&db, "steady", &["a"]);
+    let peers = DevicePeers::default();
+    let connections = ConnectionRegistry::default();
+    let guest = live_guest(&peers, "guest-601", "steady", sessions_grant(&["a"]), false);
+    let owner = pair_owned(&db, "steady laptop");
+    let owner_token = live_peer(&peers, &owner);
+    let reaper = tokio::spawn(run(
+        dir.path().to_path_buf(),
+        db.clone(),
+        peers.clone(),
+        connections,
+    ));
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    reaper.abort();
+    assert!(
+        !guest.is_cancelled(),
+        "an unchanged grant stays open across rechecks"
+    );
+    assert!(
+        !owner_token.is_cancelled(),
+        "an owner peer stays open across rechecks"
+    );
+}
+
+/// The MCP `trust_remove` reply carries how many live guest peers closed:
+/// one for a live guest, zero when nothing is live.
+#[tokio::test]
+async fn mcp_trust_remove_reply_carries_closed_count() {
+    let scratch = tempfile::tempdir().expect("scratch");
+    let db = Arc::new(Database::new(&scratch.path().join("test.db")).expect("database"));
+    let handler = TaskTriggerHandler::with_deps(test_deps(&db, scratch.path()));
+    crate::remote::panel::trust_add(&db, "mcpbob", false, &["a".to_string()], false)
+        .expect("trust row");
+    let peers = crate::remote::live::shared().peers().clone();
+    let token = Arc::new(CancellationToken::new());
+    let (control, _inbox) = tokio::sync::mpsc::unbounded_channel();
+    assert!(
+        peers.register_guest(
+            "guest-mcp-1",
+            "d:guest-mcp-1",
+            Arc::clone(&token),
+            control,
+            GuestMeta {
+                login: "mcpbob".to_string(),
+                grant: sessions_grant(&["a"]),
+                upload: false,
+            },
+        ),
+        "the live guest registers on the shared peers"
+    );
+    let reply = handler
+        .remote_trust_remove_impl("mcpbob")
+        .expect("trust_remove");
+    assert_eq!(
+        reply_json(&reply),
+        json!({ "removed": "mcpbob", "closed": 1 })
+    );
+    assert!(token.is_cancelled());
+    peers.close("guest-mcp-1");
+    assert!(peers.take_revoked("guest-mcp-1"));
+
+    crate::remote::panel::trust_add(&db, "mcpbob", false, &["a".to_string()], false)
+        .expect("trust row again");
+    let reply = handler
+        .remote_trust_remove_impl("mcpbob")
+        .expect("trust_remove");
+    assert_eq!(
+        reply_json(&reply),
+        json!({ "removed": "mcpbob", "closed": 0 })
     );
 }

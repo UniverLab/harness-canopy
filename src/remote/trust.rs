@@ -34,6 +34,19 @@ impl Grant {
             Grant::Sessions(names) => names.contains(session_name),
         }
     }
+
+    /// Whether this grant covers `other`: `All` covers anything,
+    /// `Sessions(a)` covers `Sessions(b)` exactly when `b` is a subset of
+    /// `a`, and `Sessions` never covers `All`.
+    pub fn covers(&self, other: &Grant) -> bool {
+        match (self, other) {
+            (Grant::All, _) => true,
+            (Grant::Sessions(_), Grant::All) => false,
+            (Grant::Sessions(names), Grant::Sessions(wanted)) => {
+                wanted.iter().all(|name| names.contains(name))
+            }
+        }
+    }
 }
 
 /// Canonical login form: trimmed and lowercased.

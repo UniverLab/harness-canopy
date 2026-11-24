@@ -17,7 +17,7 @@ use crate::application::ports::StateRepository as _;
 use crate::db::Database;
 use crate::domain::canopy_config::CanopyConfig;
 use crate::remote::auth;
-use crate::remote::connection::DevicePeers;
+use crate::remote::connection::{DevicePeers, GuestMeta};
 use crate::remote::devices::RemoteDevices;
 use crate::remote::relay::{
     ConnectionRegistry, REMOTE_DISCONNECT_KEY, REMOTE_REVOKE_KEY, REMOTE_TRUST_REVOKE_KEY,
@@ -85,6 +85,7 @@ pub async fn run(
         close_when_host_dark(&data_dir, &peers, &connections);
         if tick.is_multiple_of(5) {
             close_removed_with_log(&db, &peers, &connections);
+            close_stale_guests_with_log(&data_dir, &db, &peers, &connections);
         }
     }
 }
@@ -115,6 +116,61 @@ fn close_removed_with_log(db: &Database, peers: &DevicePeers, connections: &Conn
     }
 }
 
+/// Close stale guest peers whose stored grant no longer holds, logging the
+/// pass when it closes anything. A close is final: the guest reconnects
+/// and re-resolves its smaller grant; there is no per-frame refusal path
+/// and no partial restriction of a live peer.
+fn close_stale_guests_with_log(
+    data_dir: &Path,
+    db: &Database,
+    peers: &DevicePeers,
+    connections: &ConnectionRegistry,
+) {
+    let n = close_stale_guests(data_dir, db, peers, connections);
+    if n > 0 {
+        tracing::info!("remote: closed {n} live peer(s): trust narrowed");
+    }
+}
+
+/// Recheck every live guest peer against the trust store: close the peer
+/// when its login has no grant left, when the resolved grant is not a
+/// superset of the grant the peer opened with, or when the peer opened
+/// with upload and the resolved upload is now denied. Skips the pass
+/// while signed out (the dark-host pass already closes everything then).
+fn close_stale_guests(
+    data_dir: &Path,
+    db: &Database,
+    peers: &DevicePeers,
+    connections: &ConnectionRegistry,
+) -> usize {
+    let Some(identity) = auth::load_identity(data_dir) else {
+        return 0;
+    };
+    let stale: Vec<(String, GuestMeta)> = peers
+        .guest_snapshot()
+        .into_iter()
+        .filter(
+            |(_, meta)| match trust::resolve(db, &identity.login, &meta.login) {
+                None => true,
+                Some(resolved) => {
+                    !resolved.covers(&meta.grant)
+                        || (meta.upload && !trust::resolve_upload(db, &identity.login, &meta.login))
+                }
+            },
+        )
+        .collect();
+    let mut closed = 0;
+    let mut done: HashSet<String> = HashSet::new();
+    for (key, meta) in &stale {
+        if done.insert(meta.login.clone()) {
+            peers.close_guests_of(&meta.login);
+        }
+        connections.close(key);
+        closed += 1;
+    }
+    closed
+}
+
 /// Close every live peer paired under one login. A narrowed grant closes
 /// the whole peer — there is no live-push channel for a smaller grant, so
 /// the guest reconnects and re-resolves it. Returns how many live peers
@@ -137,6 +193,18 @@ fn close_login_peers(
             }
             peers.close_revoked(&device.id);
             connections.close(&device.id);
+        }
+    }
+    let guest_keys: Vec<String> = peers
+        .guest_snapshot()
+        .into_iter()
+        .filter(|(_, meta)| meta.login == login)
+        .map(|(key, _)| key)
+        .collect();
+    if !guest_keys.is_empty() {
+        closed += peers.close_guests_of(&login);
+        for key in &guest_keys {
+            connections.close(key);
         }
     }
     closed

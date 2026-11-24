@@ -296,14 +296,23 @@ fn twenty_five_parts_arrive_as_twenty_then_five() {
     deliver_due_scheduled_prompts_with_window(&db, &hub, &mut HeldTracker::new(), 60);
 
     assert!(due_ids(&db).is_empty(), "both chunks are consumed");
-    let contents = wait_for_output(&session, "--- delivery 25 of 25 ---");
-    assert!(
-        contents.contains("--- delivery 21 of 25 ---"),
-        "{contents:?}"
-    );
-    // The first chunk scrolled past the live view: assert over all text
-    // that the chunks went out consecutive and in order.
-    let all = session.test_all_text().unwrap_or_default();
+    wait_for_output(&session, "--- delivery 25 of 25 ---");
+    // The live view mixes the PTY's input echo (bare `\n` staircases into
+    // `cat`) with `cat`'s clean output, so one snapshot can tear mid-line
+    // (see the 2026-11-24 gate failure). Poll the full text until the
+    // second chunk's first separator has landed before asserting.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let all = loop {
+        let all = session.test_all_text().unwrap_or_default();
+        if all.contains("--- delivery 21 of 25 ---") && all.contains("--- delivery 25 of 25 ---") {
+            break all;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "second chunk never landed: {all:?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
     assert!(all.contains("--- delivery 1 of 25 ---"), "first chunk");
     assert!(all.contains("--- delivery 20 of 25 ---"), "first chunk end");
     let first = all.find("merge-part-00").expect("first echoed");

@@ -138,9 +138,15 @@ impl TaskTriggerHandler {
         }
     }
 
-    fn remote_trust_remove_impl(&self, login: &str) -> Result<CallToolResult, McpError> {
+    pub(crate) fn remote_trust_remove_impl(&self, login: &str) -> Result<CallToolResult, McpError> {
         match panel::trust_remove(&self.db, login) {
-            Ok(true) => to_json(&json!({ "removed": login })),
+            Ok(true) => {
+                // Close live guest peers at once so the reply reflects it;
+                // the reaper drains the queued login right after for every
+                // other holder, and the 5 s sweep covers direct row edits.
+                let closed = live::shared().peers().close_guests_of(login);
+                to_json(&json!({ "removed": login, "closed": closed }))
+            }
             Ok(false) => Ok(error_result(&format!("no trusted profile for '{login}'"))),
             Err(error) => Ok(error_result(&format!("remote trust_remove: {error:#}"))),
         }

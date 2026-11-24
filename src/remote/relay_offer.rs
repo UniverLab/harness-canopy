@@ -123,10 +123,17 @@ impl RelayRuntime {
         let guest_key = format!("guest-{}", offer.uid);
         let token = self.connections.register(&guest_key);
         let (control_tx, control_rx) = tokio::sync::mpsc::unbounded_channel();
-        if !self
-            .peers
-            .register(&guest_key, from, Arc::clone(&token), control_tx)
-        {
+        if !self.peers.register_guest(
+            &guest_key,
+            from,
+            Arc::clone(&token),
+            control_tx,
+            connection::GuestMeta {
+                login: offer.login.clone(),
+                grant: offer.grant.clone(),
+                upload: offer.upload,
+            },
+        ) {
             self.connections.release(&guest_key, &token);
             let _ = signal.send((from.to_string(), signaling::connect_fail(Refusal::Busy)));
             return;

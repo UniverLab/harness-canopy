@@ -192,6 +192,74 @@ fn revoke_deletes_the_row_and_queues_the_id() {
 }
 
 #[test]
+fn trust_remove_queues_the_normalized_login() {
+    use crate::remote::relay::REMOTE_TRUST_REVOKE_KEY;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = test_db(&dir);
+    trust_add(&db, "Bob", false, &["a".to_string()], false).expect("trust");
+
+    assert!(
+        !trust_remove(&db, "nobody").expect("unknown"),
+        "an unknown login removes nothing"
+    );
+    assert_eq!(
+        db.get_state(REMOTE_TRUST_REVOKE_KEY).expect("state"),
+        None,
+        "an unknown login queues nothing"
+    );
+
+    assert!(trust_remove(&db, "BOB").expect("removed"));
+    assert_eq!(
+        db.get_state(REMOTE_TRUST_REVOKE_KEY)
+            .expect("state")
+            .unwrap_or_default(),
+        "bob",
+        "the daemon picks the normalized login up on its next tick"
+    );
+}
+
+#[test]
+fn trust_add_queues_only_narrowing_rewrites() {
+    use crate::remote::relay::REMOTE_TRUST_REVOKE_KEY;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = test_db(&dir);
+    let queued = || {
+        db.get_state(REMOTE_TRUST_REVOKE_KEY)
+            .expect("state")
+            .unwrap_or_default()
+    };
+    let clear = || db.set_state(REMOTE_TRUST_REVOKE_KEY, "").expect("clear");
+
+    trust_add(&db, "fresh", false, &["a".to_string()], false).expect("fresh");
+    assert_eq!(queued(), "", "a fresh grant kicks nothing");
+
+    trust_add(&db, "full", true, &[], false).expect("full");
+    trust_add(&db, "full", false, &["a".to_string()], false).expect("narrowed");
+    assert_eq!(queued(), "full", "all to scoped kicks the live peer");
+    clear();
+
+    trust_add(&db, "full", true, &[], false).expect("widened back");
+    assert_eq!(queued(), "", "scoped to all kicks nothing");
+    trust_add(&db, "other", false, &["a".to_string()], true).expect("upload");
+    trust_add(&db, "other", false, &["a".to_string()], false).expect("withdrawn");
+    assert_eq!(queued(), "other", "withdrawing upload kicks the live peer");
+    clear();
+
+    trust_add(&db, "shrink", false, &["a".to_string()], false).expect("scoped");
+    trust_add(
+        &db,
+        "shrink",
+        false,
+        &["a".to_string(), "b".to_string()],
+        false,
+    )
+    .expect("grown");
+    assert_eq!(queued(), "", "adding a session kicks nothing");
+}
+
+#[test]
 fn disconnect_queues_the_id_and_keeps_the_row() {
     use crate::remote::relay::REMOTE_DISCONNECT_KEY;
 
