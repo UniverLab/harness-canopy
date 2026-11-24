@@ -407,7 +407,7 @@ only while the daemon is running, `remote status` shows a login, and
 remote is on. `canopy remote pair` refuses before minting a code that
 could not work: `not signed in: run 'canopy remote login'` while signed
 out, `remote is off: run 'canopy remote on'` while remote is off, and
-`remote is on but not connected to the relay yet (state: <state>)...`
+`remote is on but not connected to the relay yet (state: <state>); wait a few seconds and retry, or check 'canopy remote status'`
 while the relay is not connected — each names its fix and writes no
 pairing row. A failed exchange tells the browser only `no_code`,
 `expired` or `bad_code`: run `canopy remote pair` again for a fresh code.
