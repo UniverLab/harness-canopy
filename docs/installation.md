@@ -54,8 +54,12 @@ canopy setup
 
 `canopy setup` is an interactive wizard and needs a terminal: it
 prompts you to select the detected AI CLI platforms and the temperature
-unit (plus RAG settings and skill sync), then writes
-`~/.canopy/config.toml`. Its only flags are `--local-registry` (use a
+unit (plus RAG settings and skill sync), asks whether to receive
+UniverLab announcements (default no; stays off unless you say yes),
+then writes `~/.canopy/config.toml`. On an install that still holds the
+previous STUN fallback, setup prints `STUN fallback is set to the
+previous default (stun.l.google.com); change it with canopy config set
+remote.stun_fallback`. Its only flags are `--local-registry` (use a
 local registry directory instead of fetching from GitHub) and
 `--force-skills` (overwrite local skill files that diverge from the sync
 source). It also rewrites legacy unauthenticated canopy MCP entries (the

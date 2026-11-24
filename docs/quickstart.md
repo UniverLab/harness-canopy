@@ -23,7 +23,8 @@ canopy setup
 
 `canopy setup` is an interactive wizard — run it in a terminal. It
 prompts you to select your AI CLI platforms (Claude Code, and others
-from the registry), the temperature unit, and RAG settings, then writes
+from the registry), the temperature unit, and RAG settings, asks
+whether to receive UniverLab announcements (default no), then writes
 `~/.canopy/config.toml`. Setup also rewrites any legacy unauthenticated
 canopy MCP entry (the old URL form) to the stdio `canopy bridge` form,
 keeping a one-time `<config>.canopy-bak` backup.
