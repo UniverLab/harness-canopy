@@ -52,36 +52,60 @@ cargo build --release
 canopy setup
 ```
 
-The interactive wizard detects installed AI CLI platforms from a
-GitHub-hosted registry, configures binary paths, model flags, headless
-modes, environment variables and temperature units, and generates
-`~/.canopy/config.toml`. It also rewrites legacy unauthenticated
-canopy MCP entries (the old URL form, with or without headers) to the
-stdio `canopy bridge` form, creating a one-time `<config>.canopy-bak`
-backup before the first rewrite of a file. Running `canopy` with no
-arguments triggers setup automatically if it has never run.
+`canopy setup` is an interactive wizard and needs a terminal: it
+prompts you to select the detected AI CLI platforms and the temperature
+unit (plus RAG settings and skill sync), then writes
+`~/.canopy/config.toml`. Its only flags are `--local-registry` (use a
+local registry directory instead of fetching from GitHub) and
+`--force-skills` (overwrite local skill files that diverge from the sync
+source). It also rewrites legacy unauthenticated canopy MCP entries (the
+old URL form, with or without headers) to the stdio `canopy bridge`
+form, creating a one-time `<config>.canopy-bak` backup before the first
+rewrite of a file. Running `canopy` with no arguments triggers setup
+automatically if it has never run.
 
-If no supported platform is on `PATH`, setup is meant to say so, list
-what it supports, and finish with zero platforms configured. It currently
-doesn't reach that message — see
-[Requirements: If no platform is installed](../README.md#if-no-platform-is-installed)
-in the README for the verified failure and where it comes from.
+If no supported platform CLI is on `PATH`, `canopy setup` prints `No
+supported platform CLI detected on PATH.` — meaning no platform is
+installed at all, not that an installed one is failing to respond (if a
+platform is installed but its binary is not on `PATH`, setup still
+cannot see it; to check whether an installed platform actually answers,
+run `canopy doctor` — a non-interactive report that needs no terminal —
+or `harness probe`). It then lists every supported platform with its CLI
+binary name, and exits cleanly without writing any configuration.
+Install one of the listed binaries, make sure it is on your `PATH`, then
+re-run `canopy setup`.
 
 The registry itself keeps changing after setup, and the TUI only refreshes it
 in the background at startup, and only when the last refresh is more than 24
-hours old. To apply the current registry right away, run
+hours old. To apply the current registry right away without the TUI, run
 `canopy registry refresh` — see
 [CLI Reference: Platform registry](cli-reference.md#platform-registry).
 
 ## Auto-update
 
-The daemon checks GitHub releases for new stable versions every 24 hours,
-downloads the platform-specific binary (linux-musl, macos-darwin;
-x86_64/aarch64) and atomically replaces the running executable.
+The TUI may run a throttled, read-only release lookup in the background
+(`maybe_spawn_update_notice`). It is gated by `update.check_enabled`
+(set it to `false` and no request is ever made) and
+`update.check_interval_hours` (default 24), and it only shows an update
+notice — nothing is downloaded and nothing is replaced. Network failures
+are silent.
 
-The check is tunable: `update.check_interval_hours` (default 24) sets the
-interval, and `update.check_enabled = false` turns the check off so no
-request is made. The manual `canopy update` command is not affected.
+`canopy update` is the only command that downloads and replaces the
+executable. It asks `Update to <tag>? [y/N]` first (default no) unless
+`--yes` is passed, refuses to overwrite a cargo-installed binary
+(printing the `cargo install` command instead), and restarts the daemon
+afterwards (asking first when a graph is running).
+
+`canopy update --check` only prints whether an update exists and changes
+nothing: exit 0 means up to date, 1 means an update is available, and 2
+means the check failed (network, DNS, TLS, HTTP error, or unparsable
+response).
+
+The published Linux binary is `x86_64-unknown-linux-gnu` (glibc, not
+static musl — it loads the ONNX Runtime that local RAG embeddings need).
+macOS builds are `aarch64-apple-darwin` and `x86_64-apple-darwin` (see
+`scripts/install.sh`); `release.yml` builds Linux directly and delegates
+the rest to the shared `UniverLab/workflows` release workflow.
 
 ## Running as a service
 

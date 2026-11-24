@@ -13,6 +13,9 @@ mod autoupdate;
 mod config;
 mod daemon;
 mod db;
+#[cfg(test)]
+#[path = "docs_first_graph_tests.rs"]
+mod docs_first_graph_tests;
 mod domain;
 mod dynamic_skills;
 mod executor;

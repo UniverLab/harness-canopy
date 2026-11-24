@@ -21,10 +21,17 @@ the cron scheduler, the file watcher engine and the database.
 canopy setup
 ```
 
-Choose your AI CLI platforms (Claude Code, and others from the registry),
-model flags, temperature units and RAG settings. Setup also rewrites any
-legacy unauthenticated canopy MCP entry (the old URL form) to the stdio
-`canopy bridge` form, keeping a one-time `<config>.canopy-bak` backup.
+`canopy setup` is an interactive wizard — run it in a terminal. It
+prompts you to select your AI CLI platforms (Claude Code, and others
+from the registry), the temperature unit, and RAG settings, then writes
+`~/.canopy/config.toml`. Setup also rewrites any legacy unauthenticated
+canopy MCP entry (the old URL form) to the stdio `canopy bridge` form,
+keeping a one-time `<config>.canopy-bak` backup.
+
+If no supported platform CLI is on `PATH`, setup prints `No supported
+platform CLI detected on PATH.`, lists every supported platform with its
+CLI binary name, and exits cleanly without writing any configuration —
+install one, make sure it is on your `PATH`, and re-run `canopy setup`.
 
 ## 3. Launch the TUI
 
@@ -61,7 +68,14 @@ After that, your AI agents can call all
 [36 MCP tools](mcp-tools.md) — schedule background agents, store
 knowledge, coordinate with each other.
 
-## 5. Verify
+## 5. Run your first graph
+
+No AI CLI is needed for this: a single `check` node runs `echo hello`
+and finishes. Follow [Your First Graph](first-graph.md) — start the
+daemon, validate and import one JSON file, run it with `--idea`, and
+read its event log.
+
+## 6. Verify
 
 ```bash
 canopy doctor          # full health diagnostics

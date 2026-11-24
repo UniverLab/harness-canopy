@@ -72,9 +72,15 @@ tools will otherwise tell you the moment you actually run them for real.
 
 ### If no platform is installed
 
-`canopy setup` detects nothing, lists every supported platform with its
-CLI binary name, and exits cleanly without writing any configuration.
-Install one of the listed binaries, make sure it's on your PATH, then
+If no supported platform CLI is on `PATH`, `canopy setup` prints `No
+supported platform CLI detected on PATH.` — meaning no platform is
+installed at all, not that an installed one is failing to respond (if a
+platform is installed but its binary is not on `PATH`, setup still
+cannot see it; to check whether an installed platform actually answers,
+run `canopy doctor` — a non-interactive report that needs no terminal —
+or `harness probe`). It then lists every supported platform with its CLI
+binary name, and exits cleanly without writing any configuration.
+Install one of the listed binaries, make sure it is on your `PATH`, then
 re-run `canopy setup`.
 
 ---
@@ -89,10 +95,12 @@ curl -fsSL https://raw.githubusercontent.com/UniverLab/harness-canopy/main/scrip
 
 Or via cargo: `cargo install harness-canopy` (the binary is `canopy`). Prefer the script: release binaries carry two patched dependencies that cargo leaves out of published crates, including the fix that keeps remote control connected over a relay.
 See [`docs/installation.md`](docs/installation.md) for all methods and first-time setup.
+New here? Run your first graph in five minutes with [`docs/first-graph.md`](docs/first-graph.md) — no AI CLI needed.
 
 ## Documentation
 
-Full documentation lives in [`docs/`](docs/): installation, quick start, the
+Full documentation lives in [`docs/`](docs/): installation, quick start,
+[your first graph](docs/first-graph.md), the
 TUI, agents and seed identities, intelligence & sync, graphs, the RAG
 pipeline, all MCP tools, and the complete CLI reference.
 

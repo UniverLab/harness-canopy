@@ -38,6 +38,7 @@ no external services, no cloud account.
 
 - [Installation](installation.md) — install and set up the daemon.
 - [Quick Start](quickstart.md) — daemon, setup wizard, first agent.
+- [Your First Graph](first-graph.md) — one check node, run and log, in five minutes.
 - [The TUI — Canopy Hub](tui.md) — the interactive terminal interface.
 - [Agents](agents.md) — interactive, background and terminal agents; seed identities.
 - [Intelligence & Sync](intelligence-and-sync.md) — knowledge graph and multi-agent coordination.
