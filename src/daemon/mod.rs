@@ -84,6 +84,7 @@ pub(crate) mod health_routine;
 pub(crate) mod helpers;
 pub(crate) mod install_confirm;
 pub(crate) mod mcp_auth;
+pub(crate) mod mcp_sessions;
 pub(crate) mod missions_cli;
 pub(crate) mod models_cli;
 pub(crate) mod mutex_cli;

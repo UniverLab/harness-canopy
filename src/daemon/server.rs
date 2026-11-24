@@ -355,8 +355,8 @@ fn build_mcp_router(
         {
             let mut mgr =
                 rmcp::transport::streamable_http_server::session::local::LocalSessionManager::default();
-            mgr.session_config.keep_alive = None;
-            mgr.into()
+            mgr.session_config.keep_alive = Some(super::mcp_sessions::MCP_SESSION_IDLE_TIMEOUT);
+            std::sync::Arc::new(super::mcp_sessions::CappedSessionManager::new(mgr))
         },
         {
             #[allow(clippy::field_reassign_with_default)]
@@ -1003,6 +1003,98 @@ mod hang_repro {
             }))
             .await
         }
+    }
+
+    /// Audit F-16: an unauthenticated `initialize` is rejected by the
+    /// bearer-token gate before session allocation — 401, and the capped
+    /// manager behind the authed route still tracks zero live sessions.
+    #[tokio::test]
+    async fn unauthenticated_initialize_allocates_no_session() {
+        use crate::daemon::mcp_sessions::{CappedSessionManager, MCP_SESSION_IDLE_TIMEOUT};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::new(&dir.path().join("test.db")).unwrap());
+        let notif: Arc<dyn NotificationService> = Arc::new(DefaultNotificationService);
+        let executor = Arc::new(Executor::new(Arc::clone(&db), Arc::clone(&notif)));
+        let graph_engine = Arc::new(GraphEngine::new(Arc::clone(&db), Arc::clone(&notif)));
+        let watcher_engine = Arc::new(WatcherEngine::new(
+            Arc::clone(&db),
+            Arc::clone(&executor),
+            Arc::clone(&graph_engine),
+        ));
+        let tmp = tempfile::tempdir().unwrap();
+        let ingestion = Arc::new(IngestionManager::new(
+            Arc::clone(&db),
+            tmp.path().to_path_buf(),
+        ));
+        let dynamic_skills = Arc::new(crate::dynamic_skills::SkillStore::new(
+            tmp.path().join("skills"),
+            Vec::new(),
+            15,
+        ));
+
+        let handler_db = Arc::clone(&db);
+        let handler_executor = Arc::clone(&executor);
+        let handler_watcher_engine = Arc::clone(&watcher_engine);
+        let handler_graph_engine = Arc::clone(&graph_engine);
+        let handler_notif = Arc::clone(&notif);
+        let handler_ingestion = Arc::clone(&ingestion);
+        let handler_dynamic_skills = Arc::clone(&dynamic_skills);
+        let mut inner =
+            rmcp::transport::streamable_http_server::session::local::LocalSessionManager::default();
+        inner.session_config.keep_alive = Some(MCP_SESSION_IDLE_TIMEOUT);
+        let sessions = Arc::new(CappedSessionManager::new(inner));
+        let service = rmcp::transport::streamable_http_server::StreamableHttpService::new(
+            move || {
+                Ok(TaskTriggerHandler::with_deps(HandlerDeps {
+                    db: Arc::clone(&handler_db),
+                    executor: Arc::clone(&handler_executor),
+                    watcher_engine: Arc::clone(&handler_watcher_engine),
+                    scheduler_notify: Arc::new(tokio::sync::Notify::new()),
+                    scheduled_prompt_notify: Arc::new(tokio::sync::Notify::new()),
+                    graph_engine: Arc::clone(&handler_graph_engine),
+                    notification_service: Arc::clone(&handler_notif),
+                    ingestion: Arc::clone(&handler_ingestion),
+                    dynamic_skills: Arc::clone(&handler_dynamic_skills),
+                    shelf: crate::sessions::shelf::ShelfStore::for_test(&handler_db),
+                    start_time: std::time::Instant::now(),
+                    port: 0,
+                }))
+            },
+            Arc::clone(&sessions),
+            Default::default(),
+        );
+        // No `daemon.token` under this data dir: every request must 401.
+        let data_dir = tempfile::tempdir().unwrap();
+        let router = axum::Router::new().route(
+            "/mcp",
+            crate::daemon::mcp_auth::authed_mcp_route(
+                axum::routing::any_service(service),
+                data_dir.path(),
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{port}/mcp"))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(
+                reqwest::header::ACCEPT,
+                "application/json, text/event-stream",
+            )
+            .body(
+                r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"repro","version":"0.1"}}}"#,
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+        assert_eq!(sessions.live_count().await, 0);
     }
 
     fn insert_graph_and_sleeping_node(db: &Database, workdir: &str) -> (String, String) {
