@@ -189,6 +189,7 @@ pub struct RelayRuntime {
     pub(crate) sessions: Option<Arc<SessionsState>>,
     pub(crate) relay_url: String,
     pub(crate) bearer: String,
+    pub(crate) data_dir: std::path::PathBuf,
     pub(crate) peers: DevicePeers,
     pub(crate) guests: GuestConns,
     pub(crate) seen_offers: Mutex<signaling::SeenOffers>,
@@ -217,6 +218,7 @@ impl RelayRuntime {
             sessions: None,
             relay_url: String::new(),
             bearer: String::new(),
+            data_dir: std::path::PathBuf::new(),
             peers: DevicePeers::default(),
             guests: GuestConns::default(),
             seen_offers: Mutex::new(signaling::SeenOffers::new()),
@@ -509,6 +511,7 @@ fn next_action(
     runtime.sessions = Some(Arc::clone(sessions));
     runtime.relay_url = config.remote.relay_url.clone();
     runtime.bearer = identity.token.clone();
+    runtime.data_dir = data_dir.to_path_buf();
     runtime.peers = peers.clone();
     let runtime = Arc::new(runtime);
     Next::Connect {

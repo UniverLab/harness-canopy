@@ -8,7 +8,7 @@ use crate::setup_module::registry_fetch::{fetch_registry, print_banner};
 use crate::setup_module::sync_and_skills::{run_essential_skills_step, run_sync_step};
 use crate::setup_module::PlatformWithCli;
 use anyhow::{Context, Result};
-use inquire::{MultiSelect, Select};
+use inquire::{Confirm, MultiSelect, Select};
 use std::io::{self, Write};
 
 mod rag;
@@ -41,7 +41,13 @@ pub fn run_setup(force_skills: bool) -> Result<()> {
     let mut wiz = WizardState::new();
     let home = dirs::home_dir().context("No home directory")?;
     let canopy_dir = home.join(".canopy");
+    // Existing installs keep their pre-upgrade behavior (pinned above when
+    // absent); the notice below fires whenever the legacy value is in
+    // effect, whether this run pinned it or an earlier start did.
+    let _ = crate::domain::config_pin::pin_legacy_defaults(&canopy_dir);
     let existing_config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
+    let legacy_stun =
+        existing_config.remote.stun_fallback == crate::remote::peer_ice::LEGACY_STUN_URL;
 
     // ── Step 1: Fetch registry ──────────────────────────────────
     let registry = fetch_registry_step()?;
@@ -72,6 +78,14 @@ pub fn run_setup(force_skills: bool) -> Result<()> {
             crate::domain::canopy_config::TemperatureUnit::Celsius => "Celsius (°C)",
             crate::domain::canopy_config::TemperatureUnit::Fahrenheit => "Fahrenheit (°F)",
         }
+    ));
+
+    // ── Step 2.23: Announcements opt-in ──────────────────────────
+    wiz.render()?;
+    let announcements_enabled = select_announcements()?;
+    wiz.add(format!(
+        "\x1b[32m✓\x1b[0m Announcements: {}",
+        if announcements_enabled { "on" } else { "off" }
     ));
 
     // ── Step 2.25: TUI theme preference ──────────────────────────
@@ -106,17 +120,19 @@ pub fn run_setup(force_skills: bool) -> Result<()> {
     record_config_and_summary(
         &mut wiz,
         &canopy_dir,
-        temperature_unit,
-        theme,
-        (
+        WizardAnswers {
+            temperature_unit,
+            announcements_enabled,
+            theme,
             embeddings_model,
             similarity_threshold,
             rag_personal_dirs,
             rag_max_file_mb,
-        ),
+        },
         &platforms_with_cli,
         &cli_registry,
     )?;
+    maybe_print_stun_notice(legacy_stun);
 
     Ok(())
 }
@@ -325,14 +341,23 @@ fn record_daemon_service_steps(wiz: &mut WizardState) -> Result<()> {
     Ok(())
 }
 
+/// The wizard's answers that land in `config.toml` as scalar values.
+struct WizardAnswers {
+    temperature_unit: crate::domain::canopy_config::TemperatureUnit,
+    announcements_enabled: bool,
+    theme: String,
+    embeddings_model: String,
+    similarity_threshold: f32,
+    rag_personal_dirs: Vec<String>,
+    rag_max_file_mb: u32,
+}
+
 /// Save the unified config with the wizard's choices and print the final
 /// setup summary.
 fn record_config_and_summary(
     wiz: &mut WizardState,
     canopy_dir: &std::path::Path,
-    temperature_unit: crate::domain::canopy_config::TemperatureUnit,
-    theme: String,
-    rag: (String, f32, Vec<String>, u32),
+    answers: WizardAnswers,
     platforms_with_cli: &[PlatformWithCli],
     cli_registry: &crate::domain::cli_config::CliRegistry,
 ) -> Result<()> {
@@ -366,13 +391,13 @@ fn record_config_and_summary(
         baseline.as_ref(),
         &referenced,
     );
-    let (embeddings_model, similarity_threshold, rag_personal_dirs, rag_max_file_mb) = rag;
-    config.temperature_unit = temperature_unit;
-    config.theme = theme;
-    config.embeddings_model = embeddings_model;
-    config.similarity_threshold = similarity_threshold;
-    config.rag_personal_dirs = rag_personal_dirs;
-    config.rag_max_file_mb = rag_max_file_mb;
+    config.temperature_unit = answers.temperature_unit;
+    config.announcements_enabled = answers.announcements_enabled;
+    config.theme = answers.theme;
+    config.embeddings_model = answers.embeddings_model;
+    config.similarity_threshold = answers.similarity_threshold;
+    config.rag_personal_dirs = answers.rag_personal_dirs;
+    config.rag_max_file_mb = answers.rag_max_file_mb;
     // CM51: first install, no daemon running yet — the wizard writes through
     // the same writer as everything else, so nothing else in config.toml is
     // rewritten. The keys it asks for come from the registry's `wizard`
@@ -396,6 +421,9 @@ fn record_config_and_summary(
                 )
             }),
     )
+    .chain(std::iter::once(announcements_edit(
+        config.announcements_enabled,
+    )))
     .collect();
     let saved = crate::domain::settings::writer::write_keys(canopy_dir, &edits)
         .and_then(|()| crate::domain::settings::writer::write_clis(canopy_dir, &config.clis));
@@ -421,6 +449,16 @@ fn record_config_and_summary(
     println!();
 
     Ok(())
+}
+
+/// Print the STUN notice whenever the legacy fallback is in effect.
+fn maybe_print_stun_notice(legacy_stun: bool) {
+    if legacy_stun {
+        println!(
+            "  STUN fallback is set to the previous default (stun.l.google.com); \
+             change it with canopy config set remote.stun_fallback"
+        );
+    }
 }
 
 /// Print the "this build can't do local embeddings" notice. Shared by the
@@ -613,6 +651,27 @@ fn select_temperature_unit() -> Result<crate::domain::canopy_config::Temperature
     })
 }
 
+/// Ask whether announcements are wanted (default No). The answer is always
+/// written as `announcements_enabled`, so every configured config holds
+/// the key.
+fn select_announcements() -> Result<bool> {
+    let answer = Confirm::new(
+        "Receive UniverLab announcements (opens a connection to announcements.univerlab.org)?",
+    )
+    .with_default(false)
+    .prompt()
+    .map_err(|e| anyhow::anyhow!("Announcements selection cancelled: {}", e))?;
+    Ok(answer)
+}
+
+/// The explicit `announcements_enabled` edit the wizard always writes.
+fn announcements_edit(answer: bool) -> (&'static str, Option<toml_edit::Value>) {
+    (
+        "announcements_enabled",
+        Some(toml_edit::Value::from(answer)),
+    )
+}
+
 const THEME_OPTION_CLASSIC: &str = "Classic (bordered)";
 const THEME_OPTION_MODERN: &str = "Modern (borderless)";
 
@@ -712,25 +771,44 @@ mod tests {
         );
     }
 
-    // ── CB60: announcements step removed from the wizard ───────────
+    // ── Announcements opt-in: the wizard asks and always writes ───
 
     #[test]
-    fn announcements_step_removed_from_wizard() {
+    fn announcements_step_asks_and_writes_the_key() {
         let source = include_str!("wizard.rs");
         let production = source
             .split("mod tests {")
             .next()
             .expect("wizard.rs always has a tests module");
         assert!(
-            !production.contains("Enable announcements?"),
-            "the announcements prompt must be gone — the flag defaults on \
-             and setup no longer asks"
+            production.contains(
+                "Receive UniverLab announcements (opens a connection to announcements.univerlab.org)?"
+            ),
+            "the wizard must ask the announcements opt-in question"
         );
         assert!(
-            !production.contains("announcements_enabled ="),
-            "the wizard must not assign announcements_enabled — it must \
-             leave the loaded/default value untouched"
+            production.contains("announcements_enabled"),
+            "the wizard must write the announcements_enabled key"
         );
+        assert!(
+            production.contains("STUN fallback is set to the previous default (stun.l.google.com)"),
+            "setup must print the legacy STUN notice when the pin wrote it"
+        );
+    }
+
+    #[test]
+    fn wizard_answer_yes_writes_true_no_writes_false() {
+        for (answer, expected) in [(true, "true"), (false, "false")] {
+            let dir = tempfile::TempDir::new().unwrap();
+            let (key, value) = announcements_edit(answer);
+            assert_eq!(key, "announcements_enabled");
+            crate::domain::settings::writer::write_keys(dir.path(), &[(key, value)]).unwrap();
+            let text = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
+            assert!(
+                text.contains(&format!("announcements_enabled = {expected}")),
+                "answer {answer} must write announcements_enabled = {expected}:\n{text}"
+            );
+        }
     }
 
     // ── CB59: capability check gates the "keep it" branch's return ─

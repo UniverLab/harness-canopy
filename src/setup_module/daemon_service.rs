@@ -134,16 +134,51 @@ pub fn run_setup_silent() -> Result<()> {
     let mut config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
     config.mark_configured();
     config.clis = cli_registry.available_clis;
-    crate::domain::settings::writer::write_keys(
-        &canopy_dir,
-        &[(
-            "configured_at",
-            Some(toml_edit::Value::from(
-                config.configured_at.clone().unwrap_or_default(),
-            )),
-        )],
-    )?;
-    crate::domain::settings::writer::write_clis(&canopy_dir, &config.clis)?;
+    write_silent_config(&canopy_dir, &config)?;
 
     Ok(())
+}
+
+/// Persist a silent setup: `configured_at`, the CLI list, and
+/// `announcements_enabled = false` (no terminal to ask at).
+pub(crate) fn write_silent_config(
+    canopy_dir: &std::path::Path,
+    config: &crate::domain::canopy_config::CanopyConfig,
+) -> Result<()> {
+    crate::domain::settings::writer::write_keys(
+        canopy_dir,
+        &[
+            (
+                "configured_at",
+                Some(toml_edit::Value::from(
+                    config.configured_at.clone().unwrap_or_default(),
+                )),
+            ),
+            ("announcements_enabled", Some(toml_edit::Value::from(false))),
+        ],
+    )?;
+    crate::domain::settings::writer::write_clis(canopy_dir, &config.clis)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn silent_setup_writes_announcements_off() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let canopy_dir = dir.path().join(".canopy");
+        let mut config = crate::domain::canopy_config::CanopyConfig::default();
+        config.mark_configured();
+        write_silent_config(&canopy_dir, &config).unwrap();
+
+        let text = std::fs::read_to_string(canopy_dir.join("config.toml")).unwrap();
+        assert!(
+            text.contains("announcements_enabled = false"),
+            "silent setup must record announcements off:\n{text}"
+        );
+        let loaded = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
+        assert!(!loaded.announcements_enabled);
+    }
 }

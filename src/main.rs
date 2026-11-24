@@ -713,6 +713,7 @@ pub(crate) fn ensure_data_dir() -> Result<std::path::PathBuf> {
     let other_instance_may_be_running = daemon::process::other_instance_may_be_running(&data_dir);
     domain::usage_stats::migrate_legacy_json(&data_dir, other_instance_may_be_running);
     domain::models_db::migrate_legacy_caches(&data_dir, other_instance_may_be_running);
+    let _ = domain::config_pin::pin_legacy_defaults(&data_dir);
     Ok(data_dir)
 }
 

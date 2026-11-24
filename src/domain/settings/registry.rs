@@ -246,9 +246,9 @@ pub static REGISTRY: &[SettingDef] = &[
     SettingDef {
         key: "announcements_enabled",
         kind: Kind::Bool,
-        default: DefaultValue::Literal("true"),
+        default: DefaultValue::Literal("false"),
         group: Group::Notifications,
-        description: "Show upgrade and tip announcements. Turn off with `canopy config set announcements_enabled false`.",
+        description: "Show upgrade and tip announcements (opens a connection to announcements.univerlab.org). Asked at setup; see docs/network-and-privacy.md. Turn off with `canopy config set announcements_enabled false`.",
         apply: Apply::NextRun,
         wizard: false,
     },
@@ -568,6 +568,15 @@ pub static REGISTRY: &[SettingDef] = &[
         wizard: false,
     },
     SettingDef {
+        key: "remote.stun_fallback",
+        kind: Kind::String,
+        default: DefaultValue::Literal("\"\""),
+        description: "STUN fallback server used when the relay returns no ICE servers (replaces the previous hard-coded default stun:stun.l.google.com:19302). Empty means no fallback. See docs/network-and-privacy.md.",
+        group: Group::General,
+        apply: Apply::Hot,
+        wizard: false,
+    },
+    SettingDef {
         key: "daemon.cpu_quota_percent",
         kind: Kind::Int { min: 0, max: 25600 },
         default: DefaultValue::Computed(crate::domain::daemon_config::default_quota_percent),
@@ -585,7 +594,7 @@ mod tests {
 
     #[test]
     fn registry_has_one_entry_per_setting_and_they_are_unique() {
-        assert_eq!(REGISTRY.len(), 59);
+        assert_eq!(REGISTRY.len(), 60);
         for def in REGISTRY {
             assert_eq!(find(def.key).map(|d| d.key), Some(def.key));
         }

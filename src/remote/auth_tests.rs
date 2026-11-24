@@ -187,6 +187,7 @@ fn status_json_reports_signed_in_login_enabled_and_relay_url() {
             "login": "alice",
             "enabled": true,
             "relay_url": "https://remote.univerlab.org",
+            "stun_fallback": null,
             "relay": "connecting",
             "last_error": null,
             "last_reconnect": null,
@@ -262,6 +263,44 @@ fn status_surfaces_a_stored_handshake_rejection() {
         seen.last_error.as_deref().unwrap().contains("bad_label"),
         "the 400 reason must reach status verbatim"
     );
+}
+
+#[test]
+fn status_reports_the_configured_stun_fallback_or_null() {
+    let empty = build_remote_status(&CanopyConfig::default(), None, None);
+    assert_eq!(empty.stun_fallback, None);
+    let json = serde_json::to_value(&empty).unwrap();
+    assert_eq!(json["stun_fallback"], serde_json::Value::Null);
+
+    let config = CanopyConfig {
+        remote: RemoteConfig {
+            stun_fallback: "stun:custom.example:3478".to_string(),
+            ..RemoteConfig::default()
+        },
+        ..CanopyConfig::default()
+    };
+    let set = build_remote_status(&config, None, None);
+    assert_eq!(
+        set.stun_fallback.as_deref(),
+        Some("stun:custom.example:3478")
+    );
+    let json = serde_json::to_value(&set).unwrap();
+    assert_eq!(json["stun_fallback"], "stun:custom.example:3478");
+}
+
+#[test]
+fn status_json_without_stun_fallback_still_parses() {
+    let status: RemoteStatus = serde_json::from_value(serde_json::json!({
+        "signed_in": false,
+        "login": null,
+        "enabled": false,
+        "relay_url": "https://remote.univerlab.org",
+        "relay": "off",
+        "last_error": null,
+        "last_reconnect": null,
+    }))
+    .expect("old status JSON without stun_fallback still parses");
+    assert_eq!(status.stun_fallback, None);
 }
 
 #[test]

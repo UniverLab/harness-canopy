@@ -93,6 +93,9 @@ pub struct RemoteStatus {
     pub enabled: bool,
     /// The configured relay URL.
     pub relay_url: String,
+    /// The configured `remote.stun_fallback` value, `None` when empty.
+    #[serde(default)]
+    pub stun_fallback: Option<String>,
     /// The relay phase (`connected`, `connecting`, `token rejected: sign in
     /// again`, `relay rejected: see remote status`, `off`). The CLI replaces
     /// this local fallback with the daemon's live phase whenever it answers.
@@ -124,11 +127,18 @@ pub fn build_remote_status(
         login: identity.map(|identity| identity.login.clone()),
         enabled,
         relay_url: config.remote.relay_url.clone(),
+        stun_fallback: stun_status_value(&config.remote.stun_fallback),
         relay,
         last_error,
         last_reconnect: state_value(db, super::relay::REMOTE_RECONNECT_KEY),
         config_fault: None,
     }
+}
+
+/// The configured STUN fallback as status reports it: the URL, or `None`
+/// when the setting is empty (no fallback).
+fn stun_status_value(configured: &str) -> Option<String> {
+    (!configured.is_empty()).then(|| configured.to_string())
 }
 
 /// The `relay:` value when the daemon's live phase is unknown: `off` while

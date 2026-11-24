@@ -926,7 +926,7 @@ it came from. **Apply** says when a change takes effect: `applied` (at once),
 | `notifications.enabled` | `true` | bool | applied | Desktop notifications |
 | `update.check_enabled` | `true` | bool | applied | Automatic update checks |
 | `update.check_interval_hours` | 24 | 1–720 | applied | Hours between automatic update checks |
-| `announcements_enabled` | `true` | bool | next run | Upgrade and tip announcements |
+| `announcements_enabled` | `false` | bool | next run | Upgrade and tip announcements (asked at setup; opens a connection to announcements.univerlab.org) |
 | `embeddings_model` | empty | — | restart the daemon | Embedding model used by the knowledge layer |
 | `embeddings_idle_unload_secs` | 600 | 1–86400 s | restart the daemon | Idle time before the embedding model is unloaded |
 | `similarity_threshold` | 0.25 | 0.0–1.0 | next run | Lexical-cohesion threshold for semantic chunk merging |
@@ -958,6 +958,7 @@ it came from. **Apply** says when a change takes effect: `applied` (at once),
 | `remote.relay_url` | `https://remote.univerlab.org` | — | next run | Relay URL for owner-only remote control |
 | `remote.github_client_id` | `Ov23liVCfE58kUb3ssDy` | — | next run | Public Client ID of UniverLab's "Canopy Remote" OAuth App (identity only; empty disables `remote login`) |
 | `remote.host_label` | empty | — | next run | Label shown for this host; empty means the hostname |
+| `remote.stun_fallback` | empty | `stun:`/`stuns:` URL | applied | STUN fallback server used when the relay returns no ICE servers; empty means no fallback |
 | `daemon.cpu_quota_percent` | half the host's logical CPUs | 0–25600 | applied | CPU cap for every agent and gate the daemon spawns, in percent of one core (600 = 6 cores); `0` disables the cap ([CPU quota cap](graphs-isolation.md#cpu-quota-cap)) |
 
 `scheduler.retry_*`, `spec_attempt_limit` and `spec_review.*` are not in

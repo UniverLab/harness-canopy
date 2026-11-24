@@ -192,6 +192,15 @@ mod skills_module {
     }
 }
 
+// Stub for the legacy STUN URL `domain::config_pin` pins for
+// already-configured installs: the example never pins a config, so this
+// only needs to typecheck (the value is `peer_ice::LEGACY_STUN_URL`).
+mod remote {
+    pub mod peer_ice {
+        pub const LEGACY_STUN_URL: &str = "stun:stun.l.google.com:19302";
+    }
+}
+
 #[path = "../src/application/mod.rs"]
 mod application;
 #[path = "../src/db/mod.rs"]

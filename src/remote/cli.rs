@@ -159,6 +159,7 @@ fn handle_status(json: bool) -> Result<()> {
     }
     println!("enabled: {}", status.enabled);
     println!("relay_url: {}", status.relay_url);
+    println!("{}", stun_status_line(status.stun_fallback.as_deref()));
     println!("relay: {}", status.relay);
     if let Some(at) = &status.last_reconnect {
         println!("last_reconnect: {at}");
@@ -170,6 +171,15 @@ fn handle_status(json: bool) -> Result<()> {
         println!("{fault}");
     }
     Ok(())
+}
+
+/// The `stun_fallback:` line `remote status` prints: the URL, or `none`
+/// when no fallback is configured.
+fn stun_status_line(stun_fallback: Option<&str>) -> String {
+    match stun_fallback {
+        Some(url) => format!("stun_fallback: {url}"),
+        None => "stun_fallback: none".to_string(),
+    }
 }
 
 /// `off` stays local (it only reduces access); `on` goes through the
@@ -555,6 +565,15 @@ mod tests {
             RemoteAction::Disconnect { device_id } => assert_eq!(device_id, "bfcba2b742a807bb"),
             _ => panic!("expected disconnect"),
         }
+    }
+
+    #[test]
+    fn status_stun_line_shows_the_url_or_none() {
+        assert_eq!(
+            stun_status_line(Some("stun:custom.example:3478")),
+            "stun_fallback: stun:custom.example:3478"
+        );
+        assert_eq!(stun_status_line(None), "stun_fallback: none");
     }
 
     #[test]

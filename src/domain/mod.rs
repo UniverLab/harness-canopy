@@ -10,6 +10,7 @@ pub mod clean;
 pub mod cli_config;
 pub mod cli_strategy;
 pub mod config_cache;
+pub mod config_pin;
 pub mod crews;
 pub mod daemon_config;
 pub mod db_health;

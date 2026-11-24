@@ -129,10 +129,9 @@ pub struct CanopyConfig {
     #[serde(default = "default_rag_vector_cache_entries")]
     pub rag_vector_cache_entries: u32,
 
-    /// Defaults to enabled for both a fresh install (no config file yet)
-    /// and an installation whose config.toml predates this field —
-    /// announcements are on by default and not something setup asks
-    /// about (CB60).
+    /// Defaults to disabled for a fresh install (no recorded answer yet);
+    /// the setup wizard asks explicitly, and existing installs keep their
+    /// pinned pre-upgrade value (see `domain::config_pin`).
     #[serde(default = "default_announcements_enabled")]
     pub announcements_enabled: bool,
 
@@ -1178,9 +1177,22 @@ mod tests {
     }
 
     #[test]
-    fn announcements_enabled_defaults_to_true() {
+    fn announcements_enabled_defaults_to_false() {
         let config = CanopyConfig::default();
-        assert!(config.announcements_enabled);
+        assert!(!config.announcements_enabled);
+    }
+
+    #[test]
+    fn fresh_install_without_config_leaves_announcements_off() {
+        let dir = TempDir::new().unwrap();
+        let canopy_dir = dir.path().join(".canopy");
+        std::fs::create_dir_all(&canopy_dir).unwrap();
+
+        let loaded = CanopyConfig::load(&canopy_dir);
+        assert!(
+            !loaded.announcements_enabled,
+            "a fresh install without a terminal, or any config that never recorded an answer, keeps announcements off"
+        );
     }
 
     #[test]
@@ -1216,7 +1228,7 @@ mod tests {
     }
 
     #[test]
-    fn config_without_announcements_field_defaults_to_true() {
+    fn config_without_announcements_field_defaults_to_false() {
         let dir = TempDir::new().unwrap();
         let canopy_dir = dir.path().join(".canopy");
         std::fs::create_dir_all(&canopy_dir).unwrap();
@@ -1224,7 +1236,7 @@ mod tests {
         std::fs::write(canopy_dir.join("config.toml"), toml).unwrap();
 
         let loaded = CanopyConfig::load(&canopy_dir);
-        assert!(loaded.announcements_enabled);
+        assert!(!loaded.announcements_enabled);
     }
 
     #[test]
@@ -1299,6 +1311,12 @@ mod tests {
     }
 
     #[test]
+    fn remote_stun_fallback_defaults_to_empty() {
+        assert_eq!(RemoteConfig::default().stun_fallback, "");
+        assert_eq!(CanopyConfig::default().remote.stun_fallback, "");
+    }
+
+    #[test]
     fn remote_section_round_trips_via_config_toml() {
         let dir = TempDir::new().unwrap();
         let canopy_dir = dir.path().join(".canopy");
@@ -1310,6 +1328,7 @@ mod tests {
                 github_client_id: "custom-id".to_string(),
                 host_label: "home-server".to_string(),
                 shelf_max_file_mb: 20,
+                stun_fallback: "stun:custom.example:3478".to_string(),
             },
             ..CanopyConfig::default()
         };
@@ -1320,5 +1339,6 @@ mod tests {
         assert_eq!(loaded.remote.relay_url, "https://relay.example");
         assert_eq!(loaded.remote.github_client_id, "custom-id");
         assert_eq!(loaded.remote.host_label, "home-server");
+        assert_eq!(loaded.remote.stun_fallback, "stun:custom.example:3478");
     }
 }

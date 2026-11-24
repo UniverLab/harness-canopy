@@ -13,8 +13,10 @@ use super::peer::IceServer;
 /// How long to wait for the relay's TURN credential response.
 const RELAY_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Compiled-in backup STUN server used when the relay's `/turn` fetch fails.
-pub const FALLBACK_STUN_URL: &str = "stun:stun.l.google.com:19302";
+/// The pre-upgrade STUN fallback, kept only as the value
+/// `domain::config_pin` writes for already-configured installs. The live
+/// fallback comes from the `remote.stun_fallback` setting instead.
+pub const LEGACY_STUN_URL: &str = "stun:stun.l.google.com:19302";
 
 /// How many times [`fetch_ice_servers_or_fallback`] tries the relay.
 const FETCH_ATTEMPTS: u32 = 3;
@@ -22,10 +24,14 @@ const FETCH_ATTEMPTS: u32 = 3;
 /// Base backoff step between fetch attempts; attempt `n` waits `n` steps.
 const RETRY_BACKOFF_STEP: Duration = Duration::from_millis(100);
 
-/// Backup ICE servers: the single [`FALLBACK_STUN_URL`] server, no credentials.
-pub fn fallback_ice_servers() -> Vec<IceServer> {
+/// Backup ICE servers from the configured `remote.stun_fallback` value: the
+/// single server, no credentials — or empty when the setting is empty.
+pub fn fallback_ice_servers(stun_fallback: &str) -> Vec<IceServer> {
+    if stun_fallback.is_empty() {
+        return Vec::new();
+    }
     vec![IceServer {
-        urls: vec![FALLBACK_STUN_URL.to_string()],
+        urls: vec![stun_fallback.to_string()],
         username: None,
         credential: None,
     }]
@@ -36,8 +42,14 @@ pub fn fallback_ice_servers() -> Vec<IceServer> {
 /// the host with no ICE servers. A 200 that yields no usable servers counts
 /// as a failed attempt: returning it would leave the host with no ICE
 /// servers, which is exactly what the fallback prevents. A later call that
-/// succeeds returns the provider servers; nothing sticks.
-pub async fn fetch_ice_servers_or_fallback(relay_url: &str, token: &str) -> Vec<IceServer> {
+/// succeeds returns the provider servers; nothing sticks. With an empty
+/// setting the fallback list is empty and the peer proceeds with whatever
+/// the relay supplied (none).
+pub async fn fetch_ice_servers_or_fallback(
+    relay_url: &str,
+    token: &str,
+    stun_fallback: &str,
+) -> Vec<IceServer> {
     let mut last_error = String::new();
     for attempt in 1..=FETCH_ATTEMPTS {
         match fetch_ice_servers(relay_url, token).await {
@@ -49,10 +61,16 @@ pub async fn fetch_ice_servers_or_fallback(relay_url: &str, token: &str) -> Vec<
             tokio::time::sleep(RETRY_BACKOFF_STEP * attempt).await;
         }
     }
-    tracing::warn!(
-        "remote: no ICE servers from the relay after {FETCH_ATTEMPTS} attempts ({last_error}); falling back to {FALLBACK_STUN_URL}"
-    );
-    fallback_ice_servers()
+    if stun_fallback.is_empty() {
+        tracing::warn!(
+            "remote: no ICE servers from the relay after {FETCH_ATTEMPTS} attempts ({last_error}); no STUN fallback configured"
+        );
+    } else {
+        tracing::warn!(
+            "remote: no ICE servers from the relay after {FETCH_ATTEMPTS} attempts ({last_error}); falling back to the configured STUN server"
+        );
+    }
+    fallback_ice_servers(stun_fallback)
 }
 
 /// Asks the relay for ICE servers: `GET <relay_url>/turn` with the host token.
@@ -210,17 +228,19 @@ mod tests {
         (format!("http://{addr}"), hits, fail_times)
     }
 
-    fn has_fallback(servers: &[IceServer]) -> bool {
+    fn has_fallback(servers: &[IceServer], stun: &str) -> bool {
         servers
             .iter()
             .flat_map(|server| &server.urls)
-            .any(|url| url == FALLBACK_STUN_URL)
+            .any(|url| url == stun)
     }
+
+    const CUSTOM_STUN: &str = "stun:custom.example:3478";
 
     #[tokio::test]
     async fn fail_twice_then_ok_recovers_without_fallback() {
         let (relay_url, hits, _) = start_flaky(2).await;
-        let servers = fetch_ice_servers_or_fallback(&relay_url, "test-token").await;
+        let servers = fetch_ice_servers_or_fallback(&relay_url, "test-token", CUSTOM_STUN).await;
         assert_eq!(
             hits.load(Ordering::SeqCst),
             3,
@@ -230,37 +250,70 @@ mod tests {
         assert_eq!(servers[0].urls, vec![PROVIDER_URL.to_string()]);
         assert_eq!(servers[0].username.as_deref(), Some("u"));
         assert_eq!(servers[0].credential.as_deref(), Some("p"));
-        assert!(!has_fallback(&servers), "no fallback after a success");
+        assert!(
+            !has_fallback(&servers, CUSTOM_STUN),
+            "a successful relay fetch ignores the setting"
+        );
     }
 
     #[tokio::test]
     async fn fail_always_leaves_fallback_stun() {
         let (relay_url, hits, _) = start_flaky(u32::MAX).await;
-        let servers = fetch_ice_servers_or_fallback(&relay_url, "test-token").await;
+        let servers =
+            fetch_ice_servers_or_fallback(&relay_url, "test-token", LEGACY_STUN_URL).await;
         assert_eq!(hits.load(Ordering::SeqCst), 3, "the retry is bounded");
         assert_eq!(
             servers.len(),
             1,
             "the fallback is one STUN server, not empty"
         );
-        assert_eq!(servers[0].urls, vec![FALLBACK_STUN_URL.to_string()]);
+        assert_eq!(servers[0].urls, vec![LEGACY_STUN_URL.to_string()]);
         assert!(servers[0].username.is_none(), "STUN has no username");
         assert!(servers[0].credential.is_none(), "STUN has no credential");
-        let expected = fallback_ice_servers();
+        let expected = fallback_ice_servers(LEGACY_STUN_URL);
         assert_eq!(servers[0].urls, expected[0].urls);
+    }
+
+    #[tokio::test]
+    async fn empty_setting_never_yields_a_google_url() {
+        let (relay_url, hits, _) = start_flaky(u32::MAX).await;
+        let servers = fetch_ice_servers_or_fallback(&relay_url, "test-token", "").await;
+        assert_eq!(hits.load(Ordering::SeqCst), 3, "the retry is bounded");
+        assert!(
+            servers.is_empty(),
+            "an empty setting yields an empty fallback list"
+        );
+        assert!(
+            !servers
+                .iter()
+                .flat_map(|server| &server.urls)
+                .any(|url| url.contains("google")),
+            "no Google URL without a configured fallback"
+        );
+        assert!(fallback_ice_servers("").is_empty());
+    }
+
+    #[tokio::test]
+    async fn set_value_yields_that_server() {
+        let (relay_url, _, _) = start_flaky(u32::MAX).await;
+        let servers = fetch_ice_servers_or_fallback(&relay_url, "test-token", CUSTOM_STUN).await;
+        assert_eq!(servers.len(), 1, "the setting yields one STUN server");
+        assert_eq!(servers[0].urls, vec![CUSTOM_STUN.to_string()]);
+        assert!(servers[0].username.is_none(), "STUN has no username");
+        assert!(servers[0].credential.is_none(), "STUN has no credential");
     }
 
     #[tokio::test]
     async fn empty_list_retries_then_falls_back_to_stun() {
         let (relay_url, hits, _) = start_flaky_with_empty(0, u32::MAX).await;
-        let servers = fetch_ice_servers_or_fallback(&relay_url, "test-token").await;
+        let servers = fetch_ice_servers_or_fallback(&relay_url, "test-token", CUSTOM_STUN).await;
         assert_eq!(
             hits.load(Ordering::SeqCst),
             3,
             "an empty list retries like a failure"
         );
         assert_eq!(servers.len(), 1, "the fallback replaces the empty list");
-        assert_eq!(servers[0].urls, vec![FALLBACK_STUN_URL.to_string()]);
+        assert_eq!(servers[0].urls, vec![CUSTOM_STUN.to_string()]);
         assert!(servers[0].username.is_none(), "STUN has no username");
         assert!(servers[0].credential.is_none(), "STUN has no credential");
     }
@@ -268,7 +321,7 @@ mod tests {
     #[tokio::test]
     async fn empty_then_ok_recovers_without_fallback() {
         let (relay_url, hits, _) = start_flaky_with_empty(0, 2).await;
-        let servers = fetch_ice_servers_or_fallback(&relay_url, "test-token").await;
+        let servers = fetch_ice_servers_or_fallback(&relay_url, "test-token", "").await;
         assert_eq!(
             hits.load(Ordering::SeqCst),
             3,
@@ -276,18 +329,24 @@ mod tests {
         );
         assert_eq!(servers.len(), 1, "the provider hands out one server");
         assert_eq!(servers[0].urls, vec![PROVIDER_URL.to_string()]);
-        assert!(!has_fallback(&servers), "no fallback after a success");
+        assert!(
+            !has_fallback(&servers, CUSTOM_STUN),
+            "no fallback after a success"
+        );
     }
 
     #[tokio::test]
     async fn later_success_clears_fallback() {
         let (relay_url, hits, fail_times) = start_flaky(u32::MAX).await;
-        let first = fetch_ice_servers_or_fallback(&relay_url, "test-token").await;
-        assert!(has_fallback(&first), "a failing relay yields the fallback");
-        fail_times.store(0, Ordering::SeqCst);
-        let second = fetch_ice_servers_or_fallback(&relay_url, "test-token").await;
+        let first = fetch_ice_servers_or_fallback(&relay_url, "test-token", CUSTOM_STUN).await;
         assert!(
-            !has_fallback(&second),
+            has_fallback(&first, CUSTOM_STUN),
+            "a failing relay yields the fallback"
+        );
+        fail_times.store(0, Ordering::SeqCst);
+        let second = fetch_ice_servers_or_fallback(&relay_url, "test-token", CUSTOM_STUN).await;
+        assert!(
+            !has_fallback(&second, CUSTOM_STUN),
             "a later success restores provider servers"
         );
         assert_eq!(second.len(), 1);

@@ -121,6 +121,9 @@ fn require_string(key: &str, value: &toml_edit::Value) -> Result<(), String> {
     if key == "remote.host_label" {
         return require_host_label(key, text);
     }
+    if key == "remote.stun_fallback" {
+        return require_stun_fallback(key, text);
+    }
     Ok(())
 }
 
@@ -142,6 +145,22 @@ fn require_host_label(key: &str, label: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// A STUN fallback is empty (no fallback) or a `stun:`/`stuns:` URL with
+/// a non-empty host.
+fn require_stun_fallback(key: &str, text: &str) -> Result<(), String> {
+    if text.is_empty() {
+        return Ok(());
+    }
+    for prefix in ["stun:", "stuns:"] {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            if !rest.is_empty() {
+                return Ok(());
+            }
+        }
+    }
+    Err(format!("{key} must be empty or a stun: / stuns: URL"))
 }
 
 fn require_chrono_format(key: &str, value: &toml_edit::Value) -> Result<(), String> {
@@ -290,6 +309,26 @@ mod tests {
         assert!(validate_value(def, &value("10")).is_ok());
         assert!(validate_value(def, &value("0")).is_err());
         assert!(validate_value(def, &value("101")).is_err());
+    }
+
+    #[test]
+    fn stun_fallback_accepts_empty_and_stun_urls() {
+        let def = find("remote.stun_fallback").unwrap();
+        assert!(validate_value(def, &value("\"\"")).is_ok());
+        assert!(validate_value(def, &value("\"stun:host:3478\"")).is_ok());
+        assert!(validate_value(def, &value("\"stuns:host\"")).is_ok());
+    }
+
+    #[test]
+    fn stun_fallback_rejects_non_stun_urls_and_bare_scheme() {
+        let def = find("remote.stun_fallback").unwrap();
+        for raw in ["\"http://x\"", "\"stun:\""] {
+            let error = validate_value(def, &value(raw)).unwrap_err();
+            assert_eq!(
+                error, "remote.stun_fallback must be empty or a stun: / stuns: URL",
+                "{error}"
+            );
+        }
     }
 
     #[test]

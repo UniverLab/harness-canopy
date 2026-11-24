@@ -65,12 +65,18 @@ impl RelayRuntime {
         let devices = self.devices.clone();
         let peers = self.peers.clone();
         let connections = self.connections.clone();
+        // Read fresh per offer so a setting change applies to the next
+        // connection; moved into the spawn below.
+        let stun_fallback = crate::domain::canopy_config::CanopyConfig::load(&self.data_dir)
+            .remote
+            .stun_fallback;
         let relay_url = self.relay_url.clone();
         let bearer = self.bearer.clone();
         let signal = signal.clone();
         let from = from.to_string();
         tokio::spawn(async move {
-            let servers = peer::fetch_ice_servers_or_fallback(&relay_url, &bearer).await;
+            let servers =
+                peer::fetch_ice_servers_or_fallback(&relay_url, &bearer, &stun_fallback).await;
             let answered = peer::Peer::answer_offer(servers, &offer.sdp).await;
             let Ok((sdp, peer)) = answered else {
                 peers.remove(&device_id, &token);
@@ -160,12 +166,18 @@ impl RelayRuntime {
         let host = Arc::clone(&self.host);
         let peers = self.peers.clone();
         let connections = self.connections.clone();
+        // Read fresh per offer so a setting change applies to the next
+        // connection; moved into the spawn below.
+        let stun_fallback = crate::domain::canopy_config::CanopyConfig::load(&self.data_dir)
+            .remote
+            .stun_fallback;
         let relay_url = self.relay_url.clone();
         let bearer = self.bearer.clone();
         let signal = signal.clone();
         let from = from.to_string();
         tokio::spawn(async move {
-            let servers = peer::fetch_ice_servers_or_fallback(&relay_url, &bearer).await;
+            let servers =
+                peer::fetch_ice_servers_or_fallback(&relay_url, &bearer, &stun_fallback).await;
             let answered = peer::Peer::answer_offer(servers, &offer.sdp).await;
             let Ok((sdp, peer)) = answered else {
                 peers.remove(&guest_key, &token);
