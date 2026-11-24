@@ -22,6 +22,13 @@ configs that still use the old unauthenticated URL form are rewritten to
 the stdio `canopy bridge` form by `canopy setup` and `canopy mcp`, with a
 one-time `<config>.canopy-bak` backup before the first rewrite.
 
+HTTP sessions are bounded: a session with no request for 30 minutes is closed,
+and at most 64 live sessions are kept — when a 65th client initializes, the
+least recently used session is closed and the daemon logs one
+`mcp session evicted: cap (live=64)` INFO line. A request on an expired or
+evicted session gets the session-not-found `404`; `canopy bridge` replays its
+captured `initialize` on that 404, so it reconnects on its own.
+
 Writes wait up to 5 seconds for a concurrent writer. If the database is still
 busy after that, the call fails with `<tool>: database busy after 5 s — nothing
 was written, retry`. Nothing changed, so retry the same call.
