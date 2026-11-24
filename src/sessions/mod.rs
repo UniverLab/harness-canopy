@@ -24,6 +24,7 @@ pub mod protocol_dir;
 pub mod protocol_resume;
 pub mod resume;
 pub mod shelf;
+pub mod shelf_confine;
 pub mod shelf_upload;
 pub mod spawn;
 pub mod ws;
@@ -31,6 +32,7 @@ pub mod ws;
 pub use hub::{
     HubEvent, HubSession, OutputReceiver, SessionHub, SessionKind, SessionStatus, SpawnRequest,
 };
+pub use shelf_confine::confine;
 pub use spawn::{
     agent_args_string, build_agent_cmd, build_terminal_cmd, default_terminal_shell,
     format_accent_rgb, parse_accent_rgb, preserve_rows_on_shrink, resolve_spawn_workdir,

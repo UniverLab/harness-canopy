@@ -347,9 +347,18 @@ fn shelf_png(path: &std::path::Path) {
     std::fs::write(path, bytes).unwrap();
 }
 
-fn shelf_session(db: &std::sync::Arc<Database>, id: &str, name: &str) {
-    db.insert_interactive_session(id, name, "claude", "/proj", None, None, "interactive", None)
-        .unwrap();
+fn shelf_session(db: &std::sync::Arc<Database>, id: &str, name: &str, workdir: &std::path::Path) {
+    db.insert_interactive_session(
+        id,
+        name,
+        "claude",
+        workdir.to_str().expect("utf8 workdir"),
+        None,
+        None,
+        "interactive",
+        None,
+    )
+    .unwrap();
 }
 
 async fn send_file(
@@ -377,8 +386,9 @@ async fn send_file(
 #[tokio::test]
 async fn session_send_file_explicit_session_id_wins() {
     let (dir, db, handler) = endpoint_test_handler();
-    shelf_session(&db, "caller", "caller-name");
-    shelf_session(&db, "other", "other-name");
+    let _home = HomeVar::set(dir.path());
+    shelf_session(&db, "caller", "caller-name", dir.path());
+    shelf_session(&db, "other", "other-name", dir.path());
     let _guard = AgentIdVar::set("caller");
 
     let shot = dir.path().join("shot.png");
@@ -406,7 +416,8 @@ async fn session_send_file_explicit_session_id_wins() {
 #[tokio::test]
 async fn session_send_file_resolves_caller_session_from_identity() {
     let (dir, db, handler) = endpoint_test_handler();
-    shelf_session(&db, "me", "me-name");
+    let _home = HomeVar::set(dir.path());
+    shelf_session(&db, "me", "me-name", dir.path());
     let _guard = AgentIdVar::set("me");
 
     let shot = dir.path().join("shot.png");
@@ -425,7 +436,8 @@ async fn session_send_file_resolves_caller_session_from_identity() {
 #[tokio::test]
 async fn session_send_file_partial_success_reports_per_path_errors() {
     let (dir, db, handler) = endpoint_test_handler();
-    shelf_session(&db, "me", "me-name");
+    let _home = HomeVar::set(dir.path());
+    shelf_session(&db, "me", "me-name", dir.path());
     let _guard = AgentIdVar::set("me");
 
     let good = dir.path().join("good.png");

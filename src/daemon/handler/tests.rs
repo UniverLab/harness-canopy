@@ -118,7 +118,9 @@ const EXPECTED_TOOL_NAMES: &[&str] = &[
 /// the `deliver` node kind. The `graph_edit` row was re-pinned when
 /// `create`/`update` gained the optional `enabled`/`enable_at`/`expires_at`
 /// params (field docs are part of the input schema). The `graph` row was
-/// re-pinned when it gained the `metrics` read action.
+/// re-pinned when it gained the `metrics` read action. The
+/// `session_send_file` row was re-pinned when source paths were confined to
+/// the caller workdir/shelf dir with the `forbidden` code.
 const EXPECTED_TOOL_ROWS: &[&str] = &[
     "agent|d8f9c6d2e27d78721e0e68301793b430eb079a49d68e003c0a36062ade4326c2|d713589e444e00e203c10fb39b668774212540a62cec84a04d9f2b34b7c386b1",
     "agent_edit|9f9d97739be8934e8023b86d6ed35d9acf9209d18d42a8cafd8ffc99154965cf|eb0e7e1757828c2db9669176f36f437dc1cfc1797eacee875d69ff61ae80b271",
@@ -153,7 +155,7 @@ const EXPECTED_TOOL_ROWS: &[&str] = &[
     "session_list|f983db33c96519c95584055f90c807dda350a17e9b12d402c0551590e772532b|adae59573f649012ccb3856be07ea7740581587cfeb6e9caba07ab66ca88ec84",
     "session_list_files|afa7444761fb7f5d92c453122768ae9de1b6dc1a7f925cec3621cf16d18b340a|695a0cd5630c395f2a30cb253d744d41ac3ac0088d6fcf049d5761efce710c0d",
     "session_read_file|c344ccef462cd404d9eb2b14e6e18f41d1c494a463f0bc09a5b232ab5b44a1e0|30f081eb596d628c81069adfe68f04e23f4f4e70efba62750eb138516727a7a3",
-    "session_send_file|9424b037dd8df451162063514cb2d43a4892d1d77cf0a04fe208a1d1f9088978|35ce6f69b6ea1f5b513740aab091a7b4bf3afd859803470f1a93a631f735142d",
+    "session_send_file|108b5bbbcdb5cd31c6e48f4aa33915cdb051ec0225f76194ac50236ae46dd26d|7b00317cbbccf23c31655fef847e4b653da23f3df1a3978bcd34f7ed977930af",
     "skill|0f77b55bf9e5bff59383d9d96a628615e4ce85cb0f780ddff691be95175a2943|c1849c347bfba170073e7b6f79a3f0a07f2db09cad05d4c0fc51319a6c05a6ae",
     "spec|3a76fcb9ac04bc4e33bf9e92b34c5a16ab77d4f9fd73e8411eba177341ab04ea|95a2a14538394eafccf45e3054aaffd06ee7ff0573212da02bc7649d35fd1620",
     "spec_edit|31d7b1f8b84218068fbc4083e6be6b5ef73feeaa096664c657593eb02b368df1|f2f6eeb5d00df4962e1f15049036238f0aab8796e3821ba66c42f0e6394284d8",

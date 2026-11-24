@@ -6,7 +6,10 @@ pub struct SessionSendFileParams {
     /// Absolute paths of the files to copy onto the shelf, 1 to 10 per
     /// call. Each path must exist and be a regular file of at most 20 MiB;
     /// any type is accepted, and content sniffing only decides how it is
-    /// displayed.
+    /// displayed. Only paths inside the calling session's workdir or the
+    /// shelf directory are accepted; anything else fails with code
+    /// `forbidden` (`not_found`, `not_a_file`, `too_large`, `io` for the
+    /// other per-path failures).
     pub paths: Vec<String>,
     /// Optional caption stored with every file of this call, at most 500
     /// characters.

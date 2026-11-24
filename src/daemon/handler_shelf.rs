@@ -22,7 +22,7 @@ impl TaskTriggerHandler {
     /// Copy files onto the session shelf (FR2).
     #[tool(
         name = "session_send_file",
-        description = "Copy files onto the session shelf — the session's file tray, surfaced live to its TUI over `/sessions/ws`. Pass 1 to 10 absolute paths per call; any file type is accepted (content sniffing only decides how it is displayed) and each file is at most 20 MiB. Omit `session_id` to shelve under your own session; a caller with no session shelves on the host shelf. One bad path never blocks the others: the result lists `items` (`file_id`, `name`, `mime`, `size`) and per-path `errors` (`path`, `code`, `message`), with codes `not_found`, `not_a_file`, `too_large`, `io`."
+        description = "Copy files onto the session shelf — the session's file tray, surfaced live to its TUI over `/sessions/ws`. Pass 1 to 10 absolute paths per call; any file type is accepted (content sniffing only decides how it is displayed) and each file is at most 20 MiB. Only files inside the calling session's workdir or the shelf directory are accepted; anything else is refused with code `forbidden`. Omit `session_id` to shelve under your own session; a caller with no session shelves on the host shelf. One bad path never blocks the others: the result lists `items` (`file_id`, `name`, `mime`, `size`) and per-path `errors` (`path`, `code`, `message`), with codes `not_found`, `not_a_file`, `too_large`, `forbidden`, `io`."
     )]
     pub(crate) async fn session_send_file(
         &self,
@@ -77,9 +77,37 @@ impl TaskTriggerHandler {
             .map(str::to_owned)
             .or_else(|| caller_session.as_ref().map(|s| s.id.clone()));
         let from_label = caller_session
-            .map(|s| s.name)
+            .as_ref()
+            .map(|s| s.name.clone())
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| "host".to_string());
+
+        // ── F-01 confinement roots: the canonical form of the caller's
+        // own session workdir (even when `session_id` names another
+        // shelf) plus the canonical shelf directory; a caller with no
+        // session row has the shelf directory only. A root whose
+        // canonical form does not resolve still contributes its raw form,
+        // so a missing path inside it reaches `insert` (`not_found`)
+        // instead of looking forbidden. ──────────────────────────────
+        let mut allowed_roots: Vec<PathBuf> = Vec::new();
+        if let Some(session) = caller_session.as_ref() {
+            let workdir = PathBuf::from(&session.working_dir);
+            match std::fs::canonicalize(&workdir) {
+                Ok(canonical) => allowed_roots.push(canonical),
+                Err(_) => allowed_roots.push(workdir),
+            }
+        }
+        let data_dir = crate::ensure_data_dir().unwrap_or_else(|_| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".canopy")
+        });
+        let shelf_dir = data_dir.join("shelf");
+        match std::fs::canonicalize(&shelf_dir) {
+            Ok(canonical) => allowed_roots.push(canonical),
+            Err(_) => allowed_roots.push(shelf_dir),
+        }
 
         // ── Per-path inserts: file IO up to 20 MiB per file, off the
         // async runtime. One bad path is an entry in `errors`, never a
@@ -91,12 +119,16 @@ impl TaskTriggerHandler {
             let mut items = Vec::new();
             let mut errors = Vec::new();
             for path in paths {
-                match shelf.insert(
-                    &PathBuf::from(&path),
-                    session_id.as_deref(),
-                    caption.as_deref(),
-                    &from_label,
-                ) {
+                let src = PathBuf::from(&path);
+                if let Err(confined) = crate::sessions::confine(&src, &allowed_roots, &data_dir) {
+                    errors.push(serde_json::json!({
+                        "path": path,
+                        "code": confined.code,
+                        "message": confined.message,
+                    }));
+                    continue;
+                }
+                match shelf.insert(&src, session_id.as_deref(), caption.as_deref(), &from_label) {
                     Ok(item) => items.push(serde_json::json!({
                         "file_id": item.file_id,
                         "name": item.name,

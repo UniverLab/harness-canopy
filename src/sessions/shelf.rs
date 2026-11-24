@@ -46,6 +46,7 @@ pub const MAX_PATHS_PER_CALL: usize = 10;
 pub const ERR_NOT_FOUND: &str = "not_found";
 pub const ERR_NOT_A_FILE: &str = "not_a_file";
 pub const ERR_TOO_LARGE: &str = "too_large";
+pub const ERR_FORBIDDEN: &str = "forbidden";
 pub const ERR_IO: &str = "io";
 pub const ERR_BAD_REQUEST: &str = "bad_request";
 pub const ERR_CHECKSUM_MISMATCH: &str = "checksum_mismatch";
@@ -64,7 +65,7 @@ pub struct ShelfError {
 }
 
 impl ShelfError {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
