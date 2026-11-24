@@ -194,6 +194,19 @@ completed. To run the check and backup now:
 ```bash
 canopy daemon health-check
 ```
+
+When the database file itself is damaged, `canopy daemon start` fails
+before doing anything and names the verified backup plus the restore
+command; the damaged file is never modified. To restore it (stop the
+daemon first):
+
+```bash
+canopy doctor --restore [--from <file>]
+```
+
+The damaged file is renamed aside to `<name>.damaged-<UTC timestamp>`
+(never deleted), the backup is copied into place, and the restored file is
+verified before the command reports success.
 For platforms, it confirms each configured binary is present and
 executable on `PATH`, and — when the entry declares `identity_args` /
 `identity_pattern` — that the binary really is that program; a wrong

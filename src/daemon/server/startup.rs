@@ -79,8 +79,9 @@ pub(super) async fn run_http_startup_reconciliations(
     db: &Arc<Database>,
     data_dir: &std::path::Path,
     core: &HttpCore,
+    port: u16,
 ) {
-    super::reconcile_orphaned_graphs_on_startup(db, data_dir);
+    super::reconcile_orphaned_graphs_on_startup(db, data_dir, port);
     super::reconcile_stranded_queue_specs_on_startup(db);
     super::reconcile_mutex_leases_on_startup(db);
     migrate_agents_to_backing_graphs(db);

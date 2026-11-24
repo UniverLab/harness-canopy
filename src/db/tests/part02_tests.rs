@@ -192,7 +192,7 @@ fn reconcile_orphaned_graphs_pauses_running_graph_and_interrupts_its_run() {
     db.set_graph_spec_start_head(&spec.id, Some("deadbeef"))
         .unwrap();
 
-    let reconciled = db.reconcile_orphaned_graphs(data_dir.path()).unwrap();
+    let reconciled = db.reconcile_orphaned_graphs(data_dir.path(), 0).unwrap();
     assert_eq!(reconciled.len(), 1);
 
     // Test 1: the graph is paused, and its dangling run is no longer `running`.
@@ -256,7 +256,7 @@ fn reconcile_orphaned_graphs_pauses_pausing_graph_and_interrupts_its_run() {
     db.insert_graph_node(&node).unwrap();
     db.insert_graph_run(&run).unwrap();
 
-    let reconciled = db.reconcile_orphaned_graphs(data_dir.path()).unwrap();
+    let reconciled = db.reconcile_orphaned_graphs(data_dir.path(), 0).unwrap();
     assert_eq!(reconciled.len(), 1);
 
     let lp_after = db.get_graph(&lp.id).unwrap().unwrap();
@@ -318,7 +318,9 @@ fn reconcile_orphaned_graphs_marks_queue_member_spec_interrupted() {
     .unwrap();
 
     assert_eq!(
-        db.reconcile_orphaned_graphs(data_dir.path()).unwrap().len(),
+        db.reconcile_orphaned_graphs(data_dir.path(), 0)
+            .unwrap()
+            .len(),
         1
     );
 
@@ -423,14 +425,14 @@ fn reconcile_orphaned_graphs_is_idempotent() {
     db.insert_graph_node(&node).unwrap();
     db.insert_graph_run(&run).unwrap();
 
-    let first_pass = db.reconcile_orphaned_graphs(data_dir.path()).unwrap();
+    let first_pass = db.reconcile_orphaned_graphs(data_dir.path(), 0).unwrap();
     assert_eq!(first_pass.len(), 1);
     let lp_after_first = db.get_graph(&lp.id).unwrap().unwrap();
     let run_after_first = db.get_graph_run(&run.id).unwrap().unwrap();
 
     // Test 3: a second reconcile pass finds nothing left to reconcile, and
     // leaves the already-paused graph/run untouched.
-    let second_pass = db.reconcile_orphaned_graphs(data_dir.path()).unwrap();
+    let second_pass = db.reconcile_orphaned_graphs(data_dir.path(), 0).unwrap();
     assert_eq!(second_pass.len(), 0);
     let lp_after_second = db.get_graph(&lp.id).unwrap().unwrap();
     let run_after_second = db.get_graph_run(&run.id).unwrap().unwrap();
@@ -499,7 +501,9 @@ async fn reconcile_orphaned_graphs_kills_survivor_pid_from_same_boot() {
     db.insert_graph_run(&run).unwrap();
 
     assert_eq!(
-        db.reconcile_orphaned_graphs(data_dir.path()).unwrap().len(),
+        db.reconcile_orphaned_graphs(data_dir.path(), 0)
+            .unwrap()
+            .len(),
         1
     );
 
@@ -563,7 +567,9 @@ fn reconcile_orphaned_graphs_skips_kill_for_mismatched_boot_id() {
     // us) process — the boot_id mismatch must short-circuit before any
     // signal is ever attempted.
     assert_eq!(
-        db.reconcile_orphaned_graphs(data_dir.path()).unwrap().len(),
+        db.reconcile_orphaned_graphs(data_dir.path(), 0)
+            .unwrap()
+            .len(),
         1
     );
     let run_after = db.get_graph_run(&run.id).unwrap().unwrap();
@@ -579,7 +585,7 @@ fn reconcile_orphaned_graphs_leaves_completed_graph_untouched() {
     db.insert_graph(&lp).unwrap();
 
     // Test 4: a `Completed` graph is not reconciled.
-    let reconciled = db.reconcile_orphaned_graphs(data_dir.path()).unwrap();
+    let reconciled = db.reconcile_orphaned_graphs(data_dir.path(), 0).unwrap();
     assert_eq!(reconciled.len(), 0);
     let lp_after = db.get_graph(&lp.id).unwrap().unwrap();
     assert_eq!(lp_after.status, GraphStatus::Completed);
@@ -587,39 +593,23 @@ fn reconcile_orphaned_graphs_leaves_completed_graph_untouched() {
 
 /// The ownership gate (second line of defence, alongside never calling this
 /// from `run_stdio_server` at all — see the doc comment on
-/// `reconcile_orphaned_graphs`): when the on-disk `daemon.pid` names a *live*
-/// process that isn't this one, some other process owns the daemon
-/// lifecycle right now, and this call must not touch graph state at all —
-/// no signal, no pause, no interrupted-run marking.
-#[tokio::test]
-async fn reconcile_orphaned_graphs_skips_everything_when_foreign_daemon_pid_is_live() {
-    let Some(current_boot_id) = crate::system::boot_id() else {
-        return;
-    };
-
-    let data_dir = tempdir().unwrap();
-    // Stand in for "a live daemon other than us": a real, still-running
-    // process whose pid is guaranteed not to equal this test process's own.
-    let mut foreign_daemon = std::process::Command::new("sleep")
-        .arg("30")
-        .spawn()
-        .expect("spawn stand-in foreign daemon process");
-    std::fs::write(
-        data_dir.path().join("daemon.pid"),
-        foreign_daemon.id().to_string(),
-    )
-    .unwrap();
-
+/// A `Running` graph + spec + node + `Running` run: the orphan shape every
+/// recovery test below starts from. Returns the database, its data dir, and
+/// the graph, spec and run ids.
+fn insert_running_orphan(
+    prefix: &str,
+    pid: Option<i64>,
+    boot_id: Option<String>,
+) -> (Database, tempfile::TempDir, String, String, String) {
     let db = test_db();
-    let mut lp = sample_graph("wf-foreign-daemon-owned");
+    let data_dir = tempdir().unwrap();
+    let mut lp = sample_graph(&format!("wf-{prefix}"));
     lp.status = GraphStatus::Running;
-    let mut spec = sample_graph_spec(&lp.id, "spec-foreign-daemon-owned", 1);
+    let mut spec = sample_graph_spec(&lp.id, &format!("spec-{prefix}"), 1);
     spec.status = GraphSpecStatus::Running;
-    let node = sample_graph_node(&spec.id, "node-foreign-daemon-owned", 1);
-    // A pid/boot_id that WOULD be killed if the gate failed to short-circuit
-    // (same boot, matching the same-boot kill precondition tested elsewhere).
+    let node = sample_graph_node(&spec.id, &format!("node-{prefix}"), 1);
     let run = GraphNodeRun {
-        id: "run-foreign-daemon-owned".to_string(),
+        id: format!("run-{prefix}"),
         graph_id: lp.id.clone(),
         spec_id: spec.id.clone(),
         node_id: node.id.clone(),
@@ -629,48 +619,130 @@ async fn reconcile_orphaned_graphs_skips_everything_when_foreign_daemon_pid_is_l
         started_at: Utc::now(),
         completed_at: None,
         iteration: 1,
-        pid: Some(foreign_daemon.id() as i64),
-        boot_id: Some(current_boot_id),
+        pid,
+        boot_id,
         session_id: None,
         executed_platform: None,
         executed_model: None,
     };
-
     db.insert_graph(&lp).unwrap();
     db.insert_graph_spec(&spec).unwrap();
     db.insert_graph_node(&node).unwrap();
     db.insert_graph_run(&run).unwrap();
+    (db, data_dir, lp.id, spec.id, run.id)
+}
 
-    let reconciled = db.reconcile_orphaned_graphs(data_dir.path()).unwrap();
-    assert_eq!(
-        reconciled.len(),
-        0,
-        "must not report any graph reconciled while a foreign live daemon owns the pid file"
+/// The reconciled shape: one run reported, the graph paused, the run failed
+/// with the `interrupted` marker, the spec interrupted.
+fn assert_reconciled(
+    db: &Database,
+    reconciled: &[(Graph, GraphNodeRun)],
+    graph_id: &str,
+    spec_id: &str,
+    run_id: &str,
+) {
+    assert_eq!(reconciled.len(), 1);
+    let lp_after = db.get_graph(graph_id).unwrap().unwrap();
+    assert_eq!(lp_after.status, GraphStatus::Paused);
+    let run_after = db.get_graph_run(run_id).unwrap().unwrap();
+    assert_eq!(run_after.status, GraphRunStatus::Fail);
+    assert!(
+        run_after
+            .output
+            .as_ref()
+            .and_then(|value| value.get("interrupted"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true),
+        "the dangling run must carry the interrupted marker"
     );
+    let spec_after = db.get_graph_spec(spec_id).unwrap().unwrap();
+    assert_eq!(spec_after.status, GraphSpecStatus::Interrupted);
+}
 
-    let lp_after = db.get_graph(&lp.id).unwrap().unwrap();
-    assert_eq!(
-        lp_after.status,
-        GraphStatus::Running,
-        "the graph must be left exactly as found, not paused"
-    );
-    let run_after = db.get_graph_run(&run.id).unwrap().unwrap();
-    assert_eq!(
-        run_after.status,
-        GraphRunStatus::Running,
-        "the run must not be reported as interrupted by a restart that never happened"
-    );
+/// A reused pid after a crash passes an aliveness-only gate, which used to skip
+/// recovery and leave the run `Running` forever. The belief rule needs the
+/// port match too: a pid-file pid that is alive but is NOT the listener on
+/// `port` must not block recovery — reconcile proceeds and marks the run
+/// interrupted.
+#[tokio::test]
+async fn reconcile_orphaned_graphs_reconciles_when_pid_file_names_live_non_listener() {
+    let Some(current_boot_id) = crate::system::boot_id() else {
+        return;
+    };
 
-    // The pid named in the "foreign daemon" run must never have been
-    // signaled — prove it's still alive rather than merely unreaped.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    assert_eq!(
-        foreign_daemon.try_wait().unwrap(),
-        None,
-        "the gate must never signal the pid it protects"
+    // Stand in for "a reused pid, not a daemon": a real, still-running
+    // process that holds no port. Its own process group (like every real
+    // spawn site) so the same-boot kill below reaches only it.
+    let mut command = std::process::Command::new("sleep");
+    command.arg("30");
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut reused = command.spawn().expect("spawn stand-in reused-pid process");
+    // The run records the reused pid on the same boot, so recovery
+    // best-effort kills it (its own group, set above) and marks the run.
+    let (db, data_dir, graph_id, spec_id, run_id) = insert_running_orphan(
+        "foreign-daemon-owned",
+        Some(reused.id() as i64),
+        Some(current_boot_id),
     );
-    let _ = foreign_daemon.kill();
-    let _ = foreign_daemon.wait();
+    std::fs::write(data_dir.path().join("daemon.pid"), reused.id().to_string()).unwrap();
+    // A port nothing listens on (bind-then-release, mirroring the
+    // `resolve_port_pid_returns_none...` test): no occupant can equal the
+    // pid-file pid, so the gate must let recovery through.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("local_addr").port();
+    drop(listener);
+
+    let reconciled = db.reconcile_orphaned_graphs(data_dir.path(), port).unwrap();
+    assert_reconciled(&db, &reconciled, &graph_id, &spec_id, &run_id);
+
+    let _ = reused.kill();
+    let _ = reused.wait();
+}
+
+/// The mirror gate: when the pid-file pid is alive AND holds `port`, a live
+/// daemon owns the lifecycle and recovery must still stand down — signal
+/// nothing, pause nothing, mark nothing.
+#[cfg(target_os = "linux")]
+#[test]
+fn reconcile_orphaned_graphs_skips_when_pid_file_names_live_port_listener() {
+    // This test process stands in for the live daemon: it holds the bound
+    // port, so `resolve_port_pid` returns its own pid (the shape the
+    // `resolve_port_pid_finds_current_process...` test proves).
+    let (db, data_dir, graph_id, _spec_id, run_id) =
+        insert_running_orphan("live-listener-owned", None, None);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("local_addr").port();
+    std::fs::write(
+        data_dir.path().join("daemon.pid"),
+        std::process::id().to_string(),
+    )
+    .unwrap();
+
+    let reconciled = db.reconcile_orphaned_graphs(data_dir.path(), port).unwrap();
+    assert!(
+        reconciled.is_empty(),
+        "a live daemon holding the port must keep recovery out"
+    );
+    let lp_after = db.get_graph(&graph_id).unwrap().unwrap();
+    assert_eq!(lp_after.status, GraphStatus::Running);
+    let run_after = db.get_graph_run(&run_id).unwrap().unwrap();
+    assert_eq!(run_after.status, GraphRunStatus::Running);
+    drop(listener);
+}
+
+/// An unrecorded run (no pid, no boot id) is still marked interrupted — and
+/// there is nothing to signal.
+#[test]
+fn reconcile_orphaned_graphs_marks_interrupted_run_without_pid() {
+    let (db, data_dir, graph_id, spec_id, run_id) =
+        insert_running_orphan("unrecorded-run", None, None);
+
+    let reconciled = db.reconcile_orphaned_graphs(data_dir.path(), 0).unwrap();
+    assert_reconciled(&db, &reconciled, &graph_id, &spec_id, &run_id);
 }
 
 #[cfg(target_os = "linux")]
@@ -728,7 +800,7 @@ fn reconcile_orphaned_graphs_skips_kill_for_own_ancestor_pid() {
     db.insert_graph_node(&node).unwrap();
     db.insert_graph_run(&run).unwrap();
 
-    let reconciled = db.reconcile_orphaned_graphs(data_dir.path()).unwrap();
+    let reconciled = db.reconcile_orphaned_graphs(data_dir.path(), 0).unwrap();
     assert_eq!(reconciled.len(), 1);
 
     // Run must be marked interrupted in DB, but parent process must still be alive.

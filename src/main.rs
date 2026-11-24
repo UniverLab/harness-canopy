@@ -89,6 +89,13 @@ enum Commands {
         /// Show the searched PATH for missing harnesses.
         #[arg(long)]
         verbose: bool,
+        /// Restore the verified backup over a damaged database, then verify
+        /// the restored file. Refuses while the daemon is running.
+        #[arg(long)]
+        restore: bool,
+        /// Restore from this file instead of the daily backup.
+        #[arg(long, value_name = "FILE", requires = "restore")]
+        from: Option<PathBuf>,
     },
     /// Run the MCP server over stdio transport.
     Stdio,
@@ -342,13 +349,11 @@ async fn main() -> Result<()> {
             let code = autoupdate::run_update(check, yes)?;
             std::process::exit(code);
         }
-        Some(Commands::Doctor { verbose }) => {
-            if verbose {
-                crate::daemon::doctor::run_doctor_verbose().await
-            } else {
-                run_doctor().await
-            }
-        }
+        Some(Commands::Doctor {
+            verbose,
+            restore,
+            from,
+        }) => handle_doctor(verbose, restore, from).await,
         Some(Commands::Stdio) => run_stdio_server().await,
         Some(Commands::Serve) => run_http_server(cli.port).await,
         Some(Commands::Setup {
@@ -490,6 +495,24 @@ fn restore_default_sigpipe(cmd: &Option<Commands>) {
     #[cfg(windows)]
     {
         let _ = cmd;
+    }
+}
+
+/// `canopy doctor`: health report by default, verified-backup restore with
+/// `--restore` (refuses while the daemon runs, verifies the restored file).
+async fn handle_doctor(verbose: bool, restore: bool, from: Option<PathBuf>) -> Result<()> {
+    if restore {
+        let data_dir = crate::ensure_data_dir()?;
+        let port = crate::daemon::cli::configured_port(&data_dir);
+        return crate::daemon::db_recovery::run_restore(&data_dir, from.as_deref(), &|| {
+            crate::daemon::process::other_instance_may_be_running(&data_dir)
+                || crate::daemon::process::resolve_port_pid(port).is_some()
+        });
+    }
+    if verbose {
+        crate::daemon::doctor::run_doctor_verbose().await
+    } else {
+        run_doctor().await
     }
 }
 

@@ -76,7 +76,9 @@ async fn graph_engine_restart_recovery_runs_interrupted_queue_spec_first() {
 
     // G2 boot reconcile.
     assert_eq!(
-        db.reconcile_orphaned_graphs(data_dir.path()).unwrap().len(),
+        db.reconcile_orphaned_graphs(data_dir.path(), 0)
+            .unwrap()
+            .len(),
         1
     );
     let lp_after_reconcile = db.get_graph(&graph_id).unwrap().unwrap();
@@ -906,7 +908,9 @@ async fn graph_engine_resume_redispatches_full_ensemble_after_interrupt() {
     // Paused. This is exactly what a real daemon restart mid-ensemble
     // leaves behind.
     assert_eq!(
-        db.reconcile_orphaned_graphs(data_dir.path()).unwrap().len(),
+        db.reconcile_orphaned_graphs(data_dir.path(), 0)
+            .unwrap()
+            .len(),
         1
     );
     let spec_after_reconcile = db.get_graph_spec(&spec_id).unwrap().unwrap();

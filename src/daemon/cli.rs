@@ -83,6 +83,17 @@ pub(crate) fn configured_port(data_dir: &std::path::Path) -> u16 {
 }
 
 async fn handle_start(data_dir: &std::path::Path, port_override: Option<u16>) -> Result<()> {
+    // A damaged database fails here, before any pid-file handling, spawn or
+    // service-manager call, with the backup and the restore command named.
+    // Read-only: the damaged file is never touched.
+    let db_path = database_path(data_dir);
+    if let Some(error) = super::db_recovery::probe_database(&db_path) {
+        return Err(anyhow::anyhow!(super::db_recovery::damage_message(
+            &db_path,
+            &error,
+            &super::health_routine::backup_path(data_dir),
+        )));
+    }
     // Believe the pid file only when its pid is alive AND holds the port —
     // a reused pid satisfies the first half and must not stop here.
     let belief_port = port_override.unwrap_or_else(|| configured_port(data_dir));

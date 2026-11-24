@@ -54,17 +54,23 @@ impl Database {
     pub fn reconcile_orphaned_graphs(
         &self,
         data_dir: &std::path::Path,
+        port: u16,
     ) -> Result<Vec<(Graph, GraphNodeRun)>> {
-        // Ownership gate: if the on-disk pid file names a *live* process
-        // that isn't us, some other process owns the daemon lifecycle right
-        // now and this call has no business touching graph state — signal
-        // nothing, pause nothing, quarantine nothing. Belt and braces with
-        // keeping `run_stdio_server` from calling this at all: that removes
-        // the caller, this makes the function itself safe to call by
-        // mistake.
-        if crate::daemon::process::read_pid(data_dir).is_some_and(|pid| {
-            pid != std::process::id() && crate::daemon::process::is_process_running(pid)
-        }) {
+        // Ownership gate: skip only when the on-disk pid file names the live
+        // daemon — the `pid_truth` belief rule (that pid is alive AND holds
+        // `port`). Aliveness alone is not enough: after a crash the OS may
+        // have reused the pid for an unrelated process, which would leave
+        // the orphaned run `Running` forever. Belt and braces with keeping
+        // `run_stdio_server` from calling this at all: that removes the
+        // caller, this makes the function itself safe to call by mistake.
+        if crate::daemon::pid_truth::pid_file_is_live(
+            data_dir,
+            port,
+            &crate::daemon::process::is_process_running,
+            &crate::daemon::process::resolve_port_pid,
+        )
+        .is_some()
+        {
             return Ok(Vec::new());
         }
 

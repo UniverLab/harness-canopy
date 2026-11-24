@@ -134,6 +134,19 @@ mod daemon {
         }
         pub fn terminate_process_group_async(_pid: i64, _grace: std::time::Duration) {}
         pub const KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(0);
+        pub fn resolve_port_pid(_port: u16) -> Option<u32> {
+            None
+        }
+    }
+    pub mod pid_truth {
+        pub fn pid_file_is_live(
+            _data_dir: &std::path::Path,
+            _port: u16,
+            _alive: &dyn Fn(u32) -> bool,
+            _port_pid: &dyn Fn(u16) -> Option<u32>,
+        ) -> Option<u32> {
+            None
+        }
     }
 }
 

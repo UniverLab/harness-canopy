@@ -488,7 +488,9 @@ async fn fire_due_autorun_graphs_fires_reconciliation_paused_graph() {
     // The next boot's reconciliation pass — this is what must leave the
     // graph resumable, not the test hand-setting `paused_by_reconciliation`.
     assert_eq!(
-        db.reconcile_orphaned_graphs(data_dir.path()).unwrap().len(),
+        db.reconcile_orphaned_graphs(data_dir.path(), 0)
+            .unwrap()
+            .len(),
         1
     );
     let lp_after_reconcile = db.get_graph(&graph_id).unwrap().unwrap();

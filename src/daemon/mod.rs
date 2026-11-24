@@ -17,6 +17,7 @@ pub(crate) mod config_watch;
 pub(crate) mod cpu_quota;
 pub(crate) mod crew_cli;
 pub(crate) mod daemon_start;
+pub(crate) mod db_recovery;
 pub(crate) mod doctor;
 pub(crate) mod draft_pending;
 pub(crate) mod graph_cli;

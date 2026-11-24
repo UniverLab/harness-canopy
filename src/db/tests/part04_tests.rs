@@ -1092,7 +1092,9 @@ fn reconcile_orphaned_graphs_marks_interrupted_and_leaves_dirty_worktree_untouch
     db.insert_graph_run(&run).unwrap();
 
     assert_eq!(
-        db.reconcile_orphaned_graphs(data_dir.path()).unwrap().len(),
+        db.reconcile_orphaned_graphs(data_dir.path(), 0)
+            .unwrap()
+            .len(),
         1
     );
 
@@ -1158,7 +1160,9 @@ fn reconcile_orphaned_graphs_marks_interrupted_for_clean_worktree_too() {
     db.insert_graph_run(&run).unwrap();
 
     assert_eq!(
-        db.reconcile_orphaned_graphs(data_dir.path()).unwrap().len(),
+        db.reconcile_orphaned_graphs(data_dir.path(), 0)
+            .unwrap()
+            .len(),
         1
     );
 
@@ -1219,7 +1223,9 @@ fn reconcile_orphaned_graphs_marks_interrupted_in_non_git_workdir() {
     db.insert_graph_run(&run).unwrap();
 
     assert_eq!(
-        db.reconcile_orphaned_graphs(data_dir.path()).unwrap().len(),
+        db.reconcile_orphaned_graphs(data_dir.path(), 0)
+            .unwrap()
+            .len(),
         1
     );
 
@@ -1278,7 +1284,9 @@ fn reconcile_orphaned_graphs_interrupted_marking_is_idempotent_across_two_passes
     db.insert_graph_run(&run).unwrap();
 
     assert_eq!(
-        db.reconcile_orphaned_graphs(data_dir.path()).unwrap().len(),
+        db.reconcile_orphaned_graphs(data_dir.path(), 0)
+            .unwrap()
+            .len(),
         1
     );
     let spec_after_first = db.get_graph_spec(&spec.id).unwrap().unwrap();
@@ -1288,7 +1296,9 @@ fn reconcile_orphaned_graphs_interrupted_marking_is_idempotent_across_two_passes
     // candidate — nothing should change again, and the worktree stays
     // exactly as it was after the first pass.
     assert_eq!(
-        db.reconcile_orphaned_graphs(data_dir.path()).unwrap().len(),
+        db.reconcile_orphaned_graphs(data_dir.path(), 0)
+            .unwrap()
+            .len(),
         0
     );
     let spec_after_second = db.get_graph_spec(&spec.id).unwrap().unwrap();

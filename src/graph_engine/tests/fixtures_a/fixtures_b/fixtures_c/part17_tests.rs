@@ -1349,7 +1349,7 @@ fn reconcile_then_retry_reruns_interrupted_check_not_fail_edge() {
     db.update_graph_spec_status(&spec_id, GraphSpecStatus::Running, None, None)
         .unwrap();
 
-    let reconciled = db.reconcile_orphaned_graphs(dir.path()).unwrap();
+    let reconciled = db.reconcile_orphaned_graphs(dir.path(), 0).unwrap();
     assert_eq!(reconciled.len(), 1);
     let lp = db.get_graph(&graph_id).unwrap().unwrap();
     assert_eq!(lp.status, GraphStatus::Paused);

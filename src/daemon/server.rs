@@ -42,7 +42,7 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
     let port = crate::resolve_port(port_override);
     let data_dir = crate::ensure_data_dir()?;
     let _daemon_lock = acquire_daemon_lock(&data_dir)?;
-    let db = Arc::new(Database::new(&database_path(&data_dir))?);
+    let db = Arc::new(super::db_recovery::open_database(&data_dir)?);
     crate::setup_module::harness_prune::prune_on_startup(&data_dir, &db);
     if let Err(e) = crate::domain::prompts::seed_builtin_prompt_presets(&data_dir) {
         tracing::warn!("Could not seed builtin prompt presets: {e}");
@@ -55,7 +55,7 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
     write_pid_file(&data_dir)?;
     write_startup_state(&db, port)?;
 
-    run_http_startup_reconciliations(&db, &data_dir, &core).await;
+    run_http_startup_reconciliations(&db, &data_dir, &core, port).await;
 
     // The session endpoint's state comes up before anything serves: the hub
     // owns every PTY, so reconciliation has to respawn the previous daemon's
@@ -156,8 +156,8 @@ fn reconcile_stale_sessions_on_startup(db: &Database) {
 }
 
 /// Startup reconciliation 1/2: graphs a previous daemon left `Running`.
-fn reconcile_orphaned_graphs_on_startup(db: &Database, data_dir: &std::path::Path) {
-    match db.reconcile_orphaned_graphs(data_dir) {
+fn reconcile_orphaned_graphs_on_startup(db: &Database, data_dir: &std::path::Path, port: u16) {
+    match db.reconcile_orphaned_graphs(data_dir, port) {
         Ok(reconciled) if !reconciled.is_empty() => {
             tracing::warn!(
                 "Reconciled {} graph(s) left running by a previous daemon",
@@ -1992,7 +1992,7 @@ mod stdio_startup_reconciliation_tests {
         use crate::application::ports::StateRepository;
         let dir = tempdir().unwrap();
         let db = test_db();
-        reconcile_orphaned_graphs_on_startup(&db, dir.path());
+        reconcile_orphaned_graphs_on_startup(&db, dir.path(), 0);
         reconcile_stranded_queue_specs_on_startup(&db);
         let _ = db.get_state("port").unwrap();
     }
