@@ -394,5 +394,7 @@ retries of the same spec. `graph_control` `reset` keeps them unless called with
 spec's notes to a temp file — one `## <owner_name>` section per note — and
 exports its path as `CANOPY_SPEC_NOTES_FILE`. A presence check like
 `grep -q '^## Designer' "$CANOPY_SPEC_NOTES_FILE"` needs no `canopy`
-binary inside a check command.
+binary inside a check command. Prefer the `CANOPY_*` environment variables;
+markers are inserted as single-quoted words, so write them bare or inside
+single quotes, never inside double quotes or backticks — refused at save and at run.
 

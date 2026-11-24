@@ -32,7 +32,7 @@ use crate::domain::graphs::{
 
 /// One validation failure: where in the document, and why.
 #[derive(Debug, Clone, Serialize)]
-struct Problem {
+pub(crate) struct Problem {
     path: String,
     message: String,
 }
@@ -555,7 +555,11 @@ fn validate_ensemble_node_config(document: &NodeDocument, problems: &mut Vec<Pro
 
 /// The config must be an object with keys known for the kind, and must not
 /// carry harness bindings anywhere inside it — not even nested.
-fn validate_node_config(kind: GraphNodeKind, config: &Value, problems: &mut Vec<Problem>) {
+pub(crate) fn validate_node_config(
+    kind: GraphNodeKind,
+    config: &Value,
+    problems: &mut Vec<Problem>,
+) {
     let Some(map) = config.as_object() else {
         problems.push(problem(
             "config",
@@ -572,6 +576,13 @@ fn validate_node_config(kind: GraphNodeKind, config: &Value, problems: &mut Vec<
     if kind == GraphNodeKind::Router {
         if let Err(message) = validate_router_config_shape(config) {
             problems.push(problem("config", message));
+        }
+    }
+    if kind == GraphNodeKind::Check {
+        if let Some(command) = config.get("command").and_then(Value::as_str) {
+            if let Some(message) = crate::graph_engine::quoted_marker_error(command) {
+                problems.push(problem("config", message));
+            }
         }
     }
     collect_harness_key_problems(config, "config", problems);

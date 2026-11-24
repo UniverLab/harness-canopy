@@ -434,6 +434,11 @@ pub(crate) fn validate_node_config(
                         .to_string(),
                 );
             }
+            if let Some(command) = map.get("command").and_then(serde_json::Value::as_str) {
+                if let Some(message) = crate::graph_engine::quoted_marker_error(command) {
+                    return Err(message);
+                }
+            }
         }
         GraphNodeKind::Gate => {
             let evaluate = map

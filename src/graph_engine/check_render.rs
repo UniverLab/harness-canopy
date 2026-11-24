@@ -84,6 +84,9 @@ pub(crate) struct CheckCommandCtx<'a> {
 /// nested, then expand. Quoted markers go through `shell_quote`; the
 /// head/dirty markers expand raw. A `\{{x}}` escape stays literal text.
 pub(crate) fn render_check_command(template: &str, ctx: &CheckCommandCtx<'_>) -> Result<String> {
+    if let Some(message) = quoted_marker_error(template) {
+        bail!("{message}");
+    }
     if let Some(name) =
         crate::domain::prompts::unbindable_placeholders(template, CHECK_COMMAND_MARKERS).first()
     {
@@ -143,6 +146,21 @@ pub fn check_command_marker_error(details: &crate::domain::graphs::GraphDetails)
                 "unknown marker {{{{{name}}}}} in check command (check node '{}').",
                 node.name
             ));
+        }
+    }
+    let quoted_nodes = details
+        .graph_nodes
+        .iter()
+        .chain(details.specs.iter().flat_map(|s| s.nodes.iter()));
+    for node in quoted_nodes {
+        if node.kind != GraphNodeKind::Check {
+            continue;
+        }
+        let Some(command) = node.config.get("command").and_then(Value::as_str) else {
+            continue;
+        };
+        if let Some(message) = quoted_marker_error(command) {
+            return Some(format!("{message} (check node '{}').", node.name));
         }
     }
     None

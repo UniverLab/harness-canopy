@@ -328,7 +328,7 @@ impl TaskTriggerHandler {
 
 /// The per-node config checks import runs before building its plan: known
 /// keys for the kind, plus the `mutex` shape.
-fn check_import_node_configs(
+pub(crate) fn check_import_node_configs(
     document: &crate::domain::graph_transfer::GraphExportDocument,
 ) -> Result<(), String> {
     for node in &document.nodes {
@@ -336,6 +336,13 @@ fn check_import_node_configs(
             validate_known_config_keys(node.kind, map)?;
         }
         crate::daemon::handler_validate::validate_node_mutex_config(&node.name, &node.config)?;
+        if node.kind == crate::domain::graphs::GraphNodeKind::Check {
+            if let Some(command) = node.config.get("command").and_then(|value| value.as_str()) {
+                if let Some(message) = crate::graph_engine::quoted_marker_error(command) {
+                    return Err(format!("node '{}': {message}", node.name));
+                }
+            }
+        }
         if node.kind == crate::domain::graphs::GraphNodeKind::Router {
             let mode = crate::domain::graphs::validate_router_config_shape(&node.config)?;
             if mode == "value" {

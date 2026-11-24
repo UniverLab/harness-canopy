@@ -69,8 +69,15 @@ The shell-quoted markers expand to a single POSIX-quoted shell word, so a
 name containing spaces or quotes can never break or inject into the
 command. Write them bare (`{{spec_name}}`) or already single-quoted
 (`'{{spec_name}}'` — the engine strips that exact wrapper so the quoting
-is not doubled), never inside other quotes; a `\{{marker}}` escape stays
-literal text. The raw markers expand unquoted exactly as before.
+is not doubled), never inside double quotes or backticks; a `\{{marker}}`
+escape stays literal text. The raw markers expand unquoted exactly as
+before. Prefer the `CANOPY_*` environment variables below over markers
+wherever a value is only read, not substituted into another word.
+
+A marker inside double quotes or backticks is refused when the node is
+saved and again before it runs: markers are inserted as single-quoted
+words, so such a command would let the shell expand `$(...)` and
+backticks coming from the value itself.
 
 Any other `{{…}}` marker fails the check node before the command runs: the
 run records `unknown marker {{x}} in check command` and nothing reaches
