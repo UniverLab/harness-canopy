@@ -124,6 +124,9 @@ fn require_string(key: &str, value: &toml_edit::Value) -> Result<(), String> {
     if key == "remote.stun_fallback" {
         return require_stun_fallback(key, text);
     }
+    if key == "remote.relay_url" {
+        return crate::domain::remote_config::validate_relay_url(text);
+    }
     Ok(())
 }
 
@@ -328,6 +331,35 @@ mod tests {
                 error, "remote.stun_fallback must be empty or a stun: / stuns: URL",
                 "{error}"
             );
+        }
+    }
+
+    #[test]
+    fn relay_url_accepts_https_wss_and_loopback_only() {
+        let def = find("remote.relay_url").unwrap();
+        for valid in [
+            "\"https://x\"",
+            "\"wss://x\"",
+            "\"http://localhost:8787\"",
+            "\"http://127.0.0.1/\"",
+            "\"ws://127.0.0.1\"",
+            "\"http://[::1]/\"",
+        ] {
+            assert!(
+                validate_value(def, &value(valid)).is_ok(),
+                "expected {valid} to be accepted"
+            );
+        }
+        let expected = "remote.relay_url must use https; plain http is allowed only for localhost";
+        for invalid in [
+            "\"http://evil.example\"",
+            "\"ws://evil\"",
+            "\"http://localhost.evil.com\"",
+            "\"ftp://x\"",
+            "\"x\"",
+        ] {
+            let error = validate_value(def, &value(invalid)).unwrap_err();
+            assert_eq!(error, expected, "for {invalid}: {error}");
         }
     }
 

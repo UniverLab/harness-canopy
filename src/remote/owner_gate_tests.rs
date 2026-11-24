@@ -1,5 +1,6 @@
 //! The owner gate: `spawn`, `kill`, `graphs`, `graph_watch`, `graph_control`,
-//! `catalog` and `compose` answer only the host owner's own devices.
+//! `catalog`, `compose` and `host.metrics` answer only the host owner's own
+//! devices.
 //!
 //! A guest — full grant or narrow — answers `forbidden` naming the frame for
 //! each of them, and the refusal has no side effect: nothing spawns, nothing
@@ -160,6 +161,7 @@ async fn assert_guest_refusals(grant: Grant) {
             }),
             "compose",
         ),
+        (json!({"t": "host.metrics", "req": "h1"}), "host.metrics"),
     ];
     for (frame, name) in &cases {
         assert_forbidden(&mut bridge, &out, &mut rx, frame, name).await;

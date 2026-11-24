@@ -1456,3 +1456,49 @@ fn proxy_url_precedence() {
         "lowercase scheme proxy is used when uppercase is unset"
     );
 }
+
+#[test]
+fn stored_invalid_relay_url_blocks_connect_and_records_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = test_db();
+    let mut config = CanopyConfig::default();
+    config.remote.enabled = true;
+    config.remote.relay_url = "http://evil.example".to_string();
+    config.save_for_tests(dir.path()).expect("config");
+    crate::remote::auth::save_identity(
+        dir.path(),
+        &crate::remote::auth::GitHubIdentity {
+            token: "gho_test".to_string(),
+            login: "octocat".to_string(),
+            id: 1,
+        },
+    )
+    .expect("identity");
+    let live = crate::remote::live::RemoteLive::new();
+    let next = next_action(
+        dir.path(),
+        &db,
+        None,
+        None,
+        &ConnectionRegistry::default(),
+        &test_sessions(&db),
+        live.peers(),
+    );
+    assert!(matches!(next, Next::Wait(Wait::InvalidRelayUrl)));
+    let recorded = crate::application::ports::StateRepository::get_state(&db, REMOTE_ERROR_KEY)
+        .expect("state")
+        .unwrap_or_default();
+    assert_eq!(
+        recorded,
+        "remote.relay_url must use https; plain http is allowed only for localhost"
+    );
+    assert_eq!(
+        websocket_url("http://localhost:8787"),
+        "ws://localhost:8787/ws/host"
+    );
+    assert_eq!(websocket_url("ws://127.0.0.1"), "ws://127.0.0.1/ws/host");
+    assert_eq!(
+        websocket_url("wss://relay.example.com/"),
+        "wss://relay.example.com/ws/host"
+    );
+}

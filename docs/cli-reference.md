@@ -787,7 +787,7 @@ and a launch that starts no process answers `error{code:"spawn_failed"}`:
 {"t": "session_resume", "req": "r2", "id": "7c1e4b2a-9d3f-4a6e-8b5c-2f0d1e3a4b6c"}
 ```
 
-Host metrics ride the same channel, read-only. `host.metrics{req}`
+Host metrics ride the same channel, read-only, owner-only (guests get `forbidden`). `host.metrics{req}`
 answers `host.metrics{req,metrics}` with one sample — `cpu_usage`,
 `cpu_temperature_c`, `cpu_temp_source`, `memory_used_mb`,
 `memory_total_mb`, `gpu` (`name`, `usage`, `temperature_c`,
@@ -955,7 +955,7 @@ it came from. **Apply** says when a change takes effect: `applied` (at once),
 | `clean.reclaim_min_deleted_rows` | 50 | 0–100000 | applied | Deleted rows that trigger VACUUM during `canopy clean` |
 | `activity.retention_per_workdir` | 500 | 50–100000 | applied | Activity-log entries kept per workdir |
 | `remote.enabled` | `false` | bool | applied | Whether this host accepts owner-only remote control via the relay |
-| `remote.relay_url` | `https://remote.univerlab.org` | — | next run | Relay URL for owner-only remote control |
+| `remote.relay_url` | `https://remote.univerlab.org` | — | next run | Relay URL for owner-only remote control; `https://`/`wss://`, or plain `http://`/`ws://` only for localhost, 127.x, or ::1 |
 | `remote.github_client_id` | `Ov23liVCfE58kUb3ssDy` | — | next run | Public Client ID of UniverLab's "Canopy Remote" OAuth App (identity only; empty disables `remote login`) |
 | `remote.host_label` | empty | — | next run | Label shown for this host; empty means the hostname |
 | `remote.stun_fallback` | empty | `stun:`/`stuns:` URL | applied | STUN fallback server used when the relay returns no ICE servers; empty means no fallback |

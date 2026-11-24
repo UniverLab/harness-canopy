@@ -362,9 +362,20 @@ impl RemoteBridge {
                     handle_dir_list(&self.state, out, req, path);
                 }
             }
-            ClientFrame::HostMetrics { req } => handle_host_metrics(&self.metrics, out, &req),
+            ClientFrame::HostMetrics { req } => {
+                if self.owner_allowed(out, &req, "host.metrics") {
+                    handle_host_metrics(&self.metrics, out, &req);
+                }
+            }
             ClientFrame::HostMetricsWatch { interval_s } => {
-                handle_host_metrics_watch(&mut self.metrics_watch, &self.metrics, out, interval_s);
+                if self.owner_allowed_noreq(out, "host.metrics.watch") {
+                    handle_host_metrics_watch(
+                        &mut self.metrics_watch,
+                        &self.metrics,
+                        out,
+                        interval_s,
+                    );
+                }
             }
             ClientFrame::HostMetricsUnwatch => {
                 handle_host_metrics_unwatch(&mut self.metrics_watch);
@@ -398,6 +409,16 @@ impl RemoteBridge {
             return true;
         }
         owner_denied(out, Some(req), frame);
+        false
+    }
+
+    /// `true` when this peer may run an owner-only frame without a `req`
+    /// id; a guest already got its `forbidden` answer naming the frame.
+    fn owner_allowed_noreq(&self, out: &OutTx, frame: &str) -> bool {
+        if self.scope.is_owner() {
+            return true;
+        }
+        owner_denied(out, None, frame);
         false
     }
 

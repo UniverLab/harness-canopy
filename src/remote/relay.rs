@@ -98,6 +98,10 @@ pub fn websocket_url(relay_url: &str) -> String {
         format!("wss://{rest}/ws/host")
     } else if let Some(rest) = base.strip_prefix("http://") {
         format!("ws://{rest}/ws/host")
+    } else if let Some(rest) = base.strip_prefix("wss://") {
+        format!("wss://{rest}/ws/host")
+    } else if let Some(rest) = base.strip_prefix("ws://") {
+        format!("ws://{rest}/ws/host")
     } else {
         format!("{base}/ws/host")
     }
@@ -445,6 +449,8 @@ enum Wait {
     Rejected,
     /// This label already got a 400; never retry it.
     LabelRejected,
+    /// `remote.relay_url` uses plain HTTP/WS for a non-loopback host.
+    InvalidRelayUrl,
 }
 
 /// One supervisor iteration's decision.
@@ -483,6 +489,10 @@ fn next_action(
     let config = CanopyConfig::load(data_dir);
     if !config.remote.enabled {
         return Next::Wait(Wait::Disabled);
+    }
+    if let Err(msg) = crate::domain::remote_config::validate_relay_url(&config.remote.relay_url) {
+        let _ = db.set_state(REMOTE_ERROR_KEY, &msg);
+        return Next::Wait(Wait::InvalidRelayUrl);
     }
     let label = host_label(&config);
     if rejected_label == Some(label.as_str()) {
@@ -604,7 +614,7 @@ fn apply_wait(
             *attempt = 0;
         }
         Wait::Disabled => *attempt = 0,
-        Wait::Rejected | Wait::LabelRejected => {}
+        Wait::Rejected | Wait::LabelRejected | Wait::InvalidRelayUrl => {}
     }
 }
 
@@ -614,6 +624,7 @@ fn wait_phase(wait: &Wait) -> RelayPhase {
     match wait {
         Wait::Rejected => RelayPhase::TokenRejected,
         Wait::LabelRejected => RelayPhase::RelayRejected,
+        Wait::InvalidRelayUrl => RelayPhase::Connecting,
         Wait::SignedOut | Wait::Disabled => RelayPhase::Off,
     }
 }

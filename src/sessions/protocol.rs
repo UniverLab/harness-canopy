@@ -261,12 +261,14 @@ pub enum ClientFrame {
         path: Option<String>,
     },
     /// `host.metrics{req}`: one host-metrics frame. Remote-only: the local
-    /// socket answers `error{code:"forbidden"}`.
+    /// socket answers `error{code:"forbidden"}`. Owner-only on the remote
+    /// bridge.
     HostMetrics {
         req: String,
     },
     /// `host.metrics.watch{interval_s?}`: push the metrics frame every N
-    /// seconds (clamped to 5..=60, default 10). Remote-only.
+    /// seconds (clamped to 5..=60, default 10). Remote-only, owner-only on
+    /// the remote bridge.
     HostMetricsWatch {
         interval_s: Option<u64>,
     },

@@ -305,6 +305,7 @@ async fn bridge_answers_host_metrics_with_req() {
         ..HostMetrics::default()
     };
     let mut bridge = RemoteBridge::with_metrics(state, fake_source(metrics));
+    bridge.set_owner(true);
     let (out, mut rx) = outbound::channel();
     bridge
         .handle_text(r#"{"t":"host.metrics","req":"m1"}"#, &out)
@@ -319,6 +320,7 @@ async fn bridge_answers_host_metrics_with_req() {
 async fn bridge_watch_registers_and_unwatch_clears() {
     let (state, _dir) = test_state();
     let mut bridge = RemoteBridge::with_metrics(state, fake_source(HostMetrics::default()));
+    bridge.set_owner(true);
     let (out, mut rx) = outbound::channel();
     assert!(bridge.metrics_watch.is_none());
     bridge
@@ -350,6 +352,7 @@ async fn bridge_watch_registers_and_unwatch_clears() {
 async fn bridge_second_watch_replaces_the_first() {
     let (state, _dir) = test_state();
     let mut bridge = RemoteBridge::with_metrics(state, fake_source(HostMetrics::default()));
+    bridge.set_owner(true);
     let (out, mut rx) = outbound::channel();
     bridge
         .handle_text(r#"{"t":"host.metrics.watch","interval_s":5}"#, &out)
@@ -372,12 +375,42 @@ async fn bridge_second_watch_replaces_the_first() {
 async fn bridge_watch_clamps_a_zero_interval_instead_of_panicking() {
     let (state, _dir) = test_state();
     let mut bridge = RemoteBridge::with_metrics(state, fake_source(HostMetrics::default()));
+    bridge.set_owner(true);
     let (out, mut rx) = outbound::channel();
     bridge
         .handle_text(r#"{"t":"host.metrics.watch","interval_s":0}"#, &out)
         .await;
     let frame = recv_frame(&mut rx, "clamped watch push").await;
     assert_eq!(frame["t"], "host.metrics");
+}
+
+#[tokio::test]
+async fn guest_host_metrics_and_watch_are_forbidden() {
+    let (state, _dir) = test_state();
+    let mut guest = RemoteBridge::with_metrics(state, fake_source(HostMetrics::default()));
+    guest.set_owner(false);
+    let (out, mut rx) = outbound::channel();
+
+    guest
+        .handle_text(r#"{"t":"host.metrics","req":"m1"}"#, &out)
+        .await;
+    let frame = recv_frame(&mut rx, "forbidden host.metrics").await;
+    assert_eq!(frame["t"], "error");
+    assert_eq!(frame["code"], ERR_FORBIDDEN);
+    assert_eq!(frame["req"], "m1");
+
+    guest
+        .handle_text(r#"{"t":"host.metrics.watch","interval_s":1}"#, &out)
+        .await;
+    let watch_frame = recv_frame(&mut rx, "forbidden host.metrics.watch").await;
+    assert_eq!(watch_frame["t"], "error");
+    assert_eq!(watch_frame["code"], ERR_FORBIDDEN);
+    assert!(
+        guest.metrics_watch.is_none(),
+        "guest must not subscribe to periodic metrics"
+    );
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(rx.try_recv().is_err(), "no periodic frames for guest");
 }
 
 fn spawn_cat(hub: &SessionHub, workdir: &str) -> Arc<HubSession> {
