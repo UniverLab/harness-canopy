@@ -27,6 +27,19 @@ to install)).
 | `canopy daemon uninstall-service` | Remove the system service |
 | `canopy daemon health-check` | Run the daily database integrity check and backup now, instead of waiting for the daemon to find an idle moment (see [Installation](installation.md#health-check)) |
 
+After a crash the pid file can name a pid the OS has since reused for an
+unrelated program. `daemon start`, `daemon stop` and `daemon status` believe
+the pid file only when that pid is alive **and** listening on the daemon's
+port. A stale file is removed by `start` (`removed a stale pid file (pid N)`)
+and by a `stop` that finds nothing to signal (`Daemon is not running
+(removed a stale pid file, pid N)`); `stop` never signals an unbelieved pid.
+An `INCONSISTENT` `daemon status` adds a `Stale pid file` line naming the
+fix. `daemon start` prints `Daemon started on port N` only once something
+listens on the port: a directly spawned daemon that dies during start fails
+with `daemon exited during start: <line>` plus the tail of
+`~/.canopy/daemon.log`, and one that never listens within 20 s fails with
+`daemon did not become ready in 20 s`.
+
 ## Updates
 
 | Command | Description |
