@@ -45,7 +45,7 @@ const GRAPH_EVENT_KINDS: &[&str] = &[
     "ensemble_changed",
 ];
 
-#[tool_router(router = tool_router_run_history, vis = "pub(crate)")]
+#[tool_router(router = tool_router_run_history, vis = "pub(crate)", allow_empty)]
 impl TaskTriggerHandler {
     pub(crate) async fn graph_node_runs_list_impl(
         &self,

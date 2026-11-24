@@ -410,11 +410,16 @@ impl ServerHandler for TaskTriggerHandler {
             tools,
             meta: None,
             next_cursor: None,
+            // rmcp 3.x cache-hint fields (SEP-2322/SEP-2549): left absent so
+            // the wire shape is unchanged; clients treat absent as complete.
+            result_type: None,
+            ttl_ms: None,
+            cache_scope: None,
         })
     }
 
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new(
                 env!("CARGO_PKG_NAME"),
                 env!("CARGO_PKG_VERSION"),

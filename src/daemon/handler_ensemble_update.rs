@@ -23,7 +23,7 @@ use rmcp::model::CallToolResult;
 use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
 
-#[tool_router(router = tool_router_ensemble_update, vis = "pub(crate)")]
+#[tool_router(router = tool_router_ensemble_update, vis = "pub(crate)", allow_empty)]
 impl TaskTriggerHandler {
     pub(crate) async fn graph_update_ensemble_impl(
         &self,

@@ -26,7 +26,7 @@ use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
 
-#[tool_router(router = tool_router_nodes, vis = "pub(crate)")]
+#[tool_router(router = tool_router_nodes, vis = "pub(crate)", allow_empty)]
 impl TaskTriggerHandler {
     pub(crate) async fn graph_add_node_impl(
         &self,

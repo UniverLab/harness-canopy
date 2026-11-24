@@ -21,7 +21,7 @@ use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
 use std::sync::Arc;
 
-#[tool_router(router = tool_router_run_exec, vis = "pub(crate)")]
+#[tool_router(router = tool_router_run_exec, vis = "pub(crate)", allow_empty)]
 impl TaskTriggerHandler {
     pub(crate) async fn graph_run_impl(
         &self,

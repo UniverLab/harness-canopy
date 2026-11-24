@@ -25,7 +25,7 @@ pub(crate) use crate::daemon::handler_ensemble_plan::{
     EnsembleUnitSpec,
 };
 
-#[tool_router(router = tool_router_ensemble_core, vis = "pub(crate)")]
+#[tool_router(router = tool_router_ensemble_core, vis = "pub(crate)", allow_empty)]
 impl TaskTriggerHandler {
     pub(crate) async fn graph_add_ensemble_impl(
         &self,

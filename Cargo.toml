@@ -22,7 +22,7 @@ path = "src/main.rs"
 
 [dependencies]
 # MCP SDK
-rmcp = { version = "2.1", features = ["server", "transport-io", "transport-streamable-http-server"] }
+rmcp = { version = "3.11", features = ["server", "transport-io", "transport-streamable-http-server"] }
 
 # Axum for Streamable HTTP transport
 axum = { version = "0.8", features = ["ws"] }
@@ -50,7 +50,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 schemars = { version = "1.2.1", features = ["derive"] }
 
 # SQLite persistence
-rusqlite = { version = "0.39", features = ["bundled"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
 
 # File watching
 notify = "8.2"

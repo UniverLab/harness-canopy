@@ -57,7 +57,7 @@ use rmcp::model::CallToolResult;
 use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
 
-#[tool_router(router = tool_router_graphs, vis = "pub(crate)")]
+#[tool_router(router = tool_router_graphs, vis = "pub(crate)", allow_empty)]
 impl TaskTriggerHandler {
     pub(crate) async fn graph_create_impl(
         &self,

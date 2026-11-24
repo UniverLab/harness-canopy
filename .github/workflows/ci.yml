@@ -39,4 +39,6 @@ jobs:
       # Trunk-based (decision 10eadef1): the release binaries are built by
       # release.yml when a release is cut.
       release-build: false
+      # cargo-deny gates every PR; keep on
+      run-deny: true
     secrets: inherit
