@@ -199,18 +199,23 @@ pub(crate) fn start_daemon_live(
     let (manager_start_prog, manager_start_args, manager_available) =
         (String::new(), Vec::<String>::new(), false);
 
-    // Direct-spawn fallback, with the same 500 ms liveness check `daemon
-    // start` did inline after spawning.
+    // Direct-spawn fallback: the child only counts as started once
+    // something actually listens on the port (`wait_until_ready`), which
+    // also reports the daemon's own fatal log line when it dies mid-start.
     let spawn_direct = || -> anyhow::Result<()> {
+        let log_path = data_dir.join("daemon.log");
+        let base_len = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
         let pid = spawn_direct_daemon(exe, port_arg, data_dir)?;
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        if !super::process::is_process_running(pid) {
-            anyhow::bail!(
-                "Daemon failed to start — check logs at {}",
-                data_dir.join("daemon.log").display()
-            );
-        }
-        Ok(())
+        super::pid_truth::wait_until_ready(
+            port,
+            pid,
+            &log_path,
+            base_len,
+            &super::process::is_process_running,
+            &|p| super::process::resolve_port_pid(p).is_some(),
+            &|| std::thread::sleep(std::time::Duration::from_millis(250)),
+            &std::time::Instant::now,
+        )
     };
 
     let deps = StartDeps {

@@ -80,12 +80,21 @@ pub(crate) fn configured_port(data_dir: &std::path::Path) -> u16 {
 }
 
 async fn handle_start(data_dir: &std::path::Path, port_override: Option<u16>) -> Result<()> {
-    if let Some(pid) = read_pid(data_dir) {
-        if is_process_running(pid) {
-            println!("Daemon is already running (PID: {pid})");
-            return Ok(());
-        }
+    // Believe the pid file only when its pid is alive AND holds the port —
+    // a reused pid satisfies the first half and must not stop here.
+    let belief_port = port_override.unwrap_or_else(|| configured_port(data_dir));
+    if let Some(pid) = super::pid_truth::pid_file_is_live(
+        data_dir,
+        belief_port,
+        &super::process::is_process_running,
+        &super::process::resolve_port_pid,
+    ) {
+        println!("Daemon is already running (PID: {pid})");
+        return Ok(());
+    }
+    if let Some(stale) = read_pid(data_dir) {
         remove_pid_file(data_dir);
+        println!("removed a stale pid file (pid {stale})");
     }
 
     let exe = std::env::current_exe()?;
@@ -215,25 +224,35 @@ async fn handle_stop(data_dir: &std::path::Path) -> Result<()> {
         return Ok(());
     }
 
-    // Signal whichever PIDs are actually alive among the PID file and the
-    // port's real occupant — not just the PID file. An orphaned `canopy
-    // serve` that outlived its unit (or was never tracked by one) can hold
-    // the port with a stale, missing, or simply different PID file; without
-    // checking the port directly, `daemon stop` can never clear it and the
-    // only fix is hunting the PID down by hand.
-    let mut targets: Vec<u32> = Vec::new();
-    if let Some(pid) = read_pid(data_dir).filter(|&p| is_process_running(p)) {
-        targets.push(pid);
-    }
-    if let Some(pid) = resolve_port_pid(port).filter(|&p| is_process_running(p)) {
-        if !targets.contains(&pid) {
-            targets.push(pid);
-        }
-    }
+    // Signal the believed PID-file pid plus the port's real occupant. A
+    // stale pid file whose pid the OS reused for an unrelated program is
+    // never signalled — belief needs the port match, not just aliveness.
+    // An orphaned `canopy serve` that outlived its unit (or was never
+    // tracked by one) can hold the port with a stale, missing, or simply
+    // different PID file; without checking the port directly, `daemon stop`
+    // can never clear it and the only fix is hunting the PID down by hand.
+    let raw_pid = read_pid(data_dir);
+    let believed = super::pid_truth::pid_file_is_live(
+        data_dir,
+        port,
+        &super::process::is_process_running,
+        &super::process::resolve_port_pid,
+    );
+    let targets = super::pid_truth::stop_targets(
+        raw_pid,
+        believed,
+        resolve_port_pid(port),
+        &super::process::is_process_running,
+    );
 
     if targets.is_empty() {
-        println!("Daemon is not running");
-        remove_pid_file(data_dir);
+        if let Some(stale) = raw_pid {
+            remove_pid_file(data_dir);
+            println!("Daemon is not running (removed a stale pid file, pid {stale})");
+        } else {
+            println!("Daemon is not running");
+            remove_pid_file(data_dir);
+        }
         return Ok(());
     }
 
@@ -297,6 +316,11 @@ fn handle_status(data_dir: &std::path::Path) -> Result<()> {
             println!("Daemon: INCONSISTENT");
             for line in d.describe() {
                 println!("  {line}");
+            }
+            if raw_pid.is_some_and(is_process_running) && port_pid.is_none() {
+                println!(
+                    "Stale pid file: nothing listens on port {port}. Run: canopy daemon start (it removes the stale pid file) or canopy daemon stop."
+                );
             }
             return Ok(());
         }
