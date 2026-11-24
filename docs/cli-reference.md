@@ -532,6 +532,12 @@ login` makes it connect again. If the relay answers HTTP 400, the daemon
 stops retrying that label, records `relay rejected the handshake: HTTP 400
 <reason>` for `remote status` (the Remote tab reads `relay rejected: see
 remote status`), and waits: fixing the label reconnects without a restart.
+A `remote.relay_url` with a plain `http://` or `ws://` scheme for any host
+but `localhost`, `127.x`, or `::1` is never dialed: `canopy config set`
+refuses it with `remote.relay_url must use https; plain http is allowed
+only for localhost`, and an already stored bad value keeps the relay
+`connecting` with that message as the last error in `remote status` until
+the URL is fixed.
 Behind a corporate proxy the daemon tunnels the socket with an HTTP `CONNECT`:
 `ws://` relays read `HTTP_PROXY`, `wss://` relays read `HTTPS_PROXY`
 (uppercase wins over lowercase, empty counts as unset, `ALL_PROXY` is the
@@ -590,8 +596,9 @@ shape — is logged and ignored, and the connection stays up.
 Once the data channel is open, the browser speaks the same protocol v2 as
 `/sessions/ws`, with owner-only frames: `spawn`, `kill`, `graphs`,
 `graph_watch`, `graph_control`, `catalog`, `compose`, `resumable_list`,
-`session_resume`, `dir_list`, `resize` and
-`resize_release` answer only the host owner's own paired device. A guest
+`session_resume`, `dir_list`, `resize`,
+`resize_release`, `host.metrics` and `host.metrics.watch` answer only the
+host owner's own paired device. A guest
 inside its grant answers `error{code:"forbidden"}` naming the frame —
 `spawn is only available to the host owner's devices`, and so on — `kill`
 outside its grant stays `not_found`, and `graph_unwatch` stays a silent
