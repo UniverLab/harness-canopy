@@ -41,6 +41,10 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
     let daemon_start = std::time::Instant::now();
     let port = crate::resolve_port(port_override);
     let data_dir = crate::ensure_data_dir()?;
+    let tighten_root = data_dir.clone();
+    drop(tokio::task::spawn_blocking(move || {
+        crate::state_dir::tighten_tree(&tighten_root);
+    }));
     let _daemon_lock = acquire_daemon_lock(&data_dir)?;
     let db = Arc::new(super::db_recovery::open_database(&data_dir)?);
     crate::setup_module::harness_prune::prune_on_startup(&data_dir, &db);

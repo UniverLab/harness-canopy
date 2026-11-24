@@ -61,8 +61,33 @@ pub(crate) mod guard {
     }
 }
 
+/// Pre-create a missing SQLite database file with mode 0600 so it (and the
+/// `-wal`/`-shm`/`-journal` files SQLite derives from its mode) is private
+/// from its first byte without altering the process umask.
+fn precreate_db_0600(db_path: &std::path::Path) -> Result<()> {
+    if db_path == std::path::Path::new(":memory:") || db_path.exists() {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        match std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(db_path)
+        {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
+}
+
 impl Database {
     pub fn new(db_path: &PathBuf) -> Result<Self> {
+        precreate_db_0600(db_path)?;
         let conn = Self::open_connection_with_pragmas(db_path)?;
         let db = Database {
             conn: ConnLock::new(conn),
@@ -140,6 +165,7 @@ impl Database {
     /// exception, because it holds the daemon lock and therefore *is* the
     /// daemon.
     pub fn new_safe(db_path: &PathBuf, data_dir: &std::path::Path) -> Result<Self> {
+        precreate_db_0600(db_path)?;
         if crate::daemon::process::other_instance_may_be_running(data_dir) {
             let conn = Self::open_connection_with_pragmas(db_path)?;
             return Ok(Database {

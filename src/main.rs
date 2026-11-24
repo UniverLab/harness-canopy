@@ -28,6 +28,10 @@ mod sessions;
 mod setup_module;
 mod shared;
 mod skills_module;
+mod state_dir;
+#[cfg(test)]
+#[path = "state_dir_tests.rs"]
+mod state_dir_tests;
 mod system;
 mod tui;
 mod watchers;
@@ -694,8 +698,8 @@ pub(crate) fn ensure_data_dir() -> Result<std::path::PathBuf> {
     let home =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
     let data_dir = home.join(".canopy");
-    std::fs::create_dir_all(&data_dir)?;
-    std::fs::create_dir_all(data_dir.join("logs"))?;
+    state_dir::ensure_private_dir(&data_dir)?;
+    state_dir::ensure_private_dir(&data_dir.join("logs"))?;
     // Migrate a pre-existing flat/JSON layout to the current one (TOML for
     // hand-inspectable files, a named `cache/` dir for program-managed
     // caches). Idempotent and cheap once migrated, so it's safe to run on

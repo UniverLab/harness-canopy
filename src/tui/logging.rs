@@ -21,11 +21,7 @@ pub(crate) fn append_log(path: &Path, text: &str) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
+    if let Ok(mut file) = crate::state_dir::open_private_log(path) {
         let _ = writeln!(file, "{text}");
     }
 }

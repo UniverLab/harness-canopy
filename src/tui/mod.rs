@@ -13,7 +13,7 @@ pub(crate) mod context_transfer;
 mod event;
 mod gamification;
 pub mod keymap_reference;
-mod logging;
+pub(crate) mod logging;
 pub(crate) mod mcp_client;
 #[cfg(unix)]
 mod orphan_watchdog;
@@ -67,6 +67,10 @@ pub fn run_tui() -> Result<()> {
     crate::domain::notification::register_aumid();
     crate::domain::notification::clear_stale_notifications();
     let data_dir = crate::ensure_data_dir()?;
+    let tighten_root = data_dir.clone();
+    std::thread::spawn(move || {
+        crate::state_dir::tighten_tree(&tighten_root);
+    });
     let db_path = database_path(&data_dir);
 
     if !db_path.exists() {

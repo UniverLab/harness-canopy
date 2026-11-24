@@ -120,10 +120,7 @@ pub(crate) fn spawn_direct_daemon(
     }
 
     let log_path = data_dir.join("daemon.log");
-    let log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)?;
+    let log_file = crate::state_dir::open_private_log(&log_path)?;
     let log_file_err = log_file.try_clone()?;
 
     cmd.stdout(log_file)
