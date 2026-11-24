@@ -15,7 +15,8 @@ use crate::db::Database;
 pub(super) const REMOTE_TRUST_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS remote_trust_users (
                 login TEXT PRIMARY KEY,
                 all_sessions INTEGER NOT NULL DEFAULT 0,
-                upload INTEGER NOT NULL DEFAULT 0
+                upload INTEGER NOT NULL DEFAULT 0,
+                guest_pubkey TEXT
             );
             CREATE TABLE IF NOT EXISTS remote_trust_grants (
                 login TEXT NOT NULL REFERENCES remote_trust_users(login) ON DELETE CASCADE,
@@ -41,6 +42,10 @@ pub struct TrustedProfile {
     pub sessions: Vec<String>,
     /// Whether the profile may upload files into its granted sessions.
     pub upload: bool,
+    /// The guest's registered P-256 public key (base64 SPKI DER), if the
+    /// guest bound one at invite redemption. `None` means keyless: the host
+    /// trusts the relay's attested identity for this login.
+    pub guest_pubkey: Option<String>,
 }
 
 /// Canonical login form: trimmed and lowercased (GitHub logins are
@@ -102,14 +107,14 @@ impl Database {
     pub fn get_trust(&self, login: &str) -> Result<Option<TrustedProfile>> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         let login = normalize(login);
-        let flags: Option<(i64, i64)> = conn
+        let flags: Option<(i64, i64, Option<String>)> = conn
             .query_row(
-                "SELECT all_sessions, upload FROM remote_trust_users WHERE login = ?1",
+                "SELECT all_sessions, upload, guest_pubkey FROM remote_trust_users WHERE login = ?1",
                 [&login],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
-        let Some((all, upload)) = flags else {
+        let Some((all, upload, guest_pubkey)) = flags else {
             return Ok(None);
         };
         let mut stmt = conn.prepare(
@@ -123,35 +128,51 @@ impl Database {
             all_sessions: all != 0,
             sessions,
             upload: upload != 0,
+            guest_pubkey,
         }))
     }
 
     /// Every trusted profile, ascending by login.
     pub fn list_trust(&self) -> Result<Vec<TrustedProfile>> {
-        let logins: Vec<(String, i64, i64)> = {
+        let logins: Vec<(String, i64, i64, Option<String>)> = {
             let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
             let mut stmt = conn.prepare(
-                "SELECT login, all_sessions, upload FROM remote_trust_users ORDER BY login ASC",
+                "SELECT login, all_sessions, upload, guest_pubkey FROM remote_trust_users ORDER BY login ASC",
             )?;
             let rows = stmt.query_map([], |row| {
                 let login: String = row.get(0)?;
                 let all: i64 = row.get(1)?;
                 let upload: i64 = row.get(2)?;
-                Ok((login, all, upload))
+                let key: Option<String> = row.get(3)?;
+                Ok((login, all, upload, key))
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
         let mut profiles = Vec::with_capacity(logins.len());
-        for (login, all, upload) in logins {
+        for (login, all, upload, guest_pubkey) in logins {
             let sessions = self.grant_names(&login)?;
             profiles.push(TrustedProfile {
                 login,
                 all_sessions: all != 0,
                 sessions,
                 upload: upload != 0,
+                guest_pubkey,
             });
         }
         Ok(profiles)
+    }
+
+    /// Record a guest's public key (base64 SPKI DER) for one login. Called
+    /// once at invite redemption when the guest proves possession of the
+    /// matching private key; the stored key is never overwritten here, so
+    /// callers must check the profile has no key first.
+    pub fn set_guest_pubkey(&self, login: &str, spki_b64: &str) -> Result<()> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        conn.execute(
+            "UPDATE remote_trust_users SET guest_pubkey = ?1 WHERE login = ?2",
+            params![spki_b64, normalize(login)],
+        )?;
+        Ok(())
     }
 
     /// Set one login's upload grant (default deny). Both [`Self::upsert_trust`]
@@ -286,6 +307,22 @@ impl Database {
         if !has_upload {
             conn.execute(
                 "ALTER TABLE remote_trust_users ADD COLUMN upload INTEGER NOT NULL DEFAULT 0",
+                [],
+            )
+            .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+        }
+        // The guest key postdates the table too: a keyless login (NULL)
+        // trusts the relay, so existing profiles stay keyless.
+        let has_key: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('remote_trust_users') WHERE name = 'guest_pubkey'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if !has_key {
+            conn.execute(
+                "ALTER TABLE remote_trust_users ADD COLUMN guest_pubkey TEXT",
                 [],
             )
             .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;

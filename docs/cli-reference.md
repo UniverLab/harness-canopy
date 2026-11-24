@@ -466,6 +466,23 @@ replaces that base, but only when it is a local `http://` origin
 value is ignored with a warning, so the host's GitHub token never leaves
 the machine through it. Set it for both the CLI and the daemon.
 
+### Guest sessions and the relay
+
+A guest without a registered key trusts the relay: the host accepts its
+offer on the guest identity the relay attests on the envelope (the login
+and uid the relay wrote from its own connection table), because that is
+all the host has to key on. A guest that registered a key at invite
+redemption is verified by signature on every offer — ECDSA P-256 over
+SHA-256, the same crypto as the device path — and the relay cannot
+impersonate it: a missing, malformed or invalid signature refuses the
+offer as `bad_signature`, and an offer timestamp more than 120 seconds
+off refuses as `stale`. Registration is trust on first use at redemption:
+the redeeming offer carries the guest's public key with a signature
+proving possession of the matching private key, and the host stores it;
+the key is never overwritten afterwards. Forgetting the login (from the
+Remote tab) deletes the trust row and the key with it, so re-trusting a
+login starts keyless again.
+
 ### The relay connection
 
 With `remote on` and a stored identity, the daemon keeps one WebSocket to

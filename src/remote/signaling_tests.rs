@@ -8,10 +8,19 @@ use crate::db::Database;
 use crate::remote::devices::RemoteDevices;
 use crate::remote::hostkey::{verify_p1363, HostKey};
 use crate::remote::signaling::{
-    answer_body, answer_message, connect_fail, ice_body, ice_candidate, offer_message,
-    verify_offer, verify_offer_seen, IceCandidate, Refusal, SeenOffers, MAX_CLOCK_SKEW_SECS,
-    SEEN_OFFER_CAP,
+    answer_body, answer_message, connect_fail, guest_offer_message_text, ice_body, ice_candidate,
+    offer_message, verify_offer, verify_offer_seen, IceCandidate, Refusal, SeenOffers,
+    MAX_CLOCK_SKEW_SECS, SEEN_OFFER_CAP,
 };
+
+#[test]
+fn guest_offer_message_text_pins_order_and_normalization() {
+    assert_eq!(
+        guest_offer_message_text("h", " Mallory ", 42, "1793100000", "v=0"),
+        "canopy-remote/v1/guest-offer\nh\nmallory\n42\n1793100000\nv=0",
+        "the signed bytes are fixed: prefix, host, normalized login, uid, verbatim ts, sdp"
+    );
+}
 
 const VECTOR_TS: i64 = 1_793_100_000;
 const VECTOR_OFFER_SDP: &str = "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\n";

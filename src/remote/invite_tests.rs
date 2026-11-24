@@ -6,11 +6,21 @@ use super::{
     code_hash, guest_link, guest_link_for, issue, live, normalize_code_input, NoGuestLink,
 };
 use crate::db::Database;
-use crate::remote::guest::{attested_body, GuestConns, RELAY_FROM};
-use crate::remote::signaling::{connect_fail, verify_offer, Refusal};
+use crate::remote::guest::{attested_body, GuestConns, GuestVerify, RELAY_FROM};
+use crate::remote::signaling::{connect_fail, verify_offer, Refusal, SeenOffers};
 use crate::remote::trust;
 
 const NOW: i64 = 1_800_000_000;
+
+/// Verification context for keyless-guest tests: the registry stays empty
+/// because no key is registered, so no signature is ever checked.
+fn keyless_ctx(seen: &mut SeenOffers) -> GuestVerify<'_> {
+    GuestVerify {
+        host_id: "test-host",
+        now: NOW,
+        seen,
+    }
+}
 
 fn test_db() -> (tempfile::TempDir, Database) {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -74,8 +84,9 @@ fn guest_offer_uses_injected_identity_not_body() {
         "github_login": "owner", "device_id": "bfcba2b742a807bb",
         "sig": "bogus", "ts": NOW, "sdp": "v=0",
     });
+    let mut seen = SeenOffers::new();
     let offer = guests
-        .verify_guest_offer(&db, "owner", &body, "d:9")
+        .verify_guest_offer(&db, "owner", &body, "d:9", keyless_ctx(&mut seen))
         .expect("the guest offer verifies");
     assert_eq!(offer.uid, 42);
     assert_eq!(offer.sdp, "v=0");
@@ -93,10 +104,11 @@ fn guest_offer_without_injected_identity_rejected() {
     let guests = GuestConns::default();
     guests.note_device_identity(&guest_notice("mallory", 42, "9"), RELAY_FROM);
     // No injected fields at all, only the spoofable body hint.
+    let mut seen = SeenOffers::new();
     let no_identity = json!({"t": "offer", "github_login": "mallory", "sdp": "v=0"});
     assert!(
         matches!(
-            guests.verify_guest_offer(&db, "owner", &no_identity, "d:9"),
+            guests.verify_guest_offer(&db, "owner", &no_identity, "d:9", keyless_ctx(&mut seen)),
             Err(Refusal::Forbidden)
         ),
         "an offer without injected identity is forbidden"
@@ -104,19 +116,19 @@ fn guest_offer_without_injected_identity_rejected() {
     // Half an identity is no identity.
     let no_uid = json!({"t": "offer", "login": "mallory", "sdp": "v=0"});
     assert!(matches!(
-        guests.verify_guest_offer(&db, "owner", &no_uid, "d:9"),
+        guests.verify_guest_offer(&db, "owner", &no_uid, "d:9", keyless_ctx(&mut seen)),
         Err(Refusal::Forbidden)
     ));
     // Right login, wrong uid.
     let wrong_uid = json!({"t": "offer", "login": "mallory", "uid": 43, "sdp": "v=0"});
     assert!(matches!(
-        guests.verify_guest_offer(&db, "owner", &wrong_uid, "d:9"),
+        guests.verify_guest_offer(&db, "owner", &wrong_uid, "d:9", keyless_ctx(&mut seen)),
         Err(Refusal::Forbidden)
     ));
     // Right identity on an untracked connection.
     let untracked = json!({"t": "offer", "login": "mallory", "uid": 42, "sdp": "v=0"});
     assert!(matches!(
-        guests.verify_guest_offer(&db, "owner", &untracked, "d:10"),
+        guests.verify_guest_offer(&db, "owner", &untracked, "d:10", keyless_ctx(&mut seen)),
         Err(Refusal::Forbidden)
     ));
     // Injected identity with no grant.
@@ -125,7 +137,13 @@ fn guest_offer_without_injected_identity_rejected() {
     strangers.note_device_identity(&guest_notice("stranger", 43, "11"), RELAY_FROM);
     let no_grant = json!({"t": "offer", "login": "stranger", "uid": 43, "sdp": "v=0"});
     assert!(matches!(
-        strangers.verify_guest_offer(&untrusted, "owner", &no_grant, "d:11"),
+        strangers.verify_guest_offer(
+            &untrusted,
+            "owner",
+            &no_grant,
+            "d:11",
+            keyless_ctx(&mut seen)
+        ),
         Err(Refusal::Forbidden)
     ));
     // The wire reads the existing `forbidden`: no new reason string.
@@ -387,8 +405,9 @@ fn guest_tracking_takes_only_the_relays_notices() {
     guests.note_device_identity(&guest_notice("mallory", 42, "c-1"), RELAY_FROM);
     assert!(guests.is_guest("d:c-1"));
     assert!(!guests.is_guest(RELAY_FROM));
+    let mut seen = SeenOffers::new();
     assert!(guests
-        .verify_guest_offer(&db, "owner", &offer, "d:c-1")
+        .verify_guest_offer(&db, "owner", &offer, "d:c-1", keyless_ctx(&mut seen))
         .is_ok());
     // A device or guest connection announcing itself is ignored: it could
     // claim any login.
@@ -406,7 +425,7 @@ fn guest_tracking_takes_only_the_relays_notices() {
     guests.note_device_left(&json!({"t": "device_left", "conn": "c-1"}), RELAY_FROM);
     assert!(!guests.is_guest("d:c-1"));
     assert!(matches!(
-        guests.verify_guest_offer(&db, "owner", &offer, "d:c-1"),
+        guests.verify_guest_offer(&db, "owner", &offer, "d:c-1", keyless_ctx(&mut seen)),
         Err(Refusal::Forbidden)
     ));
 }

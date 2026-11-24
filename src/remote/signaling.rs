@@ -25,6 +25,8 @@ use super::trust;
 pub const OFFER_PREFIX: &str = "canopy-remote/v1/offer\n";
 /// Prefix of the signed answer payload.
 pub const ANSWER_PREFIX: &str = "canopy-remote/v1/answer\n";
+/// Prefix of a signed guest-offer payload.
+pub const GUEST_OFFER_PREFIX: &str = "canopy-remote/v1/guest-offer\n";
 /// Accepted distance between the device clock and the host clock.
 pub const MAX_CLOCK_SKEW_SECS: i64 = 120;
 /// Concurrent device peers a host serves.
@@ -98,11 +100,27 @@ fn offer_message_text(host_id: &str, ts: &str, sdp: &str) -> String {
     format!("{OFFER_PREFIX}{host_id}\n{ts}\n{sdp}")
 }
 
+/// The exact bytes a guest signs: the host, the normalized login, the uid,
+/// the timestamp verbatim, and the SDP. `ts` keeps the spelling the guest
+/// sent, the same rule as [`offer_message`].
+pub fn guest_offer_message_text(
+    host_id: &str,
+    login: &str,
+    uid: u64,
+    ts: &str,
+    sdp: &str,
+) -> String {
+    format!(
+        "{GUEST_OFFER_PREFIX}{host_id}\n{}\n{uid}\n{ts}\n{sdp}",
+        trust::normalize_login(login)
+    )
+}
+
 /// The offer's timestamp: its signed text plus the value used for the clock
 /// window. The contract sends `ts` as a unix-seconds string (`"1793100000"`);
 /// a JSON number is accepted too, and both keep the spelling the device
 /// signed.
-fn offer_ts(body: &Value) -> Option<(i64, String)> {
+pub(crate) fn offer_ts(body: &Value) -> Option<(i64, String)> {
     match body.get("ts")? {
         Value::String(text) => Some((text.parse().ok()?, text.clone())),
         Value::Number(number) => Some((number.as_i64()?, number.to_string())),
@@ -224,7 +242,7 @@ fn evict_oldest(seen: &mut HashMap<[u8; 32], i64>) {
 }
 
 /// The replay-registry key for one offer signature.
-fn offer_sig_hash(sig: &[u8]) -> [u8; 32] {
+pub(crate) fn offer_sig_hash(sig: &[u8]) -> [u8; 32] {
     use sha2::{Digest as _, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(sig);
@@ -256,8 +274,9 @@ pub fn answer_body(host: &HostKey, device_id: &str, offer_sig_b64: &str, sdp: &s
     json!({"t": "answer", "sdp": sdp, "sig": encode_b64(&sig)})
 }
 
-/// `answer{sdp,sig}` for a guest offer: guest offers carry no signature to
-/// bind to, so the signed payload keeps an empty offer-signature slot.
+/// `answer{sdp,sig}` for a guest offer: the signed payload keeps an empty
+/// offer-signature slot. A keyed guest's signature authenticates the offer,
+/// not the answer, so the slot stays empty either way.
 pub fn guest_answer_body(host: &HostKey, guest_key: &str, sdp: &str) -> Value {
     let message = answer_message(guest_key, "", sdp);
     let sig = host.sign(message.as_bytes());
@@ -336,7 +355,7 @@ fn encode_b64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-fn decode_b64(text: &str) -> Option<Vec<u8>> {
+pub(crate) fn decode_b64(text: &str) -> Option<Vec<u8>> {
     base64::engine::general_purpose::STANDARD.decode(text).ok()
 }
 

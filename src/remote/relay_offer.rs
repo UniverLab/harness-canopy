@@ -10,6 +10,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use super::connection::{self, PeerSession};
+use super::guest::{self, GuestOffer, GuestVerify};
 use super::peer;
 use super::relay::{RelayRuntime, SignalTx};
 use super::signaling::{self, Refusal};
@@ -99,23 +100,41 @@ impl RelayRuntime {
     }
 
     /// Verify a guest offer, refuse it, or build the answer off the socket
-    /// loop. The guest path needs no device row and no replay registry
-    /// (there is no signature to key on): injected identity plus a live
-    /// grant. The peer is keyed `guest-{uid}` and skips the `last_seen`
-    /// touch, which belongs to the device registry.
+    /// loop. The guest path needs no device row: relay-attested identity
+    /// plus a live grant, and — for a login with a registered key — a
+    /// signature over the offer checked against the replay registry. The
+    /// peer is keyed `guest-{uid}` and skips the `last_seen` touch, which
+    /// belongs to the device registry. A bad signature refuses before the
+    /// invite is burned; the redeeming offer binds the guest's key.
     pub(crate) fn start_guest_offer(&self, body: &Value, now: i64, from: &str, signal: &SignalTx) {
-        let offer = match self
-            .guests
-            .verify_guest_offer(&self.db, &self.github_login, body, from)
-        {
+        let host_id = self.host.host_id();
+        let mut seen = self
+            .seen_offers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let offer = match self.guests.verify_guest_offer(
+            &self.db,
+            &self.github_login,
+            body,
+            from,
+            GuestVerify {
+                host_id: &host_id,
+                now,
+                seen: &mut seen,
+            },
+        ) {
             Ok(offer) => offer,
             Err(refusal) => {
                 let _ = signal.send((from.to_string(), signaling::connect_fail(refusal)));
                 return;
             }
         };
+        drop(seen);
         // The first accepted offer redeems the invite: single-use from here.
-        let _ = self.db.consume_invites_for_uid(offer.uid, now);
+        let burned = self.db.consume_invites_for_uid(offer.uid, now).unwrap_or(0);
+        if burned >= 1 {
+            self.register_guest_key(&host_id, &offer, body, now);
+        }
         let Some(sessions) = self.sessions.clone() else {
             let _ = signal.send((from.to_string(), signaling::connect_fail(Refusal::Busy)));
             return;
@@ -173,5 +192,39 @@ impl RelayRuntime {
                 max_frame: connection::peer_frame_cap(&offer.sdp),
             });
         });
+    }
+
+    /// Bind the guest's key on its redeeming offer only (trust on first
+    /// use): when the offer burned an invite and the login has no key yet
+    /// and the body carries a `pubkey` whose proof of possession verifies,
+    /// store it. A registered key is never overwritten; any other `pubkey`
+    /// field is ignored.
+    fn register_guest_key(&self, host_id: &str, offer: &GuestOffer, body: &Value, now: i64) {
+        let keyed = self
+            .db
+            .get_trust(&offer.login)
+            .ok()
+            .flatten()
+            .is_some_and(|profile| profile.guest_pubkey.is_some());
+        if keyed {
+            return;
+        }
+        let Some(pubkey) = body.get("pubkey").and_then(Value::as_str) else {
+            return;
+        };
+        if !guest::guest_proof_verifies(
+            host_id,
+            &offer.login,
+            offer.uid,
+            &offer.sdp,
+            body,
+            pubkey,
+            now,
+        ) {
+            return;
+        }
+        if self.db.set_guest_pubkey(&offer.login, pubkey).is_ok() {
+            tracing::info!("remote: guest key registered for {}", offer.login);
+        }
     }
 }
