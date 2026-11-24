@@ -83,7 +83,7 @@ impl std::fmt::Debug for GitHubIdentity {
 }
 
 /// The `canopy remote status` payload (human and `--json` share it).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteStatus {
     /// Whether an identity is stored.
     pub signed_in: bool,
@@ -93,6 +93,12 @@ pub struct RemoteStatus {
     pub enabled: bool,
     /// The configured relay URL.
     pub relay_url: String,
+    /// The relay phase (`connected`, `connecting`, `token rejected: sign in
+    /// again`, `relay rejected: see remote status`, `off`). The CLI replaces
+    /// this local fallback with the daemon's live phase whenever it answers.
+    /// Old JSON without the field still parses (`serde` default).
+    #[serde(default)]
+    pub relay: String,
     /// The last relay error the daemon recorded, if any.
     pub last_error: Option<String>,
     /// RFC 3339 instant of the last successful reconnect, if any.
@@ -110,14 +116,37 @@ pub fn build_remote_status(
     identity: Option<&GitHubIdentity>,
     db: Option<&Database>,
 ) -> RemoteStatus {
+    let last_error = state_value(db, super::relay::REMOTE_ERROR_KEY);
+    let enabled = config.remote.enabled;
+    let relay = fallback_relay(enabled, last_error.as_deref());
     RemoteStatus {
         signed_in: identity.is_some(),
         login: identity.map(|identity| identity.login.clone()),
-        enabled: config.remote.enabled,
+        enabled,
         relay_url: config.remote.relay_url.clone(),
-        last_error: state_value(db, super::relay::REMOTE_ERROR_KEY),
+        relay,
+        last_error,
         last_reconnect: state_value(db, super::relay::REMOTE_RECONNECT_KEY),
         config_fault: None,
+    }
+}
+
+/// The `relay:` value when the daemon's live phase is unknown: `off` while
+/// the switch is off, else the phase the stored error names (a rejected
+/// token or handshake keeps its text; any other state means the relay is
+/// still dialling, so `connecting`).
+pub fn fallback_relay(enabled: bool, last_error: Option<&str>) -> String {
+    if !enabled {
+        return "off".to_string();
+    }
+    match last_error {
+        Some(error) if error.contains("token rejected") => {
+            "token rejected: sign in again".to_string()
+        }
+        Some(error) if error.contains("relay rejected the handshake") => {
+            "relay rejected: see remote status".to_string()
+        }
+        _ => "connecting".to_string(),
     }
 }
 

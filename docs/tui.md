@@ -277,7 +277,8 @@ out); Relay only reports the phase (`connected`, `connecting`,
 `token rejected: sign in again`, `relay rejected: see remote status`,
 `off`); `Enter` on Pair a device shows the
 fresh code with its link, QR and countdown in an overlay (`Esc` hides it,
-the code stays valid). Each device row shows its label, id, paired time,
+the code stays valid); while signed out, switched off, or not connected,
+the overlay shows the refusal and its fix instead of a code. Each device row shows its label, id, paired time,
 last seen time and `live` while a peer is open; `d` disconnects its live peer at once
 (the pairing stays), `r` revokes it behind a `y`/`n`
 confirmation (`Enter` also confirms, `Esc` cancels); both report success

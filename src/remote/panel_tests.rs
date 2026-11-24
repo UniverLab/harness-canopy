@@ -147,6 +147,65 @@ fn create_pairing_returns_code_link_qr_and_expiry() {
 }
 
 #[test]
+fn ensure_pairable_refuses_signed_out_first() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let live = RemoteLive::new();
+    live.set_phase(RelayPhase::Connected);
+    let error = super::ensure_pairable(dir.path(), &live).expect_err("signed out refuses");
+    assert_eq!(
+        error.to_string(),
+        "not signed in: run 'canopy remote login'"
+    );
+}
+
+#[test]
+fn ensure_pairable_refuses_while_remote_is_off() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    auth::save_identity(dir.path(), &signed_in_identity()).expect("identity");
+    let live = RemoteLive::new();
+    live.set_phase(RelayPhase::Connected);
+    let error = super::ensure_pairable(dir.path(), &live).expect_err("switched off refuses");
+    assert_eq!(error.to_string(), "remote is off: run 'canopy remote on'");
+}
+
+#[test]
+fn ensure_pairable_refuses_each_non_connected_phase() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    auth::save_identity(dir.path(), &signed_in_identity()).expect("identity");
+    set_enabled(dir.path(), true).expect("on");
+    for (phase, state) in [
+        (RelayPhase::Off, "off"),
+        (RelayPhase::Connecting, "connecting"),
+        (RelayPhase::TokenRejected, "token rejected: sign in again"),
+        (
+            RelayPhase::RelayRejected,
+            "relay rejected: see remote status",
+        ),
+    ] {
+        let live = RemoteLive::new();
+        live.set_phase(phase);
+        let error = super::ensure_pairable(dir.path(), &live).expect_err("no relay refuses");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "remote is on but not connected to the relay yet (state: {state}); wait a few seconds and retry, or check 'canopy remote status'"
+            ),
+            "phase {phase:?}"
+        );
+    }
+}
+
+#[test]
+fn ensure_pairable_passes_only_when_signed_in_enabled_and_connected() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    auth::save_identity(dir.path(), &signed_in_identity()).expect("identity");
+    set_enabled(dir.path(), true).expect("on");
+    let live = RemoteLive::new();
+    live.set_phase(RelayPhase::Connected);
+    super::ensure_pairable(dir.path(), &live).expect("pairable");
+}
+
+#[test]
 fn set_enabled_flips_the_switch_both_ways() {
     use crate::domain::canopy_config::CanopyConfig;
 

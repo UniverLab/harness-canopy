@@ -366,9 +366,9 @@ WebSocket — the CLI never writes the shelf itself. `file_id` is the
 |---|---|
 | `canopy remote login` | Sign in to GitHub with the OAuth device flow (identity only, no scopes) |
 | `canopy remote logout` | Delete the stored GitHub identity |
-| `canopy remote status [--json]` | Show the sign-in state, whether remote is enabled, the relay URL, the last relay error and reconnect time, and a `config invalid, ...; config.toml: <reason>` line while `config.toml` fails to parse (the last valid config stays live, and `enabled`/`relay_url` show those effective values); `--json` prints `{signed_in, login, enabled, relay_url, last_error, last_reconnect}` plus `config_fault` when invalid (`last_error`/`last_reconnect` are `null` when unrecorded; `config_fault` is omitted while the file parses; a successful reconnect clears `last_error`) |
+| `canopy remote status [--json]` | Show the sign-in state, whether remote is enabled, the relay URL, the relay phase (`relay:`), the last relay error and reconnect time, and a `config invalid, ...; config.toml: <reason>` line while `config.toml` fails to parse (the last valid config stays live, and `enabled`/`relay_url` show those effective values); `--json` prints `{signed_in, login, enabled, relay_url, relay, last_error, last_reconnect}` plus `config_fault` when invalid (`relay` is the daemon's live phase when it answers, else a local fallback; `last_error`/`last_reconnect` are `null` when unrecorded; `config_fault` is omitted while the file parses; a successful reconnect clears `last_error`) |
 | `canopy remote on [--yes]` / `off` | Turn the relay connection on or off (`[remote] enabled`); the daemon picks the change up without a restart. `on` goes through the running daemon and asks `Type 'yes' to confirm` unless `--yes` is passed (for scripts); `off` stays local |
-| `canopy remote pair [--yes]` | Create a one-time code, print it with its `<relay_url>/pair#<code>` link and expiry, and draw the link as a terminal QR code. Asks `Type 'yes' to confirm` unless `--yes` is passed |
+| `canopy remote pair [--yes]` | Create a one-time code, print it with its `<relay_url>/pair#<code>` link and expiry, and draw the link as a terminal QR code. Refuses with the fix (exit 1, no code) while signed out, while remote is off, or while the relay is not connected. Asks `Type 'yes' to confirm` unless `--yes` is passed |
 | `canopy remote devices [--json]` | List paired browsers (`id`, `label`, `paired_at`, `last_seen`) |
 | `canopy remote revoke <device_id> [--yes]` | Delete a paired browser and close its live connection at once. Asks `Type 'yes' to confirm` unless `--yes` is passed |
 | `canopy remote disconnect <device_id>` | Close a paired browser's live connection at once, keeping the pairing so it may reconnect |
@@ -404,7 +404,12 @@ this host, authenticated by the code, so later connections need no code
 and the relay never learns anything that lets it impersonate either side.
 The exchange rides the daemon's relay connection, so pairing completes
 only while the daemon is running, `remote status` shows a login, and
-remote is on. A failed exchange tells the browser only `no_code`,
+remote is on. `canopy remote pair` refuses before minting a code that
+could not work: `not signed in: run 'canopy remote login'` while signed
+out, `remote is off: run 'canopy remote on'` while remote is off, and
+`remote is on but not connected to the relay yet (state: <state>)...`
+while the relay is not connected — each names its fix and writes no
+pairing row. A failed exchange tells the browser only `no_code`,
 `expired` or `bad_code`: run `canopy remote pair` again for a fresh code.
 A guest browser — one signed in as a GitHub login other than the owner's —
 pairs only while that login holds a trust grant (add one from the TUI

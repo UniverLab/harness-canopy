@@ -88,6 +88,9 @@ pub(crate) struct RemoteState {
     pub row_idx: usize,
     /// The last pairing code fetched; stays valid after the overlay hides.
     pub pair: Option<PairView>,
+    /// The last pairing refusal: the overlay shows this fix text instead of
+    /// a code until a fresh code arrives.
+    pub pair_error: Option<String>,
     pub pair_open: bool,
     /// The device id an armed `r` revoke would delete.
     pub revoke_confirm: Option<String>,
@@ -344,9 +347,13 @@ impl App {
             RemoteWriteResult::SetEnabled(Err(text)) => self.set_remote_message(true, text),
             RemoteWriteResult::Pair(Ok(pair)) => {
                 self.hub.remote.pair = Some(pair);
+                self.hub.remote.pair_error = None;
                 self.open_pair_overlay();
             }
-            RemoteWriteResult::Pair(Err(text)) => self.set_remote_message(true, text),
+            RemoteWriteResult::Pair(Err(text)) => {
+                self.hub.remote.pair_error = Some(text);
+                self.open_pair_overlay();
+            }
             RemoteWriteResult::Revoke(Ok(id)) => {
                 self.set_remote_message(false, format!("Revoked {id}"));
                 self.remote_request_refresh();
@@ -498,9 +505,10 @@ impl App {
         self.spawn_remote_write(|port| RemoteWriteResult::Pair(fetch_pair_view(&port)));
     }
 
-    /// Show the pairing overlay for the last fetched code.
+    /// Show the pairing overlay for the last fetched code, or for the last
+    /// refusal when no fresh code arrived.
     pub(crate) fn open_pair_overlay(&mut self) {
-        if self.hub.remote.pair.is_some() {
+        if self.hub.remote.pair.is_some() || self.hub.remote.pair_error.is_some() {
             self.hub.remote.pair_open = true;
         }
     }
@@ -1015,6 +1023,43 @@ mod tests {
         app.close_pair_overlay();
         assert!(!app.hub.remote.pair_open);
         assert!(app.hub.remote.pair.is_some(), "the code stays");
+    }
+
+    #[test]
+    fn pair_refusal_opens_the_overlay_with_the_fix_text() {
+        let mut app = test_app();
+        app.apply_remote_write(RemoteWriteResult::Pair(Err(
+            "not signed in: run 'canopy remote login'".to_string(),
+        )));
+        assert!(
+            app.hub.remote.pair_open,
+            "a refusal opens the overlay, like a code does"
+        );
+        assert_eq!(
+            app.hub.remote.pair_error.as_deref(),
+            Some("not signed in: run 'canopy remote login'")
+        );
+        assert!(
+            app.hub.remote.pair.is_none(),
+            "no code arrives with a refusal"
+        );
+        assert!(
+            app.hub.remote.message.is_none(),
+            "the refusal lives in the overlay, not the message line"
+        );
+
+        app.close_pair_overlay();
+        assert!(!app.hub.remote.pair_open);
+
+        // A fresh code clears the refusal so the overlay shows the code.
+        app.apply_remote_write(RemoteWriteResult::Pair(Ok(PairView {
+            code: "7K3QH-M9P2X".to_string(),
+            link: "https://remote.univerlab.org/pair#7K3QH-M9P2X".to_string(),
+            expires_at: chrono::Utc::now().timestamp() + 600,
+            qr: "qr".to_string(),
+        })));
+        assert!(app.hub.remote.pair_error.is_none());
+        assert!(app.hub.remote.pair_open);
     }
 
     #[test]

@@ -132,6 +132,31 @@ pub fn status_view(data_dir: &Path, db: &Database, live: &RemoteLive) -> Result<
     })
 }
 
+/// Refuse to create a pairing code unless it could work, in the order the
+/// fix runs: sign in first, then switch remote on, then wait for the relay.
+/// The daemon calls this before `create_pairing` so the CLI, the TUI and
+/// direct `/admin/remote` callers share one guard and write no row on
+/// refusal.
+pub fn ensure_pairable(data_dir: &Path, live: &RemoteLive) -> Result<()> {
+    if super::auth::load_identity(data_dir).is_none() {
+        anyhow::bail!("not signed in: run 'canopy remote login'");
+    }
+    if !crate::domain::canopy_config::CanopyConfig::load(data_dir)
+        .remote
+        .enabled
+    {
+        anyhow::bail!("remote is off: run 'canopy remote on'");
+    }
+    let phase = live.phase();
+    if phase != RelayPhase::Connected {
+        anyhow::bail!(
+            "remote is on but not connected to the relay yet (state: {}); wait a few seconds and retry, or check 'canopy remote status'",
+            relay_text(phase)
+        );
+    }
+    Ok(())
+}
+
 /// Create a one-time pairing code with its link and QR, replacing any live
 /// one — the same code `canopy remote pair` prints.
 pub fn create_pairing(data_dir: &Path) -> Result<PairView> {

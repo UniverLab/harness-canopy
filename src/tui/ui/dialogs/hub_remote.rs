@@ -396,10 +396,18 @@ fn draw_revoke_confirm(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, 
 }
 
 /// The pairing overlay: code, link, QR, countdown and the Esc hint,
-/// centered on the frame over the hub.
+/// centered on the frame over the hub. A refusal shows its fix text
+/// instead of a code.
 pub(super) fn draw_pair_overlay(frame: &mut Frame, app: &App, theme: &Theme) {
     let remote = &app.hub.remote;
-    let (Some(pair), true) = (remote.pair.as_ref(), remote.pair_open) else {
+    if !remote.pair_open {
+        return;
+    }
+    if let Some(error) = remote.pair_error.as_deref() {
+        draw_pair_refusal(frame, theme, error);
+        return;
+    }
+    let Some(pair) = remote.pair.as_ref() else {
         return;
     };
     let qr_lines: Vec<&str> = pair.qr.lines().collect();
@@ -483,6 +491,107 @@ pub(super) fn draw_pair_overlay(frame: &mut Frame, app: &App, theme: &Theme) {
         .alignment(Alignment::Center),
         rows[4],
     );
+}
+
+/// The pairing refusal: why no code was minted and how to fix it, with
+/// the Esc hint, centered on the frame over the hub. The fix text wraps
+/// instead of truncating, so the longest refusal (the relay one) keeps its
+/// `canopy remote status` pointer visible on an 80-column terminal.
+fn draw_pair_refusal(frame: &mut Frame, theme: &Theme, error: &str) {
+    use ratatui::widgets::Wrap;
+    let hint = "Esc hide";
+    let frame_area = frame.area();
+    let width = ((error.chars().count().max(hint.chars().count()) + 4) as u16)
+        .min(frame_area.width.saturating_sub(2));
+    if width < 10 {
+        return;
+    }
+    // Two border columns flank the text; wrap to what remains.
+    let wrap_width = width.saturating_sub(4).max(8) as usize;
+    let lines = wrap_refusal(error, wrap_width);
+    // Wrapped lines, the hint row, and the top/bottom borders.
+    let height = (lines.len() as u16 + 1 + 2).min(frame_area.height);
+    if height < 4 {
+        return;
+    }
+    let area = centered_box(width, height, frame_area);
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .title(" Pair a device ")
+        .borders(crate::tui::ui::dialog_borders_for(theme))
+        .border_style(Style::default().fg(theme.header_color))
+        .style(Style::default().bg(theme.dialog_bg));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let mut constraints = vec![Constraint::Length(1); lines.len() + 1];
+    // The rows the frame can actually show (a short frame clips the tail).
+    constraints.truncate(inner.height as usize);
+    if constraints.is_empty() {
+        return;
+    }
+    let rows = Layout::vertical(constraints).split(inner);
+    for (line, row) in lines.iter().zip(rows.iter()) {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                line.clone(),
+                Style::default().fg(theme.error),
+            )))
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+            *row,
+        );
+    }
+    if let Some(hint_row) = rows.get(lines.len()) {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                hint,
+                Style::default().fg(theme.dim_text),
+            )))
+            .alignment(Alignment::Center),
+            *hint_row,
+        );
+    }
+}
+
+/// Greedy word-wrap for the refusal overlay: fill each row without breaking
+/// words, splitting only a word longer than the row itself.
+fn wrap_refusal(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for word in text.split(' ') {
+        if word.chars().count() > width {
+            if !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+            }
+            // `cut` is a char-boundary prefix of `rest`, so its byte length
+            // is the split point.
+            let mut rest = word;
+            while rest.chars().count() > width {
+                let cut: String = rest.chars().take(width).collect();
+                let taken = cut.len();
+                lines.push(cut);
+                rest = &rest[taken..];
+            }
+            current = rest.to_string();
+            continue;
+        }
+        let extra = if current.is_empty() { 0 } else { 1 } + word.chars().count();
+        if current.chars().count() + extra > width {
+            lines.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+    if !current.is_empty() {
+        lines.push(std::mem::take(&mut current));
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
 }
 
 /// The trust overlay: username, comma-separated sessions, the
@@ -992,6 +1101,54 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn pair_refusal_wraps_the_full_fix_on_a_narrow_frame() {
+        // The longest refusal must keep its fix visible at 80 columns: no
+        // truncation ellipsis, and the status pointer survives intact.
+        let error = "remote is on but not connected to the relay yet (state: token rejected: sign in again); wait a few seconds and retry, or check 'canopy remote status'";
+        let mut app = remote_app();
+        app.hub.remote.pair_error = Some(error.to_string());
+        app.hub.remote.pair_open = true;
+        let text = draw(&mut app, 80, 24);
+        assert!(!text.contains('…'), "nothing truncates: {text}");
+        // Wrapping may split a phrase across rows, so assert on fragments.
+        for word in [
+            "remote is on but not connected",
+            "token rejected:",
+            "sign in again",
+            "wait a few seconds and retry",
+            "check 'canopy remote",
+            "status'",
+            "Esc hide",
+        ] {
+            assert!(text.contains(word), "{word}: {text}");
+        }
+        // A short refusal still fits on one line next to the hint.
+        let mut app = remote_app();
+        app.hub.remote.pair_error = Some("not signed in: run 'canopy remote login'".to_string());
+        app.hub.remote.pair_open = true;
+        let text = draw(&mut app, 120, 40);
+        assert!(
+            text.contains("not signed in: run 'canopy remote login'"),
+            "{text}"
+        );
+        assert!(text.contains("Esc hide"), "{text}");
+    }
+
+    #[test]
+    fn wrap_refusal_fills_rows_without_breaking_words() {
+        assert_eq!(wrap_refusal("a b c", 5), vec!["a b c".to_string()]);
+        assert_eq!(
+            wrap_refusal("a b c", 3),
+            vec!["a b".to_string(), "c".to_string()]
+        );
+        assert_eq!(
+            wrap_refusal("abcdefghij", 4),
+            vec!["abcd".to_string(), "efgh".to_string(), "ij".to_string()]
+        );
+        assert_eq!(wrap_refusal("", 4), vec![String::new()]);
     }
 
     #[test]

@@ -187,6 +187,7 @@ fn status_json_reports_signed_in_login_enabled_and_relay_url() {
             "login": "alice",
             "enabled": true,
             "relay_url": "https://remote.univerlab.org",
+            "relay": "connecting",
             "last_error": null,
             "last_reconnect": null,
         })
@@ -261,6 +262,56 @@ fn status_surfaces_a_stored_handshake_rejection() {
         seen.last_error.as_deref().unwrap().contains("bad_label"),
         "the 400 reason must reach status verbatim"
     );
+}
+
+#[test]
+fn status_relay_falls_back_off_while_disabled() {
+    let signed_out = build_remote_status(&CanopyConfig::default(), None, None);
+    assert_eq!(signed_out.relay, "off");
+    assert_eq!(fallback_relay(false, None), "off");
+    assert_eq!(
+        fallback_relay(
+            false,
+            Some("github token rejected: run canopy remote login")
+        ),
+        "off",
+        "the switch wins over any stored error"
+    );
+}
+
+#[test]
+fn status_relay_names_the_rejected_phase_from_the_stored_error() {
+    assert_eq!(
+        fallback_relay(true, Some("github token rejected: run canopy remote login")),
+        "token rejected: sign in again"
+    );
+    assert_eq!(
+        fallback_relay(
+            true,
+            Some("relay rejected the handshake: HTTP 400 bad_label: label is not header-safe")
+        ),
+        "relay rejected: see remote status"
+    );
+    assert_eq!(fallback_relay(true, None), "connecting");
+    assert_eq!(
+        fallback_relay(true, Some("relay socket idle past its timeout")),
+        "connecting",
+        "a transient error means the relay is still dialling"
+    );
+}
+
+#[test]
+fn status_json_without_relay_still_parses() {
+    let status: RemoteStatus = serde_json::from_value(serde_json::json!({
+        "signed_in": false,
+        "login": null,
+        "enabled": false,
+        "relay_url": "https://remote.univerlab.org",
+        "last_error": null,
+        "last_reconnect": null,
+    }))
+    .expect("old status JSON without relay still parses");
+    assert_eq!(status.relay, String::new());
 }
 
 #[test]

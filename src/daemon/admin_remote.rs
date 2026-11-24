@@ -481,12 +481,15 @@ mod tests {
     #[tokio::test]
     async fn pair_returns_the_pairing_view() {
         let server = spawn_admin().await;
+        sign_in_and_enable(server.home.path());
+        crate::remote::live::shared().set_phase(crate::remote::live::RelayPhase::Connected);
         let response = post(
             &server,
             Some(TEST_TOKEN),
             &serde_json::json!({ "action": "pair", "confirm": true }),
         )
         .await;
+        crate::remote::live::shared().set_phase(crate::remote::live::RelayPhase::Off);
         assert_eq!(response.status().as_u16(), 200);
         let body = response.json::<serde_json::Value>().await.expect("json");
         for key in ["code", "link", "expires_at", "qr"] {
@@ -500,6 +503,88 @@ mod tests {
                 .exists(),
             "the code is written under the temp HOME, never the real one"
         );
+    }
+
+    /// Signed in, switched on and connected: the only state that mints a
+    /// code. Every helper below leaves the temp HOME exactly as it found
+    /// it except for the identity and switch it sets up.
+    fn sign_in_and_enable(home: &std::path::Path) {
+        let data_dir = home.join(".canopy");
+        crate::remote::auth::save_identity(
+            &data_dir,
+            &crate::remote::auth::GitHubIdentity {
+                token: "[REDACTED]".to_string(),
+                login: "octocat".to_string(),
+                id: 1,
+            },
+        )
+        .expect("identity");
+        crate::remote::panel::set_enabled(&data_dir, true).expect("on");
+    }
+
+    /// One `pair` refusal: the exact fix text, a 422, and no pairing row.
+    async fn refused_pair(server: &AdminServer, expected: &str) {
+        let (status, body) = error_body(
+            post(
+                server,
+                Some(TEST_TOKEN),
+                &serde_json::json!({ "action": "pair", "confirm": true }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, 422, "{body}");
+        assert_eq!(
+            body.get("error").and_then(Value::as_str),
+            Some(expected),
+            "{body}"
+        );
+        assert!(
+            !server
+                .home
+                .path()
+                .join(".canopy/remote/pairing.json")
+                .exists(),
+            "a refusal writes no pairing row: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pair_refuses_while_signed_out() {
+        let server = spawn_admin().await;
+        crate::remote::live::shared().set_phase(crate::remote::live::RelayPhase::Off);
+        refused_pair(&server, "not signed in: run 'canopy remote login'").await;
+    }
+
+    #[tokio::test]
+    async fn pair_refuses_while_remote_is_off() {
+        let server = spawn_admin().await;
+        let data_dir = server.home.path().join(".canopy");
+        crate::remote::auth::save_identity(
+            &data_dir,
+            &crate::remote::auth::GitHubIdentity {
+                token: "[REDACTED]".to_string(),
+                login: "octocat".to_string(),
+                id: 1,
+            },
+        )
+        .expect("identity");
+        crate::remote::live::shared().set_phase(crate::remote::live::RelayPhase::Connected);
+        refused_pair(&server, "remote is off: run 'canopy remote on'").await;
+        crate::remote::live::shared().set_phase(crate::remote::live::RelayPhase::Off);
+    }
+
+    #[tokio::test]
+    async fn pair_refuses_while_the_relay_is_not_connected() {
+        let server = spawn_admin().await;
+        sign_in_and_enable(server.home.path());
+        crate::remote::live::shared().set_phase(crate::remote::live::RelayPhase::Connecting);
+        refused_pair(
+            &server,
+            "remote is on but not connected to the relay yet (state: connecting); wait a few seconds and retry, or check 'canopy remote status'",
+        )
+        .await;
+        crate::remote::live::shared().set_phase(crate::remote::live::RelayPhase::Off);
     }
 
     #[tokio::test]

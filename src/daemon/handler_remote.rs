@@ -155,6 +155,11 @@ impl TaskTriggerHandler {
 
 pub(crate) fn remote_pair_impl() -> Result<CallToolResult, McpError> {
     let dir = data_dir()?;
+    // The one guard for every pair caller (CLI, TUI, direct admin route):
+    // a refusal writes no pairing row and keeps the exact fix text.
+    if let Err(error) = panel::ensure_pairable(&dir, &live::shared()) {
+        return Ok(error_result(&format!("{error:#}")));
+    }
     match panel::create_pairing(&dir) {
         Ok(pair) => to_json(&pair),
         Err(error) => Ok(error_result(&format!("remote pair: {error:#}"))),

@@ -143,6 +143,12 @@ fn handle_status(json: bool) -> Result<()> {
     let db = open_db(&data_dir).ok();
     let mut status = auth::build_remote_status(&config, identity.as_ref(), db.as_ref());
     status.config_fault = crate::domain::config_cache::read_fault_message(&data_dir);
+    // The daemon's live phase when it answers; otherwise the local
+    // fallback already in `status.relay` (off, a rejected phase, or
+    // connecting). This is the state the pair guard checks.
+    if let Some(relay) = daemon_relay(crate::resolve_port(None)) {
+        status.relay = relay;
+    }
     if json {
         println!("{}", serde_json::to_string_pretty(&status)?);
         return Ok(());
@@ -153,6 +159,7 @@ fn handle_status(json: bool) -> Result<()> {
     }
     println!("enabled: {}", status.enabled);
     println!("relay_url: {}", status.relay_url);
+    println!("relay: {}", status.relay);
     if let Some(at) = &status.last_reconnect {
         println!("last_reconnect: {at}");
     }
@@ -183,6 +190,25 @@ fn handle_switch(enabled: bool, yes: bool) -> Result<()> {
     )?;
     println!("remote: on");
     Ok(())
+}
+
+/// The relay phase from the running daemon's `remote status`, or `None`
+/// when the daemon is down or its answer is unreadable (the caller keeps
+/// the local fallback). A refused connection answers at once; only a
+/// half-open socket waits out the client's timeout.
+fn daemon_relay(port: u16) -> Option<String> {
+    let outcome = crate::tui::mcp_client::call_daemon_tool(
+        &port.to_string(),
+        "remote",
+        &serde_json::json!({ "action": "status" }),
+    )
+    .ok()?;
+    if outcome.is_error {
+        return None;
+    }
+    serde_json::from_str::<super::panel::RemoteView>(&outcome.text)
+        .ok()
+        .map(|view| view.relay)
 }
 
 /// POST one body to the daemon's admin route, mapping its refusal onto the
@@ -529,6 +555,15 @@ mod tests {
             RemoteAction::Disconnect { device_id } => assert_eq!(device_id, "bfcba2b742a807bb"),
             _ => panic!("expected disconnect"),
         }
+    }
+
+    #[test]
+    fn relay_falls_back_when_the_daemon_is_down() {
+        // Nothing listens here, so the connection is refused at once: the
+        // status keeps its local fallback instead of the live phase.
+        let port = crate::remote::admin_client::test_support::unused_port();
+        let port: u16 = port.parse().expect("port");
+        assert_eq!(daemon_relay(port), None);
     }
 
     #[test]
