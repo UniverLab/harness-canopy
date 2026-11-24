@@ -266,6 +266,8 @@ Graph-node sessions (agent and ensemble nodes launched by the graph engine) rece
 
 ## Data Storage
 
+On Unix, `~/.canopy/` is private to the user: `~/.canopy/` and `~/.canopy/logs/` are created and kept at mode `0700`, new database and log files are created `0600`, and daemon/TUI startup recursively strips group and world permission bits from existing entries without changing the process umask.
+
 | Data | Location | Format |
 |------|----------|--------|
 | Structured data | `~/.canopy/background_agents.db` | SQLite (WAL mode) |

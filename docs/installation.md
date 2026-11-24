@@ -151,7 +151,11 @@ rather than only pointing at the logs: an `ExecMainStatus` of `203` reports
 
 ## Data directory
 
-All state lives under `~/.canopy/`:
+All state lives under `~/.canopy/` (on Unix, created and maintained with mode
+`0700` for `~/.canopy/` and `~/.canopy/logs/`, refusing if the state directory
+is a symlink; new `background_agents.db` and log files are created `0600`, and
+daemon/TUI startup strips group and world permission bits recursively from
+existing non-symlink entries without altering the process umask):
 
 | Data | Location | Format |
 |------|----------|--------|
