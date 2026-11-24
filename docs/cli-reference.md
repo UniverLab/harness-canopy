@@ -42,7 +42,10 @@ with `daemon exited during start: <line>` plus the tail of
 this daemon did not start, `daemon start` (and a managed `daemon restart`)
 fails without signalling it: `port N is held by pid P (...), which this
 daemon did not start; ...` — stop it with `canopy daemon stop` or pick
-another port with `--port`.
+another port with `--port`. If the database is damaged, `daemon start`
+fails before any spawn or pid-file handling, names the backup (or that none
+exists) and the restore command, and leaves the damaged file untouched; see
+[Health check](installation.md#health-check).
 
 ## Updates
 
