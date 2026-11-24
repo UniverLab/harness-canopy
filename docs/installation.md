@@ -62,7 +62,9 @@ source). It also rewrites legacy unauthenticated canopy MCP entries (the
 old URL form, with or without headers) to the stdio `canopy bridge`
 form, creating a one-time `<config>.canopy-bak` backup before the first
 rewrite of a file. Running `canopy` with no arguments triggers setup
-automatically if it has never run.
+automatically if it has never run. Before or after setup,
+[Network and privacy](network-and-privacy.md) lists every outbound
+connection canopy makes and how to turn each one off.
 
 If no supported platform CLI is on `PATH`, `canopy setup` prints `No
 supported platform CLI detected on PATH.` — meaning no platform is

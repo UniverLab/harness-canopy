@@ -94,7 +94,7 @@ curl -fsSL https://raw.githubusercontent.com/UniverLab/harness-canopy/main/scrip
 ```
 
 Or via cargo: `cargo install harness-canopy` (the binary is `canopy`). Prefer the script: release binaries carry two patched dependencies that cargo leaves out of published crates, including the fix that keeps remote control connected over a relay.
-See [`docs/installation.md`](docs/installation.md) for all methods and first-time setup.
+See [`docs/installation.md`](docs/installation.md) for all methods and first-time setup. To see every connection canopy makes before you install, read [Network and privacy](docs/network-and-privacy.md).
 New here? Run your first graph in five minutes with [`docs/first-graph.md`](docs/first-graph.md) — no AI CLI needed.
 
 ## Documentation
@@ -102,7 +102,8 @@ New here? Run your first graph in five minutes with [`docs/first-graph.md`](docs
 Full documentation lives in [`docs/`](docs/): installation, quick start,
 [your first graph](docs/first-graph.md), the
 TUI, agents and seed identities, intelligence & sync, graphs, the RAG
-pipeline, all MCP tools, and the complete CLI reference.
+pipeline, all MCP tools, the complete CLI reference,
+and [network and privacy](docs/network-and-privacy.md).
 
 ## Contributing
 

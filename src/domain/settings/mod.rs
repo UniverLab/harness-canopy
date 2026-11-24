@@ -15,6 +15,10 @@ pub mod registry;
 pub mod validate;
 pub mod writer;
 
+#[cfg(test)]
+#[path = "docs_network_tests.rs"]
+mod docs_network_tests;
+
 pub use registry::REGISTRY;
 
 /// The value type a setting accepts.
