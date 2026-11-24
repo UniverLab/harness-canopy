@@ -26,6 +26,7 @@ pub mod peer;
 pub mod peer_ice;
 pub mod proxy;
 pub mod qr;
+pub mod reaper;
 #[cfg(test)]
 #[path = "reconnect_tests.rs"]
 mod reconnect_tests;

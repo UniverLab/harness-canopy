@@ -98,7 +98,16 @@ impl TaskTriggerHandler {
 
     pub(crate) fn remote_revoke_impl(&self, device_id: &str) -> Result<CallToolResult, McpError> {
         match panel::revoke(&self.db, device_id) {
-            Ok(true) => to_json(&json!({ "revoked": device_id })),
+            Ok(true) => {
+                // Close the live peer at once so the reply reflects it; the
+                // peer shares its connection token with the registry, so one
+                // cancel ends both. The reaper drains the queued id right
+                // after for every other holder.
+                let live = live::shared();
+                let closed = u8::from(live.live_devices().iter().any(|id| id == device_id));
+                live.peers().close_revoked(device_id);
+                to_json(&json!({ "revoked": device_id, "closed": closed }))
+            }
             Ok(false) => Ok(error_result(&format!(
                 "no paired device with id {device_id}"
             ))),
@@ -149,7 +158,20 @@ pub(crate) fn remote_pair_impl() -> Result<CallToolResult, McpError> {
 pub(crate) fn remote_set_enabled_impl(enabled: bool) -> Result<CallToolResult, McpError> {
     let dir = data_dir()?;
     match panel::set_enabled(&dir, enabled) {
-        Ok(()) => to_json(&json!({ "enabled": enabled })),
+        Ok(()) => {
+            if !enabled {
+                // Close every live peer at once so the reply reflects it;
+                // the reaper repeats the pass within a second.
+                let live = live::shared();
+                let ids = live.live_devices();
+                for id in &ids {
+                    live.peers().close(id);
+                }
+                to_json(&json!({ "enabled": false, "closed": ids.len() }))
+            } else {
+                to_json(&json!({ "enabled": true }))
+            }
+        }
         Err(error) => Ok(error_result(&format!("remote set_enabled: {error:#}"))),
     }
 }

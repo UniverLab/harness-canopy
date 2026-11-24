@@ -358,56 +358,11 @@ impl RelayRuntime {
     /// Close every connection whose device was revoked or disconnected by
     /// another process (the CLI queues ids to `remote_revoke` /
     /// `remote_disconnect`), plus every guest peer whose login lost trust
-    /// (`remote_trust_revoke`). A revoked peer hears `error{code:"revoked"}`
-    /// before its close; a disconnected one just closes and may reconnect.
+    /// (`remote_trust_revoke`). The daemon-level reaper runs the same pass
+    /// without the socket, so this tick only keeps a connected socket
+    /// current.
     pub fn drain_remote_revocations(&self) {
-        self.drain_queue(REMOTE_REVOKE_KEY, |runtime, id| {
-            runtime.peers.close_revoked(id);
-            runtime.connections.close(id);
-        });
-        self.drain_queue(REMOTE_DISCONNECT_KEY, |runtime, id| {
-            runtime.connections.close(id);
-            runtime.peers.close(id);
-        });
-        self.drain_queue(REMOTE_TRUST_REVOKE_KEY, |runtime, login| {
-            runtime.close_login_peers(login);
-        });
-    }
-
-    /// Close every live peer paired under one login. A narrowed grant closes
-    /// the whole peer — there is no live-push channel for a smaller grant,
-    /// so the guest reconnects and re-resolves it.
-    fn close_login_peers(&self, login: &str) {
-        let login = trust::normalize_login(login);
-        let Ok(devices) = self.devices.list() else {
-            return;
-        };
-        for device in devices {
-            if trust::normalize_login(&device.github_login) == login {
-                self.peers.close_revoked(&device.id);
-                self.connections.close(&device.id);
-            }
-        }
-    }
-
-    /// Close every id queued under `key`, leaving ids that landed while
-    /// closing for the next tick.
-    fn drain_queue(&self, key: &str, close: impl Fn(&Self, &str)) {
-        let Ok(Some(value)) = self.db.get_state(key) else {
-            return;
-        };
-        let drained: Vec<&str> = value.split(',').filter(|id| !id.is_empty()).collect();
-        for id in &drained {
-            close(self, id);
-        }
-        // An id that lands while we close must survive: keep whatever we
-        // did not just drain instead of blanking the key.
-        let current = self.db.get_state(key).ok().flatten().unwrap_or_default();
-        let remaining: Vec<&str> = current
-            .split(',')
-            .filter(|id| !id.is_empty() && !drained.contains(id))
-            .collect();
-        let _ = self.db.set_state(key, &remaining.join(","));
+        super::reaper::drain_queues(&self.db, &self.peers, &self.connections);
     }
 }
 
@@ -459,12 +414,23 @@ fn queue_device_id(db: &Database, key: &str, device_id: &str) {
     let _ = db.set_state(key, &ids.join(","));
 }
 
-/// Spawn the relay supervisor for the life of the daemon. It re-reads
-/// config and identity on every iteration, so `canopy remote on|off` takes
-/// effect without a restart.
+/// Spawn the relay supervisor and the peer reaper for the life of the
+/// daemon. The supervisor re-reads config and identity on every iteration,
+/// so `canopy remote on|off` takes effect without a restart; the reaper
+/// ticks every second beside it and closes live peers without the socket,
+/// so revocations land in every supervisor state.
 pub fn spawn(data_dir: std::path::PathBuf, db: Database, sessions: Arc<SessionsState>) {
     let live = crate::remote::live::shared();
-    tokio::spawn(async move { supervise(data_dir, db, sessions, live).await });
+    let connections = ConnectionRegistry::default();
+    let peers = live.peers().clone();
+    tokio::spawn(supervise(
+        data_dir.clone(),
+        db.clone(),
+        sessions,
+        live,
+        connections.clone(),
+    ));
+    tokio::spawn(super::reaper::run(data_dir, db, peers, connections));
 }
 
 /// What keeps the relay from connecting this second.
@@ -672,11 +638,11 @@ pub async fn supervise(
     db: Database,
     sessions: Arc<SessionsState>,
     live: Arc<RemoteLive>,
+    connections: ConnectionRegistry,
 ) {
     let mut attempt = 0u32;
     let mut rejected_token: Option<String> = None;
     let mut rejected_label: Option<String> = None;
-    let connections = ConnectionRegistry::default();
     let peers = live.peers().clone();
     loop {
         match next_action(

@@ -417,7 +417,7 @@ mod tests {
         assert_eq!(response.status().as_u16(), 200);
         assert_eq!(
             response.json::<serde_json::Value>().await.expect("json"),
-            serde_json::json!({ "enabled": false })
+            serde_json::json!({ "enabled": false, "closed": 0 })
         );
     }
 
@@ -531,8 +531,32 @@ mod tests {
         assert_eq!(response.status().as_u16(), 200);
         assert_eq!(
             response.json::<serde_json::Value>().await.expect("json"),
-            serde_json::json!({ "revoked": id })
+            serde_json::json!({ "revoked": id, "closed": 0 })
         );
+
+        // A live peer reports `closed: 1` and is cancelled at once. This
+        // test holds `HOME_LOCK` for its whole life, so no other admin test
+        // can close the shared peers in between.
+        let live_id = pair_device(&server.db, "live laptop");
+        let live = crate::remote::live::shared();
+        let token = std::sync::Arc::new(tokio_util::sync::CancellationToken::new());
+        let (control, _inbox) = tokio::sync::mpsc::unbounded_channel();
+        assert!(live
+            .peers()
+            .register(&live_id, "d:live", token.clone(), control));
+        let response = post(
+            &server,
+            Some(TEST_TOKEN),
+            &serde_json::json!({ "action": "revoke", "device_id": live_id, "confirm": true }),
+        )
+        .await;
+        assert_eq!(response.status().as_u16(), 200);
+        assert_eq!(
+            response.json::<serde_json::Value>().await.expect("json"),
+            serde_json::json!({ "revoked": live_id, "closed": 1 })
+        );
+        assert!(token.is_cancelled(), "revoke closes the live peer at once");
+        live.peers().close(&live_id);
 
         let (status, body) = error_body(
             post(

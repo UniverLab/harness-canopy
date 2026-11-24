@@ -128,6 +128,7 @@ fn handle_logout() -> Result<()> {
     let data_dir = crate::ensure_data_dir()?;
     auth::logout(&data_dir)?;
     println!("Signed out of GitHub.");
+    println!("live connections close within a second while the daemon runs");
     Ok(())
 }
 
@@ -283,6 +284,11 @@ fn handle_revoke(device_id: &str, yes: bool) -> Result<()> {
         .and_then(|revoked| revoked.as_str())
         .unwrap_or(device_id);
     println!("revoked {revoked}");
+    if body.get("closed").and_then(|closed| closed.as_u64()) == Some(1) {
+        println!("closed 1 live connection");
+    } else {
+        println!("no live connection");
+    }
     Ok(())
 }
 

@@ -190,6 +190,7 @@ async fn http_401_stops_without_reconnecting() {
         db.clone(),
         test_sessions(&db),
         Arc::clone(&live),
+        ConnectionRegistry::default(),
     ));
     // Longer than the slowest first backoff (1200 ms): a 401 misclassified
     // as transient would have retried by now.
@@ -906,6 +907,7 @@ async fn supervise_reports_off_while_signed_out_or_disabled() {
         db.clone(),
         test_sessions(&db),
         Arc::clone(&live),
+        ConnectionRegistry::default(),
     ));
     tokio::time::sleep(Duration::from_millis(300)).await;
     running.abort();
@@ -930,6 +932,7 @@ async fn supervise_reports_off_while_signed_out_or_disabled() {
         db.clone(),
         test_sessions(&db),
         Arc::clone(&live),
+        ConnectionRegistry::default(),
     ));
     tokio::time::sleep(Duration::from_millis(300)).await;
     running.abort();
@@ -996,6 +999,7 @@ async fn a_held_open_socket_reports_connected_while_it_serves() {
         db.clone(),
         test_sessions(&db),
         Arc::clone(&live),
+        ConnectionRegistry::default(),
     ));
     tokio::time::sleep(Duration::from_millis(1000)).await;
     assert_eq!(
@@ -1085,6 +1089,7 @@ async fn a_killed_relay_socket_reconnects_within_the_minute_and_status_shows_it(
         db.clone(),
         test_sessions(&db),
         Arc::clone(&live),
+        ConnectionRegistry::default(),
     ));
 
     wait_until(Duration::from_secs(10), "the first connection", || {
@@ -1185,6 +1190,7 @@ async fn disabled_stays_quiet_without_a_reconnect_storm() {
         db.clone(),
         test_sessions(&db),
         Arc::clone(&live),
+        ConnectionRegistry::default(),
     ));
     wait_until(Duration::from_secs(10), "the first connection", || {
         counter.load(Ordering::SeqCst) >= 1
@@ -1288,6 +1294,7 @@ async fn http_400_records_the_reason_without_reconnecting() {
         db.clone(),
         test_sessions(&db),
         Arc::clone(&live),
+        ConnectionRegistry::default(),
     ));
     // Longer than the slowest first backoff (1200 ms): a 400 misclassified
     // as transient would have retried by now.

@@ -395,7 +395,8 @@ the code.
 `last_seen` (`never` when the registry has no time), one line per device
 or as a JSON array; `no paired devices` when there are none. `canopy
 remote revoke <device_id>` deletes the device and closes its live
-connection within a second, printing `revoked <device_id>`, and refuses
+connection at once, printing `revoked <device_id>` followed by `closed 1
+live connection` (`no live connection` when nothing was live), and refuses
 an unknown id with `no paired device with id <device_id>`. `canopy
 remote disconnect <device_id>` closes the live connection the same way
 but keeps the pairing, printing `disconnected <device_id>` and refusing
@@ -479,8 +480,9 @@ nothing comes back — no Pong, no frame — for 45 seconds, so a dead relay
 link is noticed within a minute instead of leaving the relay listing the
 host as online. A dropped socket is retried after one second, doubling to
 thirty seconds, with jitter.
-`canopy remote off` closes the socket and `on` reconnects within a second
-— neither needs a daemon restart. If the relay answers HTTP 401, the
+`canopy remote off` closes the socket and every live connection within a
+second, and `on` reconnects within a second — neither needs a daemon
+restart. If the relay answers HTTP 401, the
 daemon stops retrying that token and logs `github token rejected: run
 canopy remote login` (see `canopy daemon logs`); a fresh `canopy remote
 login` makes it connect again. If the relay answers HTTP 400, the daemon
@@ -507,7 +509,9 @@ denied code stops with a one-line message — and ends with `Signed in to
 GitHub as <login>.` It stores `{token, login, id}` in
 `~/.canopy/remote/github.json` (mode 0600, directory 0700); the token never
 appears in logs, errors, or status output. `logout` deletes that file and
-succeeds when it is already gone. `status` prints `login: <login>` (or
+succeeds when it is already gone, printing `live connections close within
+a second while the daemon runs` — the daemon's reaper closes every live
+peer once the identity is gone. `status` prints `login: <login>` (or
 `not signed in`), `enabled: …`, `relay_url: …`, and — once the daemon has
 recorded them — `last_reconnect: <RFC 3339>` and `last_error: <message>`,
 so a dropped relay link is visible without reading the daemon log; the
