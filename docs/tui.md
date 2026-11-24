@@ -295,6 +295,10 @@ live the sidebar header shows `⇄ n`.
 
 - **Sending** — an agent delivers files to its session with the MCP tool
   `session_send_file`: 1..10 absolute paths per call, up to 20 MiB each.
+  Only files inside the sending session's own workdir or the shelf directory
+  are accepted — paths outside them, secret-looking names (`daemon.token`,
+  `*.key`, `*.pem`, `id_*`), and files under the canopy data directory
+  outside the shelf are refused with code `forbidden`.
   Any type is accepted; PNG, JPEG, WebP, GIF and SVG are recognised from the
   file's content (never its extension) for display. A trusted remote guest
   with the `upload` grant sends files into its granted sessions through the
