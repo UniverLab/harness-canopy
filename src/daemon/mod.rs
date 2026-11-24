@@ -94,6 +94,7 @@ pub(crate) mod panic_hook;
 pub(crate) mod params;
 pub(crate) mod params_extract;
 pub(crate) mod pid_truth;
+pub(crate) mod port_holder;
 pub(crate) mod probe;
 pub(crate) mod process;
 pub(crate) mod project_cli;

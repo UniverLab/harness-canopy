@@ -4,10 +4,13 @@ use clap::Subcommand;
 
 use crate::application::ports::{AgentRepository, StateRepository};
 use crate::daemon::daemon_start::{restart_daemon_live, start_daemon_live, StartIntent};
+use crate::daemon::port_holder::{
+    holder_command, holder_message, port_in_use, start_decision, StartDecision,
+};
 use crate::daemon::process::{
-    diagnose_daemon, is_process_running, kill_port_occupant, orphan_needs_kill, print_last_n_lines,
-    read_pid, remove_pid_file, resolve_port_pid, send_signal, service_manager_facts,
-    service_manager_stop, service_unit_installed, should_stop_via_manager, DaemonState,
+    diagnose_daemon, is_process_running, print_last_n_lines, read_pid, remove_pid_file,
+    resolve_port_pid, send_signal, service_manager_facts, service_manager_stop,
+    service_unit_installed, should_stop_via_manager, DaemonState,
 };
 
 #[cfg(target_os = "linux")]
@@ -102,13 +105,13 @@ async fn handle_start(data_dir: &std::path::Path, port_override: Option<u16>) ->
 
     // The PID-file check above can miss a daemon that's alive and well but
     // whose PID this invocation doesn't know about yet — e.g. a stale or
-    // missing PID file right after `canopy daemon install`. Killing
-    // whatever holds the port unconditionally and forking a fresh detached
-    // `canopy serve` on top of it is exactly how an untracked orphan that
-    // the unit can never supersede gets created: the fork wins the race for
-    // the port, and every subsequent restart of the managed unit fails to
-    // bind. If the current occupant is already the service manager's own
-    // process, leave it alone instead of replacing it.
+    // missing PID file right after `canopy daemon install`. Signalling
+    // whatever holds the port and forking a fresh detached `canopy serve`
+    // on top of it is exactly how an untracked orphan that the unit can
+    // never supersede used to get created (F-13 forbids it now): the fork
+    // wins the race for the port, and every subsequent restart of the
+    // managed unit fails to bind. If the current occupant is already the
+    // service manager's own process, leave it alone instead of replacing it.
     if let Some(manager) = service_manager_facts() {
         if let Some(pid) = resolve_port_pid(port) {
             if manager.pid == Some(pid) {
@@ -121,6 +124,29 @@ async fn handle_start(data_dir: &std::path::Path, port_override: Option<u16>) ->
         }
     }
 
+    // F-13: the port belongs to a process this daemon did not start — fail
+    // clearly naming the holder instead of signalling a stranger. The bind
+    // probe after `resolve_port_pid` also sees holders owned by other users,
+    // which the `/proc` scan silently skips. This runs before any install,
+    // reconcile or spawn side effect, and nothing is signalled here.
+    let occupant = resolve_port_pid(port);
+    let manager_pid = service_manager_facts().and_then(|m| m.pid);
+    if matches!(
+        start_decision(
+            occupant,
+            occupant.is_some() || port_in_use(port),
+            false,
+            manager_pid
+        ),
+        StartDecision::Refuse
+    ) {
+        return Err(anyhow::anyhow!(holder_message(
+            port,
+            occupant,
+            &holder_command
+        )));
+    }
+
     install_service_if_needed(&exe, port);
 
     // CB75 FR1: before the unit is asked to start, make sure its ExecStart
@@ -128,19 +154,6 @@ async fn handle_start(data_dir: &std::path::Path, port_override: Option<u16>) ->
     // left behind by a past `cargo install`) otherwise loops 203/EXEC and
     // the only symptom is a port that never opens.
     service_reconcile::reconcile_unit_binary_live(&exe, port);
-
-    // CB72 orphan rule (FR2): with a unit installed, clear the port only
-    // when the live occupant is provably NOT that unit's MainPID — a
-    // proven orphan blocking the unit from ever binding. Never fires
-    // without an installed unit, and never against the managed daemon;
-    // when nothing is listening there is nothing to kill.
-    if orphan_needs_kill(
-        service_unit_installed(),
-        service_manager_facts().and_then(|m| m.pid),
-        resolve_port_pid(port),
-    ) {
-        kill_port_occupant(port);
-    }
 
     // CB72: one shared start for every path — asks systemd/launchd to start
     // the installed unit (and waits for the port) when one exists; only
@@ -382,19 +395,23 @@ async fn handle_restart(port_override: Option<u16>) -> Result<()> {
     // re-rendered and reloaded before a restart can mean anything.
     service_reconcile::reconcile_unit_binary_live(&exe, port);
 
-    // CB72 orphan rule (FR2), in the same position `handle_start` uses it and
-    // *before* the unit is restarted: an orphan holding the port would
-    // otherwise survive `systemctl --user restart` — the new unit process
-    // cannot bind while the orphan holds the port, so the restart waits out
-    // its 10s and fails, and this kill (now unreachable) never runs.
-    // Never fires without an installed unit, and never against the managed
-    // daemon (occupant == MainPID).
-    if orphan_needs_kill(
-        service_unit_installed(),
-        service_manager_facts().and_then(|m| m.pid),
-        resolve_port_pid(port),
-    ) {
-        kill_port_occupant(port);
+    // F-13: with a unit installed, refuse to restart over a port occupant
+    // that is not the manager's MainPID, naming the holder instead of
+    // signalling a stranger. An unidentifiable (other-user) holder falls
+    // through here and reaches the stop-then-start fallback, where
+    // `handle_start`'s bind probe refuses it all the same.
+    if service_unit_installed() {
+        let occupant = resolve_port_pid(port);
+        let manager_pid = service_manager_facts().and_then(|m| m.pid);
+        if let Some(pid) = occupant {
+            if Some(pid) != manager_pid {
+                return Err(anyhow::anyhow!(holder_message(
+                    port,
+                    Some(pid),
+                    &holder_command
+                )));
+            }
+        }
     }
 
     // CB75 FR2: with an installed unit this is one daemon-reload + restart
@@ -527,29 +544,6 @@ fn handle_uninstall_service() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// (c) FR2's `handle_start` kill rule, as the pure predicate the
-    /// sequence hinges on: unit installed + something holds the port +
-    /// that something is NOT the unit's MainPID → kill the orphan first,
-    /// then the shared start runs `systemctl --user start` (that second
-    /// half is asserted by the `Explicit` call in `daemon_start`'s
-    /// unit-start test). Every other combination must keep its hands off
-    /// the port — especially the no-unit case, which is the TUI/setup
-    /// (Auto) callers' guarantee that they can never kill.
-    #[test]
-    fn explicit_start_kills_orphan_then_starts_unit() {
-        // Proven orphan: unit installed, no live MainPID, orphan listens → kill.
-        assert!(orphan_needs_kill(true, None, Some(9)));
-        // Managed daemon holds its own port → never kill.
-        assert!(!orphan_needs_kill(true, Some(9), Some(9)));
-        // No unit installed → never kill (Auto callers can't reach a kill).
-        assert!(!orphan_needs_kill(false, None, Some(9)));
-        // Nothing holds the port → nothing to kill.
-        assert!(!orphan_needs_kill(true, None, None));
-        // Unit's MainPID alive but a *different* process holds the port →
-        // the listener is an orphan, kill it.
-        assert!(orphan_needs_kill(true, Some(7), Some(9)));
-    }
 
     #[test]
     fn status_warns_only_when_the_daemon_version_differs() {

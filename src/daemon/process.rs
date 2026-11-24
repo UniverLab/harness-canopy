@@ -66,30 +66,7 @@ pub(crate) fn is_process_running(pid: u32) -> bool {
     }
 }
 
-pub(crate) fn kill_port_occupant(port: u16) {
-    #[cfg(unix)]
-    {
-        let output = std::process::Command::new("ss")
-            .args(["-tlnp", &format!("sport = :{port}")])
-            .output();
-
-        if let Ok(out) = output {
-            let text = String::from_utf8_lossy(&out.stdout);
-            let self_pid = std::process::id();
-            for pid in parse_pids_from_ss(&text) {
-                if pid != self_pid && pid != 0 {
-                    terminate_process(pid, port);
-                }
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = port;
-    }
-}
-
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn parse_pids_from_ss(text: &str) -> Vec<u32> {
     text.lines()
         .filter_map(|line| {
@@ -99,18 +76,6 @@ fn parse_pids_from_ss(text: &str) -> Vec<u32> {
             rest[..end].parse::<u32>().ok()
         })
         .collect()
-}
-
-#[cfg(unix)]
-fn terminate_process(pid: u32, port: u16) {
-    eprintln!("Port {port} occupied by PID {pid} — sending SIGTERM");
-    unsafe { libc::kill(pid as i32, libc::SIGTERM) };
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    if unsafe { libc::kill(pid as i32, 0) } == 0 {
-        eprintln!("PID {pid} did not exit — sending SIGKILL");
-        unsafe { libc::kill(pid as i32, libc::SIGKILL) };
-        std::thread::sleep(std::time::Duration::from_millis(200));
-    }
 }
 
 /// Send `signal` to the process group led by `pid` (i.e. `killpg`). A group
@@ -338,9 +303,9 @@ fn find_pid_for_inode(inode: u64) -> Option<u32> {
     None
 }
 
-/// Best-effort port occupant lookup for non-Linux Unix (macOS): reuses the
-/// same `ss` parsing that already backs [`kill_port_occupant`]. Returns
-/// `None` — never a guess — when `ss` isn't installed.
+/// Best-effort port occupant lookup for non-Linux Unix (macOS): parses the
+/// `pid=` fields out of `ss -tlnp` output. Returns `None` — never a guess —
+/// when `ss` isn't installed.
 #[cfg(all(unix, not(target_os = "linux")))]
 pub(crate) fn resolve_port_pid(port: u16) -> Option<u32> {
     let output = std::process::Command::new("ss")
@@ -623,19 +588,6 @@ pub(crate) fn service_manager_facts() -> Option<ServiceManagerFacts> {
     None
 }
 
-/// CB72 kill rule for `canopy daemon start` (FR2): the port may be cleared
-/// only of a *proven orphan* — a unit is installed, something is listening,
-/// and that listener is not the unit's own MainPID. Never true when no unit
-/// is installed, so the Auto callers (TUI/setup) can never reach a kill
-/// through this rule.
-pub(crate) fn orphan_needs_kill(
-    unit_installed: bool,
-    manager_pid: Option<u32>,
-    occupant: Option<u32>,
-) -> bool {
-    unit_installed && occupant.is_some() && manager_pid != occupant
-}
-
 /// CB72 stop rule (FR3): go through the service manager only when the live
 /// port occupant IS the unit's MainPID — signalling that PID directly reads
 /// as an unclean exit under `Restart=on-failure` and systemd respawns it
@@ -857,7 +809,7 @@ mod tests {
         assert!(!other_instance_may_be_running(dir.path()));
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "linux")))]
     #[test]
     fn parse_pids_from_ss_extracts_pids_from_ss_output() {
         let ss_output = r#"State   Recv-Q  Send-Q  Local Address:Port  Peer Address:Port  Process
@@ -868,14 +820,14 @@ LISTEN  0       128     0.0.0.0:9090        0.0.0.0:*            users:(("node",
         assert_eq!(pids, vec![1234, 5678]);
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "linux")))]
     #[test]
     fn parse_pids_from_ss_handles_empty_output() {
         let pids = parse_pids_from_ss("");
         assert!(pids.is_empty());
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "linux")))]
     #[test]
     fn parse_pids_from_ss_handles_no_pid_field() {
         let ss_output = r#"State   Recv-Q  Send-Q  Local Address:Port  Peer Address:Port

@@ -7,9 +7,8 @@ use crate::application::notification_service::{DefaultNotificationService, Notif
 use crate::application::ports::StateRepository;
 use crate::daemon::handler::HandlerDeps;
 use crate::daemon::health_routine::HealthRoutine;
-use crate::daemon::process::{
-    acquire_daemon_lock, kill_port_occupant, remove_pid_file, write_pid_file,
-};
+use crate::daemon::port_holder::serve_bind_error;
+use crate::daemon::process::{acquire_daemon_lock, remove_pid_file, write_pid_file};
 use crate::daemon::TaskTriggerHandler;
 use crate::db::Database;
 use crate::domain::db_paths::database_path;
@@ -388,8 +387,8 @@ fn build_mcp_router(
         .with_state(sessions)
 }
 
-/// Frees the port (a stale occupant from a previous daemon), binds, logs the
-/// listening address, and serves until the shutdown signal cancels `ct`.
+/// Binds, logs the listening address, and serves until the shutdown signal
+/// cancels `ct`. A stranger holding the port is named, never cleared.
 async fn bind_and_serve(
     router: axum::Router,
     port: u16,
@@ -398,9 +397,11 @@ async fn bind_and_serve(
 ) -> Result<()> {
     let bind_addr = format!("127.0.0.1:{port}");
 
-    kill_port_occupant(port);
-
-    let tcp_listener = tokio::net::TcpListener::bind(&bind_addr).await?;
+    // F-13: never clear the port — `daemon start` quotes the ERROR line as
+    // the fatal line. `serve_bind_error` logs it and maps other errors.
+    let tcp_listener = tokio::net::TcpListener::bind(&bind_addr)
+        .await
+        .map_err(|e| serve_bind_error(port, e, crate::daemon::process::resolve_port_pid(port)))?;
 
     tracing::info!(
         "Streamable HTTP MCP server listening on http://{}/mcp",

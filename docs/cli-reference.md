@@ -38,7 +38,11 @@ fix. `daemon start` prints `Daemon started on port N` only once something
 listens on the port: a directly spawned daemon that dies during start fails
 with `daemon exited during start: <line>` plus the tail of
 `~/.canopy/daemon.log`, and one that never listens within 20 s fails with
-`daemon did not become ready in 20 s`.
+`daemon did not become ready in 20 s`. When the port is held by a process
+this daemon did not start, `daemon start` (and a managed `daemon restart`)
+fails without signalling it: `port N is held by pid P (...), which this
+daemon did not start; ...` — stop it with `canopy daemon stop` or pick
+another port with `--port`.
 
 ## Updates
 

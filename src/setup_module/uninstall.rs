@@ -173,7 +173,9 @@ fn build_service_plan(home: &Path) -> ServicePlan {
 }
 
 /// Pure rule: Some(orphan_pid) iff a port occupant exists AND a unit is installed
-/// AND occupant != manager MainPID. Mirrors process::orphan_needs_kill but returns the pid.
+/// AND occupant != manager MainPID. Same shape as the former start-time
+/// orphan rule (removed under F-13: start/refusal paths never signal), but
+/// returns the pid so the explicit `uninstall` path can stop it.
 pub(crate) fn diagnose_uninstall_orphan(
     unit_installed: bool,
     manager_pid: Option<u32>,
