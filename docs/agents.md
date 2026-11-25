@@ -101,6 +101,7 @@ cross-session autocomplete search and a Warp-like input mode.
 
 ## Context transfer
 
-Conversation context, prompts and output can be transferred between
-agents while preserving session state and scrollback history — from the
-TUI or as part of automated flows.
+A bounded summary (up to 12,000 characters) — any combination of header,
+visible screen tail (up to 120 lines), and last user prompt (up to 1,500
+characters) — can be transferred between agents while preserving session
+state and scrollback history, from the TUI or as part of automated flows.

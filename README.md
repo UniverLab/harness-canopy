@@ -130,7 +130,7 @@ docs/ is published at univerlab.org/canopy/docs and holds user documentation onl
 - **Terminal Sessions** — Raw shell sessions with per-session command history (TOML-backed), cross-session autocomplete search, and Warp-like input mode for efficient command entry.
 - **Background Agents** — Cron-scheduled and file-watcher-triggered agents with configurable timeouts, automatic retries, execution logging (5 MB rotation), and per-run status tracking.
 - **Platform Liveness Probe** — `harness` `probe` tests whether a platform+model pair can actually respond before the `graph_control` run action spends real quota on it. Probes the exact pair a node would use, not just the platform default.
-- **Context Transfer** — Seamlessly transfer conversation context, prompts, and output between agents while preserving session state and scrollback history.
+- **Context Transfer** — Transfer a bounded summary (up to 12,000 characters) — header, visible screen tail (up to 120 lines), and last user prompt (up to 1,500 characters) — between agents while preserving session state and scrollback history.
 - **Prompt Builder** — Structured prompt templates with configurable sections (instruction, context, resources, examples, Canopy protocol), section picker, and @-mention agent references. The session-start Canopy protocol rides on the first prompt of an interactive session only — persisted per session across restarts and resumes — and the locked **Canopy protocol** section (`Ctrl+A`) resends it on purpose.
 - **Launchpad** — Start new interactive sessions with previous mission recovery, mission input, and auto-injected context.
 
@@ -184,7 +184,7 @@ session later instead of polling), and `intelligence_upsert` /
 - **Projects Sidebar** — Sections for active graphs, backlog specs, and graph history, filterable by project workdir.
 - **Graph Editor** — Inline node config JSON editing with validation.
 - **RAG Transfer Modal** — Send semantic search results to other agents as injected context.
-- **Context Transfer** — Two-step modal (preview → agent picker) to inject conversation context between sessions.
+- **Context Transfer** — Two-step modal (preview → agent picker) to toggle parts (`↑↓`, `Space`) and inject a bounded context summary between sessions.
 - **Brian's Brain** — 3-state cellular automaton drawn as Braille glyphs; the cursor seeds clusters along its path at a fixed step rate.
 - **Whimsg** — Animated kaomoji status messages with typing effects: curated forest-voice phrases and deliberate jokes, or a real-event message naming the agent, graph, or spec that just happened.
 - **Gamification** — Achievement-style missions across 5 categories (Environment, Intelligence, Projects, Graph, SysInfo) tracked automatically during normal TUI operation; list them read-only with `canopy missions [--json]`.
