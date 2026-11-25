@@ -107,8 +107,8 @@ Both `canopy setup` and `canopy mcp` also rewrite legacy unauthenticated canopy 
 | `canopy registry apply [<cli>] [--yes]` | Approve staged changes (all, or one CLI's) and write them to `config.toml`; without `--yes` it asks `Apply <N> change(s)? [y/N]` and needs a terminal |
 | `canopy registry discard [<cli>]` | Drop staged changes without applying them; the next refresh stages them again while the registry still differs |
 
-Registry-owned CLI fields — binary path, model flag, headless mode,
-environment variables — are rewritten from the registry. A field you edited
+Registry-owned CLI metadata fields — display name, accent color,
+instruction file, retry settings — are rewritten from the registry. A field you edited
 yourself is kept as it is; when the registry changed that same field, the
 refresh reports it as a local override, so a refresh never overwrites your
 choice. Executable fields (anything that changes what the daemon runs:
