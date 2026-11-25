@@ -428,10 +428,22 @@ row: `/` filters, `n` creates, `e` edits and `F4` deletes.
 The graph editor allows inline editing of node config JSON with
 validation. See [Graphs](graphs.md) for the engine itself.
 
-Wherever a spec is named — the live graph view, the sync panel's graph
-face, Activity lines and the node-tail waiting line — a spec with a type
-shows its code first (`[FIX-7] name`), like the Backlog badge above.
-Legacy specs without a type show the name alone.
+The right (activity) panel's graph face shows one card per running or
+pausing graph — every running graph visible at once — ordered by most
+recent activity. Each card shows the graph name with its status icon
+(`▶` running, `‖` pausing), the last two segments of its workdir, a
+`done/total` spec counter with a progress bar, and the current spec's
+code and intent (`CODE intent`, the intent alone when the spec has no
+code). Clicking a card selects that graph and previews its live view.
+When no graph is running, the face shows the selected graph's card, or
+`no graphs yet` when there is none; when the cards do not all fit, the
+last row shows which ones are visible (`a-b of N`).
+
+Wherever a spec is named — the live graph view, Activity lines and the
+node-tail waiting line — a spec with a type shows its code first
+(`[FIX-7] name`), like the Backlog badge above. The graph-face card
+shows the same code without brackets (`FIX-7 name`). Legacy specs
+without a type show the name alone.
 
 ## Notifications
 
