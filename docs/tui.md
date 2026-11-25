@@ -187,7 +187,10 @@ step instead of launching straight away:
   next node change. Manual node inspection shows per-node run info (status,
   elapsed time, iteration; a node parked on a named mutex shows `waiting`
   with a `waiting for:` line naming each resource and who holds it).
-  `Esc` toggles between auto-follow and manual mode.
+  `Esc` toggles between auto-follow and manual mode. Nodes are drawn as
+  boxed nodes laid out in columns and joined by connectors, with the spec
+  strip pinned at the top while the diagram scrolls beneath it; narrow
+  panels fall back to the vertical list.
 - **Output pane** — `t` opens a read-only viewer beside the live graph that
   streams the highlighted node's stdout/stderr as the engine writes it (agent
   nodes and check nodes alike). In auto-follow the pane retargets node by
