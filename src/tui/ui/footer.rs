@@ -11,7 +11,6 @@ use crate::tui::app::types::{AgentEntry, App, AutomationKind, Focus, ProjectTab,
 use crate::tui::event::focused_child_claimed_keyboard;
 
 pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    let activity_available = app.activity_panel_available();
     // The Knowledge arm of `footer_hints` wins over the playground check, so
     // hoisting the check here must keep the same precedence: an agent-face
     // playground footer only replaces the normal hints when the sidebar is
@@ -20,9 +19,9 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Them
         && app.sidebar_layer != SidebarLayer::Knowledge
         && app.playground_active
     {
-        return draw_footer_playground(frame, area, app, activity_available, theme);
+        return draw_footer_playground(frame, area, app, theme);
     }
-    let hints = footer_hints(app, activity_available);
+    let hints = footer_hints(app);
     let spans = footer_hint_spans(&hints, theme);
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 
@@ -43,10 +42,10 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Them
 }
 
 /// Hint pairs for the current focus.
-fn footer_hints(app: &App, activity_available: bool) -> Vec<(&'static str, &'static str)> {
+fn footer_hints(app: &App) -> Vec<(&'static str, &'static str)> {
     match app.focus {
-        Focus::Home => footer_hints_home(app, activity_available),
-        Focus::Preview => footer_hints_preview(app, activity_available),
+        Focus::Home => footer_hints_home(app),
+        Focus::Preview => footer_hints_preview(app),
         Focus::NewAgentDialog => vec![
             ("↑↓", "fields"),
             ("←→", "cycle"),
@@ -63,7 +62,7 @@ fn footer_hints(app: &App, activity_available: bool) -> Vec<(&'static str, &'sta
         Focus::Agent if app.sidebar_layer == SidebarLayer::Knowledge => {
             footer_hints_agent_knowledge(app)
         }
-        Focus::Agent => footer_hints_agent(app, activity_available),
+        Focus::Agent => footer_hints_agent(app),
         Focus::ContextTransfer => vec![
             ("↑↓", "select"),
             ("Tab/Enter", "next step"),
@@ -108,11 +107,8 @@ fn footer_hints(app: &App, activity_available: bool) -> Vec<(&'static str, &'sta
 }
 
 /// Hint pairs for the home face.
-fn footer_hints_home(_app: &App, activity_available: bool) -> Vec<(&'static str, &'static str)> {
+fn footer_hints_home(_app: &App) -> Vec<(&'static str, &'static str)> {
     let mut h = vec![("↑↓", "select"), ("n", "new")];
-    if activity_available {
-        h.push(("F3", "activity"));
-    }
     h.push(("Shift+←→", "panels"));
     h.push(("F10", "preview"));
     h.push(("F1", "hub"));
@@ -120,7 +116,7 @@ fn footer_hints_home(_app: &App, activity_available: bool) -> Vec<(&'static str,
 }
 
 /// Hint pairs for the preview face — playground, knowledge layer, or main sidebar.
-fn footer_hints_preview(app: &App, activity_available: bool) -> Vec<(&'static str, &'static str)> {
+fn footer_hints_preview(app: &App) -> Vec<(&'static str, &'static str)> {
     if app.playground_active {
         return vec![
             ("type", "search"),
@@ -134,7 +130,7 @@ fn footer_hints_preview(app: &App, activity_available: bool) -> Vec<(&'static st
     if app.sidebar_layer == SidebarLayer::Knowledge {
         return footer_hints_preview_knowledge(app);
     }
-    footer_hints_preview_main(app, activity_available)
+    footer_hints_preview_main(app)
 }
 
 /// Hint pairs for the preview face's knowledge sidebar layer.
@@ -151,10 +147,7 @@ fn footer_hints_preview_knowledge(_app: &App) -> Vec<(&'static str, &'static str
 }
 
 /// Hint pairs for the preview face's automation / project sidebar.
-fn footer_hints_preview_main(
-    app: &App,
-    activity_available: bool,
-) -> Vec<(&'static str, &'static str)> {
+fn footer_hints_preview_main(app: &App) -> Vec<(&'static str, &'static str)> {
     let on_graph = app.sidebar_layer == SidebarLayer::Automation
         && app.automation_kind == AutomationKind::Graph;
     let is_bg = matches!(app.selected_agent(), Some(AgentEntry::Agent(_)));
@@ -183,9 +176,6 @@ fn footer_hints_preview_main(
         h.push(("r", "rerun"));
     }
     h.push(("n", "new"));
-    if activity_available {
-        h.push(("F3", "activity"));
-    }
     h.push(("Esc", "home"));
     h
 }
@@ -236,24 +226,20 @@ fn footer_hints_agent_knowledge(app: &App) -> Vec<(&'static str, &'static str)> 
 }
 
 /// Hint pairs for a selected agent — pty sessions or plain background agents.
-fn footer_hints_agent(app: &App, activity_available: bool) -> Vec<(&'static str, &'static str)> {
+fn footer_hints_agent(app: &App) -> Vec<(&'static str, &'static str)> {
     let is_pty = matches!(
         app.selected_agent(),
         Some(AgentEntry::Interactive(_)) | Some(AgentEntry::Terminal(_))
     );
     if !is_pty {
-        return footer_hints_agent_plain(app, activity_available);
+        return footer_hints_agent_plain(app);
     }
     let child_claimed = focused_child_claimed_keyboard(app);
-    footer_hints_agent_pty(app, activity_available, child_claimed)
+    footer_hints_agent_pty(app, child_claimed)
 }
 
 /// Hint pairs for a selected pty session (interactive / terminal).
-fn footer_hints_agent_pty(
-    app: &App,
-    activity_available: bool,
-    child_claimed: bool,
-) -> Vec<(&'static str, &'static str)> {
+fn footer_hints_agent_pty(app: &App, child_claimed: bool) -> Vec<(&'static str, &'static str)> {
     // While the focused child has claimed the keyboard (alternate
     // screen or Kitty keyboard protocol), every canopy shortcut
     // below yields to it except F1 (hub), F10, the Shift+arrow frame
@@ -289,27 +275,18 @@ fn footer_hints_agent_pty(
     // keeps the user from reaching for Shift — the terminal's own selection,
     // which canopy cannot see — and the fatal Ctrl+C that follows it.
     h.push(("drag", "to copy"));
-    if activity_available {
-        h.push(("F3", "activity"));
-    }
     h.push(("Ctrl+N", "new"));
     h.push(("F1", "hub"));
     h
 }
 
 /// Hint pairs for a selected plain (non-pty) background agent.
-fn footer_hints_agent_plain(
-    app: &App,
-    activity_available: bool,
-) -> Vec<(&'static str, &'static str)> {
+fn footer_hints_agent_plain(app: &App) -> Vec<(&'static str, &'static str)> {
     let mut h = vec![("F10", "preview"), ("Esc", "home")];
     if !app.agents_rag_focused {
         h.push(("e", "edit"));
     }
     h.push(("Shift+←→", "tab"));
-    if activity_available {
-        h.push(("F3", "activity"));
-    }
     h.push(("Ctrl+N", "new"));
     h.push(("F1", "hub"));
     h
@@ -372,14 +349,8 @@ fn draw_footer_right(
     frame.render_widget(right_p, right_area);
 }
 
-fn draw_footer_playground(
-    frame: &mut Frame,
-    area: Rect,
-    app: &App,
-    activity_available: bool,
-    theme: &Theme,
-) {
-    let mut hints = vec![
+fn draw_footer_playground(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    let hints = [
         ("type", "search"),
         ("↑↓", "results"),
         ("Enter", "search/open"),
@@ -388,9 +359,6 @@ fn draw_footer_playground(
         ("F10", "preview"),
         ("Esc", "close"),
     ];
-    if activity_available {
-        hints.push(("F3", "activity"));
-    }
 
     let mut spans = Vec::new();
     spans.push(Span::raw("  "));
@@ -1145,5 +1113,18 @@ mod tests {
             "agent-focus footer must advertise the plain-drag copy: {text}"
         );
         app.interactive_agents[0].kill();
+    }
+
+    #[test]
+    fn footer_contains_no_f3_hint() {
+        let mut app = make_app();
+        let theme = Theme::classic();
+        for focus in [Focus::Home, Focus::Preview, Focus::Agent] {
+            app.focus = focus;
+            let text = render_footer_to_text(200, 1, |frame, area| {
+                draw_footer(frame, area, &app, &theme);
+            });
+            assert!(!text.contains("F3"), "footer still mentions F3: {text}");
+        }
     }
 }

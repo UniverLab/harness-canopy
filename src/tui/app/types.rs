@@ -81,9 +81,7 @@ pub(crate) enum ContextTransferSource {
 }
 
 #[derive(Clone)]
-pub(crate) struct SyncPanelState {
-    pub workdir: String,
-}
+pub(crate) struct SyncPanelState;
 
 #[derive(Clone)]
 pub(crate) struct RagTransferModal {
@@ -382,8 +380,6 @@ pub struct App {
     /// `knowledge_filter`, which filters entries *inside* a project.
     pub(crate) project_filter: String,
     pub(crate) sidebar_visible: bool,
-    pub(crate) hidden_activity_workdirs: HashSet<String>,
-    pub(crate) forced_activity_workdirs: HashSet<String>,
     pub(crate) term_width: u16,
     /// CT31: whether the F1 Canopy hub overlay is open.
     pub(crate) hub_open: bool,

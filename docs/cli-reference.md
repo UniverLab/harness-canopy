@@ -945,6 +945,7 @@ it came from. **Apply** says when a change takes effect: `applied` (at once),
 | `temperature_unit` | `celsius` | `celsius`, `fahrenheit` | restart the TUI | Temperature unit for the TUI's system widgets |
 | `theme` | `classic` | `classic`, `modern` | applied | TUI colour theme: bordered or borderless |
 | `pinned_panel_face` | `auto` | `auto`, `activity`, `knowledge`, `graph`, `crews` | applied | Pinned right-panel face; `auto` lets the panel switch on its own |
+| `activity_panel_width` | `0` | 0–120 | applied | Activity panel width in columns; 0 sizes it automatically |
 | `tui.datetime_format` | `%Y-%m-%d %H:%M` | chrono format | applied | Dates and times in the TUI (validated by formatting a fixed instant) |
 | `tui.time_format` | `%H:%M` | chrono format | applied | Time-only labels in the TUI |
 | `tui.panel_dwell_seconds` | 10 | 0–300 | applied | Seconds a panel event holds the right panel; 0 disables the dwell |

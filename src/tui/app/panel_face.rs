@@ -285,6 +285,25 @@ impl App {
             .panel_pinned
             .map(|face| face.label().to_string())
             .unwrap_or_else(|| "auto".to_string());
+        self.save_config_setting(
+            "pinned_panel_face",
+            &serde_json::Value::String(value),
+            "pin not saved: daemon not running",
+        );
+    }
+
+    /// Persist the dragged activity panel width through the daemon's
+    /// `config set` so `config.toml` stays single-writer. With the daemon
+    /// down the width still applies in memory and the status banner says so.
+    pub(crate) fn save_activity_panel_width(&mut self, width: u16) {
+        self.save_config_setting(
+            "activity_panel_width",
+            &serde_json::json!(width),
+            "activity panel width not saved: daemon unreachable",
+        );
+    }
+
+    fn save_config_setting(&mut self, key: &str, value: &serde_json::Value, unreachable_msg: &str) {
         let port = self
             .db
             .get_state("port")
@@ -294,12 +313,12 @@ impl App {
         let outcome = crate::tui::mcp_client::call_daemon_tool(
             &port,
             "config",
-            &serde_json::json!({ "action": "set", "key": "pinned_panel_face", "value": value }),
+            &serde_json::json!({ "action": "set", "key": key, "value": value }),
         );
         match outcome {
             Ok(outcome) if !outcome.is_error => {}
             Ok(outcome) => self.set_status_message(true, outcome.text),
-            Err(_) => self.set_status_message(true, "pin not saved: daemon not running"),
+            Err(_) => self.set_status_message(true, unreachable_msg),
         }
     }
 
@@ -317,6 +336,11 @@ impl App {
     /// Read the persisted pin back into a face, ignoring unknown values.
     pub(crate) fn load_panel_pinned_face(value: &Option<String>) -> Option<PanelFace> {
         value.as_deref().and_then(PanelFace::from_str)
+    }
+
+    /// Read the persisted activity panel width: `0` means automatic sizing.
+    pub(crate) fn load_activity_panel_width(value: u16) -> Option<u16> {
+        (value != 0).then_some(value)
     }
 
     /// A mouse-wheel scroll over the panel: marks the interaction and drops
@@ -889,5 +913,31 @@ mod tests {
             calls[0]["arguments"],
             serde_json::json!({ "action": "set", "key": "pinned_panel_face", "value": "knowledge" })
         );
+    }
+
+    #[test]
+    fn app_new_and_settings_revision_load_activity_panel_width() {
+        let db = Arc::new(Database::new(&crate::test_support::temp_db_path()).unwrap());
+        let dir = tempdir().unwrap();
+        let config = crate::domain::canopy_config::CanopyConfig {
+            activity_panel_width: 50,
+            ..Default::default()
+        };
+
+        let mut app = App::new(Arc::clone(&db), dir.path(), &config).unwrap();
+        assert_eq!(app.activity_panel_user_width, Some(50));
+
+        // Reloading a config with activity_panel_width = 0 clears it to None.
+        app.apply_settings_revision("rev-1".to_string());
+        assert_eq!(app.activity_panel_user_width, None);
+
+        // Reloading a config with activity_panel_width = 50 sets Some(50).
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "activity_panel_width = 50\n",
+        )
+        .unwrap();
+        app.apply_settings_revision("rev-2".to_string());
+        assert_eq!(app.activity_panel_user_width, Some(50));
     }
 }

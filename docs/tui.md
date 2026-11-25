@@ -69,10 +69,12 @@ step instead of launching straight away:
   the key-hint row shows `drag to copy`, so no keyboard modifier is needed.
   A `Ctrl+C` within 3 s of that copy is taken as the copy reflex and
   swallowed, and the pane shows `already copied`.
-- **Sizing the side panel** — drag the activity panel's left border to make
-  it wider or narrower (between 24 columns and the terminal width minus 40).
-  The border takes the accent colour while dragged, and the session resizes
-  once on release.
+- **Sizing the side panel** — the activity panel is always shown when there
+  is room (64 columns or more) and hides automatically on narrower terminals.
+  Drag the panel's left border to resize it (between 24 and
+  `min(terminal width - 40, 120)` columns); the border takes the accent
+  colour while dragged, the session resizes once on release, and the width
+  is kept between runs via `activity_panel_width` (`0` = automatic).
   While a paired device sizes the session narrower, the panel fills the freed
   strip on its own and cannot be dragged; when the device lets go or
   disconnects, the panel returns to the TUI's own layout.

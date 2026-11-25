@@ -52,12 +52,6 @@ pub static KEY_REFS: &[KeyRef] = &[
         code: "F2",
     },
     KeyRef {
-        key: "F3",
-        context: "Global",
-        action: "toggle the activity panel",
-        code: "F3",
-    },
-    KeyRef {
         key: "Ctrl+N",
         context: "Global",
         action: "new agent",
@@ -758,6 +752,14 @@ mod tests {
                 entry.key,
                 entry.action
             );
+        }
+    }
+
+    #[test]
+    fn key_refs_has_no_f3_entry() {
+        for entry in KEY_REFS {
+            assert_ne!(entry.key, "F3");
+            assert_ne!(entry.code, "F3");
         }
     }
 }

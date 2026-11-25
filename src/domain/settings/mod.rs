@@ -603,4 +603,17 @@ mod tests {
         }
         Some(current)
     }
+
+    #[test]
+    fn activity_panel_width_validates_0_and_120_and_refuses_121() {
+        let def = find("activity_panel_width").expect("activity_panel_width in registry");
+        let v0 = validate::parse_cli_value(def, "0").expect("parse 0");
+        validate::validate_value(def, &v0).expect("0 validates");
+
+        let v120 = validate::parse_cli_value(def, "120").expect("parse 120");
+        validate::validate_value(def, &v120).expect("120 validates");
+
+        let v121 = validate::parse_cli_value(def, "121").expect("parse 121");
+        assert!(validate::validate_value(def, &v121).is_err());
+    }
 }

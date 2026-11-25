@@ -142,6 +142,8 @@ pub struct CanopyConfig {
     #[serde(default)]
     pub pinned_panel_face: Option<String>,
 
+    #[serde(default)]
+    pub activity_panel_width: u16,
     /// CM46: how long a graph durable event log is kept
     /// before `canopy clean` prunes it, in days. Separate from
     /// `clean.retention_days` (which governs sessions and files) so the two
@@ -779,6 +781,7 @@ impl Default for CanopyConfig {
             rag_vector_cache_entries: default_rag_vector_cache_entries(),
             announcements_enabled: default_announcements_enabled(),
             pinned_panel_face: None,
+            activity_panel_width: 0,
             graph_event_retention_days: default_graph_event_retention_days(),
             metrics_retention_days: default_metrics_retention_days(),
             scheduler: SchedulerConfig::default(),

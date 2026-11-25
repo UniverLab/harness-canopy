@@ -37,6 +37,9 @@ pub(super) fn handle_panel_border_drag(app: &mut App, mouse: &MouseEvent) -> boo
                 app.activity_panel_dragging = false;
                 app.apply_activity_panel_drag_size();
                 app.resize_interactive_agents();
+                if let Some(width) = app.activity_panel_user_width {
+                    app.save_activity_panel_width(width);
+                }
                 return true;
             }
             _ => return false,

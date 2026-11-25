@@ -323,35 +323,6 @@ impl App {
         self.playground_results.get(self.playground_selected)
     }
 
-    pub fn toggle_activity_panel(&mut self) {
-        if self.sidebar_layer == SidebarLayer::Knowledge {
-            return;
-        }
-
-        let Some(workdir) = self.selected_activity_workdir().map(str::to_owned) else {
-            return;
-        };
-        let panel_rendered = self
-            .activity_panel_layout_width(self.term_width, self.activity_panel_state().is_some())
-            > 0;
-
-        if self.hidden_activity_workdirs.remove(&workdir) {
-            self.forced_activity_workdirs.insert(workdir);
-            self.sync_scroll_offset = 0;
-            return;
-        }
-
-        // Nueva lógica: siempre permite togglear el panel de actividad con F3,
-        // aunque no haya actividad previa en el workdir seleccionado.
-        if panel_rendered || self.forced_activity_workdirs.contains(&workdir) {
-            self.forced_activity_workdirs.remove(&workdir);
-            self.hidden_activity_workdirs.insert(workdir);
-        } else {
-            self.forced_activity_workdirs.insert(workdir);
-        }
-        self.sync_scroll_offset = 0;
-    }
-
     fn live_agent_for_entry(&self, entry: &AgentEntry) -> Option<&InteractiveAgent> {
         match entry {
             AgentEntry::Interactive(idx) => self.interactive_agents.get(*idx),

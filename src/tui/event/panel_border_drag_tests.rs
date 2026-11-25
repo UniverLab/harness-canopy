@@ -155,3 +155,29 @@ fn drag_is_ignored_while_a_remote_owns_the_size() {
     assert!(app.activity_panel_user_width.is_none());
     app.terminal_agents[0].kill();
 }
+
+#[test]
+fn drag_release_saves_width_via_daemon_config_set() {
+    use crate::application::ports::StateRepository;
+    use crate::tui::mcp_client::test_support::spawn_fake_daemon;
+
+    let fake = spawn_fake_daemon(serde_json::json!({
+        "content": [{ "type": "text", "text": "{}" }],
+        "isError": false
+    }));
+    let mut app = drag_app();
+    app.db.set_state("port", &fake.port).unwrap();
+
+    assert!(handle_panel_border_drag(&mut app, &press(90, 5)));
+    assert!(handle_panel_border_drag(&mut app, &drag_to(80, 5)));
+    assert!(handle_panel_border_drag(&mut app, &release(80, 5)));
+
+    let calls = fake.recorded_calls();
+    assert_eq!(calls.len(), 1, "exactly one daemon call: {calls:?}");
+    assert_eq!(calls[0]["name"], "config");
+    assert_eq!(
+        calls[0]["arguments"],
+        serde_json::json!({ "action": "set", "key": "activity_panel_width", "value": 40 })
+    );
+    app.terminal_agents[0].kill();
+}

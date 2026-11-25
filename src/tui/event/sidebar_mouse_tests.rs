@@ -425,6 +425,28 @@ fn f6_no_longer_opens_a_panel_picker_in_preview_or_agent_focus() {
     );
 }
 
+#[test]
+fn f3_is_not_handled_and_reaches_focused_session() {
+    let mut app = app_with_agents(1);
+    let term = spawn_live_session("f3-forward");
+    app.terminal_agents.push(term);
+    app.reindex_sessions();
+    app.selected = app
+        .agents
+        .iter()
+        .position(|e| matches!(e, AgentEntry::Terminal(_)))
+        .expect("terminal entry");
+    app.focus = Focus::Agent;
+
+    assert!(
+        !handle_global_key(&mut app, KeyCode::F(3), KeyModifiers::NONE),
+        "F3 must not be claimed by the global handler"
+    );
+    handle_key(&mut app, KeyCode::F(3), KeyModifiers::NONE).unwrap();
+    assert!(matches!(app.focus, Focus::Agent));
+    app.terminal_agents[0].kill();
+}
+
 // ── Per-section wheel scrolling (interactive / terminal / groups) ──
 
 fn spawn_live_session(name: &str) -> crate::tui::agent::InteractiveAgent {

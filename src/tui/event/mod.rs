@@ -277,11 +277,6 @@ fn handle_global_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> b
         return true;
     }
 
-    if code == KeyCode::F(3) {
-        app.toggle_activity_panel();
-        return true;
-    }
-
     if code == KeyCode::Char('f')
         && modifiers.contains(KeyModifiers::CONTROL)
         && matches!(app.focus, Focus::Agent)

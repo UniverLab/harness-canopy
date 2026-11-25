@@ -39,6 +39,8 @@ impl App {
         self.theme = crate::tui::ui::theme::Theme::resolve(&config.theme);
         self.temperature_unit = config.temperature_unit;
         self.panel_pinned = App::load_panel_pinned_face(&config.pinned_panel_face);
+        self.activity_panel_user_width =
+            App::load_activity_panel_width(config.activity_panel_width);
         // CT26: a registry refresh that flips `ctrl_c_exits` publishes a
         // revision; re-deriving here means the guard picks it up without a
         // restart, exactly like theme and the pinned face.

@@ -264,6 +264,15 @@ pub static REGISTRY: &[SettingDef] = &[
         wizard: false,
     },
     SettingDef {
+        key: "activity_panel_width",
+        kind: Kind::Int { min: 0, max: 120 },
+        default: DefaultValue::Literal("0"),
+        group: Group::TuiAppearance,
+        description: "Activity panel width in columns; 0 sizes it automatically.",
+        apply: Apply::Hot,
+        wizard: false,
+    },
+    SettingDef {
         key: "scheduler.retry_enabled",
         kind: Kind::Bool,
         default: DefaultValue::Literal("true"),
@@ -594,7 +603,7 @@ mod tests {
 
     #[test]
     fn registry_has_one_entry_per_setting_and_they_are_unique() {
-        assert_eq!(REGISTRY.len(), 60);
+        assert_eq!(REGISTRY.len(), 61);
         for def in REGISTRY {
             assert_eq!(find(def.key).map(|d| d.key), Some(def.key));
         }

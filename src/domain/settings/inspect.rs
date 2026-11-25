@@ -306,6 +306,7 @@ pub fn config_value(config: &CanopyConfig, key: &str) -> Value {
                 .clone()
                 .unwrap_or_else(|| "auto".to_string()),
         ),
+        "activity_panel_width" => Value::from(config.activity_panel_width as i64),
         "scheduler.retry_enabled"
         | "scheduler.retry_delay_minutes"
         | "scheduler.retry_max"

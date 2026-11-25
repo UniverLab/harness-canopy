@@ -39,10 +39,9 @@ fn activity_panel_available_for_selected_workdir() {
     app.agents = vec![AgentEntry::Agent(agent)];
     app.selected = 0;
 
-    let state = app
-        .activity_panel_state()
+    app.activity_panel_state()
         .expect("panel available for selected workdir");
-    assert_eq!(state.workdir, "/tmp/snap-panel");
+    assert_eq!(app.selected_activity_workdir(), Some("/tmp/snap-panel"));
     assert!(app
         .activity_panel_state_for_workdir("/tmp/snap-panel")
         .is_some());

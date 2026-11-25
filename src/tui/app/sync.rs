@@ -10,7 +10,8 @@ use super::types::{AgentEntry, App, SidebarLayer, SyncPanelState};
 // 34-column cap used to bind, so today's normal terminals are unaffected.
 const ACTIVITY_PANEL_MAX_WIDTH: u16 = 80;
 const ACTIVITY_PANEL_MIN_WIDTH: u16 = 24;
-const ACTIVITY_PANEL_FORCED_MIN_WIDTH: u16 = 16;
+const ACTIVITY_PANEL_MAIN_MIN_WIDTH: u16 = 40;
+const ACTIVITY_PANEL_MAX_USER_WIDTH: u16 = 120;
 const ACTIVITY_PANEL_PERCENT: u16 = 30;
 const RECENT_MESSAGE_LIMIT: usize = 18;
 const MAX_RECENT_MESSAGE_LIMIT: usize = 200;
@@ -18,10 +19,6 @@ const MESSAGE_WINDOW_LINES_PER_STEP: u16 = 6;
 const MESSAGE_WINDOW_ITEMS_PER_STEP: usize = 8;
 
 impl App {
-    pub(crate) fn activity_panel_available(&self) -> bool {
-        self.selected_activity_workdir().is_some()
-    }
-
     /// Returns activity for the selected workdir without applying visibility rules.
     pub(crate) fn selected_activity_state(&self) -> Option<SyncPanelState> {
         let workdir = self.selected_activity_workdir()?;
@@ -66,24 +63,8 @@ impl App {
         summarize_sync_context(&messages, &active_agent_ids, 0).active_intents
     }
 
-    /// True when the selected sidebar entry is a terminal session.
-    fn selected_session_is_terminal(&self) -> bool {
-        matches!(self.selected_agent(), Some(AgentEntry::Terminal(_)))
-    }
-
     pub(crate) fn activity_panel_state(&self) -> Option<SyncPanelState> {
-        let state = self.selected_activity_state()?;
-        if self.sidebar_layer == SidebarLayer::Knowledge {
-            return Some(state);
-        }
-        // Terminal sessions hide the sync panel by default; an explicit toggle
-        // (F3 → forced) still brings it up.
-        if self.selected_session_is_terminal()
-            && !self.forced_activity_workdirs.contains(&state.workdir)
-        {
-            return None;
-        }
-        (!self.hidden_activity_workdirs.contains(&state.workdir)).then_some(state)
+        self.selected_activity_state()
     }
 
     /// The remote size of the selected session, if a remote device owns it.
@@ -99,7 +80,7 @@ impl App {
     /// selected session narrower than the pane: the pane's inner width then
     /// equals the remote's cols exactly. `None` when no fill applies — no
     /// remote size, a remote wider than the pane, or a strip below the
-    /// forced minimum.
+    /// panel minimum.
     pub(crate) fn remote_fill_width(&self, total_width: u16) -> Option<u16> {
         let (remote_cols, _) = self.selected_remote_size()?;
         let panel_inner = self.last_panel_inner.0;
@@ -110,19 +91,19 @@ impl App {
         let panel_w = total_width.saturating_sub(sync_w);
         let chrome = panel_w.saturating_sub(panel_inner);
         let fill = total_width.saturating_sub(remote_cols.saturating_add(chrome));
-        if fill < ACTIVITY_PANEL_FORCED_MIN_WIDTH {
+        if fill < ACTIVITY_PANEL_MIN_WIDTH {
             return None;
         }
         Some(fill)
     }
 
     /// Clamp a dragged panel width between the panel minimum and the body
-    /// minus 40 columns, so the main pane keeps a usable width.
+    /// minus 40 columns (capped at 120), so the main pane keeps a usable width.
     pub(crate) fn clamp_activity_panel_drag(&self, width: u16) -> u16 {
         let hi = self
             .last_body_width
-            .saturating_sub(40)
-            .max(ACTIVITY_PANEL_MIN_WIDTH);
+            .saturating_sub(ACTIVITY_PANEL_MAIN_MIN_WIDTH)
+            .clamp(ACTIVITY_PANEL_MIN_WIDTH, ACTIVITY_PANEL_MAX_USER_WIDTH);
         width.clamp(ACTIVITY_PANEL_MIN_WIDTH, hi)
     }
 
@@ -150,34 +131,20 @@ impl App {
         if let Some(fill) = self.remote_fill_width(total_width) {
             return fill;
         }
-        if !enabled {
+        if !enabled || total_width < ACTIVITY_PANEL_MIN_WIDTH + ACTIVITY_PANEL_MAIN_MIN_WIDTH {
             return 0;
         }
-        // A drag outranks the proportional rule; the drag already clamped
-        // it, and this re-clamps it against a resized terminal.
+        // A drag (or persisted width) outranks the proportional rule; this
+        // re-clamps it against a narrower terminal or the 120-column cap.
+        let hi = total_width
+            .saturating_sub(ACTIVITY_PANEL_MAIN_MIN_WIDTH)
+            .min(ACTIVITY_PANEL_MAX_USER_WIDTH);
         if let Some(user) = self.activity_panel_user_width {
-            let hi = total_width.saturating_sub(40);
-            if hi >= ACTIVITY_PANEL_MIN_WIDTH {
-                return user.clamp(ACTIVITY_PANEL_MIN_WIDTH, hi);
-            }
+            return user.clamp(ACTIVITY_PANEL_MIN_WIDTH, hi);
         }
 
-        let proportional_width = ((total_width as u32 * ACTIVITY_PANEL_PERCENT as u32 / 100)
-            as u16)
-            .min(ACTIVITY_PANEL_MAX_WIDTH);
-
-        let force_shown = self
-            .selected_activity_workdir()
-            .is_some_and(|workdir| self.forced_activity_workdirs.contains(workdir));
-
-        if proportional_width < ACTIVITY_PANEL_MIN_WIDTH {
-            if force_shown {
-                return ACTIVITY_PANEL_FORCED_MIN_WIDTH.min(total_width);
-            }
-            return 0;
-        }
-
-        proportional_width
+        ((total_width as u32 * ACTIVITY_PANEL_PERCENT as u32 / 100) as u16)
+            .clamp(ACTIVITY_PANEL_MIN_WIDTH, ACTIVITY_PANEL_MAX_WIDTH)
     }
 
     pub(crate) fn selected_activity_workdir(&self) -> Option<&str> {
@@ -208,9 +175,7 @@ impl App {
         if workdir.is_empty() {
             return None;
         }
-        Some(SyncPanelState {
-            workdir: workdir.to_owned(),
-        })
+        Some(SyncPanelState)
     }
 
     pub(crate) fn message_window_limit_for_scroll(&self) -> usize {
@@ -275,11 +240,10 @@ mod tests {
         app.agents = vec![AgentEntry::Agent(sample_agent("bg-1", "/tmp/project"))];
         app.selected = 0;
 
-        let state = app
-            .activity_panel_state()
+        app.activity_panel_state()
             .expect("activity panel should render");
 
-        assert_eq!(state.workdir, "/tmp/project");
+        assert_eq!(app.selected_activity_workdir(), Some("/tmp/project"));
     }
 
     #[test]
@@ -340,11 +304,10 @@ mod tests {
         app.agents = vec![AgentEntry::Agent(sample_agent("bg-1", "/tmp/project"))];
         app.selected = 0;
 
-        let state = app
-            .activity_panel_state()
+        app.activity_panel_state()
             .expect("activity panel should render without messages");
 
-        assert_eq!(state.workdir, "/tmp/project");
+        assert_eq!(app.selected_activity_workdir(), Some("/tmp/project"));
     }
 
     #[test]
@@ -402,15 +365,14 @@ mod tests {
         app.projects = vec![project];
         app.sidebar_layer = SidebarLayer::Knowledge;
 
-        let state = app
-            .activity_panel_state()
+        app.activity_panel_state()
             .expect("projects mode should keep activity panel visible");
 
-        assert_eq!(state.workdir, "/tmp/project");
+        assert_eq!(app.selected_activity_workdir(), Some("/tmp/project"));
     }
 
     #[test]
-    fn toggle_activity_panel_is_ignored_in_projects_mode() {
+    fn activity_panel_shown_for_terminal_and_interactive_at_64_hidden_at_63() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
         let mut app = App::new(
@@ -419,86 +381,48 @@ mod tests {
             &crate::domain::canopy_config::CanopyConfig::default(),
         )
         .expect("create app");
-        let project = sample_project("/tmp/project");
-        app.projects = vec![project];
-        app.sidebar_layer = SidebarLayer::Knowledge;
-
-        assert!(app.activity_panel_state().is_some());
-        app.toggle_activity_panel();
-        assert!(app.activity_panel_state().is_some());
-    }
-
-    #[test]
-    fn explicit_activity_toggle_forces_width_on_narrow_screens() {
-        let db = test_db();
-        db.insert_activity_log_entry(
-            "/tmp/project",
-            "sync",
-            Some("agent-a"),
-            "info",
-            "first activity",
+        let term = crate::tui::agent::InteractiveAgent::spawn_terminal(
+            "cat",
+            "/tmp",
+            80,
+            24,
+            Some("term-act"),
+            &[],
+            ratatui::style::Color::White,
+        )
+        .expect("spawn terminal");
+        let inter = crate::tui::agent::InteractiveAgent::spawn(
+            crate::domain::models::Cli::new("cat"),
+            "/tmp",
+            80,
+            24,
             None,
-        )
-        .unwrap();
-
-        let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(
-            Arc::clone(&db),
-            data_dir.path(),
-            &crate::domain::canopy_config::CanopyConfig::default(),
-        )
-        .expect("create app");
-        app.agents = vec![AgentEntry::Agent(sample_agent("bg-1", "/tmp/project"))];
-        app.selected = 0;
-        app.hidden_activity_workdirs
-            .insert("/tmp/project".to_string());
-
-        assert_eq!(app.activity_panel_layout_width(60, true), 0);
-
-        app.toggle_activity_panel();
-
-        assert!(app.forced_activity_workdirs.contains("/tmp/project"));
-        assert!(app.activity_panel_layout_width(60, true) > 0);
-    }
-
-    #[test]
-    fn toggle_activity_panel_shows_when_auto_panel_is_suppressed_by_width() {
-        let db = test_db();
-        // The panel renders the bitácora, not `sync_messages`.
-        db.insert_activity_log_entry(
-            "/tmp/project",
-            "sync",
-            Some("agent-a"),
-            "info",
-            "first activity",
             None,
+            ratatui::style::Color::White,
+            Some("inter-act"),
+            None,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            false,
         )
-        .unwrap();
+        .expect("spawn interactive");
+        app.terminal_agents.push(term);
+        app.interactive_agents.push(inter);
+        app.reindex_sessions();
 
-        let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(
-            Arc::clone(&db),
-            data_dir.path(),
-            &crate::domain::canopy_config::CanopyConfig::default(),
-        )
-        .expect("create app");
-        app.agents = vec![AgentEntry::Agent(sample_agent("bg-1", "/tmp/project"))];
-        app.selected = 0;
-        app.term_width = 60;
+        for idx in 0..app.agents.len() {
+            app.selected = idx;
+            let enabled = app.activity_panel_state().is_some();
+            assert!(enabled, "session {idx} should expose activity panel state");
+            assert_eq!(app.activity_panel_layout_width(64, enabled), 24);
+            assert_eq!(app.activity_panel_layout_width(63, enabled), 0);
+        }
 
-        assert_eq!(
-            app.activity_panel_layout_width(app.term_width, app.activity_panel_state().is_some()),
-            0
-        );
-
-        app.toggle_activity_panel();
-
-        assert!(app.forced_activity_workdirs.contains("/tmp/project"));
-        assert!(!app.hidden_activity_workdirs.contains("/tmp/project"));
-        assert!(
-            app.activity_panel_layout_width(app.term_width, app.activity_panel_state().is_some())
-                > 0
-        );
+        app.terminal_agents[0].kill();
+        app.interactive_agents[0].kill();
     }
 
     #[test]
@@ -512,8 +436,11 @@ mod tests {
         )
         .expect("create app");
 
+        assert_eq!(app.activity_panel_layout_width(63, true), 0);
+        assert_eq!(app.activity_panel_layout_width(64, true), 24);
+        assert_eq!(app.activity_panel_layout_width(70, true), 24);
         assert_eq!(app.activity_panel_layout_width(100, true), 30);
-        assert_eq!(app.activity_panel_layout_width(70, true), 0);
+        assert_eq!(app.activity_panel_layout_width(267, true), 80);
     }
 
     #[test]
@@ -527,9 +454,12 @@ mod tests {
         )
         .expect("create app");
 
-        // Narrow: below the minimum, panel is hidden.
-        assert_eq!(app.activity_panel_layout_width(70, true), 0);
-        // Right at the minimum threshold.
+        // Narrow: below 64 columns, panel is hidden.
+        assert_eq!(app.activity_panel_layout_width(63, true), 0);
+        // 64..=79 clamps up to 24.
+        assert_eq!(app.activity_panel_layout_width(64, true), 24);
+        assert_eq!(app.activity_panel_layout_width(79, true), 24);
+        // Right at the 30% = 24 threshold.
         assert_eq!(app.activity_panel_layout_width(80, true), 24);
         // Mid range: follows the 30% proportion.
         assert_eq!(app.activity_panel_layout_width(100, true), 30);
@@ -546,18 +476,8 @@ mod tests {
     }
 
     #[test]
-    fn activity_panel_width_uses_forced_minimum_when_narrow() {
+    fn stored_width_clamped_on_narrow_terminal_and_above_120() {
         let db = test_db();
-        db.insert_activity_log_entry(
-            "/tmp/project",
-            "sync",
-            Some("agent-a"),
-            "info",
-            "first activity",
-            None,
-        )
-        .unwrap();
-
         let data_dir = tempdir().expect("create data dir");
         let mut app = App::new(
             Arc::clone(&db),
@@ -565,15 +485,17 @@ mod tests {
             &crate::domain::canopy_config::CanopyConfig::default(),
         )
         .expect("create app");
-        app.agents = vec![AgentEntry::Agent(sample_agent("bg-1", "/tmp/project"))];
-        app.selected = 0;
-        app.hidden_activity_workdirs
-            .insert("/tmp/project".to_string());
 
-        app.toggle_activity_panel();
-        assert!(app.forced_activity_workdirs.contains("/tmp/project"));
+        // Clamped on a narrower terminal (70 - 40 = 30).
+        app.activity_panel_user_width = Some(80);
+        assert_eq!(app.activity_panel_layout_width(70, true), 30);
+        assert_eq!(app.activity_panel_layout_width(64, true), 24);
 
-        assert_eq!(app.activity_panel_layout_width(70, true), 16);
+        // Clamped at 120 on wide terminals, and 24 at the lower end.
+        app.activity_panel_user_width = Some(150);
+        assert_eq!(app.activity_panel_layout_width(300, true), 120);
+        app.activity_panel_user_width = Some(10);
+        assert_eq!(app.activity_panel_layout_width(120, true), 24);
     }
 
     fn app_with_remote_terminal(remote: Option<(u16, u16)>) -> (App, tempfile::TempDir, String) {
@@ -633,9 +555,9 @@ mod tests {
         assert_eq!(app.remote_fill_width(120), None);
         assert_eq!(app.activity_panel_layout_width(120, true), 36);
 
-        // A strip below the forced minimum leaves the layout as it is:
-        // 120 - (110 + 2) = 8 < 16.
-        app.terminal_agents[0].remote_size = Some((110, 20));
+        // A strip below the panel minimum leaves the layout as it is:
+        // 120 - (98 + 2) = 20 < 24.
+        app.terminal_agents[0].remote_size = Some((98, 20));
         assert_eq!(app.remote_fill_width(120), None);
         assert_eq!(app.activity_panel_layout_width(120, true), 36);
         app.terminal_agents[0].kill();
@@ -670,6 +592,15 @@ mod tests {
 
         app.terminal_agents[0].remote_size = None;
         assert_eq!(app.activity_panel_layout_width(120, false), 0);
+        app.terminal_agents[0].kill();
+    }
+
+    #[test]
+    fn remote_fill_shows_panel_below_64_columns() {
+        let (mut app, _dir, _id) = app_with_remote_terminal(Some((30, 20)));
+        app.last_panel_inner = (58, 24);
+        assert_eq!(app.activity_panel_layout_width(60, true), 28);
+        assert_eq!(app.activity_panel_layout_width(60, false), 28);
         app.terminal_agents[0].kill();
     }
 }
