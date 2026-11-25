@@ -85,6 +85,13 @@ step instead of launching straight away:
 - **Scrolling up** — the scrollback keeps everything the session wrote,
   including output an inline TUI scrolled off the top of the screen, so
   scrolling up shows the transcript instead of stale rows.
+- **Scrolling sidebar lists** — on the **Live** tab, turning the mouse
+  wheel over the **interactive**, **terminal**, or **groups** list scrolls
+  only that section's view by 1 row per notch (3 rows with `Shift`), leaving
+  the current selection untouched. Overflowing lists show scroll indicators;
+  keyboard navigation still scrolls a section to keep the selected row in
+  view, and adding or closing a session clamps the offset to the remaining
+  rows.
 - **Overlays keep the panel live behind them** — opening the prompt
   builder, the knowledge list or viewer, context transfer, RAG transfer, the
   launchpad or the new-agent form never replaces the panel behind it: a
