@@ -100,14 +100,25 @@ Both `canopy setup` and `canopy mcp` also rewrite legacy unauthenticated canopy 
 | Command | Description |
 |---|---|
 | `canopy registry refresh` | Fetch the platform registry and apply it now, ignoring the 24-hour interval the TUI's background refresh uses; prints one line per affected platform (`<platform>: changed <fields>`, `<platform>: kept local override <fields>`, `<platform>: added`, `<platform>: updated`, `<platform>: removed`), or `registry already up to date` when nothing changed. Rewrites only `config.toml` and the baseline file — never starts the TUI, wizard or daemon, safe while graphs run |
-| `canopy registry refresh --json` | Print the same report as JSON (`changed`, `kept`, `added`, `updated`, `deleted`, `up_to_date`) |
+| `canopy registry refresh --json` | Print the same report as JSON (`changed`, `kept`, `added`, `updated`, `deleted`, `pending`, `up_to_date`) |
 | `canopy registry refresh --local-registry <path>` | Apply a local registry directory instead of fetching from GitHub (same flag as `canopy setup --local-registry`) |
+| `canopy registry pending` | Show the registry changes waiting for approval (`<cli>.<field>: <old> -> <new>` per change), or `no registry changes waiting for approval` |
+| `canopy registry pending --json` | Print the staged file content as JSON (`{"changes":[]}` when none) |
+| `canopy registry apply [<cli>] [--yes]` | Approve staged changes (all, or one CLI's) and write them to `config.toml`; without `--yes` it asks `Apply <N> change(s)? [y/N]` and needs a terminal |
+| `canopy registry discard [<cli>]` | Drop staged changes without applying them; the next refresh stages them again while the registry still differs |
 
 Registry-owned CLI fields — binary path, model flag, headless mode,
 environment variables — are rewritten from the registry. A field you edited
 yourself is kept as it is; when the registry changed that same field, the
 refresh reports it as a local override, so a refresh never overwrites your
-choice. The command needs an existing `~/.canopy/config.toml` — on a machine
+choice. Executable fields (anything that changes what the daemon runs:
+binary, flags, argv templates) are never rewritten unattended: the refresh
+keeps your value, stages the registry value in `registry-pending.json`, and
+reports `<cli>: held <field> (waiting for approval)`. The refresh is not
+`up_to_date` while anything is staged. `canopy registry pending` shows the
+diff, `canopy registry apply` writes it after you confirm, and
+`canopy registry discard` drops it (the next refresh stages it again).
+Applying is a human step on purpose: there is no MCP action for it. The command needs an existing `~/.canopy/config.toml` — on a machine
 that has not run setup it fails with ``run `canopy setup` first``. The refresh
 time is recorded where the TUI's background refresh records it, so a manual
 refresh also restarts that 24-hour window. A harness whose binary is gone is

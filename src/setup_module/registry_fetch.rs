@@ -1,3 +1,4 @@
+use super::registry_platforms::{reconcile_platforms, warn_platform_reconciliation};
 use crate::application::ports::StateRepository;
 use crate::db::Database;
 use crate::domain::cli_config::CliConfig;
@@ -45,6 +46,8 @@ pub(crate) struct RegistryRefreshReport {
     pub(crate) updated: Vec<String>,
     /// Platforms removed from the registry.
     pub(crate) deleted: Vec<String>,
+    /// Executable CLI changes staged for approval, not applied.
+    pub(crate) pending: Vec<super::registry_pending::PendingChange>,
     /// True only when this refresh changed nothing.
     pub(crate) up_to_date: bool,
 }
@@ -80,6 +83,18 @@ impl RegistryRefreshReport {
         }
         for platform in &self.deleted {
             lines.push(format!("{}: removed", platform));
+        }
+        for held in &self.pending {
+            lines.push(format!(
+                "{}: held {} (waiting for approval)",
+                held.cli, held.field
+            ));
+        }
+        if !self.pending.is_empty() {
+            lines.push(format!(
+                "{} registry change(s) waiting for approval; run canopy registry pending",
+                self.pending.len()
+            ));
         }
 
         if lines.is_empty() {
@@ -436,7 +451,7 @@ fn apply_registry_refresh(home: &Path, registry: &RegistryRaw) -> Result<Registr
     // invocation flags is everyone, permanently, with no way to even know.
     backup_config_before_first_refresh(&canopy_dir, baseline.is_none())?;
 
-    let (changed_fields, kept_fields) =
+    let (changed_fields, kept_fields, pending) =
         merge_existing_cli_entries(&mut config, &registry_by_name, baseline.as_ref());
     add_newly_detected_clis(&mut config, &cli_registry);
 
@@ -476,11 +491,36 @@ fn apply_registry_refresh(home: &Path, registry: &RegistryRaw) -> Result<Registr
     // longer wipe the user's comments out of config.toml.
     crate::domain::settings::writer::write_clis(&canopy_dir, &config.clis)?;
 
+    // The baseline must remember the value still in use for every held
+    // field — the local one, not the registry's — or the next refresh
+    // would read the held field as a deliberate local edit and never
+    // offer it again.
+    let mut baseline_clis = cli_registry.available_clis;
+    for held in &pending {
+        if let Some(entry) = baseline_clis.iter_mut().find(|c| c.name == held.cli) {
+            super::registry_pending::set_cli_field(entry, &held.field, held.old.clone());
+        }
+    }
     RegistryBaseline {
-        clis: cli_registry.available_clis,
+        clis: baseline_clis,
         platforms: refresh.reconciled_platforms,
     }
     .save(&canopy_dir)?;
+
+    let previous = super::registry_pending::load_pending(&canopy_dir);
+    super::registry_pending::save_pending(&canopy_dir, &pending)?;
+    if !pending.is_empty()
+        && !super::registry_pending::pending_eq_ignoring_time(&pending, &previous)
+    {
+        crate::domain::notification::send_notification(
+            "Canopy registry",
+            &format!(
+                "{} registry change(s) waiting for approval: run canopy registry pending",
+                pending.len()
+            ),
+            crate::domain::notification::NotificationLevel::Warning,
+        );
+    }
 
     db?.set_state(
         REGISTRY_LAST_REFRESH_STATE_KEY,
@@ -493,7 +533,8 @@ fn apply_registry_refresh(home: &Path, registry: &RegistryRaw) -> Result<Registr
         && kept.is_empty()
         && refresh.added.is_empty()
         && refresh.updated.is_empty()
-        && refresh.deleted.is_empty();
+        && refresh.deleted.is_empty()
+        && pending.is_empty();
 
     Ok(RegistryRefreshReport {
         changed,
@@ -501,6 +542,7 @@ fn apply_registry_refresh(home: &Path, registry: &RegistryRaw) -> Result<Registr
         added: refresh.added,
         updated: refresh.updated,
         deleted: refresh.deleted,
+        pending,
         up_to_date,
     })
 }
@@ -527,23 +569,31 @@ fn backup_config_before_first_refresh(canopy_dir: &Path, is_first_refresh: bool)
 /// the registry published at the previous baseline is user-untouched, so
 /// the new registry value wins; a field that has drifted from the
 /// baseline was deliberately edited, so it's left alone. A user who
-/// customised `model_flag` must still receive a corrected `headless_mode`.
-/// Returns the (rewritten, preserved) field lists for the CLIs that were
-/// three-way merged: fields that took the registry value, and local overrides
-/// that were deliberately kept. Both are emitted as `"cli.key"` strings.
+/// customised `model_flag` must still receive a corrected `prompt_via_stdin`.
+/// Executable changes (binary, flags, argv templates) are staged for
+/// approval instead of applied: the local value stays in the config and one
+/// [`super::registry_pending::PendingChange`] is emitted per held field.
+/// Returns the (rewritten, preserved, staged) field lists for the CLIs that
+/// were three-way merged. The first two are emitted as `"cli.key"` strings.
 fn merge_existing_cli_entries(
     config: &mut crate::domain::canopy_config::CanopyConfig,
     registry_by_name: &std::collections::HashMap<String, CliConfig>,
     baseline: Option<&RegistryBaseline>,
-) -> (Vec<String>, Vec<String>) {
+) -> (
+    Vec<String>,
+    Vec<String>,
+    Vec<super::registry_pending::PendingChange>,
+) {
     let mut changed_fields: Vec<String> = Vec::new();
     let mut kept_fields: Vec<String> = Vec::new();
+    let mut pending: Vec<super::registry_pending::PendingChange> = Vec::new();
+    let fetched_at = chrono::Utc::now().to_rfc3339();
 
     for existing in config.clis.iter_mut() {
         if let Some(registry_cli) = registry_by_name.get(&existing.name) {
             let baseline_cli = baseline.and_then(|b| b.get(&existing.name));
             let name = existing.name.clone();
-            *existing = merge_cli_fields(
+            let merged = merge_cli_fields(
                 existing,
                 baseline_cli,
                 registry_cli,
@@ -551,10 +601,17 @@ fn merge_existing_cli_entries(
                 &mut changed_fields,
                 &mut kept_fields,
             );
+            let (held_back, mut staged) =
+                super::registry_pending::hold_executable_changes(existing, &merged, &fetched_at);
+            for held in &staged {
+                changed_fields.retain(|f| f != &format!("{}.{}", held.cli, held.field));
+            }
+            *existing = held_back;
+            pending.append(&mut staged);
         }
     }
 
-    (changed_fields, kept_fields)
+    (changed_fields, kept_fields, pending)
 }
 
 /// Add newly detected CLIs that aren't already in config.
@@ -581,125 +638,6 @@ fn warn_updated_non_customised_fields(changed_fields: &[String]) {
             changed_fields.join(", ")
         );
     }
-}
-
-/// Platform-level reconciliation outcome: which registry platforms were
-/// added, updated, unchanged or deleted, plus the surviving set that
-/// becomes the next baseline.
-struct PlatformRefresh {
-    added: Vec<String>,
-    updated: Vec<String>,
-    unchanged: Vec<String>,
-    deleted: Vec<String>,
-    reconciled_platforms: Vec<Platform>,
-}
-
-/// Reconcile the registry's platforms against the previous baseline:
-/// add / update / delete / unchanged.
-fn reconcile_platforms(
-    home: &Path,
-    baseline: Option<&RegistryBaseline>,
-    registry: &RegistryRaw,
-) -> PlatformRefresh {
-    let baseline_platforms: std::collections::HashMap<String, &Platform> = baseline
-        .map(|b| b.platforms.iter().map(|p| (p.name.clone(), p)).collect())
-        .unwrap_or_default();
-
-    let mut refresh = PlatformRefresh {
-        added: Vec::new(),
-        updated: Vec::new(),
-        unchanged: Vec::new(),
-        deleted: Vec::new(),
-        reconciled_platforms: Vec::new(),
-    };
-
-    for platform in &registry.platforms {
-        if !resolve_config_path(home, &platform.config_path).exists() {
-            continue;
-        }
-        match baseline_platforms.get(&platform.name) {
-            Some(baseline_platform) => {
-                if platforms_differ(baseline_platform, platform) {
-                    refresh.updated.push(platform.name.clone());
-                } else {
-                    refresh.unchanged.push(platform.name.clone());
-                }
-            }
-            None => {
-                refresh.added.push(platform.name.clone());
-            }
-        }
-        refresh.reconciled_platforms.push((*platform).clone());
-    }
-
-    let new_platform_names: std::collections::HashSet<String> = refresh
-        .reconciled_platforms
-        .iter()
-        .map(|p| p.name.clone())
-        .collect();
-    if let Some(b) = baseline {
-        for baseline_platform in &b.platforms {
-            if !new_platform_names.contains(&baseline_platform.name) {
-                // Only count as deleted if the platform's config was part of
-                // the baseline's detected set; platforms never detected are
-                // not reconciled and should not appear here, but since we
-                // only ever store detected platforms, any missing name is a
-                // genuine deletion.
-                refresh.deleted.push(baseline_platform.name.clone());
-            }
-        }
-    }
-
-    refresh
-}
-
-/// Warn about the platforms a refresh added, updated or deleted — summary
-/// first, then names in that order — but only when something changed.
-fn warn_platform_reconciliation(refresh: &PlatformRefresh) {
-    if refresh.added.is_empty() && refresh.updated.is_empty() && refresh.deleted.is_empty() {
-        return;
-    }
-    warn_platform_summary(refresh);
-    warn_platform_name_list("updated", &refresh.updated);
-    warn_platform_name_list("added", &refresh.added);
-    warn_platform_name_list("deleted", &refresh.deleted);
-}
-
-/// Warn the one-line reconciliation summary.
-fn warn_platform_summary(refresh: &PlatformRefresh) {
-    tracing::warn!(
-        "registry refresh: {} added, {} updated, {} deleted, {} unchanged platform(s)",
-        refresh.added.len(),
-        refresh.updated.len(),
-        refresh.deleted.len(),
-        refresh.unchanged.len()
-    );
-}
-
-/// Warn the concrete names behind one non-empty reconciliation bucket.
-fn warn_platform_name_list(label: &str, names: &[String]) {
-    if !names.is_empty() {
-        tracing::warn!("  {label}: {}", names.join(", "));
-    }
-}
-
-/// Structural comparison of two Platform objects. Returns true when any
-/// registry-controlled field differs. The `cli` field is excluded — it is
-/// handled by the existing CLI three-way merge.
-fn platforms_differ(old: &Platform, new: &Platform) -> bool {
-    old.config_path != new.config_path
-        || old.config_format != new.config_format
-        || old.toml_array_format != new.toml_array_format
-        || old.command_format != new.command_format
-        || old.mcp_servers_key != new.mcp_servers_key
-        || old.deprecated_keys != new.deprecated_keys
-        || old.unsupported_keys != new.unsupported_keys
-        || old.fields_mapping != new.fields_mapping
-        || old.required_fields != new.required_fields
-        || old.server_extras != new.server_extras
-        || old.skills_dir != new.skills_dir
-        || old.instruction_file != new.instruction_file
-        || old.instruction_precedence != new.instruction_precedence
 }
 
 /// Merges one CLI's registry-owned fields into `local`, field by field: a
@@ -817,23 +755,26 @@ mod tests {
         let local = CliConfig {
             name: "testcli".to_string(),
             binary: "ls".to_string(),
-            headless_mode: "--old-headless".to_string(),
+            headless_mode: "--headless".to_string(),
             ..Default::default()
         };
         write_config(&canopy_dir, vec![local.clone()]);
         write_baseline(&canopy_dir, vec![local]);
 
+        // `prompt_via_stdin` is metadata, so the registry value applies
+        // directly; executable fields such as `headless_mode` are staged
+        // for approval instead (see `registry_pending`).
         let registry = registry_of(vec![detected_platform(
             home.path(),
             "testcli",
-            serde_json::json!({"binary": "ls", "headless_mode": "--new-headless"}),
+            serde_json::json!({"binary": "ls", "headless_mode": "--headless", "prompt_via_stdin": true}),
         )]);
 
         apply_registry_refresh(home.path(), &registry).unwrap();
 
         let config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
         let cli = config.get_cli("testcli").unwrap();
-        assert_eq!(cli.headless_mode, "--new-headless");
+        assert!(cli.prompt_via_stdin);
     }
 
     #[test]
@@ -846,11 +787,11 @@ mod tests {
             name: "testcli".to_string(),
             binary: "ls".to_string(),
             model_flag: Some("--model-old".to_string()),
-            headless_mode: "--old-headless".to_string(),
+            headless_mode: "--headless".to_string(),
             ..Default::default()
         };
         // Local drifted from the baseline on model_flag (deliberate edit)
-        // but never touched headless_mode.
+        // but never touched prompt_via_stdin.
         let local_cli = CliConfig {
             model_flag: Some("--model-custom".to_string()),
             ..baseline_cli.clone()
@@ -864,7 +805,8 @@ mod tests {
             serde_json::json!({
                 "binary": "ls",
                 "model_flag": "--model-new",
-                "headless_mode": "--new-headless"
+                "headless_mode": "--headless",
+                "prompt_via_stdin": true
             }),
         )]);
 
@@ -874,16 +816,19 @@ mod tests {
         let cli = config.get_cli("testcli").unwrap();
         // Customised field is untouched...
         assert_eq!(cli.model_flag.as_deref(), Some("--model-custom"));
-        // ...but the field the user never touched still gets corrected.
-        assert_eq!(cli.headless_mode, "--new-headless");
+        // ...but the metadata field the user never touched still applies.
+        assert!(cli.prompt_via_stdin);
     }
 
-    /// CB44: the generic `merge_cli_fields` graph must carry the new
-    /// `identity_check` field — a platform whose check the user never
-    /// touched gets the registry's updated check on refresh.
+    /// CB44: the generic `merge_cli_fields` graph must carry a new field —
+    /// here a metadata one (`ctrl_c_exits`), which a platform whose
+    /// entry the user never touched gets from the registry on refresh.
+    /// Executable fields such as `identity_check` are staged for approval
+    /// instead (see `registry_pending`). (`instruction_file` cannot serve
+    /// here: `to_platform_with_cli` overwrites the `[cli]` value with the
+    /// top-level platform field.)
     #[test]
-    fn identity_check_never_touched_by_user_is_updated_on_refresh() {
-        use crate::domain::cli_config::IdentityCheck;
+    fn metadata_field_never_touched_by_user_is_updated_on_refresh() {
         let home = TempDir::new().unwrap();
         let canopy_dir = home.path().join(".canopy");
 
@@ -891,10 +836,6 @@ mod tests {
             name: "testcli".to_string(),
             binary: "ls".to_string(),
             headless_mode: "--headless".to_string(),
-            identity_check: Some(IdentityCheck {
-                cmd: "--version".to_string(),
-                contains: "old".to_string(),
-            }),
             ..Default::default()
         };
         write_config(&canopy_dir, vec![old.clone()]);
@@ -906,7 +847,7 @@ mod tests {
             serde_json::json!({
                 "binary": "ls",
                 "headless_mode": "--headless",
-                "identity_check": {"cmd": "--version", "contains": "new"}
+                "ctrl_c_exits": true
             }),
         )]);
 
@@ -914,10 +855,7 @@ mod tests {
 
         let config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
         let cli = config.get_cli("testcli").unwrap();
-        assert_eq!(
-            cli.identity_check.as_ref().map(|c| c.contains.as_str()),
-            Some("new")
-        );
+        assert!(cli.ctrl_c_exits);
     }
 
     /// CB44: a user-customised `identity_check` survives a registry refresh
@@ -1112,16 +1050,21 @@ mod tests {
         let registry = registry_of(vec![detected_platform(
             home.path(),
             "testcli",
-            serde_json::json!({"binary": "ls", "headless_mode": "--corrected"}),
+            serde_json::json!({
+                "binary": "ls",
+                "headless_mode": "--corrected",
+                "prompt_via_stdin": true
+            }),
         )]);
 
-        apply_registry_refresh(home.path(), &registry).unwrap();
+        let report = apply_registry_refresh(home.path(), &registry).unwrap();
 
         let config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
-        assert_eq!(
-            config.get_cli("testcli").unwrap().headless_mode,
-            "--corrected"
-        );
+        // Metadata is adopted outright...
+        assert!(config.get_cli("testcli").unwrap().prompt_via_stdin);
+        // ...but the executable correction is staged, not applied.
+        assert_eq!(config.get_cli("testcli").unwrap().headless_mode, "--stale");
+        assert_eq!(report.pending.len(), 1);
 
         // A timestamped backup of the pre-refresh config exists and holds
         // the old value.
@@ -1670,7 +1613,8 @@ unsupported_keys = []
     }
 
     /// (a) `canopy registry refresh` driven from a local registry directory
-    /// adds newly published CLI fields to an existing platform entry.
+    /// adds newly published metadata CLI fields to an existing platform
+    /// entry; newly published executable fields are staged, not applied.
     #[test]
     fn local_registry_refresh_adds_new_cli_fields_to_existing_platform() {
         let home = TempDir::new().unwrap();
@@ -1689,7 +1633,7 @@ unsupported_keys = []
                 "ls",
                 &platform_toml_with_cli(
                     "testcli",
-                    "binary = \"ls\"\nheadless_mode = \"--new\"\nmodel_flag = \"--model\"",
+                    "binary = \"ls\"\nheadless_mode = \"--new\"\nmodel_flag = \"--model\"\nprompt_via_stdin = true",
                 ),
             )],
         );
@@ -1701,15 +1645,17 @@ unsupported_keys = []
 
         let config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
         let cli = config.get_cli("testcli").unwrap();
-        assert_eq!(cli.headless_mode, "--new");
-        assert_eq!(cli.model_flag.as_deref(), Some("--model"));
+        assert!(cli.prompt_via_stdin);
+        // Executable fields stay local; the registry values wait for approval.
+        assert_eq!(cli.headless_mode, "--old");
+        assert_eq!(cli.model_flag, None);
+        assert_eq!(report.pending.len(), 2);
 
         let changed = report.changed.get("testcli").unwrap();
         assert!(
-            changed.contains(&"headless_mode".to_string()),
+            changed.contains(&"prompt_via_stdin".to_string()),
             "{changed:?}"
         );
-        assert!(changed.contains(&"model_flag".to_string()), "{changed:?}");
     }
 
     /// (b) A locally overridden field diverging from the registry is kept
