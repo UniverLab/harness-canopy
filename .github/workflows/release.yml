@@ -10,17 +10,21 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 jobs:
   ci:
     uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
     secrets: inherit
 
   release:
     needs: ci
-    uses: UniverLab/workflows/.github/workflows/rust-release-manual.yml@main
+    uses: UniverLab/workflows/.github/workflows/rust-release-manual.yml@00d844d828a9bb76c0a6cd22f0c0123c2f9b8b5c # main
+    permissions:
+      contents: write
+      id-token: write
     with:
       binary-name: canopy
       system-packages: protobuf-compiler

@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   ci:
-    uses: UniverLab/workflows/.github/workflows/rust-ci.yml@main
+    uses: UniverLab/workflows/.github/workflows/rust-ci.yml@00d844d828a9bb76c0a6cd22f0c0123c2f9b8b5c # main
     with:
       system-packages: protobuf-compiler
       # Default features only. `--all-features` turns on local-embeddings,
@@ -42,3 +42,11 @@ jobs:
       # cargo-deny gates every PR; keep on
       run-deny: true
     secrets: inherit
+
+  pins:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: bash scripts/check-workflow-pins.sh
