@@ -173,6 +173,15 @@ is a percentage of the machine's physical memory, so the unit stays portable.
 (the systemd default for a unit written before this), naming the reinstall
 that fixes it.
 
+The generated unit also places `StartLimitIntervalSec=60` and
+`StartLimitBurst=5` in `[Unit]` (where systemd reads them) and adds
+`After=network-online.target` / `Wants=network-online.target`, so the
+restart limit is actually applied and the daemon waits for the network to
+be online before it starts. `canopy doctor` warns when an installed unit
+keeps its restart limits outside `[Unit]` or lacks the network-online wait,
+and reports that the restart limits are not applied until the unit is
+updated; run `canopy daemon install-service` to rewrite the unit.
+
 The generated unit also carries `CPUQuota=` from the
 `daemon.cpu_quota_percent` setting (half the host's logical CPUs by
 default; `0` disables it), so graph work can never saturate every core of
