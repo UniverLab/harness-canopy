@@ -50,8 +50,14 @@ fn running_graph_renders_header_queue_graph_and_footer_with_current_node_highlig
     ] {
         assert!(text.contains(name), "missing node {name} in:\n{text}");
     }
-    assert!(text.contains("pass →"), "{text}");
-    assert!(text.contains("fail →"), "{text}");
+    assert!(
+        text.contains('│'),
+        "expected diagram connectors in:\n{text}"
+    );
+    assert!(
+        text.contains('↺'),
+        "expected retry back-edge marker in:\n{text}"
+    );
     // The auto-followed current node (Implement/n0) uses the solid
     // follow marker.
     assert!(text.contains("●"), "expected follow marker in:\n{text}");
@@ -615,27 +621,18 @@ fn ensemble_renders_as_one_collapsed_box_with_per_member_status() {
     state.ensembles = vec![ensemble_live_fixture()];
     state.current_node_id = Some("kickoff".to_string());
 
-    let node_info = NodeRunInfo::default();
-    let text = render_to_text(80, 40, |frame, area| {
-        render_graph_live_view(
-            frame,
-            area,
-            &LiveViewContext {
-                state: &state,
-                follow: true,
-                follow_anchor: None,
-                highlighted_node_id: state.current_node_id.as_deref(),
-                node_info: &node_info,
-                blocked: false,
-                now: Utc::now(),
-                theme: &Theme::classic(),
-                time_format: "%H:%M",
-                selected_spec_id: None,
-                spec_scroll: 0,
-                scroll: 0,
-            },
-        );
-    });
+    let text = graph_lines(
+        &state,
+        state.current_node_id.as_deref(),
+        true,
+        80,
+        &Theme::classic(),
+    )
+    .lines
+    .into_iter()
+    .map(|l| l.to_string())
+    .collect::<Vec<_>>()
+    .join("\n");
 
     // Collapsed to one box with the member count, not three separate
     // member boxes or a fourth box for the join.
@@ -1119,27 +1116,18 @@ fn dfs_layout_renders_children_immediately_after_edges() {
     ];
     state.ensembles = Vec::new();
     state.current_node_id = Some("a".to_string());
-    let node_info = NodeRunInfo::default();
-    let text = render_to_text(80, 40, |frame, area| {
-        render_graph_live_view(
-            frame,
-            area,
-            &LiveViewContext {
-                state: &state,
-                follow: true,
-                follow_anchor: None,
-                highlighted_node_id: state.current_node_id.as_deref(),
-                node_info: &node_info,
-                blocked: false,
-                now: Utc::now(),
-                theme: &Theme::classic(),
-                time_format: "%H:%M",
-                selected_spec_id: None,
-                spec_scroll: 0,
-                scroll: 0,
-            },
-        );
-    });
+    let text = graph_lines(
+        &state,
+        state.current_node_id.as_deref(),
+        true,
+        80,
+        &Theme::classic(),
+    )
+    .lines
+    .into_iter()
+    .map(|l| l.to_string())
+    .collect::<Vec<_>>()
+    .join("\n");
     // Ensure B appears after A and C after B
     // For robustness, just check order of node names in rendered text
     let ai = text.find("A").unwrap();
@@ -1206,27 +1194,18 @@ fn dfs_layout_shows_back_reference_for_cycles() {
     ];
     state.ensembles = Vec::new();
     state.current_node_id = Some("a".to_string());
-    let node_info = NodeRunInfo::default();
-    let text = render_to_text(80, 40, |frame, area| {
-        render_graph_live_view(
-            frame,
-            area,
-            &LiveViewContext {
-                state: &state,
-                follow: true,
-                follow_anchor: None,
-                highlighted_node_id: state.current_node_id.as_deref(),
-                node_info: &node_info,
-                blocked: false,
-                now: Utc::now(),
-                theme: &Theme::classic(),
-                time_format: "%H:%M",
-                selected_spec_id: None,
-                spec_scroll: 0,
-                scroll: 0,
-            },
-        );
-    });
+    let text = graph_lines(
+        &state,
+        state.current_node_id.as_deref(),
+        true,
+        80,
+        &Theme::classic(),
+    )
+    .lines
+    .into_iter()
+    .map(|l| l.to_string())
+    .collect::<Vec<_>>()
+    .join("\n");
     assert!(
         text.contains("↩"),
         "cycle back-edge should render with ↩ marker, got:\n{text}"
@@ -1291,27 +1270,18 @@ fn dfs_layout_pass_before_fail() {
     ];
     state.ensembles = Vec::new();
     state.current_node_id = Some("a".to_string());
-    let node_info = NodeRunInfo::default();
-    let text = render_to_text(80, 40, |frame, area| {
-        render_graph_live_view(
-            frame,
-            area,
-            &LiveViewContext {
-                state: &state,
-                follow: true,
-                follow_anchor: None,
-                highlighted_node_id: state.current_node_id.as_deref(),
-                node_info: &node_info,
-                blocked: false,
-                now: Utc::now(),
-                theme: &Theme::classic(),
-                time_format: "%H:%M",
-                selected_spec_id: None,
-                spec_scroll: 0,
-                scroll: 0,
-            },
-        );
-    });
+    let text = graph_lines(
+        &state,
+        state.current_node_id.as_deref(),
+        true,
+        80,
+        &Theme::classic(),
+    )
+    .lines
+    .into_iter()
+    .map(|l| l.to_string())
+    .collect::<Vec<_>>()
+    .join("\n");
     let pass_idx = text.find("pass → B").expect("pass edge missing");
     let fail_idx = text.find("fail → C").expect("fail edge missing");
     assert!(

@@ -9,13 +9,15 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
+use super::diagram::diagram_lines;
 use super::lines::graph_lines;
+pub(super) use super::spec_strip::spec_strip_layout;
+#[cfg(test)]
+pub(super) use super::spec_strip::SPEC_CHIP_WIDTH;
 use super::{LiveViewContext, LiveViewRenderResult};
 use crate::db::mutex_store::MutexWaitDetail;
-use crate::domain::graphs::{GraphRunStatus, GraphSpecStatus, GraphStatus};
-use crate::tui::app::graph_live_state::{
-    pausing_label, GraphLiveState, NodeRunInfo, SpecQueueEntry,
-};
+use crate::domain::graphs::{GraphRunStatus, GraphStatus};
+use crate::tui::app::graph_live_state::{pausing_label, GraphLiveState, NodeRunInfo};
 use crate::tui::ui::panel::compact_cwd;
 use crate::tui::ui::sidebar::draw_scroll_indicators;
 use crate::tui::ui::theme::Theme;
@@ -26,10 +28,10 @@ pub(super) fn render_graph_live_view(
     ctx: &LiveViewContext,
 ) -> LiveViewRenderResult {
     let state = ctx.state;
-    let mut lines = header_lines(state, ctx.blocked, ctx.theme, ctx.time_format);
-    lines.push(Line::from(""));
+    let mut top_lines = header_lines(state, ctx.blocked, ctx.theme, ctx.time_format);
+    top_lines.push(Line::from(""));
 
-    let chip_row = area.y + lines.len() as u16;
+    let chip_row = area.y + top_lines.len() as u16;
     let strip = spec_strip_layout(
         state,
         ctx.selected_spec_id,
@@ -38,19 +40,27 @@ pub(super) fn render_graph_live_view(
         area.height,
         ctx.theme,
     );
-    lines.extend(strip.lines);
+    top_lines.extend(strip.lines);
 
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
+    let top_para = Paragraph::new(top_lines)
+        .wrap(Wrap { trim: false })
+        .style(Style::default().bg(ctx.theme.info_bg));
+    let top_h = (top_para.line_count(area.width) as u16).min(area.height);
+    let body_h = area.height.saturating_sub(top_h);
+    let top_area = Rect::new(area.x, area.y, area.width, top_h);
+    let body_area = Rect::new(area.x, area.y + top_h, area.width, body_h);
+
+    let mut body_lines = vec![Line::from(Span::styled(
         "Graph",
         Style::default().fg(ctx.theme.dim_text),
-    )));
-    let graph_start_line = lines.len() as u16;
-    let (graph_offset, graph_span) = push_graph_lines(&mut lines, state, ctx, area.width).unzip();
+    ))];
+    let graph_start_line = body_lines.len() as u16;
+    let (graph_offset, graph_span) =
+        push_graph_lines(&mut body_lines, state, ctx, area.width).unzip();
     let graph_offset = graph_offset.flatten();
     let graph_span = graph_span.flatten();
-    lines.push(Line::from(""));
-    lines.extend(footer_lines(
+    body_lines.push(Line::from(""));
+    body_lines.extend(footer_lines(
         state,
         ctx.highlighted_node_id,
         ctx.node_info,
@@ -59,8 +69,8 @@ pub(super) fn render_graph_live_view(
         ctx.theme,
     ));
 
-    let total_lines = lines.len() as u16;
-    let max_scroll = total_lines.saturating_sub(area.height);
+    let body_line_count = body_lines.len() as u16;
+    let max_scroll = body_line_count.saturating_sub(body_h);
     let clamped_from_input = ctx.scroll.min(max_scroll);
 
     let (scroll, next_follow_anchor) = live_view_scroll(
@@ -68,24 +78,29 @@ pub(super) fn render_graph_live_view(
         graph_offset,
         graph_start_line,
         clamped_from_input,
-        area.height,
+        body_h,
         max_scroll,
         graph_span,
     );
     let clamped_scroll = scroll.min(max_scroll);
 
-    frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .scroll((clamped_scroll, 0))
-            .style(Style::default().bg(ctx.theme.info_bg)),
-        area,
-    );
+    if top_h > 0 {
+        frame.render_widget(top_para, top_area);
+    }
+    if body_h > 0 {
+        frame.render_widget(
+            Paragraph::new(body_lines)
+                .wrap(Wrap { trim: false })
+                .scroll((clamped_scroll, 0))
+                .style(Style::default().bg(ctx.theme.info_bg)),
+            body_area,
+        );
+    }
 
     let has_up = clamped_scroll > 0;
-    let has_down = total_lines > area.height && clamped_scroll < max_scroll;
-    if has_up || has_down {
-        draw_scroll_indicators(frame, area, has_up, has_down, ctx.theme);
+    let has_down = body_line_count > body_h && clamped_scroll < max_scroll;
+    if body_h > 0 && (has_up || has_down) {
+        draw_scroll_indicators(frame, body_area, has_up, has_down, ctx.theme);
     }
 
     LiveViewRenderResult {
@@ -102,7 +117,7 @@ pub(super) fn render_graph_live_view(
             })
             .collect(),
         capacity: strip.capacity,
-        total_lines,
+        total_lines: top_h + body_line_count,
         clamped_scroll,
         follow_anchor: next_follow_anchor,
     }
@@ -122,13 +137,22 @@ fn push_graph_lines(
         )));
         return None;
     }
-    let result = graph_lines(
+    let result = diagram_lines(
         state,
         ctx.highlighted_node_id,
         ctx.follow,
         area_width,
         ctx.theme,
-    );
+    )
+    .unwrap_or_else(|| {
+        graph_lines(
+            state,
+            ctx.highlighted_node_id,
+            ctx.follow,
+            area_width,
+            ctx.theme,
+        )
+    });
     let offset = result.highlighted_offset;
     let span = result.highlighted_span;
     lines.extend(result.lines);
@@ -274,235 +298,6 @@ fn header_lines(
             Style::default().fg(theme.dim_text),
         )),
     ]
-}
-
-/// Chip glyph for a queue entry: the current spec always shows `▶`
-/// regardless of its underlying status (running or the next pending one —
-/// see `assemble_graph_live_state`'s `current_spec_id` rule); otherwise the
-/// glyph reflects the terminal status directly, since that's exactly the
-/// case a user goes looking for (which spec failed vs. was skipped).
-fn spec_chip(
-    entry: &SpecQueueEntry,
-    current_spec_id: Option<&str>,
-    theme: &Theme,
-) -> (&'static str, Color) {
-    if Some(entry.spec_id.as_str()) == current_spec_id {
-        return ("▶", theme.status_running);
-    }
-    match entry.status {
-        GraphSpecStatus::Pending => ("○", theme.dim_text),
-        GraphSpecStatus::Running => ("▶", theme.status_running),
-        GraphSpecStatus::Completed => ("✓", theme.status_ok),
-        GraphSpecStatus::Failed => ("✗", theme.status_fail),
-        GraphSpecStatus::Skipped => ("⊘", theme.status_disabled),
-        GraphSpecStatus::Interrupted => ("⚑", theme.status_interrupted),
-    }
-}
-
-/// A marker chip's fixed on-screen footprint: a 3-column core (bracketed
-/// when selected, plain otherwise) plus a 1-column gap, so the strip's
-/// column arithmetic never has to special-case which chip is selected.
-pub(super) const SPEC_CHIP_WIDTH: u16 = 4;
-
-/// Columns reserved for the "(a-b of N)" suffix when the strip has to
-/// truncate — wide enough for three-digit spec counts on either side.
-const SPEC_STRIP_RANGE_SUFFIX_WIDTH: u16 = 14;
-
-/// The marker strip's rendered lines, its click map (spec id + row offset +
-/// column span, relative to the strip's own origin — the caller translates
-/// to absolute screen coordinates), and how many chips fit in the given
-/// width.
-pub(super) struct SpecStripLayout {
-    pub(super) lines: Vec<Line<'static>>,
-    pub(super) click_map: Vec<(String, u16, u16, u16)>,
-    pub(super) capacity: usize,
-    #[allow(dead_code)]
-    pub(super) chip_line_count: usize,
-}
-
-/// Lay out the spec marker strip: status chips wrapped across multiple lines
-/// to fill available height; compressed to a scrollable window with a
-/// "(a-b of N)" indicator only when even multi-line wrapping cannot fit all
-/// specs — followed by the selected spec's detail, falling back to the
-/// running/next-pending spec when nothing is manually selected.
-pub(super) fn spec_strip_layout(
-    state: &GraphLiveState,
-    selected_spec_id: Option<&str>,
-    scroll: usize,
-    area_width: u16,
-    area_height: u16,
-    theme: &Theme,
-) -> SpecStripLayout {
-    if state.spec_queue.is_empty() {
-        return SpecStripLayout {
-            lines: vec![Line::from(Span::styled(
-                "Queue: (empty)",
-                Style::default().fg(theme.dim_text),
-            ))],
-            click_map: Vec::new(),
-            capacity: 0,
-            chip_line_count: 1,
-        };
-    }
-
-    let total = state.spec_queue.len();
-    let chips_per_line = (area_width / SPEC_CHIP_WIDTH).max(1) as usize;
-    let lines_needed = total.div_ceil(chips_per_line);
-    const RESERVED_NON_CHIP_LINES: u16 = 8;
-    let max_chip_lines = area_height.saturating_sub(RESERVED_NON_CHIP_LINES).max(1) as usize;
-    let chip_lines = lines_needed.min(max_chip_lines);
-    let truncated = total > chip_lines * chips_per_line;
-    let capacity = if truncated {
-        // Round up: reserving 3 whole chips (12 cols) for a 14-col suffix
-        // leaves the "(a-b of N)" text spilling past the line and soft-wrapping
-        // onto an extra visual row. Reserve the ceiling so it fits.
-        let last_line_reserved = SPEC_STRIP_RANGE_SUFFIX_WIDTH
-            .div_ceil(SPEC_CHIP_WIDTH)
-            .max(1) as usize;
-        chip_lines.saturating_sub(1) * chips_per_line
-            + chips_per_line.saturating_sub(last_line_reserved)
-    } else {
-        chip_lines * chips_per_line
-    };
-    let capacity = capacity.max(1);
-    let start = scroll.min(total.saturating_sub(capacity));
-    let end = (start + capacity).min(total);
-
-    let mut chip_lines_vec: Vec<Line<'static>> = Vec::new();
-    let mut click_map: Vec<(String, u16, u16, u16)> = Vec::new();
-    let mut current_spans: Vec<Span<'static>> = Vec::new();
-    let mut col: u16 = 0;
-    let mut row_offset: u16 = 0;
-
-    for entry in &state.spec_queue[start..end] {
-        if col > 0 && col + SPEC_CHIP_WIDTH > area_width {
-            chip_lines_vec.push(Line::from(std::mem::take(&mut current_spans)));
-            row_offset += 1;
-            col = 0;
-        }
-        let (icon, color) = spec_chip(entry, state.current_spec_id.as_deref(), theme);
-        let selected = Some(entry.spec_id.as_str()) == selected_spec_id;
-        let core = if selected {
-            format!("[{icon}]")
-        } else {
-            format!(" {icon} ")
-        };
-        let style = if selected {
-            Style::default().fg(color).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(color)
-        };
-        let core_width = core.chars().count() as u16;
-        click_map.push((entry.spec_id.clone(), row_offset, col, col + core_width));
-        current_spans.push(Span::styled(core, style));
-        current_spans.push(Span::raw(" "));
-        col += SPEC_CHIP_WIDTH;
-    }
-    if truncated {
-        current_spans.push(Span::styled(
-            format!(" ({}-{} of {})", start + 1, end, total),
-            Style::default().fg(theme.dim_text),
-        ));
-    }
-    if !current_spans.is_empty() || chip_lines_vec.is_empty() {
-        chip_lines_vec.push(Line::from(current_spans));
-    }
-
-    let chip_line_count = chip_lines_vec.len();
-    let mut lines = chip_lines_vec;
-    lines.extend(spec_detail_lines(state, selected_spec_id, theme));
-
-    SpecStripLayout {
-        lines,
-        click_map,
-        capacity,
-        chip_line_count,
-    }
-}
-
-/// Name, status, and (for a failed/skipped spec) the recorded reason for
-/// whichever spec the marker strip is showing: the manual selection if
-/// there is one, else the running/next-pending spec — the same fallback
-/// the strip's detail line always showed before selection existed.
-fn spec_detail_lines(
-    state: &GraphLiveState,
-    selected_spec_id: Option<&str>,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
-    let entry = selected_spec_id
-        .and_then(|id| state.spec_queue.iter().find(|e| e.spec_id == id))
-        .or_else(|| {
-            state
-                .spec_queue
-                .iter()
-                .find(|e| Some(e.spec_id.as_str()) == state.current_spec_id.as_deref())
-        });
-    let Some(entry) = entry else {
-        return Vec::new();
-    };
-
-    let (_, color) = spec_chip(entry, state.current_spec_id.as_deref(), theme);
-    let mut lines = Vec::new();
-
-    // SPECCODE: Show code badge before name, then dimmed type/scope
-    let mut name_line_parts = Vec::new();
-    if let Some(ref code) = entry.spec_code {
-        name_line_parts.push(Span::styled(
-            format!("[{code}] "),
-            Style::default().fg(theme.status_ok),
-        ));
-    }
-    name_line_parts.push(Span::styled(
-        entry.spec_name.clone(),
-        Style::default()
-            .fg(theme.text_primary)
-            .add_modifier(Modifier::BOLD),
-    ));
-
-    // SPECCODE: dimmed type/scope after name
-    if let Some(ref spec_type) = entry.spec_type {
-        let type_str = spec_type.as_str();
-        if let Some(ref scope) = entry.spec_scope {
-            name_line_parts.push(Span::raw(" "));
-            name_line_parts.push(Span::styled(
-                format!("({type_str}:{scope}) "),
-                Style::default().fg(theme.dim_text),
-            ));
-        } else {
-            name_line_parts.push(Span::raw(" "));
-            name_line_parts.push(Span::styled(
-                format!("({type_str}) "),
-                Style::default().fg(theme.dim_text),
-            ));
-        }
-    }
-
-    name_line_parts.push(Span::raw(" "));
-    name_line_parts.push(Span::styled(
-        format!("[{}]", spec_status_label(entry.status)),
-        Style::default().fg(color),
-    ));
-
-    lines.push(Line::from(name_line_parts));
-
-    if let Some(reason) = entry.failure_reason.as_deref() {
-        lines.push(Line::from(Span::styled(
-            format!("  {reason}"),
-            Style::default().fg(theme.dim_text),
-        )));
-    }
-    lines
-}
-
-fn spec_status_label(status: GraphSpecStatus) -> &'static str {
-    match status {
-        GraphSpecStatus::Pending => "pending",
-        GraphSpecStatus::Running => "running",
-        GraphSpecStatus::Completed => "completed",
-        GraphSpecStatus::Failed => "failed",
-        GraphSpecStatus::Skipped => "skipped",
-        GraphSpecStatus::Interrupted => "interrupted",
-    }
 }
 
 fn format_elapsed(started_at: DateTime<Utc>, now: DateTime<Utc>) -> String {
@@ -841,4 +636,169 @@ mod tests {
     }
     // Breaks if: `highlighted_span` is not measured after `dfs_push_box`
     // (plain box 3 lines, 1-member ensemble box 4 lines).
+
+    fn buffer_row_text(buf: &ratatui::buffer::Buffer, y: u16, width: u16) -> String {
+        (0..width)
+            .map(|x| buf[(x, y)].symbol())
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    #[test]
+    fn strip_remains_fixed_at_top_when_body_scrolls() {
+        use crate::domain::graphs::{GraphEdge, GraphEdgeCondition, GraphSpecStatus};
+        use crate::tui::app::graph_live_state::SpecQueueEntry;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut state = blank_state();
+        state.graph_name = "demo".to_string();
+        state.spec_queue = vec![SpecQueueEntry {
+            spec_id: "s1".to_string(),
+            spec_name: "pinned-spec".to_string(),
+            spec_code: None,
+            spec_type: None,
+            spec_scope: None,
+            status: GraphSpecStatus::Running,
+            failure_reason: None,
+        }];
+        state.current_spec_id = Some("s1".to_string());
+        state.effective_nodes = (0..10).map(|i| agent_node(&format!("n{i}"), i)).collect();
+        state.effective_edges = (0..9)
+            .map(|i| GraphEdge {
+                id: format!("e{i}"),
+                spec_id: Some("s1".to_string()),
+                graph_id: None,
+                from_node: format!("n{i}"),
+                to_node: format!("n{}", i + 1),
+                condition: GraphEdgeCondition::Pass,
+            })
+            .collect();
+
+        let info = NodeRunInfo::default();
+        let theme = Theme::classic();
+        let draw_at = |scroll: u16| -> (Vec<String>, LiveViewRenderResult) {
+            let mut terminal = Terminal::new(TestBackend::new(60, 18)).unwrap();
+            let mut res = None;
+            terminal
+                .draw(|frame| {
+                    let area = frame.area();
+                    res = Some(render_graph_live_view(
+                        frame,
+                        area,
+                        &scroll_ctx(&state, &info, &theme, false, Some("n0"), None, scroll),
+                    ));
+                })
+                .unwrap();
+            let buf = terminal.backend().buffer().clone();
+            let rows = (0..18).map(|y| buffer_row_text(&buf, y, 60)).collect();
+            (rows, res.unwrap())
+        };
+
+        let (rows0, res0) = draw_at(0);
+        let (rows_scrolled, res_scrolled) = draw_at(500);
+        // Header (2) + blank (1) + strip chips (1) + spec detail (1) = 5 top rows
+        assert_eq!(&rows0[..5], &rows_scrolled[..5]);
+        assert!(rows_scrolled[4].contains("pinned-spec"));
+        assert!(res_scrolled.clamped_scroll > 0);
+        assert_eq!(res0.total_lines, res_scrolled.total_lines);
+    }
+
+    #[test]
+    fn max_scroll_matches_total_minus_full_height_and_shows_footer_end() {
+        use crate::domain::graphs::{GraphEdge, GraphEdgeCondition};
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut state = blank_state();
+        state.graph_name = "demo".to_string();
+        state.effective_nodes = (0..10).map(|i| agent_node(&format!("n{i}"), i)).collect();
+        state.effective_edges = (0..9)
+            .map(|i| GraphEdge {
+                id: format!("e{i}"),
+                spec_id: Some("spec-1".to_string()),
+                graph_id: None,
+                from_node: format!("n{i}"),
+                to_node: format!("n{}", i + 1),
+                condition: GraphEdgeCondition::Pass,
+            })
+            .collect();
+
+        let info = NodeRunInfo {
+            waiting_for: vec![MutexWaitDetail {
+                resource: "cpu".to_string(),
+                holder_graph: None,
+                holder_node: None,
+                since: None,
+            }],
+            ..NodeRunInfo::default()
+        };
+        let theme = Theme::classic();
+        let full_height = 18u16;
+        let mut terminal = Terminal::new(TestBackend::new(60, full_height)).unwrap();
+        let mut res = None;
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                res = Some(render_graph_live_view(
+                    frame,
+                    area,
+                    &scroll_ctx(&state, &info, &theme, false, None, None, u16::MAX),
+                ));
+            })
+            .unwrap();
+        let res = res.unwrap();
+        assert_eq!(res.clamped_scroll, res.total_lines - full_height);
+        let buf = terminal.backend().buffer();
+        let last_row = buffer_row_text(buf, full_height - 1, 60);
+        assert!(
+            last_row.contains("(no node selected)"),
+            "expected footer last line at max scroll, got: {last_row:?}"
+        );
+    }
+
+    #[test]
+    fn narrow_panel_falls_back_to_vertical_edge_labels() {
+        use crate::domain::graphs::{GraphEdge, GraphEdgeCondition};
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut state = blank_state();
+        state.graph_name = "demo".to_string();
+        state.effective_nodes = vec![agent_node("a", 0), agent_node("b", 1)];
+        state.effective_edges = vec![GraphEdge {
+            id: "e1".to_string(),
+            spec_id: Some("spec-1".to_string()),
+            graph_id: None,
+            from_node: "a".to_string(),
+            to_node: "b".to_string(),
+            condition: GraphEdgeCondition::Pass,
+        }];
+
+        let info = NodeRunInfo::default();
+        let theme = Theme::classic();
+        let mut terminal = Terminal::new(TestBackend::new(29, 40)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                render_graph_live_view(
+                    frame,
+                    area,
+                    &scroll_ctx(&state, &info, &theme, false, Some("a"), None, 0),
+                );
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let text = (0..40)
+            .map(|y| buffer_row_text(&buf, y, 29))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("pass →"),
+            "width-29 panel must fall back to the vertical list with edge labels, got:\n{text}"
+        );
+    }
+    // Breaks if: `push_graph_lines` stops falling back to `graph_lines`
+    // when `diagram_lines` returns `None` (the diagram draws no edge labels).
 }

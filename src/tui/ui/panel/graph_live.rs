@@ -15,8 +15,10 @@ use super::super::theme::Theme;
 use crate::tui::app::graph_live_state::{GraphLiveState, NodeRunInfo};
 use crate::tui::app::types::App;
 
+mod diagram;
 mod lines;
 mod render;
+mod spec_strip;
 
 use render::render_graph_live_view;
 

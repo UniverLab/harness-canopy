@@ -96,7 +96,7 @@ fn truncate_str_width(s: &str, max_width: usize) -> String {
 /// row built this way — this is what keeps member rows exactly as wide as
 /// the title and border rows (previously short by 2 columns because the
 /// padding math didn't add up to `inner`).
-fn fit_row(content: &str, inner: usize, leading: usize) -> String {
+pub(super) fn fit_row(content: &str, inner: usize, leading: usize) -> String {
     let budget = inner.saturating_sub(leading + 1);
     let truncated = truncate_str_width(content, budget);
     let pad = budget.saturating_sub(UnicodeWidthStr::width(truncated.as_str()));
@@ -220,16 +220,16 @@ pub(super) struct GraphLinesResult<'a> {
 }
 
 /// A collapsed box entry: either a plain node or a whole ensemble.
-enum Collapsed<'a> {
+pub(super) enum Collapsed<'a> {
     Node(&'a GraphNode),
     Ensemble(&'a EnsembleLiveInfo),
 }
 
 /// Indexes over the state's ensembles, used to collapse members into one box.
-struct EnsembleIndex<'a> {
-    join_ids: std::collections::HashSet<&'a str>,
-    by_member: HashMap<&'a str, &'a EnsembleLiveInfo>,
-    by_join: HashMap<&'a str, &'a EnsembleLiveInfo>,
+pub(super) struct EnsembleIndex<'a> {
+    pub(super) join_ids: std::collections::HashSet<&'a str>,
+    pub(super) by_member: HashMap<&'a str, &'a EnsembleLiveInfo>,
+    pub(super) by_join: HashMap<&'a str, &'a EnsembleLiveInfo>,
 }
 
 /// Borrowed state the recursive DFS walk needs.
@@ -320,7 +320,7 @@ pub(super) fn graph_lines(
 }
 
 /// Index the state's ensembles by join node and by member node.
-fn ensemble_index(state: &GraphLiveState) -> EnsembleIndex<'_> {
+pub(super) fn ensemble_index(state: &GraphLiveState) -> EnsembleIndex<'_> {
     EnsembleIndex {
         join_ids: state
             .ensembles
@@ -341,7 +341,7 @@ fn ensemble_index(state: &GraphLiveState) -> EnsembleIndex<'_> {
 }
 
 /// Collapse ensemble members into one box each, recording the first position.
-fn collapse_nodes<'a>(
+pub(super) fn collapse_nodes<'a>(
     state: &'a GraphLiveState,
     index: &EnsembleIndex<'a>,
 ) -> (HashMap<String, Collapsed<'a>>, HashMap<String, i64>) {
@@ -369,7 +369,7 @@ fn collapse_nodes<'a>(
 
 /// Rewrite edges onto collapsed keys, dropping ensemble-internal edges and
 /// duplicates, then sorting each adjacency by condition priority.
-fn collapse_edges<'a>(
+pub(super) fn collapse_edges<'a>(
     state: &'a GraphLiveState,
     index: &EnsembleIndex<'a>,
     collapsed_nodes: &HashMap<String, Collapsed<'a>>,
@@ -430,7 +430,7 @@ fn collapse_key(
 
 /// The DFS entry node: the one with no incoming collapsed edge, or the one
 /// with the smallest position when every node has one.
-fn find_entry_key(
+pub(super) fn find_entry_key(
     nodes: &HashMap<String, Collapsed>,
     edges: &HashMap<String, Vec<(String, GraphEdgeCondition)>>,
     positions: &HashMap<String, i64>,
@@ -505,15 +505,24 @@ fn dfs_visit(
 }
 
 /// Whether this entry is the highlighted node (or holds it as a member/join).
-fn dfs_is_highlighted(ctx: &DfsCtx, key: &str) -> bool {
-    if let Some(Collapsed::Ensemble(ens)) = ctx.nodes.get(key) {
+pub(super) fn is_collapsed_highlighted(
+    nodes: &HashMap<String, Collapsed>,
+    highlighted_node_id: Option<&str>,
+    key: &str,
+) -> bool {
+    if let Some(Collapsed::Ensemble(ens)) = nodes.get(key) {
         return ens
             .members
             .iter()
-            .any(|m| Some(m.node_id.as_str()) == ctx.highlighted_node_id)
-            || ctx.highlighted_node_id == Some(ens.join_node_id.as_str());
+            .any(|m| Some(m.node_id.as_str()) == highlighted_node_id)
+            || highlighted_node_id == Some(ens.join_node_id.as_str());
     }
-    ctx.highlighted_node_id == Some(key)
+    highlighted_node_id == Some(key)
+}
+
+/// Whether this entry is the highlighted node (or holds it as a member/join).
+fn dfs_is_highlighted(ctx: &DfsCtx, key: &str) -> bool {
+    is_collapsed_highlighted(ctx.nodes, ctx.highlighted_node_id, key)
 }
 
 /// Render the node or ensemble box for an entry.
