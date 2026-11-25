@@ -196,6 +196,7 @@ macro_rules! app_new_fields {
             last_graph_face_rect: None,
             graph_face_scroll: 0,
             graph_face_total_lines: 0,
+            graph_card_click_map: Vec::new(),
             panel_face: PanelFace::Activity,
             panel_pinned: App::load_panel_pinned_face(&$canopy_config.pinned_panel_face),
             panel_dwell_face: None,

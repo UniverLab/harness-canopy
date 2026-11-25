@@ -175,7 +175,7 @@ mod home_preview;
 pub(crate) mod knowledge_dialog;
 pub(crate) mod knowledge_viewer;
 mod launchpad;
-mod mouse;
+pub(crate) mod mouse;
 mod new_agent_dialog;
 pub(crate) mod new_agent_mode_step;
 mod paste;

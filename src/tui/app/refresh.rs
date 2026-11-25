@@ -328,6 +328,14 @@ impl App {
             let autorun_label = lp
                 .autorun_at
                 .map(|at| format!("resumes {}", utils::relative_time_until_compact(&at)));
+            let (done, total, current_spec_code, current_spec_intent) =
+                if matches!(lp.status, GraphStatus::Running | GraphStatus::Pausing)
+                    || self.selected_graph_id.as_deref() == Some(lp.id.as_str())
+                {
+                    super::graph_card_data::graph_card_fields(&self.db, lp)
+                } else {
+                    (0, 0, String::new(), String::new())
+                };
             meta.insert(
                 lp.id.clone(),
                 GraphSidebarMeta {
@@ -335,6 +343,10 @@ impl App {
                     last_run_label,
                     blocked,
                     autorun_label,
+                    done,
+                    total,
+                    current_spec_code,
+                    current_spec_intent,
                 },
             );
         }

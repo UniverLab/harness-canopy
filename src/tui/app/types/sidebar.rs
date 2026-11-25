@@ -161,6 +161,14 @@ pub(crate) struct GraphSidebarMeta {
     /// `"resumes 5m"`-style label when the graph has a pending
     /// `graph_control`, `None` otherwise.
     pub autorun_label: Option<String>,
+    /// Completed spec count in the active queue or bound specs.
+    pub done: usize,
+    /// Total spec count in the active queue or bound specs.
+    pub total: usize,
+    /// `spec_code` of the current spec (first Running, else Pending/Interrupted).
+    pub current_spec_code: String,
+    /// Intent of the current spec (or its name when intent is empty/absent).
+    pub current_spec_intent: String,
 }
 
 impl Default for GraphSidebarMeta {
@@ -173,6 +181,10 @@ impl Default for GraphSidebarMeta {
             last_run_label: String::new(),
             blocked: false,
             autorun_label: None,
+            done: 0,
+            total: 0,
+            current_spec_code: String::new(),
+            current_spec_intent: String::new(),
         }
     }
 }

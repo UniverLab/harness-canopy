@@ -173,6 +173,14 @@ fn build_graphs(db: &Database, request: &SnapshotRequest, snapshot: &mut SlowSna
                 crate::tui::app::utils::relative_time_until_compact(&at)
             )
         });
+        let (done, total, current_spec_code, current_spec_intent) =
+            if matches!(lp.status, GraphStatus::Running | GraphStatus::Pausing)
+                || request.selected_graph_id.as_deref() == Some(lp.id.as_str())
+            {
+                crate::tui::app::graph_card_data::graph_card_fields(db, lp)
+            } else {
+                (0, 0, String::new(), String::new())
+            };
         snapshot.graph_sidebar_meta.insert(
             lp.id.clone(),
             crate::tui::app::types::GraphSidebarMeta {
@@ -180,6 +188,10 @@ fn build_graphs(db: &Database, request: &SnapshotRequest, snapshot: &mut SlowSna
                 last_run_label,
                 blocked: graph_blocked(db, lp),
                 autorun_label,
+                done,
+                total,
+                current_spec_code,
+                current_spec_intent,
             },
         );
     }

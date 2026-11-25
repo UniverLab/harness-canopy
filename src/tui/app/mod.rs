@@ -7,6 +7,7 @@ pub(crate) mod crews_logic;
 mod data;
 pub mod dialog;
 mod gamification;
+pub(crate) mod graph_card_data;
 pub(crate) mod graph_live_nav;
 pub(crate) mod graph_live_state;
 pub(crate) mod hub;

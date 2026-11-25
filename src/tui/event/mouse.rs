@@ -60,7 +60,7 @@ pub(super) fn handle_panel_border_drag(app: &mut App, mouse: &MouseEvent) -> boo
 
 /// A left-click inside the right panel claims its focus (automatic switches
 /// are dropped while focused); a left-click anywhere else releases it.
-fn handle_panel_mouse(app: &mut App, mouse: &MouseEvent) -> bool {
+pub(crate) fn handle_panel_mouse(app: &mut App, mouse: &MouseEvent) -> bool {
     if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
         return false;
     }
@@ -71,6 +71,9 @@ fn handle_panel_mouse(app: &mut App, mouse: &MouseEvent) -> bool {
         return false;
     };
     if rect_contains_point(sync_area, mouse.column, mouse.row) {
+        if crate::tui::app::graph_card_data::graph_card_click(app, mouse.row) {
+            return true;
+        }
         app.on_panel_clicked(true);
         return true;
     }

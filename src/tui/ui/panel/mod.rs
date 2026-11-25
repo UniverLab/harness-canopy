@@ -22,6 +22,7 @@ use rag_view::*;
 mod playground;
 use playground::*;
 mod crews;
+mod graph_cards;
 
 pub mod background_agent;
 pub mod details;

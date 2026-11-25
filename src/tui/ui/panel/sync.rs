@@ -5,7 +5,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
 
-use crate::domain::graphs::GraphSpecStatus;
 use crate::domain::sync::{MessageKind, MissionImpact, SyncMessage, WorkspaceStatus};
 use crate::tui::app::types::{App, PanelFace, SyncPanelState};
 use crate::tui::ui::theme::Theme;
@@ -45,6 +44,7 @@ pub(crate) fn draw_panel_face(frame: &mut Frame, area: Rect, app: &mut App, them
     app.last_knowledge_graph_rect = None;
     app.last_knowledge_list_rect = None;
     app.last_graph_face_rect = None;
+    app.graph_card_click_map.clear();
 
     match face {
         PanelFace::Activity => {
@@ -70,7 +70,7 @@ pub(crate) fn draw_panel_face(frame: &mut Frame, area: Rect, app: &mut App, them
     }
 }
 
-fn draw_panel_placeholder(frame: &mut Frame, area: Rect, text: &str, theme: &Theme) {
+pub(super) fn draw_panel_placeholder(frame: &mut Frame, area: Rect, text: &str, theme: &Theme) {
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             text,
@@ -240,148 +240,11 @@ fn draw_knowledge_list(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) 
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-/// Graph face (read-only first step): the running graph's name, status and
-/// CT5's spec strip — same spec-queue data and same done/current/pending
-/// markers the Automation view renders, without the live node output and
-/// without taking any keys.
 fn draw_graph_face(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
-    app.last_graph_face_rect = Some(area);
-    app.graph_face_total_lines = 0;
-
-    let Some(target) = app
-        .selected_graph_id
-        .as_ref()
-        .and_then(|id| app.graphs.iter().find(|lp| &lp.id == id))
-        .or_else(|| {
-            app.graphs
-                .iter()
-                .find(|lp| lp.status == crate::domain::graphs::GraphStatus::Running)
-        })
-        .or_else(|| app.graphs.first())
-    else {
-        draw_panel_placeholder(frame, area, "no graphs yet", theme);
-        return;
-    };
-
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled(
-                truncate_str(&target.name, area.width.saturating_sub(12) as usize),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("  {}", target.status.as_str()),
-                Style::default().fg(graph_status_color(target.status)),
-            ),
-        ]),
-        Line::from(Span::styled(
-            truncate_str(
-                &format!("workdir {}", last_two_segments(&target.workdir)),
-                area.width as usize,
-            ),
-            Style::default().fg(theme.dim_text),
-        )),
-        Line::from(""),
-    ];
-
-    let strip_known = app
-        .graph_live_state
-        .as_ref()
-        .is_some_and(|live| live.graph_id == target.id);
-    if strip_known {
-        let live = app.graph_live_state.as_ref().expect("checked above");
-        lines.push(Line::from(Span::styled(
-            format!("specs {}/{}", live.done_count, live.total_count),
-            Style::default().fg(theme.dim_text),
-        )));
-        for entry in &live.spec_queue {
-            let current = live.current_spec_id.as_deref() == Some(entry.spec_id.as_str());
-            lines.push(spec_strip_line(
-                entry.status,
-                current,
-                entry.spec_code.as_deref(),
-                &entry.spec_name,
-                area.width.saturating_sub(4) as usize,
-                theme,
-            ));
-        }
-    } else if let Some(details) = app.graph_details.as_ref().filter(|d| d.lp.id == target.id) {
-        lines.push(Line::from(Span::styled(
-            format!("specs ({})", details.specs.len()),
-            Style::default().fg(theme.dim_text),
-        )));
-        for spec in &details.specs {
-            lines.push(spec_strip_line(
-                spec.spec.status,
-                false,
-                spec.spec.spec_code.as_deref(),
-                &spec.spec.name,
-                area.width.saturating_sub(4) as usize,
-                theme,
-            ));
-        }
-    } else {
-        lines.push(Line::from(Span::styled(
-            "open Automation → Graphs for specs",
-            Style::default().fg(theme.dim_text),
-        )));
-    }
-
-    app.graph_face_total_lines = lines.len() as u16;
-    let scroll = app.graph_face_scroll.min(app.graph_face_scroll_max());
-    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), area);
+    super::graph_cards::draw_graph_cards(frame, area, app, theme);
 }
 
-/// One spec-strip row: status marker, green `[code] ` badge when the spec
-/// has one (like graph_live/render.rs), then the name. A codeless spec
-/// shows its name alone. Pure so it is testable without a full `App`.
-fn spec_strip_line(
-    status: GraphSpecStatus,
-    current: bool,
-    code: Option<&str>,
-    name: &str,
-    width: usize,
-    theme: &Theme,
-) -> Line<'static> {
-    let mut parts = vec![
-        Span::styled(
-            spec_strip_marker(status, current),
-            Style::default().fg(theme.header_color),
-        ),
-        Span::raw(" "),
-    ];
-    if let Some(code) = code {
-        parts.push(Span::styled(
-            format!("[{code}] "),
-            Style::default().fg(theme.status_ok),
-        ));
-    }
-    parts.push(Span::styled(
-        truncate_str(name, width),
-        Style::default().fg(Color::White),
-    ));
-    Line::from(parts)
-}
-
-/// CT5 spec-strip marker, shared convention: done / current / failed /
-/// pending. Pure so it is testable without constructing a full `App`.
-fn spec_strip_marker(status: GraphSpecStatus, current: bool) -> &'static str {
-    if current {
-        return "▶";
-    }
-    match status {
-        GraphSpecStatus::Completed => "●",
-        GraphSpecStatus::Running => "▶",
-        GraphSpecStatus::Failed => "✗",
-        GraphSpecStatus::Skipped => "○",
-        GraphSpecStatus::Pending => "○",
-        _ => "○",
-    }
-}
-
-fn graph_status_color(status: crate::domain::graphs::GraphStatus) -> Color {
+pub(super) fn graph_status_color(status: crate::domain::graphs::GraphStatus) -> Color {
     match status {
         crate::domain::graphs::GraphStatus::Running => STATUS_OK,
         crate::domain::graphs::GraphStatus::Failed => ERROR_COLOR,
@@ -630,23 +493,12 @@ fn format_timestamp(timestamp: i64, fmt: &str) -> String {
 mod tests {
     use super::*;
     use crate::db::Database;
+    use crate::domain::graphs::GraphSpecStatus;
     use crate::tui::app::types::App;
 
     fn test_db() -> std::sync::Arc<Database> {
         let path = crate::test_support::temp_db_path();
         std::sync::Arc::new(Database::new(&path).expect("create test db"))
-    }
-
-    #[test]
-    fn spec_strip_marker_distinguishes_done_current_failed_and_pending() {
-        assert_eq!(spec_strip_marker(GraphSpecStatus::Completed, false), "●");
-        assert_eq!(spec_strip_marker(GraphSpecStatus::Running, false), "▶");
-        assert_eq!(spec_strip_marker(GraphSpecStatus::Pending, false), "○");
-        assert_eq!(spec_strip_marker(GraphSpecStatus::Failed, false), "✗");
-        assert_eq!(spec_strip_marker(GraphSpecStatus::Skipped, false), "○");
-        // The current spec reads as running even before its status flips.
-        assert_eq!(spec_strip_marker(GraphSpecStatus::Pending, true), "▶");
-        assert_eq!(spec_strip_marker(GraphSpecStatus::Completed, true), "▶");
     }
 
     #[test]
@@ -729,34 +581,6 @@ mod tests {
             text.push('\n');
         }
         text
-    }
-
-    fn test_graph() -> crate::domain::graphs::Graph {
-        crate::domain::graphs::Graph {
-            trigger_prompt: None,
-            id: "g1".to_string(),
-            name: "Grove".to_string(),
-            description: None,
-            workdir: "/tmp/grove".to_string(),
-            status: crate::domain::graphs::GraphStatus::Running,
-            trigger: None,
-            created_at: chrono::Utc::now(),
-            started_at: None,
-            completed_at: None,
-            autorun_at: None,
-            auto_continue_at: None,
-            auto_continue_action: None,
-            active_run_queue_id: None,
-            hooks: std::collections::BTreeMap::new(),
-            require_spec_type: false,
-            archived: false,
-            paused_by_reconciliation: false,
-            allow_dirty_start: false,
-            infra_node_id: None,
-            enabled: true,
-            enable_at: None,
-            expires_at: None,
-        }
     }
 
     fn test_spec(name: &str, code: Option<&str>) -> crate::domain::graphs::GraphSpec {
@@ -861,136 +685,6 @@ mod tests {
         let beta_line = text
             .lines()
             .find(|line| line.contains("'Beta'"))
-            .expect("codeless line in dump");
-        assert!(
-            !beta_line.contains('['),
-            "no placeholder for a codeless spec: {beta_line}"
-        );
-    }
-
-    /// SPECCODE: the graph face's spec strip shows the code before the name
-    /// when the strip comes from the live queue.
-    #[test]
-    fn graph_face_strip_shows_code_from_live_queue() {
-        use crate::tui::app::graph_live_state::{GraphLiveState, SpecQueueEntry};
-        use std::collections::HashMap;
-
-        let db = test_db();
-        let mut app = test_app(db);
-        app.graphs = vec![test_graph()];
-        app.selected_graph_id = Some("g1".to_string());
-        app.graph_live_state = Some(GraphLiveState {
-            graph_id: "g1".to_string(),
-            graph_name: "Grove".to_string(),
-            graph_status: crate::domain::graphs::GraphStatus::Running,
-            workdir: "/tmp/grove".to_string(),
-            trigger_type: "manual".to_string(),
-            schedule_expr: None,
-            watch_path: None,
-            autorun_at: None,
-            pause_waiting_for: Vec::new(),
-            spec_queue: vec![
-                SpecQueueEntry {
-                    spec_id: "s-Alpha".to_string(),
-                    spec_name: "Alpha".to_string(),
-                    status: GraphSpecStatus::Completed,
-                    failure_reason: None,
-                    spec_code: Some("FIX-7".to_string()),
-                    spec_type: None,
-                    spec_scope: None,
-                },
-                SpecQueueEntry {
-                    spec_id: "s-Beta".to_string(),
-                    spec_name: "Beta".to_string(),
-                    status: GraphSpecStatus::Running,
-                    failure_reason: None,
-                    spec_code: None,
-                    spec_type: None,
-                    spec_scope: None,
-                },
-            ],
-            done_count: 1,
-            total_count: 2,
-            current_spec_id: Some("s-Beta".to_string()),
-            effective_nodes: Vec::new(),
-            effective_edges: Vec::new(),
-            ensembles: Vec::new(),
-            router_taken_routes: HashMap::new(),
-            current_node_id: None,
-            current_node_status: None,
-            current_node_started_at: None,
-            current_node_iteration: None,
-        });
-
-        let theme = Theme::classic();
-        let text = render_to_text(60, 20, |frame, area| {
-            draw_graph_face(frame, area, &mut app, &theme);
-        });
-
-        let code_pos = text.find("[FIX-7]").expect("coded line in dump:\n{text}");
-        let name_pos = text.find("Alpha").expect("coded name in dump:\n{text}");
-        assert!(
-            code_pos < name_pos,
-            "code must come before the name:\n{text}"
-        );
-        let beta_line = text
-            .lines()
-            .find(|line| line.contains("Beta"))
-            .expect("codeless line in dump");
-        assert!(
-            !beta_line.contains('['),
-            "no placeholder for a codeless spec: {beta_line}"
-        );
-    }
-
-    /// SPECCODE: the graph face's spec strip shows the code before the name
-    /// when the strip falls back to the stored graph details.
-    #[test]
-    fn graph_face_strip_shows_code_from_details_fallback() {
-        use crate::domain::graphs::{GraphDetails, GraphSpecDetails};
-
-        let db = test_db();
-        let mut app = test_app(db);
-        app.graphs = vec![test_graph()];
-        app.selected_graph_id = Some("g1".to_string());
-        app.graph_live_state = None;
-        let mut coded = test_spec("Alpha", Some("FIX-7"));
-        coded.status = GraphSpecStatus::Completed;
-        let mut codeless = test_spec("Beta", None);
-        codeless.status = GraphSpecStatus::Running;
-        app.graph_details = Some(GraphDetails {
-            lp: test_graph(),
-            graph_nodes: Vec::new(),
-            graph_edges: Vec::new(),
-            specs: vec![
-                GraphSpecDetails {
-                    spec: coded,
-                    nodes: Vec::new(),
-                    edges: Vec::new(),
-                },
-                GraphSpecDetails {
-                    spec: codeless,
-                    nodes: Vec::new(),
-                    edges: Vec::new(),
-                },
-            ],
-            completion_hook_runs: Vec::new(),
-        });
-
-        let theme = Theme::classic();
-        let text = render_to_text(60, 20, |frame, area| {
-            draw_graph_face(frame, area, &mut app, &theme);
-        });
-
-        let code_pos = text.find("[FIX-7]").expect("coded line in dump:\n{text}");
-        let name_pos = text.find("Alpha").expect("coded name in dump:\n{text}");
-        assert!(
-            code_pos < name_pos,
-            "code must come before the name:\n{text}"
-        );
-        let beta_line = text
-            .lines()
-            .find(|line| line.contains("Beta"))
             .expect("codeless line in dump");
         assert!(
             !beta_line.contains('['),

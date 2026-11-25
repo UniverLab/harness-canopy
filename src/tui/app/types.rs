@@ -619,6 +619,8 @@ pub struct App {
     /// Total rendered line count of the Graph face's last draw, written by
     /// `draw_graph_face`. Used to clamp `graph_face_scroll`.
     pub(crate) graph_face_total_lines: u16,
+    /// Row hit-test map `(graph_id, y_start, y_end)` populated by `draw_graph_cards`.
+    pub(crate) graph_card_click_map: Vec<(String, u16, u16)>,
 
     // CT1 multi-face right panel: the switching rule lives in
     // `crate::tui::app::panel_face` — these are its inputs and outputs.

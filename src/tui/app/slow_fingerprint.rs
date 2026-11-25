@@ -201,10 +201,14 @@ fn graphs_meta_digest(app: &App) -> u64 {
     for (id, meta) in sorted_entries(&app.graph_sidebar_meta) {
         let _ = writeln!(
             summary,
-            "{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}|{}",
             id,
             meta.last_activity.timestamp(),
             meta.blocked,
+            meta.done,
+            meta.total,
+            meta.current_spec_code,
+            meta.current_spec_intent,
         );
     }
     calculate_log_hash(&summary)
@@ -586,6 +590,7 @@ mod cadence_tests {
                 last_run_label: "never".to_string(),
                 blocked: false,
                 autorun_label: None,
+                ..Default::default()
             },
         );
         let before = SlowFingerprint::capture(&app);
@@ -597,6 +602,29 @@ mod cadence_tests {
             before,
             SlowFingerprint::capture(&app),
             "a blocker flip must move the fingerprint"
+        );
+    }
+
+    #[test]
+    fn fingerprint_sees_graph_card_done_change() {
+        let (mut app, _dir) = test_app();
+        app.graph_sidebar_meta.insert(
+            "g1".to_string(),
+            GraphSidebarMeta {
+                last_activity: chrono::Utc::now(),
+                last_run_label: "running".to_string(),
+                ..Default::default()
+            },
+        );
+        let before = SlowFingerprint::capture(&app);
+        app.graph_sidebar_meta
+            .get_mut("g1")
+            .expect("fixture meta must exist")
+            .done = 1;
+        assert_ne!(
+            before,
+            SlowFingerprint::capture(&app),
+            "a done count change must move the fingerprint"
         );
     }
 
