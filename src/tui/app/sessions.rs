@@ -82,7 +82,6 @@ impl App {
                 &existing_ids,
                 None,
                 cli_config.and_then(|config| config.model_flag.as_deref()),
-                None,
                 session.harness_conversation_id.as_deref(),
                 true,
             )

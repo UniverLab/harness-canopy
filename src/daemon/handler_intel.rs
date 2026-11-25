@@ -5,7 +5,6 @@ use crate::daemon::handler::{
     OptionalExtension, TaskTriggerHandler, INTELLIGENCE_DUPLICATE_CANDIDATES_CAP,
 };
 use crate::daemon::handler_helpers::resolve_effective_project_hash;
-use crate::daemon::handler_seeds_skills::inject_seed_identity;
 use crate::daemon::handler_sync::inject_project_context;
 use crate::daemon::handler_validate::validate_non_empty;
 use crate::daemon::helpers::error_result;
@@ -31,7 +30,6 @@ impl TaskTriggerHandler {
         Parameters(params): Parameters<IntelligenceGetContextParams>,
         OptionalExtension(parts): OptionalExtension<Parts>,
     ) -> Result<CallToolResult, McpError> {
-        self.reject_if_nursery(parts.as_ref())?;
         self.record_harness_id(parts.as_ref());
         let scope = params.scope.trim().to_lowercase();
         let (session_limit, _knowledge_limit, sync_limit, dependency_limit) = match scope.as_str() {
@@ -143,12 +141,6 @@ impl TaskTriggerHandler {
             &traversal,
             &dependents,
         );
-        inject_seed_identity(
-            &mut out,
-            &self.db,
-            parts.as_ref(),
-            resolved_agent_id.as_deref(),
-        );
         if scope == "light" {
             crate::daemon::light_context::shrink_light_context(&mut out);
         }
@@ -169,7 +161,6 @@ impl TaskTriggerHandler {
         Parameters(params): Parameters<IntelligenceUpsertParams>,
         OptionalExtension(parts): OptionalExtension<Parts>,
     ) -> Result<CallToolResult, McpError> {
-        self.reject_if_nursery(parts.as_ref())?;
         self.record_harness_id(parts.as_ref());
         // Track an explicit id that resolved to nothing: the caller almost
         // certainly mistyped or truncated the id of a node they meant to
@@ -319,7 +310,6 @@ impl TaskTriggerHandler {
         Parameters(params): Parameters<IntelligenceSearchParams>,
         OptionalExtension(parts): OptionalExtension<Parts>,
     ) -> Result<CallToolResult, McpError> {
-        self.reject_if_nursery(parts.as_ref())?;
         self.record_harness_id(parts.as_ref());
         let limit = params.limit.unwrap_or(10).min(50);
         let depth = params
@@ -486,7 +476,6 @@ impl TaskTriggerHandler {
         params: IntelligenceDeleteNodeParams,
         parts: Option<&Parts>,
     ) -> Result<CallToolResult, McpError> {
-        self.reject_if_nursery(parts)?;
         self.record_harness_id(parts);
         if let Err(e) = validate_non_empty(&params.node_id, "node_id") {
             return Ok(error_result(&e));
@@ -548,7 +537,6 @@ impl TaskTriggerHandler {
         params: IntelligenceDeleteRelationParams,
         parts: Option<&Parts>,
     ) -> Result<CallToolResult, McpError> {
-        self.reject_if_nursery(parts)?;
         self.record_harness_id(parts);
 
         let effective_project_hash =

@@ -30,9 +30,8 @@ no external services, no cloud account.
 |---|---|
 | **Daemon** | MCP server (Streamable HTTP + stdio), scheduler, watcher engine, database |
 | **Canopy Hub (TUI)** | Full-screen terminal UI for agents, graphs and system metrics |
-| **36 MCP tools** | Agent management, harness, intelligence, identity, skills, graphs, crews, config, specs, queues, nodes, catalogue, RAG, projects, sessions, session shelf, remote control, scheduled prompts |
-| **Seed identities** | Persistent, evolvable agent personalities stored as TOML |
-| **Gamification** | 28 missions across 6 categories tracking usage milestones |
+| **35 MCP tools** | Agent management, harness, intelligence, skills, graphs, crews, config, specs, queues, nodes, catalogue, RAG, projects, sessions, session shelf, remote control, scheduled prompts |
+| **Gamification** | 24 missions across 5 categories tracking usage milestones |
 
 ## How the documentation is organized
 
@@ -40,7 +39,7 @@ no external services, no cloud account.
 - [Quick Start](quickstart.md) — daemon, setup wizard, first agent.
 - [Your First Graph](first-graph.md) — one check node, run and log, in five minutes.
 - [The TUI — Canopy Hub](tui.md) — the interactive terminal interface.
-- [Agents](agents.md) — interactive, background and terminal agents; seed identities.
+- [Agents](agents.md) — interactive, background and terminal agents.
 - [Intelligence & Sync](intelligence-and-sync.md) — knowledge graph and multi-agent coordination.
 - [Graphs](graphs.md) — the DAG graph engine: overview and structure.
 - [Template Variables](graphs-templates.md) — placeholders in agent prompts and check commands.

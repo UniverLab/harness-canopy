@@ -426,7 +426,6 @@ fn spawn_cat(hub: &SessionHub, workdir: &str) -> Arc<HubSession> {
         model_flag: None,
         id: None,
         harness_conversation_id: None,
-        seed_id: None,
         accent: None,
         yolo: false,
         preserve_args: false,

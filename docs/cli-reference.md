@@ -246,12 +246,12 @@ Read-only inspection of registered agents, served from the local database
 
 ## Missions
 
-Read-only listing of the 28 gamification missions (see [TUI](tui.md#gamification)),
+Read-only listing of the 24 gamification missions (see [TUI](tui.md#gamification)),
 served from the local database — no daemon required.
 
 | Command | Description |
 |---|---|
-| `canopy missions` | List every mission: icon, title, category, `unlocked <date>` or `locked: <challenge>`, plus `N / 28 unlocked` |
+| `canopy missions` | List every mission: icon, title, category, `unlocked <date>` or `locked: <challenge>`, plus `N / 24 unlocked` |
 | `canopy missions --json` | Print the same report as one JSON object (`unlocked`, `total`, `missions` with `id`, `title`, `icon`, `category`, `challenge`, `unlocked_at` as RFC 3339 UTC or null) |
 
 <!-- RETIRED-VOCAB-BEGIN: `loop_lag_ms` below is a live metric key (event-loop lag), not the retired `loop:` attribution — the guard regex cannot tell the prefix apart, so this section is exempt. -->
@@ -1035,7 +1035,7 @@ drain; specs with no recorded session produce no message.
 | Command | Description |
 |---|---|
 | `canopy stdio` | Run the MCP server over stdio |
-| `canopy bridge --id <session>` | Stdio sidecar proxy that injects canopy identity headers |
+| `canopy bridge --id <session>` | Stdio sidecar proxy that injects canopy session and agent headers |
 
 ## Global flags
 

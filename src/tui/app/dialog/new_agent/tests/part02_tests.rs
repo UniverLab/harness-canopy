@@ -50,44 +50,6 @@ fn set_cli_index_valid_index() {
 // ── detect_available_shells ──────────────────────────────────
 
 #[test]
-fn detect_available_shells_returns_at_least_bash() {
-    let shells = detect_available_shells();
-    assert!(!shells.is_empty());
-    // bash should be present (it's a fallback)
-    assert!(shells.iter().any(|s| s == "bash"));
-}
-
-// ── load_seed_options: count >= 2 ───────────────────────────
-
-#[test]
-fn load_seed_options_at_least_two() {
-    let options = load_seed_options();
-    assert!(options.len() >= 2);
-}
-
-// ── SeedOption Clone and Debug ──────────────────────────────
-
-#[test]
-fn seed_option_clone() {
-    let opt = SeedOption::Seed {
-        id: "id".to_string(),
-        name: "name".to_string(),
-    };
-    let other = opt.clone();
-    match other {
-        SeedOption::Seed { id, name } => {
-            assert_eq!(id, "id");
-            assert_eq!(name, "name");
-        }
-        _ => panic!("expected Seed variant"),
-    }
-    // Verify original still usable
-    assert!(matches!(opt, SeedOption::Seed { .. }));
-}
-
-// ── NewTaskType / BackgroundTrigger / NewTaskMode ────────────
-
-#[test]
 fn new_task_type_eq() {
     assert!(NewTaskType::Interactive == NewTaskType::Interactive);
     assert!(NewTaskType::Interactive != NewTaskType::Terminal);

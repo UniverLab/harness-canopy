@@ -81,18 +81,6 @@ impl Database {
         Ok(count > 0)
     }
 
-    pub fn max_seed_session_bindings(&self) -> Result<i64> {
-        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
-        let max: i64 = conn.query_row(
-            "SELECT COALESCE(MAX(cnt), 0) FROM (
-                SELECT COUNT(*) AS cnt FROM seed_sessions GROUP BY seed_id
-             )",
-            [],
-            |r| r.get(0),
-        )?;
-        Ok(max)
-    }
-
     /// Record one Gardener project: add `project_hash` to the deduplicated
     /// comma-separated set at `GARDENER_PROJECTS_KEY`. Re-adding the same
     /// project does not grow the set.
@@ -163,13 +151,6 @@ mod tests {
     fn max_graph_nodes_in_any_graph_empty() {
         let db = test_db();
         let max = db.max_graph_nodes_in_any_graph().unwrap();
-        assert_eq!(max, 0);
-    }
-
-    #[test]
-    fn max_seed_session_bindings_empty() {
-        let db = test_db();
-        let max = db.max_seed_session_bindings().unwrap();
         assert_eq!(max, 0);
     }
 
@@ -459,34 +440,5 @@ mod tests {
         let db = test_db();
         seed_ensemble_run(&db, "cascade");
         assert!(!db.has_parallel_graph_run().unwrap());
-    }
-
-    #[test]
-    fn max_seed_session_bindings_with_data() {
-        let db = test_db();
-        // Need an interactive_sessions row for the FK
-        let conn = db.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO interactive_sessions (id, name, cli, working_dir, started_at) VALUES (?1, 's1', 'opencode', '/tmp', '2024-01-01T00:00:00Z')",
-            rusqlite::params!["sess1"],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO interactive_sessions (id, name, cli, working_dir, started_at) VALUES (?1, 's2', 'opencode', '/tmp', '2024-01-01T00:00:00Z')",
-            rusqlite::params!["sess2"],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO seed_sessions (session_id, seed_id, bound_at) VALUES (?1, 'seed1', '2024-01-01T00:00:00Z')",
-            rusqlite::params!["sess1"],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO seed_sessions (session_id, seed_id, bound_at) VALUES (?1, 'seed1', '2024-01-01T00:00:00Z')",
-            rusqlite::params!["sess2"],
-        )
-        .unwrap();
-        drop(conn);
-        assert_eq!(db.max_seed_session_bindings().unwrap(), 2);
     }
 }

@@ -49,7 +49,7 @@ impl AgentEntry {
             Self::Interactive(idx) => app
                 .interactive_agents
                 .get(*idx)
-                .map_or("?", |a| a.seed_name.as_deref().unwrap_or(&a.name)),
+                .map_or("?", |a| a.name.as_str()),
             Self::Terminal(idx) => app.terminal_agents.get(*idx).map_or("?", |a| &a.name),
             Self::Orphaned(idx) => app.orphaned_sessions.get(*idx).map_or("?", |s| &s.name),
         }
@@ -621,9 +621,6 @@ pub struct App {
     pub(crate) project_relation_dialog: Option<ProjectRelationDialog>,
     pub(crate) project_graph_edges: Vec<ProjectGraphEdge>,
     pub(crate) project_graph_trees: Vec<Vec<String>>,
-
-    // Nursery — temporary path for seed creation graph
-    pub(crate) nursery_path: Option<std::path::PathBuf>,
 
     /// Whether the terminal supports and has enabled the Kitty keyboard
     /// enhancement protocol (Shift+Enter disambiguation).

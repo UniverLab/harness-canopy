@@ -142,7 +142,7 @@ use crate::daemon::handler_resource_tools::{
 };
 #[cfg(test)]
 use crate::daemon::handler_resource_tools_final::{
-    CatalogueObject, IdentityObject, IntelligenceAdminObject, NodeObject, ProjectObject, RagObject,
+    CatalogueObject, IntelligenceAdminObject, NodeObject, ProjectObject, RagObject,
     ScheduledPromptObject, SkillObject, SubagentObject,
 };
 #[cfg(test)]
@@ -358,7 +358,6 @@ pub const NODE_TOOLS: &[&str] = &[
     "intelligence_admin",
     "rag",
     "skill",
-    "identity",
     "get_tools",
 ];
 
@@ -589,7 +588,7 @@ pub(crate) async fn call_graph_action_value(
 /// Test-only dispatch seam for the eighteen second- and final-wave resource
 /// tools (`spec`, `spec_edit`, `queue`, `agent`, `agent_edit`, `harness`,
 /// `config`, `crew`, `node`, `intelligence_admin`, `project`,
-/// `scheduled_prompts`, `sandbox`, `skill`, `subagent`, `rag`, `identity`,
+/// `scheduled_prompts`, `sandbox`, `skill`, `subagent`, `rag`,
 /// `catalogue`): the
 /// typed params struct is serialized with nulls stripped, `action` is injected,
 /// and the call goes through the tool's own per-tool parameter newtype
@@ -745,14 +744,6 @@ pub(crate) async fn call_resource_action_value(
             handler
                 .rag(
                     crate::daemon::params_extract::Parameters(RagObject(object)),
-                    OptionalExtension(None),
-                )
-                .await
-        }
-        "identity" => {
-            handler
-                .identity(
-                    crate::daemon::params_extract::Parameters(IdentityObject(object)),
                     OptionalExtension(None),
                 )
                 .await

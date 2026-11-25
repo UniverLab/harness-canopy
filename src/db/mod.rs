@@ -480,15 +480,6 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
             CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_members_position
                 ON queue_members(queue_id, position);
 
-            CREATE TABLE IF NOT EXISTS seed_sessions (
-                session_id TEXT PRIMARY KEY,
-                seed_id TEXT NOT NULL,
-                bound_at TEXT NOT NULL,
-                FOREIGN KEY(session_id) REFERENCES interactive_sessions(id) ON DELETE CASCADE
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_seed_sessions_seed
-                ON seed_sessions(seed_id);
             CREATE TABLE IF NOT EXISTS spec_review_drains (session_id TEXT PRIMARY KEY, drained_at_ms INTEGER NOT NULL);
 
             CREATE TABLE IF NOT EXISTS scheduled_prompts (
@@ -760,7 +751,6 @@ pub mod scheduled_prompts;
 pub mod scheduled_prompts_agent;
 mod schema;
 mod schema_spec_review;
-pub mod seeds;
 pub mod session;
 pub mod session_finish;
 pub mod session_target;

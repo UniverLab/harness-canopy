@@ -14,12 +14,10 @@ pub(crate) const RESUME_ROW: usize = 1;
 pub(crate) const MODE_ROW_COUNT: usize = 2;
 
 /// The Mode step follows an Interactive form in create mode, and only then:
-/// Terminal and Background types, edit mode and "plant new seed" go straight
+/// Terminal and Background types and edit mode go straight
 /// from the form to today's launch path (FR 2).
 pub(crate) fn can_open_mode_step(dialog: &NewAgentDialog) -> bool {
-    matches!(dialog.task_type, NewTaskType::Interactive)
-        && !dialog.is_edit_mode()
-        && !dialog.is_planting_new_seed()
+    matches!(dialog.task_type, NewTaskType::Interactive) && !dialog.is_edit_mode()
 }
 
 /// Enter the Mode step with the resumable sessions carried over from the DB.

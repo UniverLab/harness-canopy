@@ -43,10 +43,6 @@ impl TaskTriggerHandler {
             ));
         }
 
-        if self.resolve_sync_agent_id(parts.as_ref()).is_ok() {
-            self.reject_if_nursery(parts.as_ref())?;
-        }
-
         let mut out = if scope == "file_write" {
             let mut result = build_get_tools_response(&scope);
             if let Some(obj) = result.as_object_mut() {
@@ -128,7 +124,7 @@ impl TaskTriggerHandler {
 
         if updated {
             // The Gardener mission counts distinct projects whose description
-            // or tags changed — same one-shot flag pattern as identity_evolved.
+            // or tags changed — same one-shot flag pattern as other gamification missions.
             if params.description.is_some() || params.tags.is_some() {
                 let _ = self.db.record_gardener_project(&params.project_hash);
             }
@@ -237,7 +233,6 @@ impl TaskTriggerHandler {
         params: RagSearchParams,
         parts: Option<&Parts>,
     ) -> Result<CallToolResult, McpError> {
-        self.reject_if_nursery(parts)?;
         self.record_harness_id(parts);
         if let Some(result) = self.check_rag_rate_limit(&params).await {
             return Ok(result);
@@ -311,13 +306,6 @@ impl TaskTriggerHandler {
         params: SubagentSpawnParams,
         parts: Option<&Parts>,
     ) -> Result<CallToolResult, McpError> {
-        // Block spawning mid seed-creation interview — but only for a synced
-        // agent caller. The `canopy subagent` CLI reaches this tool through
-        // the daemon with no sync identity, and `reject_if_nursery` would
-        // otherwise hard-fail it on identity resolution alone.
-        if self.resolve_sync_agent_id(parts).is_ok() {
-            self.reject_if_nursery(parts)?;
-        }
         self.record_harness_id(parts);
 
         let platform = params.cli.as_deref().unwrap_or("opencode");
@@ -484,7 +472,7 @@ impl TaskTriggerHandler {
     }
 
     /// Flag one-shot RAG missions for the TUI to pick up via shared state,
-    /// mirroring the `gamification:identity_evolved` mechanism.
+    /// mirroring the one-shot gamification flag mechanism.
     pub(crate) fn record_rag_search_missions(
         &self,
         results: &[crate::rag::vector_store::SearchResult],
@@ -523,7 +511,6 @@ fn tool_map_entries() -> Vec<&'static str> {
         "graph_node — add, update, delete, copy; author graph nodes",
         "graph_report_blocker — report a blocker for an active graph node",
         "harness — models, probe, probe_recent, refresh_registry, roster_list, roster_set, roster_clear, roster_check; inspect catalogs, probe liveness, manage the roster",
-        "identity — get, evolve, list_seeds, create_seed, remove_seed; read and evolve the agent identity, manage seed identities",
         "intelligence_admin — delete_node, delete_relation, walk, list_projects, link_projects; prune the knowledge graph and link projects",
         "intelligence_get_context — curated project context for session start",
         "intelligence_search — full-text search across intelligence nodes",

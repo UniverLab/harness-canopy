@@ -3,7 +3,7 @@ use super::*;
 use crate::db::intelligence::{IntelligenceNodeInput, IntelligenceRelationInput};
 use crate::domain::graphs::{
     Graph, GraphEdge, GraphEdgeCondition, GraphNode, GraphNodeKind, GraphNodeRun, GraphRunStatus,
-    GraphSpec, GraphSpecStatus, GraphStatus, SpecAdminStatusOutcome,
+    GraphSpec, GraphSpecStatus, GraphStatus,
 };
 use crate::domain::models::{Agent, Cli, RunLog, RunStatus, Trigger, TriggerType, WatchEvent};
 use crate::domain::queues::Queue;
@@ -279,46 +279,6 @@ fn rs3_fixture() -> Database {
 
 // ── B36: interrupted-run marking (no git stash) ──────────────────────────
 
-fn init_git_repo(path: &std::path::Path) {
-    let run = |args: &[&str]| {
-        let status = std::process::Command::new("git")
-            .args(args)
-            .current_dir(path)
-            .env("GIT_AUTHOR_NAME", "Test")
-            .env("GIT_AUTHOR_EMAIL", "test@example.com")
-            .env("GIT_COMMITTER_NAME", "Test")
-            .env("GIT_COMMITTER_EMAIL", "test@example.com")
-            .status()
-            .expect("git command failed to run");
-        assert!(status.success(), "git {:?} failed", args);
-    };
-    run(&["init", "-q"]);
-    run(&["config", "user.name", "Test"]);
-    run(&["config", "user.email", "test@example.com"]);
-    std::fs::write(path.join("README.md"), "test").unwrap();
-    run(&["add", "."]);
-    run(&["commit", "-q", "-m", "init"]);
-}
-
-fn git_head(path: &std::path::Path) -> String {
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(path)
-        .output()
-        .expect("git rev-parse failed to run");
-    assert!(output.status.success(), "git rev-parse HEAD failed");
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
-}
-
-fn git_is_clean(path: &std::path::Path) -> bool {
-    let output = std::process::Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(path)
-        .output()
-        .expect("git status failed to run");
-    output.stdout.is_empty()
-}
-
 // ── CM9: typed project graph ──────────────────────────────────────────
 
 /// Register a project row at an on-disk path (hash derived like production).
@@ -466,7 +426,6 @@ mod mutex_tests;
 mod part01_tests;
 mod part02_tests;
 mod part03_tests;
-mod part04_tests;
 mod part05_tests;
 mod part06_tests;
 mod part07_tests;

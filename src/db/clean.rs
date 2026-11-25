@@ -192,7 +192,6 @@ impl Database {
     /// `graph_nodes` / `graph_edges` / `graph_runs` /
     /// `graph_completion_hook_runs` / `ensembles` / `ensemble_members` /
     /// `queue_members`; deleting `interactive_sessions` cascades through
-    /// `seed_sessions`; deleting `intelligence_nodes` cascades through
     /// `intelligence_edges`. Those follow-on rows are therefore never
     /// deleted by an explicit statement here — issuing one *after* the
     /// cascade already ran would always affect zero rows, silently
@@ -233,7 +232,6 @@ impl Database {
             "DELETE FROM terminal_sessions WHERE working_dir = ?1",
             params![workdir],
         )?;
-        // CASCADEs to seed_sessions.
         tx.execute(
             "DELETE FROM interactive_sessions WHERE working_dir = ?1",
             params![workdir],
@@ -432,7 +430,6 @@ fn count_hard_cascade(
         ensembles: follow_on.ensembles,
         ensemble_members: follow_on.ensemble_members,
         queue_members: follow_on.queue_members,
-        seed_sessions: follow_on.seed_sessions,
         intelligence_edges: follow_on.intelligence_edges,
     })
 }
@@ -594,12 +591,6 @@ fn count_follow_on_cascade_targets(
             params![workdir],
             |row| row.get(0),
         )?;
-    let seed_sessions: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM seed_sessions
-              WHERE session_id IN (SELECT id FROM interactive_sessions WHERE working_dir = ?1)",
-        params![workdir],
-        |row| row.get(0),
-    )?;
     let intelligence_edges: i64 = tx.query_row(
         "SELECT COUNT(*) FROM intelligence_edges
               WHERE from_node_id IN (SELECT id FROM intelligence_nodes WHERE project_hash = ?1)
@@ -617,7 +608,6 @@ fn count_follow_on_cascade_targets(
         ensembles,
         ensemble_members,
         queue_members,
-        seed_sessions,
         intelligence_edges,
     })
 }
@@ -644,7 +634,6 @@ struct FollowOnCascadeTargets {
     ensembles: i64,
     ensemble_members: i64,
     queue_members: i64,
-    seed_sessions: i64,
     intelligence_edges: i64,
 }
 
@@ -1261,7 +1250,6 @@ mod tests {
             "ensembles",
             "ensemble_members",
             "queue_members",
-            "seed_sessions",
             "intelligence_edges",
         ];
         for field in &fields {
@@ -1285,7 +1273,6 @@ mod tests {
                 "ensembles" => counts.ensembles = 1,
                 "ensemble_members" => counts.ensemble_members = 1,
                 "queue_members" => counts.queue_members = 1,
-                "seed_sessions" => counts.seed_sessions = 1,
                 "intelligence_edges" => counts.intelligence_edges = 1,
                 _ => unreachable!(),
             }

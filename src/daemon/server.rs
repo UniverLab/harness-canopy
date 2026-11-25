@@ -41,6 +41,7 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
     let daemon_start = std::time::Instant::now();
     let port = crate::resolve_port(port_override);
     let data_dir = crate::ensure_data_dir()?;
+    crate::daemon::seed_retirement::retire_legacy_seeds_dir(&data_dir);
     let tighten_root = data_dir.clone();
     drop(tokio::task::spawn_blocking(move || {
         crate::state_dir::tighten_tree(&tighten_root);
@@ -578,6 +579,7 @@ pub(crate) async fn run_stdio_server() -> Result<()> {
     tracing::info!("Starting in stdio MCP transport mode");
 
     let data_dir = crate::ensure_data_dir()?;
+    crate::daemon::seed_retirement::retire_legacy_seeds_dir(&data_dir);
     let db = Arc::new(Database::new_safe(&database_path(&data_dir), &data_dir)?);
     let startup = stdio_server_startup(Arc::clone(&db), &data_dir).await;
 

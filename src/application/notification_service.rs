@@ -35,9 +35,6 @@ pub trait NotificationService: Send + Sync {
     /// Send a notification about an interactive agent failure.
     fn notify_agent_failed(&self, agent_id: &str, cli: &str, exit_code: i32, output: &str);
 
-    /// Send a notification about a nursery (seed creation) failure.
-    fn notify_nursery_failed(&self, error_msg: &str);
-
     /// Send a notification when a graph run actually begins executing.
     ///
     /// `resumed` distinguishes a fresh launch ("Started") from picking up
@@ -127,10 +124,6 @@ impl NotificationService for DefaultNotificationService {
             format!("{cli} stopped · exit {exit_code}\n{output}")
         };
         send_notification(agent_id, &body, NotificationLevel::Error);
-    }
-
-    fn notify_nursery_failed(&self, error_msg: &str) {
-        send_notification("Seed creation failed", error_msg, NotificationLevel::Error);
     }
 
     fn notify_graph_started(

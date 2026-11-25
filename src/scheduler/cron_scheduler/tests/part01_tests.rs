@@ -1469,7 +1469,6 @@ async fn delivery_loop_delivers_due_send_while_fire_due_tasks_is_blocked() {
             model_flag: None,
             id: None,
             harness_conversation_id: None,
-            seed_id: None,
             accent: None,
             yolo: false,
             preserve_args: false,

@@ -6,7 +6,6 @@ const BODY_EXCERPT_MAX_CHARS: usize = 300;
 const TITLE_MAX_CHARS: usize = 120;
 const MESSAGE_MAX_CHARS: usize = 200;
 const PAYLOAD_MAX_CHARS: usize = 300;
-const PROMPT_INJECTION_MAX_CHARS: usize = 1_000;
 const LIGHT_HINT: &str =
     "light scope returns excerpts; read a node in full with intelligence_search";
 
@@ -93,7 +92,6 @@ fn pop_longest_list(obj: &mut Map<String, Value>) -> Option<&'static str> {
 }
 
 fn enforce_budget(out: &mut Value) {
-    let mut trimmed_prompt = false;
     loop {
         let len = serde_json::to_string_pretty(out).map_or(0, |s| s.chars().count());
         if len <= MAX_LIGHT_CONTEXT_CHARS {
@@ -106,20 +104,7 @@ fn enforce_budget(out: &mut Value) {
             increment_truncated(obj, key, 1);
             continue;
         }
-        if !trimmed_prompt {
-            trimmed_prompt = true;
-            if let Some(Value::String(prompt)) = obj
-                .get_mut("seed_identity")
-                .and_then(Value::as_object_mut)
-                .and_then(|seed| seed.get_mut("prompt_injection"))
-            {
-                if prompt.chars().count() > PROMPT_INJECTION_MAX_CHARS {
-                    *prompt = truncate_chars(prompt, PROMPT_INJECTION_MAX_CHARS);
-                    continue;
-                }
-            }
-        }
-        if obj.remove("traversal").is_some() || obj.remove("seed_identity").is_some() {
+        if obj.remove("traversal").is_some() {
             continue;
         }
         break;
@@ -232,8 +217,7 @@ mod tests {
             "knowledge": [make_node(2, &huge, "b")],
             "project_knowledge": [make_node(3, &huge, "b")],
             "activity": [{ "message": huge, "payload": "p" }],
-            "traversal": { "nodes": vec!["t".repeat(1_000); 20] },
-            "seed_identity": { "prompt_injection": "s".repeat(15_000) }
+            "traversal": { "nodes": vec!["t".repeat(1_000); 20] }
         });
 
         shrink_light_context(&mut out);

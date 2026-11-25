@@ -160,7 +160,6 @@ pub struct SpawnRequest {
     /// launcher knows it. Recorded on the session row so the next resume of
     /// the same conversation resolves back to this session.
     pub harness_conversation_id: Option<String>,
-    pub seed_id: Option<String>,
     /// Canopy accent as `"r,g,b"`.
     pub accent: Option<String>,
     /// Skip the harness's approval prompts: append its registry `yolo_flag`
@@ -798,7 +797,6 @@ mod tests {
             model_flag: None,
             id: None,
             harness_conversation_id: None,
-            seed_id: None,
             accent: None,
             yolo: false,
             preserve_args: false,

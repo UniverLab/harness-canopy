@@ -1496,3 +1496,95 @@ async fn intelligence_graph_walk_with_prefix() {
         "walk response should contain the full UUID: {body}"
     );
 }
+
+#[tokio::test]
+async fn intelligence_get_context_has_no_seed_identity_injection() {
+    let (_dir, _db, handler) = endpoint_test_handler();
+    let out = handler
+        .intelligence_get_context(
+            crate::daemon::params_extract::Parameters(IntelligenceGetContextParams {
+                scope: "full".to_string(),
+                project_hash: None,
+                depth: None,
+            }),
+            OptionalExtension(None),
+        )
+        .await
+        .unwrap();
+    assert!(!is_err(&out), "{}", text(&out));
+    let body = raw_text(&out);
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert!(
+        v.get("seed_identity").is_none(),
+        "context must not inject seed_identity: {body}"
+    );
+}
+
+#[tokio::test]
+async fn resume_without_injection() {
+    let (dir, db, handler) = endpoint_test_handler();
+    let config_dir = tempdir().unwrap();
+    std::fs::write(
+        config_dir.path().join("config.toml"),
+        "[[clis]]\nname = \"cat\"\n",
+    )
+    .expect("write config");
+    let config = crate::domain::canopy_config::CanopyConfig::load(config_dir.path());
+    let hub = crate::sessions::SessionHub::with_broadcast_capacity(
+        Arc::clone(&db),
+        "test-host".to_string(),
+        256,
+    );
+
+    db.insert_interactive_session(
+        "resume-no-seed",
+        "resume-no-seed",
+        "cat",
+        dir.path().to_str().unwrap(),
+        None,
+        None,
+        "interactive",
+        None,
+    )
+    .unwrap();
+    db.mark_session_closed("resume-no-seed").unwrap();
+    let row = db
+        .get_interactive_session("resume-no-seed")
+        .unwrap()
+        .expect("finished row exists");
+
+    crate::sessions::resume::resume_recorded_session(&hub, &row, &config, None)
+        .expect("resume starts a process");
+
+    let resumed = hub.get("resume-no-seed").expect("session resumed");
+    assert_eq!(resumed.name, "resume-no-seed");
+    assert_eq!(
+        db.get_interactive_session_status("resume-no-seed")
+            .unwrap()
+            .as_deref(),
+        Some("active")
+    );
+
+    let out = handler
+        .intelligence_get_context(
+            crate::daemon::params_extract::Parameters(IntelligenceGetContextParams {
+                scope: "full".to_string(),
+                project_hash: None,
+                depth: None,
+            }),
+            OptionalExtension(None),
+        )
+        .await
+        .unwrap();
+    assert!(!is_err(&out), "{}", text(&out));
+    let body = raw_text(&out);
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    for key in ["seed_identity", "identity", "seed_name", "seed_prompt"] {
+        assert!(
+            v.get(key).is_none(),
+            "resumed session must not inject {key}: {body}"
+        );
+    }
+
+    let _ = hub.kill("resume-no-seed");
+}

@@ -11,7 +11,7 @@ use portable_pty::CommandBuilder;
 
 use crate::domain::cli_config::PasteSubmitSpec;
 use crate::shared::sync_identity::{
-    CANOPY_AGENT_ID_ENV, CANOPY_SEED_ID_ENV, CANOPY_SESSION_NAME_ENV, CANOPY_WORKDIR_ENV,
+    CANOPY_AGENT_ID_ENV, CANOPY_SESSION_NAME_ENV, CANOPY_WORKDIR_ENV,
 };
 
 /// Scrollback rows for every session parser, TUI or hub.
@@ -78,14 +78,10 @@ pub fn apply_canopy_session_env(
     agent_id: &str,
     session_name: &str,
     working_dir: &str,
-    seed_id: Option<&str>,
 ) {
     cmd.env(CANOPY_AGENT_ID_ENV, agent_id);
     cmd.env(CANOPY_SESSION_NAME_ENV, session_name);
     cmd.env(CANOPY_WORKDIR_ENV, working_dir);
-    if let Some(sid) = seed_id {
-        cmd.env(CANOPY_SEED_ID_ENV, sid);
-    }
 }
 
 /// Everything [`build_agent_cmd`] needs to build an agent child command.
@@ -103,7 +99,6 @@ pub struct AgentSpawnSpec<'a> {
     pub accent_rgb: Option<(u8, u8, u8)>,
     pub id: &'a str,
     pub name: &'a str,
-    pub seed_id: Option<&'a str>,
 }
 
 /// Build the child command for an interactive agent session: registry
@@ -126,7 +121,7 @@ pub fn build_agent_cmd(spec: &AgentSpawnSpec<'_>) -> CommandBuilder {
         }
     }
     cmd.cwd(spec.working_dir);
-    apply_canopy_session_env(&mut cmd, spec.id, spec.name, spec.working_dir, spec.seed_id);
+    apply_canopy_session_env(&mut cmd, spec.id, spec.name, spec.working_dir);
 
     // Advertise truecolor capability so child CLIs (Kiro, etc.) use
     // 24-bit RGB color sequences for their accent colors instead of
@@ -158,7 +153,7 @@ pub struct TerminalSpawnSpec<'a> {
 pub fn build_terminal_cmd(spec: &TerminalSpawnSpec<'_>) -> CommandBuilder {
     let mut cmd = CommandBuilder::new(spec.shell);
     cmd.cwd(spec.working_dir);
-    apply_canopy_session_env(&mut cmd, spec.id, spec.name, spec.working_dir, None);
+    apply_canopy_session_env(&mut cmd, spec.id, spec.name, spec.working_dir);
     // Compact prompt since warp mode shows its own prompt line
     cmd.env("PS1", "$ ");
     cmd.env("PROMPT_COMMAND", "");

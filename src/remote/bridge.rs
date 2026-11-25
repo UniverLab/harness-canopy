@@ -118,7 +118,6 @@ fn spawn_request(
         model_flag: ext.model_flag,
         id: ext.id,
         harness_conversation_id: ext.harness_conversation_id,
-        seed_id: ext.seed_id,
         accent: ext.accent,
         yolo: ext.yolo,
         preserve_args: ext.preserve_args,

@@ -137,20 +137,6 @@ impl TaskTriggerHandler {
         }
     }
 
-    pub(crate) fn reject_if_nursery(&self, parts: Option<&Parts>) -> Result<(), McpError> {
-        let agent_id = self.resolve_sync_agent_id(parts)?;
-        match self.db.get_session_type(&agent_id) {
-            Ok(Some(st)) if st == "nursery" => {
-                Err(McpError::invalid_params(
-                    "This tool is not available during a seed creation session (nursery). Complete the seed identity interview first.".to_string(),
-                    None,
-                ))
-            }
-            Ok(_) => Ok(()),
-            Err(e) => Err(McpError::internal_error(e.to_string(), None)),
-        }
-    }
-
     /// Resolve the project hash a delete tool should scope itself to: an
     /// explicit `provided` value always wins (the same override the read
     /// tools allow), otherwise it's auto-detected from the caller's session

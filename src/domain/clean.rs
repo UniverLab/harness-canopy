@@ -58,7 +58,7 @@ pub struct ProjectDependentCounts {
 /// actually deletes (sessions, prompts, scheduled sends, sync state) plus
 /// every row that is auto-cascade-deleted by SQLite's FK rules when the
 /// owning graph / interactive_session / intelligence_node is removed (the
-/// `graph_*` / `ensemble_*` / `queue_members` / `seed_sessions` /
+/// `graph_*` / `ensemble_*` / `queue_members` /
 /// `intelligence_edges` rows). Surfaced in the pre-delete prompt so the
 /// reader sees the entire blast radius, not just the rows the cascade
 /// driver issues a `DELETE` for.
@@ -86,7 +86,6 @@ pub struct HardCascadeCounts {
     pub ensembles: i64,
     pub ensemble_members: i64,
     pub queue_members: i64,
-    pub seed_sessions: i64,
     pub intelligence_edges: i64,
 }
 
@@ -110,7 +109,6 @@ impl HardCascadeCounts {
             && self.ensembles == 0
             && self.ensemble_members == 0
             && self.queue_members == 0
-            && self.seed_sessions == 0
             && self.intelligence_edges == 0
     }
 }
@@ -966,7 +964,6 @@ mod tests {
             ensembles: 0,
             ensemble_members: 0,
             queue_members: 0,
-            seed_sessions: 0,
             intelligence_edges: 0,
         };
         assert!(c.is_empty());

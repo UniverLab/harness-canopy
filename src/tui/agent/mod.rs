@@ -105,11 +105,6 @@ pub struct InteractiveAgent {
     pub id: String,
     /// Display name for personality (from RANDOM_NAMES)
     pub name: String,
-    /// Seed identity ID (if bound to a seed)
-    #[allow(dead_code)]
-    pub seed_id: Option<String>,
-    /// Seed display name (resolved from seed_id, shown in TUI instead of random name)
-    pub seed_name: Option<String>,
     pub cli: Cli,
     #[allow(dead_code)]
     pub working_dir: String,
@@ -209,7 +204,7 @@ impl InteractiveAgent {
     ///
     /// `cols` and `rows` should match the panel area where the agent will render.
     /// `interactive_args` (resume/yolo included), `fallback_args`, `model_flag`,
-    /// `id` (resume identity), `seed_id`, the harness conversation id and the
+    /// `id` (resume identity), the harness conversation id and the
     /// accent travel in the spawn frame so the hub builds the same child the
     /// TUI built before and records the conversation on the session row.
     /// `name` is an optional user-provided session name (random if None).
@@ -231,7 +226,6 @@ impl InteractiveAgent {
         existing_ids: &[&str],
         model: Option<&str>,
         model_flag: Option<&str>,
-        seed_id: Option<&str>,
         harness_conversation_id: Option<&str>,
         preserve_args: bool,
     ) -> Result<Self> {
@@ -252,12 +246,11 @@ impl InteractiveAgent {
             fallback_args,
             model_flag,
             id,
-            seed_id,
             accent: accent.as_deref(),
             harness_conversation_id,
             preserve_args,
         })?;
-        Self::attach_item(&item, cli, accent_color, seed_id, cols, rows)
+        Self::attach_item(&item, cli, accent_color, cols, rows)
     }
 
     /// Spawn a raw terminal session (no AI CLI model) and attach to it.
@@ -277,7 +270,7 @@ impl InteractiveAgent {
             .map(str::to_owned)
             .unwrap_or_else(|| naming::pick_terminal_name(existing_ids));
         let item = spawn_on_hub_terminal("terminal", shell, working_dir, &name)?;
-        Self::attach_item(&item, Cli::new(shell), accent_color, None, cols, rows)
+        Self::attach_item(&item, Cli::new(shell), accent_color, cols, rows)
     }
 
     /// Attach to a hub session: open its stream, take its snapshot, size it.
@@ -285,19 +278,18 @@ impl InteractiveAgent {
         item: &SessionItem,
         cli: Cli,
         accent_color: Color,
-        seed_id: Option<&str>,
         cols: u16,
         rows: u16,
     ) -> Result<Self> {
         let endpoint = with_active(|active| (active.url.clone(), active.token.clone()));
         if item.status == "exited" {
-            return Self::attach_failed_item(item, cli, accent_color, seed_id);
+            return Self::attach_failed_item(item, cli, accent_color);
         }
         let endpoint =
             endpoint.ok_or_else(|| anyhow::anyhow!("not connected to the session hub"))?;
         let (stream, rx) = SessionStream::open(&endpoint.0, &endpoint.1, &item.id)
             .map_err(|e| anyhow::anyhow!("cannot attach to session '{}': {e}", item.id))?;
-        let mut agent = Self::from_item(item, cli, accent_color, seed_id, stream);
+        let mut agent = Self::from_item(item, cli, accent_color, stream);
         agent.wait_for_snapshot(&rx)?;
         agent.spawn_stream_reader(rx);
         agent.resize(cols, rows);
@@ -309,15 +301,10 @@ impl InteractiveAgent {
     /// detail into a card the sidebar retains (see
     /// `crate::tui::app::session_hub`). Its stream write half points
     /// nowhere; writes fail silently.
-    fn attach_failed_item(
-        item: &SessionItem,
-        cli: Cli,
-        accent_color: Color,
-        seed_id: Option<&str>,
-    ) -> Result<Self> {
+    fn attach_failed_item(item: &SessionItem, cli: Cli, accent_color: Color) -> Result<Self> {
         let code = item.exit_code.unwrap_or(-1);
         let stream = crate::sessions::client::SessionSend::detached_placeholder(&item.id);
-        let mut agent = Self::from_item(item, cli, accent_color, seed_id, stream);
+        let mut agent = Self::from_item(item, cli, accent_color, stream);
         agent.status = AgentStatus::Exited(code);
         agent
             .exit_code
@@ -364,22 +351,7 @@ impl InteractiveAgent {
 
     /// Build the agent shell around an open stream; the snapshot wait and
     /// the reader come right after (see `attach_item`).
-    fn from_item(
-        item: &SessionItem,
-        cli: Cli,
-        accent_color: Color,
-        seed_id: Option<&str>,
-        stream: SessionSend,
-    ) -> Self {
-        let (seed_id_owned, seed_name) = match seed_id {
-            Some(sid) => {
-                let resolved = crate::domain::seeds::load_seed(sid)
-                    .ok()
-                    .map(|identity| identity.name);
-                (Some(sid.to_string()), resolved)
-            }
-            None => (None, None),
-        };
+    fn from_item(item: &SessionItem, cli: Cli, accent_color: Color, stream: SessionSend) -> Self {
         let is_terminal = item.kind == "terminal";
         let status = match item.status.as_str() {
             "exited" => AgentStatus::Exited(item.exit_code.unwrap_or(-1)),
@@ -388,8 +360,6 @@ impl InteractiveAgent {
         Self {
             id: item.id.clone(),
             name: item.name.clone(),
-            seed_id: seed_id_owned,
-            seed_name,
             cli,
             working_dir: item.workdir.clone(),
             started_at: parse_hub_time(&item.started_at),

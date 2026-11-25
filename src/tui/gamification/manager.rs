@@ -14,8 +14,6 @@ use crate::tui::whimsg::Whimsg;
 pub enum MissionEvent {
     FireflyCaught,
     WorldLinked,
-    IdentityEvolved,
-    FirstSeedCreated,
     YoloTaskCompleted,
     DeepRagSearch,
     DigitalArcheologistFind,
@@ -39,8 +37,6 @@ pub struct MissionSnapshot {
     pub completed_graph_runs: i64,
     pub total_graph_node_runs: i64,
     pub has_parallel_graph: bool,
-    pub seed_count: usize,
-    pub max_seed_session_bindings: i64,
     pub agent_running: bool,
     pub cpu_usage: f32,
     pub cpu_temperature_c: Option<f32>,
@@ -122,8 +118,6 @@ impl MissionManager {
             match event {
                 MissionEvent::FireflyCaught => pending.push(MissionId::FireflyCatcher),
                 MissionEvent::WorldLinked => pending.push(MissionId::WorldConnector),
-                MissionEvent::IdentityEvolved => pending.push(MissionId::IdentityEvolved),
-                MissionEvent::FirstSeedCreated => pending.push(MissionId::FirstBloom),
                 MissionEvent::YoloTaskCompleted => pending.push(MissionId::YoloPilot),
                 MissionEvent::DeepRagSearch => pending.push(MissionId::DeepSearcher),
                 MissionEvent::DigitalArcheologistFind => {
@@ -204,13 +198,6 @@ impl MissionManager {
         Self::push_if(
             snapshot.total_graph_node_runs >= 100,
             MissionId::GraphSurvivor,
-            pending,
-        );
-        Self::push_if(snapshot.seed_count >= 1, MissionId::FirstBloom, pending);
-        Self::push_if(snapshot.seed_count >= 5, MissionId::TheOrchard, pending);
-        Self::push_if(
-            snapshot.max_seed_session_bindings >= 50,
-            MissionId::DeepRoots,
             pending,
         );
     }

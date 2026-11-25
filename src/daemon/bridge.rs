@@ -1,8 +1,8 @@
 //! `canopy bridge` — stdio sidecar proxy between an MCP harness and the daemon.
 //!
 //! Reads JSON-RPC lines from stdin and forwards them to the daemon's
-//! Streamable HTTP endpoint with identity headers (`x-canopy-agent-id`,
-//! `x-canopy-seed-id`), writing responses back to stdout. This keeps a
+//! Streamable HTTP endpoint with identity headers (`x-canopy-agent-id`),
+//! writing responses back to stdout. This keeps a
 //! single daemon owning the scheduler, watchers, RAG ingestion, and sync
 //! state, while each harness session carries its own identity in
 //! `argv`/env.
@@ -34,8 +34,7 @@ use crate::domain::db_paths::database_path;
 use crate::shared::sync_identity::{
     CANOPY_AGENT_ID_ENV, CANOPY_AGENT_ID_HEADER, CANOPY_GRAPH_ID_ENV, CANOPY_GRAPH_ID_HEADER,
     CANOPY_MCP_PROFILE_ENV, CANOPY_MCP_PROFILE_HEADER, CANOPY_NODE_ID_ENV, CANOPY_NODE_ID_HEADER,
-    CANOPY_NODE_RUN_ID_ENV, CANOPY_NODE_RUN_ID_HEADER, CANOPY_SEED_ID_ENV, CANOPY_SEED_ID_HEADER,
-    CANOPY_WORKDIR_ENV,
+    CANOPY_NODE_RUN_ID_ENV, CANOPY_NODE_RUN_ID_HEADER, CANOPY_WORKDIR_ENV,
 };
 
 const MCP_SESSION_HEADER: &str = "mcp-session-id";
@@ -292,7 +291,6 @@ async fn run_proxy_graph(port: u16, agent_id: &str) -> Result<()> {
     let endpoint = format!("http://127.0.0.1:{port}/mcp");
     init_bridge_token();
     let client = Client::new();
-    let seed_id = non_empty_env(CANOPY_SEED_ID_ENV);
 
     let stdin = tokio::io::stdin();
     let mut lines = BufReader::new(stdin).lines();
@@ -345,15 +343,7 @@ async fn run_proxy_graph(port: u16, agent_id: &str) -> Result<()> {
         }
 
         match serve_one_request(
-            &client,
-            &endpoint,
-            port,
-            agent_id,
-            seed_id.as_deref(),
-            &policy,
-            &mut state,
-            &line,
-            &method,
+            &client, &endpoint, port, agent_id, &policy, &mut state, &line, &method,
         )
         .await
         {
@@ -399,7 +389,6 @@ async fn forward_request(
     client: &Client,
     endpoint: &str,
     agent_id: &str,
-    seed_id: Option<&str>,
     line: &str,
     session_id: Option<&str>,
 ) -> Result<DaemonReply> {
@@ -412,10 +401,6 @@ async fn forward_request(
             "application/json, text/event-stream",
         )
         .body(line.to_string());
-
-    if let Some(sid) = seed_id {
-        request = request.header(CANOPY_SEED_ID_HEADER, sid);
-    }
     if let Some(profile) = non_empty_env(CANOPY_MCP_PROFILE_ENV) {
         request = request.header(CANOPY_MCP_PROFILE_HEADER, profile);
     }
@@ -585,11 +570,10 @@ async fn reestablish_session(
     client: &Client,
     endpoint: &str,
     agent_id: &str,
-    seed_id: Option<&str>,
     init_request: &str,
     initialized_notification: Option<&str>,
 ) -> Result<String> {
-    let reply = forward_request(client, endpoint, agent_id, seed_id, init_request, None)
+    let reply = forward_request(client, endpoint, agent_id, init_request, None)
         .await
         .context("re-initializing the MCP session with the daemon failed")?;
 
@@ -599,7 +583,7 @@ async fn reestablish_session(
 
     if let Some(note) = initialized_notification {
         // Best-effort: rmcp already marks the session usable on `initialize`.
-        let _ = forward_request(client, endpoint, agent_id, seed_id, note, Some(&session_id)).await;
+        let _ = forward_request(client, endpoint, agent_id, note, Some(&session_id)).await;
     }
 
     Ok(session_id)
@@ -614,7 +598,6 @@ async fn serve_one_request(
     endpoint: &str,
     port: u16,
     agent_id: &str,
-    seed_id: Option<&str>,
     policy: &ReconnectPolicy,
     state: &mut ProxyState,
     line: &str,
@@ -630,7 +613,6 @@ async fn serve_one_request(
             client,
             endpoint,
             agent_id,
-            seed_id,
             line,
             state.session_id.as_deref(),
         )
@@ -660,7 +642,6 @@ async fn serve_one_request(
                 client,
                 endpoint,
                 agent_id,
-                seed_id,
                 &init_line,
                 state.initialized_notification.as_deref(),
             )
@@ -669,8 +650,7 @@ async fn serve_one_request(
                 Ok(new_sid) => {
                     state.session_id = Some(new_sid.clone());
                     result =
-                        forward_request(client, endpoint, agent_id, seed_id, line, Some(&new_sid))
-                            .await;
+                        forward_request(client, endpoint, agent_id, line, Some(&new_sid)).await;
                 }
                 Err(err) => result = Err(err),
             }
@@ -830,6 +810,7 @@ mod tests {
         init_count: usize,
         got_initialized_notification: bool,
         omit_session_header: bool,
+        seen_seed_header: bool,
     }
 
     #[derive(Clone)]
@@ -845,6 +826,7 @@ mod tests {
                 init_count: 0,
                 got_initialized_notification: false,
                 omit_session_header: false,
+                seen_seed_header: false,
             })),
         }
     }
@@ -878,7 +860,11 @@ mod tests {
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_string);
 
+            let saw_seed = parts.headers.get("x-canopy-seed-id").is_some();
             let mut inner = fake.inner.lock().unwrap();
+            if saw_seed {
+                inner.seen_seed_header = true;
+            }
             match method.as_str() {
                 "initialize" => {
                     inner.init_count += 1;
@@ -1094,7 +1080,6 @@ mod tests {
             &client,
             &endpoint,
             "agent",
-            None,
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
             Some("dead-session"),
         )
@@ -1155,7 +1140,6 @@ mod tests {
             &client,
             &endpoint,
             "sess-boletus",
-            None,
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
             None,
         )
@@ -1221,7 +1205,6 @@ mod tests {
             &client,
             &endpoint,
             "sess-boletus",
-            None,
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
             None,
         )
@@ -1296,7 +1279,6 @@ mod tests {
             &client,
             &endpoint,
             "sess-boletus",
-            None,
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
             None,
         )
@@ -1334,7 +1316,6 @@ mod tests {
             &client,
             &endpoint,
             "agent",
-            None,
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
             None,
         )
@@ -1819,7 +1800,6 @@ mod tests {
             &endpoint,
             port,
             "agent",
-            None,
             &policy,
             &mut state,
             INIT_LINE,
@@ -1837,7 +1817,6 @@ mod tests {
             &endpoint,
             port,
             "agent",
-            None,
             &policy,
             &mut state,
             INITIALIZED_LINE,
@@ -1852,7 +1831,6 @@ mod tests {
             &endpoint,
             port,
             "agent",
-            None,
             &policy,
             &mut state,
             TOOLS_LIST_LINE,
@@ -1877,7 +1855,6 @@ mod tests {
             &endpoint,
             port,
             "agent",
-            None,
             &policy,
             &mut state,
             TOOLS_LIST_LINE,
@@ -1973,7 +1950,6 @@ mod tests {
             &endpoint,
             port,
             "agent",
-            None,
             &policy,
             &mut state,
             TOOLS_LIST_LINE,
@@ -2017,7 +1993,6 @@ mod tests {
             &endpoint,
             port,
             "agent",
-            None,
             &policy,
             &mut state,
             TOOLS_LIST_LINE,
@@ -2069,7 +2044,6 @@ mod tests {
                 &endpoint,
                 port,
                 "agent",
-                None,
                 &policy,
                 &mut ProxyState::default(),
                 TOOLS_LIST_LINE,
@@ -2100,7 +2074,6 @@ mod tests {
                 &endpoint,
                 port,
                 "agent",
-                None,
                 &policy,
                 &mut ProxyState::default(),
                 TOOLS_LIST_LINE,
@@ -2140,7 +2113,6 @@ mod tests {
             &endpoint,
             port,
             "agent",
-            None,
             &policy,
             &mut ProxyState::default(),
             TOOLS_LIST_LINE,
@@ -2191,7 +2163,6 @@ mod tests {
             &client,
             &endpoint,
             "agent",
-            None,
             INIT_LINE,
             Some(INITIALIZED_LINE),
         )
@@ -2208,9 +2179,31 @@ mod tests {
         let (port, fake, _handle) = spawn_stateful_fake_daemon().await;
         fake.inner.lock().unwrap().omit_session_header = true;
         let endpoint = format!("http://127.0.0.1:{port}/mcp");
-        let err = reestablish_session(&Client::new(), &endpoint, "agent", None, INIT_LINE, None)
+        let err = reestablish_session(&Client::new(), &endpoint, "agent", INIT_LINE, None)
             .await
             .expect_err("no mcp-session-id header must be an error, not a silent empty session");
         assert!(format!("{err:#}").to_lowercase().contains("session"));
+    }
+    #[tokio::test]
+    async fn forwarded_request_carries_no_seed_header() {
+        let fake = new_fake_daemon();
+        let app = fake_daemon_router(fake.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let endpoint = format!("http://127.0.0.1:{port}/mcp");
+        let client = reqwest::Client::new();
+        let line = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
+        let reply = forward_request(&client, &endpoint, "agent-1", line, None)
+            .await
+            .expect("forward should succeed");
+        assert!(reply.session_id.is_some());
+        let inner = fake.inner.lock().unwrap();
+        assert!(
+            !inner.seen_seed_header,
+            "bridge must not forward x-canopy-seed-id"
+        );
     }
 }

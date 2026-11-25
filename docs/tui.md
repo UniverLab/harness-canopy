@@ -21,14 +21,14 @@ time.
    (TOML-backed), cross-session autocomplete search, and a Warp-like
    input mode.
 
-The dialog includes a CLI picker, model picker, seed identity selector
-(`◀ None / SeedName ▶`), directory browser, and a yolo-mode toggle.
+The dialog includes a CLI picker, model picker, directory browser, and a
+yolo-mode toggle.
 
 For **Interactive**, `Enter` on the finished form opens a second **Mode**
 step instead of launching straight away:
 
 - **New session** — exactly the launch the form always did: the launchpad
-  opens (or the session starts directly when a new seed is being planted).
+  opens (or the session starts directly).
 - **Resume a session** — lists the finished sessions that belong to the
   selected harness *and* directory, or the harness's own `session_list_cmd`
   output when it defines one. `Enter` on a session launches it resumed,
@@ -234,7 +234,7 @@ step instead of launching straight away:
 
 ## Gamification
 
-Canopy tracks 28 achievement-style missions across six categories:
+Canopy tracks 24 achievement-style missions across five categories:
 
 | Category | Missions | Examples |
 |---|---|---|
@@ -242,7 +242,6 @@ Canopy tracks 28 achievement-style missions across six categories:
 | **Intelligence** | 6 | World Connector, Data Architect, Deep Searcher, Digital Archeologist |
 | **Projects** | 3 | Project Polyglot, The Gardener, Data Hoarder |
 | **Graph** | 4 | Automation Engineer, Pipeline Pilot, Parallel Vision, Graph Survivor |
-| **Seeds** | 4 | First Bloom, Identity Evolved, The Orchard, Deep Roots |
 | **SysInfo** | 7 | Full Throttle, Nuclear Winter, VRAM Squeezer, YOLO Pilot |
 
 Missions are checked automatically during normal TUI operation — no

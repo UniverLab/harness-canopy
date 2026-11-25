@@ -747,25 +747,6 @@ impl Database {
         Ok(())
     }
 
-    /// Get the session_type for an interactive session by id.
-    pub fn get_session_type(&self, session_id: &str) -> Result<Option<String>> {
-        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
-        let mut stmt =
-            conn.prepare("SELECT session_type FROM interactive_sessions WHERE id = ?1")?;
-        let result = stmt.query_row(params![session_id], |row| row.get(0)).ok();
-        Ok(result)
-    }
-
-    /// Remove an interactive session record entirely (used for nursery cleanup).
-    pub fn remove_interactive_session(&self, id: &str) -> Result<()> {
-        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
-        conn.execute(
-            "DELETE FROM interactive_sessions WHERE id = ?1",
-            params![id],
-        )?;
-        Ok(())
-    }
-
     pub fn count_interactive_sessions(&self) -> Result<i64> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         let count: i64 =

@@ -40,7 +40,6 @@ fn agent_spawn(cli: &str) -> SpawnRequest {
         model_flag: None,
         id: None,
         harness_conversation_id: None,
-        seed_id: None,
         accent: None,
         yolo: false,
         preserve_args: false,

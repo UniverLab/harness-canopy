@@ -457,7 +457,7 @@ impl App {
             Self::resume_session_accent(config.get_cli(cli.as_str()))
         };
         let (cols, rows) = Self::session_panel_size();
-        match InteractiveAgent::attach_item(item, cli, accent, None, cols, rows) {
+        match InteractiveAgent::attach_item(item, cli, accent, cols, rows) {
             Ok(agent) => {
                 if is_terminal {
                     // The snapshot already carries the scrollback; only the
@@ -805,7 +805,6 @@ mod tests {
             &item,
             crate::domain::models::Cli::new(item.cli.as_str()),
             ratatui::style::Color::White,
-            None,
             80,
             24,
         )

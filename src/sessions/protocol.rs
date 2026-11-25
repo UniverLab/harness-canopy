@@ -285,7 +285,6 @@ pub struct SpawnExt {
     pub fallback_args: Option<String>,
     pub model_flag: Option<String>,
     pub id: Option<String>,
-    pub seed_id: Option<String>,
     pub accent: Option<String>,
     /// The harness's own conversation identifier for this launch, when the
     /// launcher knows it (a resume of a recorded conversation). The hub
@@ -452,7 +451,6 @@ fn parse_spawn_frame(value: &Value, frame: &str) -> Result<ClientFrame, FrameErr
     let fallback_args = opt_str_field(value, frame, "fallback_args")?;
     let model_flag = opt_str_field(value, frame, "model_flag")?;
     let id = opt_str_field(value, frame, "id")?;
-    let seed_id = opt_str_field(value, frame, "seed_id")?;
     let accent = opt_str_field(value, frame, "accent")?;
     let harness_conversation_id = opt_str_field(value, frame, "harness_conversation_id")?;
     let yolo = opt_bool_field(value, frame, "yolo")?;
@@ -470,7 +468,6 @@ fn parse_spawn_frame(value: &Value, frame: &str) -> Result<ClientFrame, FrameErr
             fallback_args,
             model_flag,
             id,
-            seed_id,
             accent,
             harness_conversation_id,
             yolo,

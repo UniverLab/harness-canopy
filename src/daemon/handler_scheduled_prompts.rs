@@ -21,7 +21,6 @@ impl TaskTriggerHandler {
         params: ScheduledPromptCreateParams,
         parts: Option<&Parts>,
     ) -> Result<CallToolResult, McpError> {
-        self.reject_if_nursery(parts)?;
         self.record_harness_id(parts);
         let agent_id = self.resolve_sync_agent_id(parts)?;
 
@@ -115,10 +114,7 @@ impl TaskTriggerHandler {
             .filter(|s| !s.is_empty())
         {
             Some(id) => id.to_string(),
-            None => {
-                self.reject_if_nursery(parts)?;
-                self.resolve_sync_agent_id(parts)?
-            }
+            None => self.resolve_sync_agent_id(parts)?,
         };
 
         let pending = self

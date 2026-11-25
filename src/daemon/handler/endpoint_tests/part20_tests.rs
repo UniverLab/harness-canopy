@@ -322,10 +322,9 @@ async fn session_send_file_rejects_bad_input() {
 }
 
 /// FR2 case 3b: no identity at all (no header, no env) — the host shelf,
-/// not an error. The nursery gate only applies to callers that HAVE an
-/// identity to check; an anonymous caller has no session whose type could
-/// be `nursery`, so it falls through to the host shelf like an unmapped
-/// identity does.
+/// not an error. An anonymous caller carries no agent id, so there is no
+/// session to attribute the upload to; it falls through to the host shelf
+/// like an unmapped identity does.
 #[tokio::test]
 async fn session_send_file_anonymous_caller_uses_host_shelf() {
     let (dir, db, handler) = endpoint_test_handler();

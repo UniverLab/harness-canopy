@@ -1,12 +1,12 @@
 ---
 title: MCP Tools
-description: All 36 MCP tools exposed by the canopy daemon, by category.
+description: All 35 MCP tools exposed by the canopy daemon, by category.
 order: 17
 ---
 
 # MCP Tools
 
-The daemon exposes **36 MCP tools** over Streamable HTTP (port 7755) and
+The daemon exposes **35 MCP tools** over Streamable HTTP (port 7755) and
 stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 
 Every HTTP request under `/mcp` must present the daemon token as an
@@ -89,12 +89,6 @@ The multi-agent sync tools are retired: coordination now goes through
 `session_list` (see every live session), `scheduled_prompts` (wake a
 session later instead of polling), and `intelligence_upsert` /
 `intelligence_search` (persist and find shared findings).
-
-## Identity (1)
-
-| Tool | Description |
-|---|---|
-| `identity` | Read and evolve the agent identity, and manage seed identities. Actions: `get` (the agent's own structured identity contract), `evolve` (optional `new_directives`/`new_traits`), `list_seeds`, `create_seed` (`name`, optional `directives`/`traits`), `remove_seed` (`seed_id`) — pass `action` plus the params the refusal/table lists |
 
 ## Skills (1)
 

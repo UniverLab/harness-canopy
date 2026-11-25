@@ -2,9 +2,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::{
-    cron_value, filter_row, focus_style, identity_label, picker_item_style,
-    prompt_visual_line_count, push_spaced_row, selector_spans, truncate_str, FieldLayout,
-    PickerWindow, PROMPT_VISIBLE_ROWS, TERMINAL_SHELL_FIELD,
+    cron_value, filter_row, focus_style, picker_item_style, prompt_visual_line_count,
+    push_spaced_row, truncate_str, FieldLayout, PickerWindow, PROMPT_VISIBLE_ROWS,
+    TERMINAL_SHELL_FIELD,
 };
 use crate::tui::app::dialog::new_agent::{BackgroundTrigger, NewAgentDialog};
 use crate::tui::ui::theme::Theme;
@@ -198,30 +198,6 @@ fn background_target_row(
             ),
         ]),
     }
-}
-
-pub(super) fn append_identity_section(
-    lines: &mut Vec<Line<'static>>,
-    dialog: &NewAgentDialog,
-    accent: Color,
-    identity_field: usize,
-    theme: &Theme,
-) {
-    let label = identity_label(dialog);
-    let locked = dialog.seed_options.len() <= 1;
-    let mut identity_row = vec![Span::styled(
-        "  Identity: ",
-        Style::default().fg(theme.dim_text),
-    )];
-    identity_row.extend(selector_spans(
-        &label,
-        identity_field,
-        locked,
-        accent,
-        dialog.field,
-        theme,
-    ));
-    push_spaced_row(lines, Line::from(identity_row));
 }
 
 pub(super) fn append_yolo_section(

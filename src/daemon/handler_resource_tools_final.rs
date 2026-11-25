@@ -188,37 +188,6 @@ pub(crate) static CATALOGUE: ToolSpec = ToolSpec {
     }],
 };
 
-pub(crate) static IDENTITY: ToolSpec = ToolSpec {
-    name: "identity",
-    actions: &[
-        ActionSpec {
-            name: "get",
-            required: &[],
-            optional: &[],
-        },
-        ActionSpec {
-            name: "evolve",
-            required: &[],
-            optional: &["new_directives", "new_traits"],
-        },
-        ActionSpec {
-            name: "list_seeds",
-            required: &[],
-            optional: &[],
-        },
-        ActionSpec {
-            name: "create_seed",
-            required: &["name"],
-            optional: &["directives", "traits"],
-        },
-        ActionSpec {
-            name: "remove_seed",
-            required: &["seed_id"],
-            optional: &[],
-        },
-    ],
-};
-
 // ── Typed input schemas, one newtype per tool (FR1) ─────────────────
 
 resource_action_object!(
@@ -276,16 +245,6 @@ resource_action_object!(
 );
 
 resource_action_object!(RagObject, RAG, [("search", RagSearchParams)]);
-
-resource_action_object!(
-    IdentityObject,
-    IDENTITY,
-    [
-        ("evolve", EvolveIdentityParams),
-        ("create_seed", CreateSeedParams),
-        ("remove_seed", RemoveSeedParams),
-    ]
-);
 
 resource_action_object!(
     CatalogueObject,
@@ -515,44 +474,6 @@ impl TaskTriggerHandler {
                     .await
             }
             "compact" => self.rag_compact_impl().await,
-            _ => unreachable!("validated action"),
-        }
-    }
-
-    #[tool(
-        name = "identity",
-        description = "Read and evolve the agent's identity, and manage seed identities. Pass `action` plus the parameters listed for it. \
-        Actions (required params; optional params): \
-        `get` (required: none; optional: none) — read the agent's own structured identity contract. \
-        `evolve` (required: none; optional: new_directives, new_traits) — suggest refinements to directives or traits from the current session's learnings. \
-        `list_seeds` (required: none; optional: none) — list all seed identities. \
-        `create_seed` (required: name; optional: directives, traits) — create a new seed identity. \
-        `remove_seed` (required: seed_id; optional: none) — remove a seed identity by ID."
-    )]
-    pub(crate) async fn identity(
-        &self,
-        Parameters(params): Parameters<IdentityObject>,
-        OptionalExtension(parts): OptionalExtension<Parts>,
-    ) -> Result<CallToolResult, McpError> {
-        let mut params = params.into_value();
-        IdentityObject::coerce(&mut params);
-        let action = IDENTITY.validate(&params)?;
-        let spec = IDENTITY.action(action).expect("validated action");
-        match action {
-            "get" => self.identity_get_impl(parts.as_ref()).await,
-            "evolve" => {
-                self.identity_evolve_impl(action_params(&params, spec)?, parts.as_ref())
-                    .await
-            }
-            "list_seeds" => self.identity_list_seeds_impl().await,
-            "create_seed" => {
-                self.identity_create_seed_impl(action_params(&params, spec)?, parts.as_ref())
-                    .await
-            }
-            "remove_seed" => {
-                self.identity_remove_seed_impl(action_params(&params, spec)?)
-                    .await
-            }
             _ => unreachable!("validated action"),
         }
     }

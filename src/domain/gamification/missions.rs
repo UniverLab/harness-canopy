@@ -20,10 +20,6 @@ pub enum MissionId {
     PipelinePilot,
     ParallelVision,
     GraphSurvivor,
-    FirstBloom,
-    IdentityEvolved,
-    TheOrchard,
-    DeepRoots,
     FullThrottle,
     NuclearWinter,
     VramSqueezer,
@@ -53,10 +49,6 @@ impl MissionId {
             Self::PipelinePilot => "pipeline_pilot",
             Self::ParallelVision => "parallel_vision",
             Self::GraphSurvivor => "graph_survivor",
-            Self::FirstBloom => "first_bloom",
-            Self::IdentityEvolved => "identity_evolved",
-            Self::TheOrchard => "the_orchard",
-            Self::DeepRoots => "deep_roots",
             Self::FullThrottle => "full_throttle",
             Self::NuclearWinter => "nuclear_winter",
             Self::VramSqueezer => "vram_squeezer",
@@ -87,10 +79,6 @@ impl MissionId {
             "pipeline_pilot" => Self::PipelinePilot,
             "parallel_vision" => Self::ParallelVision,
             "graph_survivor" => Self::GraphSurvivor,
-            "first_bloom" => Self::FirstBloom,
-            "identity_evolved" => Self::IdentityEvolved,
-            "the_orchard" => Self::TheOrchard,
-            "deep_roots" => Self::DeepRoots,
             "full_throttle" => Self::FullThrottle,
             "nuclear_winter" => Self::NuclearWinter,
             "vram_squeezer" => Self::VramSqueezer,
@@ -109,7 +97,6 @@ pub enum MissionCategory {
     Intelligence,
     Projects,
     Graph,
-    Seeds,
     SysInfo,
 }
 
@@ -120,7 +107,6 @@ impl MissionCategory {
             Self::Intelligence => "Intelligence",
             Self::Projects => "Projects",
             Self::Graph => "Graph",
-            Self::Seeds => "Seeds",
             Self::SysInfo => "System",
         }
     }
@@ -258,34 +244,6 @@ pub const MISSIONS: &[MissionDef] = &[
         challenge: "Execute 100+ individual graph node runs",
     },
     MissionDef {
-        id: MissionId::FirstBloom,
-        title: "First Bloom",
-        icon: "◰",
-        category: MissionCategory::Seeds,
-        challenge: "Create your first Seed Identity via the Nursery graph",
-    },
-    MissionDef {
-        id: MissionId::IdentityEvolved,
-        title: "Identity Evolved",
-        icon: "◱",
-        category: MissionCategory::Seeds,
-        challenge: "Use identity evolve to refine a Seed's traits or directives",
-    },
-    MissionDef {
-        id: MissionId::TheOrchard,
-        title: "The Orchard",
-        icon: "◲",
-        category: MissionCategory::Seeds,
-        challenge: "Have 5 or more active Seed Identities in your registry",
-    },
-    MissionDef {
-        id: MissionId::DeepRoots,
-        title: "Deep Roots",
-        icon: "◳",
-        category: MissionCategory::Seeds,
-        challenge: "A single Seed participates in 50+ different sessions",
-    },
-    MissionDef {
         id: MissionId::FullThrottle,
         title: "Full Throttle",
         icon: "◶",
@@ -349,7 +307,7 @@ mod tests {
 
     #[test]
     fn all_mission_ids_have_defs() {
-        assert_eq!(MISSIONS.len(), 28);
+        assert_eq!(MISSIONS.len(), 24);
         for def in MISSIONS {
             assert_eq!(mission_def(def.id).id, def.id);
             assert_eq!(MissionId::from_str(def.id.as_str()), Some(def.id));

@@ -1,5 +1,4 @@
 use super::{log_terminal_exit, recent_output_snippet, SessionTarget};
-use crate::domain::nursery;
 use crate::domain::sandbox;
 use crate::tui::agent::AgentStatus;
 use crate::tui::app::types::App;
@@ -119,30 +118,10 @@ impl App {
     pub(super) fn record_interactive_exit_in_db(
         &mut self,
         agent_id: &str,
-        working_dir: &str,
+        _working_dir: &str,
         code: i32,
     ) {
-        let Some(nursery_path) = self.nursery_path.clone() else {
-            let _ = self.db.finish_interactive_session(agent_id, code); // non-nursery path
-            return;
-        };
-        if nursery_path.to_string_lossy() == working_dir && code == 0 {
-            match nursery::finalize_nursery(&nursery_path) {
-                Ok(seed_id) => {
-                    let _ = self.db.bind_session_to_seed(agent_id, &seed_id);
-                    self.queue_mission_event(MissionEvent::FirstSeedCreated);
-                }
-                Err(e) => {
-                    tracing::error!("Nursery finalization failed: {e}");
-                    self.notification_service.notify_nursery_failed(&e);
-                }
-            }
-        } else if code != 0 {
-            let _ = std::fs::remove_dir_all(&nursery_path);
-        }
-        let _ = self.db.remove_interactive_session(agent_id);
-        let _ = self.db.unregister_project_path(&nursery_path);
-        self.nursery_path = None;
+        let _ = self.db.finish_interactive_session(agent_id, code);
     }
 
     pub(super) fn merge_active_sandbox(&mut self) {
@@ -161,8 +140,6 @@ impl App {
                 );
                 if let crate::domain::sandbox::MergeOutcome::MergeFailed(ref reason) = outcome {
                     tracing::error!("Sandbox merge failed: {reason}");
-                    self.notification_service
-                        .notify_nursery_failed(&format!("Sandbox merge failed: {reason}"));
                 }
             }
             Err(e) => {

@@ -29,13 +29,6 @@ impl TaskTriggerHandler {
         Parameters(params): Parameters<SessionSendFileParams>,
         OptionalExtension(parts): OptionalExtension<Parts>,
     ) -> Result<CallToolResult, McpError> {
-        // Nursery sessions stay out — but only when the caller has an
-        // identity to check. An anonymous caller is not a nursery session;
-        // it shelves on the host shelf (FR2's third resolution case), so a
-        // missing identity must fall through instead of failing here.
-        if self.resolve_sync_agent_id(parts.as_ref()).is_ok() {
-            self.reject_if_nursery(parts.as_ref())?;
-        }
         self.record_harness_id(parts.as_ref());
 
         // ── Input validation (whole-call rejects) ────────────────────

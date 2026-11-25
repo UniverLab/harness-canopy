@@ -66,69 +66,6 @@ fn terminal_dialog_uses_canopy_accent() {
 }
 
 #[test]
-fn is_planting_new_seed_returns_true_when_selected() {
-    let mut dialog = NewAgentDialog::new(None);
-    // Find the PlantNewSeed option
-    if let Some(idx) = dialog
-        .seed_options
-        .iter()
-        .position(|o| matches!(o, SeedOption::PlantNewSeed))
-    {
-        dialog.seed_index = idx;
-        assert!(dialog.is_planting_new_seed());
-    }
-}
-
-#[test]
-fn is_planting_new_seed_returns_false_for_none() {
-    let dialog = NewAgentDialog::new(None);
-    // Seed index 0 is always None
-    assert_eq!(dialog.seed_index, 0);
-    assert!(!dialog.is_planting_new_seed());
-}
-
-#[test]
-fn is_planting_new_seed_returns_false_for_existing_seed() {
-    let mut dialog = NewAgentDialog::new(None);
-    // Find an existing seed option
-    if let Some(idx) = dialog
-        .seed_options
-        .iter()
-        .position(|o| matches!(o, SeedOption::Seed { .. }))
-    {
-        dialog.seed_index = idx;
-        assert!(!dialog.is_planting_new_seed());
-    }
-}
-
-#[test]
-fn selected_seed_id_returns_none_for_plant_new_seed() {
-    let mut dialog = NewAgentDialog::new(None);
-    if let Some(idx) = dialog
-        .seed_options
-        .iter()
-        .position(|o| matches!(o, SeedOption::PlantNewSeed))
-    {
-        dialog.seed_index = idx;
-        assert!(dialog.selected_seed_id().is_none());
-    }
-}
-
-#[test]
-fn selected_seed_id_returns_none_for_none_option() {
-    let dialog = NewAgentDialog::new(None);
-    assert!(dialog.selected_seed_id().is_none());
-}
-
-#[test]
-fn load_seed_options_always_has_none_and_plant() {
-    let options = load_seed_options();
-    assert!(options.len() >= 2);
-    assert!(matches!(options.first(), Some(SeedOption::None)));
-    assert!(matches!(options.last(), Some(SeedOption::PlantNewSeed)));
-}
-
-#[test]
 fn parse_session_list_handles_empty_input() {
     let result = parse_session_list("");
     assert!(result.is_empty());
@@ -227,21 +164,6 @@ fn load_sessions_does_not_spawn_for_empty_session_list_cmd() {
     dialog.load_sessions();
     assert!(dialog.session_entries.is_empty());
 }
-
-#[test]
-fn seed_option_display_order() {
-    let options = load_seed_options();
-    // First is always None
-    assert!(matches!(options.first(), Some(SeedOption::None)));
-    // Last is always PlantNewSeed
-    assert!(matches!(options.last(), Some(SeedOption::PlantNewSeed)));
-    // Any seeds in between are Seed variants
-    for opt in options.iter().skip(1).take(options.len().saturating_sub(2)) {
-        assert!(matches!(opt, SeedOption::Seed { .. }));
-    }
-}
-
-// ── selected_cli ─────────────────────────────────────────────
 
 #[test]
 fn selected_cli_returns_correct_index() {

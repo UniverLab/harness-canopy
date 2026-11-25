@@ -58,9 +58,9 @@ impl App {
 
         // ── Create mode ───────────────────────────────────────────────────
         if matches!(dialog.task_type, NewTaskType::Interactive) {
-            // New (the mission step) is the launchpad; resuming and nursery
-            // sessions go straight to the PTY as they always have (CT34).
-            if dialog.is_planting_new_seed() || matches!(dialog.task_mode, NewTaskMode::Resume) {
+            // New (the mission step) is the launchpad; resuming sessions go
+            // straight to the PTY as they always have (CT34).
+            if matches!(dialog.task_mode, NewTaskMode::Resume) {
                 self.launch_interactive(&dialog)?;
                 let name = self.take_new_interactive_name();
                 self.new_agent_dialog = None;
@@ -191,16 +191,10 @@ impl App {
             tracing::warn!("Failed to record launchpad session: {e}");
         }
 
-        let is_nursery = dialog.is_planting_new_seed();
         self.launch_interactive(&dialog)?;
         let name = self.take_new_interactive_name();
         self.refresh_agents()?;
         self.select_agent_by_name(&name);
-
-        if is_nursery {
-            self.focus = crate::tui::app::types::Focus::Agent;
-            return Ok(());
-        }
 
         let initial_content = Self::launchpad_initial_content(
             self,
@@ -210,9 +204,7 @@ impl App {
             &launchpad,
         );
         self.focus = crate::tui::app::types::Focus::Agent;
-        if !dialog.is_planting_new_seed() {
-            self.open_simple_prompt_dialog(Some(initial_content));
-        }
+        self.open_simple_prompt_dialog(Some(initial_content));
         Ok(())
     }
 
@@ -340,15 +332,7 @@ impl App {
         let cli = dialog.selected_cli();
         self.record_cli_usage(cli.as_str());
 
-        // Check if planting a new seed via Nursery
-        let (dir, is_nursery) = if dialog.is_planting_new_seed() {
-            let nursery_dir = crate::domain::nursery::create_nursery(cli.as_str(), None)
-                .map_err(|e| anyhow::anyhow!(e))?;
-            let d = nursery_dir.to_string_lossy().to_string();
-            // Store nursery path for finalization on session end
-            self.nursery_path = Some(nursery_dir);
-            (d, true)
-        } else if dialog.sandbox_mode {
+        let dir = if dialog.sandbox_mode {
             let protocol = crate::domain::sandbox::canopy_protocol_block();
             let workdir = dialog.working_dir.clone();
             let cli_name = cli.as_str().to_string();
@@ -362,14 +346,10 @@ impl App {
                 .db
                 .insert_sandbox_run(&sb, "interactive", &agent_id_placeholder);
             self.active_sandbox = Some(sb.clone());
-            (sb.worktree_path.to_string_lossy().to_string(), false)
+            sb.worktree_path.to_string_lossy().to_string()
         } else {
-            (dialog.working_dir.clone(), false)
+            dialog.working_dir.clone()
         };
-
-        // The nursery instruction file is written only inside the ephemeral
-        // nursery temp dir by `create_nursery`; normal sessions must never get
-        // the Gardener instructions written into their working directory.
 
         let args = yolo_launch_args(dialog);
         let fallback = dialog.selected_fallback_args();
@@ -391,17 +371,7 @@ impl App {
             .iter()
             .map(|a| a.name.as_str())
             .collect();
-        // For nursery sessions, don't pass seed_id (it gets bound on finalization)
-        let seed_id = if is_nursery {
-            None
-        } else {
-            dialog.selected_seed_id()
-        };
-        let agent_name = if is_nursery { Some("Gardener") } else { None };
-        let spawn_name = known_session
-            .as_ref()
-            .map(|session| session.name.clone())
-            .or_else(|| agent_name.map(str::to_string));
+        let spawn_name = known_session.as_ref().map(|session| session.name.clone());
         let spawn_id = known_session.as_ref().map(|session| session.id.clone());
         // The name this launch asked the hub for: a resume whose source name
         // is held by another live session lands under a fresh name instead
@@ -427,12 +397,11 @@ impl App {
             &existing_refs,
             model.as_deref(),
             model_flag.as_deref(),
-            seed_id,
             harness_conversation_id.as_deref(),
             is_resume,
         )?;
         // Persist session in registry
-        let session_type = if is_nursery { "nursery" } else { "interactive" };
+        let session_type = "interactive";
         self.persist_launched_session(
             &agent,
             &dir,
@@ -441,8 +410,7 @@ impl App {
             harness_conversation_id.as_deref(),
             is_resume,
         );
-        // Don't register nursery temp dir as a project — it's ephemeral
-        if !is_nursery && crate::domain::project::should_auto_register(Path::new(&dir)) {
+        if crate::domain::project::should_auto_register(Path::new(&dir)) {
             let _ = self.db.register_project_path(Path::new(&dir));
         }
         self.announce_spawned_agent(agent, is_resume, requested_name.as_deref());
@@ -1042,7 +1010,6 @@ mod tests {
             model_flag: None,
             id: None,
             harness_conversation_id: None,
-            seed_id: None,
             accent: None,
             yolo: false,
             preserve_args: false,

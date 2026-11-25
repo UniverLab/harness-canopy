@@ -765,10 +765,6 @@ const RESOURCE_TOOL_SPECS: &[(&str, &ToolSpec)] = &[
     ),
     ("harness", &crate::daemon::handler_resource_tools::HARNESS),
     (
-        "identity",
-        &crate::daemon::handler_resource_tools_final::IDENTITY,
-    ),
-    (
         "intelligence_admin",
         &crate::daemon::handler_resource_tools_final::INTELLIGENCE_ADMIN,
     ),
@@ -835,8 +831,8 @@ fn schema_covers_every_action_param_of_every_resource_tool() {
     let tools = TaskTriggerHandler::tool_router().list_all();
     assert_eq!(
         RESOURCE_TOOL_SPECS.len(),
-        25,
-        "all 25 resource tools listed"
+        24,
+        "all 24 resource tools listed"
     );
     for (name, spec) in RESOURCE_TOOL_SPECS {
         let tool = tools

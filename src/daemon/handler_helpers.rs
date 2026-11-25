@@ -376,7 +376,6 @@ pub(crate) fn interactive_only_rejection(platform: &str) -> Option<String> {
 // ── Intelligence context helpers ─────────────────────────────────
 
 use crate::db::Database;
-use crate::shared::sync_identity::{self, header_str};
 
 /// Try to auto-detect the effective project_hash from session workdir,
 /// falling back to the caller-supplied value. A workdir inside a sandbox
@@ -395,32 +394,6 @@ pub(crate) fn resolve_effective_project_hash(
         let mapped = db.map_workdir_out_of_sandbox(&wd).unwrap_or(wd);
         crate::domain::project::workdir_hash(&mapped)
     })
-}
-
-/// Load the seed identity bound to the current session agent.
-/// Returns (seed_id, identity) after resolving from seed header or DB mapping.
-pub(crate) fn load_bound_seed_identity(
-    db: &crate::db::Database,
-    parts: Option<&axum::http::request::Parts>,
-    agent_id: &str,
-) -> Result<(String, crate::domain::seeds::SeedIdentity), String> {
-    let seed_id = if let Some(parts) = parts {
-        if let Some(sid) = header_str(parts, sync_identity::CANOPY_SEED_ID_HEADER) {
-            let _ = db.bind_session_to_seed(agent_id, sid);
-            sid.to_string()
-        } else {
-            db.resolve_session_seed(agent_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| "No seed identity bound to this session.".to_string())?
-        }
-    } else {
-        db.resolve_session_seed(agent_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "No seed identity bound to this session.".to_string())?
-    };
-
-    let identity = crate::domain::seeds::load_seed(&seed_id)?;
-    Ok((seed_id, identity))
 }
 
 #[cfg(test)]

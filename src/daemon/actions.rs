@@ -832,7 +832,6 @@ mod tests {
             &crate::daemon::handler_resource_tools_final::SKILL,
             &crate::daemon::handler_resource_tools_final::SUBAGENT,
             &crate::daemon::handler_resource_tools_final::RAG,
-            &crate::daemon::handler_resource_tools_final::IDENTITY,
             &crate::daemon::handler_resource_tools_final::CATALOGUE,
             &crate::daemon::handler_sandbox::SANDBOX,
             &crate::daemon::handler_remote::REMOTE,

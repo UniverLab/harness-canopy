@@ -2,7 +2,7 @@
 //!
 //! `rmcp`'s own `Parameters<T>` extractor turns a deserialization failure
 //! into `format!("failed to deserialize parameters: {serde_error}")`, which
-//! only ever names a Rust type (e.g. "expected struct SeedDirectives") and
+//! only ever names a Rust type (e.g. "expected struct ExampleDirectives") and
 //! never the JSON field that was actually wrong. Every caller of this MCP
 //! surface is an LLM re-guessing the argument shape from that message alone,
 //! so a message that doesn't name the field and show a fix is, functionally,
@@ -286,9 +286,7 @@ fn schema_primary_type(schema: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::params::{
-        CreateSeedParams, IntelligenceNodeParams, IntelligenceUpsertParams,
-    };
+    use crate::daemon::params::{IntelligenceNodeParams, IntelligenceUpsertParams};
     use rmcp::model::ErrorCode;
 
     fn message_of(result: Result<impl std::fmt::Debug, ErrorData>) -> String {
@@ -305,15 +303,28 @@ mod tests {
         }
     }
 
+    #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+    struct NestedExample {
+        #[allow(dead_code)]
+        name: String,
+        #[allow(dead_code)]
+        directives: Option<NestedInner>,
+    }
+    #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+    struct NestedInner {
+        #[allow(dead_code)]
+        general: Vec<String>,
+    }
+
     #[test]
     fn nested_wrong_type_names_field_path_and_example() {
         // `directives` should be `{"general": [...]}`, not a bare array.
         let value = serde_json::json!({
-            "name": "seed-1",
+            "name": "item-1",
             "directives": ["Be concise", "Prefer tests"],
         });
 
-        let message = message_of(deserialize_params::<CreateSeedParams>(&value));
+        let message = message_of(deserialize_params::<NestedExample>(&value));
 
         assert!(
             message.contains("directives"),
@@ -336,7 +347,7 @@ mod tests {
         // separated detail — not as the sentence's main vocabulary.
         let primary_sentence = message.split("(serde:").next().unwrap();
         assert!(
-            !primary_sentence.contains("SeedDirectives"),
+            !primary_sentence.contains("ExampleDirectives"),
             "Rust type name leaked into the primary message: {message}"
         );
     }
@@ -390,12 +401,17 @@ mod tests {
         );
     }
 
+    #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+    struct FlatExample {
+        item_id: String,
+    }
+
     #[test]
     fn well_formed_flat_params_still_deserialize() {
-        let value = serde_json::json!({ "seed_id": "abc" });
-        let params: crate::daemon::params::RemoveSeedParams =
+        let value = serde_json::json!({ "item_id": "abc" });
+        let params: FlatExample =
             deserialize_params(&value).expect("flat scalar params should still deserialize");
-        assert_eq!(params.seed_id, "abc");
+        assert_eq!(params.item_id, "abc");
     }
 
     #[test]

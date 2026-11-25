@@ -13,7 +13,6 @@ use crate::tui::gamification::{MissionEvent, MissionManager, MissionSnapshot};
 
 use super::types::App;
 
-const IDENTITY_EVOLVED_KEY: &str = "gamification:identity_evolved";
 const DEEP_RAG_SEARCH_KEY: &str = "gamification:deep_rag_search";
 const DIGITAL_ARCHEOLOGIST_KEY: &str = "gamification:digital_archeologist";
 const MAX_CPU_FREQ_KEY: &str = "gamification:max_cpu_freq_mhz";
@@ -225,10 +224,6 @@ impl App {
             completed_graph_runs: counters.completed_graph_runs,
             total_graph_node_runs: counters.total_graph_node_runs,
             has_parallel_graph,
-            seed_count: crate::domain::seeds::list_seeds()
-                .map(|s| s.len())
-                .unwrap_or(0),
-            max_seed_session_bindings: counters.max_seed_session_bindings,
             agent_running,
             cpu_usage: self.system_info.cpu_usage,
             cpu_temperature_c: self.system_info.cpu_temperature,
@@ -264,7 +259,6 @@ impl App {
         // One-shot flags written by the daemon (MCP tools run there, not in
         // the TUI process); consumed once via the shared DB.
         let daemon_flags = [
-            (IDENTITY_EVOLVED_KEY, MissionEvent::IdentityEvolved),
             (DEEP_RAG_SEARCH_KEY, MissionEvent::DeepRagSearch),
             (
                 DIGITAL_ARCHEOLOGIST_KEY,
@@ -343,10 +337,6 @@ impl App {
             completed_graph_runs: self.db.count_completed_graphs().unwrap_or(0),
             total_graph_node_runs: self.db.count_graph_node_runs().unwrap_or(0),
             has_parallel_graph,
-            seed_count: crate::domain::seeds::list_seeds()
-                .map(|s| s.len())
-                .unwrap_or(0),
-            max_seed_session_bindings: self.db.max_seed_session_bindings().unwrap_or(0),
             agent_running,
             cpu_usage: self.system_info.cpu_usage,
             cpu_temperature_c: self.system_info.cpu_temperature,

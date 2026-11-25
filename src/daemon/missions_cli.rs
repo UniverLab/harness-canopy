@@ -118,8 +118,8 @@ mod tests {
     fn listing_counts_22_ignores_loop_survivor() {
         let store = fixture_store();
         let report = build_missions_report(&store);
-        assert_eq!(report.total, 28);
-        assert_eq!(report.missions.len(), 28);
+        assert_eq!(report.total, 24);
+        assert_eq!(report.missions.len(), 24);
         assert_eq!(report.unlocked, 22);
         assert!(
             store.is_unlocked(MissionId::FireflyCatcher),
@@ -134,9 +134,9 @@ mod tests {
         let json = serde_json::to_string_pretty(&report).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["unlocked"], 22);
-        assert_eq!(value["total"], 28);
+        assert_eq!(value["total"], 24);
         let missions = value["missions"].as_array().unwrap();
-        assert_eq!(missions.len(), 28);
+        assert_eq!(missions.len(), 24);
         let first = &missions[0];
         for key in [
             "id",
@@ -149,6 +149,6 @@ mod tests {
             assert!(first.get(key).is_some(), "mission entry lacks {key}");
         }
         assert!(first["unlocked_at"].is_string());
-        assert!(missions[27]["unlocked_at"].is_null());
+        assert!(missions[23]["unlocked_at"].is_null());
     }
 }

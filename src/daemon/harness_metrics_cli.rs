@@ -181,7 +181,7 @@ mod tests {
     fn missions_totals_match_build_missions_report_on_fixture() {
         let store = fixture_store();
         let expected = build_missions_report(&store);
-        assert_eq!(expected.total, 28);
+        assert_eq!(expected.total, 24);
         assert_eq!(expected.unlocked, 22);
 
         let report = build_harness_report(&CliUsage::default(), &store);
@@ -204,7 +204,7 @@ mod tests {
         let value = serde_json::to_value(&report).unwrap();
         assert_eq!(value["first_run_at"], "2024-01-01T00:00:00Z");
         assert_eq!(value["missions"]["unlocked"], 22);
-        assert_eq!(value["missions"]["total"], 28);
+        assert_eq!(value["missions"]["total"], 24);
         let rows = value["harnesses"].as_array().unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["harness"], "opencode");

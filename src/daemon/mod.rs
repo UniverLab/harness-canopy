@@ -108,6 +108,7 @@ pub(crate) mod rag_cli;
 pub(crate) mod roster_cli;
 pub(crate) mod sandbox_cli;
 pub(crate) mod sandbox_ops;
+pub(crate) mod seed_retirement;
 pub(crate) mod server;
 pub(crate) mod service_install;
 pub(crate) mod service_reconcile;

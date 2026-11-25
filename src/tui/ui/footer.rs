@@ -751,7 +751,6 @@ mod tests {
             None,
             None,
             None,
-            None,
             false,
         )
         .expect("spawn cat as a stand-in interactive child");
@@ -797,7 +796,6 @@ mod tests {
             Some("claimed-end-agent"),
             None,
             &[],
-            None,
             None,
             None,
             None,
@@ -1090,7 +1088,6 @@ mod tests {
             Some("drag-copy-hint-agent"),
             None,
             &[],
-            None,
             None,
             None,
             None,

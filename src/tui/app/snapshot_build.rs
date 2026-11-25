@@ -356,10 +356,6 @@ fn build_mission(
 ) {
     // One-shot daemon flags: consumed exactly once here, surfaced as events.
     for (key, event) in [
-        (
-            "gamification:identity_evolved",
-            MissionEvent::IdentityEvolved,
-        ),
         ("gamification:deep_rag_search", MissionEvent::DeepRagSearch),
         (
             "gamification:digital_archeologist",
@@ -389,7 +385,6 @@ fn build_mission(
         completed_graph_runs: db.count_completed_graphs().unwrap_or(0),
         total_graph_node_runs: db.count_graph_node_runs().unwrap_or(0),
         has_parallel_graph: has_parallel,
-        max_seed_session_bindings: db.max_seed_session_bindings().unwrap_or(0),
         intelligence_nodes: db.count_intelligence_nodes().unwrap_or(0),
         cross_project_links: db.count_cross_project_intelligence_links().unwrap_or(0),
         max_cpu_frequency_seen: state.max_cpu_frequency_seen,

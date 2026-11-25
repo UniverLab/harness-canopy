@@ -2,8 +2,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::fields::{
-    append_directory_section, append_identity_section, append_prompt_section,
-    append_sandbox_section, append_yolo_section, terminal_shell_row, DirSection,
+    append_directory_section, append_prompt_section, append_sandbox_section, append_yolo_section,
+    terminal_shell_row, DirSection,
 };
 use super::{
     background_trigger_label, filter_row, focus_style, model_value, picker_detail_style,
@@ -35,7 +35,6 @@ pub(super) fn append_interactive_sections(
     // CT34: no Session (Mode) row and no inline session lists on the form —
     // the New/Resume choice moved to the Mode step that follows it.
     append_cli_section(lines, dialog, accent, filtered_clis, layout.cli, theme);
-    append_identity_section(lines, dialog, accent, layout.identity, theme);
     append_yolo_section(lines, dialog, accent, layout.yolo, theme);
     append_sandbox_section(lines, dialog, accent, layout.sandbox, theme);
     append_directory_section(

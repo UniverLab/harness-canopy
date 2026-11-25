@@ -47,9 +47,6 @@ mod test {
         // Test task completed notification
         service.notify_task_completed("test-agent", true, Some(0));
 
-        // Test nursery failed notification
-        service.notify_nursery_failed("identity.toml not found");
-
         // Test graph lifecycle notifications (return ())
         service.notify_graph_started("R4 graph", 19, false, Some("R4"));
         service.notify_spec_completed("R4 graph", "R4", 11, 19, Some("R5"));

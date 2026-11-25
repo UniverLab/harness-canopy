@@ -47,8 +47,7 @@ new agent:
 - **Background** — cron-scheduled or file-watcher-triggered.
 - **Terminal** — a raw shell session with per-session history.
 
-Optionally select a **seed identity** to give the agent a persistent
-personality.
+Choose the platform, model, and working directory for the session.
 
 ## 4. Wire up your AI CLI via MCP
 
@@ -86,7 +85,7 @@ canopy daemon logs     # tail the daemon log
 
 ## Where to go next
 
-- [Agents](agents.md) — the three agent kinds and seed identities.
+- [Agents](agents.md) — the three agent kinds.
 - [Intelligence & Sync](intelligence-and-sync.md) — persistent knowledge.
 - [Graphs](graphs.md) — multi-step automation.
 - [RAG Pipeline](rag.md) — index and search your documents.

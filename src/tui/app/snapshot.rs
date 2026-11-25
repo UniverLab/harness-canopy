@@ -100,7 +100,6 @@ pub(crate) struct MissionDbCounters {
     pub completed_graph_runs: i64,
     pub total_graph_node_runs: i64,
     pub has_parallel_graph: bool,
-    pub max_seed_session_bindings: i64,
     pub intelligence_nodes: i64,
     pub cross_project_links: i64,
     pub max_cpu_frequency_seen: Option<u64>,

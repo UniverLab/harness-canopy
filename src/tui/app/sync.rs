@@ -405,7 +405,6 @@ mod tests {
             None,
             None,
             None,
-            None,
             false,
         )
         .expect("spawn interactive");

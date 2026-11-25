@@ -151,14 +151,12 @@ fn is_test_path(path: &str) -> bool {
     path.contains("test")
 }
 
-/// Removed names that are also `Database` method (or `domain::seeds`
-/// function) names, which keep their names: the read path the engine and
-/// CLIs call directly. A method call (`.name(`), a `::`-qualified path, the
-/// `fn name(` definition inside `src/db/`, or any use inside either
-/// `seeds.rs` (the module that implements the seeds functions) is the
-/// database, not the MCP surface — everything else (a `name = "…"` tool
-/// attribute, a `call_tool("…")` caller, prompt or error prose) is still a
-/// hit.
+/// Removed names that are also `Database` method names, which keep their
+/// names: the read path the engine and CLIs call directly. A method call
+/// (`.name(`), a `::`-qualified path, or the `fn name(` definition inside
+/// `src/db/` is the database, not the MCP surface — everything else (a
+/// `name = "…"` tool attribute, a `call_tool("…")` caller, prompt or error
+/// prose) is still a hit.
 const DB_METHOD_NAMES: &[&str] = &[
     "spec_note_write",
     "spec_notes_get",
@@ -169,8 +167,6 @@ const DB_METHOD_NAMES: &[&str] = &[
     "crew_update",
     "crew_delete",
     "graph_crew",
-    "list_seeds",
-    "remove_seed",
 ];
 
 /// Removed names that survive as `harness` action names. The action table
@@ -180,14 +176,6 @@ const DB_METHOD_NAMES: &[&str] = &[
 /// `name = "…"` tool attribute or an old-style `call_tool("…")` caller is
 /// still a hit.
 const ROSTER_ACTION_NAMES: &[&str] = &["roster_set", "roster_list", "roster_clear", "roster_check"];
-
-/// Removed names that survive as `identity` action names. Same shape as the
-/// roster exemption: the action table (`name: "…"`), the dispatch match arm
-/// (`"…"=>`), a caller payload (the line names `action`), new-surface prose
-/// (the line names `identity`), and the dispatch file's own action
-/// descriptions are the new surface — a `name = "…"` tool attribute or an
-/// old-style `call_tool("…")` caller is still a hit.
-const IDENTITY_ACTION_NAMES: &[&str] = &["list_seeds", "create_seed", "remove_seed"];
 
 fn scan_file(path: &Path) -> Vec<String> {
     let Ok(text) = fs::read_to_string(path) else {
@@ -223,7 +211,6 @@ fn scan_file(path: &Path) -> Vec<String> {
             if DB_METHOD_NAMES.contains(name)
                 && (line.contains(&format!(".{name}("))
                     || line.contains(&format!("::{name}"))
-                    || shown.ends_with("seeds.rs")
                     || (line.contains(&format!("fn {name}(")) && shown.contains("src/db/")))
             {
                 continue;
@@ -237,19 +224,6 @@ fn scan_file(path: &Path) -> Vec<String> {
                     || line.contains(&format!("name: \"{name}\""))
                     || line.contains(&format!("\"{name}\" =>"))
                     || shown.ends_with("src/daemon/handler_resource_tools.rs")
-                {
-                    continue;
-                }
-            }
-            if IDENTITY_ACTION_NAMES.contains(name) {
-                let words: Vec<&str> = line
-                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-                    .collect();
-                if words.contains(&"identity")
-                    || words.contains(&"action")
-                    || line.contains(&format!("name: \"{name}\""))
-                    || line.contains(&format!("\"{name}\" =>"))
-                    || shown.ends_with("src/daemon/handler_resource_tools_final.rs")
                 {
                     continue;
                 }
@@ -364,5 +338,24 @@ fn no_mutex_mcp_tool_survives_while_engine_and_param_keep_the_word() {
     assert!(
         src.join("daemon/mutex_cli.rs").exists(),
         "the `canopy mutex` CLI must stay"
+    );
+}
+
+/// Spec: "The MCP `identity` tool is removed from the tool surface."
+/// A client that still calls it gets the standard unknown-tool error:
+/// `rmcp`'s `ToolRouter::call` returns `invalid_params("tool not found")`
+/// exactly when the route map has no entry, which is what `get` checks.
+#[test]
+fn identity_tool_is_absent_from_mcp_surface() {
+    let router = crate::daemon::handler::TaskTriggerHandler::tool_router();
+    let tools = router.list_all();
+    let names: Vec<_> = tools.iter().map(|t| t.name.as_ref()).collect();
+    assert!(
+        !names.contains(&"identity"),
+        "identity tool must be removed from MCP surface: {names:?}"
+    );
+    assert!(
+        router.get("identity").is_none(),
+        "calling `identity` must hit the standard unknown-tool error"
     );
 }

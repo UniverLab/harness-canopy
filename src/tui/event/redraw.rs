@@ -322,7 +322,6 @@ mod redraw_tests {
             None,
             None,
             None,
-            None,
             false,
         )
         .expect("spawn cat as a stand-in interactive child");
@@ -467,7 +466,6 @@ mod redraw_tests {
             None,
             None,
             None,
-            None,
             false,
         )
         .expect("spawn cat as a stand-in interactive child");
@@ -502,7 +500,6 @@ mod redraw_tests {
             Some("redraw-test-activity"),
             None,
             &[],
-            None,
             None,
             None,
             None,

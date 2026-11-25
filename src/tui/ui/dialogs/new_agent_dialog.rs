@@ -6,7 +6,7 @@ use ratatui::Frame;
 
 use super::{centered_rect, draw_dialog_left_wave, truncate_str};
 use crate::tui::app::{
-    dialog::new_agent::{BackgroundTrigger, DialogStep, NewAgentDialog, NewTaskType, SeedOption},
+    dialog::new_agent::{BackgroundTrigger, DialogStep, NewAgentDialog, NewTaskType},
     types::App,
 };
 use crate::tui::ui::effective_animation_tick;
@@ -41,7 +41,6 @@ pub(crate) const SESSION_RESUME_PICKER_VISIBLE: usize = 6;
 #[derive(Clone, Copy)]
 struct FieldLayout {
     cli: usize,
-    identity: usize,
     model: usize,
     prompt: usize,
     extra: usize,
@@ -53,21 +52,19 @@ struct FieldLayout {
 impl FieldLayout {
     fn for_task(task_type: NewTaskType) -> Self {
         match task_type {
-            // Interactive (CT34: no Mode row): 0 Type · 1 Harness · 2 Identity
-            // · 3 Yolo · 4 Sandbox · 5 Dir (model/prompt are unused here).
+            // Interactive (CT34: no Mode row): 0 Type · 1 Harness · 2 Yolo ·
+            // 3 Sandbox · 4 Dir (model/prompt are unused here).
             NewTaskType::Interactive => Self {
                 cli: 1,
-                identity: 2,
                 model: 3,
                 prompt: 4,
                 extra: 5,
-                dir: 5,
-                yolo: 3,
-                sandbox: 4,
+                dir: 4,
+                yolo: 2,
+                sandbox: 3,
             },
             NewTaskType::Terminal => Self {
                 cli: 0,
-                identity: 0,
                 model: 3,
                 prompt: 4,
                 extra: 5,
@@ -77,7 +74,6 @@ impl FieldLayout {
             },
             NewTaskType::Background => Self {
                 cli: 2,
-                identity: 0,
                 model: 3,
                 prompt: 4,
                 extra: 5,
@@ -233,6 +229,7 @@ fn help_text(dialog: &NewAgentDialog) -> String {
     )
 }
 
+#[cfg(test)]
 pub(super) fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
     let mut chars = value.chars();
     let shortened: String = chars.by_ref().take(max_chars).collect();
@@ -455,14 +452,6 @@ pub(super) fn cron_value(dialog: &NewAgentDialog) -> String {
         " * * * * *  (min hr dom mon dow · local time)".to_string()
     } else {
         format!(" {}▏ (local time)", dialog.cron_expr)
-    }
-}
-
-pub(super) fn identity_label(dialog: &NewAgentDialog) -> String {
-    match dialog.seed_options.get(dialog.seed_index) {
-        Some(SeedOption::Seed { name, .. }) => truncate_with_ellipsis(name, 30),
-        Some(SeedOption::PlantNewSeed) => "🌱 New".to_string(),
-        _ => "None".to_string(),
     }
 }
 
@@ -735,57 +724,25 @@ mod tests {
     }
 
     #[test]
-    fn identity_label_with_seed() {
-        use crate::tui::app::dialog::new_agent::SeedOption;
-        let mut d = NewAgentDialog::new(Some("."));
-        d.seed_options = vec![SeedOption::Seed {
-            name: "My Seed".to_string(),
-            id: "seed-1".to_string(),
-        }];
-        let label = identity_label(&d);
-        assert_eq!(label, "My Seed");
-    }
-
-    #[test]
-    fn identity_label_plant_new() {
-        use crate::tui::app::dialog::new_agent::SeedOption;
-        let mut d = NewAgentDialog::new(Some("."));
-        d.seed_options = vec![SeedOption::PlantNewSeed];
-        let label = identity_label(&d);
-        assert!(label.contains("New"));
-    }
-
-    #[test]
-    fn identity_label_none() {
-        let mut d = NewAgentDialog::new(Some("."));
-        d.seed_options = vec![];
-        let label = identity_label(&d);
-        assert_eq!(label, "None");
-    }
-
-    #[test]
     fn field_layout_for_interactive() {
         // CT34: the Mode row is gone, so every interactive field shifts up.
         let layout = FieldLayout::for_task(NewTaskType::Interactive);
         assert_eq!(layout.cli, 1);
-        assert_eq!(layout.identity, 2);
-        assert_eq!(layout.yolo, 3);
-        assert_eq!(layout.sandbox, 4);
-        assert_eq!(layout.dir, 5);
+        assert_eq!(layout.yolo, 2);
+        assert_eq!(layout.sandbox, 3);
+        assert_eq!(layout.dir, 4);
     }
 
     #[test]
     fn field_layout_for_terminal() {
         let layout = FieldLayout::for_task(NewTaskType::Terminal);
         assert_eq!(layout.cli, 0);
-        assert_eq!(layout.identity, 0);
     }
 
     #[test]
     fn field_layout_for_background() {
         let layout = FieldLayout::for_task(NewTaskType::Background);
         assert_eq!(layout.cli, 2);
-        assert_eq!(layout.identity, 0);
     }
 
     #[test]

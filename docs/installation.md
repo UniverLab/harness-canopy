@@ -214,7 +214,6 @@ existing non-symlink entries without altering the process umask):
 | Structured data | `~/.canopy/background_agents.db` | SQLite (WAL mode) |
 | Database backup | `~/.canopy/background_agents.db.backup` | SQLite, written by the daily health routine |
 | Vector embeddings | `~/.canopy/rag/vectors.lancedb` | LanceDB |
-| Seed identities | `~/.canopy/seeds/<id>/identity.toml` | TOML |
 | Terminal history | `~/.canopy/terminals/<name>/history.toml` | TOML |
 | Configuration | `~/.canopy/config.toml` | TOML |
 | Agent logs | `~/.canopy/logs/<id>.log` | Text (5 MB rotation) |

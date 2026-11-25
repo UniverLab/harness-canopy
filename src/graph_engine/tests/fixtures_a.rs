@@ -146,7 +146,6 @@ impl NotificationService for MockNotificationService {
     fn notify_task_failed(&self, _task_id: &str, _exit_code: i32, _error_msg: &str) {}
     fn notify_watcher_triggered(&self, _watcher_id: &str, _path: &str, _event: &str) {}
     fn notify_agent_failed(&self, _agent_id: &str, _cli: &str, _exit_code: i32, _output: &str) {}
-    fn notify_nursery_failed(&self, _error_msg: &str) {}
 
     fn notify_graph_started(
         &self,

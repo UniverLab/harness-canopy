@@ -1,31 +1,5 @@
 use super::*;
 
-// ── Seed Identity tool parameter types ─────────────────────────────
-
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct EvolveIdentityParams {
-    /// New directives list (replaces existing).
-    pub new_directives: Option<Vec<String>>,
-    /// New traits map (updates existing keys).
-    pub new_traits: Option<std::collections::HashMap<String, String>>,
-}
-
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct CreateSeedParams {
-    /// Unique display name (enforced case-insensitive across all seeds).
-    pub name: String,
-    /// Behavioral directives injected into prompts.
-    pub directives: Option<crate::domain::seeds::SeedDirectives>,
-    /// Personality/style traits.
-    pub traits: Option<crate::domain::seeds::SeedTraits>,
-}
-
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct RemoveSeedParams {
-    /// Seed ID to remove.
-    pub seed_id: String,
-}
-
 // ── Dynamic skill store tool parameter types ──────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]

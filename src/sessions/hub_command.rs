@@ -81,7 +81,6 @@ fn build_agent(req: &SpawnRequest, id: &str, name: &str) -> (CommandBuilder, Opt
         accent_rgb: parse_accent_rgb(req.accent.as_deref()),
         id,
         name,
-        seed_id: req.seed_id.as_deref(),
     });
     (cmd, args)
 }

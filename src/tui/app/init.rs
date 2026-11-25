@@ -222,7 +222,6 @@ macro_rules! app_new_fields {
             knowledge_filter: String::new(),
             knowledge_filter_mode: false,
             project_filter: String::new(),
-            nursery_path: None,
             keyboard_enhancement_active: false,
             atmosphere: crate::tui::atmosphere::SceneManager::new(),
             atmosphere_ctx: crate::tui::atmosphere::AtmosphereCtx::default(),

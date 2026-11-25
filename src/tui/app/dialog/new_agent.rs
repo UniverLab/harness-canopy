@@ -11,17 +11,6 @@ use crate::tui::ui::theme::Theme;
 pub(crate) mod dir_browser;
 pub(crate) mod mode_step;
 
-/// Seed identity option for the agent creation dialog.
-#[derive(Clone, Debug)]
-pub enum SeedOption {
-    /// No seed identity — default behavior.
-    None,
-    /// Bind to an existing seed identity.
-    Seed { id: String, name: String },
-    /// Create a new seed via the Nursery graph.
-    PlantNewSeed,
-}
-
 /// Type of background_agent to create.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum NewTaskType {
@@ -50,7 +39,7 @@ pub enum NewTaskMode {
 /// follows a confirmed Interactive create-mode form and asks New or Resume.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DialogStep {
-    /// The form: type, harness, identity, directory and the rest.
+    /// The form: type, harness, directory and the rest.
     Form,
     /// The New session / Resume a session choice after the form.
     Mode,
@@ -135,10 +124,6 @@ pub struct NewAgentDialog {
     /// Live session names offered as `send_to_session` targets, populated when
     /// the dialog opens from the app's interactive session list.
     pub send_target_names: Vec<String>,
-    /// Index into `seed_options` for the selected seed identity.
-    pub seed_index: usize,
-    /// Available seed identity options.
-    pub seed_options: Vec<SeedOption>,
 }
 
 impl NewAgentDialog {
@@ -157,7 +142,6 @@ impl NewAgentDialog {
             })
             .unwrap_or(models_db::DEFAULT_CATALOG_TTL);
         let catalog = models_db::load_catalog_nonblocking(catalog_ttl);
-        let seed_options = load_seed_options();
         let mut dialog = Self {
             edit_id: None,
             task_type: NewTaskType::Interactive,
@@ -204,8 +188,6 @@ impl NewAgentDialog {
             background_action: super::background_action::BackgroundAction::Headless,
             send_target_idx: 0,
             send_target_names: Vec::new(),
-            seed_index: 0,
-            seed_options,
         };
         dialog.refresh_dir_entries();
         dialog.refresh_model_suggestions();
@@ -218,21 +200,6 @@ impl NewAgentDialog {
             .get(self.shell_index)
             .map(|s| s.as_str())
             .unwrap_or("bash")
-    }
-
-    pub fn selected_seed_id(&self) -> Option<&str> {
-        match self.seed_options.get(self.seed_index) {
-            Some(SeedOption::Seed { id, .. }) => Some(id),
-            _ => None,
-        }
-    }
-
-    /// Returns true if the user selected "Plant New Seed".
-    pub fn is_planting_new_seed(&self) -> bool {
-        matches!(
-            self.seed_options.get(self.seed_index),
-            Some(SeedOption::PlantNewSeed)
-        )
     }
 
     fn load_available_clis() -> (Vec<Cli>, Vec<Option<crate::domain::cli_config::CliConfig>>) {
@@ -705,24 +672,6 @@ pub fn detect_available_shells() -> Vec<String> {
     }
 
     found
-}
-
-fn load_seed_options() -> Vec<SeedOption> {
-    let mut options = vec![SeedOption::None];
-    let seeds = crate::domain::seeds::list_seeds()
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|id| {
-            crate::domain::seeds::load_seed(&id)
-                .ok()
-                .map(|identity| SeedOption::Seed {
-                    id,
-                    name: identity.name,
-                })
-        });
-    options.extend(seeds);
-    options.push(SeedOption::PlantNewSeed);
-    options
 }
 
 #[cfg(test)]

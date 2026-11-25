@@ -207,11 +207,11 @@ pub fn resize_frame(id: &str, cols: u16, rows: u16) -> String {
     serde_json::json!({"t": "resize", "id": id, "cols": cols, "rows": rows}).to_string()
 }
 
-/// `spawn{req,kind,cli?,model?,workdir,name?,prompt?,interactive_args?,fallback_args?,model_flag?,id?,seed_id?,accent?,harness_conversation_id?,yolo?,preserve_args?}`:
+/// `spawn{req,kind,cli?,model?,workdir,name?,prompt?,interactive_args?,fallback_args?,model_flag?,id??,accent?,harness_conversation_id?,yolo?,preserve_args?}`:
 /// spawn a hub session. `cli` may be absent or `null` for `kind:"terminal"`
 /// (the default shell opens); agents still require it. The agent launch fields mirror what the TUI passes to
 /// `InteractiveAgent::spawn` today: explicit args (resume/yolo included),
-/// the resume identity, the seed, the accent (`"r,g,b"`) and the harness's
+/// the resume identity, the accent (`"r,g,b"`), and the harness's
 /// own conversation identifier. `yolo` (default
 /// `false`) asks the hub to append the harness's registry `yolo_flag` to the
 /// interactive args; it is refused for `kind:"terminal"` and for a harness
@@ -259,7 +259,7 @@ pub fn spawn_frame_full(args: &SpawnFrameArgs<'_>) -> String {
         "t": "spawn", "req": args.req, "kind": args.kind, "cli": args.cli,
         "model": args.model, "workdir": args.workdir, "name": args.name, "prompt": args.prompt,
         "interactive_args": ext.interactive_args, "fallback_args": ext.fallback_args,
-        "model_flag": ext.model_flag, "id": ext.id, "seed_id": ext.seed_id, "accent": ext.accent,
+        "model_flag": ext.model_flag, "id": ext.id, "accent": ext.accent,
         "harness_conversation_id": ext.harness_conversation_id,
         "yolo": ext.yolo, "preserve_args": ext.preserve_args,
     })

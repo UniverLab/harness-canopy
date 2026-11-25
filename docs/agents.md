@@ -1,6 +1,6 @@
 ---
 title: Agents
-description: Interactive PTY agents, background cron/watcher agents, terminal sessions and seed identities.
+description: Interactive PTY agents, background cron/watcher agents, and terminal sessions.
 order: 5
 ---
 
@@ -98,49 +98,6 @@ deliver once now.
 
 Raw shell sessions with per-session command history (TOML-backed),
 cross-session autocomplete search and a Warp-like input mode.
-
-## Seed nursery
-
-The **seed nursery** is a collaborative workspace for creating new seed
-identities. When you select "Plant New Seed" in the TUI, Canopy creates
-a temporary directory containing:
-
-- A draft `identity.toml` with empty/default fields.
-- An instruction file (`AGENTS.md`, `GEMINI.md`, etc., per the platform
-  registry) with gardener instructions that guide the selected CLI to
-  interview the user about the seed's name, directives, and traits.
-
-Once the agent finishes the interview and writes the final
-`identity.toml`, the nursery validates it (name uniqueness, field
-constraints, 4 KB size cap) and moves it to `~/.canopy/seeds/<id>/`.
-The temporary directory is cleaned up automatically.
-
-## Seed identities
-
-A **seed** is a persistent, evolvable agent identity stored as structured
-TOML at `~/.canopy/seeds/<id>/identity.toml`:
-
-```toml
-name = "Quercus"
-created_at = "2026-01-01T00:00:00Z"
-
-[directives]
-general = [
-    "Prioritize type-safety",
-    "Explain structural changes before executing"
-]
-
-[traits]
-tone = "Concise, Technical"
-focus = "Refactoring, Architecture"
-```
-
-- Each seed has a unique name (case-insensitive), behavioral directives
-  and personality traits; identities are capped at 4 KB and validated.
-- Sessions bound to a seed receive its prompt injection automatically.
-- The `identity` MCP tool's `evolve` action lets agents refine their own identity
-  over time; its `create_seed`, `list_seeds` and `remove_seed` actions manage the
-  nursery.
 
 ## Context transfer
 

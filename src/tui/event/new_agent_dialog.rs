@@ -74,7 +74,6 @@ struct DialogFields {
     is_terminal: bool,
     is_background: bool,
     cli_field: usize,
-    identity_field: usize,
     model_field: usize,
     prompt_field: usize,
     extra_field: usize,
@@ -90,7 +89,7 @@ impl DialogFields {
         let is_background = matches!(dialog.task_type, NewTaskType::Background);
 
         // Interactive (CT34: the Mode row is gone, its step follows the form):
-        // 0 Type · 1 Harness · 2 Identity · 3 Yolo · 4 Sandbox · 5 Dir.
+        // 0 Type · 1 Harness · 2 Yolo · 3 Sandbox · 4 Dir.
         // Terminal/Background keep their own numbering.
         Self {
             is_interactive,
@@ -103,19 +102,18 @@ impl DialogFields {
             } else {
                 0
             },
-            identity_field: if is_interactive { 2 } else { 0 },
             model_field: 3,
             prompt_field: 4,
             extra_field: 5,
             dir_field: if is_interactive {
-                5
+                4
             } else if is_terminal {
                 1
             } else {
                 6
             },
-            yolo_field: if is_interactive { 3 } else { 4 },
-            sandbox_field: if is_interactive { 4 } else { 0 },
+            yolo_field: if is_interactive { 2 } else { 4 },
+            sandbox_field: if is_interactive { 3 } else { 0 },
         }
     }
 
@@ -301,9 +299,6 @@ fn handle_dialog_field_key(
         0 => handle_type_field(dialog, code),
         1 if fields.is_background => handle_trigger_field(dialog, code, fields),
         n if n == fields.cli_field && !fields.is_terminal => handle_cli_field(dialog, code, fields),
-        n if n == fields.identity_field && fields.is_interactive => {
-            handle_identity_field(dialog, code, fields);
-        }
         n if n == fields.model_field && fields.is_background => {
             handle_model_field(dialog, code, fields);
         }
@@ -402,7 +397,7 @@ fn handle_cli_field(dialog: &mut NewAgentDialog, code: KeyCode, fields: DialogFi
         }
         KeyCode::Down => {
             dialog.field = if fields.is_interactive {
-                fields.identity_field
+                fields.yolo_field
             } else {
                 fields.model_field
             };
@@ -552,7 +547,7 @@ fn handle_yolo_field(dialog: &mut NewAgentDialog, code: KeyCode, fields: DialogF
             dialog.yolo_mode = !dialog.yolo_mode;
         }
         KeyCode::Char(' ') => {}
-        KeyCode::Up | KeyCode::BackTab => dialog.field = fields.identity_field,
+        KeyCode::Up | KeyCode::BackTab => dialog.field = fields.cli_field,
         KeyCode::Down | KeyCode::Tab => dialog.field = fields.sandbox_field,
         _ => {}
     }
@@ -567,22 +562,6 @@ fn handle_sandbox_field(dialog: &mut NewAgentDialog, code: KeyCode, fields: Dial
         KeyCode::Down | KeyCode::Tab => dialog.field = fields.dir_field,
         _ => {}
     }
-}
-
-fn handle_identity_field(dialog: &mut NewAgentDialog, code: KeyCode, fields: DialogFields) {
-    match code {
-        KeyCode::Left => step_seed_selection(dialog, false),
-        KeyCode::Right => step_seed_selection(dialog, true),
-        KeyCode::Up | KeyCode::BackTab => dialog.field = fields.cli_field,
-        KeyCode::Down | KeyCode::Tab => dialog.field = fields.yolo_field,
-        _ => {}
-    }
-}
-
-fn step_seed_selection(dialog: &mut NewAgentDialog, forward: bool) {
-    let next =
-        crate::tui::selection::move_index(dialog.seed_index, dialog.seed_options.len(), forward);
-    dialog.seed_index = next;
 }
 
 #[cfg(test)]

@@ -103,7 +103,7 @@ New here? Run your first graph in five minutes with [`docs/first-graph.md`](docs
 
 Full documentation lives in [`docs/`](docs/): installation, quick start,
 [your first graph](docs/first-graph.md), the
-TUI, agents and seed identities, intelligence & sync, graphs, the RAG
+TUI, agents, intelligence & sync, graphs, the RAG
 pipeline, all MCP tools, the complete CLI reference,
 and [network and privacy](docs/network-and-privacy.md).
 
@@ -130,8 +130,6 @@ docs/ is published at univerlab.org/canopy/docs and holds user documentation onl
 - **Terminal Sessions** — Raw shell sessions with per-session command history (TOML-backed), cross-session autocomplete search, and Warp-like input mode for efficient command entry.
 - **Background Agents** — Cron-scheduled and file-watcher-triggered agents with configurable timeouts, automatic retries, execution logging (5 MB rotation), and per-run status tracking.
 - **Platform Liveness Probe** — `harness` `probe` tests whether a platform+model pair can actually respond before the `graph_control` run action spends real quota on it. Probes the exact pair a node would use, not just the platform default.
-- **Seed Identity System** — Persistent, evolvable agent identities stored as structured TOML at `~/.canopy/seeds/<id>/identity.toml`. Each seed has a unique name, family, behavioral directives, and personality traits. Binded sessions receive the seed's prompt injection automatically. The `identity` `evolve` action lets agents refine themselves over time. 4 KB size cap, case-insensitive name uniqueness, and mandatory field validation.
-- **Seed Nursery** — Collaborative workspace for creating new seed identities. Creates a temporary directory with a draft `identity.toml` and CLI-specific instruction files (e.g. `CLAUDE.md`, `AGENTS.md`) that guide the agent to interview the user and define the seed's personality. Validates and registers the seed on completion.
 - **Context Transfer** — Seamlessly transfer conversation context, prompts, and output between agents while preserving session state and scrollback history.
 - **Prompt Builder** — Structured prompt templates with configurable sections (instruction, context, resources, examples, Canopy protocol), section picker, and @-mention agent references. The session-start Canopy protocol rides on the first prompt of an interactive session only — persisted per session across restarts and resumes — and the locked **Canopy protocol** section (`Ctrl+A`) resends it on purpose.
 - **Launchpad** — Start new interactive sessions with previous mission recovery, mission input, and auto-injected context.
@@ -176,7 +174,7 @@ session later instead of polling), and `intelligence_upsert` /
 
 ### 🖥️ Interactive TUI (Canopy Hub)
 
-- **NewAgentDialog** — Three modes (Interactive, Background Cron/Watch, Terminal) with CLI picker, model picker, seed identity selector (`◀ None / SeedName ▶`), directory browser, and yolo mode toggle.
+- **NewAgentDialog** — Three modes (Interactive, Background Cron/Watch, Terminal) with CLI picker, model picker, directory browser, and yolo mode toggle.
 - **Detachable Sessions** — Sessions run in the daemon, not the TUI: quitting the TUI leaves them running, reopening it reattaches to them live with screen and scrollback, a daemon restart respawns every session still listed as active under the same id and name (a terminal comes back with a clean pane and a fresh prompt), sessions started or closed elsewhere update the sidebar live, and a dropped daemon connection reconnects on its own (0.5 s doubling to 5 s) and re-lists what the daemon still has.
 - **Scheduled Delivery** — `Shift+Enter` (Kitty keyboard protocol) sends prompts at a chosen time instead of immediately.
 - **Session Shelf** — an agent copies up to 10 files per call (any type, 20 MiB each; content sniffing only decides how it is displayed; only files inside its own workdir or the shelf directory — secrets such as the daemon token and key files are always refused with `forbidden`) onto its session's shelf with the `session_send_file` MCP tool, lists a shelf with `session_list_files`, and reads one file with `session_read_file` (text or base64, capped at 1 MiB). A trusted remote guest with the `upload` grant sends files into its granted sessions over the session protocol's `shelf_put_*` frames. The F1 hub's `Shelf` tab lists every shelf newest first, toasts each arrival as `📎 <name> — <from>`, and opens, copies the path of, or deletes the selected file, with `canopy shelf list`/`open` reaching the same files from the CLI.
@@ -189,7 +187,7 @@ session later instead of polling), and `intelligence_upsert` /
 - **Context Transfer** — Two-step modal (preview → agent picker) to inject conversation context between sessions.
 - **Brian's Brain** — 3-state cellular automaton drawn as Braille glyphs; the cursor seeds clusters along its path at a fixed step rate.
 - **Whimsg** — Animated kaomoji status messages with typing effects: curated forest-voice phrases and deliberate jokes, or a real-event message naming the agent, graph, or spec that just happened.
-- **Gamification** — 28 achievement-style missions across 6 categories (Environment, Intelligence, Projects, Graph, Seeds, SysInfo) tracked automatically during normal TUI operation; list them read-only with `canopy missions [--json]`.
+- **Gamification** — Achievement-style missions across 5 categories (Environment, Intelligence, Projects, Graph, SysInfo) tracked automatically during normal TUI operation; list them read-only with `canopy missions [--json]`.
 
 ### 🔧 Additional Features
 
@@ -206,7 +204,7 @@ session later instead of polling), and `intelligence_upsert` /
 
 ---
 
-## MCP Tools (36)
+## MCP Tools (35)
 
 Graph-node sessions (agent and ensemble nodes launched by the graph engine) receive a fixed node profile of 12 tools via `CANOPY_MCP_PROFILE=node`, so every node stays well under the 128-tool cap of OpenAI-compatible providers. All other sessions — the orchestrator, check nodes, hooks, TUI, subagents, and background agents — keep the full tool list.
 
@@ -215,7 +213,6 @@ Graph-node sessions (agent and ensemble nodes launched by the graph engine) rece
 | `agent`, `agent_edit`, `agent_report`, `subagent` | **Agent management** (4) |
 | `harness` | **Harness** (1) |
 | `intelligence_get_context`, `intelligence_upsert`, `intelligence_search`, `intelligence_admin` | **Intelligence** (4) |
-| `identity` | **Identity** (1) |
 | `skill` | **Skills** (1) |
 | `graph`, `graph_edit`, `graph_node`, `graph_edge`, `graph_ensemble`, `graph_control`, `graph_complete_node`, `graph_report_blocker`, `sandbox` | **Graph engine** (9) |
 | `crew` | **Crews** (1) |
@@ -255,8 +252,8 @@ Graph-node sessions (agent and ensemble nodes launched by the graph engine) rece
 - `application/` — Application ports and abstractions
 - `autoupdate/` — Self-update system (GitHub releases)
 - `daemon/` — MCP server, handler, params, RAG CLI, doctor
-- `db/` — SQLite persistence and migrations (agents, runs, sessions, sync, intelligence, graphs, projects, seeds, groups, state)
-- `domain/` — Core models: Agent, Trigger, WatchEvent, Project, SeedIdentity, Graph, GraphSpec, Queue, GraphNode, SyncMessage, IntelligenceNode
+- `db/` — SQLite persistence and migrations (agents, runs, sessions, sync, intelligence, graphs, projects, groups, state)
+- `domain/` — Core models: Agent, Trigger, WatchEvent, Project, Graph, GraphSpec, Queue, GraphNode, SyncMessage, IntelligenceNode
 - `executor/` — Task and agent execution logic
 - `rag/` — RAG pipeline (ingestion, chunking, embedding, vector store, rate limiting)
 - `scheduler/` — Internal cron scheduler with template variables
@@ -274,7 +271,6 @@ On Unix, `~/.canopy/` is private to the user: `~/.canopy/` and `~/.canopy/logs/`
 |------|----------|--------|
 | Structured data | `~/.canopy/background_agents.db` | SQLite (WAL mode) |
 | Vector embeddings | `~/.canopy/rag/vectors.lancedb` | LanceDB |
-| Seed identities | `~/.canopy/seeds/<id>/identity.toml` | TOML |
 | Terminal history | `~/.canopy/terminals/<name>/history.toml` | TOML |
 | Configuration | `~/.canopy/config.toml` | TOML |
 | Agent logs | `~/.canopy/logs/<id>.log` | Text (5 MB rotation) |
@@ -302,7 +298,7 @@ On Unix, `~/.canopy/` is private to the user: `~/.canopy/` and `~/.canopy/logs/`
    ```bash
    canopy
    ```
-   Opens the full-screen Canopy Hub. Press `Ctrl+N` or `n` to create a new agent (Interactive, Background, or Terminal). Select a seed identity to give the agent a persistent personality.
+   Opens the full-screen Canopy Hub. Press `Ctrl+N` or `n` to create a new agent (Interactive, Background, or Terminal).
 
 4. **Check health:**
    ```bash

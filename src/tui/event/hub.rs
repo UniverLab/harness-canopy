@@ -455,11 +455,11 @@ mod tests {
 
         let mut app = test_app();
         // Unlock three missions through the real path so the cursor has
-        // visited entries; the tab itself lists all 28 missions.
+        // visited entries; the tab itself lists all 24 missions.
         let events = [
             MissionEvent::FireflyCaught,
             MissionEvent::WorldLinked,
-            MissionEvent::IdentityEvolved,
+            MissionEvent::YoloTaskCompleted,
         ];
         app.mission_manager
             .process_refresh(&MissionSnapshot::default(), &events, &mut app.whimsg)

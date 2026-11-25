@@ -13,7 +13,7 @@ use crate::tui::app::types::App;
 use crate::tui::ui::theme::Theme;
 
 /// The Missions & stats tab: the same sections `draw_legend` drew, into the
-/// hub's body area instead of a self-owned centered modal. Shows all 28
+/// hub's body area instead of a self-owned centered modal. Shows all 24
 /// missions: unlocked in full colour, locked dimmed.
 pub(super) fn draw_missions_tab(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     let label_style = Style::default().fg(theme.dim_text);
@@ -92,7 +92,6 @@ fn category_color(cat: &MissionCategory) -> Color {
         MissionCategory::Intelligence => Color::Rgb(100, 180, 255),
         MissionCategory::Projects => Color::Rgb(255, 200, 80),
         MissionCategory::Graph => Color::Rgb(220, 120, 255),
-        MissionCategory::Seeds => Color::Rgb(80, 220, 180),
         MissionCategory::SysInfo => Color::Rgb(255, 130, 80),
     }
 }
@@ -421,14 +420,13 @@ mod tests {
         );
         assert_eq!(category_label(&MissionCategory::Projects), "Projects");
         assert_eq!(category_label(&MissionCategory::Graph), "Graph");
-        assert_eq!(category_label(&MissionCategory::Seeds), "Seeds");
         assert_eq!(category_label(&MissionCategory::SysInfo), "System");
     }
 
     #[test]
     fn mission_unlock_text_formats_correctly() {
-        let result = mission_unlock_text("🏆", "First Login", &MissionCategory::Seeds);
-        assert_eq!(result, "Unlocked medal 🏆 First Login in Seeds.");
+        let result = mission_unlock_text("🏆", "First Login", &MissionCategory::Environment);
+        assert_eq!(result, "Unlocked medal 🏆 First Login in Environment.");
     }
 
     #[test]
@@ -450,7 +448,7 @@ mod tests {
             MissionCategory::Intelligence,
             MissionCategory::Projects,
             MissionCategory::Graph,
-            MissionCategory::Seeds,
+            MissionCategory::Environment,
             MissionCategory::SysInfo,
         ] {
             let result = mission_unlock_text("i", "t", cat);
@@ -461,9 +459,9 @@ mod tests {
 
     #[test]
     fn mission_unlock_text_with_empty_icon() {
-        let result = mission_unlock_text("", "Title", &MissionCategory::Seeds);
+        let result = mission_unlock_text("", "Title", &MissionCategory::Environment);
         assert!(result.contains("Title"));
-        assert!(result.contains("Seeds"));
+        assert!(result.contains("Environment"));
     }
 
     #[test]

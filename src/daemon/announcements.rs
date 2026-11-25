@@ -236,7 +236,6 @@ mod tests {
         fn notify_task_failed(&self, _t: &str, _e: i32, _m: &str) {}
         fn notify_watcher_triggered(&self, _w: &str, _p: &str, _e: &str) {}
         fn notify_agent_failed(&self, _a: &str, _c: &str, _e: i32, _o: &str) {}
-        fn notify_nursery_failed(&self, _e: &str) {}
         fn notify_graph_started(&self, _l: &str, _s: usize, _r: bool, _f: Option<&str>) {}
         fn notify_spec_completed(
             &self,
