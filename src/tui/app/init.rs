@@ -100,6 +100,7 @@ macro_rules! app_new_fields {
             graph_spec_strip_click_map: Vec::new(),
             graph_live_view_scroll: 0,
             graph_live_view_total_lines: 0,
+            graph_anim_seen: None,
             graph_autorun_dialog: None,
             node_tail_dialog: None,
             node_tail_pane_body_height: 0,

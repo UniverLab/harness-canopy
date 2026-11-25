@@ -178,6 +178,9 @@ fn ct8_auto_follow_user_scroll_survives_when_current_node_unchanged() {
                     selected_spec_id: None,
                     spec_scroll: 0,
                     scroll: 0,
+
+                    running_node_id: None,
+                    anim_tick: None,
                 },
             );
             anchor = r.follow_anchor;
@@ -210,6 +213,9 @@ fn ct8_auto_follow_user_scroll_survives_when_current_node_unchanged() {
                     selected_spec_id: None,
                     spec_scroll: 0,
                     scroll: 10,
+
+                    running_node_id: None,
+                    anim_tick: None,
                 },
             );
             clamped = Some(r.clamped_scroll);
@@ -251,6 +257,9 @@ fn ct8_auto_follow_recentres_when_current_node_changes() {
                 selected_spec_id: None,
                 spec_scroll: 0,
                 scroll: 0,
+
+                running_node_id: None,
+                anim_tick: None,
             },
         );
     });
@@ -379,6 +388,9 @@ fn ct27_auto_follow_centres_a_tall_ensemble_box_in_the_panel() {
                 selected_spec_id: None,
                 spec_scroll: 0,
                 scroll: 0,
+
+                running_node_id: None,
+                anim_tick: None,
             },
         );
     });
@@ -455,6 +467,9 @@ fn ct8_auto_follow_ignores_status_or_elapsed_change_for_same_node() {
                     selected_spec_id: None,
                     spec_scroll: 0,
                     scroll: 0,
+
+                    running_node_id: None,
+                    anim_tick: None,
                 },
             );
         })
@@ -487,6 +502,9 @@ fn ct8_auto_follow_ignores_status_or_elapsed_change_for_same_node() {
                     selected_spec_id: None,
                     spec_scroll: 0,
                     scroll: 12,
+
+                    running_node_id: None,
+                    anim_tick: None,
                 },
             );
             clamped = Some(r.clamped_scroll);
@@ -526,6 +544,9 @@ fn ct8_manual_navigation_keeps_selection_below_viewport_on_screen() {
                 selected_spec_id: None,
                 spec_scroll: 0,
                 scroll: 0,
+
+                running_node_id: None,
+                anim_tick: None,
             },
         );
     });
@@ -563,6 +584,9 @@ fn ct8_manual_navigation_keeps_selection_above_viewport_on_screen() {
                 selected_spec_id: None,
                 spec_scroll: 0,
                 scroll: 250,
+
+                running_node_id: None,
+                anim_tick: None,
             },
         );
     });
@@ -595,6 +619,9 @@ fn strip_absent_after_ct11() {
                 selected_spec_id: None,
                 spec_scroll: 0,
                 scroll: 0,
+
+                running_node_id: None,
+                anim_tick: None,
             },
         );
     });
@@ -620,6 +647,9 @@ fn strip_absent_after_ct11() {
                 selected_spec_id: None,
                 spec_scroll: 0,
                 scroll: 0,
+
+                running_node_id: None,
+                anim_tick: None,
             },
         );
     });
@@ -654,6 +684,9 @@ fn header_shows_single_width_glyphs_for_paused_pausing_and_blocked() {
                     selected_spec_id: None,
                     spec_scroll: 0,
                     scroll: 0,
+
+                    running_node_id: None,
+                    anim_tick: None,
                 },
             );
         })
@@ -722,6 +755,9 @@ fn pausing_header_names_the_nodes_it_waits_for() {
                 selected_spec_id: None,
                 spec_scroll: 0,
                 scroll: 0,
+
+                running_node_id: None,
+                anim_tick: None,
             },
         );
     });
@@ -761,6 +797,9 @@ fn header_shows_single_width_glyph_for_autorun() {
                 selected_spec_id: None,
                 spec_scroll: 0,
                 scroll: 0,
+
+                running_node_id: None,
+                anim_tick: None,
             },
         );
     });

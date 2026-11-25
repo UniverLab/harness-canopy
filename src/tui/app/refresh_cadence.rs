@@ -143,6 +143,13 @@ impl App {
             || ctrl_c_cleared
             || clipboard_changed
             || snapshot_applied
+            || self.graph_anim_redraw_due()
+    }
+
+    /// True when the live graph view's animation phase changed on a recent
+    /// frame, so the tick redraws at the phase cadence and not every 100 ms.
+    pub(crate) fn graph_anim_redraw_due(&self) -> bool {
+        graph_anim_redraw_due_for(self.graph_anim_seen, self.animation_tick)
     }
 
     /// Drain off-thread clipboard-image results into the open builder: a
@@ -431,5 +438,37 @@ impl App {
             .list_pending_scheduled_prompts_for_session(&id)
             .unwrap_or_default();
         calculate_log_hash(&format!("{pending:?}"))
+    }
+}
+
+fn graph_anim_redraw_due_for(seen: Option<(u32, (u32, u32))>, tick: u32) -> bool {
+    let Some((seen_tick, key)) = seen else {
+        return false;
+    };
+    tick.wrapping_sub(seen_tick) <= 4 && key != (tick / 3, tick / 8)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::graph_anim_redraw_due_for;
+
+    #[test]
+    fn graph_anim_redraw_due_false_when_key_unchanged() {
+        let tick = 12u32;
+        let seen = Some((tick, (tick / 3, tick / 8)));
+        assert!(!graph_anim_redraw_due_for(seen, tick));
+        assert!(!graph_anim_redraw_due_for(seen, tick + 1)); // key still (4,1)
+    }
+
+    #[test]
+    fn graph_anim_redraw_due_false_when_seen_too_old() {
+        let seen = Some((0u32, (0u32, 0u32)));
+        assert!(!graph_anim_redraw_due_for(seen, 5));
+    }
+
+    #[test]
+    fn graph_anim_redraw_due_true_when_key_changed_and_recent() {
+        let seen = Some((2u32, (0u32, 0u32)));
+        assert!(graph_anim_redraw_due_for(seen, 3)); // key becomes (1,0)
     }
 }

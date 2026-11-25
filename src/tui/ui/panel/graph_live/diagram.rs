@@ -11,14 +11,17 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
 use super::lines::{
-    collapse_edges, collapse_nodes, ensemble_box_lines, ensemble_index, find_entry_key, fit_row,
-    is_collapsed_highlighted, node_box_lines, Collapsed, GraphLinesResult,
+    collapse_edges, collapse_key, collapse_nodes, ensemble_box_lines, ensemble_index,
+    find_entry_key, fit_row, is_collapsed_highlighted, node_box_lines, Collapsed, GraphLinesResult,
 };
 use crate::domain::graphs::GraphEdgeCondition;
 use crate::tui::app::graph_live_state::GraphLiveState;
 use crate::tui::ui::theme::Theme;
 
-const BOX_WIDTH: usize = 24;
+mod compose;
+use compose::compose_canvas;
+
+pub(super) const BOX_WIDTH: usize = 24;
 const BOX_INNER: usize = 22;
 const COL_GAP: usize = 2;
 const CONNECTOR_ROWS: usize = 2;
@@ -30,18 +33,25 @@ const DIR_DOWN: u8 = 1 << 1;
 const DIR_LEFT: u8 = 1 << 2;
 const DIR_RIGHT: u8 = 1 << 3;
 
+pub(super) struct DiagramAnim<'a> {
+    pub running_node_id: Option<&'a str>,
+    pub tick: Option<u32>,
+}
+
 struct DfsAnalysis {
     non_back_edges: HashMap<String, Vec<String>>,
     back_edges_by_target: HashMap<String, Vec<String>>,
     dfs_order: HashMap<String, usize>,
 }
 
-struct PlacedBox {
+pub(super) struct PlacedBox {
     key: String,
     x: usize,
     y: usize,
     lines: Vec<Line<'static>>,
 }
+
+pub(super) type EdgePath = ((String, String), Vec<(usize, usize)>);
 
 struct RankLayout {
     placed: Vec<PlacedBox>,
@@ -56,6 +66,7 @@ pub(super) fn diagram_lines(
     follow: bool,
     area_width: u16,
     theme: &Theme,
+    anim: &DiagramAnim<'_>,
 ) -> Option<GraphLinesResult<'static>> {
     if area_width < MIN_DIAGRAM_WIDTH {
         return None;
@@ -87,18 +98,30 @@ pub(super) fn diagram_lines(
         theme,
     )?;
 
-    let grid = draw_connectors(
+    let running_key = anim
+        .running_node_id
+        .and_then(|id| collapse_key(id, &index, &collapsed_nodes));
+    let (grid, edge_paths) = draw_connectors(
         &layout.placed,
         &analysis.non_back_edges,
         area_width as usize,
         layout.total_height,
     );
-    let lines = compose_canvas(layout.placed, &grid, layout.total_height, theme);
+    let (lines, anim_drawn) = compose_canvas(
+        layout.placed,
+        &grid,
+        &edge_paths,
+        layout.total_height,
+        theme,
+        running_key.as_deref(),
+        anim.tick,
+    );
 
     Some(GraphLinesResult {
         lines,
         highlighted_offset: layout.highlighted_offset,
         highlighted_span: layout.highlighted_span,
+        anim_drawn,
     })
 }
 
@@ -361,8 +384,9 @@ fn draw_connectors(
     non_back_edges: &HashMap<String, Vec<String>>,
     width: usize,
     total_height: usize,
-) -> Vec<Vec<u8>> {
+) -> (Vec<Vec<u8>>, Vec<EdgePath>) {
     let mut grid = vec![vec![0u8; width]; total_height];
+    let mut edge_paths: Vec<EdgePath> = Vec::new();
     let by_key: HashMap<&str, &PlacedBox> = placed.iter().map(|b| (b.key.as_str(), b)).collect();
 
     let mut rank_bottoms: HashMap<usize, usize> = HashMap::new();
@@ -392,12 +416,15 @@ fn draw_connectors(
                 continue;
             };
             let bx = b.x + BOX_WIDTH / 2;
+            let mut path = Vec::new();
 
-            for row in &mut grid[a_below_y..=gap1_y] {
+            for (y, row) in grid.iter_mut().enumerate().take(gap1_y + 1).skip(a_below_y) {
                 row[ax] |= DIR_UP | DIR_DOWN;
+                path.push((ax, y));
             }
             if ax == bx {
                 grid[gap2_y][ax] |= DIR_UP | DIR_DOWN;
+                path.push((ax, gap2_y));
             } else {
                 let (min_x, max_x) = if ax < bx { (ax, bx) } else { (bx, ax) };
                 grid[gap2_y][ax] |= DIR_UP;
@@ -407,66 +434,20 @@ fn draw_connectors(
                 for cell in &mut grid[gap2_y][(min_x + 1)..max_x] {
                     *cell |= DIR_LEFT | DIR_RIGHT;
                 }
+                if ax < bx {
+                    path.extend((ax..=bx).map(|x| (x, gap2_y)));
+                } else {
+                    path.extend((bx..=ax).rev().map(|x| (x, gap2_y)));
+                }
             }
+            edge_paths.push(((a.key.clone(), target_key.clone()), path));
         }
     }
 
-    grid
+    (grid, edge_paths)
 }
 
-fn compose_canvas(
-    placed: Vec<PlacedBox>,
-    grid: &[Vec<u8>],
-    total_height: usize,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
-    let mut row_boxes: Vec<Vec<(usize, Vec<Span<'static>>)>> = vec![Vec::new(); total_height];
-    for b in placed {
-        for (dy, line) in b.lines.into_iter().enumerate() {
-            row_boxes[b.y + dy].push((b.x, line.spans));
-        }
-    }
-
-    let conn_style = Style::default().fg(theme.dim_text);
-    let mut out = Vec::with_capacity(total_height);
-
-    for y in 0..total_height {
-        let mut items: Vec<(usize, usize, Vec<Span<'static>>)> = Vec::new();
-        for (x, spans) in std::mem::take(&mut row_boxes[y]) {
-            items.push((x, BOX_WIDTH, spans));
-        }
-        let mut x = 0usize;
-        while x < grid[y].len() {
-            if grid[y][x] == 0 {
-                x += 1;
-                continue;
-            }
-            let start = x;
-            let mut text = String::new();
-            while x < grid[y].len() && grid[y][x] != 0 {
-                text.push(connector_char(grid[y][x]));
-                x += 1;
-            }
-            items.push((start, x - start, vec![Span::styled(text, conn_style)]));
-        }
-        items.sort_by_key(|(col, _, _)| *col);
-
-        let mut spans = Vec::new();
-        let mut cur_col = 0usize;
-        for (col, width, item_spans) in items {
-            if col > cur_col {
-                spans.push(Span::raw(" ".repeat(col - cur_col)));
-            }
-            spans.extend(item_spans);
-            cur_col = col + width;
-        }
-        out.push(Line::from(spans));
-    }
-
-    out
-}
-
-fn connector_char(bits: u8) -> char {
+pub(super) fn connector_char(bits: u8) -> char {
     match bits {
         b if b == DIR_UP | DIR_DOWN => '│',
         b if b == DIR_LEFT | DIR_RIGHT => '─',
@@ -557,8 +538,18 @@ mod tests {
             edge("e1", "a", "b", GraphEdgeCondition::Pass),
             edge("e2", "b", "c", GraphEdgeCondition::Pass),
         ];
-        let res = diagram_lines(&state, None, false, 60, &Theme::classic())
-            .expect("linear-3 should fit in 60 cols");
+        let res = diagram_lines(
+            &state,
+            None,
+            false,
+            60,
+            &Theme::classic(),
+            &DiagramAnim {
+                running_node_id: None,
+                tick: None,
+            },
+        )
+        .expect("linear-3 should fit in 60 cols");
         let rows = line_strings(&res);
         // 3 boxes * 3 rows + 2 gaps * 2 rows = 13 rows
         assert_eq!(rows.len(), 13);
@@ -581,8 +572,18 @@ mod tests {
             edge("e3", "b", "d", GraphEdgeCondition::Pass),
             edge("e4", "c", "d", GraphEdgeCondition::Pass),
         ];
-        let res = diagram_lines(&state, None, false, 80, &Theme::classic())
-            .expect("diamond should fit in 80 cols");
+        let res = diagram_lines(
+            &state,
+            None,
+            false,
+            80,
+            &Theme::classic(),
+            &DiagramAnim {
+                running_node_id: None,
+                tick: None,
+            },
+        )
+        .expect("diamond should fit in 80 cols");
         let rows = line_strings(&res);
         // Rank 0 (0..3), gap (3..5), Rank 1 (5..8), gap (8..10), Rank 2 (10..13)
         assert_eq!(rows.len(), 13);
@@ -635,8 +636,18 @@ mod tests {
             edge("e4", "m1", "join", GraphEdgeCondition::Pass),
             edge("e5", "join", "end", GraphEdgeCondition::Pass),
         ];
-        let res = diagram_lines(&state, None, false, 60, &Theme::classic())
-            .expect("ensemble between nodes should render");
+        let res = diagram_lines(
+            &state,
+            None,
+            false,
+            60,
+            &Theme::classic(),
+            &DiagramAnim {
+                running_node_id: None,
+                tick: None,
+            },
+        )
+        .expect("ensemble between nodes should render");
         let rows = line_strings(&res);
         // start (3) + gap (2) + ensemble (5: top, title, 2 members, bottom) + gap (2) + end (3) = 15
         assert_eq!(rows.len(), 15);
@@ -653,8 +664,18 @@ mod tests {
             edge("e1", "impl", "check", GraphEdgeCondition::Pass),
             edge("e2", "check", "impl", GraphEdgeCondition::Fail),
         ];
-        let res = diagram_lines(&state, None, false, 60, &Theme::classic())
-            .expect("retry cycle should render");
+        let res = diagram_lines(
+            &state,
+            None,
+            false,
+            60,
+            &Theme::classic(),
+            &DiagramAnim {
+                running_node_id: None,
+                tick: None,
+            },
+        )
+        .expect("retry cycle should render");
         let rows = line_strings(&res);
         // impl (4 rows: top, title, ↺ check, bottom) + gap (2) + check (3) = 9
         assert_eq!(rows.len(), 9);
@@ -672,14 +693,36 @@ mod tests {
             edge("e2", "b", "c", GraphEdgeCondition::Pass),
             edge("e3", "a", "c", GraphEdgeCondition::Fail),
         ];
-        assert!(diagram_lines(&state, None, false, 80, &Theme::classic()).is_none());
+        assert!(diagram_lines(
+            &state,
+            None,
+            false,
+            80,
+            &Theme::classic(),
+            &DiagramAnim {
+                running_node_id: None,
+                tick: None
+            }
+        )
+        .is_none());
     }
 
     #[test]
     fn fallbacks_for_narrow_width_many_boxes_and_wide_rank() {
         let mut state = blank_state();
         state.effective_nodes = vec![node("a", 0)];
-        assert!(diagram_lines(&state, None, false, 29, &Theme::classic()).is_none());
+        assert!(diagram_lines(
+            &state,
+            None,
+            false,
+            29,
+            &Theme::classic(),
+            &DiagramAnim {
+                running_node_id: None,
+                tick: None
+            }
+        )
+        .is_none());
 
         let mut wide_rank = blank_state();
         wide_rank.effective_nodes = vec![node("a", 0), node("b", 1), node("c", 2)];
@@ -688,11 +731,33 @@ mod tests {
             edge("e2", "a", "c", GraphEdgeCondition::Fail),
         ];
         // Rank 1 needs 2*24 + 2 = 50 cols, so width 40 must fall back.
-        assert!(diagram_lines(&wide_rank, None, false, 40, &Theme::classic()).is_none());
+        assert!(diagram_lines(
+            &wide_rank,
+            None,
+            false,
+            40,
+            &Theme::classic(),
+            &DiagramAnim {
+                running_node_id: None,
+                tick: None
+            }
+        )
+        .is_none());
 
         let mut too_many = blank_state();
         too_many.effective_nodes = (0..41).map(|i| node(&format!("n{i}"), i)).collect();
-        assert!(diagram_lines(&too_many, None, false, 1200, &Theme::classic()).is_none());
+        assert!(diagram_lines(
+            &too_many,
+            None,
+            false,
+            1200,
+            &Theme::classic(),
+            &DiagramAnim {
+                running_node_id: None,
+                tick: None
+            }
+        )
+        .is_none());
     }
 
     #[test]
@@ -703,12 +768,38 @@ mod tests {
             edge("e1", "a", "b", GraphEdgeCondition::Pass),
             edge("e2", "b", "a", GraphEdgeCondition::Fail),
         ];
-        let res_a = diagram_lines(&state, Some("a"), true, 60, &Theme::classic()).unwrap();
+        let res_a = diagram_lines(
+            &state,
+            Some("a"),
+            true,
+            60,
+            &Theme::classic(),
+            &DiagramAnim {
+                running_node_id: None,
+                tick: None,
+            },
+        )
+        .unwrap();
         assert_eq!(res_a.highlighted_offset, Some(0));
         assert_eq!(res_a.highlighted_span, Some(4));
 
-        let res_b = diagram_lines(&state, Some("b"), false, 60, &Theme::classic()).unwrap();
+        let res_b = diagram_lines(
+            &state,
+            Some("b"),
+            false,
+            60,
+            &Theme::classic(),
+            &DiagramAnim {
+                running_node_id: None,
+                tick: None,
+            },
+        )
+        .unwrap();
         assert_eq!(res_b.highlighted_offset, Some(6));
         assert_eq!(res_b.highlighted_span, Some(3));
     }
 }
+
+#[cfg(test)]
+#[path = "diagram_anim_tests.rs"]
+mod anim_tests;

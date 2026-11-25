@@ -12,9 +12,11 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use super::super::theme::Theme;
+use crate::domain::graphs::{GraphRunStatus, GraphStatus};
 use crate::tui::app::graph_live_state::{GraphLiveState, NodeRunInfo};
 use crate::tui::app::types::App;
 
+mod chrome;
 mod diagram;
 mod lines;
 mod render;
@@ -23,7 +25,7 @@ mod spec_strip;
 use render::render_graph_live_view;
 
 #[cfg(test)]
-use crate::domain::graphs::{GraphEdgeCondition, GraphRunStatus};
+use crate::domain::graphs::GraphEdgeCondition;
 #[cfg(test)]
 use crate::tui::app::graph_live_state::{EnsembleLiveInfo, SpecQueueEntry};
 #[cfg(test)]
@@ -66,6 +68,11 @@ pub(crate) fn draw_graph_live_view(frame: &mut Frame, area: Rect, app: &mut App,
         (area, Rect::default())
     };
 
+    let running_node_id = (state.graph_status == GraphStatus::Running
+        && state.current_node_status == Some(GraphRunStatus::Running))
+    .then_some(state.current_node_id.as_deref())
+    .flatten();
+    let anim_tick = crate::tui::ui::animations_enabled(app).then_some(app.animation_tick);
     let result = render_graph_live_view(
         frame,
         graph_area,
@@ -82,6 +89,8 @@ pub(crate) fn draw_graph_live_view(frame: &mut Frame, area: Rect, app: &mut App,
             selected_spec_id: selected_spec_id.as_deref(),
             spec_scroll,
             scroll: app.graph_live_view_scroll,
+            running_node_id,
+            anim_tick,
         },
     );
 
@@ -90,6 +99,10 @@ pub(crate) fn draw_graph_live_view(frame: &mut Frame, area: Rect, app: &mut App,
     app.graph_live_view_total_lines = result.total_lines;
     app.graph_live_view_scroll = result.clamped_scroll;
     app.graph_live_follow_anchor = result.follow_anchor;
+    app.graph_anim_seen = result.anim_drawn.then_some((
+        app.animation_tick,
+        (app.animation_tick / 3, app.animation_tick / 8),
+    ));
 
     // CT28: live-tail pane renders beside the graph. Read-only viewer.
     if let Some(dialog) = app.node_tail_dialog.as_ref() {
@@ -139,6 +152,8 @@ struct LiveViewContext<'a> {
     /// First visible index into `state.spec_queue` for the marker strip.
     spec_scroll: usize,
     scroll: u16,
+    running_node_id: Option<&'a str>,
+    anim_tick: Option<u32>,
 }
 
 /// What [`render_graph_live_view`] hands back to its `App`-owning caller:
@@ -153,6 +168,7 @@ struct LiveViewRenderResult {
     /// current node id (adopted whether or not we re-centred this frame); in
     /// manual it is carried through unchanged.
     follow_anchor: Option<String>,
+    anim_drawn: bool,
 }
 
 #[cfg(test)]

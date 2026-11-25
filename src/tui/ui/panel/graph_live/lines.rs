@@ -217,6 +217,7 @@ pub(super) struct GraphLinesResult<'a> {
     pub(super) lines: Vec<Line<'a>>,
     pub(super) highlighted_offset: Option<u16>,
     pub(super) highlighted_span: Option<u16>,
+    pub(super) anim_drawn: bool,
 }
 
 /// A collapsed box entry: either a plain node or a whole ensemble.
@@ -260,6 +261,7 @@ pub(super) fn graph_lines(
             lines: Vec::new(),
             highlighted_offset: None,
             highlighted_span: None,
+            anim_drawn: false,
         };
     }
 
@@ -316,6 +318,7 @@ pub(super) fn graph_lines(
         lines,
         highlighted_offset,
         highlighted_span,
+        anim_drawn: false,
     }
 }
 
@@ -411,7 +414,7 @@ pub(super) fn collapse_edges<'a>(
 }
 
 /// Map a raw node id onto the collapsed key that represents it.
-fn collapse_key(
+pub(super) fn collapse_key(
     raw: &str,
     index: &EnsembleIndex,
     collapsed_nodes: &HashMap<String, Collapsed>,

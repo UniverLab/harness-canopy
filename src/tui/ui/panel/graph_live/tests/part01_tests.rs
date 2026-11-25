@@ -29,6 +29,9 @@ fn running_graph_renders_header_queue_graph_and_footer_with_current_node_highlig
                 selected_spec_id: None,
                 spec_scroll: 0,
                 scroll: 0,
+
+                running_node_id: None,
+                anim_tick: None,
             },
         );
     });
@@ -94,6 +97,9 @@ fn manual_selection_switches_footer_to_the_picked_node() {
                 selected_spec_id: None,
                 spec_scroll: 0,
                 scroll: 0,
+
+                running_node_id: None,
+                anim_tick: None,
             },
         );
     });
@@ -139,6 +145,9 @@ fn spec_strip_shows_distinct_markers_and_selected_detail_with_failure_reason() {
                 selected_spec_id: Some("s3"),
                 spec_scroll: 0,
                 scroll: 0,
+
+                running_node_id: None,
+                anim_tick: None,
             },
         );
     });
@@ -198,6 +207,9 @@ fn spec_strip_wraps_across_multiple_lines_when_many_specs_fit() {
                 selected_spec_id: None,
                 spec_scroll: 0,
                 scroll: 0,
+
+                running_node_id: None,
+                anim_tick: None,
             },
         );
     });
@@ -279,6 +291,9 @@ fn spec_strip_wraps_21_specs_across_rows_and_click_map_tracks_row() {
                 selected_spec_id: None,
                 spec_scroll: 0,
                 scroll: 0,
+
+                running_node_id: None,
+                anim_tick: None,
             },
         );
     });
@@ -337,6 +352,9 @@ fn spec_strip_falls_back_to_scroll_when_height_is_tight() {
                 selected_spec_id: None,
                 spec_scroll: 0,
                 scroll: 0,
+
+                running_node_id: None,
+                anim_tick: None,
             },
         );
     });
@@ -383,6 +401,9 @@ fn spec_strip_single_line_when_few_specs() {
                 selected_spec_id: None,
                 spec_scroll: 0,
                 scroll: 0,
+
+                running_node_id: None,
+                anim_tick: None,
             },
         );
     });
@@ -415,6 +436,9 @@ fn spec_strip_click_map_matches_rendered_chip_positions() {
                     selected_spec_id: None,
                     spec_scroll: 0,
                     scroll: 0,
+
+                    running_node_id: None,
+                    anim_tick: None,
                 },
             ));
         })
@@ -481,6 +505,9 @@ fn narrow_width_render_does_not_panic() {
         selected_spec_id: None,
         spec_scroll: 0,
         scroll: 0,
+
+        running_node_id: None,
+        anim_tick: None,
     };
     render_to_text(1, 5, |frame, area| {
         render_graph_live_view(frame, area, &ctx);
@@ -523,6 +550,9 @@ fn completed_graph_renders_statically_with_completed_icon() {
                 selected_spec_id: None,
                 spec_scroll: 0,
                 scroll: 0,
+
+                running_node_id: None,
+                anim_tick: None,
             },
         );
     });
@@ -854,6 +884,9 @@ fn router_node_renders_distinctly_with_every_route_legible_at_real_width() {
                 selected_spec_id: None,
                 spec_scroll: 0,
                 scroll: 0,
+
+                running_node_id: None,
+                anim_tick: None,
             },
         );
     });
@@ -910,6 +943,9 @@ fn graph_taller_than_panel_is_clipped_with_indicators() {
                 selected_spec_id: None,
                 spec_scroll: 0,
                 scroll: 0,
+
+                running_node_id: None,
+                anim_tick: None,
             },
         );
     });
@@ -940,6 +976,9 @@ fn graph_taller_than_panel_is_clipped_with_indicators() {
                 selected_spec_id: None,
                 spec_scroll: 0,
                 scroll: 10,
+
+                running_node_id: None,
+                anim_tick: None,
             },
         );
     });
@@ -974,6 +1013,9 @@ fn graph_that_fits_has_no_indicators() {
                 selected_spec_id: None,
                 spec_scroll: 0,
                 scroll: 0,
+
+                running_node_id: None,
+                anim_tick: None,
             },
         );
     });
@@ -1009,6 +1051,9 @@ fn scroll_clamped_to_valid_range() {
                     selected_spec_id: None,
                     spec_scroll: 0,
                     scroll: 1000,
+
+                    running_node_id: None,
+                    anim_tick: None,
                 },
             );
             clamped = Some((result.clamped_scroll, result.total_lines));
@@ -1052,6 +1097,9 @@ fn auto_follow_keeps_highlighted_node_visible() {
                 selected_spec_id: None,
                 spec_scroll: 0,
                 scroll: 0,
+
+                running_node_id: None,
+                anim_tick: None,
             },
         );
     });
@@ -1322,6 +1370,9 @@ fn graph_canvas_sits_on_info_bg() {
                     selected_spec_id: None,
                     spec_scroll: 0,
                     scroll: 0,
+
+                    running_node_id: None,
+                    anim_tick: None,
                 },
             );
         })

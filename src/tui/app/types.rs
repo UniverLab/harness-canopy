@@ -346,6 +346,9 @@ pub struct App {
     /// Total number of content lines rendered on the last frame — used to
     /// clamp `graph_live_view_scroll`. Populated by `render_graph_live_view`.
     pub(crate) graph_live_view_total_lines: u16,
+    /// Last frame that drew an animated graph connector: (animation_tick,
+    /// (tick/3, tick/8)). `None` when the view was not drawn or animation was off.
+    pub(crate) graph_anim_seen: Option<(u32, (u32, u32))>,
     /// Open autorun-scheduling input for the graph currently focused in the
     /// live view — `None` when not open. See
     /// [`crate::tui::app::dialog::GraphAutorunDialog`].
