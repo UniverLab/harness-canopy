@@ -69,7 +69,7 @@ mod tests {
     use super::*;
     use crate::db::Database;
     use std::sync::Arc;
-    use tempfile::{tempdir, NamedTempFile};
+    use tempfile::tempdir;
 
     fn node(id: &str, title: &str) -> crate::db::intelligence::IntelligenceNodeRecord {
         crate::db::intelligence::IntelligenceNodeRecord {
@@ -87,9 +87,7 @@ mod tests {
     }
 
     fn app_with_entries() -> App {
-        let tmp = NamedTempFile::new().expect("create temp file");
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(Database::new(&path).expect("create test db"));
         let data_dir = tempdir().expect("create data dir");
         let mut app = App::new(

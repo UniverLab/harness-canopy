@@ -193,9 +193,7 @@ mod tests {
     }
 
     fn test_db() -> Database {
-        let tmp = tempfile::NamedTempFile::new().expect("create temp file");
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         Database::new(&path).expect("create test db")
     }
 

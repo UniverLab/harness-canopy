@@ -6,14 +6,12 @@ use crate::tui::app::types::{AgentEntry, App};
 use crate::tui::app::SidebarLayer;
 use std::path::Path;
 use std::sync::Arc;
-use tempfile::{tempdir, NamedTempFile};
+use tempfile::tempdir;
 
 const FIRST_ACTION: &str = "get_tools(scope=\"session_start\")";
 
 fn test_db() -> Arc<Database> {
-    let tmp = NamedTempFile::new().expect("create temp file");
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
     Arc::new(Database::new(&path).expect("create test db"))
 }
 

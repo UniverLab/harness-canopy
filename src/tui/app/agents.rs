@@ -838,9 +838,7 @@ mod tests {
     }
 
     fn test_app() -> (App, tempfile::TempDir) {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = std::sync::Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
         let app = App::new(
@@ -886,12 +884,10 @@ mod handle_interactive_exit_tests {
     use crate::db::Database;
     use crate::tui::agent::{AgentStatus, InteractiveAgent};
     use std::sync::Arc;
-    use tempfile::{tempdir, NamedTempFile};
+    use tempfile::tempdir;
 
     fn test_db() -> Arc<Database> {
-        let tmp = NamedTempFile::new().expect("create temp file");
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         Arc::new(Database::new(&path).expect("create test db"))
     }
 
@@ -1201,12 +1197,10 @@ mod close_terminal_session_tests {
     use crate::db::Database;
     use crate::tui::terminal_history::{load_history, save_history};
     use std::sync::Arc;
-    use tempfile::{tempdir, NamedTempFile, TempDir};
+    use tempfile::{tempdir, TempDir};
 
     fn test_db() -> Arc<Database> {
-        let tmp = NamedTempFile::new().expect("create temp file");
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         Arc::new(Database::new(&path).expect("create test db"))
     }
 
@@ -1355,12 +1349,10 @@ mod ct16_warp_fullscreen_handover_tests {
     use super::*;
     use crate::db::Database;
     use std::sync::Arc;
-    use tempfile::{tempdir, NamedTempFile};
+    use tempfile::tempdir;
 
     fn test_db() -> Arc<Database> {
-        let tmp = NamedTempFile::new().expect("create temp file");
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         Arc::new(Database::new(&path).expect("create test db"))
     }
 
@@ -1536,9 +1528,7 @@ mod cleanup_shadow_linger_tests {
     #[test]
     fn cleanup_kills_a_session_closed_inside_its_shadow_linger() {
         let hub = &crate::sessions::client::test_client().hub;
-        let tmp = tempfile::NamedTempFile::new().expect("create temp file");
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(Database::new(&path).expect("create test db"));
         let data_dir = tempdir().expect("tempdir");
         let mut app = App::new(

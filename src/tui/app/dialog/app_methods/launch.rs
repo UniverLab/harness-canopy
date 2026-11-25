@@ -757,9 +757,7 @@ mod tests {
     fn app_with_known_session() -> (App, Arc<crate::db::Database>, tempfile::TempDir) {
         // Same file pattern as `tui::app::tests::test_db` (forget the named
         // temp file so the path survives for the connection).
-        let tmp = tempfile::NamedTempFile::new().expect("create temp file");
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(crate::db::Database::new(&path).expect("create test db"));
         db.insert_interactive_session(
             "sess-orch",
@@ -1070,9 +1068,7 @@ mod tests {
     fn app_with_db_path() -> (App, Arc<crate::db::Database>, PathBuf, tempfile::TempDir) {
         // Same file pattern as `app_with_known_session`, with no seeded
         // rows: the path survives for the second connection's lock.
-        let tmp = tempfile::NamedTempFile::new().expect("create temp file");
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(crate::db::Database::new(&path).expect("create test db"));
         let data_dir = tempdir().unwrap();
         let app = App::new(

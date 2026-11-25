@@ -660,9 +660,7 @@ mod tests {
         use crate::domain::graphs::{GraphSpec, GraphSpecStatus};
         use std::sync::Arc;
 
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(Database::new(&path).unwrap());
         db.insert_graph_spec(&GraphSpec {
             intent: None,
@@ -734,9 +732,7 @@ mod tests {
 
     fn app_with_test_entries(count: usize) -> App {
         use crate::db::Database;
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
         let mut app = App::new(
@@ -1114,9 +1110,7 @@ mod tests {
 
     #[test]
     fn panel_mode_label_preview() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
         let mut app = App::new(
@@ -1131,9 +1125,7 @@ mod tests {
 
     #[test]
     fn panel_mode_label_agent() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
         let mut app = App::new(
@@ -1161,9 +1153,7 @@ mod tests {
     }
 
     fn focus_pill_test_app() -> App {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
         let mut app = App::new(
@@ -1190,7 +1180,7 @@ mod tests {
             .push(crate::tui::app::types::AgentEntry::Interactive(0));
         app.selected = 0;
         app.log_content = String::new();
-        std::mem::forget(data_dir);
+        crate::test_support::hold(data_dir);
         app
     }
 
@@ -1237,9 +1227,7 @@ mod tests {
 
     #[test]
     fn panel_mode_label_home() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
         let mut app = App::new(
@@ -1254,9 +1242,7 @@ mod tests {
 
     #[test]
     fn focus_preview_is_evident_in_modern_buffer_without_border_title() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
         let mut app = App::new(
@@ -1295,9 +1281,7 @@ mod tests {
 
     #[test]
     fn draw_log_panel_modern_renders_rail_and_hides_border_title() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
         let mut app = App::new(
@@ -1373,9 +1357,7 @@ mod tests {
 
     #[test]
     fn show_home_fallback_empty_agents_and_projects() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
         let mut app = App::new(
@@ -1390,9 +1372,7 @@ mod tests {
 
     #[test]
     fn show_home_fallback_not_when_dialog_open() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
         let mut app = App::new(
@@ -1407,9 +1387,7 @@ mod tests {
 
     #[test]
     fn draw_log_panel_zero_area_no_panic() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
         let mut app = App::new(
@@ -1431,9 +1409,7 @@ mod tests {
 
     #[test]
     fn draw_split_panel_zero_area_no_panic() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
         let mut app = App::new(
@@ -1485,9 +1461,7 @@ mod tests {
 
     #[test]
     fn draw_home_panel_renders() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
         let mut app = App::new(
@@ -1604,9 +1578,7 @@ mod tests {
 
     #[test]
     fn playground_scope_label_global() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
         let app = App::new(
@@ -1634,9 +1606,7 @@ mod tests {
 
     #[test]
     fn rag_status_lines_empty_queue() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
         let mut app = App::new(
@@ -1653,9 +1623,7 @@ mod tests {
 
     #[test]
     fn rag_status_lines_with_queue() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
         let app = App::new(
@@ -1678,9 +1646,7 @@ mod tests {
     #[test]
     #[cfg(not(feature = "local-embeddings"))]
     fn rag_status_reports_unavailable_for_local_model_without_feature() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
         let mut app = App::new(
@@ -1700,9 +1666,7 @@ mod tests {
 
     #[test]
     fn rag_status_reports_downloading_and_not_ready() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
         let mut app = App::new(
@@ -1724,9 +1688,7 @@ mod tests {
 
     #[test]
     fn rag_status_reports_preparing() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
         let mut app = App::new(
@@ -1746,9 +1708,7 @@ mod tests {
 
     #[test]
     fn rag_status_reports_download_failed() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
         let mut app = App::new(
@@ -1794,9 +1754,7 @@ mod tests {
     }
 
     fn graph_app(follow: bool) -> App {
-        let db_file = tempfile::NamedTempFile::new().unwrap();
-        let db_path: std::path::PathBuf = db_file.path().to_path_buf();
-        std::mem::forget(db_file);
+        let db_path = crate::test_support::temp_db_path();
         let mut app = App::new(
             Arc::new(crate::db::Database::new(&db_path).unwrap()),
             tempfile::tempdir().unwrap().path(),
@@ -1912,9 +1870,7 @@ mod tests {
 
     #[test]
     fn prompt_builder_keeps_session_pty_colours_behind_dialog() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
         let mut app = App::new(
@@ -1995,9 +1951,7 @@ mod tests {
 
     #[test]
     fn knowledge_viewer_keeps_project_card_behind_dialog() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
         let mut app = App::new(
@@ -2039,9 +1993,7 @@ mod tests {
 
     #[test]
     fn panel_background_focus_follows_prev_focus_and_defaults_to_preview() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
         let mut app = App::new(

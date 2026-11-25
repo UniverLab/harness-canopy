@@ -517,12 +517,10 @@ mod tests {
     };
     use chrono::Utc;
     use std::sync::Arc;
-    use tempfile::{tempdir, NamedTempFile};
+    use tempfile::tempdir;
 
     fn test_db() -> Arc<Database> {
-        let tmp = NamedTempFile::new().expect("create temp file");
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         Arc::new(Database::new(&path).expect("create test db"))
     }
 
@@ -616,7 +614,7 @@ mod tests {
     fn test_app(db: Arc<Database>) -> App {
         let data_dir = tempdir().expect("create data dir");
         let dir_path = data_dir.path().to_path_buf();
-        std::mem::forget(data_dir);
+        crate::test_support::hold(data_dir);
         App::new(
             db,
             &dir_path,

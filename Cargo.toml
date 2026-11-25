@@ -229,6 +229,7 @@ rtc-turn = { path = "vendor/rtc-turn" }
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3.8"
+ctor = "0.2"
 # The TURN channel test runs a fake TURN server speaking the same codec as the
 # patched client (see vendor/rtc-turn/CANOPY-PATCH.md).
 crypto = { package = "rtc-crypto", version = "=0.21.1" }

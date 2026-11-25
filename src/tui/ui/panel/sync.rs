@@ -633,9 +633,7 @@ mod tests {
     use crate::tui::app::types::App;
 
     fn test_db() -> std::sync::Arc<Database> {
-        let tmp = tempfile::NamedTempFile::new().expect("create temp file");
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         std::sync::Arc::new(Database::new(&path).expect("create test db"))
     }
 
@@ -795,7 +793,7 @@ mod tests {
     fn test_app(db: std::sync::Arc<Database>) -> App {
         let data_dir = tempfile::tempdir().expect("create data dir");
         let dir_path = data_dir.path().to_path_buf();
-        std::mem::forget(data_dir);
+        crate::test_support::hold(data_dir);
         App::new(
             db,
             &dir_path,

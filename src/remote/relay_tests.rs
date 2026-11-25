@@ -23,7 +23,7 @@ use crate::remote::signaling::MAX_DEVICE_PEERS;
 fn test_db() -> Database {
     let dir = tempfile::tempdir().expect("tempdir");
     let db = Database::new(&dir.path().join("test.db")).expect("database");
-    std::mem::forget(dir);
+    crate::test_support::hold(dir);
     db
 }
 

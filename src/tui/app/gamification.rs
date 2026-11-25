@@ -411,9 +411,7 @@ mod tests {
     use std::sync::Arc;
 
     fn test_app_with_gardener_projects(hashes: &[&str]) -> App {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         for hash in hashes {
             db.record_gardener_project(hash).unwrap();

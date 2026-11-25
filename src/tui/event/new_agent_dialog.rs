@@ -1012,9 +1012,7 @@ mod tests {
     }
 
     fn app_with(dialog: NewAgentDialog) -> App {
-        let db_file = tempfile::NamedTempFile::new().unwrap();
-        let path = db_file.path().to_path_buf();
-        std::mem::forget(db_file); // keep the sqlite file alive for the test
+        let path = crate::test_support::temp_db_path();
         let db = std::sync::Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
         let mut app = App::new(

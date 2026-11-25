@@ -949,9 +949,7 @@ mod tests {
         use crate::domain::canopy_config::CanopyConfig;
         use crate::tui::agent::InteractiveAgent;
         use std::sync::Arc;
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp); // keep the sqlite file alive for the test
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
         let workdir = data_dir.path().to_string_lossy().to_string();

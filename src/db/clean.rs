@@ -656,10 +656,10 @@ mod tests {
 
     fn test_db() -> Database {
         let dir = tempdir().unwrap();
-        // Leak the tempdir so the backing file survives for the DB's lifetime
-        // within the test (mirrors the pattern used elsewhere in this crate).
+        // Hold the tempdir so the backing file survives for the DB's lifetime
+        // within the test; it is released when the test thread ends.
         let path = dir.path().join("test.db");
-        std::mem::forget(dir);
+        crate::test_support::hold(dir);
         Database::new(&path).unwrap()
     }
 

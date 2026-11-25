@@ -31,9 +31,7 @@ fn sidebar_brain_reaches_the_right_edge_of_its_area() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
     let db = Arc::new(Database::new(&path).unwrap());
     db.insert_graph(&Graph {
         trigger_prompt: None,
@@ -119,9 +117,7 @@ fn sidebar_has_tab_to_list_gap() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
     let db = Arc::new(Database::new(&path).unwrap());
     let data_dir = tempfile::tempdir().unwrap();
     let mut app = App::new(
@@ -153,9 +149,7 @@ fn sidebar_has_gaps_between_all_sections() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
     let db = Arc::new(Database::new(&path).unwrap());
     let data_dir = tempfile::tempdir().unwrap();
     let mut app = App::new(
@@ -279,9 +273,7 @@ fn sidebar_lists_every_status_ordered_by_recency_and_visually_distinguishable() 
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
     let db = Arc::new(Database::new(&path).unwrap());
 
     // Staggered `created_at`, oldest first, so recency ordering is
@@ -491,9 +483,7 @@ fn drawing_the_knowledge_layer_populates_project_click_map() {
     use ratatui::Terminal;
     use std::sync::Arc;
 
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
     let db = Arc::new(Database::new(&path).unwrap());
     for i in 0..2 {
         db.upsert_project(&crate::domain::project::Project {
@@ -657,9 +647,7 @@ fn exited_0_and_exited_1_sidebar_cards_render_different_colors() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
     let db = Arc::new(Database::new(&path).unwrap());
     let data_dir = tempfile::tempdir().unwrap();
     let mut app = App::new(
@@ -841,9 +829,7 @@ fn draw_sidebar_tab_bar_registers_three_equal_click_cells_spanning_the_full_widt
     use ratatui::Terminal;
     use std::sync::Arc;
 
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
     let db = Arc::new(Database::new(&path).unwrap());
     let data_dir = tempfile::tempdir().unwrap();
     let mut app = App::new(
@@ -894,9 +880,7 @@ fn draw_sidebar_tab_bar_paints_the_sidebar_surface_in_every_theme() {
     use std::sync::Arc;
 
     for theme in [Theme::classic(), Theme::modern()] {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
         let mut app = App::new(
@@ -1295,9 +1279,7 @@ fn project_meta_style_not_selected() {
 #[test]
 fn rag_info_title_when_paused() {
     use crate::db::Database;
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
     let db = Arc::new(Database::new(&path).unwrap());
     let data_dir = tempfile::tempdir().unwrap();
     let mut app = App::new(
@@ -1313,9 +1295,7 @@ fn rag_info_title_when_paused() {
 #[test]
 fn rag_info_title_when_not_paused() {
     use crate::db::Database;
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
     let db = Arc::new(Database::new(&path).unwrap());
     let data_dir = tempfile::tempdir().unwrap();
     let mut app = App::new(
@@ -1331,9 +1311,7 @@ fn rag_info_title_when_not_paused() {
 #[test]
 fn rag_status_line_when_paused() {
     use crate::db::Database;
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
     let db = Arc::new(Database::new(&path).unwrap());
     let data_dir = tempfile::tempdir().unwrap();
     let mut app = App::new(
@@ -1352,9 +1330,7 @@ fn rag_status_line_when_paused() {
 #[test]
 fn rag_queue_text_with_items() {
     use crate::db::Database;
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
     let db = Arc::new(Database::new(&path).unwrap());
     let data_dir = tempfile::tempdir().unwrap();
     let mut app = App::new(
@@ -1370,9 +1346,7 @@ fn rag_queue_text_with_items() {
 #[test]
 fn rag_queue_text_zero_items() {
     use crate::db::Database;
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
     let db = Arc::new(Database::new(&path).unwrap());
     let data_dir = tempfile::tempdir().unwrap();
     let mut app = App::new(
@@ -1412,9 +1386,7 @@ fn failed_card_with_exit_detail_shows_error_and_tail() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
     let db = Arc::new(Database::new(&path).unwrap());
     let data_dir = tempfile::tempdir().unwrap();
     let mut app = App::new(

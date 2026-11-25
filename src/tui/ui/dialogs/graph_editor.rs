@@ -325,9 +325,7 @@ mod tests {
     }
 
     fn test_app_with_router_dialog() -> App {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
         let mut app = App::new(

@@ -7,9 +7,7 @@ use super::*;
 /// defaults and the counter table.
 #[test]
 fn spec_type_migration_opens_pre_migration_db_unchanged() {
-    let tmp = NamedTempFile::new().expect("create temp file");
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
 
     {
         let conn = rusqlite::Connection::open(&path).expect("open raw legacy db");
@@ -538,9 +536,7 @@ fn pre_ct17_intelligence_nodes_without_content_touched_at_opens_and_migrates() {
     // it must succeed (the base batch must not reference a column this
     // table doesn't have yet), and the CT17 migration further down in
     // `init()` must then add the column and its index.
-    let tmp = NamedTempFile::new().expect("create temp file");
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
 
     {
         let conn = rusqlite::Connection::open(&path).expect("open raw pre-CT17 db");
@@ -610,9 +606,7 @@ fn v3_close_schema_with_break_condition_migrates_loops_to_graphs() {
     // 2026-09-15): loop_*/loops naming, a 'break' edge condition, no
     // content_touched_at. Database::new must run migrate_loop_to_graph_schema
     // (rename loops->graphs etc.) and every later guarded ALTER cleanly.
-    let tmp = NamedTempFile::new().expect("create temp file");
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
 
     {
         let conn = rusqlite::Connection::open(&path).expect("open raw v3-close db");
@@ -1173,9 +1167,7 @@ fn v3_close_schema_with_break_condition_migrates_loops_to_graphs() {
 // retired prefix on purpose; exempt from the vocabulary guard below)
 #[test]
 fn activity_attribution_prefix_migration_renames_old_rows_and_is_idempotent() {
-    let tmp = NamedTempFile::new().expect("create temp file");
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
 
     // Fresh database: `init()` runs the attribution migration before the
     // `CREATE TABLE IF NOT EXISTS` batch, so on a brand-new file the

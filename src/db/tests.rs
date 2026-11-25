@@ -12,13 +12,11 @@ use crate::domain::sync::{
     IntentPayload, MessageKind, MissionImpact, StatusPayload, WorkspaceStatus,
 };
 use chrono::{Duration, TimeZone, Utc};
-use tempfile::{tempdir, NamedTempFile};
+use tempfile::tempdir;
 
 /// Create an in-memory-like DB backed by a temp file (`SQLite` needs a real file for WAL).
 fn test_db() -> Database {
-    let tmp = NamedTempFile::new().expect("create temp file");
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
     Database::new(&path).expect("create test db")
 }
 

@@ -412,12 +412,10 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use std::sync::Arc;
-    use tempfile::{tempdir, NamedTempFile};
+    use tempfile::tempdir;
 
     fn test_app() -> App {
-        let tmp = NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempdir().unwrap();
         App::new(

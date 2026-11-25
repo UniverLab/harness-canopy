@@ -56,7 +56,7 @@ mod tests {
     use crate::domain::project::Project;
     use crate::tui::event::home_preview::handle_preview_key;
     use std::sync::Arc;
-    use tempfile::{tempdir, NamedTempFile, TempDir};
+    use tempfile::{tempdir, TempDir};
 
     fn project(hash: &str, name: &str) -> Project {
         Project {
@@ -73,9 +73,7 @@ mod tests {
     /// Preview focus on the Knowledge layer's project list, holding three
     /// projects: "aardvark", "cadforge", "canopy" (the list's own order).
     fn knowledge_app() -> (App, TempDir) {
-        let tmp = NamedTempFile::new().expect("create temp file");
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(Database::new(&path).expect("create test db"));
         for (hash, name) in [
             ("h-aardvark", "aardvark"),

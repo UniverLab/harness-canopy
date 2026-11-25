@@ -71,9 +71,7 @@ mod tests {
     const HEIGHT: u16 = 24;
 
     fn app_with_body(body: String) -> (App, tempfile::TempDir) {
-        let tmp = tempfile::NamedTempFile::new().expect("create temp file");
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(Database::new(&path).expect("create test db"));
         let data_dir = tempfile::tempdir().expect("create data dir");
         let mut app = App::new(

@@ -69,7 +69,7 @@ mod tests {
     use crate::db::Database;
     use crate::domain::project::Project;
     use std::sync::Arc;
-    use tempfile::{tempdir, NamedTempFile, TempDir};
+    use tempfile::{tempdir, TempDir};
 
     fn project(hash: &str, name: &str) -> Project {
         Project {
@@ -86,9 +86,7 @@ mod tests {
     /// An `App` holding three projects — "canopy", "cadforge", "univerlab" —
     /// as if the list had already been ranked by recency.
     fn app_with_projects() -> (App, TempDir) {
-        let tmp = NamedTempFile::new().expect("create temp file");
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(Database::new(&path).expect("create test db"));
         let data_dir = tempdir().expect("create data dir");
         let mut app = App::new(
@@ -176,9 +174,7 @@ mod tests {
 
     #[test]
     fn refresh_keeps_the_selected_project_by_hash_when_the_order_changes() {
-        let tmp = NamedTempFile::new().expect("create temp file");
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(Database::new(&path).expect("create test db"));
         for (hash, name) in [("h-a", "alpha"), ("h-b", "bravo"), ("h-c", "charlie")] {
             db.upsert_project(&project(hash, name)).expect("upsert");

@@ -29,7 +29,7 @@ fn manual_agent(id: &str, enabled: bool) -> Agent {
 fn test_scheduler() -> (Arc<Database>, CronScheduler) {
     let dir = tempfile::tempdir().unwrap();
     let db = Arc::new(Database::new(&dir.path().join("test.db")).unwrap());
-    std::mem::forget(dir);
+    crate::test_support::hold(dir);
     let executor = Arc::new(Executor::new(
         db.clone(),
         Arc::new(DefaultNotificationService),
@@ -41,7 +41,7 @@ fn test_scheduler() -> (Arc<Database>, CronScheduler) {
 fn test_scheduler_with_graphs() -> (Arc<Database>, CronScheduler) {
     let dir = tempfile::tempdir().unwrap();
     let db = Arc::new(Database::new(&dir.path().join("test.db")).unwrap());
-    std::mem::forget(dir);
+    crate::test_support::hold(dir);
     let executor = Arc::new(Executor::new(
         db.clone(),
         Arc::new(DefaultNotificationService),
@@ -62,7 +62,7 @@ fn test_scheduler_with_graphs() -> (Arc<Database>, CronScheduler) {
 fn test_scheduler_and_engine() -> (Arc<Database>, CronScheduler, Arc<GraphEngine>) {
     let dir = tempfile::tempdir().unwrap();
     let db = Arc::new(Database::new(&dir.path().join("test.db")).unwrap());
-    std::mem::forget(dir);
+    crate::test_support::hold(dir);
     let executor = Arc::new(Executor::new(
         db.clone(),
         Arc::new(DefaultNotificationService),

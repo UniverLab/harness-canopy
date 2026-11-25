@@ -2,7 +2,6 @@ use super::*;
 use crate::db::Database;
 use crate::tui::app::dialog::{ProjectPickerEntry, SectionPickerMode, SimplePromptDialog};
 use std::sync::Arc;
-use tempfile::NamedTempFile;
 
 #[test]
 fn skills_picker_up_at_zero_wraps_to_last() {
@@ -351,9 +350,7 @@ fn remove_section_picker_esc_closes() {
 }
 
 fn test_db() -> Arc<Database> {
-    let tmp = NamedTempFile::new().expect("create temp file");
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
     Arc::new(Database::new(&path).expect("create test db"))
 }
 

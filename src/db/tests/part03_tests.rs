@@ -10,9 +10,7 @@ fn legacy_queue_table_names_migrate_preserving_member_order_and_context_groups()
     // queues, several members each, deliberately inserted out of position
     // order, spanning multiple (and no) context groups — the thing most
     // worth not losing is the position-driven order and each member's group.
-    let tmp = NamedTempFile::new().expect("create temp file");
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
 
     {
         let conn = rusqlite::Connection::open(&path).expect("open raw legacy db");
@@ -146,9 +144,7 @@ fn legacy_queue_table_names_migrate_preserving_member_order_and_context_groups()
 
 #[test]
 fn legacy_queue_table_rename_is_a_noop_on_an_already_migrated_database() {
-    let tmp = NamedTempFile::new().expect("create temp file");
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
 
     // First open: fresh database, already on the current (post-rename) schema.
     let db = Database::new(&path).expect("create fresh db");
@@ -215,9 +211,7 @@ fn legacy_queue_table_rename_is_a_noop_on_an_already_migrated_database() {
 
 #[test]
 fn a_schema_version_newer_than_this_binary_supports_fails_loudly_instead_of_starting_empty() {
-    let tmp = NamedTempFile::new().expect("create temp file");
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
 
     let db = Database::new(&path).expect("create fresh db");
     db.set_state("schema_version", "999").unwrap();
@@ -240,9 +234,7 @@ fn a_schema_version_newer_than_this_binary_supports_fails_loudly_instead_of_star
 fn auto_continue_migration_is_idempotent_and_a_pre_migration_database_opens_cleanly() {
     // Simulate a database written before `auto_continue_at`/`auto_continue_action`
     // existed: `graphs` has every other current column, including `autorun_at`.
-    let tmp = NamedTempFile::new().expect("create temp file");
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
 
     {
         let conn = rusqlite::Connection::open(&path).expect("open raw legacy db");

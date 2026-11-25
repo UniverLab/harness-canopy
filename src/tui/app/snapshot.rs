@@ -159,7 +159,7 @@ impl SnapshotWorker {
     pub(crate) fn fake() -> (Self, mpsc::Sender<SlowSnapshot>) {
         let (req_tx, req_rx) = mpsc::channel::<SnapshotRequest>();
         let (snap_tx, snap_rx) = mpsc::channel::<SlowSnapshot>();
-        std::mem::forget(req_rx);
+        std::mem::forget(req_rx); // forget-ok: channel receiver, not a file
         (
             Self {
                 req_tx,

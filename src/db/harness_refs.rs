@@ -163,12 +163,9 @@ mod tests {
         Graph, GraphHookEvent, GraphNode, GraphNodeKind, GraphSpec, GraphSpecStatus,
     };
     use crate::domain::models::{Agent, AgentAction, Cli};
-    use tempfile::NamedTempFile;
 
     fn test_db() -> Database {
-        let tmp = NamedTempFile::new().expect("create temp file");
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         Database::new(&path).expect("create test db")
     }
 

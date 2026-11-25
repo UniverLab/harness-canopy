@@ -42,9 +42,7 @@ fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
 /// Previewing an interactive session with the central panel last
 /// rendered at (30, 5) of size 80x20 — so (35, 10) is inside it.
 fn app_previewing_interactive() -> App {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
     let db = Arc::new(crate::db::Database::new(&path).unwrap());
     let dir = tempfile::tempdir().unwrap();
     let mut app = App::new(

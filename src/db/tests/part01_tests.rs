@@ -1020,9 +1020,7 @@ fn graph_migration_adds_graph_id_and_is_idempotent_across_reopen() {
     // (SQLite can't relax NOT NULL via ALTER TABLE ADD COLUMN) without
     // losing the existing rows, and running it again on an already-migrated
     // database must be a no-op.
-    let tmp = NamedTempFile::new().expect("create temp file");
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
 
     {
         let conn = rusqlite::Connection::open(&path).expect("open raw legacy db");
@@ -1128,9 +1126,7 @@ fn graph_specs_migration_relaxes_graph_id_and_adds_workdir_and_is_idempotent() {
     // relax NOT NULL via ALTER TABLE ADD COLUMN) without losing existing
     // (graph-bound) rows, and running it again on an already-migrated
     // database must be a no-op.
-    let tmp = NamedTempFile::new().expect("create temp file");
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
 
     {
         let conn = rusqlite::Connection::open(&path).expect("open raw legacy db");
@@ -1226,9 +1222,7 @@ fn graph_specs_migration_carries_spec_end_dirty_columns() {
     // Same pre-R3 legacy shape as the sibling migration test above, missing
     // every column CM29 adds — `spec_end_dirty`/`spec_end_dirty_paths` on
     // `graph_specs` and `allow_dirty_start` on `graphs`.
-    let tmp = NamedTempFile::new().expect("create temp file");
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
 
     {
         let conn = rusqlite::Connection::open(&path).expect("open raw legacy db");

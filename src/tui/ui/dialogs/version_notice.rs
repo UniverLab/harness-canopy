@@ -25,9 +25,7 @@ mod tests {
     use crate::tui::app::version_check::VersionNotice;
 
     fn rendered_with(notice: Option<VersionNotice>) -> String {
-        let tmp = tempfile::NamedTempFile::new().expect("scratch db file");
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = std::sync::Arc::new(crate::db::Database::new(&path).expect("scratch db"));
         let data_dir = tempfile::tempdir().expect("scratch dir");
         let mut app = App::new(

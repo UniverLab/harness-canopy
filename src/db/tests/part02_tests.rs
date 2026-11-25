@@ -1179,9 +1179,7 @@ fn ungrouped_and_cross_group_members_never_cross_resume() {
 #[test]
 fn group_name_column_is_added_to_a_pre_rs3_queue_members_table() {
     // Simulate a pre-RS3 database whose `queue_members` predates `group_name`.
-    let tmp = NamedTempFile::new().expect("create temp file");
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
 
     {
         let conn = rusqlite::Connection::open(&path).expect("open raw db");
@@ -1252,9 +1250,7 @@ fn group_name_column_is_added_to_a_pre_rs3_queue_members_table() {
 fn queues_migration_is_idempotent_and_a_pre_r4_database_opens_cleanly() {
     // Simulate a pre-R4 database: `graphs` has the old `spec_queue` column
     // (7f2efdf) but no `queues`/`queue_members` tables at all.
-    let tmp = NamedTempFile::new().expect("create temp file");
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
 
     {
         let conn = rusqlite::Connection::open(&path).expect("open raw legacy db");
@@ -1335,9 +1331,7 @@ fn queues_migration_is_idempotent_and_a_pre_r4_database_opens_cleanly() {
 fn active_run_queue_id_migration_is_idempotent_and_a_pre_b8_database_opens_cleanly() {
     // Simulate a pre-B8 database: `graphs` has `autorun_at` and `queues`/
     // `queue_members` already exist, but `graphs` predates `active_run_queue_id`.
-    let tmp = NamedTempFile::new().expect("create temp file");
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
 
     {
         let conn = rusqlite::Connection::open(&path).expect("open raw legacy db");

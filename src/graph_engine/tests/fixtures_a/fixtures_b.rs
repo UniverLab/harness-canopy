@@ -182,7 +182,7 @@ async fn run_grouped_queue(
 
     // Keep `dir` alive until after the run (workdir + argv log live in it).
     let argv_file = std::fs::canonicalize(&argv_file).unwrap_or(argv_file);
-    std::mem::forget(dir);
+    crate::test_support::hold(dir);
     (db, argv_file)
 }
 

@@ -6,9 +6,7 @@ use tempfile::tempdir;
 /// An app with a selected terminal session and a drawn layout: body 120,
 /// sync panel 30 wide at `x = 90`, pane inner `(88, 24)` (chrome 2).
 fn drag_app() -> App {
-    let tmp = tempfile::NamedTempFile::new().expect("create temp file");
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
     let db = Arc::new(Database::new(&path).expect("create test db"));
     let data_dir = tempdir().expect("create data dir");
     let mut app = App::new(

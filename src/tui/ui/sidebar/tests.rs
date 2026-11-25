@@ -57,9 +57,7 @@ fn render_sidebar_text_with(
     use ratatui::Terminal;
     use std::sync::Arc;
 
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
     let db = Arc::new(Database::new(&path).unwrap());
     for i in 0..project_count {
         db.upsert_project(&Project {
@@ -167,9 +165,7 @@ fn render_automation_text_for(
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
     let db = Arc::new(Database::new(&path).unwrap());
     db.insert_graph(lp).unwrap();
     seed(&db);

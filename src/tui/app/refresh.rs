@@ -734,15 +734,13 @@ mod tests {
     use crate::db::Database;
     use crate::tui::ui::theme::Theme;
     use std::sync::Arc;
-    use tempfile::{tempdir, NamedTempFile};
+    use tempfile::tempdir;
 
     /// A `settings_changed` revision for `theme` must swap the in-memory
     /// theme on the next poll, without a restart (CT31 hot apply).
     #[test]
     fn settings_changed_swaps_the_theme_next_frame() {
-        let tmp = NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempdir().unwrap();
         std::fs::write(data_dir.path().join("config.toml"), "theme = \"modern\"\n").unwrap();

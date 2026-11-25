@@ -33,6 +33,8 @@ mod state_dir;
 #[path = "state_dir_tests.rs"]
 mod state_dir_tests;
 mod system;
+#[cfg(test)]
+mod test_support;
 mod tui;
 mod watchers;
 

@@ -5,9 +5,7 @@ use super::*;
 fn list_project_history_merges_finished_graphs_and_past_sessions_newest_first() {
     use crate::db::project::ProjectHistoryKind;
 
-    let tmp = NamedTempFile::new().expect("create temp file");
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
     let db = Database::new(&path).expect("create test db");
     let workdir = "/tmp/history-project";
     let other_workdir = "/tmp/other-project";
@@ -319,9 +317,7 @@ fn permanent_delete_removes_the_graph_and_its_run_history() {
 /// migration must be a no-op on a second open.
 #[test]
 fn archived_migration_defaults_existing_rows_and_is_idempotent() {
-    let tmp = NamedTempFile::new().expect("create temp file");
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
 
     {
         let conn = rusqlite::Connection::open(&path).expect("open raw legacy db");
@@ -375,9 +371,7 @@ fn archived_migration_defaults_existing_rows_and_is_idempotent() {
 #[test]
 fn cross_run_attempts_migration_defaults_existing_rows_and_is_idempotent() {
     // Simulate a pre-C19 database: `graph_specs` without `cross_run_attempts`.
-    let tmp = NamedTempFile::new().expect("create temp file");
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
 
     {
         let conn = rusqlite::Connection::open(&path).expect("open raw legacy db");
@@ -505,9 +499,7 @@ fn no_retired_schema_name_identifiers_remain_outside_its_migration() {
 
 #[test]
 fn ensemble_kind_migration_is_idempotent_and_pre_migration_db_opens_cleanly() {
-    let tmp = NamedTempFile::new().expect("create temp file");
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
 
     {
         let conn = rusqlite::Connection::open(&path).expect("open raw legacy db");

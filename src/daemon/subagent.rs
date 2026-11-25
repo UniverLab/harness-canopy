@@ -545,9 +545,7 @@ mod tests {
     /// Create a real DB file (`SQLite` needs a file for WAL), mirroring
     /// `src/db/tests.rs::test_db`.
     fn blocking_test_db() -> Database {
-        let tmp = tempfile::NamedTempFile::new().expect("create temp file");
-        let path = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        let path = crate::test_support::temp_db_path();
         Database::new(&path).expect("create test db")
     }
 

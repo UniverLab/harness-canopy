@@ -6,9 +6,7 @@ fn draw_sidebar_renders_without_panic() {
     use crate::db::Database;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
     let db = Arc::new(Database::new(&path).unwrap());
     let data_dir = tempfile::tempdir().unwrap();
     let mut app = App::new(
@@ -31,9 +29,7 @@ fn draw_sidebar_modern_theme_no_panic() {
     use crate::db::Database;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
     let db = Arc::new(Database::new(&path).unwrap());
     let data_dir = tempfile::tempdir().unwrap();
     let mut app = App::new(
@@ -54,9 +50,7 @@ fn draw_sidebar_modern_theme_no_panic() {
 #[test]
 fn rag_status_line_shows_downloading_not_ready_even_when_loaded_flag_is_stale() {
     use crate::db::Database;
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
     let db = Arc::new(Database::new(&path).unwrap());
     let data_dir = tempfile::tempdir().unwrap();
     let mut app = App::new(
@@ -79,9 +73,7 @@ fn rag_status_line_shows_downloading_not_ready_even_when_loaded_flag_is_stale() 
 #[test]
 fn rag_status_line_shows_download_failed() {
     use crate::db::Database;
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
     let db = Arc::new(Database::new(&path).unwrap());
     let data_dir = tempfile::tempdir().unwrap();
     let mut app = App::new(
@@ -312,9 +304,7 @@ fn ct14_fair_section_floor_tracks_cursor_not_stored_focus() {
     // CT14 render invariant (C32 follow-on): the guaranteed floor follows
     // the section holding the cursor, not the stored focus alone — so a
     // zero-row focused section cannot steal the floor on short screens.
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
     let db = Arc::new(crate::db::Database::new(&path).unwrap());
     let data_dir = tempfile::tempdir().unwrap();
     let mut app = crate::tui::app::App::new(

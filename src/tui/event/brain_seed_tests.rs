@@ -4,12 +4,10 @@ use crate::tui::brians_brain::{BriansBrain, CellState};
 use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use std::sync::Arc;
-use tempfile::{tempdir, NamedTempFile};
+use tempfile::tempdir;
 
 fn test_app() -> App {
-    let tmp = NamedTempFile::new().expect("create temp file");
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
     let db = Arc::new(Database::new(&path).expect("create test db"));
     let data_dir = tempdir().expect("create data dir");
     App::new(

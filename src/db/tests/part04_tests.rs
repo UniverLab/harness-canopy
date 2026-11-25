@@ -399,9 +399,7 @@ fn mark_session_orphaned_is_a_noop_once_already_resumed() {
 fn boot_id_migration_is_idempotent_and_a_pre_boot_id_database_opens_cleanly() {
     // Simulate a database written before the boot_id column existed:
     // interactive_sessions has `pid` but no `boot_id`.
-    let tmp = NamedTempFile::new().expect("create temp file");
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
 
     {
         let conn = rusqlite::Connection::open(&path).expect("open raw legacy db");
@@ -451,9 +449,7 @@ fn harness_conversation_id_migration_adds_column_and_index_and_is_idempotent() {
     // Simulate a database written before the harness conversation column
     // existed: interactive_sessions has `boot_id` but no
     // `harness_conversation_id`.
-    let tmp = NamedTempFile::new().expect("create temp file");
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
 
     {
         let conn = rusqlite::Connection::open(&path).expect("open raw legacy db");
@@ -528,9 +524,7 @@ fn harness_conversation_id_migration_adds_column_and_index_and_is_idempotent() {
 fn legacy_bridge_rows_are_reclassified_by_migration() {
     // Simulate a row left over from before session_type = 'bridge' existed:
     // old builds stored the bridge sidecar with session_type = 'interactive'.
-    let tmp = NamedTempFile::new().expect("create temp file");
-    let path = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
+    let path = crate::test_support::temp_db_path();
     let db = Database::new(&path).expect("create test db");
     db.insert_interactive_session(
         "legacy-bridge",
