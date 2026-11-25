@@ -618,16 +618,16 @@ mod tests {
         );
     }
 
-    /// FR4: the Overview tab's three section labels are headings in the
+    /// FR4: the Overview tab's two section labels are headings in the
     /// header colour with BOLD, each preceded by a blank line, and the
     /// metadata keys are dim with the value in the normal ink.
     #[test]
     fn overview_sections_render_as_headings() {
         let theme = Theme::classic();
         let project = crate::domain::project::Project::new("/tmp/x");
-        let lines = build_project_overview_lines(&project, None, &[], &theme, "%Y-%m-%d");
+        let lines = build_project_overview_lines(&project, &[], &theme, "%Y-%m-%d");
 
-        for heading in ["Description", "Workspace context", "Recent sessions"] {
+        for heading in ["Description", "Recent sessions"] {
             let idx = lines
                 .iter()
                 .position(|l| l.spans.iter().any(|s| s.content == heading))

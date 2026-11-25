@@ -39,8 +39,8 @@ Canopy persists what agents learn, scoped to projects.
   and related-project summaries (`scope`: `light` or `full`). In `light`
   scope, output stays under 12,000 characters: nodes return a 300-char
   `body_excerpt` (with `metadata` omitted and `title` capped at 120 chars),
-  `knowledge` and `project_knowledge` are capped at 5 nodes, `sync_messages`
-  and `activity` trim `message` (200 chars) and `payload` (300 chars), any
+  `knowledge` and `project_knowledge` are capped at 5 nodes, `activity`
+  trims `message` (200 chars) and `payload` (300 chars), any
   dropped items are counted in `truncated`, and `hint` points to
   `intelligence_search` for full node bodies; `full` returns complete nodes.
 

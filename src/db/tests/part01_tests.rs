@@ -412,37 +412,6 @@ fn scheduled_prompts_for_closed_session_are_dropped_on_missing_target_restore() 
         .is_empty());
 }
 
-// ── Sync message lifecycle ───────────────────────────────────────
-
-#[test]
-fn test_list_sync_messages_returns_chronological_order() {
-    let db = test_db();
-    db.insert_sync_message(
-        "/tmp/project",
-        "agent-a",
-        "copilot",
-        MessageKind::Info,
-        "one",
-        None,
-    )
-    .unwrap();
-    db.insert_sync_message(
-        "/tmp/project",
-        "agent-b",
-        "claude",
-        MessageKind::Query,
-        "two",
-        None,
-    )
-    .unwrap();
-
-    let messages = db.list_sync_messages("/tmp/project", 10).unwrap();
-
-    assert_eq!(messages.len(), 2);
-    assert_eq!(messages[0].message, "one");
-    assert_eq!(messages[1].message, "two");
-}
-
 #[test]
 fn test_list_active_sync_agent_ids_includes_live_sessions_and_running_background_agents() {
     let db = test_db();
@@ -482,84 +451,6 @@ fn test_list_active_sync_agent_ids_includes_live_sessions_and_running_background
         ids,
         vec!["bg-1".to_string(), "ix-1".to_string(), "term-1".to_string()]
     );
-}
-
-#[test]
-fn test_sync_message_payload_roundtrip() {
-    let db = test_db();
-    let payload = serde_json::to_string(&IntentPayload {
-        mission: "Refactor auth".to_string(),
-        impact: MissionImpact::High,
-        description: "touching login flow".to_string(),
-    })
-    .unwrap();
-    db.insert_sync_message(
-        "/tmp/project",
-        "agent-a",
-        "copilot",
-        MessageKind::Intent,
-        "copilot: Refactor auth",
-        Some(&payload),
-    )
-    .unwrap();
-    let status_payload = serde_json::to_string(&StatusPayload {
-        status: WorkspaceStatus::Testing,
-        message: "running smoke tests".to_string(),
-    })
-    .unwrap();
-    db.insert_sync_message(
-        "/tmp/project",
-        "agent-a",
-        "copilot",
-        MessageKind::Status,
-        "running smoke tests",
-        Some(&status_payload),
-    )
-    .unwrap();
-
-    let messages = db.list_sync_messages("/tmp/project", 10).unwrap();
-
-    assert_eq!(messages[0].kind, MessageKind::Intent);
-    assert_eq!(messages[1].kind, MessageKind::Status);
-    assert!(messages[0]
-        .payload
-        .as_deref()
-        .unwrap_or_default()
-        .contains("Refactor auth"));
-    assert!(messages[1]
-        .payload
-        .as_deref()
-        .unwrap_or_default()
-        .contains("testing"));
-}
-
-#[test]
-fn test_recent_sync_messages_returns_global_order() {
-    let db = test_db();
-    db.insert_sync_message(
-        "/tmp/project-a",
-        "agent-a",
-        "copilot",
-        MessageKind::Info,
-        "one",
-        None,
-    )
-    .unwrap();
-    db.insert_sync_message(
-        "/tmp/project-b",
-        "agent-b",
-        "claude",
-        MessageKind::Info,
-        "two",
-        None,
-    )
-    .unwrap();
-
-    let messages = db.list_recent_sync_messages(10).unwrap();
-
-    assert_eq!(messages.len(), 2);
-    assert_eq!(messages[0].message, "one");
-    assert_eq!(messages[1].message, "two");
 }
 
 #[test]

@@ -189,15 +189,15 @@ impl App {
         lines.join("\n")
     }
 
-    /// Extract workdir and intents from activity state or fallback.
+    /// Workdir from the selected activity entry (or the current workdir),
+    /// plus the active missions for that workdir from the bitácora.
     fn build_system_context_parts(&self) -> (String, Vec<crate::domain::sync::ActiveIntent>) {
-        if let Some(state) = self.selected_activity_state() {
-            (state.workdir.clone(), state.active_intents)
-        } else {
-            let workdir = self.current_workdir().to_string_lossy().to_string();
-            let intents = self.active_missions_for_workdir(&workdir);
-            (workdir, intents)
-        }
+        let workdir = self
+            .selected_activity_workdir()
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.current_workdir().to_string_lossy().to_string());
+        let intents = self.active_missions_for_workdir(&workdir);
+        (workdir, intents)
     }
 
     fn push_intents(lines: &mut Vec<String>, intents: &[crate::domain::sync::ActiveIntent]) {
@@ -1154,23 +1154,19 @@ mod tests {
         app.agents = vec![AgentEntry::Agent(agent)];
         app.selected = 0;
 
-        // Precondition: the activity state this block reads from really does
-        // carry chatter, so the test fails if the chatter path returns.
-        let state = app
-            .selected_activity_state()
-            .expect("activity state present");
+        // Precondition: the workdir really does carry an active mission, so
+        // the test fails if the mission path returns nothing.
+        let (workdir, intents) = app.build_system_context_parts();
+        assert_eq!(workdir, "/tmp/ctx-project");
         assert!(
-            state.recent_messages.iter().any(|m| m.kind.is_chatter()),
-            "the fixture must produce chatter"
-        );
-        assert!(
-            !state.active_intents.is_empty(),
+            !intents.is_empty(),
             "the fixture must produce an active mission"
         );
 
         let block = app.build_turn_context_block();
         assert!(block.contains("workspace: /tmp/ctx-project"));
         assert!(block.contains("active missions:"));
+        assert!(block.contains("deploy"));
         assert!(!block.contains("recent messages"));
         assert!(!block.contains("chatter that must not leak into the prompt"));
     }

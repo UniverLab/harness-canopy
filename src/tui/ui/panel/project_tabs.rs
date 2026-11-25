@@ -1,61 +1,5 @@
 use super::*;
 
-pub(super) fn format_intent_lines(
-    state: &crate::tui::app::types::SyncPanelState,
-    _area_width: u16,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    if state.active_intents.is_empty() {
-        lines.push(Line::from("active missions: none"));
-        return lines;
-    }
-
-    lines.push(Line::from("active missions:"));
-    for intent in state.active_intents.iter().take(3) {
-        lines.push(Line::from(format!(
-            "  - {} [{}]: {}",
-            intent.agent_name,
-            intent.impact.as_str(),
-            intent.mission
-        )));
-        if !intent.description.trim().is_empty() {
-            lines.push(Line::from(Span::styled(
-                format!("    {}", truncate_str(intent.description.trim(), 92)),
-                Style::default().fg(theme.dim_text),
-            )));
-        }
-    }
-    lines
-}
-
-pub(super) fn format_recent_activity_lines(
-    state: &crate::tui::app::types::SyncPanelState,
-) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    let recent_messages = state
-        .recent_messages
-        .iter()
-        .rev()
-        .take(3)
-        .collect::<Vec<_>>();
-
-    if recent_messages.is_empty() {
-        lines.push(Line::from("recent activity: none"));
-        return lines;
-    }
-
-    lines.push(Line::from("recent activity:"));
-    for message in recent_messages {
-        lines.push(Line::from(format!(
-            "  - {}: {}",
-            message.agent_name,
-            truncate_str(message.message.trim(), 92)
-        )));
-    }
-    lines
-}
-
 pub(super) fn format_recent_session_lines(
     sessions: &[(String, String)],
     theme: &Theme,
@@ -78,7 +22,6 @@ pub(super) fn format_recent_session_lines(
 
 pub(super) fn build_project_overview_lines<'a>(
     project: &'a crate::domain::project::Project,
-    project_activity: Option<&crate::tui::app::types::SyncPanelState>,
     recent_sessions: &[(String, String)],
     theme: &Theme,
     datetime_format: &str,
@@ -113,25 +56,8 @@ pub(super) fn build_project_overview_lines<'a>(
         overview_heading("Description", theme),
         Line::from(description),
         Line::from(""),
-        overview_heading("Workspace context", theme),
+        overview_heading("Recent sessions", theme),
     ];
-
-    if let Some(state) = project_activity {
-        lines.push(Line::from(format!(
-            "participants: {}  vibe: {}",
-            state.participant_count,
-            state.vibe.as_str()
-        )));
-        lines.extend(format_intent_lines(state, 0, theme));
-        lines.extend(format_recent_activity_lines(state));
-    } else {
-        lines.push(Line::from("participants: 0  vibe: stable"));
-        lines.push(Line::from("active missions: none"));
-        lines.push(Line::from("recent activity: none"));
-    }
-
-    lines.push(Line::from(""));
-    lines.push(overview_heading("Recent sessions", theme));
     lines.extend(format_recent_session_lines(recent_sessions, theme));
 
     lines
@@ -167,11 +93,9 @@ pub(super) fn draw_project_overview(frame: &mut Frame, area: Rect, app: &App, th
         return;
     };
 
-    let project_activity = app.activity_panel_state_for_workdir(&project.path);
     let recent_sessions = recent_project_session_summaries(app, project, 3);
     let lines = build_project_overview_lines(
         project,
-        project_activity.as_ref(),
         &recent_sessions,
         theme,
         &app.tui_settings.datetime_format,

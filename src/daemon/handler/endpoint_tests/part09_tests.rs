@@ -582,6 +582,14 @@ async fn intelligence_get_context_light_and_full() {
         .unwrap();
     assert!(!is_err(&light), "{}", text(&light));
     assert!(raw_text(&light).contains("\"scope\": \"light\""));
+    assert!(
+        !raw_text(&light).contains("\"sync_messages\""),
+        "sync board is retired from light context"
+    );
+    assert!(
+        !raw_text(&light).contains("sync message(s)"),
+        "summary must not count sync messages"
+    );
 
     let full = handler
         .intelligence_get_context(
@@ -596,6 +604,14 @@ async fn intelligence_get_context_light_and_full() {
         .unwrap();
     assert!(!is_err(&full), "{}", text(&full));
     assert!(raw_text(&full).contains("\"scope\": \"full\""));
+    assert!(
+        !raw_text(&full).contains("\"sync_messages\""),
+        "sync board is retired from full context"
+    );
+    assert!(
+        !raw_text(&full).contains("sync message(s)"),
+        "summary must not count sync messages"
+    );
 }
 
 // ── intelligence_list_projects / intelligence_link_projects ────

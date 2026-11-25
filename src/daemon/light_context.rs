@@ -10,13 +10,7 @@ const PROMPT_INJECTION_MAX_CHARS: usize = 1_000;
 const LIGHT_HINT: &str =
     "light scope returns excerpts; read a node in full with intelligence_search";
 
-const LIST_KEYS: [&str; 5] = [
-    "sessions",
-    "knowledge",
-    "project_knowledge",
-    "sync_messages",
-    "activity",
-];
+const LIST_KEYS: [&str; 4] = ["sessions", "knowledge", "project_knowledge", "activity"];
 
 fn truncate_chars(s: &str, max: usize) -> String {
     match s.char_indices().nth(max) {
@@ -149,10 +143,8 @@ pub(crate) fn shrink_light_context(out: &mut Value) {
         increment_truncated(obj, key, removed);
     }
 
-    for key in ["sync_messages", "activity"] {
-        if let Some(arr) = obj.get_mut(key).and_then(Value::as_array_mut) {
-            shrink_event_list(arr);
-        }
+    if let Some(arr) = obj.get_mut("activity").and_then(Value::as_array_mut) {
+        shrink_event_list(arr);
     }
 
     obj.insert("hint".to_string(), Value::String(LIGHT_HINT.to_string()));
@@ -216,9 +208,9 @@ mod tests {
     }
 
     #[test]
-    fn light_context_truncates_sync_payload_and_keeps_null() {
+    fn light_context_truncates_activity_payload_and_keeps_null() {
         let mut out = json!({
-            "sync_messages": [
+            "activity": [
                 { "message": "ok", "payload": "p".repeat(5_000) },
                 { "message": "ok", "payload": null }
             ]
@@ -226,10 +218,10 @@ mod tests {
 
         shrink_light_context(&mut out);
 
-        let payload0 = out["sync_messages"][0]["payload"].as_str().unwrap();
+        let payload0 = out["activity"][0]["payload"].as_str().unwrap();
         assert_eq!(payload0.chars().count(), 301);
         assert!(payload0.ends_with('…'));
-        assert!(out["sync_messages"][1]["payload"].is_null());
+        assert!(out["activity"][1]["payload"].is_null());
     }
 
     #[test]
@@ -239,7 +231,6 @@ mod tests {
             "sessions": [make_node(1, &huge, "b")],
             "knowledge": [make_node(2, &huge, "b")],
             "project_knowledge": [make_node(3, &huge, "b")],
-            "sync_messages": [{ "message": huge, "payload": "p" }],
             "activity": [{ "message": huge, "payload": "p" }],
             "traversal": { "nodes": vec!["t".repeat(1_000); 20] },
             "seed_identity": { "prompt_injection": "s".repeat(15_000) }
@@ -248,13 +239,7 @@ mod tests {
         shrink_light_context(&mut out);
 
         assert!(pretty_chars(&out) <= 12_000);
-        for key in [
-            "sessions",
-            "knowledge",
-            "project_knowledge",
-            "sync_messages",
-            "activity",
-        ] {
+        for key in ["sessions", "knowledge", "project_knowledge", "activity"] {
             assert_eq!(out[key].as_array().unwrap().len(), 0);
             assert_eq!(out["truncated"][key], 1);
         }
@@ -266,7 +251,7 @@ mod tests {
             "scope": "light",
             "sessions": [{ "id": "s1", "title": "Session 1", "body": "short body" }],
             "knowledge": [{ "id": "k1", "title": "Fact 1", "body": "short fact" }],
-            "sync_messages": [{ "message": "hello", "payload": "world" }]
+            "activity": [{ "message": "hello", "payload": "world" }]
         });
 
         shrink_light_context(&mut out);
@@ -279,7 +264,7 @@ mod tests {
         assert_eq!(out["sessions"][0]["body_excerpt"], "short body");
         assert!(out["sessions"][0].get("body").is_none());
         assert_eq!(out["knowledge"][0]["body_excerpt"], "short fact");
-        assert_eq!(out["sync_messages"][0]["message"], "hello");
-        assert_eq!(out["sync_messages"][0]["payload"], "world");
+        assert_eq!(out["activity"][0]["message"], "hello");
+        assert_eq!(out["activity"][0]["payload"], "world");
     }
 }

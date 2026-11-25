@@ -1,14 +1,12 @@
-use chrono::{Local, TimeZone};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
 
-use crate::domain::sync::{MessageKind, MissionImpact, SyncMessage, WorkspaceStatus};
-use crate::tui::app::types::{App, PanelFace, SyncPanelState};
+use crate::tui::app::types::{App, PanelFace};
 use crate::tui::ui::theme::Theme;
-use crate::tui::ui::{last_two_segments, truncate_str, ERROR_COLOR, STATUS_OK};
+use crate::tui::ui::{truncate_str, ERROR_COLOR, STATUS_OK};
 
 /// CT1 multi-face right panel: one bordered panel, three faces. The title
 /// names the face; when the panel switched on its own the badge names the
@@ -49,15 +47,8 @@ pub(crate) fn draw_panel_face(frame: &mut Frame, area: Rect, app: &mut App, them
     match face {
         PanelFace::Activity => {
             app.last_activity_rect = Some(inner);
-            if let Some(state) = app.activity_panel_state() {
-                draw_sync_section(
-                    frame,
-                    inner,
-                    &state,
-                    app.sync_scroll_offset,
-                    &app.tui_settings.datetime_format,
-                    theme,
-                );
+            if app.activity_panel_state().is_some() {
+                draw_graph_face(frame, inner, app, theme);
             } else {
                 draw_panel_placeholder(frame, inner, "no activity", theme);
             }
@@ -86,17 +77,10 @@ pub(super) fn draw_panel_placeholder(frame: &mut Frame, area: Rect, text: &str, 
 fn draw_knowledge_face(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     let graph_rows = knowledge_graph_height(app, area.height);
     if area.height < 8 || graph_rows == 0 {
-        // Too short to split honestly: activity keeps the whole panel.
+        // Too short to split honestly: the graph cards keep the whole panel.
         app.last_activity_rect = Some(area);
-        if let Some(state) = app.selected_activity_state() {
-            draw_sync_section(
-                frame,
-                area,
-                &state,
-                app.sync_scroll_offset,
-                &app.tui_settings.datetime_format,
-                theme,
-            );
+        if app.selected_activity_state().is_some() {
+            draw_graph_face(frame, area, app, theme);
         } else {
             draw_panel_placeholder(frame, area, "no activity", theme);
         }
@@ -111,15 +95,8 @@ fn draw_knowledge_face(frame: &mut Frame, area: Rect, app: &mut App, theme: &The
     .areas(area);
 
     app.last_activity_rect = Some(activity_area);
-    if let Some(state) = app.selected_activity_state() {
-        draw_sync_section(
-            frame,
-            activity_area,
-            &state,
-            app.sync_scroll_offset,
-            &app.tui_settings.datetime_format,
-            theme,
-        );
+    if app.selected_activity_state().is_some() {
+        draw_graph_face(frame, activity_area, app, theme);
     } else {
         draw_panel_placeholder(frame, activity_area, "no activity", theme);
     }
@@ -254,246 +231,10 @@ pub(super) fn graph_status_color(status: crate::domain::graphs::GraphStatus) -> 
     }
 }
 
-fn draw_sync_section(
-    frame: &mut Frame,
-    area: Rect,
-    state: &SyncPanelState,
-    scroll_offset: u16,
-    datetime_format: &str,
-    theme: &Theme,
-) {
-    let w = area.width as usize;
-    let vibe_fg = vibe_color(state.vibe);
-    let mut lines: Vec<Line> = vec![
-        Line::from(vec![
-            Span::styled("vibe ", Style::default().fg(theme.dim_text)),
-            Span::styled(
-                state.vibe.as_str(),
-                Style::default().fg(vibe_fg).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-            Span::styled("participants ", Style::default().fg(theme.dim_text)),
-            Span::styled(
-                state.participant_count.to_string(),
-                Style::default().fg(Color::White),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("workdir ", Style::default().fg(theme.dim_text)),
-            Span::styled(
-                last_two_segments(&state.workdir),
-                Style::default().fg(Color::White),
-            ),
-        ]),
-        Line::raw(""),
-        Line::from(Span::styled(
-            "missions",
-            Style::default()
-                .fg(theme.dim_text)
-                .add_modifier(Modifier::BOLD),
-        )),
-    ];
-
-    push_sync_intent_lines(&mut lines, state, w, theme);
-
-    lines.push(Line::raw(""));
-    lines.push(Line::from(Span::styled(
-        "messages",
-        Style::default()
-            .fg(theme.dim_text)
-            .add_modifier(Modifier::BOLD),
-    )));
-
-    push_sync_message_lines(&mut lines, state, w, theme, datetime_format);
-
-    frame.render_widget(
-        Paragraph::new(lines)
-            .style(Style::default())
-            .scroll((scroll_offset, 0)),
-        area,
-    );
-}
-
-/// Append one card per active intent, or a `none` placeholder when there are none.
-fn push_sync_intent_lines<'a>(
-    lines: &mut Vec<Line<'a>>,
-    state: &'a SyncPanelState,
-    w: usize,
-    theme: &Theme,
-) {
-    if state.active_intents.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  none",
-            Style::default().fg(theme.dim_text),
-        )));
-        return;
-    }
-    for intent in &state.active_intents {
-        // Card header: agent · impact · status
-        lines.push(Line::from(vec![
-            Span::styled(
-                "┌ ",
-                Style::default().fg(intent_color(intent.impact, theme)),
-            ),
-            Span::styled(
-                &intent.agent_name,
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!(" [{}]", intent.impact.as_str()),
-                Style::default().fg(intent_color(intent.impact, theme)),
-            ),
-        ]));
-        // Mission text — wrap manually
-        for chunk in wrap_text(&intent.mission, w.saturating_sub(2)) {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    "│ ",
-                    Style::default().fg(intent_color(intent.impact, theme)),
-                ),
-                Span::styled(chunk, Style::default().fg(Color::White)),
-            ]));
-        }
-        // Description — wrap
-        if !intent.description.is_empty() {
-            for chunk in wrap_text(&intent.description, w.saturating_sub(2)) {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        "│ ",
-                        Style::default().fg(intent_color(intent.impact, theme)),
-                    ),
-                    Span::styled(chunk, Style::default().fg(theme.dim_text)),
-                ]));
-            }
-        }
-        lines.push(Line::from(Span::styled(
-            "└─",
-            Style::default().fg(intent_color(intent.impact, theme)),
-        )));
-    }
-}
-
-/// Append one card per recent message, or a placeholder when both sections are empty.
-fn push_sync_message_lines<'a>(
-    lines: &mut Vec<Line<'a>>,
-    state: &'a SyncPanelState,
-    w: usize,
-    theme: &Theme,
-    datetime_format: &str,
-) {
-    let recent_msgs = recent_messages_for_display(&state.recent_messages);
-    if state.active_intents.is_empty() && recent_msgs.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  nothing to show",
-            Style::default().fg(theme.dim_text),
-        )));
-    }
-    for message in recent_msgs {
-        let icon = match message.kind {
-            MessageKind::Intent => "◉",
-            MessageKind::Status => "≈",
-            MessageKind::Query => "?",
-            MessageKind::Answer => "↳",
-            MessageKind::Info => "·",
-        };
-        let color = kind_color(message.kind, theme);
-        // Card header: icon · session_name · client
-        lines.push(Line::from(vec![
-            Span::styled(format!("┌{icon} "), Style::default().fg(color)),
-            Span::styled(
-                &message.agent_name,
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("│ ", Style::default().fg(color)),
-            Span::styled(
-                format_timestamp(message.created_at, datetime_format),
-                Style::default().fg(theme.dim_text),
-            ),
-        ]));
-        // Message body — wrap
-        for chunk in wrap_text(&message.message, w.saturating_sub(2)) {
-            lines.push(Line::from(vec![
-                Span::styled("│ ", Style::default().fg(color)),
-                Span::styled(chunk, Style::default().fg(Color::White)),
-            ]));
-        }
-        lines.push(Line::from(Span::styled("└─", Style::default().fg(color))));
-    }
-}
-
-/// Split `text` into chunks of at most `max_width` chars, breaking on whitespace.
-fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
-    if max_width == 0 {
-        return vec![text.to_string()];
-    }
-    let mut result = Vec::new();
-    let mut current = String::new();
-    for word in text.split_whitespace() {
-        if current.is_empty() {
-            current.push_str(word);
-        } else if current.chars().count() + 1 + word.chars().count() <= max_width {
-            current.push(' ');
-            current.push_str(word);
-        } else {
-            result.push(current.clone());
-            current = word.to_string();
-        }
-    }
-    if !current.is_empty() {
-        result.push(current);
-    }
-    if result.is_empty() {
-        result.push(String::new());
-    }
-    result
-}
-
-fn recent_messages_for_display(messages: &[SyncMessage]) -> Vec<&SyncMessage> {
-    messages.iter().rev().collect()
-}
-
-fn vibe_color(status: WorkspaceStatus) -> Color {
-    match status {
-        WorkspaceStatus::Stable => STATUS_OK,
-        WorkspaceStatus::Unstable => ERROR_COLOR,
-        WorkspaceStatus::Testing => Color::Yellow,
-    }
-}
-
-fn intent_color(impact: MissionImpact, theme: &Theme) -> Color {
-    match impact {
-        MissionImpact::Low => theme.header_color,
-        MissionImpact::High => Color::Yellow,
-        MissionImpact::Breaking => ERROR_COLOR,
-    }
-}
-
-fn kind_color(kind: MessageKind, theme: &Theme) -> Color {
-    match kind {
-        MessageKind::Intent => theme.header_color,
-        MessageKind::Status => Color::Yellow,
-        MessageKind::Query => Color::Cyan,
-        MessageKind::Answer => STATUS_OK,
-        MessageKind::Info => theme.dim_text,
-    }
-}
-
-fn format_timestamp(timestamp: i64, fmt: &str) -> String {
-    match Local.timestamp_opt(timestamp, 0).single() {
-        Some(datetime) => datetime.format(fmt).to_string(),
-        None => timestamp.to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::Database;
-    use crate::domain::graphs::GraphSpecStatus;
     use crate::tui::app::types::App;
 
     fn test_db() -> std::sync::Arc<Database> {
@@ -541,190 +282,5 @@ mod tests {
         .expect("create app");
         // Empty: header + placeholder only.
         assert_eq!(knowledge_list_min_height(&app), 2);
-    }
-
-    #[test]
-    fn format_timestamp_returns_non_empty_text() {
-        assert!(!format_timestamp(0, "%Y-%m-%d %H:%M").is_empty());
-    }
-
-    /// CM52: the message timestamp uses `tui.datetime_format`.
-    #[test]
-    fn format_timestamp_reads_the_setting() {
-        let default = format_timestamp(0, "%Y-%m-%d %H:%M");
-        let custom = format_timestamp(0, "%d/%m/%Y");
-        assert_ne!(default, custom);
-        assert!(custom.contains('/'));
-        assert!(!custom.contains(':'));
-    }
-
-    fn render_to_text(
-        width: u16,
-        height: u16,
-        draw: impl FnOnce(&mut ratatui::Frame, Rect),
-    ) -> String {
-        let backend = ratatui::backend::TestBackend::new(width, height);
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| {
-                let area = frame.area();
-                draw(frame, area);
-            })
-            .unwrap();
-
-        let buffer = terminal.backend().buffer().clone();
-        let mut text = String::new();
-        for y in 0..buffer.area.height {
-            for x in 0..buffer.area.width {
-                text.push_str(buffer[(x, y)].symbol());
-            }
-            text.push('\n');
-        }
-        text
-    }
-
-    fn test_spec(name: &str, code: Option<&str>) -> crate::domain::graphs::GraphSpec {
-        crate::domain::graphs::GraphSpec {
-            intent: None,
-            id: format!("s-{name}"),
-            graph_id: Some("g1".to_string()),
-            name: name.to_string(),
-            description: None,
-            position: 0,
-            parallelizable: false,
-            status: GraphSpecStatus::Pending,
-            started_at: None,
-            completed_at: None,
-            spec_start_head: None,
-            spec_start_dirty: None,
-            spec_end_dirty: None,
-            spec_end_dirty_paths: None,
-            spec_committed_head: None,
-            workdir: None,
-            completed_via: None,
-            completed_via_reason: None,
-            completed_via_at: None,
-            spec_code: code.map(str::to_string),
-            spec_scope: None,
-            spec_type: None,
-            review_state: crate::domain::graphs::SpecReviewState::Approved,
-            review_tier: None,
-            review_findings: None,
-            created_by_session: None,
-        }
-    }
-
-    fn test_app(db: std::sync::Arc<Database>) -> App {
-        let data_dir = tempfile::tempdir().expect("create data dir");
-        let dir_path = data_dir.path().to_path_buf();
-        crate::test_support::hold(data_dir);
-        App::new(
-            db,
-            &dir_path,
-            &crate::domain::canopy_config::CanopyConfig::default(),
-        )
-        .expect("create app")
-    }
-
-    /// SPECCODE: engine-seeded Activity lines show the code before the spec
-    /// name; a codeless spec shows its name alone with no placeholder.
-    #[test]
-    fn activity_face_shows_spec_code_before_name() {
-        use crate::domain::activity;
-
-        let db = test_db();
-        let app = test_app(std::sync::Arc::clone(&db));
-        let workdir = "/tmp/spec-code-activity";
-
-        let coded = test_spec("Alpha", Some("FIX-7"));
-        let codeless = test_spec("Beta", None);
-        for (id, message) in [
-            (
-                "s-Alpha",
-                format!("Spec {} started.", activity::spec_label(&coded)),
-            ),
-            (
-                "s-Beta",
-                format!("Spec {} completed.", activity::spec_label(&codeless)),
-            ),
-        ] {
-            activity::record(
-                &db,
-                activity::GraphEvent {
-                    graph_id: "g1",
-                    graph_name: "Grove",
-                    workdir,
-                    spec_id: Some(id),
-                    node_id: None,
-                    run_id: None,
-                    kind: activity::GraphEventKind::SpecStarted,
-                    message,
-                    payload: None,
-                },
-            );
-        }
-
-        let state = app
-            .activity_panel_state_for_workdir(workdir)
-            .expect("activity state");
-        let theme = Theme::classic();
-        let text = render_to_text(100, 30, |frame, area| {
-            draw_sync_section(frame, area, &state, 0, "%Y-%m-%d %H:%M", &theme);
-        });
-
-        let code_pos = text.find("[FIX-7]").expect("coded line in dump:\n{text}");
-        let name_pos = text.find("'Alpha'").expect("coded name in dump:\n{text}");
-        assert!(
-            code_pos < name_pos,
-            "code must come before the name:\n{text}"
-        );
-        assert!(
-            text.contains("Spec 'Beta' completed."),
-            "codeless spec shows its bare name:\n{text}"
-        );
-        let beta_line = text
-            .lines()
-            .find(|line| line.contains("'Beta'"))
-            .expect("codeless line in dump");
-        assert!(
-            !beta_line.contains('['),
-            "no placeholder for a codeless spec: {beta_line}"
-        );
-    }
-
-    #[test]
-    fn recent_messages_for_display_prioritizes_newest_entries() {
-        let messages = vec![
-            SyncMessage {
-                id: 1,
-                workdir: "/tmp/project".into(),
-                agent_id: "agent-a".into(),
-                agent_name: "oak-fern".into(),
-                kind: MessageKind::Info,
-                message: "older".into(),
-                payload: None,
-                created_at: 1,
-            },
-            SyncMessage {
-                id: 2,
-                workdir: "/tmp/project".into(),
-                agent_id: "agent-b".into(),
-                agent_name: "moss-hawk".into(),
-                kind: MessageKind::Info,
-                message: "newer".into(),
-                payload: None,
-                created_at: 2,
-            },
-        ];
-
-        let ordered = recent_messages_for_display(&messages);
-
-        assert_eq!(
-            ordered
-                .into_iter()
-                .map(|message| message.id)
-                .collect::<Vec<_>>(),
-            vec![2, 1]
-        );
     }
 }

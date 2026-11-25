@@ -64,10 +64,6 @@ impl TaskTriggerHandler {
         let (knowledge, project_knowledge, traversal) =
             (knowledge.generic, knowledge.project, knowledge.traversal);
 
-        let sync_messages = self
-            .db
-            .list_recent_sync_messages(sync_limit)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         // Bitácora: recent activity for the resolved project (or across all
         // workdirs when no project resolved), readable without the TUI.
         let activity_workdir: Option<String> = effective_project_hash
@@ -128,15 +124,13 @@ impl TaskTriggerHandler {
         let mut out = serde_json::json!({
             "scope": scope,
             "summary": format!(
-                "{}: {} session node(s), {} knowledge node(s), {} sync message(s).",
+                "{}: {} session node(s), {} knowledge node(s).",
                 summary_prefix,
                 sessions.len(),
                 knowledge.len(),
-                sync_messages.len()
             ),
             "sessions": sessions.iter().map(intelligence_node_json).collect::<Vec<_>>(),
             "knowledge": knowledge.iter().map(intelligence_node_json).collect::<Vec<_>>(),
-            "sync_messages": sync_messages.iter().map(sync_message_json).collect::<Vec<_>>(),
             "activity": activity_entries.iter().map(activity_log_entry_json).collect::<Vec<_>>(),
             "cross_project_dependencies": cross_project_dependencies,
         });
@@ -678,18 +672,5 @@ pub(crate) fn activity_log_entry_json(
         "message": entry.message,
         "payload": entry.payload,
         "created_at": entry.created_at,
-    })
-}
-
-pub(crate) fn sync_message_json(message: &crate::domain::sync::SyncMessage) -> serde_json::Value {
-    serde_json::json!({
-        "id": message.id,
-        "workdir": message.workdir,
-        "agent_id": message.agent_id,
-        "agent_name": message.agent_name,
-        "kind": message.kind.as_str(),
-        "message": message.message,
-        "payload": message.payload,
-        "created_at": message.created_at,
     })
 }

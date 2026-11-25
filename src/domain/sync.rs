@@ -70,16 +70,6 @@ pub enum WorkspaceStatus {
     Testing,
 }
 
-impl WorkspaceStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Stable => "stable",
-            Self::Unstable => "unstable",
-            Self::Testing => "testing",
-        }
-    }
-}
-
 /// A message in the per-workdir sync channel.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncMessage {
@@ -430,13 +420,6 @@ mod tests {
         assert_eq!(MissionImpact::Low.as_str(), "low");
         assert_eq!(MissionImpact::High.as_str(), "high");
         assert_eq!(MissionImpact::Breaking.as_str(), "breaking");
-    }
-
-    #[test]
-    fn workspace_status_as_str() {
-        assert_eq!(WorkspaceStatus::Stable.as_str(), "stable");
-        assert_eq!(WorkspaceStatus::Unstable.as_str(), "unstable");
-        assert_eq!(WorkspaceStatus::Testing.as_str(), "testing");
     }
 
     #[test]

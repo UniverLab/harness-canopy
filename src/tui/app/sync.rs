@@ -16,7 +16,6 @@ const RECENT_MESSAGE_LIMIT: usize = 18;
 const MAX_RECENT_MESSAGE_LIMIT: usize = 200;
 const MESSAGE_WINDOW_LINES_PER_STEP: u16 = 6;
 const MESSAGE_WINDOW_ITEMS_PER_STEP: usize = 8;
-const CHATTER_LIMIT: usize = 8;
 
 impl App {
     pub(crate) fn activity_panel_available(&self) -> bool {
@@ -204,53 +203,13 @@ impl App {
     }
 
     pub(crate) fn activity_panel_state_for_workdir(&self, workdir: &str) -> Option<SyncPanelState> {
-        let recent_limit = self.message_window_limit_for_scroll();
-        let mut recent_messages = self
-            .db
-            .list_activity_log_entries(workdir, recent_limit)
-            .map(|entries| {
-                entries
-                    .into_iter()
-                    .map(crate::domain::sync::SyncMessage::from)
-                    .collect::<Vec<_>>()
-            })
-            .ok()?;
-
-        for message in &mut recent_messages {
-            if let Ok(Some(session_name)) =
-                self.db.resolve_sync_actor_name(workdir, &message.agent_id)
-            {
-                message.agent_name = session_name;
-            }
+        // The sync board is gone: the panel keeps its place for the graph
+        // cards and is available for every selected workdir.
+        if workdir.is_empty() {
+            return None;
         }
-
-        let active_agent_ids = self
-            .db
-            .list_active_sync_agent_ids(workdir)
-            .unwrap_or_default()
-            .into_iter()
-            .collect::<std::collections::HashSet<_>>();
-        if recent_messages.is_empty() {
-            if self.sidebar_layer != SidebarLayer::Knowledge {
-                return None;
-            }
-            return Some(SyncPanelState {
-                workdir: workdir.to_owned(),
-                participant_count: active_agent_ids.len(),
-                vibe: crate::domain::sync::WorkspaceStatus::Stable,
-                active_intents: Vec::new(),
-                recent_messages,
-            });
-        }
-        let summary = summarize_sync_context(&recent_messages, &active_agent_ids, CHATTER_LIMIT);
-        let participant_count = active_agent_ids.len().max(1);
-
         Some(SyncPanelState {
             workdir: workdir.to_owned(),
-            participant_count,
-            vibe: summary.vibe,
-            active_intents: summary.active_intents,
-            recent_messages,
         })
     }
 
@@ -304,19 +263,8 @@ mod tests {
     }
 
     #[test]
-    fn activity_panel_auto_shows_for_single_agent_when_messages_exist() {
+    fn activity_panel_auto_shows_for_selected_workdir() {
         let db = test_db();
-        // The panel renders the bitácora, not `sync_messages`.
-        db.insert_activity_log_entry(
-            "/tmp/project",
-            "sync",
-            Some("agent-a"),
-            "info",
-            "first activity",
-            None,
-        )
-        .unwrap();
-
         let data_dir = tempdir().expect("create data dir");
         let mut app = App::new(
             Arc::clone(&db),
@@ -332,44 +280,6 @@ mod tests {
             .expect("activity panel should render");
 
         assert_eq!(state.workdir, "/tmp/project");
-        assert_eq!(state.participant_count, 1);
-        assert_eq!(state.recent_messages.len(), 1);
-    }
-
-    #[test]
-    fn activity_panel_reads_from_activity_log() {
-        let db = test_db();
-        // Seed ONLY the bitácora — nothing in sync_messages.
-        db.insert_activity_log_entry(
-            "/tmp/project",
-            "graph",
-            Some("graph-7"),
-            "info",
-            "bitacora-only event",
-            None,
-        )
-        .unwrap();
-
-        let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(
-            Arc::clone(&db),
-            data_dir.path(),
-            &crate::domain::canopy_config::CanopyConfig::default(),
-        )
-        .expect("create app");
-        app.agents = vec![AgentEntry::Agent(sample_agent("bg-1", "/tmp/project"))];
-        app.selected = 0;
-
-        let state = app
-            .activity_panel_state()
-            .expect("activity panel should render from the bitácora");
-        assert_eq!(state.workdir, "/tmp/project");
-        assert_eq!(state.recent_messages.len(), 1);
-        assert_eq!(state.recent_messages[0].message, "bitacora-only event");
-        // Panel and direct read return the same entries.
-        let direct = db.list_activity_log_entries("/tmp/project", 10).unwrap();
-        assert_eq!(direct.len(), 1);
-        assert_eq!(direct[0].message, state.recent_messages[0].message);
     }
 
     #[test]
@@ -418,25 +328,8 @@ mod tests {
     }
 
     #[test]
-    fn activity_panel_hides_intents_for_inactive_agents() {
+    fn activity_panel_needs_no_messages_to_show() {
         let db = test_db();
-        let intent_payload = serde_json::to_string(&crate::domain::sync::IntentPayload {
-            mission: "Old mission".to_string(),
-            impact: crate::domain::sync::MissionImpact::High,
-            description: "should not show when inactive".to_string(),
-        })
-        .expect("serialize intent payload");
-        // The panel renders the bitácora, not `sync_messages`.
-        db.insert_activity_log_entry(
-            "/tmp/project",
-            "sync",
-            Some("agent-a"),
-            "intent",
-            "intent",
-            Some(intent_payload.as_str()),
-        )
-        .expect("insert intent");
-
         let data_dir = tempdir().expect("create data dir");
         let mut app = App::new(
             Arc::clone(&db),
@@ -449,27 +342,14 @@ mod tests {
 
         let state = app
             .activity_panel_state()
-            .expect("activity panel should render");
+            .expect("activity panel should render without messages");
 
-        assert!(state.active_intents.is_empty());
+        assert_eq!(state.workdir, "/tmp/project");
     }
 
     #[test]
-    fn activity_panel_expands_message_window_with_scroll() {
+    fn message_window_grows_with_scroll_and_caps() {
         let db = test_db();
-        for index in 0..(RECENT_MESSAGE_LIMIT + 4) {
-            // The panel renders the bitácora, not `sync_messages`.
-            db.insert_activity_log_entry(
-                "/tmp/project",
-                "sync",
-                Some(&format!("agent-{index}")),
-                "info",
-                &format!("message-{index}"),
-                None,
-            )
-            .expect("insert sync message");
-        }
-
         let data_dir = tempdir().expect("create data dir");
         let mut app = App::new(
             Arc::clone(&db),
@@ -477,19 +357,18 @@ mod tests {
             &crate::domain::canopy_config::CanopyConfig::default(),
         )
         .expect("create app");
-        app.agents = vec![AgentEntry::Agent(sample_agent("bg-1", "/tmp/project"))];
-        app.selected = 0;
 
-        let compact = app
-            .activity_panel_state()
-            .expect("activity panel should render");
-        assert_eq!(compact.recent_messages.len(), RECENT_MESSAGE_LIMIT);
-
+        assert_eq!(app.message_window_limit_for_scroll(), RECENT_MESSAGE_LIMIT);
         app.sync_scroll_offset = MESSAGE_WINDOW_LINES_PER_STEP;
-        let expanded = app
-            .activity_panel_state()
-            .expect("activity panel should render");
-        assert!(expanded.recent_messages.len() > RECENT_MESSAGE_LIMIT);
+        assert_eq!(
+            app.message_window_limit_for_scroll(),
+            RECENT_MESSAGE_LIMIT + MESSAGE_WINDOW_ITEMS_PER_STEP
+        );
+        app.sync_scroll_offset = u16::MAX;
+        assert_eq!(
+            app.message_window_limit_for_scroll(),
+            MAX_RECENT_MESSAGE_LIMIT
+        );
     }
 
     #[test]
@@ -528,8 +407,6 @@ mod tests {
             .expect("projects mode should keep activity panel visible");
 
         assert_eq!(state.workdir, "/tmp/project");
-        assert!(state.recent_messages.is_empty());
-        assert_eq!(state.participant_count, 0);
     }
 
     #[test]

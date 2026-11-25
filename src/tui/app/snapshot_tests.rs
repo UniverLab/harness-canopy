@@ -28,6 +28,26 @@ fn test_app(db: &Arc<Database>) -> (App, tempfile::TempDir) {
     (app, data_dir)
 }
 
+/// The retired sync board leaves the panel in place for the graph cards:
+/// a selected workdir always has panel state.
+#[test]
+fn activity_panel_available_for_selected_workdir() {
+    let db = test_db();
+    let (mut app, _dir) = test_app(&db);
+    let mut agent = make_agent("bg-panel");
+    agent.working_dir = Some("/tmp/snap-panel".to_string());
+    app.agents = vec![AgentEntry::Agent(agent)];
+    app.selected = 0;
+
+    let state = app
+        .activity_panel_state()
+        .expect("panel available for selected workdir");
+    assert_eq!(state.workdir, "/tmp/snap-panel");
+    assert!(app
+        .activity_panel_state_for_workdir("/tmp/snap-panel")
+        .is_some());
+}
+
 fn make_agent(id: &str) -> Agent {
     Agent {
         id: id.to_string(),

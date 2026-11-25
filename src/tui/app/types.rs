@@ -10,7 +10,6 @@ use crate::db::Database;
 use crate::domain::graphs::{Graph, GraphDetails, GraphNodeRun, GraphSpec};
 use crate::domain::models::{Agent, CorruptAgent, RunLog};
 use crate::domain::project::Project;
-use crate::domain::sync::{ActiveIntent, SyncMessage, WorkspaceStatus};
 use crate::rag::vector_store::SearchResult;
 use crate::tui::agent::InteractiveAgent;
 use crate::tui::app::dialog::{
@@ -84,10 +83,6 @@ pub(crate) enum ContextTransferSource {
 #[derive(Clone)]
 pub(crate) struct SyncPanelState {
     pub workdir: String,
-    pub participant_count: usize,
-    pub vibe: WorkspaceStatus,
-    pub active_intents: Vec<ActiveIntent>,
-    pub recent_messages: Vec<SyncMessage>,
 }
 
 #[derive(Clone)]
