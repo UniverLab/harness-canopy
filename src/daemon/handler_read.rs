@@ -24,6 +24,26 @@ impl TaskTriggerHandler {
         &self,
         params: GraphGetParams,
     ) -> Result<CallToolResult, McpError> {
+        let compact = params.compact == Some(true);
+        let node_id = params
+            .node_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let ensemble = params
+            .ensemble
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if compact && (node_id.is_some() || ensemble.is_some()) {
+            return Ok(error_result(
+                "compact cannot be combined with node_id or ensemble",
+            ));
+        }
+        if node_id.is_some() && ensemble.is_some() {
+            return Ok(error_result("pass node_id or ensemble, not both"));
+        }
+
         let graph_id = match resolve_prefix_or_error(
             &self.db,
             params.graph_id.trim(),
@@ -39,11 +59,20 @@ impl TaskTriggerHandler {
             Err(e) => return Err(internal_error(e.to_string())),
         };
 
+        let full = graph_details_json(&self.db, &lp).map_err(internal_error)?;
+        let out = if node_id.is_some() || ensemble.is_some() {
+            match crate::daemon::graph_compact::select_graph_item(&full, node_id, ensemble) {
+                Ok(value) => value,
+                Err(msg) => return Ok(error_result(&msg)),
+            }
+        } else if compact {
+            crate::daemon::graph_compact::compact_graph_json(&full)
+        } else {
+            full
+        };
+
         Ok(CallToolResult::success(vec![ContentBlock::text(
-            serde_json::to_string_pretty(
-                &graph_details_json(&self.db, &lp).map_err(internal_error)?,
-            )
-            .unwrap_or_default(),
+            serde_json::to_string_pretty(&out).unwrap_or_default(),
         )]))
     }
 

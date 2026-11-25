@@ -495,6 +495,7 @@ async fn idea_placeholder_spec_is_absent_from_spec_listings() {
         "get",
         params_id(GraphGetParams {
             graph_id: lp.id.clone(),
+            ..Default::default()
         }),
     )
     .await

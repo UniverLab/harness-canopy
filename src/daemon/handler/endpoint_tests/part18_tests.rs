@@ -582,6 +582,7 @@ async fn graph_get_reports_the_newest_sandbox_id_and_status() {
         "get",
         params_id(GraphGetParams {
             graph_id: graph.id.clone(),
+            ..Default::default()
         }),
     )
     .await
@@ -599,6 +600,7 @@ async fn graph_get_reports_the_newest_sandbox_id_and_status() {
         "get",
         params_id(GraphGetParams {
             graph_id: bare.id.clone(),
+            ..Default::default()
         }),
     )
     .await

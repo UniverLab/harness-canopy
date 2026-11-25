@@ -290,3 +290,100 @@ async fn adds_and_entry_wiring_stay_refused_while_running() {
     );
     let _ = lp;
 }
+
+/// Spec: `graph get` without the new parameters returns byte-identical JSON to
+/// `graph_details_json` (the default output must not change).
+#[tokio::test]
+async fn graph_get_default_output_is_byte_identical() {
+    let (dir, db, handler) = endpoint_test_handler();
+    let lp = insert_test_graph(&db, dir.path());
+
+    let got = call_graph_action(
+        &handler,
+        "graph",
+        "get",
+        params_id(GraphGetParams {
+            graph_id: lp.id.clone(),
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!is_err(&got), "{}", text(&got));
+
+    let details = db.get_graph_details(&lp.id).unwrap().unwrap();
+    let expected = serde_json::to_string_pretty(
+        &crate::daemon::handler_read::graph_details_json(&db, &details).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(raw_text(&got), expected);
+}
+
+/// Spec: compact mode and selector errors/dispatch.
+#[tokio::test]
+async fn graph_get_compact_and_selector_errors() {
+    let (dir, db, handler) = endpoint_test_handler();
+    let lp = insert_test_graph(&db, dir.path());
+
+    // compact + node_id -> error
+    let err = call_graph_action(
+        &handler,
+        "graph",
+        "get",
+        params_id(GraphGetParams {
+            graph_id: lp.id.clone(),
+            compact: Some(true),
+            node_id: Some("n1".to_string()),
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(is_err(&err), "{}", text(&err));
+    assert!(
+        raw_text(&err).contains("compact cannot be combined with node_id or ensemble"),
+        "{}",
+        raw_text(&err)
+    );
+
+    // node_id + ensemble -> error
+    let err = call_graph_action(
+        &handler,
+        "graph",
+        "get",
+        params_id(GraphGetParams {
+            graph_id: lp.id.clone(),
+            node_id: Some("n1".to_string()),
+            ensemble: Some("e1".to_string()),
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(is_err(&err), "{}", text(&err));
+    assert!(
+        raw_text(&err).contains("pass node_id or ensemble, not both"),
+        "{}",
+        raw_text(&err)
+    );
+
+    // compact returns summary shape
+    let compact = call_graph_action(
+        &handler,
+        "graph",
+        "get",
+        params_id(GraphGetParams {
+            graph_id: lp.id.clone(),
+            compact: Some(true),
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!is_err(&compact), "{}", text(&compact));
+    let json: serde_json::Value = serde_json::from_str(&raw_text(&compact)).unwrap();
+    assert_eq!(json["compact"], true);
+    assert!(json.get("counts").is_some());
+    assert!(json.get("hint").is_some());
+    assert!(json.get("graph").is_none());
+}

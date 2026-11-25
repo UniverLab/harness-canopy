@@ -21,6 +21,7 @@ pub(crate) mod db_recovery;
 pub(crate) mod doctor;
 pub(crate) mod draft_pending;
 pub(crate) mod graph_cli;
+pub(crate) mod graph_compact;
 pub(crate) mod graph_install;
 pub(crate) mod graph_validate;
 pub(crate) mod handler_agents;

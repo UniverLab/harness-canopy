@@ -29,7 +29,7 @@ pub(crate) static GRAPH: ToolSpec = ToolSpec {
         ActionSpec {
             name: "get",
             required: &["graph_id"],
-            optional: &[],
+            optional: &["compact", "node_id", "ensemble"],
         },
         ActionSpec {
             name: "export",
@@ -444,7 +444,7 @@ impl TaskTriggerHandler {
         description = "Read graphs, specs, node runs, events, and metrics. Pass `action` plus the parameters listed for it. \
         Actions (required params; optional params): \
         `list` (required: none; optional: workdir, include_archived) — list graphs, optionally filtered by workdir. \
-        `get` (required: graph_id; optional: none) — return a graph with its ordered specs, nodes, and edges. \
+        `get` (required: graph_id; optional: compact, node_id, ensemble) — return a graph with its ordered specs, nodes, and edges; `compact` returns a summary, `node_id` or `ensemble` returns the full record of one node or ensemble. \
         `export` (required: graph_id; optional: none) — export the graph as a portable document. \
         `validate` (required: none; optional: path, document) — validate a graph or node JSON document. \
         `audit` (required: none; optional: none) — audit every node config for known misconfigurations. \

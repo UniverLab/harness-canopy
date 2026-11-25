@@ -1003,6 +1003,7 @@ async fn graph_get_includes_orphan_join_warnings() {
         "get",
         params_id(GraphGetParams {
             graph_id: lp.id.clone(),
+            ..Default::default()
         }),
     )
     .await
@@ -1027,6 +1028,7 @@ async fn graph_get_running_without_run_or_schedule_warns() {
         "get",
         params_id(GraphGetParams {
             graph_id: lp.id.clone(),
+            ..Default::default()
         }),
     )
     .await
@@ -1079,6 +1081,7 @@ async fn graph_get_running_with_live_run_does_not_warn() {
         "get",
         params_id(GraphGetParams {
             graph_id: lp.id.clone(),
+            ..Default::default()
         }),
     )
     .await
@@ -1125,6 +1128,7 @@ async fn graph_get_running_with_scheduled_resume_does_not_warn() {
         "get",
         params_id(GraphGetParams {
             graph_id: lp.id.clone(),
+            ..Default::default()
         }),
     )
     .await
@@ -1431,6 +1435,7 @@ async fn graph_add_node_router_created_persisted_and_read_back_with_routes() {
         "get",
         params_id(GraphGetParams {
             graph_id: lp.id.clone(),
+            ..Default::default()
         }),
     )
     .await

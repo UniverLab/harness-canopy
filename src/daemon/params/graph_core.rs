@@ -693,10 +693,19 @@ pub struct QueueSetGroupParams {
     pub group: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GraphGetParams {
     /// Graph ID.
     pub graph_id: String,
+    /// Return a compact summary instead of the full graph.
+    #[serde(default)]
+    pub compact: Option<bool>,
+    /// Return the full record of one node by id or unique id prefix.
+    #[serde(default)]
+    pub node_id: Option<String>,
+    /// Return the full record of one ensemble by id, unique id prefix, or exact name.
+    #[serde(default)]
+    pub ensemble: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]

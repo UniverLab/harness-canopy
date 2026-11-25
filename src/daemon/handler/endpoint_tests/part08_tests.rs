@@ -57,6 +57,7 @@ async fn graph_get_reports_infra_config_with_source() {
         "get",
         params_id(GraphGetParams {
             graph_id: lp.id.clone(),
+            ..Default::default()
         }),
     )
     .await
@@ -1002,6 +1003,7 @@ async fn graph_update_ensemble_multi_source_entry_reaches_every_member() {
         "get",
         params_id(GraphGetParams {
             graph_id: lp.id.clone(),
+            ..Default::default()
         }),
     )
     .await

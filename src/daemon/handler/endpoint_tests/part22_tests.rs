@@ -145,6 +145,7 @@ async fn graph_create_cron_prompt_round_trips_through_get() {
         "get",
         params_id(GraphGetParams {
             graph_id: graph_id.clone(),
+            ..Default::default()
         }),
     )
     .await
@@ -345,6 +346,7 @@ async fn graph_update_cannot_drop_cron_while_prompt_set() {
         "get",
         params_id(GraphGetParams {
             graph_id: graph_id.clone(),
+            ..Default::default()
         }),
     )
     .await

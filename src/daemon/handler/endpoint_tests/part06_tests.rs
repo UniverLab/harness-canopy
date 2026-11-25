@@ -650,6 +650,7 @@ async fn graph_get_and_graph_list() {
         "get",
         params_id(GraphGetParams {
             graph_id: lp.id.clone(),
+            ..Default::default()
         }),
     )
     .await
@@ -663,6 +664,7 @@ async fn graph_get_and_graph_list() {
         "get",
         params_id(GraphGetParams {
             graph_id: "ghost".to_string(),
+            ..Default::default()
         }),
     )
     .await
@@ -783,6 +785,7 @@ async fn graph_get_reports_prompt_source_for_agent_nodes() {
         "get",
         params_id(GraphGetParams {
             graph_id: lp.id.clone(),
+            ..Default::default()
         }),
     )
     .await

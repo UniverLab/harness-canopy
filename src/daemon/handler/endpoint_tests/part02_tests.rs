@@ -1101,6 +1101,7 @@ async fn graph_trigger_lifecycle_fields_round_trip_through_create_update_and_get
         "get",
         params_id(GraphGetParams {
             graph_id: graph_id.clone(),
+            ..Default::default()
         }),
     )
     .await
