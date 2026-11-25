@@ -23,7 +23,8 @@ impl TaskTriggerHandler {
         name = "intelligence_get_context",
         description = "Return project context at the requested scope: light or full. \
          When project_hash is provided (or auto-detected from session workdir), \
-         returns project-scoped facts and patterns instead of generic knowledge."
+         returns project-scoped facts and patterns instead of generic knowledge. \
+         The light scope returns summaries: body excerpts, at most 5 knowledge nodes and a truncated count."
     )]
     pub(crate) async fn intelligence_get_context(
         &self,
@@ -154,6 +155,9 @@ impl TaskTriggerHandler {
             parts.as_ref(),
             resolved_agent_id.as_deref(),
         );
+        if scope == "light" {
+            crate::daemon::light_context::shrink_light_context(&mut out);
+        }
 
         Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&out).unwrap_or_default(),

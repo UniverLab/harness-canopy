@@ -84,6 +84,7 @@ pub(crate) mod harness_metrics_cli;
 pub(crate) mod health_routine;
 pub(crate) mod helpers;
 pub(crate) mod install_confirm;
+pub(crate) mod light_context;
 pub(crate) mod mcp_auth;
 pub(crate) mod mcp_sessions;
 pub(crate) mod missions_cli;
