@@ -24,7 +24,6 @@ use crate::rag::status::AcquisitionState;
 pub(crate) struct SlowFingerprint {
     agents: u64,
     orphaned_sessions: u64,
-    split_groups: u64,
     graphs: u64,
     graphs_meta: u64,
     archived_graphs: u64,
@@ -152,9 +151,6 @@ fn agents_digest(app: &App) -> u64 {
             AgentEntry::Orphaned(idx) => {
                 let _ = writeln!(summary, "orphaned|{idx}");
             }
-            AgentEntry::Group(idx) => {
-                let _ = writeln!(summary, "group|{idx}");
-            }
         }
     }
     calculate_log_hash(&summary)
@@ -169,23 +165,6 @@ fn orphaned_sessions_digest(app: &App) -> u64 {
             summary,
             "{}|{}|{}|{}|{}",
             session.id, session.name, session.cli, session.working_dir, session.status,
-        );
-    }
-    calculate_log_hash(&summary)
-}
-
-/// Split groups render their id, orientation and both member names.
-fn split_groups_digest(app: &App) -> u64 {
-    use std::fmt::Write as _;
-    let mut summary = String::new();
-    for group in &app.split_groups {
-        let _ = writeln!(
-            summary,
-            "{}|{}|{}|{}",
-            group.id,
-            group.orientation.as_str(),
-            group.session_a,
-            group.session_b,
         );
     }
     calculate_log_hash(&summary)
@@ -441,7 +420,6 @@ impl SlowFingerprint {
         Self {
             agents: agents_digest(app),
             orphaned_sessions: orphaned_sessions_digest(app),
-            split_groups: split_groups_digest(app),
             graphs: calculate_log_hash(&format!("{:?}", app.graphs)),
             graphs_meta: graphs_meta_digest(app),
             archived_graphs: calculate_log_hash(&format!("{:?}", app.archived_graphs)),

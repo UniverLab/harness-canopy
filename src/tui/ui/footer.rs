@@ -26,7 +26,6 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Them
     let spans = footer_hint_spans(&hints, theme);
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 
-    let split_label = footer_split_label(app);
     let version = if app.daemon_version.is_empty() {
         String::new()
     } else {
@@ -40,14 +39,7 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Them
             .map(|tag| format!(" canopy {tag} available — run canopy update"))
             .unwrap_or_default()
     });
-    draw_footer_right(
-        frame,
-        area,
-        split_label.as_deref(),
-        &version,
-        &notice,
-        theme,
-    );
+    draw_footer_right(frame, area, &version, &notice, theme);
 }
 
 /// Hint pairs for the current focus.
@@ -247,23 +239,19 @@ fn footer_hints_agent_knowledge(app: &App) -> Vec<(&'static str, &'static str)> 
 fn footer_hints_agent(app: &App, activity_available: bool) -> Vec<(&'static str, &'static str)> {
     let is_pty = matches!(
         app.selected_agent(),
-        Some(AgentEntry::Interactive(_))
-            | Some(AgentEntry::Terminal(_))
-            | Some(AgentEntry::Group(_))
+        Some(AgentEntry::Interactive(_)) | Some(AgentEntry::Terminal(_))
     );
-    let in_split = app.active_split_id.is_some();
     if !is_pty {
-        return footer_hints_agent_plain(app, activity_available, in_split);
+        return footer_hints_agent_plain(app, activity_available);
     }
     let child_claimed = focused_child_claimed_keyboard(app);
-    footer_hints_agent_pty(app, activity_available, in_split, child_claimed)
+    footer_hints_agent_pty(app, activity_available, child_claimed)
 }
 
-/// Hint pairs for a selected pty session (interactive / terminal / group).
+/// Hint pairs for a selected pty session (interactive / terminal).
 fn footer_hints_agent_pty(
     app: &App,
     activity_available: bool,
-    in_split: bool,
     child_claimed: bool,
 ) -> Vec<(&'static str, &'static str)> {
     // While the focused child has claimed the keyboard (alternate
@@ -281,20 +269,14 @@ fn footer_hints_agent_pty(
         // claimed keyboard (see agent_focus::RESERVED_FOCUS_KEYS) —
         // plain F4 still belongs to the child while claimed.
         h.push(("Shift+↑↓", "agents/rag"));
-        h.push(("Shift+←→", if in_split { "split focus" } else { "tab" }));
+        h.push(("Shift+←→", "tab"));
         h.push(("Ctrl+T", "context"));
         h.push(("Shift+F4", "end"));
     } else {
         h.push(("Shift+↑↓", "agents/rag"));
         h.push(("Ctrl+T", "context"));
-        if in_split {
-            h.push(("F4", "dissolve"));
-            h.push(("Shift+F4", "end"));
-            h.push(("Shift+←→", "split focus"));
-        } else {
-            h.push(("F4", "end"));
-            h.push(("Shift+←→", "tab"));
-        }
+        h.push(("F4", "end"));
+        h.push(("Shift+←→", "tab"));
     }
     if matches!(app.selected_agent(), Some(AgentEntry::Terminal(_))) {
         h.push(("Tab", "catalog"));
@@ -319,15 +301,12 @@ fn footer_hints_agent_pty(
 fn footer_hints_agent_plain(
     app: &App,
     activity_available: bool,
-    in_split: bool,
 ) -> Vec<(&'static str, &'static str)> {
     let mut h = vec![("F10", "preview"), ("Esc", "home")];
     if !app.agents_rag_focused {
         h.push(("e", "edit"));
     }
-    if !in_split {
-        h.push(("Shift+←→", "tab"));
-    }
+    h.push(("Shift+←→", "tab"));
     if activity_available {
         h.push(("F3", "activity"));
     }
@@ -356,35 +335,15 @@ fn footer_hint_spans(hints: &[(&'static str, &'static str)], theme: &Theme) -> V
     spans
 }
 
-/// Split session names shown while in split view.
-fn footer_split_label(app: &App) -> Option<String> {
-    let split_id = app.active_split_id.as_ref()?;
-    app.split_groups
-        .iter()
-        .find(|g| g.id == *split_id)
-        .map(|g| {
-            let left_marker = if app.split_right_focused { " " } else { "●" };
-            let right_marker = if app.split_right_focused { "●" } else { " " };
-            format!(
-                " {left_marker} {} │ {} {right_marker} ",
-                g.session_a, g.session_b
-            )
-        })
-}
-
-/// Render split label + version + update notice on the right side.
+/// Render version + update notice on the right side.
 fn draw_footer_right(
     frame: &mut Frame,
     area: Rect,
-    split_label: Option<&str>,
     version: &str,
     update_notice: &str,
     theme: &Theme,
 ) {
-    let right_text = match split_label {
-        Some(sl) => format!("{sl}{version}{update_notice}"),
-        None => format!("{version}{update_notice}"),
-    };
+    let right_text = format!("{version}{update_notice}");
     let right_w = right_text.len() as u16;
 
     if right_w == 0 || area.width <= right_w {
@@ -393,14 +352,6 @@ fn draw_footer_right(
     let right_area = Rect::new(area.x + area.width - right_w, area.y, right_w, 1);
 
     let mut right_spans = Vec::new();
-    if let Some(sl) = split_label {
-        right_spans.push(Span::styled(
-            sl,
-            Style::default()
-                .fg(theme.header_color)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
     if !version.is_empty() {
         right_spans.push(Span::styled(
             version,
@@ -798,81 +749,18 @@ mod tests {
     }
 
     #[test]
-    fn footer_renders_with_split_view() {
+    fn footer_in_agent_focus_has_no_split_text() {
         let mut app = make_app();
         app.focus = Focus::Agent;
-        app.active_split_id = Some("test-split".to_string());
-        app.split_groups.push(crate::domain::models::SplitGroup {
-            id: "test-split".to_string(),
-            session_a: "session-a".to_string(),
-            session_b: "session-b".to_string(),
-            orientation: crate::domain::models::SplitOrientation::Horizontal,
-            created_at: chrono::Utc::now(),
-        });
-        let theme = Theme::classic();
-        let text = render_footer_to_text(80, 1, |frame, area| {
-            draw_footer(frame, area, &app, &theme);
-        });
-        assert!(
-            text.contains("session-a"),
-            "Split footer should show session-a: {text}"
-        );
-        assert!(
-            text.contains("session-b"),
-            "Split footer should show session-b: {text}"
-        );
-    }
-
-    /// App with a `Group` entry selected (so the `is_pty` footer branch
-    /// fires) and, optionally, an active split.
-    fn app_with_selected_group(active_split: bool) -> App {
-        let mut app = make_app();
-        app.focus = Focus::Agent;
-        app.agents = vec![crate::tui::app::types::AgentEntry::Group(0)];
+        app.agents = vec![crate::tui::app::types::AgentEntry::Terminal(0)];
         app.selected = 0;
-        if active_split {
-            app.active_split_id = Some("test-split".to_string());
-            app.split_groups.push(crate::domain::models::SplitGroup {
-                id: "test-split".to_string(),
-                session_a: "session-a".to_string(),
-                session_b: "session-b".to_string(),
-                orientation: crate::domain::models::SplitOrientation::Horizontal,
-                created_at: chrono::Utc::now(),
-            });
-        }
-        app
-    }
-
-    #[test]
-    fn footer_in_split_advertises_split_focus_not_tab_step() {
-        // Functional requirement 5: the footer must show the binding that
-        // currently applies. With a split active, Shift+←/→ means split-pane
-        // focus, which stays the established, reachable binding.
-        let app = app_with_selected_group(true);
         let theme = Theme::classic();
         let text = render_footer_to_text(200, 1, |frame, area| {
             draw_footer(frame, area, &app, &theme);
         });
         assert!(
-            text.contains("split focus"),
-            "with a split active, Shift+\u{2190}\u{2192} must mean split focus: {text}"
-        );
-    }
-
-    #[test]
-    fn footer_in_agent_focus_without_split_advertises_tab_step_not_split_focus() {
-        // Functional requirement 5: without a split, Shift+←/→ steps the
-        // sidebar tab strip instead (now reachable from focus per
-        // functional requirement 1), so the footer must say so, not
-        // advertise the split-focus binding that doesn't apply here.
-        let app = app_with_selected_group(false);
-        let theme = Theme::classic();
-        let text = render_footer_to_text(80, 1, |frame, area| {
-            draw_footer(frame, area, &app, &theme);
-        });
-        assert!(
-            !text.contains("split focus"),
-            "no split is active, so 'split focus' must not be advertised: {text}"
+            !text.to_lowercase().contains("split"),
+            "footer in agent focus must not mention split: {text}"
         );
     }
 

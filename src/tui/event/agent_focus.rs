@@ -1,9 +1,6 @@
 use anyhow::Result;
 use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
-use super::context_transfer::{
-    active_split_session_name, resolve_session, resolve_split_focused_terminal_like,
-};
 use super::home_preview::handle_playground_key;
 use super::knowledge_dialog::{edit_knowledge_dialog, open_knowledge_dialog};
 use super::knowledge_viewer::open_knowledge_viewer;
@@ -42,8 +39,7 @@ pub fn handle_agent_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -
         return Ok(());
     }
 
-    if handle_split_picker_key(app, code)
-        || handle_background_agent_key(app, code, modifiers)
+    if handle_background_agent_key(app, code, modifiers)
         || handle_focus_shortcuts(app, code, modifiers)
     {
         return Ok(());
@@ -130,49 +126,11 @@ fn handle_project_focus_key(app: &mut App, code: KeyCode, modifiers: KeyModifier
     }
 }
 
-fn handle_split_picker_key(app: &mut App, code: KeyCode) -> bool {
-    if !app.split_picker_open {
-        return false;
-    }
-
-    match code {
-        KeyCode::Down => cycle_split_picker(app, true),
-        KeyCode::Up => cycle_split_picker(app, false),
-        KeyCode::Tab => toggle_split_orientation(app),
-        KeyCode::Enter => app.create_split(),
-        KeyCode::Esc => app.split_picker_open = false,
-        _ => {}
-    }
-
-    true
-}
-
-fn cycle_split_picker(app: &mut App, forward: bool) {
-    let len = app.split_picker_sessions.len();
-    if len == 0 {
-        return;
-    }
-
-    app.split_picker_idx = crate::tui::selection::move_index(app.split_picker_idx, len, forward);
-}
-
-fn toggle_split_orientation(app: &mut App) {
-    app.split_picker_orientation = match app.split_picker_orientation {
-        crate::domain::models::SplitOrientation::Horizontal => {
-            crate::domain::models::SplitOrientation::Vertical
-        }
-        crate::domain::models::SplitOrientation::Vertical => {
-            crate::domain::models::SplitOrientation::Horizontal
-        }
-    };
-}
-
 fn handle_background_agent_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
     if matches!(
         app.selected_agent(),
         Some(AgentEntry::Interactive(_))
             | Some(AgentEntry::Terminal(_))
-            | Some(AgentEntry::Group(_))
             | Some(AgentEntry::Orphaned(_))
     ) {
         return false;
@@ -187,7 +145,6 @@ fn handle_background_agent_key(app: &mut App, code: KeyCode, modifiers: KeyModif
 
     match code {
         KeyCode::Esc | KeyCode::Char('h') | KeyCode::F(10) => {
-            app.active_split_id = None;
             app.focus = Focus::Preview;
         }
         KeyCode::Down | KeyCode::Char('j') => app.scroll_log_down(),
@@ -233,9 +190,8 @@ const RESERVED_FOCUS_KEYS: &[(KeyCode, KeyModifiers)] = &[
     // impossible from inside one.
     (KeyCode::Up, KeyModifiers::SHIFT),
     (KeyCode::Down, KeyModifiers::SHIFT),
-    // Split-pane focus and the sidebar tab strip (`handle_split_panel_focus_shortcut`
-    // and the global handler behind it) — the horizontal half of the same
-    // frame navigation.
+    // Sidebar tab strip (handled globally in `event/mod.rs`) — the horizontal
+    // half of frame navigation.
     (KeyCode::Left, KeyModifiers::SHIFT),
     (KeyCode::Right, KeyModifiers::SHIFT),
     // Context transfer (`handle_context_transfer_shortcut`). Deliberately not
@@ -247,9 +203,9 @@ const RESERVED_FOCUS_KEYS: &[(KeyCode, KeyModifiers)] = &[
     // Shift+F4 ends the focused session (`handle_termination_shortcut`).
     // Deliberately not frame navigation — a second eyes-open exception in the
     // style of Ctrl+T above: bare F4 is a common child binding and stays the
-    // child's, but shifted-F4 is already canopy's "end the session" chord in
-    // split mode (see footer.rs), so reserving it makes one binding mean one
-    // thing everywhere and gives a claimed child a visible way out. Plain F4
+    // child's, but shifted-F4 is already canopy's "end the session" chord
+    // (see footer.rs), so reserving it makes one binding mean one thing
+    // everywhere and gives a claimed child a visible way out. Plain F4
     // is intentionally NOT reserved.
     (KeyCode::F(4), KeyModifiers::SHIFT),
     // F1 (hub) — a third eyes-open exception in the style of Ctrl+T: the hub
@@ -266,20 +222,10 @@ pub(crate) fn is_reserved_focus_key(code: KeyCode, modifiers: KeyModifiers) -> b
         .any(|(reserved, required)| *reserved == code && modifiers.contains(*required))
 }
 
-/// The agent a focus shortcut would currently apply to: the focused split
-/// pane's session when a split is active, otherwise the sidebar selection.
+/// The agent a focus shortcut would currently apply to (the sidebar selection).
 /// A read-only mirror of [`resolve_focused_agent`] — that one mutates
 /// `app.focus` on a miss, which a predicate must not do.
 fn currently_focused_target(app: &App) -> Option<FocusedAgent> {
-    if app.active_split_id.is_some() {
-        let (is_terminal, idx) = resolve_split_focused_terminal_like(app)?;
-        return Some(if is_terminal {
-            FocusedAgent::Terminal(idx)
-        } else {
-            FocusedAgent::Interactive(idx)
-        });
-    }
-
     match app.selected_agent() {
         Some(AgentEntry::Interactive(idx)) => Some(FocusedAgent::Interactive(*idx)),
         Some(AgentEntry::Terminal(idx)) => Some(FocusedAgent::Terminal(*idx)),
@@ -316,8 +262,6 @@ fn handle_focus_shortcuts(app: &mut App, code: KeyCode, modifiers: KeyModifiers)
     }
 
     handle_context_transfer_shortcut(app, code, modifiers)
-        || handle_split_picker_shortcut(app, code, modifiers)
-        || handle_split_panel_focus_shortcut(app, code, modifiers)
         || handle_dismiss_exited_session(app, code)
         || handle_orphaned_session_key(app, code)
         || handle_preview_shortcut(app, code)
@@ -327,18 +271,14 @@ fn handle_focus_shortcuts(app: &mut App, code: KeyCode, modifiers: KeyModifiers)
 }
 
 /// Whether an Esc/F10 press should dismiss a finished session instead of exiting
-/// focus or reaching the PTY. Only applies to a single (non-split) selected
-/// session that has already exited. Pure for testability.
-fn dismisses_exited_session(code: KeyCode, in_split: bool, selected_exited: bool) -> bool {
-    matches!(code, KeyCode::Esc | KeyCode::F(10)) && !in_split && selected_exited
+/// focus or reaching the PTY. Only applies to a selected session that has already
+/// exited. Pure for testability.
+fn dismisses_exited_session(code: KeyCode, selected_exited: bool) -> bool {
+    matches!(code, KeyCode::Esc | KeyCode::F(10)) && selected_exited
 }
 
 fn handle_dismiss_exited_session(app: &mut App, code: KeyCode) -> bool {
-    if !dismisses_exited_session(
-        code,
-        app.active_split_id.is_some(),
-        app.selected_session_is_exited(),
-    ) {
+    if !dismisses_exited_session(code, app.selected_session_is_exited()) {
         return false;
     }
     app.dismiss_selected_exited_session();
@@ -369,11 +309,6 @@ fn handle_context_transfer_shortcut(app: &mut App, code: KeyCode, modifiers: Key
         return false;
     }
 
-    if app.active_split_id.is_some() {
-        app.open_context_transfer_for_split();
-        return true;
-    }
-
     if matches!(
         app.selected_agent(),
         Some(AgentEntry::Interactive(_)) | Some(AgentEntry::Terminal(_))
@@ -384,67 +319,18 @@ fn handle_context_transfer_shortcut(app: &mut App, code: KeyCode, modifiers: Key
     true
 }
 
-fn handle_split_picker_shortcut(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
-    if code != KeyCode::Char('s') || !modifiers.contains(KeyModifiers::CONTROL) {
-        return false;
-    }
-
-    app.open_split_picker();
-    true
-}
-
-/// Shift+←/→ moves focus between the two split panes. Only meaningful (and
-/// only reachable — see `event::sidebar_tab_step_applies`) while a split is
-/// active: without one, the global handler claims Shift+←/→ first to step
-/// the sidebar tab strip instead, so this never sees the key in that case.
-/// The `active_split_id` check here is a second, defensive guarantee of the
-/// same contract, not load-bearing given today's call order.
-fn handle_split_panel_focus_shortcut(
-    app: &mut App,
-    code: KeyCode,
-    modifiers: KeyModifiers,
-) -> bool {
-    if !modifiers.contains(KeyModifiers::SHIFT) || app.active_split_id.is_none() {
-        return false;
-    }
-
-    match code {
-        KeyCode::Left => app.split_right_focused = false,
-        KeyCode::Right => app.split_right_focused = true,
-        _ => return false,
-    }
-
-    true
-}
-
 fn handle_preview_shortcut(app: &mut App, code: KeyCode) -> bool {
     if code != KeyCode::F(10) {
         return false;
     }
 
-    app.active_split_id = None;
     app.focus = Focus::Preview;
     true
 }
 
-fn handle_termination_shortcut(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
+fn handle_termination_shortcut(app: &mut App, code: KeyCode, _modifiers: KeyModifiers) -> bool {
     if code != KeyCode::F(4) {
         return false;
-    }
-
-    if modifiers.contains(KeyModifiers::SHIFT) {
-        // End the focused session whether or not a split is active. In a split
-        // this kills the focused pane's session (via terminate_focused_session,
-        // which also clears the now-dead group); without a split it kills the
-        // single focused session. Never dissolve-only: dissolving (keep both
-        // sessions) stays on plain F4.
-        app.terminate_focused_session();
-        return true;
-    }
-
-    if app.active_split_id.is_some() {
-        app.dissolve_split();
-        return true;
     }
 
     app.terminate_focused_session();
@@ -580,22 +466,7 @@ fn advance_focusable_selection(app: &mut App, forward: bool, focusable: &[usize]
 }
 
 fn resolve_focused_agent(app: &mut App) -> Option<FocusedAgent> {
-    if app.active_split_id.is_some() {
-        return resolve_split_focused_agent(app);
-    }
-
     resolve_selected_focused_agent(app)
-}
-
-fn resolve_split_focused_agent(app: &mut App) -> Option<FocusedAgent> {
-    let Some(session_name) = active_split_session_name(app) else {
-        app.focus = Focus::Preview;
-        return None;
-    };
-    let session_name = session_name.to_string();
-
-    let (agent_vec, idx) = resolve_session(app, &session_name);
-    resolve_agent_target(app, agent_vec, idx, Focus::Preview)
 }
 
 fn resolve_selected_focused_agent(app: &mut App) -> Option<FocusedAgent> {
@@ -617,29 +488,6 @@ fn resolve_agent_target_for_selection(app: &mut App, target: FocusedAgent) -> Op
     }
 
     app.focus = Focus::Preview;
-    None
-}
-
-fn resolve_agent_target(
-    app: &mut App,
-    agent_vec: &str,
-    idx: usize,
-    invalid_focus: Focus,
-) -> Option<FocusedAgent> {
-    let target = match agent_vec {
-        "interactive" => FocusedAgent::Interactive(idx),
-        "terminal" => FocusedAgent::Terminal(idx),
-        _ => {
-            app.focus = invalid_focus;
-            return None;
-        }
-    };
-
-    if focused_agent(app, target).is_some() {
-        return Some(target);
-    }
-
-    app.focus = invalid_focus;
     None
 }
 
@@ -861,32 +709,6 @@ mod tests {
     }
 
     #[test]
-    fn split_panel_focus_shortcut_is_a_noop_without_an_active_split() {
-        // Without a split, Shift+←/→ must not be consumed here — the global
-        // handler claims it first to step the sidebar tab strip instead.
-        let mut app = app_with_background_agent();
-        app.active_split_id = None;
-
-        let handled =
-            handle_split_panel_focus_shortcut(&mut app, KeyCode::Right, KeyModifiers::SHIFT);
-
-        assert!(!handled);
-        assert!(!app.split_right_focused);
-    }
-
-    #[test]
-    fn split_panel_focus_shortcut_still_works_with_an_active_split() {
-        let mut app = app_with_background_agent();
-        app.active_split_id = Some("split-1".to_string());
-
-        let handled =
-            handle_split_panel_focus_shortcut(&mut app, KeyCode::Right, KeyModifiers::SHIFT);
-
-        assert!(handled);
-        assert!(app.split_right_focused);
-    }
-
-    #[test]
     fn e_key_opens_edit_dialog_for_focused_background_agent() {
         let mut app = app_with_background_agent();
 
@@ -914,12 +736,10 @@ mod tests {
         // Regression guard for T26: ESC must leave the background agent focus
         // and return to the preview pane, matching the panel's "Esc → back" hint.
         let mut app = app_with_background_agent();
-        app.active_split_id = Some("split-1".to_string());
 
         let handled = handle_background_agent_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
 
         assert!(handled);
-        assert!(app.active_split_id.is_none());
         assert!(matches!(app.focus, Focus::Preview));
     }
 
@@ -928,12 +748,10 @@ mod tests {
         // Regression guard for T26: F10 is an alternate exit key for the
         // background agent focus and must behave the same as ESC.
         let mut app = app_with_background_agent();
-        app.active_split_id = Some("split-1".to_string());
 
         let handled = handle_background_agent_key(&mut app, KeyCode::F(10), KeyModifiers::NONE);
 
         assert!(handled);
-        assert!(app.active_split_id.is_none());
         assert!(matches!(app.focus, Focus::Preview));
     }
 
@@ -942,12 +760,10 @@ mod tests {
         // Regression guard for T26: 'h' is an alternate exit key for the
         // background agent focus and must behave the same as ESC.
         let mut app = app_with_background_agent();
-        app.active_split_id = Some("split-1".to_string());
 
         let handled = handle_background_agent_key(&mut app, KeyCode::Char('h'), KeyModifiers::NONE);
 
         assert!(handled);
-        assert!(app.active_split_id.is_none());
         assert!(matches!(app.focus, Focus::Preview));
     }
 
@@ -975,27 +791,22 @@ mod tests {
 
     #[test]
     fn esc_dismisses_exited_session() {
-        assert!(dismisses_exited_session(KeyCode::Esc, false, true));
+        assert!(dismisses_exited_session(KeyCode::Esc, true));
     }
 
     #[test]
     fn f10_dismisses_exited_session() {
-        assert!(dismisses_exited_session(KeyCode::F(10), false, true));
-    }
-
-    #[test]
-    fn split_active_does_not_dismiss_exited_session() {
-        assert!(!dismisses_exited_session(KeyCode::Esc, true, true));
+        assert!(dismisses_exited_session(KeyCode::F(10), true));
     }
 
     #[test]
     fn running_session_is_not_dismissed() {
-        assert!(!dismisses_exited_session(KeyCode::Esc, false, false));
+        assert!(!dismisses_exited_session(KeyCode::Esc, false));
     }
 
     #[test]
     fn other_key_does_not_dismiss_exited_session() {
-        assert!(!dismisses_exited_session(KeyCode::Char('x'), false, true));
+        assert!(!dismisses_exited_session(KeyCode::Char('x'), true));
     }
 
     #[test]
@@ -1078,30 +889,20 @@ mod tests {
 
     #[test]
     fn dismisses_exited_session_ctrl_esc() {
-        assert!(!dismisses_exited_session(KeyCode::Esc, false, false));
-    }
-
-    #[test]
-    fn dismisses_exited_session_f10_in_split() {
-        assert!(!dismisses_exited_session(KeyCode::F(10), true, false));
+        assert!(!dismisses_exited_session(KeyCode::Esc, false));
     }
 
     #[test]
     fn dismisses_exited_session_f10_not_exited() {
-        assert!(!dismisses_exited_session(KeyCode::F(10), false, false));
-    }
-
-    #[test]
-    fn dismisses_exited_session_f10_split_and_exited() {
-        assert!(!dismisses_exited_session(KeyCode::F(10), true, true));
+        assert!(!dismisses_exited_session(KeyCode::F(10), false));
     }
 
     #[test]
     fn dismisses_exited_session_various_keys() {
-        assert!(!dismisses_exited_session(KeyCode::Char('a'), false, true));
-        assert!(!dismisses_exited_session(KeyCode::Enter, false, true));
-        assert!(!dismisses_exited_session(KeyCode::Tab, false, true));
-        assert!(!dismisses_exited_session(KeyCode::Down, false, true));
+        assert!(!dismisses_exited_session(KeyCode::Char('a'), true));
+        assert!(!dismisses_exited_session(KeyCode::Enter, true));
+        assert!(!dismisses_exited_session(KeyCode::Tab, true));
+        assert!(!dismisses_exited_session(KeyCode::Down, true));
     }
 
     #[test]
@@ -1167,22 +968,10 @@ mod tests {
 
     #[test]
     fn dismisses_exited_session_all_combos() {
-        // esc, not split, exited
-        assert!(dismisses_exited_session(KeyCode::Esc, false, true));
-        // esc, not split, not exited
-        assert!(!dismisses_exited_session(KeyCode::Esc, false, false));
-        // esc, split, exited
-        assert!(!dismisses_exited_session(KeyCode::Esc, true, true));
-        // esc, split, not exited
-        assert!(!dismisses_exited_session(KeyCode::Esc, true, false));
-        // f10, not split, exited
-        assert!(dismisses_exited_session(KeyCode::F(10), false, true));
-        // f10, not split, not exited
-        assert!(!dismisses_exited_session(KeyCode::F(10), false, false));
-        // f10, split, exited
-        assert!(!dismisses_exited_session(KeyCode::F(10), true, true));
-        // f10, split, not exited
-        assert!(!dismisses_exited_session(KeyCode::F(10), true, false));
+        assert!(dismisses_exited_session(KeyCode::Esc, true));
+        assert!(!dismisses_exited_session(KeyCode::Esc, false));
+        assert!(dismisses_exited_session(KeyCode::F(10), true));
+        assert!(!dismisses_exited_session(KeyCode::F(10), false));
     }
 
     #[test]
@@ -1242,7 +1031,7 @@ mod tests {
         )
         .expect("create app");
         app.agents = vec![
-            AgentEntry::Group(0), // a Live entry that must never be visited here
+            AgentEntry::Interactive(0), // a Live entry that must never be visited here
             AgentEntry::Agent(cron_agent("bg-1")),
             AgentEntry::Agent(cron_agent("bg-2")),
         ];
@@ -1279,8 +1068,7 @@ mod tests {
 mod focus_shortcuts_keyboard_claim_tests {
     use super::*;
     use crate::db::Database;
-    use crate::domain::models::{Cli, SplitGroup, SplitOrientation};
-    use chrono::Utc;
+    use crate::domain::models::Cli;
     use ratatui::style::Color;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -1415,17 +1203,24 @@ mod focus_shortcuts_keyboard_claim_tests {
     }
 
     #[test]
-    fn kitty_negotiated_child_does_not_have_a_second_shortcut_consumed() {
-        // Proves the fix is the ownership contract, not a Ctrl+T-only patch:
-        // Ctrl+S (split picker) must yield too.
-        let agent = spawn_cat_agent("codex-like-2");
-        *agent.kitty_keyboard_flags.lock().expect("lock") = Some(7);
+    fn ctrl_s_is_not_handled_and_reaches_focused_terminal_as_0x13() {
+        // Without split mode, Ctrl+S must not be intercepted by the TUI and
+        // must encode as 0x13 to the focused terminal like any other key.
+        let agent = spawn_cat_agent("term-ctrl-s");
         let mut app = app_with_interactive_agent(agent);
 
-        let handled = handle_focus_shortcuts(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL);
-
-        assert!(!handled, "Ctrl+S must reach the Kitty-negotiated child");
-        assert!(!app.split_picker_open);
+        assert!(!handle_focus_shortcuts(
+            &mut app,
+            KeyCode::Char('s'),
+            KeyModifiers::CONTROL
+        ));
+        assert_eq!(
+            crate::tui::agent::key_to_bytes(KeyCode::Char('s'), KeyModifiers::CONTROL),
+            vec![0x13]
+        );
+        handle_agent_key(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL)
+            .expect("ctrl+s forwarded to terminal");
+        assert!(matches!(app.focus, Focus::Agent));
         app.interactive_agents[0].kill();
     }
 
@@ -1560,54 +1355,6 @@ mod focus_shortcuts_keyboard_claim_tests {
         assert!(handled);
     }
 
-    #[test]
-    fn split_predicate_reads_the_focused_pane_not_the_other() {
-        let left = spawn_cat_agent("left-term");
-        let right = spawn_cat_agent("right-term");
-        *right.kitty_keyboard_flags.lock().expect("lock") = Some(7);
-
-        let db = test_db();
-        let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(
-            Arc::clone(&db),
-            data_dir.path(),
-            &crate::domain::canopy_config::CanopyConfig::default(),
-        )
-        .expect("create app");
-        app.interactive_agents = vec![left, right];
-        app.split_groups.push(SplitGroup {
-            id: "split-1".to_string(),
-            orientation: SplitOrientation::Horizontal,
-            session_a: "left-term".to_string(),
-            session_b: "right-term".to_string(),
-            created_at: Utc::now(),
-        });
-        app.active_split_id = Some("split-1".to_string());
-        app.focus = Focus::Agent;
-
-        // Right panel focused: the claimed child owns the keyboard. Ctrl+S
-        // (split picker) is unreserved content, unlike Ctrl+T, so it still
-        // probes the claim.
-        app.split_right_focused = true;
-        assert!(!handle_focus_shortcuts(
-            &mut app,
-            KeyCode::Char('s'),
-            KeyModifiers::CONTROL
-        ));
-
-        // Left panel focused: its unclaimed child leaves Ctrl+S with canopy —
-        // the other pane's claim must not leak across.
-        app.split_right_focused = false;
-        assert!(handle_focus_shortcuts(
-            &mut app,
-            KeyCode::Char('s'),
-            KeyModifiers::CONTROL
-        ));
-
-        app.interactive_agents[0].kill();
-        app.interactive_agents[1].kill();
-    }
-
     // CT6 ownership matrix: only a *focused* child may claim the keyboard.
     // A session merely selected in Preview never does — otherwise its
     // alternate-screen/Kitty state swallows preview-level Up/Down and the
@@ -1654,29 +1401,6 @@ mod focus_shortcuts_keyboard_claim_tests {
 
         assert!(focused_child_claimed_keyboard(&app));
         app.interactive_agents[0].kill();
-    }
-
-    #[test]
-    fn previewed_claimed_child_does_not_block_unreserved_shortcuts() {
-        // Same ownership rule through `handle_focus_shortcuts`: with Preview
-        // focus, an unreserved key (Ctrl+S) reaches canopy even though the
-        // selected child negotiated Kitty — the claim cannot reach
-        // preview-level dispatch. Two sessions so the split picker can open.
-        let agent = spawn_cat_agent("previewed-ctrl-s");
-        *agent.kitty_keyboard_flags.lock().expect("lock") = Some(7);
-        let second = spawn_cat_agent("previewed-ctrl-s-2");
-        let mut app = app_with_interactive_agent(agent);
-        app.interactive_agents.push(second);
-        app.focus = Focus::Preview;
-
-        assert!(handle_focus_shortcuts(
-            &mut app,
-            KeyCode::Char('s'),
-            KeyModifiers::CONTROL
-        ));
-        assert!(app.split_picker_open);
-        app.interactive_agents[0].kill();
-        app.interactive_agents[1].kill();
     }
 
     #[test]
@@ -1753,7 +1477,7 @@ mod focus_shortcuts_keyboard_claim_tests {
 
     #[test]
     fn plain_f4_keeps_current_meaning_without_a_claim() {
-        // CT10 (T3): unclaimed child, no split — plain F4 ends the session.
+        // CT10 (T3): unclaimed child — plain F4 ends the session.
         let agent = spawn_cat_agent("plain-f4-end");
         let mut app = app_with_interactive_agent(agent);
         assert!(!focused_child_claimed_keyboard(&app));
@@ -1765,109 +1489,14 @@ mod focus_shortcuts_keyboard_claim_tests {
         ));
         assert!(
             app.interactive_agents.is_empty(),
-            "plain F4 with no split must terminate the session"
+            "plain F4 with no peer session must terminate the session"
         );
-    }
-
-    fn app_with_split(left: InteractiveAgent, right: InteractiveAgent) -> App {
-        let db = test_db();
-        let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(
-            Arc::clone(&db),
-            data_dir.path(),
-            &crate::domain::canopy_config::CanopyConfig::default(),
-        )
-        .expect("create app");
-        app.interactive_agents = vec![left, right];
-        app.split_groups.push(SplitGroup {
-            id: "split-1".to_string(),
-            orientation: SplitOrientation::Horizontal,
-            session_a: "split-left".to_string(),
-            session_b: "split-right".to_string(),
-            created_at: Utc::now(),
-        });
-        app.active_split_id = Some("split-1".to_string());
-        app.split_right_focused = false;
-        app.focus = Focus::Agent;
-        app
     }
 
     #[test]
-    fn plain_f4_dissolves_a_split_and_keeps_both_sessions() {
-        // CT10 (T3/FR4): unclaimed children in a split — plain F4 dissolves
-        // (both sessions survive, grouping drops).
-        let mut app = app_with_split(
-            spawn_cat_agent("split-left"),
-            spawn_cat_agent("split-right"),
-        );
-        assert!(!focused_child_claimed_keyboard(&app));
-
-        assert!(handle_focus_shortcuts(
-            &mut app,
-            KeyCode::F(4),
-            KeyModifiers::NONE
-        ));
-        assert!(
-            app.active_split_id.is_none(),
-            "plain F4 in a split must dissolve the grouping"
-        );
-        assert_eq!(
-            app.interactive_agents.len(),
-            2,
-            "dissolving keeps both sessions alive"
-        );
-
-        for agent in &mut app.interactive_agents {
-            agent.kill();
-        }
-    }
-
-    #[test]
-    fn shift_f4_in_a_split_ends_the_focused_pane_session() {
-        // CT10 (FR2): Shift+F4 in a split kills the focused pane's session
-        // (left here) and clears the now-dead grouping — it does NOT
-        // dissolve-only.
-        let mut app = app_with_split(
-            spawn_cat_agent("split-left"),
-            spawn_cat_agent("split-right"),
-        );
-        app.split_right_focused = false;
-        assert!(!focused_child_claimed_keyboard(&app));
-
-        assert!(handle_focus_shortcuts(
-            &mut app,
-            KeyCode::F(4),
-            KeyModifiers::SHIFT
-        ));
-        assert!(
-            app.active_split_id.is_none(),
-            "the dead pane's grouping must be cleared"
-        );
-        assert!(
-            app.interactive_agents
-                .iter()
-                .all(|agent| agent.name != "split-left"),
-            "Shift+F4 must kill the focused pane's session"
-        );
-        assert!(
-            app.interactive_agents
-                .iter()
-                .any(|agent| agent.name == "split-right"),
-            "the unfocused pane's session must survive"
-        );
-
-        for agent in &mut app.interactive_agents {
-            agent.kill();
-        }
-    }
-
-    #[test]
-    fn shift_f4_without_a_split_ends_the_single_session() {
-        // CT10 (T3/FR2): regression for the old `terminate_split_session_if_present`
-        // helper, which swallowed Shift+F4 when no split was active.
+    fn f4_terminates_the_single_session() {
         let agent = spawn_cat_agent("lone-session");
         let mut app = app_with_interactive_agent(agent);
-        assert!(app.active_split_id.is_none());
         assert!(!focused_child_claimed_keyboard(&app));
 
         assert!(handle_focus_shortcuts(
@@ -1877,7 +1506,7 @@ mod focus_shortcuts_keyboard_claim_tests {
         ));
         assert!(
             app.interactive_agents.is_empty(),
-            "Shift+F4 with no split must terminate the focused session"
+            "Shift+F4 must terminate the focused session"
         );
     }
 

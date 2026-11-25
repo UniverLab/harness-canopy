@@ -34,7 +34,7 @@ pub mod vt100;
 pub mod warp;
 
 pub(crate) use background_agent::draw_background_agent_panel;
-pub use details::{draw_agent_details, draw_group_details};
+pub use details::draw_agent_details;
 use graph_live::draw_graph_live_view;
 pub(crate) use home::draw_brians_brain;
 pub use log_fallback::draw_log_text;
@@ -443,169 +443,6 @@ pub(super) fn draw_log_panel(frame: &mut Frame, area: Rect, app: &mut App, theme
 
     draw_log_text(frame, area, inner, app);
     render_focus_indicator(frame, area, inner, app, theme, indicator_label);
-}
-
-// ── Split panel ─────────────────────────────────────────────────
-
-/// Render one half of a split view — finds the session by name and draws its PTY.
-pub(super) fn draw_split_panel(
-    frame: &mut Frame,
-    area: Rect,
-    app: &mut App,
-    session_name: &str,
-    focused: bool,
-    theme: &Theme,
-) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-
-    let found = find_session_by_name(app, session_name);
-    let border_color = if focused {
-        found.map_or(theme.border_color, |session| session.accent(app))
-    } else {
-        theme.border_color
-    };
-    let title = Span::styled(
-        if focused {
-            format!(" ● {session_name} ")
-        } else {
-            format!("   {session_name} ")
-        },
-        Style::default()
-            .fg(border_color)
-            .add_modifier(Modifier::BOLD),
-    );
-
-    let inner = render_panel_block(frame, area, border_color, Some(title), theme);
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-
-    if focused {
-        app.last_panel_inner = (inner.width, inner.height);
-        app.last_panel_x = inner.x;
-        app.last_panel_y = inner.y;
-    }
-
-    let Some(session) = found else {
-        render_missing_session(frame, inner, session_name, theme);
-        return;
-    };
-
-    if let Some(terminal_idx) = session.warp_terminal_idx(app) {
-        let snapshot = session.snapshot(app);
-        draw_split_warp_panel(frame, inner, app, terminal_idx, snapshot.as_ref(), focused);
-        return;
-    }
-
-    let Some(snap) = session.snapshot(app) else {
-        return;
-    };
-
-    render_snapshot(
-        frame,
-        inner,
-        &snap,
-        app,
-        false,
-        focused && matches!(app.focus, Focus::Agent),
-        None,
-    );
-}
-
-fn draw_split_warp_panel(
-    frame: &mut Frame,
-    area: Rect,
-    app: &mut App,
-    terminal_idx: usize,
-    snap: Option<&ScreenSnapshot>,
-    focused: bool,
-) {
-    let (pty_area, input_area) = split_warp_areas(area, &warp_input_text(app, terminal_idx));
-
-    if let Some(snap) = snap {
-        render_snapshot(frame, pty_area, snap, app, false, false, None);
-    }
-
-    if focused && matches!(app.focus, Focus::Agent) {
-        draw_warp_input_box(frame, input_area, app, terminal_idx);
-    }
-
-    if focused {
-        app.last_panel_inner = (pty_area.width, pty_area.height);
-        app.last_panel_x = pty_area.x;
-        app.last_panel_y = pty_area.y;
-    }
-}
-
-fn render_missing_session(frame: &mut Frame, area: Rect, session_name: &str, theme: &Theme) {
-    let message = Paragraph::new(format!("  Session '{session_name}' not found"))
-        .style(Style::default().fg(theme.dim_text));
-    frame.render_widget(message, area);
-}
-
-#[derive(Clone, Copy)]
-enum SessionRef {
-    Interactive(usize),
-    Terminal(usize),
-}
-
-impl SessionRef {
-    fn accent(self, app: &App) -> Color {
-        match self {
-            SessionRef::Interactive(idx) => app
-                .interactive_agents
-                .get(idx)
-                .map(|agent| agent.accent_color)
-                .unwrap_or(Color::DarkGray),
-            SessionRef::Terminal(idx) => app
-                .terminal_agents
-                .get(idx)
-                .map(|agent| agent.accent_color)
-                .unwrap_or(Color::DarkGray),
-        }
-    }
-
-    fn snapshot(self, app: &App) -> Option<ScreenSnapshot> {
-        match self {
-            SessionRef::Interactive(idx) => app
-                .interactive_agents
-                .get(idx)
-                .and_then(|a| a.screen_snapshot()),
-            SessionRef::Terminal(idx) => app
-                .terminal_agents
-                .get(idx)
-                .and_then(|a| a.screen_snapshot()),
-        }
-    }
-
-    fn warp_terminal_idx(self, app: &App) -> Option<usize> {
-        match self {
-            SessionRef::Terminal(idx) => app.terminal_agents.get(idx).and_then(|agent| {
-                (agent.warp_mode && !agent.should_bypass_warp_input()).then_some(idx)
-            }),
-            _ => None,
-        }
-    }
-}
-
-fn find_session_by_name(app: &App, name: &str) -> Option<SessionRef> {
-    if let Some(idx) = app
-        .interactive_agents
-        .iter()
-        .position(|agent| agent.name == name)
-    {
-        return Some(SessionRef::Interactive(idx));
-    }
-    if let Some(idx) = app
-        .terminal_agents
-        .iter()
-        .position(|agent| agent.name == name)
-    {
-        return Some(SessionRef::Terminal(idx));
-    }
-    None
 }
 
 #[cfg(test)]
@@ -1454,28 +1291,6 @@ mod tests {
             .draw(|frame| {
                 let area = Rect::new(0, 0, 0, 0);
                 draw_log_panel(frame, area, &mut app, &theme);
-            })
-            .unwrap();
-    }
-
-    #[test]
-    fn draw_split_panel_zero_area_no_panic() {
-        let path = crate::test_support::temp_db_path();
-        let db = Arc::new(crate::db::Database::new(&path).unwrap());
-        let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(
-            db,
-            data_dir.path(),
-            &crate::domain::canopy_config::CanopyConfig::default(),
-        )
-        .unwrap();
-        let backend = TestBackend::new(20, 10);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let theme = Theme::classic();
-        terminal
-            .draw(|frame| {
-                let area = Rect::new(0, 0, 0, 0);
-                draw_split_panel(frame, area, &mut app, "test-session", true, &theme);
             })
             .unwrap();
     }

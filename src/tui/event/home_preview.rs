@@ -379,16 +379,6 @@ fn preview_enter_key(app: &mut App, code: KeyCode, on_graph: bool) -> bool {
         let _ = app.open_graph_editor_dialog();
         return true;
     }
-    if let Some(AgentEntry::Group(idx)) = app.selected_agent() {
-        let idx = *idx;
-        if let Some(group) = app.split_groups.get(idx) {
-            let id = group.id.clone();
-            app.active_split_id = Some(id);
-            app.split_right_focused = false;
-        }
-        app.focus = Focus::Agent;
-        return true;
-    }
     app.log_scroll = 0;
     app.focus = Focus::Agent;
     true

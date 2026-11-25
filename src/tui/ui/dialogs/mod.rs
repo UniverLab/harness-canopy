@@ -40,7 +40,7 @@ pub use knowledge_viewer::draw_knowledge_viewer;
 pub use launchpad::draw_launchpad_dialog;
 pub use new_agent_dialog::draw_new_agent_dialog;
 pub(crate) use node_tail::draw_node_tail_pane;
-pub use pickers::{draw_split_picker, draw_suggestion_picker};
+pub use pickers::draw_suggestion_picker;
 pub use rag_transfer::draw_rag_transfer_modal;
 pub use simple_modals::{
     draw_archive_graph_confirm, draw_delete_project_confirm, draw_graph_reset_confirm,

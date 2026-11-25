@@ -33,46 +33,12 @@ impl App {
         }
     }
 
-    pub(super) fn delete_group_at(&mut self, idx: usize) -> bool {
-        let Some(group_id) = self.split_groups.get(idx).map(|group| group.id.clone()) else {
-            return false;
-        };
-
-        self.delete_group_by_id(&group_id)
-    }
-
-    pub(super) fn delete_group_by_id(&mut self, id: &str) -> bool {
-        if !self.split_groups.iter().any(|group| group.id == id) {
-            return false;
-        }
-
-        let _ = self.db.delete_group(id);
-        self.split_groups.retain(|group| group.id != id);
-        if self.active_split_id.as_deref() == Some(id) {
-            self.active_split_id = None;
-        }
-        true
-    }
-
     pub fn terminate_focused_session(&mut self) {
-        let terminated = if self.active_split_id.is_some() {
-            self.terminate_active_split_session()
-        } else {
-            self.terminate_selected_session()
-        };
-        if !terminated {
+        if !self.terminate_selected_session() {
             return;
         }
 
         self.finish_session_mutation();
-    }
-
-    pub(super) fn kill_session_by_name(&mut self, name: &str) {
-        let Some(target) = self.session_target_by_name(name) else {
-            return;
-        };
-
-        let _ = self.close_session_target(target, 0);
     }
 
     pub(super) fn finish_session_mutation(&mut self) {
@@ -142,28 +108,17 @@ impl App {
     }
 
     pub(super) fn remove_interactive_session_entry(&mut self, idx: usize) -> bool {
-        let Some(agent_name) = remove_session_name(&mut self.interactive_agents, idx) else {
-            return false;
-        };
-
-        self.dissolve_groups_for_session(&agent_name);
-        true
+        remove_session_name(&mut self.interactive_agents, idx).is_some()
     }
 
     pub(super) fn remove_terminal_session_entry(&mut self, idx: usize) -> bool {
-        let Some(agent_name) = remove_session_name(&mut self.terminal_agents, idx) else {
-            return false;
-        };
-
-        self.dissolve_groups_for_session(&agent_name);
-        true
+        remove_session_name(&mut self.terminal_agents, idx).is_some()
     }
 
     pub fn delete_selected(&mut self) -> anyhow::Result<()> {
         enum DeleteAction {
             Agent(String),
             Corrupt(String),
-            Group(usize),
             Interactive(usize),
             Terminal(usize),
             Orphaned(usize),
@@ -172,7 +127,6 @@ impl App {
         let Some(action) = self.selected_agent().map(|selected| match selected {
             AgentEntry::Agent(agent) => DeleteAction::Agent(agent.id.clone()),
             AgentEntry::Corrupt(corrupt) => DeleteAction::Corrupt(corrupt.id.clone()),
-            AgentEntry::Group(idx) => DeleteAction::Group(*idx),
             AgentEntry::Interactive(idx) => DeleteAction::Interactive(*idx),
             AgentEntry::Terminal(idx) => DeleteAction::Terminal(*idx),
             AgentEntry::Orphaned(idx) => DeleteAction::Orphaned(*idx),
@@ -190,11 +144,6 @@ impl App {
                 // row must always be removable.
                 use crate::application::ports::AgentRepository;
                 self.db.delete_agent(&id)?;
-            }
-            DeleteAction::Group(idx) => {
-                if !self.delete_group_at(idx) {
-                    return Ok(());
-                }
             }
             DeleteAction::Interactive(idx) => {
                 if !self.close_session_target(SessionTarget::Interactive(idx), 0) {
@@ -222,19 +171,6 @@ impl App {
 
         self.finish_session_mutation();
         Ok(())
-    }
-
-    pub(crate) fn dissolve_groups_for_session(&mut self, session_name: &str) {
-        let ids_to_dissolve: Vec<String> = self
-            .split_groups
-            .iter()
-            .filter(|group| group.session_a == session_name || group.session_b == session_name)
-            .map(|group| group.id.clone())
-            .collect();
-
-        for id in ids_to_dissolve {
-            let _ = self.delete_group_by_id(&id);
-        }
     }
 
     pub(crate) fn selected_session_is_exited(&self) -> bool {

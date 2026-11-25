@@ -491,18 +491,8 @@ impl App {
         if self.retain_failed_hub_session(id) {
             return;
         }
-        let names: Vec<String> = self
-            .interactive_agents
-            .iter()
-            .chain(self.terminal_agents.iter())
-            .filter(|agent| agent.id == id)
-            .map(|agent| agent.name.clone())
-            .collect();
         self.interactive_agents.retain(|agent| agent.id != id);
         self.terminal_agents.retain(|agent| agent.id != id);
-        for name in &names {
-            self.dissolve_groups_for_session(name);
-        }
         self.reindex_sessions();
         self.slow_force = true;
     }

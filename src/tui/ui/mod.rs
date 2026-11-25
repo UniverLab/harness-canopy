@@ -77,7 +77,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     let body_area = draw_body(frame, app, &theme, header_area, body);
     let panel_area = draw_panel_and_sync(frame, app, &theme, body_area);
-    draw_split_or_log(frame, app, &theme, panel_area);
+    panel::draw_log_panel(frame, panel_area, app, &theme);
     footer::draw_footer(frame, footer_area, app, &theme);
     draw_ctrl_c_notice(frame, body, app, &theme);
     draw_modal_dialogs(frame, app, &theme);
@@ -133,49 +133,6 @@ fn draw_panel_and_sync(frame: &mut Frame, app: &mut App, theme: &Theme, body_are
     panel::draw_panel_face(frame, sync, app, theme);
     app.last_sync_area = Some(sync);
     panel
-}
-
-/// Split view: render two panels side-by-side (or stacked) when a split is active.
-fn draw_split_or_log(frame: &mut Frame, app: &mut App, theme: &Theme, panel_area: Rect) {
-    let Some(ref split_id) = app.active_split_id.clone() else {
-        panel::draw_log_panel(frame, panel_area, app, theme);
-        return;
-    };
-    let Some(group) = app.split_groups.iter().find(|g| g.id == *split_id) else {
-        // Group no longer exists — clear stale reference
-        app.active_split_id = None;
-        panel::draw_log_panel(frame, panel_area, app, theme);
-        return;
-    };
-    let session_a = group.session_a.clone();
-    let session_b = group.session_b.clone();
-    let areas = match group.orientation {
-        crate::domain::models::SplitOrientation::Horizontal => {
-            Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .areas(panel_area)
-        }
-        crate::domain::models::SplitOrientation::Vertical => {
-            Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .areas(panel_area)
-        }
-    };
-    let [area_a, area_b]: [Rect; 2] = areas;
-    panel::draw_split_panel(
-        frame,
-        area_a,
-        app,
-        &session_a,
-        !app.split_right_focused,
-        theme,
-    );
-    panel::draw_split_panel(
-        frame,
-        area_b,
-        app,
-        &session_b,
-        app.split_right_focused,
-        theme,
-    );
 }
 
 /// The exclusive confirm chain — only one confirmation can be on screen.
@@ -247,10 +204,6 @@ fn draw_modal_dialogs(frame: &mut Frame, app: &mut App, theme: &Theme) {
 
     if app.knowledge_viewer.is_some() {
         dialogs::draw_knowledge_viewer(frame, app, theme);
-    }
-
-    if app.split_picker_open {
-        dialogs::draw_split_picker(frame, app, theme);
     }
 
     if app.version_notice.is_some() {

@@ -1,6 +1,6 @@
 ---
 title: The TUI — Canopy Hub
-description: The full-screen terminal interface — agents, split views, dashboard, transfers.
+description: The full-screen terminal interface — agents, dashboard, transfers.
 order: 4
 ---
 
@@ -171,8 +171,6 @@ step instead of launching straight away:
   covers the text there. When the panel is too narrow for both, the pill is
   dropped and the name stays. The `classic` (bordered) theme is unchanged:
   the label keeps its place in the border title.
-- **Split groups** — side-by-side horizontal/vertical views to watch
-  multiple agents simultaneously.
 - **System dashboard** — CPU, memory, disk, GPU (NVIDIA/Linux/macOS) and
   temperatures with amber/red alert thresholds. Under WSL, metrics come
   from the Windows host via PowerShell. With no reading the CPU row

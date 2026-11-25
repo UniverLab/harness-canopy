@@ -3,93 +3,11 @@
 use super::*;
 
 impl App {
-    pub fn open_split_picker(&mut self) {
-        let sessions = self.available_split_sessions();
-        if sessions.len() < 2 {
-            return;
-        }
-
-        self.split_picker_sessions = sessions;
-        self.split_picker_idx = 0;
-        self.split_picker_orientation = crate::domain::models::SplitOrientation::Horizontal;
-        self.split_picker_open = true;
-    }
-
-    pub(crate) fn available_split_sessions(&self) -> Vec<(String, String)> {
-        self.interactive_agents
-            .iter()
-            .map(|agent| (agent.name.clone(), "Interactive".to_string()))
-            .chain(
-                self.terminal_agents
-                    .iter()
-                    .map(|agent| (agent.name.clone(), "Terminal".to_string())),
-            )
-            .collect()
-    }
-
-    pub(crate) fn selected_session_name(&self) -> Option<String> {
-        self.selected_live_agent().map(|agent| agent.name.clone())
-    }
-
-    /// Create a split group from the current session and the picker selection.
-    pub fn create_split(&mut self) {
-        let Some(current_name) = self.selected_session_name() else {
-            return;
-        };
-        let Some((other_name, _)) = self
-            .split_picker_sessions
-            .get(self.split_picker_idx)
-            .cloned()
-        else {
-            return;
-        };
-        if current_name == other_name {
-            return;
-        }
-
-        let id = format!("split-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-        let group = crate::domain::models::SplitGroup {
-            id: id.clone(),
-            orientation: self.split_picker_orientation,
-            session_a: current_name,
-            session_b: other_name,
-            created_at: Utc::now(),
-        };
-        let _ = self.db.insert_group(
-            &group.id,
-            group.orientation.as_str(),
-            &group.session_a,
-            &group.session_b,
-        );
-        self.active_split_id = Some(id);
-        self.split_groups.push(group);
-        self.split_picker_open = false;
-        self.split_right_focused = false;
-        self.focus = Focus::Agent;
-    }
-
-    /// Dissolve the currently active split group.
-    pub fn dissolve_split(&mut self) {
-        if let Some(id) = self.active_split_id.take() {
-            let _ = self.db.delete_group(&id);
-            self.split_groups.retain(|g| g.id != id);
-        }
-        self.split_picker_open = false;
-    }
-
     // ── Context Transfer ────────────────────────────────────────
 
     /// Open the context transfer modal for the currently focused interactive or terminal agent.
     pub fn open_context_transfer_modal(&mut self) {
         let source = self.selected_context_transfer_source();
-        self.open_context_transfer_from_source(source);
-    }
-
-    /// Open context transfer for the focused split panel's session.
-    pub fn open_context_transfer_for_split(&mut self) {
-        let source = self
-            .active_split_session_name()
-            .and_then(|name| self.context_transfer_source_by_name(&name));
         self.open_context_transfer_from_source(source);
     }
 
@@ -157,10 +75,7 @@ impl App {
                 .terminal_agents
                 .get(*idx)
                 .map(|_| ContextTransferSource::Terminal(*idx)),
-            AgentEntry::Agent(_)
-            | AgentEntry::Corrupt(_)
-            | AgentEntry::Group(_)
-            | AgentEntry::Orphaned(_) => None,
+            AgentEntry::Agent(_) | AgentEntry::Corrupt(_) | AgentEntry::Orphaned(_) => None,
         }
     }
 
@@ -269,36 +184,6 @@ impl App {
     pub(crate) fn selected_context_transfer_source(&self) -> Option<ContextTransferSource> {
         self.selected_agent()
             .and_then(|entry| self.context_transfer_source_for_entry(entry))
-    }
-
-    pub(crate) fn active_split_session_name(&self) -> Option<String> {
-        let split_id = self.active_split_id.as_ref()?;
-        let group = self
-            .split_groups
-            .iter()
-            .find(|group| group.id == *split_id)?;
-        Some(if self.split_right_focused {
-            group.session_b.clone()
-        } else {
-            group.session_a.clone()
-        })
-    }
-
-    pub(crate) fn context_transfer_source_by_name(
-        &self,
-        name: &str,
-    ) -> Option<ContextTransferSource> {
-        if let Some(idx) = self
-            .interactive_agents
-            .iter()
-            .position(|agent| agent.name == name)
-        {
-            return Some(ContextTransferSource::Interactive(idx));
-        }
-        self.terminal_agents
-            .iter()
-            .position(|agent| agent.name == name)
-            .map(ContextTransferSource::Terminal)
     }
 
     pub(crate) fn open_context_transfer_from_source(

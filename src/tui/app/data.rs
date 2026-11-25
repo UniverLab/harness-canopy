@@ -71,10 +71,6 @@ impl App {
         for i in 0..self.orphaned_sessions.len() {
             self.agents.push(AgentEntry::Orphaned(i));
         }
-        // Then split groups
-        for i in 0..self.split_groups.len() {
-            self.agents.push(AgentEntry::Group(i));
-        }
 
         let total = self.agents.len();
         if total > 0 && self.selected >= total {
@@ -182,17 +178,6 @@ impl App {
                     output
                 };
             }
-            AgentEntry::Group(idx) => {
-                if let Some(group) = self.split_groups.get(*idx) {
-                    self.log_content = format!(
-                        "Split Group: {}\n{} · {}\nOrientation: {}",
-                        group.id,
-                        group.session_a,
-                        group.session_b,
-                        group.orientation.as_str(),
-                    );
-                }
-            }
             _ => {
                 let id = agent.id(self).to_string();
                 let log_path = self.data_dir.join("logs").join(format!("{id}.log"));
@@ -224,7 +209,7 @@ impl App {
     }
 
     /// The log pane draws whenever the sidebar is visible and no modal owns
-    /// the frame. Mirrors the draw path (`draw_split_or_log` is reached for
+    /// the frame. Mirrors the draw path (`draw_log_panel` is reached for
     /// every body frame); conservative on modals — copying while one is open
     /// costs nothing visible but keeps `log_content` fresh underneath.
     fn log_panel_visible(&self) -> bool {

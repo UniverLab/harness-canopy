@@ -422,9 +422,6 @@ impl App {
         for i in 0..self.orphaned_sessions.len() {
             self.agents.push(AgentEntry::Orphaned(i));
         }
-        for i in 0..self.split_groups.len() {
-            self.agents.push(AgentEntry::Group(i));
-        }
         let total = self.agents.len();
         if total > 0 && self.selected >= total {
             self.selected = total - 1;

@@ -572,41 +572,6 @@ impl std::fmt::Display for TriggerType {
     }
 }
 
-/// Orientation of a split group panel.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum SplitOrientation {
-    Horizontal,
-    Vertical,
-}
-
-impl SplitOrientation {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Horizontal => "horizontal",
-            Self::Vertical => "vertical",
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn from_str(s: &str) -> Self {
-        match s {
-            "vertical" => Self::Vertical,
-            _ => Self::Horizontal,
-        }
-    }
-}
-
-/// A paired view of two terminal/interactive sessions rendered side-by-side.
-#[derive(Clone)]
-pub struct SplitGroup {
-    pub id: String,
-    pub orientation: SplitOrientation,
-    pub session_a: String,
-    pub session_b: String,
-    #[allow(dead_code)]
-    pub created_at: DateTime<Utc>,
-}
-
 #[cfg(test)]
 #[path = "models_tests.rs"]
 mod tests;

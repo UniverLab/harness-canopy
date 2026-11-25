@@ -1,6 +1,6 @@
 use super::*;
 use crate::db::Database;
-use crate::domain::models::{Agent, Cli, SplitGroup, SplitOrientation, Trigger};
+use crate::domain::models::{Agent, Cli, Trigger};
 use chrono::Utc;
 use ratatui::layout::Rect;
 use std::sync::Arc;
@@ -186,20 +186,11 @@ fn f2_cycles_sidebar_layer_skipping_empty_layers() {
 
 #[test]
 fn f2_cycles_through_all_three_tabs_when_all_have_content() {
-    use crate::domain::models::{SplitGroup, SplitOrientation};
-
-    // 3 background agents (Automation) from `app_with_agents`, plus a
-    // split group (Live) and a project (Knowledge) so every tab has
+    // 3 background agents (Automation) from `app_with_agents`, plus an
+    // interactive entry (Live) and a project (Knowledge) so every tab has
     // something to land on and the ring wraps all the way around.
     let mut app = app_with_agents(3);
-    app.agents.push(AgentEntry::Group(0));
-    app.split_groups.push(SplitGroup {
-        id: "g1".to_string(),
-        orientation: SplitOrientation::Horizontal,
-        session_a: "a".to_string(),
-        session_b: "b".to_string(),
-        created_at: Utc::now(),
-    });
+    app.agents.push(AgentEntry::Interactive(0));
     app.projects
         .push(crate::domain::project::Project::new("/tmp/proj"));
 
@@ -306,10 +297,10 @@ fn unshifted_arrows_do_not_switch_sidebar_tabs() {
 }
 
 #[test]
-fn shift_arrows_step_sidebar_tab_inside_a_focused_agent_without_a_split() {
+fn shift_arrows_step_sidebar_tab_inside_a_focused_agent() {
     // Functional requirement 1: the sidebar tab strip must be reachable
     // from focus, not only from Home/Preview, as long as nothing else
-    // (a split) already owns Shift+←/→ there. Shift+arrows are frame
+    // already owns Shift+←/→ there. Shift+arrows are frame
     // navigation: they select the tab and land at sidebar level, like a
     // click — entering the tab's panel is Enter's job.
     let mut app = app_with_agents(3);
@@ -330,20 +321,26 @@ fn shift_arrows_step_sidebar_tab_inside_a_focused_agent_without_a_split() {
 }
 
 #[test]
-fn shift_arrows_defer_to_split_focus_when_a_split_is_active() {
-    // With a split active, Shift+←/→ keeps meaning split-pane focus —
-    // the established binding that would otherwise be shadowed by
-    // widening the sidebar-tab-step scope into Focus::Agent.
+fn shift_arrows_in_agent_focus_step_sidebar_tab_strip() {
     let mut app = app_with_agents(3);
     app.focus = Focus::Agent;
-    app.active_split_id = Some("split-1".to_string());
 
-    assert!(!handle_global_key(
+    assert!(handle_global_key(
         &mut app,
         KeyCode::Right,
         KeyModifiers::SHIFT
     ));
+    assert_eq!(app.sidebar_layer, crate::tui::app::SidebarLayer::Automation);
+    assert!(matches!(app.focus, Focus::Preview));
+
+    app.focus = Focus::Agent;
+    assert!(handle_global_key(
+        &mut app,
+        KeyCode::Left,
+        KeyModifiers::SHIFT
+    ));
     assert_eq!(app.sidebar_layer, crate::tui::app::SidebarLayer::Live);
+    assert!(matches!(app.focus, Focus::Preview));
 }
 
 #[test]
@@ -511,7 +508,6 @@ fn wheel_over_interactive_scrolls_to_end_and_stops() {
         "the wheel moves the view, never the cursor"
     );
     assert_eq!(app.terminal_off, 0);
-    assert_eq!(app.groups_off, 0);
 
     for _ in 0..30 {
         handle_sidebar_mouse(&mut app, &wheel_at(5, 5, false, false));
@@ -555,36 +551,8 @@ fn wheel_over_terminal_scrolls_only_terminal_sessions() {
     }
     assert_eq!(app.terminal_off, 4 - 2);
     assert_eq!(app.interactive_off, 0, "other sections stay put");
-    assert_eq!(app.groups_off, 0);
 
     kill_all_sessions(&mut app);
-}
-
-#[test]
-fn wheel_over_groups_scrolls_only_groups() {
-    let mut app = app_with_agents(0);
-    for i in 0..6 {
-        app.split_groups.push(SplitGroup {
-            id: format!("g{i}"),
-            orientation: SplitOrientation::Horizontal,
-            session_a: format!("a{i}"),
-            session_b: format!("b{i}"),
-            created_at: Utc::now(),
-        });
-        app.agents.push(AgentEntry::Group(i));
-    }
-    // Inner height 5 shows 3 group rows: (5 + 1) / 2.
-    app.groups_rect = Some(Rect::new(0, 40, 30, 5));
-
-    for _ in 0..10 {
-        assert!(handle_sidebar_mouse(
-            &mut app,
-            &wheel_at(5, 41, true, false)
-        ));
-    }
-    assert_eq!(app.groups_off, 6 - 3);
-    assert_eq!(app.interactive_off, 0);
-    assert_eq!(app.terminal_off, 0);
 }
 
 #[test]
@@ -632,5 +600,4 @@ fn wheel_outside_section_rects_keeps_legacy_behavior() {
     assert_eq!(app.sidebar_scroll_offset, 1);
     assert_eq!(app.interactive_off, 0);
     assert_eq!(app.terminal_off, 0);
-    assert_eq!(app.groups_off, 0);
 }

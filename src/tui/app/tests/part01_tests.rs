@@ -357,8 +357,8 @@ fn select_prev_on_first_live_item_does_not_select_automation() {
     )
     .expect("create app");
     app.agents = vec![
-        AgentEntry::Group(0),
-        AgentEntry::Group(1),
+        AgentEntry::Interactive(0),
+        AgentEntry::Interactive(1),
         AgentEntry::Agent(bg_agent("bg-1")),
     ];
     app.sidebar_layer = SidebarLayer::Live;
@@ -384,7 +384,7 @@ fn navigate_live_wraps_at_both_ends() {
         &crate::domain::canopy_config::CanopyConfig::default(),
     )
     .expect("create app");
-    app.agents = vec![AgentEntry::Group(0), AgentEntry::Group(1)];
+    app.agents = vec![AgentEntry::Interactive(0), AgentEntry::Interactive(1)];
     app.sidebar_layer = SidebarLayer::Live;
     app.selected = 0;
 
@@ -476,7 +476,7 @@ fn rag_reachable_upward_from_live_first_item_returns_to_live() {
         &crate::domain::canopy_config::CanopyConfig::default(),
     )
     .expect("create app");
-    app.agents = vec![AgentEntry::Group(0), AgentEntry::Group(1)];
+    app.agents = vec![AgentEntry::Interactive(0), AgentEntry::Interactive(1)];
     app.sidebar_layer = SidebarLayer::Live;
     app.selected = 0;
     app.rag_info = crate::db::project::RagInfoSummary {

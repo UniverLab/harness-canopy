@@ -205,18 +205,15 @@ use scroll::{selected_terminal_like, with_terminal_like_agent, with_terminal_lik
 use crate::tui::agent::InteractiveAgent;
 #[cfg(test)]
 use mouse::{
-    clamped_pty_position, handle_copy_click, handle_graph_live_panel_mouse,
-    handle_panel_border_drag, handle_preview_focus_click, handle_project_panel_mouse,
-    handle_selection_mouse, handle_sidebar_mouse, handle_sync_panel_scroll, mouse_pty_position,
-    rect_contains_point, scroll_direction, sidebar_agent_at, sidebar_tab_at,
+    clamped_pty_position, handle_graph_live_panel_mouse, handle_panel_border_drag,
+    handle_preview_focus_click, handle_project_panel_mouse, handle_sidebar_mouse,
+    handle_sync_panel_scroll, mouse_pty_position, rect_contains_point, scroll_direction,
+    sidebar_agent_at, sidebar_tab_at,
 };
 #[cfg(test)]
 use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 #[cfg(test)]
-use scroll::{
-    clamp_sidebar_scroll, focused_terminal_like, scroll_terminal_like_agent,
-    with_selected_terminal_like,
-};
+use scroll::{clamp_sidebar_scroll, scroll_terminal_like_agent};
 
 pub fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
     // The version notice is blocking: nothing else gets the key while it is up.
@@ -262,19 +259,10 @@ fn handle_global_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> b
 
     // Shift+←/→ walks the sidebar tab strip — one convention for both tab
     // strips in canopy (see `agent_focus::handle_project_focus_key` for the
-    // project-tab side), reachable from Home, Preview, and now Focus::Agent
-    // too. It used to be scoped to Home/Preview only because Focus::Agent
-    // already spends Shift+←/→ on split-pane focus (see
-    // `agent_focus::handle_split_panel_focus_shortcut`); the two can't both
-    // hold the key at once. Resolved by context: while a split is active,
-    // Shift+←/→ still means split focus — that binding is established and
-    // arguably more delicate to lose since it's how you jump to the *other*
-    // pane. Wherever a split isn't active, Shift+←/→ steps the sidebar tab
-    // instead — matching Home/Preview and, per functional requirement 1,
-    // making the strip reachable without backing out of focus first. Plain
-    // ←/→ is untouched either way (graph collapse/expand on Home, forwarded
-    // to the PTY / cursor movement everywhere else), and project focus /
-    // playground keep opting out entirely per the existing guard below.
+    // Shift+←/→ steps the sidebar tab strip from Home, Preview, and
+    // Focus::Agent. Plain ←/→ is untouched (graph collapse/expand on Home,
+    // forwarded to the PTY / cursor movement everywhere else), and project
+    // focus / playground keep opting out entirely per the guard below.
     if matches!(code, KeyCode::Left | KeyCode::Right)
         && modifiers.contains(KeyModifiers::SHIFT)
         && sidebar_tab_step_applies(app)
@@ -306,15 +294,9 @@ fn handle_global_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> b
 }
 
 /// Whether Shift+←/→ should step the sidebar tab strip in the app's current
-/// state: always from Home/Preview, and from Focus::Agent only when no
-/// split is active (a split keeps Shift+←/→ for split-pane focus instead —
-/// see the comment above this function's call site).
+/// state: always from Home, Preview, and Focus::Agent.
 fn sidebar_tab_step_applies(app: &App) -> bool {
-    match app.focus {
-        Focus::Home | Focus::Preview => true,
-        Focus::Agent => app.active_split_id.is_none(),
-        _ => false,
-    }
+    matches!(app.focus, Focus::Home | Focus::Preview | Focus::Agent)
 }
 
 /// Shared by the F2 key and a sidebar right-click.
@@ -455,9 +437,6 @@ mod panel_border_drag_tests;
 
 #[cfg(test)]
 mod graph_live_panel_mouse_tests;
-
-#[cfg(test)]
-mod split_selection_tests;
 
 #[cfg(test)]
 mod input_timer_tests;

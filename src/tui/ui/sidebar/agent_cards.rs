@@ -1,8 +1,6 @@
 use super::*;
 use crate::tui::agent::InteractiveAgent;
-use crate::tui::event::sidebar_scroll::{
-    group_visible_rows, section_offset, set_section_offset, Section,
-};
+use crate::tui::event::sidebar_scroll::{section_offset, set_section_offset, Section};
 use crate::tui::ui::effective_animation_tick;
 
 pub(super) fn agent_section_border_style(
@@ -18,7 +16,6 @@ pub(super) fn agent_section_border_style(
                 section == AgentSectionFocus::Interactive
             }
             Some(AgentEntry::Terminal(_)) => section == AgentSectionFocus::Terminal,
-            Some(AgentEntry::Group(_)) => section == AgentSectionFocus::Groups,
             _ => false,
         }
     } else {
@@ -64,34 +61,9 @@ pub(super) fn render_agent_list_panel(
                 match sec {
                     Section::Interactive => app.interactive_rect = Some(inner),
                     Section::Terminal => app.terminal_rect = Some(inner),
-                    Section::Groups => app.groups_rect = Some(inner),
                 }
             }
             draw_agent_list(frame, inner, panel.indices, app, theme, panel.sec);
-        },
-    );
-}
-
-pub(super) fn render_groups_panel(
-    frame: &mut Frame,
-    area: Option<Rect>,
-    app: &mut App,
-    section: AgentSectionFocus,
-    theme: &Theme,
-) {
-    let Some(area) = area else {
-        return;
-    };
-    render_titled_panel(
-        frame,
-        area,
-        " groups ",
-        Style::default().fg(theme.dim_text),
-        agent_section_border_style(app, section, theme),
-        theme,
-        |frame, inner| {
-            app.groups_rect = Some(inner);
-            draw_groups_list(frame, inner, app, theme);
         },
     );
 }
@@ -179,7 +151,7 @@ pub(super) fn draw_sidebar_card(
     };
     let name = agent.id(app);
 
-    let mut name_spans = vec![Span::styled(
+    let name_spans = vec![Span::styled(
         name,
         Style::default()
             .add_modifier(Modifier::BOLD)
@@ -189,9 +161,6 @@ pub(super) fn draw_sidebar_card(
                 theme.text_primary
             }),
     )];
-    if is_agent_in_group(name, app) {
-        name_spans.push(Span::styled(" [▣]", Style::default().fg(theme.dim_text)));
-    }
     render_sidebar_card_line(frame, area, 0, bg, status_color, name_spans);
 
     let max_detail = area.width.saturating_sub(6) as usize;
@@ -275,7 +244,6 @@ pub(super) fn agent_card_meta<'a>(
         AgentEntry::Interactive(index) => meta_for_interactive(*index, app, theme),
         AgentEntry::Terminal(index) => meta_for_terminal(*index, app, theme),
         AgentEntry::Orphaned(index) => meta_for_orphaned(*index, app, theme),
-        AgentEntry::Group(_) => meta_for_group(theme),
         AgentEntry::Corrupt(_) => meta_for_corrupt(theme),
     }
 }
@@ -390,16 +358,6 @@ fn meta_for_orphaned<'a>(index: usize, app: &'a App, theme: &Theme) -> AgentCard
         agent_type: "orphan",
         type_detail: session.cli.as_str(),
         work_dir: Some(session.working_dir.as_str()),
-    }
-}
-
-fn meta_for_group(theme: &Theme) -> AgentCardMeta<'static> {
-    AgentCardMeta {
-        accent: theme.header_color,
-        status_color: STATUS_OK,
-        agent_type: "group",
-        type_detail: "",
-        work_dir: None,
     }
 }
 
@@ -534,12 +492,6 @@ pub(super) fn agent_is_waiting(agent: &AgentEntry, app: &App, selected: bool) ->
     }
 }
 
-pub(super) fn is_agent_in_group(name: &str, app: &App) -> bool {
-    app.split_groups
-        .iter()
-        .any(|group| group.session_a == name || group.session_b == name)
-}
-
 pub(super) fn render_sidebar_card_line<'a>(
     frame: &mut Frame,
     area: Rect,
@@ -557,113 +509,5 @@ pub(super) fn render_sidebar_card_line<'a>(
     frame.render_widget(
         Paragraph::new(Line::from(spans)).style(Style::default().bg(bg)),
         Rect::new(area.x, area.y + line_offset, area.width, 1),
-    );
-}
-
-pub(super) fn group_agent_indices(app: &App) -> Vec<usize> {
-    app.agents
-        .iter()
-        .enumerate()
-        .filter(|(_, agent)| matches!(agent, AgentEntry::Group(_)))
-        .map(|(index, _)| index)
-        .collect()
-}
-
-#[derive(Clone, Copy)]
-pub(super) struct GroupRowStyle {
-    pub(super) bg: Color,
-    pub(super) fg: Color,
-    pub(super) modifier: Modifier,
-    pub(super) prefix_color: Color,
-    pub(super) active_tag: &'static str,
-}
-
-pub(super) fn group_row_style(is_selected: bool, is_active: bool, theme: &Theme) -> GroupRowStyle {
-    GroupRowStyle {
-        bg: if is_selected {
-            theme.selected_bg
-        } else {
-            theme.sidebar_bg
-        },
-        fg: if is_selected {
-            theme.header_color
-        } else if is_active {
-            theme.success
-        } else {
-            theme.text_primary
-        },
-        modifier: if is_active || is_selected {
-            Modifier::BOLD
-        } else {
-            Modifier::empty()
-        },
-        prefix_color: if is_active {
-            theme.success
-        } else {
-            theme.dim_text
-        },
-        active_tag: if is_active { " ●" } else { "" },
-    }
-}
-
-pub(super) fn draw_groups_list(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
-    let group_agent_indices = group_agent_indices(app);
-    if area.height == 0 || group_agent_indices.is_empty() {
-        return;
-    }
-    let max_visible = group_visible_rows(area.height).max(1);
-    let total = group_agent_indices.len();
-    let start = app.groups_off.min(total.saturating_sub(max_visible));
-    app.groups_off = start;
-    let mut y = area.y;
-
-    for (position, (&agent_idx, group)) in group_agent_indices
-        .iter()
-        .skip(start)
-        .zip(app.split_groups.iter().skip(start))
-        .enumerate()
-    {
-        if y >= area.y + area.height {
-            break;
-        }
-
-        let is_selected = agent_idx == app.selected && !app.agents_rag_focused;
-        let is_active = app
-            .active_split_id
-            .as_deref()
-            .is_some_and(|id| id == group.id);
-        let style = group_row_style(is_selected, is_active, theme);
-        let label = format!("{} · {}", group.session_a, group.session_b);
-        let text = format!(
-            "{}{}",
-            truncate_str(&label, area.width.saturating_sub(6) as usize),
-            style.active_tag
-        );
-        let line = Line::from(vec![
-            Span::styled("▌ ", Style::default().fg(style.prefix_color).bg(style.bg)),
-            Span::styled(
-                text,
-                Style::default()
-                    .fg(style.fg)
-                    .bg(style.bg)
-                    .add_modifier(style.modifier),
-            ),
-        ]);
-        frame.render_widget(Paragraph::new(line), Rect::new(area.x, y, area.width, 1));
-        app.sidebar_click_map.push((agent_idx, y, y + 1));
-
-        y += if position < group_agent_indices.len() - 1 {
-            2
-        } else {
-            1
-        };
-    }
-
-    draw_scroll_indicators(
-        frame,
-        area,
-        start > 0,
-        total.saturating_sub(start) > max_visible,
-        theme,
     );
 }

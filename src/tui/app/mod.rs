@@ -356,10 +356,7 @@ impl App {
         match entry {
             AgentEntry::Interactive(idx) => self.interactive_agents.get(*idx),
             AgentEntry::Terminal(idx) => self.terminal_agents.get(*idx),
-            AgentEntry::Agent(_)
-            | AgentEntry::Corrupt(_)
-            | AgentEntry::Group(_)
-            | AgentEntry::Orphaned(_) => None,
+            AgentEntry::Agent(_) | AgentEntry::Corrupt(_) | AgentEntry::Orphaned(_) => None,
         }
     }
 
@@ -419,9 +416,7 @@ impl App {
                 Some(format!("terminal:{}", agent.id))
             }
             types::AgentEntry::Agent(a) => Some(format!("agent:{}", a.id)),
-            types::AgentEntry::Corrupt(_)
-            | types::AgentEntry::Group(_)
-            | types::AgentEntry::Orphaned(_) => None,
+            types::AgentEntry::Corrupt(_) | types::AgentEntry::Orphaned(_) => None,
         }
     }
 

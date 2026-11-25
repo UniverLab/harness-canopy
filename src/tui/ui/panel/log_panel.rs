@@ -144,10 +144,6 @@ pub(super) fn draw_agent_panel(
     match selected {
         AgentEntry::Interactive(idx) => draw_focused_interactive_panel(frame, area, app, *idx),
         AgentEntry::Terminal(idx) => draw_focused_terminal_panel(frame, area, app, *idx),
-        AgentEntry::Group(idx) => {
-            draw_group_details(frame, area, app, *idx, theme);
-            true
-        }
         AgentEntry::Agent(agent) => {
             draw_background_agent_panel(frame, area, agent, app, theme);
             true
@@ -303,10 +299,6 @@ pub(super) fn draw_selected_preview(
         }
         AgentEntry::Interactive(idx) => draw_interactive_preview(frame, area, app, *idx),
         AgentEntry::Terminal(idx) => draw_terminal_preview(frame, area, app, *idx),
-        AgentEntry::Group(idx) => {
-            draw_group_details(frame, area, app, *idx, theme);
-            true
-        }
         AgentEntry::Orphaned(idx) => {
             if let Some(session) = app.orphaned_sessions.get(*idx) {
                 let text = format!(

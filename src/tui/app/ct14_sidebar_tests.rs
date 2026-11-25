@@ -98,7 +98,7 @@ fn ct14_shift_arrows_cycle_after_knowledge_round_trip() {
         &crate::domain::canopy_config::CanopyConfig::default(),
     )
     .expect("create app");
-    app.agents = vec![AgentEntry::Group(0), AgentEntry::Group(1)];
+    app.agents = vec![AgentEntry::Interactive(0), AgentEntry::Interactive(1)];
     app.sidebar_layer = SidebarLayer::Knowledge;
     app.selected_project = 0;
 
@@ -197,19 +197,6 @@ fn ct14_agent_section_focus_moves_off_empty_section() {
     app.agents = vec![AgentEntry::Interactive(0)];
     app.normalize_agent_section_focus();
     assert_eq!(app.agent_section_focus, AgentSectionFocus::Interactive);
-
-    // Subcase: only Groups remain.
-    app.split_groups.push(crate::domain::models::SplitGroup {
-        id: "g0".to_string(),
-        orientation: crate::domain::models::SplitOrientation::Horizontal,
-        session_a: "a".to_string(),
-        session_b: "b".to_string(),
-        created_at: chrono::Utc::now(),
-    });
-    app.agents = vec![AgentEntry::Group(0)];
-    app.agent_section_focus = AgentSectionFocus::Terminal;
-    app.normalize_agent_section_focus();
-    assert_eq!(app.agent_section_focus, AgentSectionFocus::Groups);
 }
 
 #[test]
@@ -227,11 +214,11 @@ fn ct14_selected_and_scroll_clamped_after_shrink() {
 
     // `selected` past the end of a shrunk agent list.
     app.agents = vec![
-        AgentEntry::Group(0),
-        AgentEntry::Group(1),
-        AgentEntry::Group(2),
-        AgentEntry::Group(3),
-        AgentEntry::Group(4),
+        AgentEntry::Interactive(0),
+        AgentEntry::Interactive(1),
+        AgentEntry::Interactive(2),
+        AgentEntry::Interactive(3),
+        AgentEntry::Interactive(4),
     ];
     app.sidebar_layer = SidebarLayer::Live;
     app.selected = 4;
@@ -270,7 +257,7 @@ fn ct14_selected_and_scroll_clamped_after_shrink() {
     app.sidebar_layer = SidebarLayer::Live;
     app.sidebar_visible_capacity = 5;
     app.sidebar_scroll_offset = 10;
-    app.agents = vec![AgentEntry::Group(0), AgentEntry::Group(1)];
+    app.agents = vec![AgentEntry::Interactive(0), AgentEntry::Interactive(1)];
     app.selected = 0;
     app.clamp_sidebar_selection();
     assert_eq!(app.sidebar_scroll_offset, 0);
@@ -301,7 +288,7 @@ fn ct14_tab_memory_dead_slot_cleared_on_failed_restore() {
         &crate::domain::canopy_config::CanopyConfig::default(),
     )
     .expect("create app");
-    app.agents = vec![AgentEntry::Group(0)];
+    app.agents = vec![AgentEntry::Interactive(0)];
 
     app.sidebar_step_memory.live_selected = Some(99);
     assert!(!app.restore_remembered_sidebar_selection(SidebarLayer::Live));
@@ -336,8 +323,8 @@ fn ct14_long_scripted_sequence_leaves_navigation_working() {
     .expect("create app");
     app.refresh_graphs().expect("refresh graphs");
     app.agents = vec![
-        AgentEntry::Group(0),
-        AgentEntry::Group(1),
+        AgentEntry::Interactive(0),
+        AgentEntry::Interactive(1),
         AgentEntry::Agent(bg_agent("bg-1")),
     ];
     app.sidebar_layer = SidebarLayer::Live;

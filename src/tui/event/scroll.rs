@@ -6,8 +6,6 @@
 use crate::tui::agent::InteractiveAgent;
 use crate::tui::app::types::{AgentEntry, App, Focus};
 
-use super::context_transfer::resolve_split_focused_terminal_like;
-
 pub(super) fn scroll_sidebar(app: &mut App, dir: i32) {
     let total = app.sidebar_click_map.len();
     let max_visible = app.sidebar_visible_capacity.max(1);
@@ -125,12 +123,8 @@ pub(super) fn selected_terminal_like(app: &App) -> Option<(bool, usize)> {
     }
 }
 
-/// Resolve the terminal-like agent that currently owns PTY input: the
-/// focused half of an active split, or the sidebar-selected agent otherwise.
+/// Resolve the terminal-like agent that currently owns PTY input.
 pub(super) fn focused_terminal_like(app: &App) -> Option<(bool, usize)> {
-    if app.active_split_id.is_some() {
-        return resolve_split_focused_terminal_like(app);
-    }
     selected_terminal_like(app)
 }
 

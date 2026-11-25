@@ -239,19 +239,7 @@ impl App {
         self.activate_selected_entry();
     }
 
-    fn activate_split_group(&mut self, idx: usize) {
-        let Some(group) = self.split_groups.get(idx) else {
-            self.active_split_id = None;
-            return;
-        };
-
-        self.active_split_id = Some(group.id.clone());
-        self.split_right_focused = false;
-    }
-
     fn activate_interactive_session(&mut self, idx: usize) {
-        self.active_split_id = None;
-
         let Some(agent) = self.interactive_agents.get(idx) else {
             return;
         };
@@ -260,23 +248,11 @@ impl App {
     }
 
     fn activate_terminal_session(&mut self, idx: usize) {
-        self.active_split_id = None;
-
         let Some(agent) = self.terminal_agents.get(idx) else {
             return;
         };
 
         agent.mark_viewed();
-    }
-
-    fn active_split_sessions(&self) -> Option<(String, String)> {
-        let split_id = self.active_split_id.as_ref()?;
-        let group = self
-            .split_groups
-            .iter()
-            .find(|group| group.id == *split_id)?;
-
-        Some((group.session_a.clone(), group.session_b.clone()))
     }
 
     fn selected_session_target(&self) -> Option<SessionTarget> {
@@ -286,22 +262,6 @@ impl App {
             AgentEntry::Terminal(idx) => Some(SessionTarget::Terminal(*idx)),
             _ => None,
         }
-    }
-
-    fn session_target_by_name(&self, name: &str) -> Option<SessionTarget> {
-        if let Some(idx) = self
-            .interactive_agents
-            .iter()
-            .position(|agent| agent.name == name)
-        {
-            return Some(SessionTarget::Interactive(idx));
-        }
-
-        let idx = self
-            .terminal_agents
-            .iter()
-            .position(|agent| agent.name == name)?;
-        Some(SessionTarget::Terminal(idx))
     }
 
     fn mark_selected_terminal_viewed(&mut self) {
@@ -332,29 +292,6 @@ impl App {
         };
 
         agent.mark_viewed();
-    }
-
-    fn terminate_active_split_session(&mut self) -> bool {
-        let Some(split_id) = self.active_split_id.clone() else {
-            return false;
-        };
-        let Some(target) = self
-            .split_groups
-            .iter()
-            .find(|group| group.id == split_id)
-            .map(|group| {
-                if self.split_right_focused {
-                    group.session_b.clone()
-                } else {
-                    group.session_a.clone()
-                }
-            })
-        else {
-            return false;
-        };
-
-        self.kill_session_by_name(&target);
-        self.delete_group_by_id(&split_id)
     }
 
     fn terminate_selected_session(&mut self) -> bool {
@@ -392,20 +329,16 @@ impl App {
         self.move_interactive_selection(false);
     }
 
-    /// Activate split or clear it based on the currently selected entry.
+    /// Activate the currently selected session entry.
     fn activate_selected_entry(&mut self) {
         let Some(entry) = self.agents.get(self.selected) else {
-            self.active_split_id = None;
             return;
         };
 
         match entry {
-            AgentEntry::Group(idx) => self.activate_split_group(*idx),
             AgentEntry::Interactive(idx) => self.activate_interactive_session(*idx),
             AgentEntry::Terminal(idx) => self.activate_terminal_session(*idx),
-            _ => {
-                self.active_split_id = None;
-            }
+            _ => {}
         }
     }
 
@@ -420,19 +353,9 @@ impl App {
             return;
         }
 
-        // In split mode, only resize the two sessions participating in the split.
-        // Other sessions keep their last size to avoid unnecessary resize churn.
-        let split_sessions = self.active_split_sessions();
-
         for agent in &mut self.interactive_agents {
             // A remote device owns this size: answering `resize` would fight it.
             if agent.remote_size.is_some() {
-                continue;
-            }
-            let dominated = split_sessions
-                .as_ref()
-                .is_some_and(|(a, b)| agent.name != *a && agent.name != *b);
-            if dominated {
                 continue;
             }
             if agent.last_pty_cols != cols || agent.last_pty_rows != rows {
@@ -442,12 +365,6 @@ impl App {
         for agent in &mut self.terminal_agents {
             // A remote device owns this size: answering `resize` would fight it.
             if agent.remote_size.is_some() {
-                continue;
-            }
-            let dominated = split_sessions
-                .as_ref()
-                .is_some_and(|(a, b)| agent.name != *a && agent.name != *b);
-            if dominated {
                 continue;
             }
             // Warp-mode terminals lose 1 row for the single-line input box.
@@ -512,7 +429,7 @@ impl App {
             return Ok(());
         };
         match agent {
-            AgentEntry::Interactive(_) | AgentEntry::Terminal(_) | AgentEntry::Group(_) => Ok(()),
+            AgentEntry::Interactive(_) | AgentEntry::Terminal(_) => Ok(()),
             _ => {
                 use crate::application::ports::StateRepository;
                 let port = self

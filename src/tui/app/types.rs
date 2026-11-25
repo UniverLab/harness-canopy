@@ -40,7 +40,6 @@ pub enum AgentEntry {
     Interactive(usize), // index into App::interactive_agents
     Terminal(usize),    // index into App::terminal_agents
     Orphaned(usize),    // index into App::orphaned_sessions
-    Group(usize),       // index into App::split_groups
 }
 
 impl AgentEntry {
@@ -54,7 +53,6 @@ impl AgentEntry {
                 .map_or("?", |a| a.seed_name.as_deref().unwrap_or(&a.name)),
             Self::Terminal(idx) => app.terminal_agents.get(*idx).map_or("?", |a| &a.name),
             Self::Orphaned(idx) => app.orphaned_sessions.get(*idx).map_or("?", |s| &s.name),
-            Self::Group(idx) => app.split_groups.get(*idx).map_or("?", |g| &g.id),
         }
     }
 }
@@ -129,19 +127,6 @@ pub struct App {
     /// this process, and a lost kill would let the closed session come
     /// back on the next start.
     pub(crate) pending_closes: Vec<crate::sessions::client::SessionSend>,
-
-    // Split group state
-    pub(crate) split_groups: Vec<crate::domain::models::SplitGroup>,
-    /// ID of the split group currently being viewed (if any).
-    pub(crate) active_split_id: Option<String>,
-    /// True = right/bottom panel is focused in split view.
-    pub(crate) split_right_focused: bool,
-    /// Whether the split picker overlay is open.
-    pub(crate) split_picker_open: bool,
-    pub(crate) split_picker_idx: usize,
-    pub(crate) split_picker_orientation: crate::domain::models::SplitOrientation,
-    /// (name, type_label) for each available session in the picker.
-    pub(crate) split_picker_sessions: Vec<(String, String)>,
 
     // Daemon info
     pub(crate) daemon_running: bool,
@@ -247,15 +232,11 @@ pub struct App {
     /// Inner list rect of the Live tab's terminal section, from the last
     /// frame — see `interactive_rect`.
     pub(crate) terminal_rect: Option<ratatui::layout::Rect>,
-    /// Inner list rect of the Live tab's groups section, from the last
-    /// frame — see `interactive_rect`.
-    pub(crate) groups_rect: Option<ratatui::layout::Rect>,
     /// Per-section manual wheel-scroll offsets (rows) for the Live tab's
-    /// three sub-lists. Independent of `sidebar_scroll_offset` (legacy) and
+    /// two sub-lists. Independent of `sidebar_scroll_offset` (legacy) and
     /// of `selected` — the wheel moves the view, never the cursor.
     pub(crate) interactive_off: usize,
     pub(crate) terminal_off: usize,
-    pub(crate) groups_off: usize,
     pub(crate) projects: Vec<Project>,
     pub(crate) selected_project: usize,
     pub(crate) agent_section_focus: AgentSectionFocus,

@@ -93,7 +93,6 @@ pub(super) fn agent_indices_by_kind(app: &App) -> (Vec<usize>, Vec<usize>, Vec<u
             match agent {
                 AgentEntry::Interactive(_) | AgentEntry::Orphaned(_) => indices.1.push(index),
                 AgentEntry::Terminal(_) => indices.2.push(index),
-                AgentEntry::Group(_) => {}
                 _ => indices.0.push(index),
             }
             indices
@@ -200,16 +199,6 @@ pub(super) fn card_list_demand(count: usize) -> u16 {
         0
     } else {
         count as u16 * 4 + 2
-    }
-}
-
-/// Rows needed for the compact groups list: 0 when empty, else
-/// `count*2+2` (1-row entries + 1-row gap + 2-row border, see `draw_groups_list`).
-pub(super) fn groups_list_demand(count: usize) -> u16 {
-    if count == 0 {
-        0
-    } else {
-        count as u16 * 2 + 2
     }
 }
 

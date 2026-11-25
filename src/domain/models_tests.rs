@@ -367,47 +367,6 @@ fn test_agent_watch_events() {
 }
 
 #[test]
-fn test_split_orientation_as_str() {
-    assert_eq!(SplitOrientation::Horizontal.as_str(), "horizontal");
-    assert_eq!(SplitOrientation::Vertical.as_str(), "vertical");
-}
-
-#[test]
-fn test_split_orientation_from_str() {
-    assert!(matches!(
-        SplitOrientation::from_str("vertical"),
-        SplitOrientation::Vertical
-    ));
-    assert!(matches!(
-        SplitOrientation::from_str("horizontal"),
-        SplitOrientation::Horizontal
-    ));
-    assert!(matches!(
-        SplitOrientation::from_str("anything"),
-        SplitOrientation::Horizontal
-    ));
-    assert!(matches!(
-        SplitOrientation::from_str(""),
-        SplitOrientation::Horizontal
-    ));
-}
-
-#[test]
-fn test_split_group_creation() {
-    let group = SplitGroup {
-        id: "sg1".to_string(),
-        orientation: SplitOrientation::Horizontal,
-        session_a: "sess_a".to_string(),
-        session_b: "sess_b".to_string(),
-        created_at: Utc::now(),
-    };
-    assert_eq!(group.id, "sg1");
-    assert!(matches!(group.orientation, SplitOrientation::Horizontal));
-    assert_eq!(group.session_a, "sess_a");
-    assert_eq!(group.session_b, "sess_b");
-}
-
-#[test]
 fn test_trigger_type_display() {
     assert_eq!(format!("{}", TriggerType::Scheduled), "scheduled");
     assert_eq!(format!("{}", TriggerType::Manual), "manual");

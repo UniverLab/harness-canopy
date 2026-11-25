@@ -594,8 +594,7 @@ pub(super) fn handle_selection_mouse(app: &mut App, mouse: &MouseEvent) -> bool 
 
 /// Pane-relative (col, row) for drag events, clamped to the panel bounds so
 /// dragging past an edge extends the selection to that edge. Uses the
-/// focused panel's last-rendered geometry, which tracks whichever half of a
-/// split (if any) is currently focused.
+/// focused panel's last-rendered geometry.
 pub(super) fn clamped_pty_position(app: &App, mouse: &MouseEvent) -> (u16, u16) {
     let (panel_w, panel_h) = app.last_panel_inner;
     let col = mouse

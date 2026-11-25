@@ -55,20 +55,6 @@ fn agent_entry_id_for_corrupt() {
 }
 
 #[test]
-fn agent_entry_id_for_group_out_of_bounds() {
-    let db = test_db();
-    let data_dir = tempdir().expect("create data dir");
-    let app = App::new(
-        Arc::clone(&db),
-        data_dir.path(),
-        &crate::domain::canopy_config::CanopyConfig::default(),
-    )
-    .expect("create app");
-    let entry = AgentEntry::Group(99);
-    assert_eq!(entry.id(&app), "?");
-}
-
-#[test]
 fn agent_entry_id_for_interactive_out_of_bounds() {
     let db = test_db();
     let data_dir = tempdir().expect("create data dir");
@@ -474,8 +460,8 @@ fn step_sidebar_tab_restores_non_edge_selection_on_return() {
     )
     .expect("create app");
     app.agents = vec![
-        AgentEntry::Group(0),
-        AgentEntry::Group(1),
+        AgentEntry::Interactive(0),
+        AgentEntry::Interactive(1),
         AgentEntry::Agent(bg_agent("bg-1")),
     ];
     app.sidebar_layer = SidebarLayer::Live;
@@ -510,8 +496,8 @@ fn step_sidebar_tab_falls_back_to_edge_when_remembered_selection_is_gone() {
     )
     .expect("create app");
     app.agents = vec![
-        AgentEntry::Group(0),
-        AgentEntry::Group(1),
+        AgentEntry::Interactive(0),
+        AgentEntry::Interactive(1),
         AgentEntry::Agent(bg_agent("bg-1")),
     ];
     app.sidebar_layer = SidebarLayer::Live;

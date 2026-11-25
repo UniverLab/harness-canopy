@@ -201,9 +201,8 @@ fn sidebar_has_gaps_between_all_sections() {
     assert!((0..buffer.area.width)
         .all(|x| { buffer[(x, 1)].symbol() == " " && buffer[(x, 1)].bg == theme.sidebar_bg }));
     // After the first titled panel (interactive) there must be another blank gap
-    // before the terminal panel, and likewise between terminal and groups.
-    // Count blank rows inside the Live body to ensure the rule is applied between
-    // every section, not just tabs->list.
+    // before the terminal panel. Count blank rows inside the Live body to
+    // ensure the rule is applied between every section, not just tabs->list.
     let blank_gap_rows = (0..buffer.area.height)
         .filter(|&y| {
             (0..buffer.area.width)
@@ -211,8 +210,8 @@ fn sidebar_has_gaps_between_all_sections() {
         })
         .count();
     assert!(
-            blank_gap_rows >= 3,
-            "expected at least 3 breathing gaps (tab->interactive, interactive->terminal, terminal->groups), found {blank_gap_rows}"
+            blank_gap_rows >= 2,
+            "expected at least 2 breathing gaps (tab->interactive, interactive->terminal), found {blank_gap_rows}"
         );
 }
 
@@ -1044,7 +1043,7 @@ fn fair_section_heights_no_focus_unchanged() {
     // With no focused section and a zero floor the function must
     // behave exactly as it did before the floor was added: the small
     // sections cap at their demand, the large one takes the rest.
-    let demands = [needed_agents(6), needed_agents(1), groups_list_demand(1)];
+    let demands = [needed_agents(6), needed_agents(1), 4];
     assert_eq!(fair_section_heights(&demands, 20, None, 0), vec![10, 6, 4]);
 }
 
@@ -1053,7 +1052,7 @@ fn fair_section_heights_focus_no_effect_when_budget_is_ample() {
     // Tall screen: everything fits. The focused-section floor must not
     // change what any section gets -- no visible difference from the
     // pre-floor behaviour on screens with sufficient height.
-    let demands = [needed_agents(3), needed_agents(2), groups_list_demand(2)];
+    let demands = [needed_agents(3), needed_agents(2), 6];
     let ample = demands.iter().sum::<u16>() + 10;
     assert_eq!(
         fair_section_heights(&demands, ample, Some(0), 6),
@@ -1078,21 +1077,6 @@ fn card_list_demand_one() {
 #[test]
 fn card_list_demand_many() {
     assert_eq!(card_list_demand(5), 22);
-}
-
-#[test]
-fn groups_list_demand_empty() {
-    assert_eq!(groups_list_demand(0), 0);
-}
-
-#[test]
-fn groups_list_demand_one() {
-    assert_eq!(groups_list_demand(1), 4);
-}
-
-#[test]
-fn groups_list_demand_many() {
-    assert_eq!(groups_list_demand(3), 8);
 }
 
 #[test]
@@ -1195,46 +1179,6 @@ fn render_sidebar_card_line_beyond_height() {
             );
         })
         .unwrap();
-}
-
-#[test]
-fn group_row_style_selected_and_active() {
-    let theme = Theme::classic();
-    let style = group_row_style(true, true, &theme);
-    assert_eq!(style.bg, theme.selected_bg);
-    assert_eq!(style.fg, theme.header_color);
-    assert!(style.modifier.contains(Modifier::BOLD));
-    assert_eq!(style.prefix_color, theme.success);
-    assert_eq!(style.active_tag, " ●");
-}
-
-#[test]
-fn group_row_style_not_selected_not_active() {
-    let theme = Theme::classic();
-    let style = group_row_style(false, false, &theme);
-    assert_eq!(style.bg, theme.sidebar_bg);
-    assert_eq!(style.fg, theme.text_primary);
-    assert!(style.modifier.is_empty());
-    assert_eq!(style.prefix_color, theme.dim_text);
-    assert_eq!(style.active_tag, "");
-}
-
-#[test]
-fn group_row_style_selected_not_active() {
-    let theme = Theme::classic();
-    let style = group_row_style(true, false, &theme);
-    assert_eq!(style.bg, theme.selected_bg);
-    assert_eq!(style.fg, theme.header_color);
-    assert!(style.modifier.contains(Modifier::BOLD));
-}
-
-#[test]
-fn group_row_style_active_not_selected() {
-    let theme = Theme::classic();
-    let style = group_row_style(false, true, &theme);
-    assert_eq!(style.bg, theme.sidebar_bg);
-    assert_eq!(style.fg, theme.success);
-    assert!(style.modifier.contains(Modifier::BOLD));
 }
 
 #[test]

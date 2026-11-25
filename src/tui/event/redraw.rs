@@ -97,11 +97,10 @@ pub(crate) fn tick(app: &mut App, state: &mut TickState, input: bool) -> Result<
 
 // ── PTY output ──────────────────────────────────────────────────────
 
-/// Ids of the sessions drawn right now: the focused or previewed session
-/// plus both members of the active split (resolved by name, mirroring
-/// `ui::panel`'s session lookup). Output from any other session must not
-/// dirty the frame (FR4) — the sidebar activity pulse still updates through
-/// [`activity_changed`], which diffs its own state.
+/// Ids of the sessions drawn right now: the focused or previewed session.
+/// Output from any other session must not dirty the frame (FR4) — the
+/// sidebar activity pulse still updates through [`activity_changed`], which
+/// diffs its own state.
 fn visible_session_ids(app: &App) -> HashSet<String> {
     let mut visible = HashSet::new();
     if matches!(app.focus, Focus::Agent | Focus::Preview) {
@@ -117,26 +116,6 @@ fn visible_session_ids(app: &App) -> HashSet<String> {
                 }
             }
             _ => {}
-        }
-    }
-    if let Some(split_id) = app.active_split_id.as_deref() {
-        if let Some(group) = app.split_groups.iter().find(|g| g.id == *split_id) {
-            for name in [&group.session_a, &group.session_b] {
-                let id = app
-                    .interactive_agents
-                    .iter()
-                    .find(|agent| &agent.name == name)
-                    .map(|agent| agent.id.clone())
-                    .or_else(|| {
-                        app.terminal_agents
-                            .iter()
-                            .find(|agent| &agent.name == name)
-                            .map(|agent| agent.id.clone())
-                    });
-                if let Some(id) = id {
-                    visible.insert(id);
-                }
-            }
         }
     }
     visible

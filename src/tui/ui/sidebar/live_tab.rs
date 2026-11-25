@@ -14,15 +14,12 @@ pub(crate) fn live_section_floor_index(
         Some(0)
     } else if terminal_indices.contains(&app.selected) {
         Some(1)
-    } else if matches!(app.agents.get(app.selected), Some(AgentEntry::Group(_))) {
-        Some(2)
     } else {
         None
     };
     cursor_idx.or(match app.agent_section_focus {
         AgentSectionFocus::Interactive => Some(0),
         AgentSectionFocus::Terminal => Some(1),
-        AgentSectionFocus::Groups => Some(2),
         AgentSectionFocus::Brain => None,
     })
 }
@@ -63,7 +60,6 @@ pub(super) fn draw_live_body(
     let demands = [
         card_list_demand(interactive_indices.len()),
         card_list_demand(terminal_indices.len()),
-        groups_list_demand(app.split_groups.len()),
     ];
     // CT14: the guaranteed floor tracks the section holding the cursor
     // (C32 follow-on) — see `live_section_floor_index`.
@@ -76,7 +72,6 @@ pub(super) fn draw_live_body(
     // stale rect from an earlier frame.
     app.interactive_rect = None;
     app.terminal_rect = None;
-    app.groups_rect = None;
 
     if let Some(sub) = take_top(&mut remaining, alloc[0]) {
         let border_style = agent_section_border_style(app, AgentSectionFocus::Interactive, theme);
@@ -108,10 +103,6 @@ pub(super) fn draw_live_body(
             app,
             theme,
         );
-    }
-    draw_sidebar_gap(frame, &mut remaining, theme);
-    if let Some(sub) = take_top(&mut remaining, alloc[2]) {
-        render_groups_panel(frame, Some(sub), app, AgentSectionFocus::Groups, theme);
     }
 
     remaining
@@ -336,7 +327,7 @@ pub(super) fn automation_border_style(app: &App, kind: AutomationKind, theme: &T
 }
 
 /// Border style for the Automation layer's `agents` sub-panel — distinct
-/// from `agent_section_border_style` (Live's Interactive/Terminal/Groups)
+/// from `agent_section_border_style` (Live's Interactive/Terminal)
 /// since Automation tracks its active sub-list via `automation_kind`.
 pub(super) fn automation_agents_border_style(app: &App, theme: &Theme) -> Style {
     automation_border_style(app, AutomationKind::Agent, theme)

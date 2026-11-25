@@ -77,8 +77,8 @@ impl App {
     /// a directional key that silently jumps two cells because the one in
     /// between was empty reads as a bug, and the empty tab's own state is
     /// worth seeing. Now reachable from `Focus::Agent` too (not just
-    /// Home/Preview) when no split is active — see the guard in
-    /// `event::handle_global_key` — so a step away from a layer remembers
+    /// Home/Preview) — see the guard in `event::handle_global_key` — so
+    /// a step away from a layer remembers
     /// that layer's selection and a step back restores it instead of
     /// re-landing on its edge item the way a fresh jump (click/F2) does.
     pub(crate) fn step_sidebar_tab(&mut self, forward: bool) {

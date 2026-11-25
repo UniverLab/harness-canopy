@@ -99,12 +99,9 @@ impl App {
     /// Width that fills the strip a remote device freed by sizing the
     /// selected session narrower than the pane: the pane's inner width then
     /// equals the remote's cols exactly. `None` when no fill applies — no
-    /// remote size, a split view (which keeps its own layout), a remote
-    /// wider than the pane, or a strip below the forced minimum.
+    /// remote size, a remote wider than the pane, or a strip below the
+    /// forced minimum.
     pub(crate) fn remote_fill_width(&self, total_width: u16) -> Option<u16> {
-        if self.active_split_id.is_some() {
-            return None;
-        }
         let (remote_cols, _) = self.selected_remote_size()?;
         let panel_inner = self.last_panel_inner.0;
         if panel_inner == 0 || remote_cols >= panel_inner {
@@ -203,7 +200,6 @@ impl App {
                 .orphaned_sessions
                 .get(*idx)
                 .map(|s| s.working_dir.as_str()),
-            AgentEntry::Group(_) => None,
         }
     }
 
@@ -763,12 +759,6 @@ mod tests {
         // A strip below the forced minimum leaves the layout as it is:
         // 120 - (110 + 2) = 8 < 16.
         app.terminal_agents[0].remote_size = Some((110, 20));
-        assert_eq!(app.remote_fill_width(120), None);
-        assert_eq!(app.activity_panel_layout_width(120, true), 36);
-
-        // A split view keeps its own layout.
-        app.terminal_agents[0].remote_size = Some((60, 20));
-        app.active_split_id = Some("split".to_string());
         assert_eq!(app.remote_fill_width(120), None);
         assert_eq!(app.activity_panel_layout_width(120, true), 36);
         app.terminal_agents[0].kill();

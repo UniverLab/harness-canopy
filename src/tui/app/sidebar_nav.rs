@@ -42,8 +42,8 @@ impl App {
     }
 
     /// Indices into `app.agents` that render inside the `Live` layer
-    /// (interactive sessions, terminals, orphaned sessions, split groups —
-    /// everything with a PTY right now), in rendering order.
+    /// (interactive sessions, terminals, orphaned sessions — everything
+    /// with a PTY right now), in rendering order.
     pub(crate) fn live_indices(&self) -> Vec<usize> {
         self.agents
             .iter()
@@ -51,10 +51,7 @@ impl App {
             .filter(|(_, a)| {
                 matches!(
                     a,
-                    AgentEntry::Interactive(_)
-                        | AgentEntry::Terminal(_)
-                        | AgentEntry::Orphaned(_)
-                        | AgentEntry::Group(_)
+                    AgentEntry::Interactive(_) | AgentEntry::Terminal(_) | AgentEntry::Orphaned(_)
                 )
             })
             .map(|(i, _)| i)
@@ -391,10 +388,6 @@ impl App {
                     self.sidebar_layer = SidebarLayer::Live;
                     self.agent_section_focus = AgentSectionFocus::Terminal;
                 }
-                AgentEntry::Group(_) => {
-                    self.sidebar_layer = SidebarLayer::Live;
-                    self.agent_section_focus = AgentSectionFocus::Groups;
-                }
             };
         }
     }
@@ -482,11 +475,9 @@ impl App {
             .agents
             .iter()
             .any(|a| matches!(a, AgentEntry::Terminal(_)));
-        let has_groups = !self.split_groups.is_empty();
         let empty = match self.agent_section_focus {
             AgentSectionFocus::Interactive => !has_interactive,
             AgentSectionFocus::Terminal => !has_terminal,
-            AgentSectionFocus::Groups => !has_groups,
             AgentSectionFocus::Brain => false,
         };
         if !empty {
@@ -496,8 +487,6 @@ impl App {
             self.agent_section_focus = AgentSectionFocus::Interactive;
         } else if has_terminal {
             self.agent_section_focus = AgentSectionFocus::Terminal;
-        } else if has_groups {
-            self.agent_section_focus = AgentSectionFocus::Groups;
         }
     }
 

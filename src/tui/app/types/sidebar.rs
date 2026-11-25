@@ -190,13 +190,12 @@ impl Default for GraphSidebarMeta {
 }
 
 /// Border-focus sub-section within the `Live` layer (interactive/terminal
-/// agents render as three stacked sub-panels sharing one collapsible layer).
+/// agents render as two stacked sub-panels sharing one collapsible layer).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[expect(dead_code)]
 pub enum AgentSectionFocus {
     Interactive,
     Terminal,
-    Groups,
     Brain,
 }
 

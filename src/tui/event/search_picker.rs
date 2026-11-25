@@ -214,31 +214,16 @@ pub fn insert_suggestion_into_terminal(app: &mut App, text: &str, is_cd: bool) {
 
 /// Find the index of the terminal agent that currently has focus.
 pub fn find_focused_terminal(app: &App) -> Option<usize> {
-    if let Some(ref split_id) = app.active_split_id {
-        let name = app
-            .split_groups
-            .iter()
-            .find(|g| g.id == *split_id)
-            .map(|g| {
-                if app.split_right_focused {
-                    &g.session_b
-                } else {
-                    &g.session_a
-                }
-            })?;
-        app.terminal_agents.iter().position(|a| &a.name == name)
-    } else {
-        match app.selected_agent() {
-            Some(AgentEntry::Terminal(idx)) => {
-                let idx = *idx;
-                if idx < app.terminal_agents.len() {
-                    Some(idx)
-                } else {
-                    None
-                }
+    match app.selected_agent() {
+        Some(AgentEntry::Terminal(idx)) => {
+            let idx = *idx;
+            if idx < app.terminal_agents.len() {
+                Some(idx)
+            } else {
+                None
             }
-            _ => None,
         }
+        _ => None,
     }
 }
 

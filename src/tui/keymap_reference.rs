@@ -748,4 +748,16 @@ mod tests {
         }
         lines[..cut].join("\n")
     }
+
+    #[test]
+    fn key_refs_has_no_split_action() {
+        for entry in KEY_REFS {
+            assert!(
+                !entry.action.to_lowercase().contains("split"),
+                "KEY_REFS entry {:?} still mentions split: {:?}",
+                entry.key,
+                entry.action
+            );
+        }
+    }
 }

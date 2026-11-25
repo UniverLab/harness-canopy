@@ -1,110 +1,13 @@
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
 
-use super::centered_rect;
 use crate::tui::app::types::App;
 use crate::tui::terminal_history::SuggestionPicker;
 use crate::tui::ui::theme::Theme;
 
-pub fn draw_split_picker(frame: &mut Frame, app: &App, theme: &Theme) {
-    if !app.split_picker_open {
-        return;
-    }
-
-    let sessions = &app.split_picker_sessions;
-    let current_name = match app.selected_agent() {
-        Some(crate::tui::app::types::AgentEntry::Interactive(idx)) => app
-            .interactive_agents
-            .get(*idx)
-            .map(|agent| agent.name.clone())
-            .unwrap_or_default(),
-        Some(crate::tui::app::types::AgentEntry::Terminal(idx)) => app
-            .terminal_agents
-            .get(*idx)
-            .map(|agent| agent.name.clone())
-            .unwrap_or_default(),
-        _ => String::new(),
-    };
-
-    let visible = sessions.len().min(6) as u16;
-    let height = 9 + visible;
-    let area = centered_rect(60, height, frame.area());
-    frame.render_widget(Clear, area);
-
-    let block = Block::default()
-        .title(" Split con... ")
-        .borders(crate::tui::ui::dialog_borders_for(theme))
-        .border_style(Style::default().fg(theme.success))
-        .style(Style::default().bg(theme.dialog_bg));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let mut lines = vec![
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("  Current: ", Style::default().fg(theme.dim_text)),
-            Span::styled(
-                &current_name,
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "  Selecciona:",
-            Style::default().fg(theme.dim_text),
-        )),
-    ];
-
-    for (i, (name, type_label)) in sessions.iter().enumerate() {
-        if name == &current_name {
-            continue;
-        }
-        let selected = i == app.split_picker_idx;
-        let style = if selected {
-            Style::default()
-                .fg(Color::Black)
-                .bg(theme.success)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::White)
-        };
-        let prefix = if selected { "  > " } else { "    " };
-        lines.push(Line::from(vec![
-            Span::styled(format!("{}{}", prefix, name), style),
-            Span::styled(
-                format!("  [{}]", type_label),
-                Style::default().fg(theme.dim_text),
-            ),
-        ]));
-    }
-
-    lines.push(Line::from(""));
-
-    let orient_label = match app.split_picker_orientation {
-        crate::domain::models::SplitOrientation::Horizontal => "● Horizontal  ○ Vertical",
-        crate::domain::models::SplitOrientation::Vertical => "○ Horizontal  ● Vertical",
-    };
-    lines.push(Line::from(vec![
-        Span::styled("  Orientación:  ", Style::default().fg(theme.dim_text)),
-        Span::styled(orient_label, Style::default().fg(Color::White)),
-    ]));
-    lines.push(Line::from(Span::styled(
-        "                Tab para alternar",
-        Style::default().fg(theme.dim_text),
-    )));
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "  Esc cancelar               Enter crear",
-        Style::default().fg(theme.dim_text),
-    )));
-
-    frame.render_widget(Paragraph::new(lines), inner);
-}
 pub fn draw_suggestion_picker(
     frame: &mut Frame,
     app: &App,
@@ -115,8 +18,7 @@ pub fn draw_suggestion_picker(
         return;
     };
 
-    // Determine the actual area to draw the picker in (respecting split view)
-    let picker_area = suggestion_picker_area(app, panel_area);
+    let picker_area = panel_area;
 
     if picker.items.is_empty() {
         // Show "no matches" indicator
@@ -173,40 +75,6 @@ pub fn draw_suggestion_picker(
 
     let list = List::new(items);
     frame.render_widget(list, inner);
-}
-
-/// The area the picker draws into, inset from the focused half of an active split.
-fn suggestion_picker_area(app: &App, panel_area: Rect) -> Rect {
-    let Some(ref split_id) = app.active_split_id else {
-        return panel_area;
-    };
-    let Some(group) = app.split_groups.iter().find(|g| g.id == *split_id) else {
-        return panel_area;
-    };
-    let orientation = group.orientation;
-    let areas = match orientation {
-        crate::domain::models::SplitOrientation::Horizontal => {
-            Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .areas(panel_area)
-        }
-        crate::domain::models::SplitOrientation::Vertical => {
-            Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .areas(panel_area)
-        }
-    };
-    let [area_a, area_b]: [Rect; 2] = areas;
-    let raw = if app.split_right_focused {
-        area_b
-    } else {
-        area_a
-    };
-    // Account for the split panel border (1px each side)
-    Rect::new(
-        raw.x.saturating_add(1),
-        raw.y.saturating_add(1),
-        raw.width.saturating_sub(2),
-        raw.height.saturating_sub(2),
-    )
 }
 
 /// Draw the "No matches" indicator in place of the picker list.
