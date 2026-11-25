@@ -190,7 +190,11 @@ step instead of launching straight away:
   `Esc` toggles between auto-follow and manual mode. Nodes are drawn as
   boxed nodes laid out in columns and joined by connectors, with the spec
   strip pinned at the top while the diagram scrolls beneath it; narrow
-  panels fall back to the vertical list.
+  panels fall back to the vertical list. While a node is running, its
+  incoming connectors are drawn in the running colour with a dot (`●`
+  with a short `··` trail) travelling along them into the running box,
+  whose top and bottom borders pulse; when animations are off or paused
+  the highlight stays static with no travelling dot.
 - **Output pane** — `t` opens a read-only viewer beside the live graph that
   streams the highlighted node's stdout/stderr as the engine writes it (agent
   nodes and check nodes alike). In auto-follow the pane retargets node by
