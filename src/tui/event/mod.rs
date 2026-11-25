@@ -185,6 +185,7 @@ mod rag_transfer;
 mod redraw;
 mod scroll;
 mod search_picker;
+pub(crate) mod sidebar_scroll;
 mod terminal_warp;
 
 use knowledge_dialog::handle_knowledge_dialog_key;

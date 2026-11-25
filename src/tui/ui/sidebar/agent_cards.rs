@@ -1,5 +1,8 @@
 use super::*;
 use crate::tui::agent::InteractiveAgent;
+use crate::tui::event::sidebar_scroll::{
+    group_visible_rows, section_offset, set_section_offset, Section,
+};
 use crate::tui::ui::effective_animation_tick;
 
 pub(super) fn agent_section_border_style(
@@ -29,13 +32,21 @@ pub(super) fn agent_section_border_style(
     })
 }
 
+/// Arguments for [`render_agent_list_panel`], bundled so the renderer stays
+/// within the argument-count lint.
+#[derive(Clone, Copy)]
+pub(super) struct AgentListPanel<'a> {
+    pub title: &'a str,
+    pub indices: &'a [usize],
+    pub border_style: Style,
+    pub sec: Option<Section>,
+}
+
 pub(super) fn render_agent_list_panel(
     frame: &mut Frame,
     area: Option<Rect>,
-    title: &str,
-    indices: &[usize],
+    panel: AgentListPanel<'_>,
     app: &mut App,
-    border_style: Style,
     theme: &Theme,
 ) {
     let Some(area) = area else {
@@ -44,11 +55,20 @@ pub(super) fn render_agent_list_panel(
     render_titled_panel(
         frame,
         area,
-        title,
+        panel.title,
         Style::default().fg(theme.dim_text),
-        border_style,
+        panel.border_style,
         theme,
-        |frame, inner| draw_agent_list(frame, inner, indices, app, theme),
+        |frame, inner| {
+            if let Some(sec) = panel.sec {
+                match sec {
+                    Section::Interactive => app.interactive_rect = Some(inner),
+                    Section::Terminal => app.terminal_rect = Some(inner),
+                    Section::Groups => app.groups_rect = Some(inner),
+                }
+            }
+            draw_agent_list(frame, inner, panel.indices, app, theme, panel.sec);
+        },
     );
 }
 
@@ -69,7 +89,10 @@ pub(super) fn render_groups_panel(
         Style::default().fg(theme.dim_text),
         agent_section_border_style(app, section, theme),
         theme,
-        |frame, inner| draw_groups_list(frame, inner, app, theme),
+        |frame, inner| {
+            app.groups_rect = Some(inner);
+            draw_groups_list(frame, inner, app, theme);
+        },
     );
 }
 
@@ -81,6 +104,7 @@ pub(super) fn draw_agent_list(
     indices: &[usize],
     app: &mut App,
     theme: &Theme,
+    sec: Option<Section>,
 ) {
     let card_h = 3u16;
     let row_h = 4u16;
@@ -91,12 +115,16 @@ pub(super) fn draw_agent_list(
 
     let max_visible = ((area.height.saturating_sub(card_h)) / row_h + 1) as usize;
     let selected_local = indices.iter().position(|&idx| idx == app.selected);
-    let scroll = scroll_state_with_offset(
-        indices.len(),
-        selected_local,
-        max_visible,
-        app.sidebar_scroll_offset,
-    );
+    let manual_offset = match sec {
+        Some(sec) => {
+            let clamped = section_offset(app, sec).min(indices.len().saturating_sub(max_visible));
+            set_section_offset(app, sec, clamped);
+            clamped
+        }
+        None => app.sidebar_scroll_offset,
+    };
+    let scroll =
+        scroll_state_with_offset(indices.len(), selected_local, max_visible, manual_offset);
     app.sidebar_visible_capacity += scroll.max_visible;
     let mut y = area.y;
     let end = indices.len().min(scroll.start + scroll.max_visible + 1);
@@ -580,11 +608,19 @@ pub(super) fn group_row_style(is_selected: bool, is_active: bool, theme: &Theme)
 
 pub(super) fn draw_groups_list(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     let group_agent_indices = group_agent_indices(app);
+    if area.height == 0 || group_agent_indices.is_empty() {
+        return;
+    }
+    let max_visible = group_visible_rows(area.height).max(1);
+    let total = group_agent_indices.len();
+    let start = app.groups_off.min(total.saturating_sub(max_visible));
+    app.groups_off = start;
     let mut y = area.y;
 
     for (position, (&agent_idx, group)) in group_agent_indices
         .iter()
-        .zip(app.split_groups.iter())
+        .skip(start)
+        .zip(app.split_groups.iter().skip(start))
         .enumerate()
     {
         if y >= area.y + area.height {
@@ -622,4 +658,12 @@ pub(super) fn draw_groups_list(frame: &mut Frame, area: Rect, app: &mut App, the
             1
         };
     }
+
+    draw_scroll_indicators(
+        frame,
+        area,
+        start > 0,
+        total.saturating_sub(start) > max_visible,
+        theme,
+    );
 }

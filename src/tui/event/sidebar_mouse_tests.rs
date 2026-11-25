@@ -1,7 +1,8 @@
 use super::*;
 use crate::db::Database;
-use crate::domain::models::{Agent, Cli, Trigger};
+use crate::domain::models::{Agent, Cli, SplitGroup, SplitOrientation, Trigger};
 use chrono::Utc;
+use ratatui::layout::Rect;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -425,4 +426,211 @@ fn f6_no_longer_opens_a_panel_picker_in_preview_or_agent_focus() {
         matches!(agent.focus, Focus::Agent),
         "F6 must leave the focused session untouched"
     );
+}
+
+// ── Per-section wheel scrolling (interactive / terminal / groups) ──
+
+fn spawn_live_session(name: &str) -> crate::tui::agent::InteractiveAgent {
+    crate::tui::agent::InteractiveAgent::spawn_terminal(
+        "cat",
+        "/tmp",
+        80,
+        24,
+        Some(name),
+        &[],
+        ratatui::style::Color::White,
+    )
+    .expect("spawn test session")
+}
+
+/// Builds an App with `count` live interactive sessions, mirroring the
+/// order `refresh_agents` produces (background rows first, then sessions).
+fn app_with_live_sessions(count: usize) -> App {
+    let db = test_db();
+    let data_dir = tempdir().expect("create data dir");
+    let mut app = App::new(
+        Arc::clone(&db),
+        data_dir.path(),
+        &crate::domain::canopy_config::CanopyConfig::default(),
+    )
+    .expect("create app");
+    for i in 0..count {
+        app.interactive_agents
+            .push(spawn_live_session(&format!("live-{i}")));
+        app.agents.push(AgentEntry::Interactive(i));
+    }
+    app.sidebar_visible = true;
+    app.selected = 0;
+    app.focus = Focus::Preview;
+    app
+}
+
+fn kill_all_sessions(app: &mut App) {
+    for agent in app.interactive_agents.iter_mut() {
+        agent.kill();
+    }
+    for agent in app.terminal_agents.iter_mut() {
+        agent.kill();
+    }
+}
+
+fn wheel_at(column: u16, row: u16, down: bool, shift: bool) -> MouseEvent {
+    MouseEvent {
+        kind: if down {
+            MouseEventKind::ScrollDown
+        } else {
+            MouseEventKind::ScrollUp
+        },
+        column,
+        row,
+        modifiers: if shift {
+            KeyModifiers::SHIFT
+        } else {
+            KeyModifiers::NONE
+        },
+    }
+}
+
+#[test]
+fn wheel_over_interactive_scrolls_to_end_and_stops() {
+    let mut app = app_with_live_sessions(12);
+    // Inner height 19 shows 5 cards: ((19 - 3) / 4) + 1.
+    app.interactive_rect = Some(Rect::new(0, 1, 30, 19));
+    let selected = app.selected;
+
+    for _ in 0..30 {
+        assert!(handle_sidebar_mouse(&mut app, &wheel_at(5, 5, true, false)));
+    }
+    assert_eq!(
+        app.interactive_off,
+        12 - 5,
+        "wheel down stops at len - visible"
+    );
+    assert_eq!(
+        app.selected, selected,
+        "the wheel moves the view, never the cursor"
+    );
+    assert_eq!(app.terminal_off, 0);
+    assert_eq!(app.groups_off, 0);
+
+    for _ in 0..30 {
+        handle_sidebar_mouse(&mut app, &wheel_at(5, 5, false, false));
+    }
+    assert_eq!(app.interactive_off, 0);
+
+    kill_all_sessions(&mut app);
+}
+
+#[test]
+fn shift_wheel_over_interactive_scrolls_three_rows_per_notch() {
+    let mut app = app_with_live_sessions(12);
+    app.interactive_rect = Some(Rect::new(0, 1, 30, 19));
+
+    handle_sidebar_mouse(&mut app, &wheel_at(5, 5, true, true));
+    assert_eq!(app.interactive_off, 3);
+
+    handle_sidebar_mouse(&mut app, &wheel_at(5, 5, false, true));
+    assert_eq!(app.interactive_off, 0);
+
+    kill_all_sessions(&mut app);
+}
+
+#[test]
+fn wheel_over_terminal_scrolls_only_terminal_sessions() {
+    let mut app = app_with_live_sessions(2);
+    for i in 0..4 {
+        app.terminal_agents
+            .push(spawn_live_session(&format!("term-{i}")));
+        app.agents.push(AgentEntry::Terminal(i));
+    }
+    app.interactive_rect = Some(Rect::new(0, 1, 30, 19));
+    // Inner height 7 shows 2 cards: ((7 - 3) / 4) + 1.
+    app.terminal_rect = Some(Rect::new(0, 30, 30, 7));
+
+    for _ in 0..10 {
+        assert!(handle_sidebar_mouse(
+            &mut app,
+            &wheel_at(5, 31, true, false)
+        ));
+    }
+    assert_eq!(app.terminal_off, 4 - 2);
+    assert_eq!(app.interactive_off, 0, "other sections stay put");
+    assert_eq!(app.groups_off, 0);
+
+    kill_all_sessions(&mut app);
+}
+
+#[test]
+fn wheel_over_groups_scrolls_only_groups() {
+    let mut app = app_with_agents(0);
+    for i in 0..6 {
+        app.split_groups.push(SplitGroup {
+            id: format!("g{i}"),
+            orientation: SplitOrientation::Horizontal,
+            session_a: format!("a{i}"),
+            session_b: format!("b{i}"),
+            created_at: Utc::now(),
+        });
+        app.agents.push(AgentEntry::Group(i));
+    }
+    // Inner height 5 shows 3 group rows: (5 + 1) / 2.
+    app.groups_rect = Some(Rect::new(0, 40, 30, 5));
+
+    for _ in 0..10 {
+        assert!(handle_sidebar_mouse(
+            &mut app,
+            &wheel_at(5, 41, true, false)
+        ));
+    }
+    assert_eq!(app.groups_off, 6 - 3);
+    assert_eq!(app.interactive_off, 0);
+    assert_eq!(app.terminal_off, 0);
+}
+
+#[test]
+fn keyboard_past_visible_window_bumps_interactive_offset() {
+    let mut app = app_with_live_sessions(12);
+    // Inner height 19 shows 5 cards.
+    app.interactive_rect = Some(Rect::new(0, 1, 30, 19));
+
+    for _ in 0..6 {
+        app.select_next();
+    }
+    assert_eq!(app.selected, 6);
+    assert_eq!(
+        app.interactive_off, 2,
+        "row 5 slides the window to 1, row 6 to 2"
+    );
+
+    kill_all_sessions(&mut app);
+}
+
+#[test]
+fn closing_last_row_clamps_interactive_offset() {
+    let mut app = app_with_live_sessions(12);
+    app.interactive_rect = Some(Rect::new(0, 1, 30, 19));
+    app.interactive_off = 7;
+    app.selected = 11;
+
+    app.terminate_focused_session();
+
+    assert_eq!(app.interactive_agents.len(), 11);
+    assert_eq!(app.interactive_off, 11 - 5);
+
+    kill_all_sessions(&mut app);
+}
+
+#[test]
+fn wheel_outside_section_rects_keeps_legacy_behavior() {
+    let mut app = app_with_agents(20);
+    app.sidebar_visible_capacity = 8;
+    app.interactive_rect = Some(Rect::new(0, 1, 30, 3));
+
+    let consumed = handle_sidebar_mouse(&mut app, &wheel_at(5, 50, true, false));
+
+    assert!(consumed);
+    assert_eq!(app.sidebar_scroll_offset, 1);
+    assert_eq!(app.interactive_off, 0);
+    assert_eq!(app.terminal_off, 0);
+    assert_eq!(app.groups_off, 0);
 }

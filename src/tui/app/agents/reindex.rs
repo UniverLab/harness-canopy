@@ -37,6 +37,8 @@ impl App {
             self.agents.push(AgentEntry::Group(i));
         }
 
+        self.clamp_live_section_offsets();
+
         let total = self.agents.len();
         if total == 0 {
             self.selected = 0;

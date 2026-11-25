@@ -9,8 +9,8 @@ use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEven
 
 use super::prompt_template;
 use super::scroll::{
-    clamp_sidebar_scroll, focused_terminal_like, handle_scroll, scroll_sidebar,
-    with_selected_terminal_like, with_selected_terminal_like_mut, with_terminal_like_agent,
+    clamp_sidebar_scroll, focused_terminal_like, handle_scroll, with_selected_terminal_like,
+    with_selected_terminal_like_mut, with_terminal_like_agent,
 };
 use super::{cycle_sidebar_layer_and_normalize_focus, switch_sidebar_tab_and_normalize_focus};
 use crate::tui::agent::InteractiveAgent;
@@ -239,14 +239,8 @@ pub(super) fn handle_sidebar_mouse(app: &mut App, mouse: &MouseEvent) -> bool {
             cycle_sidebar_layer_and_normalize_focus(app);
             true
         }
-        MouseEventKind::ScrollUp => {
-            scroll_sidebar(app, 1);
-            true
-        }
-        MouseEventKind::ScrollDown => {
-            scroll_sidebar(app, -1);
-            true
-        }
+        MouseEventKind::ScrollUp => super::sidebar_scroll::scroll_sidebar_wheel(app, mouse, 1),
+        MouseEventKind::ScrollDown => super::sidebar_scroll::scroll_sidebar_wheel(app, mouse, -1),
         _ => false,
     }
 }

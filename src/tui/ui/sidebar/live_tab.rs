@@ -1,4 +1,5 @@
 use super::*;
+use crate::tui::event::sidebar_scroll::Section;
 
 /// CT14 (C32 follow-on): the guaranteed floor must track the section holding
 /// the cursor, derived from where `selected` actually lives — not from the
@@ -70,15 +71,25 @@ pub(super) fn draw_live_body(
     let alloc = fair_section_heights(&demands, area.height, focused_idx, 6);
     let mut remaining = area;
 
+    // Sections that get no rows this frame record no rect, so the wheel
+    // handler falls back to today's behaviour instead of hit-testing a
+    // stale rect from an earlier frame.
+    app.interactive_rect = None;
+    app.terminal_rect = None;
+    app.groups_rect = None;
+
     if let Some(sub) = take_top(&mut remaining, alloc[0]) {
         let border_style = agent_section_border_style(app, AgentSectionFocus::Interactive, theme);
         render_agent_list_panel(
             frame,
             Some(sub),
-            " interactive ",
-            interactive_indices,
+            AgentListPanel {
+                title: " interactive ",
+                indices: interactive_indices,
+                border_style,
+                sec: Some(Section::Interactive),
+            },
             app,
-            border_style,
             theme,
         );
     }
@@ -88,10 +99,13 @@ pub(super) fn draw_live_body(
         render_agent_list_panel(
             frame,
             Some(sub),
-            " terminal ",
-            terminal_indices,
+            AgentListPanel {
+                title: " terminal ",
+                indices: terminal_indices,
+                border_style,
+                sec: Some(Section::Terminal),
+            },
             app,
-            border_style,
             theme,
         );
     }
@@ -128,10 +142,13 @@ pub(super) fn draw_automation_body(
         render_agent_list_panel(
             frame,
             Some(sub),
-            " agents ",
-            background_indices,
+            AgentListPanel {
+                title: " agents ",
+                indices: background_indices,
+                border_style,
+                sec: None,
+            },
             app,
-            border_style,
             theme,
         );
     }

@@ -97,6 +97,7 @@ impl App {
         self.normalize_agent_section_focus();
         let indices = self.live_indices();
         if indices.is_empty() {
+            self.clamp_live_section_offsets();
             return;
         }
         let current = indices.iter().position(|&i| i == self.selected);
@@ -104,6 +105,7 @@ impl App {
             let prev = self.selected;
             self.selected = indices[0];
             self.update_agent_section_focus_on_change(prev);
+            self.ensure_live_selection_visible();
             return;
         };
         let next_pos = if forward {
@@ -123,6 +125,7 @@ impl App {
         let prev = self.selected;
         self.selected = indices[next_pos];
         self.update_agent_section_focus_on_change(prev);
+        self.ensure_live_selection_visible();
     }
 
     /// Automation is one flat ring for arrow-key purposes, agents rendered
@@ -433,6 +436,7 @@ impl App {
         if self.sidebar_scroll_offset > max_offset {
             self.sidebar_scroll_offset = max_offset;
         }
+        self.clamp_live_section_offsets();
     }
 
     /// CT14 (selection bug): if `automation_kind` points at an empty sub-list
@@ -514,6 +518,7 @@ impl App {
         self.agents_rag_focused = false;
         self.update_agent_section_focus_on_change(prev);
         self.reset_log_scroll();
+        self.ensure_live_selection_visible();
     }
 
     pub fn scroll_log_down(&mut self) {
