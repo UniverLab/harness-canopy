@@ -3,7 +3,7 @@ use crate::tui::terminal_history::SessionHistory;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 fn ghost_for(
@@ -17,11 +17,6 @@ fn ghost_for(
         .map(str::to_string)
 }
 
-/// Base input box height (rows) when the buffer holds up to `BASE_LINE_CAPACITY`
-/// wrapped lines — matches the padding rows the single-line box always had.
-const BASE_HEIGHT: u16 = 4;
-/// Lines that already fit within `BASE_HEIGHT` without growing the box.
-const BASE_LINE_CAPACITY: usize = 3;
 /// Hard cap so the input box never eats the whole panel.
 const MAX_HEIGHT: u16 = 8;
 
@@ -61,11 +56,10 @@ pub(crate) fn wrap_offsets(text: &str, width: usize) -> Vec<(usize, usize)> {
 }
 
 /// Height (rows) the warp input box needs to show `text` wrapped at `width`
-/// columns: free up to `BASE_LINE_CAPACITY` lines, then grow 1:1 up to `MAX_HEIGHT`.
+/// columns: one row per wrapped line, at least 1, capped at `MAX_HEIGHT`.
 pub(crate) fn input_height(text: &str, width: u16) -> u16 {
-    let total_lines = wrap_offsets(text, width.max(1) as usize).len();
-    let extra = total_lines.saturating_sub(BASE_LINE_CAPACITY) as u16;
-    (BASE_HEIGHT + extra).min(MAX_HEIGHT)
+    let total_lines = wrap_offsets(text, width.max(1) as usize).len() as u16;
+    total_lines.clamp(1, MAX_HEIGHT)
 }
 
 /// Map a byte cursor position to (wrapped line index, column) using the same
@@ -104,13 +98,9 @@ pub fn draw_warp_input_box(frame: &mut Frame, area: Rect, app: &App, idx: usize)
     let cursor_pos = agent.warp_cursor.min(input_text.len());
 
     let accent = agent.accent_color;
-    // Field-style input box (no border, darkgray background — matches the
-    // opencode chat input look). The split layout reserves enough rows for
-    // the wrapped content; we use them all so the field has visible
-    // top/bottom padding around the text rows.
-    let block = Block::default().style(Style::default().bg(WARP_INPUT_BG));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    // Borderless single line on the terminal's own background. The split
+    // layout reserves exactly the wrapped rows, so no fill or padding.
+    let inner = area;
 
     if inner.height == 0 || inner.width < 4 {
         return;
@@ -173,14 +163,10 @@ pub fn draw_warp_input_box(frame: &mut Frame, area: Rect, app: &App, idx: usize)
     }
 }
 
-/// Background of the field-style input box.
-const WARP_INPUT_BG: Color = Color::Rgb(20, 20, 28);
-
-/// Every text span inside the field must carry the field's background
-/// explicitly, otherwise ratatui falls back to the terminal default
-/// and the text appears to float on the wrong color.
+/// Text spans use the terminal's own background; only the foreground
+/// carries the prompt/text/placeholder colors.
 fn warp_prompt_style(fg: Color, bold: bool) -> Style {
-    let mut s = Style::default().bg(WARP_INPUT_BG).fg(fg);
+    let mut s = Style::default().fg(fg);
     if bold {
         s = s.add_modifier(Modifier::BOLD);
     }
@@ -277,7 +263,7 @@ fn warp_input_lines(
         } else {
             vec![Span::styled(
                 ctx.indent.to_string(),
-                warp_prompt_style(WARP_INPUT_BG, false),
+                warp_prompt_style(Color::Reset, false),
             )]
         };
         spans.push(Span::styled(
@@ -458,6 +444,6 @@ mod tests {
         let text = "a".repeat(200);
         let height = input_height(&text, 40);
         assert_eq!(wrap_offsets(&text, 40).len(), 5);
-        assert_eq!(height, 6); // 5 lines - 3 free = 2 extra rows over base(4)
+        assert_eq!(height, 5); // one row per wrapped line, capped at MAX_HEIGHT
     }
 }

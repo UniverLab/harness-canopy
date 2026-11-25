@@ -450,17 +450,17 @@ impl App {
             if dominated {
                 continue;
             }
-            // Warp-mode terminals lose 3 rows for the input box. This must
-            // stay equal to `pty_area.height.saturating_sub(3)` where
-            // `pty_area` is what `draw_terminal_warp_mode` stores in
-            // `last_panel_inner` (panel inner minus input_height + gap);
+            // Warp-mode terminals lose 1 row for the single-line input box.
+            // This must stay equal to `pty_area.height.saturating_sub(1)`
+            // where `pty_area` is what `draw_terminal_warp_mode` stores in
+            // `last_panel_inner` (panel inner minus input_height, no gap);
             // a future warp-height change that drifts from it would silently
             // reintroduce completion-timed shrinks (CT15).
             // CT16: when the child holds the alternate screen it owns the
             // full pane, so do not reserve the input-box rows. Keep the
             // constant in sync with `panel/mod.rs::split_warp_areas`.
             let effective_rows = if agent.warp_mode && !agent.in_alternate_screen() {
-                rows.saturating_sub(3)
+                rows.saturating_sub(1)
             } else {
                 rows
             };
@@ -1319,7 +1319,7 @@ mod close_terminal_session_tests {
 
         let agent = &app.terminal_agents[0];
         assert!(!agent.in_alternate_screen());
-        assert_eq!(agent.last_pty_rows, 21);
+        assert_eq!(agent.last_pty_rows, 23);
         assert!(agent.last_lines(50).contains("line0"));
         assert!(agent.last_lines(50).contains("line1"));
         assert!(agent.last_lines(50).contains("line2"));
@@ -1335,7 +1335,7 @@ mod close_terminal_session_tests {
         app.resize_interactive_agents();
 
         assert!(!app.terminal_agents[0].in_alternate_screen());
-        assert_eq!(app.terminal_agents[0].last_pty_rows, 21);
+        assert_eq!(app.terminal_agents[0].last_pty_rows, 23);
         assert!(!app.terminal_agents[0].should_bypass_warp_input());
         app.terminal_agents[0].kill();
     }
@@ -1399,8 +1399,8 @@ mod ct16_warp_fullscreen_handover_tests {
         app.last_panel_inner = (80, 24);
         app.resize_interactive_agents();
         assert_eq!(
-            app.terminal_agents[0].last_pty_rows, 21,
-            "warp mode reserves 3 rows for the input box before alt screen"
+            app.terminal_agents[0].last_pty_rows, 23,
+            "warp mode reserves 1 row for the input box before alt screen"
         );
 
         feed(&app.terminal_agents[0], b"\x1b[?1049h");
@@ -1435,7 +1435,7 @@ mod ct16_warp_fullscreen_handover_tests {
                 app.terminal_agents[0].last_pty_cols,
                 app.terminal_agents[0].last_pty_rows
             ),
-            (100, 27)
+            (100, 29)
         );
 
         feed(&app.terminal_agents[0], b"\x1b[?1049h");
@@ -1462,7 +1462,7 @@ mod ct16_warp_fullscreen_handover_tests {
         let mut app = app_with_terminal(agent);
         app.last_panel_inner = (80, 24);
         app.resize_interactive_agents();
-        assert_eq!(app.terminal_agents[0].last_pty_rows, 21);
+        assert_eq!(app.terminal_agents[0].last_pty_rows, 23);
 
         feed(&app.terminal_agents[0], b"\x1b[?1049h");
         app.resize_interactive_agents();
@@ -1472,7 +1472,7 @@ mod ct16_warp_fullscreen_handover_tests {
         assert!(!app.terminal_agents[0].in_alternate_screen());
         app.resize_interactive_agents();
         assert_eq!(
-            app.terminal_agents[0].last_pty_rows, 21,
+            app.terminal_agents[0].last_pty_rows, 23,
             "warp sizing returns once the child leaves the alt screen"
         );
         let warp_active =
@@ -1502,7 +1502,7 @@ mod ct16_warp_fullscreen_handover_tests {
             app.resize_interactive_agents();
             assert!(!app.terminal_agents[0].in_alternate_screen());
             assert!(!app.terminal_agents[0].should_bypass_warp_input());
-            assert_eq!(app.terminal_agents[0].last_pty_rows, 21);
+            assert_eq!(app.terminal_agents[0].last_pty_rows, 23);
             let warp_active = app.terminal_agents[0].warp_mode
                 && !app.terminal_agents[0].should_bypass_warp_input();
             assert!(warp_active, "warp input box stays for normal children");

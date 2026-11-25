@@ -158,17 +158,13 @@ fn pane_selection(app: &App, is_terminal: bool, idx: usize) -> Option<vt100::Pan
 }
 
 /// Splits the terminal-warp panel into the PTY output area and the input
-/// box, with a 1-row gap between them. `input_text` is the current buffer
+/// box directly below it, with no gap. `input_text` is the current buffer
 /// contents (used to size the input box for wrapped/multiline content).
 fn split_warp_areas(area: Rect, input_text: &str) -> (Rect, Rect) {
     let input_height = warp::input_height(input_text, area.width);
-    let chunks = Layout::vertical([
-        Constraint::Min(0),
-        Constraint::Length(1),
-        Constraint::Length(input_height),
-    ])
-    .split(area);
-    (chunks[0], chunks[2])
+    let chunks =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(input_height)]).split(area);
+    (chunks[0], chunks[1])
 }
 
 fn warp_input_text(app: &App, idx: usize) -> String {
@@ -884,47 +880,101 @@ mod tests {
     }
 
     #[test]
-    fn split_warp_areas_reserves_four_rows_for_empty_input() {
+    fn split_warp_areas_reserves_one_row_for_empty_input() {
         let area = Rect::new(0, 0, 80, 20);
         let (pty_area, input_area) = split_warp_areas(area, "");
-        assert_eq!(input_area.height, 4);
-        // 1 row gap + 4 row input box.
-        assert_eq!(pty_area.height, 15);
+        assert_eq!(input_area.height, 1);
+        assert_eq!(pty_area.height, 19);
     }
 
     #[test]
-    fn split_warp_areas_leaves_one_row_gap_above_input() {
+    fn split_warp_areas_places_input_directly_below_output() {
         let area = Rect::new(0, 0, 80, 20);
         let (pty_area, input_area) = split_warp_areas(area, "hello");
-        assert_eq!(input_area.y, pty_area.y + pty_area.height + 1);
+        assert_eq!(input_area.y, pty_area.y + pty_area.height);
     }
 
     #[test]
     fn warp_input_height_short_text_stays_at_base() {
-        // 100 chars at 40 cols wraps to 3 lines, which fits within the
-        // base box without growing it.
+        assert_eq!(warp::input_height("hello", 40), 1);
+    }
+
+    #[test]
+    fn warp_input_height_hundred_chars_at_forty_cols_is_three_rows() {
         let text = "a".repeat(100);
-        assert_eq!(warp::input_height(&text, 40), 4);
+        assert_eq!(warp::input_height(&text, 40), 3);
     }
 
     #[test]
     fn warp_input_height_long_text_grows() {
-        // 200 chars at 40 cols wraps to 5 lines: 2 lines beyond the
-        // 3-line base capacity, so the box grows from 4 to 6 rows.
         let text = "a".repeat(200);
-        let height = warp::input_height(&text, 40);
-        assert!((5..=6).contains(&height), "height was {height}");
+        assert_eq!(warp::input_height(&text, 40), 5);
     }
 
     #[test]
     fn warp_input_height_explicit_newlines_grow_and_cap_at_max() {
         let text = "a\nb\nc\nd\ne\nf\ng"; // 7 lines
+        assert_eq!(warp::input_height(text, 40), 7);
+        let text = "a\nb\nc\nd\ne\nf\ng\nh\ni"; // 9 lines
         assert_eq!(warp::input_height(text, 40), 8);
     }
 
     #[test]
     fn warp_input_height_empty_is_base() {
-        assert_eq!(warp::input_height("", 40), 4);
+        assert_eq!(warp::input_height("", 40), 1);
+    }
+
+    #[test]
+    fn warp_input_box_renders_single_line_with_default_background() {
+        let path = crate::test_support::temp_db_path();
+        let db = Arc::new(crate::db::Database::new(&path).unwrap());
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
+        let mut agent = crate::tui::agent::InteractiveAgent::spawn_terminal(
+            "cat",
+            "/tmp",
+            80,
+            24,
+            Some("t"),
+            &[],
+            Color::White,
+        )
+        .expect("spawn");
+        agent.warp_mode = true;
+        app.terminal_agents.push(agent);
+        crate::test_support::hold(data_dir);
+        let area = Rect::new(0, 0, 80, 5);
+        let (pty_area, input_area) = split_warp_areas(area, "");
+        assert_eq!(input_area.height, 1);
+        assert_eq!(input_area.y, pty_area.y + pty_area.height);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| draw_warp_input_box(frame, input_area, &app, 0))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        for x in 0..input_area.width {
+            assert_eq!(
+                buffer[(input_area.x + x, input_area.y)].bg,
+                Color::Reset,
+                "input cell {x} must use the default background"
+            );
+        }
+        for y in 0..area.height {
+            for x in 0..area.width {
+                assert_eq!(
+                    buffer[(x, y)].bg,
+                    Color::Reset,
+                    "cell ({x},{y}) must use the default background"
+                );
+            }
+        }
+        app.terminal_agents[0].kill();
     }
 
     #[test]

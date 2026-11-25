@@ -134,13 +134,13 @@ fn drag_does_not_resize_until_release() {
     assert!(handle_panel_border_drag(&mut app, &release(80, 5)));
     assert!(!app.activity_panel_dragging);
     // Body 120, user 40, chrome 2: the pane inner is 78. The warp-mode
-    // terminal keeps 3 rows for its input box.
+    // terminal keeps 1 row for its input box.
     assert_eq!(
         (
             app.terminal_agents[0].last_pty_cols,
             app.terminal_agents[0].last_pty_rows
         ),
-        (78, 21),
+        (78, 23),
         "release resizes the PTY once, to the dragged width"
     );
     app.terminal_agents[0].kill();
