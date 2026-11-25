@@ -90,8 +90,10 @@ re-run `canopy setup`.
 **Linux / macOS:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/UniverLab/harness-canopy/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/UniverLab/harness-canopy/{{TAG}}/scripts/install.sh | sh
 ```
+
+The script verifies the release signature with [minisign](https://jedisct1.github.io/minisign/) against the release public key (`RWRDOZx1ameWKtWCHDVp3YmIsBiJszM2U4SJbCMkZ8/iSkW9Pi1yWzDD`), then checks the SHA-256 checksum; either failure aborts the install. (`{{TAG}}` is stamped with the release tag by `scripts/release-docs.sh` before tagging.)
 
 Or via cargo: `cargo install harness-canopy` (the binary is `canopy`). Prefer the script: release binaries carry two patched dependencies that cargo leaves out of published crates, including the fix that keeps remote control connected over a relay.
 See [`docs/installation.md`](docs/installation.md) for all methods and first-time setup. To see every connection canopy makes before you install, read [Network and privacy](docs/network-and-privacy.md).

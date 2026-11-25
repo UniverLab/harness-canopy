@@ -6,7 +6,10 @@
 
 mod notice;
 mod restart;
+mod signing;
 
+#[cfg(test)]
+mod signing_tests;
 #[cfg(test)]
 mod tests;
 
@@ -353,7 +356,7 @@ fn is_stable_version(tag: &str) -> bool {
     !value.is_empty() && value.chars().all(|c| c.is_ascii_digit() || c == '.')
 }
 
-fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+pub(super) fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
     let parse = |s: &str| -> Vec<u32> {
         s.trim_start_matches('v')
             .split('.')
@@ -518,6 +521,14 @@ pub fn is_cargo_installed(exe: &Path, cargo_bin: &Path) -> bool {
 // ── Download, extraction, and atomic replacement ────────────────
 
 /// Download and extract the `canopy` entry from a release tarball.
+///
+/// The archive is verified before anything is unpacked: the release's
+/// `SHA256SUMS.txt.minisig` must carry a valid minisign signature of
+/// `SHA256SUMS.txt` (trusted comment `canopy <tag>`) from the embedded
+/// release key, and the archive's SHA-256 must match its checksums entry.
+/// Releases below [`signing::SIGNED_RELEASES_FROM`] predate signing, so a
+/// missing signature there installs with a warning instead of aborting; a
+/// present-but-invalid signature always aborts.
 pub fn download_and_extract_with(
     downloader: &dyn BinaryDownloader,
     tag: &str,
@@ -525,8 +536,28 @@ pub fn download_and_extract_with(
     output: &Path,
 ) -> Result<bool> {
     let asset = asset_name(tag, target);
-    let url = format!("https://github.com/{GITHUB_REPO}/releases/download/{tag}/{asset}");
-    let bytes = downloader.download(&url)?;
+    let base = format!("https://github.com/{GITHUB_REPO}/releases/download/{tag}");
+    let minisig = match downloader.download(&format!("{base}/SHA256SUMS.txt.minisig")) {
+        Ok(bytes) => {
+            Some(String::from_utf8(bytes).context("signature invalid: minisig is not UTF-8")?)
+        }
+        Err(_) if signing::is_signature_mandatory(tag) => {
+            bail!("signature missing: {tag} has no SHA256SUMS.txt.minisig");
+        }
+        Err(_) => {
+            eprintln!(
+                "warning: release {tag} is unsigned; installing without signature verification"
+            );
+            None
+        }
+    };
+    let bytes = downloader.download(&format!("{base}/{asset}"))?;
+    if let Some(minisig) = minisig.as_deref() {
+        let sums_bytes = downloader.download(&format!("{base}/SHA256SUMS.txt"))?;
+        let sums =
+            String::from_utf8(sums_bytes).context("signature invalid: sums are not UTF-8")?;
+        signing::verify_release(signing::PUBLIC_KEY, &sums, minisig, &bytes, &asset, tag)?;
+    }
     let decoder = flate2::read::GzDecoder::new(bytes.as_slice());
     let mut archive = tar::Archive::new(decoder);
 

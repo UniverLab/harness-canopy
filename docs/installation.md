@@ -20,8 +20,32 @@ full platform list and how to check a platform is usable.
 **Linux / macOS:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/UniverLab/harness-canopy/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/UniverLab/harness-canopy/{{TAG}}/scripts/install.sh | sh
 ```
+
+(`{{TAG}}` is stamped with the release tag by `scripts/release-docs.sh`
+before tagging, so the command serves the tagged, immutable install script.)
+
+## Signature verification
+
+The install script verifies the download before installing it. Each release
+publishes `SHA256SUMS.txt` (one `<sha256>  <asset>` line per archive) plus a
+detached minisign signature, `SHA256SUMS.txt.minisig`, whose trusted comment
+is `canopy <tag>`. The script checks the signature with
+[minisign](https://jedisct1.github.io/minisign/) against the release public
+key:
+
+```text
+RWRDOZx1ameWKtWCHDVp3YmIsBiJszM2U4SJbCMkZ8/iSkW9Pi1yWzDD
+```
+
+(key id `2A96676A759C3943`), binds it to the tag through the trusted comment,
+then checks the archive's SHA-256 against its checksums entry. Any failure
+aborts the install: minisign must be installed (the script names it and exits
+1 otherwise), and a missing sha256 tool is fatal, not skipped. To skip
+signature verification (not recommended), set `CANOPY_ALLOW_UNSIGNED=1`; the
+script prints `WARNING: CANOPY_ALLOW_UNSIGNED=1, skipping signature
+verification` and still verifies the checksum.
 
 The Linux binary needs glibc 2.39 or newer: Ubuntu 24.04, Debian 13 or later.
 On an older system, use the cargo install below.
@@ -106,6 +130,15 @@ afterwards (asking first when a graph is running).
 nothing: exit 0 means up to date, 1 means an update is available, and 2
 means the check failed (network, DNS, TLS, HTTP error, or unparsable
 response).
+
+Before replacing the executable, `canopy update` verifies the release the
+same way the install script does: the `SHA256SUMS.txt.minisig` signature must
+be valid for `SHA256SUMS.txt` under the release public key compiled into the
+binary, with trusted comment `canopy <tag>`, and the archive's SHA-256 must
+match its checksums entry. Any failure aborts before anything is replaced.
+Releases before `v3.3.0` carry no signature; updating to one prints
+`warning: release <tag> is unsigned; installing without signature
+verification` and proceeds.
 
 The published Linux binary is `x86_64-unknown-linux-gnu` (glibc, not
 static musl — it loads the ONNX Runtime that local RAG embeddings need).

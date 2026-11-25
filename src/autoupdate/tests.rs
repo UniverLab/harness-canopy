@@ -201,8 +201,13 @@ struct RecordingDownloader {
 }
 
 impl super::BinaryDownloader for RecordingDownloader {
-    fn download(&self, _url: &str) -> anyhow::Result<Vec<u8>> {
+    fn download(&self, url: &str) -> anyhow::Result<Vec<u8>> {
         self.called.set(true);
+        // The pre-signing fixtures below exercise the unsigned-release path:
+        // no signature files exist for them.
+        if url.ends_with(".minisig") || url.ends_with("SHA256SUMS.txt") {
+            anyhow::bail!("404");
+        }
         Ok(self.bytes.clone())
     }
 }

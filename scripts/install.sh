@@ -6,6 +6,8 @@ set -eu
 REPO="UniverLab/harness-canopy"
 BINARY="canopy"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
+# Minisign public key signing canopy releases (key id 2A96676A759C3943).
+PUBLIC_KEY="RWRDOZx1ameWKtWCHDVp3YmIsBiJszM2U4SJbCMkZ8/iSkW9Pi1yWzDD"
 
 info() { printf '  \033[1;34m%s\033[0m %s\n' "$1" "$2"; }
 error() { printf '  \033[1;31merror:\033[0m %s\n' "$1" >&2; exit 1; }
@@ -68,28 +70,33 @@ info "download" "$URL"
 HTTP_CODE=$(curl -fSL -w '%{http_code}' -o "$TMPDIR/$ARCHIVE" "$URL" 2>/dev/null) || true
 [ "$HTTP_CODE" = "200" ] || error "Download failed (HTTP $HTTP_CODE). Check that $TAG exists for $TARGET at:\n  $URL"
 
-# --- verify checksum ---
-# Match against SHA256SUMS.txt from the same release. Missing sums file (older
-# releases) or no sha256 tool → skip; a present-but-mismatched checksum is fatal.
+# --- verify signature + checksum ---
+# The release signs SHA256SUMS.txt with minisign (key above, trusted comment
+# `canopy <tag>`), and the archive's SHA-256 must match its checksums entry.
+# Set CANOPY_ALLOW_UNSIGNED=1 to skip signature verification (the checksum is
+# still verified). Anything else missing or mismatched is fatal.
 SUMS_URL="https://github.com/$REPO/releases/download/${TAG}/SHA256SUMS.txt"
-if curl -fsSL -o "$TMPDIR/SHA256SUMS.txt" "$SUMS_URL" 2>/dev/null; then
-  EXPECTED=$(awk -v f="$ARCHIVE" '$2 == f { print $1 }' "$TMPDIR/SHA256SUMS.txt" | head -1)
-  [ -n "$EXPECTED" ] || error "No checksum listed for $ARCHIVE in SHA256SUMS.txt"
-  if command -v sha256sum >/dev/null 2>&1; then
-    ACTUAL=$(sha256sum "$TMPDIR/$ARCHIVE" | awk '{ print $1 }')
-  elif command -v shasum >/dev/null 2>&1; then
-    ACTUAL=$(shasum -a 256 "$TMPDIR/$ARCHIVE" | awk '{ print $1 }')
-  else
-    ACTUAL=""
-    info "checksum" "no sha256 tool found — skipping verification"
-  fi
-  if [ -n "$ACTUAL" ]; then
-    [ "$ACTUAL" = "$EXPECTED" ] || error "Checksum mismatch for $ARCHIVE (expected $EXPECTED, got $ACTUAL)"
-    info "checksum" "verified"
-  fi
+MINISIG_URL="https://github.com/$REPO/releases/download/${TAG}/SHA256SUMS.txt.minisig"
+curl -fsSL -o "$TMPDIR/SHA256SUMS.txt" "$SUMS_URL" 2>/dev/null || error "Checksum file SHA256SUMS.txt not found for $TAG"
+if [ "${CANOPY_ALLOW_UNSIGNED:-}" = "1" ]; then
+  printf '  \033[1;33mWARNING:\033[0m CANOPY_ALLOW_UNSIGNED=1, skipping signature verification\n' >&2
 else
-  info "checksum" "SHA256SUMS.txt not found for $TAG — skipping verification"
+  command -v minisign >/dev/null 2>&1 || error "minisign is required to verify the release signature (install it from https://jedisct1.github.io/minisign/ or your package manager), or set CANOPY_ALLOW_UNSIGNED=1 to skip verification"
+  curl -fsSL -o "$TMPDIR/SHA256SUMS.txt.minisig" "$MINISIG_URL" 2>/dev/null || error "Signature file SHA256SUMS.txt.minisig not found for $TAG (this release is unsigned)"
+  minisign -Vm "$TMPDIR/SHA256SUMS.txt" -P "$PUBLIC_KEY" || error "Signature verification failed for $TAG"
+  grep -qx "trusted comment: canopy $TAG" "$TMPDIR/SHA256SUMS.txt.minisig" || error "Trusted comment mismatch in SHA256SUMS.txt.minisig (expected 'canopy $TAG')"
 fi
+EXPECTED=$(awk -v f="$ARCHIVE" '$2 == f { print $1 }' "$TMPDIR/SHA256SUMS.txt" | head -1)
+[ -n "$EXPECTED" ] || error "No checksum listed for $ARCHIVE in SHA256SUMS.txt"
+if command -v sha256sum >/dev/null 2>&1; then
+  ACTUAL=$(sha256sum "$TMPDIR/$ARCHIVE" | awk '{ print $1 }')
+elif command -v shasum >/dev/null 2>&1; then
+  ACTUAL=$(shasum -a 256 "$TMPDIR/$ARCHIVE" | awk '{ print $1 }')
+else
+  error "No sha256 tool found (need sha256sum or shasum) — cannot verify checksum"
+fi
+[ "$ACTUAL" = "$EXPECTED" ] || error "Checksum mismatch for $ARCHIVE (expected $EXPECTED, got $ACTUAL)"
+info "checksum" "verified"
 
 # --- extract ---
 tar xzf "$TMPDIR/$ARCHIVE" -C "$TMPDIR"
