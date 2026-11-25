@@ -451,8 +451,8 @@ When no graph is running, the face shows the selected graph's card, or
 `no graphs yet` when there is none; when the cards do not all fit, the
 last row shows which ones are visible (`a-b of N`).
 
-Wherever a spec is named — the live graph view, Activity lines and the
-node-tail waiting line — a spec with a type shows its code first
+Wherever a spec is named — the live graph view and the node-tail waiting
+line — a spec with a type shows its code first
 (`[FIX-7] name`), like the Backlog badge above. The graph-face card
 shows the same code without brackets (`FIX-7 name`). Legacy specs
 without a type show the name alone.

@@ -62,17 +62,23 @@ via project deletion / `canopy clean`, and `project` `remap` moves a project
 
 The multi-agent sync protocol (mission declaration, workspace status,
 broadcast messaging, active context) is retired: the live broadcast channels
-and their MCP tools are gone. What remains is the durable history — past
-missions and chatter stay in the database, where `intelligence_get_context`
-surfaces them and the TUI renders them. Sessions coordinate through
+and their MCP tools are gone, and `intelligence_get_context` no longer
+returns the old `sync_messages` feed. What remains is the durable history —
+past missions and chatter stay in the database, still counted and removed
+by `canopy clean`. Sessions coordinate through
 `session_list` (see every live session), `scheduled_prompts` (wake a
 session later instead of polling), and `intelligence_upsert` /
 `intelligence_search` (persist and find shared findings).
 
+Recent workspace activity is still surfaced: `intelligence_get_context`
+returns the latest activity-log entries under `activity` in both scopes,
+and prompts sent from the TUI carry an `active missions` block built from
+the same log.
+
 The graph engine narrates itself into this same history: graph lifecycle
 transitions, spec starts/completions, node and ensemble terminal states, and
-hook firings are written directly into the activity log the TUI's activity
-panel already reads, attributed as `graph:<name>`.
+hook firings are written directly into the activity log, attributed as
+`graph:<name>`.
 
 ## Action protocol advisor
 

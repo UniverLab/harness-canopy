@@ -241,7 +241,7 @@ Graph-node sessions (agent and ensemble nodes launched by the graph engine) rece
 - **Watcher Engine** — Reacts to file system events, triggering tasks as defined.
 - **Executor** — Runs tasks and agents, manages locking, logs, and status.
 - **Intelligence V2** — Project-scoped knowledge graph with node/edge CRUD, deletion tools, graph walk, project relationships.
-- **Sync History** — Durable mission and chatter store that `intelligence_get_context` surfaces and the TUI renders; the live broadcast protocol is retired.
+- **Sync History** — Durable mission and chatter store kept as history (still counted by `canopy clean`); the live broadcast protocol is retired and the TUI activity panel shows graph cards only.
 - **Graph Engine** — DAG execution engine: agent/check/gate/router/deliver node runners, iteration limits, pause/continue, blocker reporting, spec queues, node documents, scheduled autorun, archive/restore, export/import, node run history, and copy tools.
 - **RAG Pipeline** — Background ingestion, language-aware chunking, embedding client, vector store, and rate-limited search.
 - **TUI** — Full-screen ratatui terminal UI for managing agents, viewing output, graphs, and system metrics in real time.
