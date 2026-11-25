@@ -65,6 +65,18 @@ command to run later.
 
 Plain `canopy update` exits 2 on the same lookup errors.
 
+Before replacing the executable, `canopy update` verifies the release: the
+`SHA256SUMS.txt.minisig` minisign signature must be valid for
+`SHA256SUMS.txt` under the release public key compiled into the binary (with
+trusted comment `canopy <tag>`), and the archive's SHA-256 must match its
+checksums entry. A failure aborts with an error naming the check
+(`signature invalid:`, `trusted comment mismatch:`, `checksum entry
+missing:`, `checksum mismatch:`, or `signature missing:`). Releases before
+`v3.3.0` predate signing and install with `warning: release <tag> is
+unsigned; installing without signature verification`. There is no override
+for `canopy update`. See
+[Signature verification](installation.md#signature-verification).
+
 ## Setup & diagnostics
 
 | Command | Description |

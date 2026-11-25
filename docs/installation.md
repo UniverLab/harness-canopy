@@ -42,10 +42,11 @@ RWRDOZx1ameWKtWCHDVp3YmIsBiJszM2U4SJbCMkZ8/iSkW9Pi1yWzDD
 (key id `2A96676A759C3943`), binds it to the tag through the trusted comment,
 then checks the archive's SHA-256 against its checksums entry. Any failure
 aborts the install: minisign must be installed (the script names it and exits
-1 otherwise), and a missing sha256 tool is fatal, not skipped. To skip
-signature verification (not recommended), set `CANOPY_ALLOW_UNSIGNED=1`; the
-script prints `WARNING: CANOPY_ALLOW_UNSIGNED=1, skipping signature
-verification` and still verifies the checksum.
+1 otherwise), and both a release without `SHA256SUMS.txt` and a missing
+sha256 tool are fatal, not skipped. To skip signature verification in the
+install script (not recommended), set `CANOPY_ALLOW_UNSIGNED=1`; it prints
+`WARNING: CANOPY_ALLOW_UNSIGNED=1, skipping signature verification` and still
+verifies the checksum. `canopy update` has no such override.
 
 The Linux binary needs glibc 2.39 or newer: Ubuntu 24.04, Debian 13 or later.
 On an older system, use the cargo install below.
@@ -138,7 +139,10 @@ binary, with trusted comment `canopy <tag>`, and the archive's SHA-256 must
 match its checksums entry. Any failure aborts before anything is replaced.
 Releases before `v3.3.0` carry no signature; updating to one prints
 `warning: release <tag> is unsigned; installing without signature
-verification` and proceeds.
+verification` and proceeds. At or after `v3.3.0` a missing signature aborts
+with `signature missing: <tag> has no SHA256SUMS.txt.minisig`, and there is
+no environment override for `canopy update` (the install script's
+`CANOPY_ALLOW_UNSIGNED=1` does not apply to it).
 
 The published Linux binary is `x86_64-unknown-linux-gnu` (glibc, not
 static musl — it loads the ONNX Runtime that local RAG embeddings need).
