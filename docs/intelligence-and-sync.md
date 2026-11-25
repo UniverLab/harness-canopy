@@ -36,7 +36,13 @@ Canopy persists what agents learn, scoped to projects.
   dependents via `dependency_impact`.
 - **Context retrieval** — `intelligence_get_context` auto-detects the
   project and returns a curated mix of session knowledge, project facts
-  and related-project summaries.
+  and related-project summaries (`scope`: `light` or `full`). In `light`
+  scope, output stays under 12,000 characters: nodes return a 300-char
+  `body_excerpt` (with `metadata` omitted and `title` capped at 120 chars),
+  `knowledge` and `project_knowledge` are capped at 5 nodes, `sync_messages`
+  and `activity` trim `message` (200 chars) and `payload` (300 chars), any
+  dropped items are counted in `truncated`, and `hint` points to
+  `intelligence_search` for full node bodies; `full` returns complete nodes.
 
 A typical agent session starts with `intelligence_get_context` and ends
 with an `intelligence_upsert` of a session summary — so the next session

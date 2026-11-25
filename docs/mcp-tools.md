@@ -80,7 +80,7 @@ platform-wide entry. An `unavailable` entry past its `until` reads as available
 
 | Tool | Description |
 |---|---|
-| `intelligence_get_context` | Curated project context for session start |
+| `intelligence_get_context` | Curated project context for session start (`scope`: `light` or `full`). `light` stays under 12,000 characters: replaces `body` with a 300-char `body_excerpt`, drops `metadata`, caps `knowledge` and `project_knowledge` at 5 nodes, trims `sync_messages`/`activity` `message` (200 chars) and `payload` (300 chars), adds a `truncated` count when items are dropped, and includes a `hint` to read full nodes with `intelligence_search`; `full` returns complete nodes |
 | `intelligence_upsert` | Persist a fact, pattern or session summary |
 | `intelligence_search` | Full-text search across nodes |
 | `intelligence_admin` | Prune and link the knowledge graph. Actions: `delete_node` (`node_id`, optional `project_hash`), `delete_relation` (`edge_id`, optional `project_hash`), `walk` (`node_id`, optional `depth`/`compact`), `list_projects` (optional `query`/`limit`), `link_projects` (`from_project_hash`, `to_project_hash`, optional `relation`/`weight`) — pass `action` plus the params the refusal/table lists |
