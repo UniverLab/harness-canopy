@@ -242,7 +242,7 @@ Graph-node sessions (agent and ensemble nodes launched by the graph engine) rece
 - **Graph Engine** — DAG execution engine: agent/check/gate/router/deliver node runners, iteration limits, pause/continue, blocker reporting, spec queues, node documents, scheduled autorun, archive/restore, export/import, node run history, and copy tools.
 - **RAG Pipeline** — Background ingestion, language-aware chunking, embedding client, vector store, and rate-limited search.
 - **TUI** — Full-screen ratatui terminal UI for managing agents, viewing output, graphs, and system metrics in real time.
-- **Gamification** — Mission tracker with 28 achievements across 6 categories, persisted in the database.
+- **Gamification** — Mission tracker with 24 achievements across 5 categories, persisted in the database.
 - **Skills Manager** — Global skills directory with cross-platform symlinks and integrity validation.
 
 ---

@@ -146,7 +146,7 @@ See [Graphs](graphs.md).
 
 Kept callable for the whole 3.x line, but excluded from tool listings
 (`tools/list`) so nothing new adopts them — call the 3.x name instead. Not
-counted in the 36 tools above.
+counted in the 35 tools above.
 
 | Deprecated name | Renamed to (3.0.0) |
 |---|---|
