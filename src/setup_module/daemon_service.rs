@@ -79,9 +79,12 @@ pub(crate) fn install_service_if_needed() -> Result<bool> {
     {
         let unit_path = home.join(".config/systemd/user/canopy.service");
         if unit_path.exists() {
-            // An already installed unit predating `KillMode=mixed` is
-            // migrated in place: sessions must survive a systemd stop.
-            return crate::daemon::service_install::ensure_kill_mode_mixed(&unit_path);
+            // An already installed unit predating `KillMode=mixed` or the
+            // `[Unit]` restart limits is migrated in place: sessions must
+            // survive a systemd stop.
+            let kill_mode = crate::daemon::service_install::ensure_kill_mode_mixed(&unit_path)?;
+            let restart_limits = crate::daemon::service_install::ensure_restart_limits(&unit_path)?;
+            return Ok(kill_mode || restart_limits);
         }
     }
 

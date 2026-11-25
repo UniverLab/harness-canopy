@@ -167,6 +167,9 @@ fn install_systemd_service(exe: &std::path::Path, port: u16) -> Result<()> {
 pub(crate) use crate::daemon::unit_kill_mode::{
     ensure_kill_mode_mixed, ensure_kill_mode_mixed_with,
 };
+pub(crate) use crate::daemon::unit_restart_limits::{
+    ensure_restart_limits, ensure_restart_limits_with, migrate_restart_limits,
+};
 
 /// Render the systemd unit file contents.
 ///
@@ -196,6 +199,10 @@ fn render_unit_content(
         r#"[Unit]
 Description=canopy daemon
 After=network.target
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 KillMode=mixed
@@ -204,8 +211,6 @@ Type=simple
 ExecStart={exe_str} serve --port {port}
 Restart=on-failure
 RestartSec=5
-StartLimitIntervalSec=60
-StartLimitBurst=5
 OOMPolicy=continue
 MemoryMax=80%
 {quota_line}Environment=RUST_LOG=info
@@ -908,5 +913,44 @@ mod tests {
         let service = service_section(&content);
         assert_eq!(service.matches("KillMode=mixed").count(), 1);
         assert_eq!(service.matches("TimeoutStopSec=30").count(), 1);
+    }
+
+    /// Everything before the `[Service]` header: the `[Unit]` section, so
+    /// a directive that leaked across the boundary is never miscounted.
+    fn unit_section(content: &str) -> &str {
+        content
+            .split_once("[Service]\n")
+            .expect("unit has [Service]")
+            .0
+    }
+
+    /// A fresh unit carries the restart limits and the network-online wait
+    /// in `[Unit]` — where systemd reads them — and no `StartLimit*` line
+    /// remains under `[Service]`, where every boot would ignore it.
+    #[test]
+    fn render_unit_keeps_restart_limits_in_unit_not_service() {
+        let content = render_unit_content(
+            "/usr/bin/canopy",
+            4177,
+            "/usr/bin:/bin",
+            &std::collections::BTreeMap::new(),
+            0,
+        );
+        let unit = unit_section(&content);
+        for key in [
+            "StartLimitIntervalSec=60",
+            "StartLimitBurst=5",
+            "After=network-online.target",
+            "Wants=network-online.target",
+        ] {
+            assert!(unit.contains(key), "[Unit] must contain {key}:\n{content}");
+        }
+        let service = service_section(&content);
+        assert!(
+            !service.contains("StartLimit"),
+            "no StartLimit* line may stay in [Service]:\n{service}"
+        );
+        assert!(service.contains("Restart=on-failure"));
+        assert!(service.contains("RestartSec=5"));
     }
 }

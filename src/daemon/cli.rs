@@ -193,6 +193,9 @@ fn install_service_if_needed(_exe: &std::path::Path, _port: u16) {
             if let Err(e) = service_install::ensure_kill_mode_mixed(&service_path) {
                 eprintln!("  ⚠ Could not migrate the service unit: {e}");
             }
+            if let Err(e) = service_install::ensure_restart_limits(&service_path) {
+                eprintln!("  ⚠ Could not migrate the service unit: {e}");
+            }
         }
         let needs_install = !service_path.exists() || !is_service_enabled();
         if !needs_install {

@@ -445,6 +445,64 @@ fn report_service_unit_silent_when_oom_policy_unavailable() {
     assert!(oom_policy_issues(&issues).is_empty(), "{issues:?}");
 }
 
+/// The restart-limits entries of a doctor run's issues — the missing
+/// ExecStart binary also contributes its own unrelated line.
+#[cfg(target_os = "linux")]
+fn restart_limit_issues(issues: &[String]) -> Vec<&String> {
+    issues
+        .iter()
+        .filter(|i| i.contains("restart limits are not applied"))
+        .collect()
+}
+
+/// Writes the unit text the old template produced: the limits under
+/// `[Service]` (where systemd ignores them) and no network-online wait.
+/// The ExecStart names a path that cannot exist, like `write_minimal_unit`.
+#[cfg(target_os = "linux")]
+fn write_old_limits_unit(home: &Path) {
+    let unit_dir = home.join(".config/systemd/user");
+    std::fs::create_dir_all(&unit_dir).unwrap();
+    std::fs::write(
+        unit_dir.join("canopy.service"),
+        "[Unit]\nDescription=canopy daemon\nAfter=network.target\n\n[Service]\nExecStart=/nonexistent/canopy serve\nRestart=on-failure\nRestartSec=5\nStartLimitIntervalSec=60\nStartLimitBurst=5\n\n[Install]\nWantedBy=default.target\n",
+    )
+    .unwrap();
+}
+
+/// An old unit — limits outside `[Unit]`, no network-online wait — pushes
+/// the restart-limits issue naming the reinstall fix.
+#[cfg(target_os = "linux")]
+#[test]
+fn report_service_unit_flags_restart_limits_outside_unit() {
+    let dir = tempfile::tempdir().unwrap();
+    write_old_limits_unit(dir.path());
+    let mut issues = Vec::new();
+    report_service_unit(dir.path(), None, None, None, None, None, &mut issues);
+    let flagged = restart_limit_issues(&issues);
+    assert_eq!(flagged.len(), 1, "{issues:?}");
+    assert!(flagged[0].contains("canopy daemon install"), "{issues:?}");
+}
+
+/// A migrated unit — limits in `[Unit]`, network-online wait present —
+/// pushes no restart-limits issue.
+#[cfg(target_os = "linux")]
+#[test]
+fn report_service_unit_silent_when_restart_limits_migrated() {
+    let dir = tempfile::tempdir().unwrap();
+    write_old_limits_unit(dir.path());
+    let unit_path = dir
+        .path()
+        .join(".config/systemd/user")
+        .join("canopy.service");
+    let old = std::fs::read_to_string(&unit_path).unwrap();
+    let migrated = crate::daemon::service_install::migrate_restart_limits(&old)
+        .expect("old unit needs migration");
+    std::fs::write(&unit_path, migrated).unwrap();
+    let mut issues = Vec::new();
+    report_service_unit(dir.path(), None, None, None, None, None, &mut issues);
+    assert!(restart_limit_issues(&issues).is_empty(), "{issues:?}");
+}
+
 #[test]
 fn doctor_renders_display_with_slug_suffix() {
     let mut cli = crate::domain::cli_config::CliConfig {

@@ -499,6 +499,14 @@ pub(super) fn report_service_unit(
     // separate, capability-checked line below.
     success(format!("Service unit ({manager}): {}", unit_path.display()));
 
+    if crate::daemon::service_install::migrate_restart_limits(&unit_content).is_some() {
+        println!("     \x1b[33m⚠\x1b[0m Service unit keeps its restart limits outside [Unit] or lacks the network-online wait");
+        issues.push(
+            "Service unit restart limits are not applied (systemd ignores StartLimit* in [Service]) — run 'canopy daemon install' to update the unit."
+                .to_string(),
+        );
+    }
+
     let Some(unit_binary) = parse_unit_binary(manager, &unit_content) else {
         println!("     \x1b[33m⚠\x1b[0m Could not find the binary the unit points at");
         return;

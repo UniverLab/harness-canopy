@@ -96,8 +96,10 @@ pub(crate) fn reconcile_unit_binary(
     let reloaded = if exec_start_needs_update(named.as_deref(), exe) {
         service_install::write_systemd_unit(exe, port, unit_path)?;
         false
-    } else if service_install::ensure_kill_mode_mixed_with(runner, unit_path)? {
-        // The migration already reloaded systemd.
+    } else if service_install::ensure_kill_mode_mixed_with(runner, unit_path)?
+        || service_install::ensure_restart_limits_with(runner, unit_path)?
+    {
+        // Either migration already reloaded systemd.
         true
     } else {
         return Ok(None);
