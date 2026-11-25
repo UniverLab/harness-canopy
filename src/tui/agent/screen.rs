@@ -1,6 +1,6 @@
-use crate::tui::agent::sanitize::{
-    command_after_shell_prompt, is_ui_line, sanitize_line, strip_borders,
-};
+use crate::tui::agent::sanitize::{command_after_shell_prompt, sanitize_line};
+#[cfg(test)]
+use crate::tui::agent::sanitize::{is_ui_line, strip_borders};
 use crate::tui::agent::InteractiveAgent;
 
 /// Read a single line from the vt100 screen at `row`, with panic protection.
@@ -25,6 +25,7 @@ fn read_screen_line(screen: &vt100::Screen, row: u16, cols: u16) -> Option<Strin
 /// non-overlapping pages.  `next_expected` ensures each absolute index is
 /// emitted exactly once even when the final clamped page overlaps with the
 /// previous one.
+#[cfg(test)]
 pub(crate) fn read_abs_range<C: vt100::Callbacks>(
     vt: &mut vt100::Parser<C>,
     max_sb: usize,
@@ -84,6 +85,7 @@ pub(crate) fn read_abs_range<C: vt100::Callbacks>(
 }
 
 /// True when a sanitized response line should be dropped (blank or pure UI chrome).
+#[cfg(test)]
 fn is_trash_response_line(sanitized: &str) -> bool {
     sanitized.trim().is_empty() || is_ui_line(sanitized)
 }
@@ -91,6 +93,7 @@ fn is_trash_response_line(sanitized: &str) -> bool {
 /// Strip box-drawing borders from a response line; if stripping leaves nothing,
 /// keep the sanitized original (the line was border-only chrome that still
 /// represents a real output row).
+#[cfg(test)]
 fn push_stripped_response_line(collected: &mut Vec<String>, sanitized: String) {
     let cleaned = strip_borders(&sanitized);
     if cleaned.is_empty() {
@@ -151,6 +154,7 @@ impl InteractiveAgent {
     }
 
     /// Get the last N lines of the entire history (scrollback + visible screen).
+    #[cfg(test)]
     pub fn last_lines(&self, n: usize) -> String {
         if n == 0 {
             return String::new();
@@ -178,6 +182,7 @@ impl InteractiveAgent {
     /// `from_abs` and `to_abs` are the scrollback-history-depth values captured
     /// via `record_prompt` (i.e. the result of `set_scrollback(usize::MAX)` at
     /// the time of capture, not the current scroll offset).
+    #[cfg(test)]
     pub fn lines_at_scrollback_range(&self, from_abs: usize, to_abs: usize) -> String {
         if to_abs <= from_abs {
             return String::new();

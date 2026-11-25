@@ -1,30 +1,35 @@
-//! Context Transfer — capture and inject conversation context between agents.
+//! Context Transfer — capture and inject a bounded summary between agents.
 //!
-//! Builds a plain-text context block from the source agent's prompt history,
-//! or from recent cleaned VT lines when the agent has no recorded prompts,
+//! Builds a plain-text context block from three toggleable parts (header,
+//! visible screen tail, and last user prompt) capped at 12,000 characters,
 //! then drives the two-step TUI modal (preview → agent picker).
 
-use std::collections::VecDeque;
-
-use super::agent::{InteractiveAgent, PromptEntry};
+use super::agent::InteractiveAgent;
 use crate::tui::app::types::Focus;
 
-// ── Config ───────────────────────────────────────────────────────
+const MAX_SCREEN_LINES: usize = 120;
+const MAX_PROMPT_CHARS: usize = 1_500;
+const MAX_PAYLOAD_CHARS: usize = 12_000;
 
-/// Runtime defaults for context transfer (no external config file required).
-pub struct ContextTransferConfig {
-    pub default_prompt_history: usize,
+// ── Parts & Payload Builder ──────────────────────────────────────
+
+/// Toggleable parts included in a context transfer payload.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContextTransferParts {
+    pub include_header: bool,
+    pub include_screen: bool,
+    pub include_last_prompt: bool,
 }
 
-impl Default for ContextTransferConfig {
+impl Default for ContextTransferParts {
     fn default() -> Self {
         Self {
-            default_prompt_history: 3,
+            include_header: true,
+            include_screen: true,
+            include_last_prompt: true,
         }
     }
 }
-
-// ── Context builder ──────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContextSourceKind {
@@ -32,242 +37,127 @@ pub enum ContextSourceKind {
     Terminal,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ContextCaptureKind {
-    Prompts,
-    LinePages,
-}
-
 impl ContextSourceKind {
     fn header(self, agent: &InteractiveAgent) -> String {
         match self {
-            Self::Interactive => {
-                format!(
-                    "--- context from: {} | workdir: {} ---\n",
-                    agent.name, agent.working_dir
-                )
-            }
-            Self::Terminal => {
-                format!(
-                    "--- context from terminal: {} | workdir: {} ---\n",
-                    agent.name, agent.working_dir
-                )
-            }
+            Self::Interactive => format!(
+                "--- context from: {} ({}) | workdir: {} ---",
+                agent.name,
+                agent.cli.as_str(),
+                agent.working_dir
+            ),
+            Self::Terminal => format!(
+                "--- context from terminal: {} ({}) | workdir: {} ---",
+                agent.name,
+                agent.cli.as_str(),
+                agent.working_dir
+            ),
         }
     }
 }
 
+/// Build the context transfer payload for `agent` from the enabled `parts`.
 pub fn build_context_payload_for(
     agent: &InteractiveAgent,
-    n_units: usize,
     source_kind: ContextSourceKind,
-    capture_kind: ContextCaptureKind,
+    parts: ContextTransferParts,
 ) -> String {
-    let mut out = source_kind.header(agent);
+    let header = parts.include_header.then(|| source_kind.header(agent));
+    let mut screen_lines = if parts.include_screen {
+        collect_visible_screen_tail(agent)
+    } else {
+        Vec::new()
+    };
+    let prompt_block = if parts.include_last_prompt {
+        collect_last_prompt_block(agent)
+    } else {
+        None
+    };
 
-    match (source_kind, capture_kind) {
-        (ContextSourceKind::Interactive, ContextCaptureKind::Prompts) => {
-            append_interactive_prompt_context(&mut out, agent, n_units);
-        }
-        (ContextSourceKind::Interactive, ContextCaptureKind::LinePages)
-        | (ContextSourceKind::Terminal, _) => append_line_context(&mut out, agent, n_units),
+    let mut payload = assemble_payload(
+        None,
+        header.as_deref(),
+        &screen_lines,
+        prompt_block.as_deref(),
+    );
+
+    while payload.chars().count() > MAX_PAYLOAD_CHARS && !screen_lines.is_empty() {
+        screen_lines.remove(0);
+        let notice = format!("[context cut: kept the last {} lines]", screen_lines.len());
+        payload = assemble_payload(
+            Some(&notice),
+            header.as_deref(),
+            &screen_lines,
+            prompt_block.as_deref(),
+        );
     }
 
-    out.push_str("--- end context ---\n");
-    clean_context_output(&out)
+    if payload.chars().count() > MAX_PAYLOAD_CHARS {
+        payload = payload.chars().take(MAX_PAYLOAD_CHARS).collect();
+    }
+
+    payload
 }
 
-/// Post-process context payload: collapse blank runs, strip status-bar noise.
-fn clean_context_output(raw: &str) -> String {
-    let mut result = Vec::new();
-    let mut blank_run = 0u8;
-
-    for line in raw.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            blank_run += 1;
-            if blank_run <= 1 {
-                result.push(String::new());
-            }
-            continue;
-        }
-        blank_run = 0;
-
-        // Skip common TUI status-bar / sidebar artifacts
-        if is_status_noise(trimmed) {
-            continue;
-        }
-        result.push(line.to_string());
+fn collect_visible_screen_tail(agent: &InteractiveAgent) -> Vec<String> {
+    let mut lines: Vec<String> = agent.visible_text().lines().map(str::to_string).collect();
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
     }
-
-    // Trim trailing blank lines before the footer
-    while result.last().is_some_and(|l| l.trim().is_empty()) {
-        result.pop();
+    if lines.len() > MAX_SCREEN_LINES {
+        let drop_count = lines.len() - MAX_SCREEN_LINES;
+        lines.drain(..drop_count);
     }
+    lines
+}
 
-    let mut out = result.join("\n");
+fn collect_last_prompt_block(agent: &InteractiveAgent) -> Option<String> {
+    let input = agent
+        .prompt_history
+        .lock()
+        .ok()
+        .and_then(|history| history.back().map(|entry| entry.input.clone()))?;
+    let truncated: String = input.chars().take(MAX_PROMPT_CHARS).collect();
+    let lines: Vec<String> = truncated.lines().map(|line| format!("> {line}")).collect();
+    if lines.is_empty() {
+        return None;
+    }
+    Some(lines.join("\n"))
+}
+
+fn assemble_payload(
+    notice: Option<&str>,
+    header: Option<&str>,
+    screen_lines: &[String],
+    prompt_block: Option<&str>,
+) -> String {
+    let mut sections: Vec<String> = Vec::new();
+    if let Some(notice) = notice {
+        sections.push(notice.to_string());
+    }
+    if let Some(header) = header {
+        sections.push(header.to_string());
+    }
+    if !screen_lines.is_empty() {
+        sections.push(screen_lines.join("\n"));
+    }
+    if let Some(prompt) = prompt_block {
+        sections.push(prompt.to_string());
+    }
+    if sections.is_empty() {
+        return String::new();
+    }
+    let mut out = sections.join("\n");
     out.push('\n');
     out
 }
-
-/// Lines that are TUI chrome / sidebar noise in CLI agents.
-fn is_status_noise(line: &str) -> bool {
-    let trimmed = line.trim();
-
-    // Only filter very specific UI navigation/help text, not content
-    const EXACT: &[&str] = &["for shortcuts", "Shift+Tab", "MCP issues", "MCP servers"];
-    if EXACT.contains(&trimmed) {
-        return true;
-    }
-
-    if trimmed.starts_with("ctrl+p commands") || trimmed.starts_with("workspace (") {
-        return true;
-    }
-
-    // Very conservative: only skip lines that look like TUI status bars with no content
-    if trimmed.contains("LSPs will activate") && trimmed.len() < 50 {
-        return true;
-    }
-
-    false
-}
-
-fn collect_last_prompts(history: &VecDeque<PromptEntry>, n: usize) -> Vec<PromptEntry> {
-    let keep = n.max(1);
-    history
-        .iter()
-        .skip(history.len().saturating_sub(keep))
-        .cloned()
-        .collect()
-}
-
-pub fn interactive_capture_kind(agent: &InteractiveAgent) -> ContextCaptureKind {
-    if interactive_prompt_count(agent) > 0 {
-        ContextCaptureKind::Prompts
-    } else {
-        ContextCaptureKind::LinePages
-    }
-}
-
-pub fn initial_capture_units(max_units: usize, config: &ContextTransferConfig) -> usize {
-    if max_units == 0 {
-        1
-    } else {
-        max_units.min(config.default_prompt_history.max(1))
-    }
-}
-
-pub fn interactive_prompt_count(agent: &InteractiveAgent) -> usize {
-    agent
-        .prompt_history
-        .lock()
-        .ok()
-        .map(|history| history.len())
-        .unwrap_or(0)
-}
-
-pub fn interactive_line_page_count(agent: &InteractiveAgent) -> usize {
-    if !agent.visible_text().trim().is_empty() {
-        return 1;
-    }
-
-    let total_depth = agent.total_depth();
-    if total_depth == 0 {
-        return 0;
-    }
-
-    if agent.last_lines(50).trim().is_empty() {
-        return 0;
-    }
-
-    total_depth.div_ceil(50)
-}
-
-fn append_interactive_prompt_context(out: &mut String, agent: &InteractiveAgent, n_prompts: usize) {
-    let prompt_history = agent
-        .prompt_history
-        .lock()
-        .ok()
-        .as_deref()
-        .cloned()
-        .unwrap_or_default();
-    let prompts = collect_last_prompts(&prompt_history, n_prompts);
-    if prompts.is_empty() {
-        return;
-    }
-
-    let total_depth = agent.total_depth();
-    for (idx, entry) in prompts.iter().enumerate() {
-        push_prompt_block(out, &entry.input);
-
-        let is_last_prompt = idx + 1 == prompts.len();
-        let response_end = response_end_line(entry, is_last_prompt, total_depth);
-        if response_end <= entry.output_range.0 {
-            continue;
-        }
-
-        let response = agent.lines_at_scrollback_range(entry.output_range.0, response_end);
-        if response.is_empty() {
-            continue;
-        }
-
-        out.push_str(&response);
-        out.push('\n');
-    }
-}
-
-fn append_line_context(out: &mut String, agent: &InteractiveAgent, n_units: usize) {
-    let visible = agent.visible_text();
-    if n_units <= 1 {
-        if visible.is_empty() {
-            return;
-        }
-        out.push_str(&visible);
-        if !visible.ends_with('\n') {
-            out.push('\n');
-        }
-        return;
-    }
-
-    let history = agent.last_lines((n_units.max(1)) * 50);
-    if history.is_empty() {
-        return;
-    }
-
-    out.push_str(&history);
-    if !history.ends_with('\n') {
-        out.push('\n');
-    }
-}
-
-/// Append a prompt with every line `> `-prefixed so multi-line prompts
-/// (e.g. from the prompt builder) stay visually separated from responses.
-fn push_prompt_block(out: &mut String, input: &str) {
-    for line in input.lines() {
-        out.push_str("> ");
-        out.push_str(line);
-        out.push('\n');
-    }
-    if input.is_empty() {
-        out.push_str(">\n");
-    }
-}
-
-fn response_end_line(entry: &PromptEntry, is_last_prompt: bool, total_depth: usize) -> usize {
-    if !is_last_prompt && entry.output_range.1 > entry.output_range.0 {
-        return entry.output_range.1;
-    }
-    total_depth
-}
-
-// ── Persistence ──────────────────────────────────────────────────
 
 // ── Modal state ──────────────────────────────────────────────────
 
 /// Which step the two-step modal is on.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ContextTransferStep {
-    /// Step 1 — adjust the capture range and preview the payload.
+    /// Step 1 — toggle payload parts and preview the payload.
     Preview,
     /// Step 2 — pick the destination agent.
     AgentPicker,
@@ -280,10 +170,10 @@ pub struct ContextTransferModal {
     pub source_agent_idx: usize,
     /// Whether the source is a terminal session (indexes `terminal_agents`).
     pub source_is_terminal: bool,
-    /// How the source content is captured for preview/transfer.
-    pub capture_kind: ContextCaptureKind,
-    /// Number of recent prompts or line pages to include (adjustable in Step 1).
-    pub n_units: usize,
+    /// Which summary parts are included in the payload.
+    pub parts: ContextTransferParts,
+    /// Highlighted part row in Step 1 (`0` = Header, `1` = Screen tail, `2` = Last prompt).
+    pub selected_part: usize,
     /// Currently highlighted agent in the picker (index into the picker list).
     pub picker_selected: usize,
     /// Precomputed payload shown as preview in Step 1.
@@ -293,52 +183,24 @@ pub struct ContextTransferModal {
 }
 
 impl ContextTransferModal {
-    fn new_with_kind(
-        source_agent_idx: usize,
-        source_kind: ContextSourceKind,
-        capture_kind: ContextCaptureKind,
-        initial_units: usize,
-    ) -> Self {
+    pub fn new(source_agent_idx: usize) -> Self {
         Self {
             step: ContextTransferStep::Preview,
             source_agent_idx,
-            source_is_terminal: source_kind == ContextSourceKind::Terminal,
-            capture_kind,
-            n_units: initial_units.max(1),
+            source_is_terminal: false,
+            parts: ContextTransferParts::default(),
+            selected_part: 0,
             picker_selected: 0,
             payload_preview: String::new(),
             prev_focus: None,
         }
     }
 
-    pub fn new(
-        source_agent_idx: usize,
-        capture_kind: ContextCaptureKind,
-        initial_units: usize,
-    ) -> Self {
-        Self::new_with_kind(
-            source_agent_idx,
-            ContextSourceKind::Interactive,
-            capture_kind,
-            initial_units,
-        )
-    }
-
-    pub fn new_terminal(source_agent_idx: usize, initial_units: usize) -> Self {
-        Self::new_with_kind(
-            source_agent_idx,
-            ContextSourceKind::Terminal,
-            ContextCaptureKind::LinePages,
-            initial_units,
-        )
-    }
-
-    pub fn decrement_field(&mut self) {
-        self.n_units = self.n_units.saturating_sub(1).max(1);
-    }
-
-    pub fn increment_field(&mut self, max_value: usize) {
-        self.n_units = (self.n_units + 1).min(max_value.max(1));
+    pub fn new_terminal(source_agent_idx: usize) -> Self {
+        Self {
+            source_is_terminal: true,
+            ..Self::new(source_agent_idx)
+        }
     }
 
     pub fn source_kind(&self) -> ContextSourceKind {
@@ -349,23 +211,13 @@ impl ContextTransferModal {
         }
     }
 
-    pub fn unit_label(&self) -> &'static str {
-        match (self.source_kind(), self.capture_kind) {
-            (ContextSourceKind::Interactive, ContextCaptureKind::Prompts) => "prompts",
-            (ContextSourceKind::Interactive, ContextCaptureKind::LinePages) => "line blocks (×50)",
-            (ContextSourceKind::Terminal, _) => "pages (×50 lines)",
-        }
-    }
-
-    pub fn unit_help(&self) -> &'static str {
-        match (self.source_kind(), self.capture_kind) {
-            (ContextSourceKind::Interactive, ContextCaptureKind::Prompts) => {
-                "most recent prompt ranges"
-            }
-            (ContextSourceKind::Interactive, ContextCaptureKind::LinePages) => {
-                "most recent cleaned lines"
-            }
-            (ContextSourceKind::Terminal, _) => "most recent terminal lines",
+    /// Toggle the currently selected part in Step 1.
+    pub fn toggle_selected_part(&mut self) {
+        match self.selected_part {
+            0 => self.parts.include_header = !self.parts.include_header,
+            1 => self.parts.include_screen = !self.parts.include_screen,
+            2 => self.parts.include_last_prompt = !self.parts.include_last_prompt,
+            _ => {}
         }
     }
 }
@@ -373,76 +225,164 @@ impl ContextTransferModal {
 #[cfg(test)]
 mod tests {
     use super::{
-        clean_context_output, collect_last_prompts, initial_capture_units, ContextCaptureKind,
-        ContextSourceKind, ContextTransferConfig, ContextTransferModal,
+        build_context_payload_for, ContextSourceKind, ContextTransferModal, ContextTransferParts,
     };
-    use crate::tui::agent::PromptEntry;
-    use chrono::Utc;
-    use std::collections::VecDeque;
+    use crate::tui::agent::InteractiveAgent;
+    use ratatui::style::Color;
 
-    #[test]
-    fn collect_last_prompts_keeps_tail_in_order() {
-        let history = VecDeque::from(vec![
-            PromptEntry {
-                input: "one".to_string(),
-                output_range: (0, 1),
-                timestamp: Utc::now(),
-            },
-            PromptEntry {
-                input: "two".to_string(),
-                output_range: (1, 2),
-                timestamp: Utc::now(),
-            },
-            PromptEntry {
-                input: "three".to_string(),
-                output_range: (2, 3),
-                timestamp: Utc::now(),
-            },
-        ]);
-
-        let prompts = collect_last_prompts(&history, 2);
-        assert_eq!(prompts.len(), 2);
-        assert_eq!(prompts[0].input, "two");
-        assert_eq!(prompts[1].input, "three");
-    }
-
-    #[test]
-    fn push_prompt_block_prefixes_every_line() {
-        let mut out = String::new();
-        super::push_prompt_block(&mut out, "# [INSTRUCTIONS]\nfix the bug\nrun tests");
-        assert_eq!(out, "> # [INSTRUCTIONS]\n> fix the bug\n> run tests\n");
-    }
-
-    #[test]
-    fn clean_context_output_drops_noise_and_collapses_blanks() {
-        let raw = "--- context from: demo | workdir: /tmp ---\n\nContext\n\nhello\n\n\nremaining 12\n--- end context ---\n";
-        let cleaned = clean_context_output(raw);
-        assert!(cleaned.contains("hello"));
-        assert!(cleaned.contains("remaining 12"));
-        assert!(cleaned.contains("hello\n\nremaining 12\n--- end context ---"));
+    fn spawn_test_terminal(name: &str, rows: u16) -> InteractiveAgent {
+        InteractiveAgent::spawn_terminal("cat", "/tmp", 80, rows, Some(name), &[], Color::White)
+            .expect("spawn terminal")
     }
 
     #[test]
     fn modal_source_kind_reflects_session_type() {
-        let interactive = ContextTransferModal::new(1, ContextCaptureKind::Prompts, 2);
-        let terminal = ContextTransferModal::new_terminal(2, 3);
+        let interactive = ContextTransferModal::new(1);
+        let terminal = ContextTransferModal::new_terminal(2);
         assert_eq!(interactive.source_kind(), ContextSourceKind::Interactive);
         assert_eq!(terminal.source_kind(), ContextSourceKind::Terminal);
+        assert_eq!(interactive.parts, ContextTransferParts::default());
+        assert_eq!(interactive.selected_part, 0);
     }
 
     #[test]
-    fn initial_capture_units_clamps_to_available_with_default_limit() {
-        let config = ContextTransferConfig::default();
-        assert_eq!(initial_capture_units(1, &config), 1);
-        assert_eq!(initial_capture_units(2, &config), 2);
-        assert_eq!(initial_capture_units(3, &config), 3);
-        assert_eq!(initial_capture_units(8, &config), 3);
+    fn payload_uses_visible_screen_only_and_excludes_scrollback() {
+        let agent = spawn_test_terminal("vis-only", 10);
+        {
+            let mut vt = agent.vt.lock().unwrap();
+            for i in 0..40 {
+                vt.process(format!("scrollback-or-visible line {i}\r\n").as_bytes());
+            }
+        }
+        agent.record_prompt("check the latest output");
+
+        let payload = build_context_payload_for(
+            &agent,
+            ContextSourceKind::Interactive,
+            ContextTransferParts::default(),
+        );
+
+        assert!(payload.starts_with("--- context from: vis-only (cat) | workdir: /tmp ---\n"));
+        assert!(!payload.contains("line 0\n"));
+        assert!(payload.contains("line 35"));
+        assert!(payload.contains("> check the latest output\n"));
     }
 
     #[test]
-    fn line_page_mode_uses_line_labels() {
-        let modal = ContextTransferModal::new(0, ContextCaptureKind::LinePages, 3);
-        assert_eq!(modal.unit_label(), "line blocks (×50)");
-        assert_eq!(modal.unit_help(), "most recent cleaned lines");
+    fn payload_without_prompt_omits_prompt_section() {
+        let agent = spawn_test_terminal("no-prompt", 10);
+        {
+            let mut vt = agent.vt.lock().unwrap();
+            vt.process(b"hello screen\r\n");
+        }
+
+        let payload = build_context_payload_for(
+            &agent,
+            ContextSourceKind::Terminal,
+            ContextTransferParts::default(),
+        );
+
+        assert_eq!(
+            payload,
+            "--- context from terminal: no-prompt (cat) | workdir: /tmp ---\nhello screen\n"
+        );
+    }
+
+    #[test]
+    fn payload_over_12k_drops_top_screen_lines_and_prepends_notice() {
+        let agent = InteractiveAgent::spawn_terminal(
+            "cat",
+            "/tmp",
+            200,
+            100,
+            Some("cap-test"),
+            &[],
+            Color::White,
+        )
+        .expect("spawn terminal");
+        {
+            let mut vt = agent.vt.lock().unwrap();
+            for i in 0..95 {
+                let padding = "x".repeat(160);
+                vt.process(format!("line-{i:03}-{padding}\r\n").as_bytes());
+            }
+        }
+
+        let payload = build_context_payload_for(
+            &agent,
+            ContextSourceKind::Interactive,
+            ContextTransferParts::default(),
+        );
+
+        assert!(payload.chars().count() <= 12_000);
+        let first_line = payload.lines().next().expect("first line");
+        assert!(
+            first_line.starts_with("[context cut: kept the last ")
+                && first_line.ends_with(" lines]"),
+            "unexpected first line: {first_line}"
+        );
+        assert!(!payload.contains("line-000-"));
+        assert!(payload.contains("line-094-"));
+    }
+
+    #[test]
+    fn payload_multibyte_utf8_never_splits_mid_character() {
+        let agent = spawn_test_terminal("utf8-test", 10);
+        let emoji_prompt = "🦀".repeat(2_000);
+        agent.record_prompt(&emoji_prompt);
+
+        let parts = ContextTransferParts {
+            include_header: false,
+            include_screen: false,
+            include_last_prompt: true,
+        };
+        let payload = build_context_payload_for(&agent, ContextSourceKind::Interactive, parts);
+        // "> " (2 chars) + 1500 crabs + "\n" (1 char) = 1503 chars, valid UTF-8.
+        assert_eq!(payload.chars().count(), 1503);
+        assert!(payload.starts_with("> 🦀"));
+
+        // Also test the 12,000-char fallback truncation with multibyte screen text
+        // when screen is disabled? No, screen enabled with 1 long multibyte line:
+        let wide_agent = InteractiveAgent::spawn_terminal(
+            "cat",
+            "/tmp",
+            15_000,
+            5,
+            Some("utf8-wide"),
+            &[],
+            Color::White,
+        )
+        .expect("spawn wide terminal");
+        {
+            let mut vt = wide_agent.vt.lock().unwrap();
+            let line = "é".repeat(13_000);
+            vt.process(format!("{line}\r\n").as_bytes());
+        }
+        let wide_payload = build_context_payload_for(
+            &wide_agent,
+            ContextSourceKind::Interactive,
+            ContextTransferParts {
+                include_header: true,
+                include_screen: true,
+                include_last_prompt: false,
+            },
+        );
+        assert!(wide_payload.chars().count() <= 12_000);
+
+        // Exercise the 12,000-char fallback truncation when screen is disabled
+        // and the header itself exceeds 12,000 multibyte characters.
+        let long_name = "é".repeat(12_500);
+        let long_header_agent = spawn_test_terminal(&long_name, 5);
+        let fallback_payload = build_context_payload_for(
+            &long_header_agent,
+            ContextSourceKind::Interactive,
+            ContextTransferParts {
+                include_header: true,
+                include_screen: false,
+                include_last_prompt: false,
+            },
+        );
+        assert_eq!(fallback_payload.chars().count(), 12_000);
+        assert!(fallback_payload.ends_with('é'));
     }
 }

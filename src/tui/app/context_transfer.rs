@@ -113,28 +113,6 @@ impl App {
         }
     }
 
-    pub(crate) fn interactive_capture_units(
-        agent: &InteractiveAgent,
-        capture_kind: ContextCaptureKind,
-    ) -> usize {
-        match capture_kind {
-            ContextCaptureKind::Prompts => interactive_prompt_count(agent),
-            ContextCaptureKind::LinePages => interactive_line_page_count(agent),
-        }
-    }
-
-    pub(crate) fn context_transfer_max_units_for_source(
-        &self,
-        source: ContextTransferSource,
-        capture_kind: ContextCaptureKind,
-    ) -> Option<usize> {
-        let ContextTransferSource::Interactive(_) = source else {
-            return Some(20);
-        };
-        let agent = self.context_transfer_agent(source)?;
-        Some(Self::interactive_capture_units(agent, capture_kind).max(1))
-    }
-
     /// Execute the context transfer to the selected destination agent.
     ///
     /// 1. Builds the payload.
@@ -156,29 +134,21 @@ impl App {
     }
 
     pub(crate) fn refresh_context_transfer_preview(&mut self) {
-        let Some((source, n_units, capture_kind)) =
-            self.context_transfer_modal.as_ref().and_then(|modal| {
-                self.modal_source(modal)
-                    .map(|source| (source, modal.n_units, modal.capture_kind))
-            })
+        let Some((source, parts)) = self
+            .context_transfer_modal
+            .as_ref()
+            .and_then(|modal| self.modal_source(modal).map(|source| (source, modal.parts)))
         else {
             return;
         };
 
-        let Some(preview) =
-            self.build_context_transfer_payload_from_source(source, n_units, capture_kind)
-        else {
+        let Some(preview) = self.build_context_transfer_payload_from_source(source, parts) else {
             return;
         };
 
         if let Some(modal) = self.context_transfer_modal.as_mut() {
             modal.payload_preview = preview;
         }
-    }
-
-    pub(crate) fn context_transfer_max_units(&self) -> Option<usize> {
-        let modal = self.context_transfer_modal.as_ref()?;
-        self.context_transfer_max_units_for_source(self.modal_source(modal)?, modal.capture_kind)
     }
 
     pub(crate) fn selected_context_transfer_source(&self) -> Option<ContextTransferSource> {
@@ -220,20 +190,13 @@ impl App {
         &self,
         idx: usize,
     ) -> Option<ContextTransferModal> {
-        let agent = self.context_transfer_agent(ContextTransferSource::Interactive(idx))?;
-        let capture_kind = interactive_capture_kind(agent);
-        let max_units = Self::interactive_capture_units(agent, capture_kind);
-        let initial_units = if capture_kind == ContextCaptureKind::LinePages {
-            1
-        } else {
-            initial_capture_units(max_units, &self.context_transfer_config)
-        };
-        Some(ContextTransferModal::new(idx, capture_kind, initial_units))
+        self.context_transfer_agent(ContextTransferSource::Interactive(idx))?;
+        Some(ContextTransferModal::new(idx))
     }
 
     pub(crate) fn build_terminal_transfer_modal(&self, idx: usize) -> Option<ContextTransferModal> {
         self.context_transfer_agent(ContextTransferSource::Terminal(idx))?;
-        Some(ContextTransferModal::new_terminal(idx, 1))
+        Some(ContextTransferModal::new_terminal(idx))
     }
 
     pub(crate) fn modal_source(
@@ -247,25 +210,19 @@ impl App {
         &self,
         modal: &ContextTransferModal,
     ) -> Option<String> {
-        self.build_context_transfer_payload_from_source(
-            self.modal_source(modal)?,
-            modal.n_units,
-            modal.capture_kind,
-        )
+        self.build_context_transfer_payload_from_source(self.modal_source(modal)?, modal.parts)
     }
 
     pub(crate) fn build_context_transfer_payload_from_source(
         &self,
         source: ContextTransferSource,
-        n_units: usize,
-        capture_kind: ContextCaptureKind,
+        parts: ContextTransferParts,
     ) -> Option<String> {
         let agent = self.context_transfer_agent(source)?;
         Some(build_context_payload_for(
             agent,
-            n_units,
             Self::context_transfer_source_kind(source),
-            capture_kind,
+            parts,
         ))
     }
 

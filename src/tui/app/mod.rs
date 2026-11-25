@@ -47,9 +47,8 @@ use crate::db::Database;
 
 use super::agent::InteractiveAgent;
 use super::context_transfer::{
-    build_context_payload_for, initial_capture_units, interactive_capture_kind,
-    interactive_line_page_count, interactive_prompt_count, ContextCaptureKind, ContextSourceKind,
-    ContextTransferConfig, ContextTransferModal, ContextTransferStep,
+    build_context_payload_for, ContextSourceKind, ContextTransferModal, ContextTransferParts,
+    ContextTransferStep,
 };
 use crate::domain::graphs::{GraphSpecStatus, GraphStatus};
 use crate::tui::prompt_templates::PromptTemplates;

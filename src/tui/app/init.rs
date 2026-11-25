@@ -126,7 +126,6 @@ macro_rules! app_new_fields {
             graph_whim_cache: HashMap::new(),
             context_transfer_modal: None,
             rag_transfer_modal: None,
-            context_transfer_config: ContextTransferConfig::default(),
             prompt_templates: PromptTemplates::load_from_registry()
                 .unwrap_or_else(|_| PromptTemplates::internal_templates()),
             simple_prompt_dialog: None,

@@ -1922,11 +1922,7 @@ mod tests {
         assert!(panel_background_focus(&app) == Focus::Agent);
 
         app.focus = Focus::ContextTransfer;
-        let mut transfer = crate::tui::context_transfer::ContextTransferModal::new(
-            0,
-            crate::tui::context_transfer::ContextCaptureKind::Prompts,
-            1,
-        );
+        let mut transfer = crate::tui::context_transfer::ContextTransferModal::new(0);
         transfer.prev_focus = Some(Focus::Agent);
         app.context_transfer_modal = Some(transfer);
         assert!(panel_background_focus(&app) == Focus::Agent);

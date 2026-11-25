@@ -26,7 +26,8 @@ fn draw_ctx_preview(frame: &mut Frame, app: &App, theme: &Theme) {
 
     let preview_lines: Vec<&str> = modal.payload_preview.lines().collect();
     let visible_preview = preview_lines.len().min(8) as u16;
-    let height = 12 + visible_preview;
+    let overflow = u16::from(preview_lines.len() > 8);
+    let height = 12 + visible_preview + overflow;
     let area = centered_rect(70, height, frame.area());
     frame.render_widget(Clear, area);
 
@@ -42,11 +43,6 @@ fn draw_ctx_preview(frame: &mut Frame, app: &App, theme: &Theme) {
             .unwrap_or(("?", theme.header_color))
     };
 
-    let src_type = if modal.source_is_terminal {
-        "terminal"
-    } else {
-        "agent"
-    };
     let block = Block::default()
         .title(format!(" Context Transfer — from: {src_id} "))
         .borders(crate::tui::ui::dialog_borders_for(theme))
@@ -57,35 +53,42 @@ fn draw_ctx_preview(frame: &mut Frame, app: &App, theme: &Theme) {
     frame.render_widget(block, area);
     draw_dialog_left_wave(frame, area, effective_animation_tick(app).into());
 
-    let active_style = Style::default()
-        .fg(Color::Black)
-        .bg(accent)
-        .add_modifier(Modifier::BOLD);
-
-    let mut lines = vec![
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(
-                format!("  From {src_type}: "),
-                Style::default().fg(theme.dim_text),
-            ),
-            Span::styled(format!(" ◀ {} ▶ ", modal.n_units), active_style),
-            Span::styled(
-                format!("  ({})", modal.unit_label()),
-                Style::default().fg(theme.dim_text),
-            ),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            format!("  Capture: {}", modal.unit_help()),
-            Style::default().fg(theme.dim_text),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            "  Preview:",
-            Style::default().fg(theme.dim_text),
-        )),
+    let part_rows = [
+        ("Header", modal.parts.include_header),
+        ("Screen tail", modal.parts.include_screen),
+        ("Last prompt", modal.parts.include_last_prompt),
     ];
+
+    let mut lines = vec![Line::from("")];
+    for (idx, (label, enabled)) in part_rows.iter().enumerate() {
+        let is_sel = idx == modal.selected_part;
+        let check = if *enabled { "[x]" } else { "[ ]" };
+        let style = if is_sel {
+            Style::default()
+                .fg(Color::Black)
+                .bg(accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.dim_text)
+        };
+        let cursor = if is_sel { "›" } else { " " };
+        lines.push(Line::from(Span::styled(
+            format!("  {cursor} {check} {label}"),
+            style,
+        )));
+    }
+
+    let char_count = modal.payload_preview.chars().count();
+    let line_count = preview_lines.len();
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!("  Size: {char_count} chars · {line_count} lines"),
+        Style::default().fg(theme.dim_text),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  Preview:",
+        Style::default().fg(theme.dim_text),
+    )));
 
     for line in preview_lines.iter().take(8) {
         lines.push(Line::from(Span::styled(
@@ -102,7 +105,7 @@ fn draw_ctx_preview(frame: &mut Frame, app: &App, theme: &Theme) {
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "  ←→: adjust range · Enter: pick destination · Esc: cancel",
+        "  ↑↓: select part · Space: toggle · Enter: pick destination · Esc: cancel",
         Style::default().fg(theme.dim_text),
     )));
 

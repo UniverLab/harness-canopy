@@ -105,6 +105,7 @@ pub fn strip_shell_prompt_prefix(line: &str) -> String {
 
 /// Returns true if `c` is a box-drawing or block-element character
 /// (Unicode ranges: Box Drawing U+2500–257F, Block Elements U+2580–259F).
+#[cfg(test)]
 pub fn is_decoration_char(c: char) -> bool {
     matches!(c,
         // Box Drawing (U+2500–U+257F)
@@ -122,6 +123,7 @@ pub fn is_decoration_char(c: char) -> bool {
 /// status bars, tool-use indicators, MCP messages, and similar chrome.
 /// Lines with box-drawing borders that contain text content between them
 /// are NOT treated as UI lines — the content is extracted by `strip_borders`.
+#[cfg(test)]
 pub fn is_ui_line(line: &str) -> bool {
     let trimmed = line.trim();
 
@@ -172,6 +174,7 @@ pub fn is_ui_line(line: &str) -> bool {
 
 /// Strip box-drawing border characters from the beginning and end of a line.
 /// E.g. `│ Hello world │` → `Hello world`.
+#[cfg(test)]
 pub fn strip_borders(line: &str) -> &str {
     let trimmed = line.trim();
     // Strip leading border char(s) + whitespace

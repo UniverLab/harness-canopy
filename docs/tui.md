@@ -391,8 +391,11 @@ row: `/` filters, `n` creates, `e` edits and `F4` deletes.
   at a chosen hour instead of immediately. Falls back to `Ctrl+S` on
   terminals without Kitty protocol. Schedules can also be made from the remote.
 - **Context transfer** — a two-step modal (preview → agent picker)
-  transfers conversation context, prompts and output between agents while
-  preserving session state and scrollback.
+  transfers a bounded summary (up to 12,000 characters) between agents while
+  preserving session state and scrollback. In the preview step, toggle any
+  combination of the three parts — header, visible screen tail (up to 120
+  lines), and last user prompt (up to 1,500 characters) — with `↑↓` and
+  `Space`.
 - **RAG transfer** — send semantic search results to another agent as
   injected context.
 - **Prompt builder** — structured prompt templates with configurable

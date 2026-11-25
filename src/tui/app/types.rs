@@ -414,7 +414,6 @@ pub struct App {
     pub(crate) graph_whim_cache: HashMap<String, super::snapshot::GraphWhimInfo>,
     pub(crate) context_transfer_modal: Option<crate::tui::context_transfer::ContextTransferModal>,
     pub(crate) rag_transfer_modal: Option<RagTransferModal>,
-    pub(crate) context_transfer_config: crate::tui::context_transfer::ContextTransferConfig,
     /// Prompt templates loaded from registry
     #[allow(dead_code)]
     pub(crate) prompt_templates: crate::tui::prompt_templates::PromptTemplates,
