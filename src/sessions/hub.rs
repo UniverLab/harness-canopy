@@ -516,6 +516,15 @@ impl SessionHub {
             }
         };
 
+        if req.kind == SessionKind::Agent {
+            let home = std::env::var_os("CANOPY_HOME_OVERRIDE")
+                .map(std::path::PathBuf::from)
+                .or_else(dirs::home_dir);
+            if let Some(home) = home {
+                crate::domain::instruction_file::ensure_skill_line(&req.cli, &home);
+            }
+        }
+
         let (cmd, args) = super::hub_command::build_spawn_command(req, &id, &name);
         // Sampled before the child exists: its conversation lock is newer.
         let spawn_since = std::time::SystemTime::now();

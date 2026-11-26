@@ -1056,6 +1056,7 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             instruction_precedence: vec![],
+            user_instruction_file: None,
             provider: provider.map(str::to_string),
             tool_name: tool.map(str::to_string),
             cli: None,

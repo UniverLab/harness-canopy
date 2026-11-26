@@ -21,6 +21,7 @@ mod shelf_upload;
 mod shutdown;
 mod snapshot;
 mod spawn_yolo;
+mod user_instruction_file;
 
 use std::sync::Arc;
 use std::time::Duration;

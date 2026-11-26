@@ -14,6 +14,7 @@ pub struct UninstallPlan {
     pub canopy_dir: PathBuf,
     pub platform_edits: Vec<PlatformEdit>,
     pub skills_symlinks: Vec<PathBuf>,
+    pub user_instruction_files: Vec<PathBuf>,
     pub daemon_running: bool,
     pub agents_skills_dir: PathBuf,
     pub keep_shared_servers: bool,
@@ -121,12 +122,14 @@ pub fn build_uninstall_plan_with_home(
     let daemon_running = check_daemon_running(&canopy_dir)
         || port_pid.is_some_and(crate::daemon::process::is_process_running);
     let skills_symlinks = collect_skills_symlinks(&registry.platforms, home, &agents_skills_dir);
+    let user_instruction_files = collect_user_instruction_files(&registry.platforms, home);
 
     Ok(UninstallPlan {
         service,
         canopy_dir,
         platform_edits,
         skills_symlinks,
+        user_instruction_files,
         daemon_running,
         agents_skills_dir,
         keep_shared_servers,
@@ -236,6 +239,34 @@ fn collect_skills_symlinks(
     symlinks
 }
 
+fn collect_user_instruction_files(platforms: &[Platform], home: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for platform in platforms {
+        let Some(ref rel) = platform.user_instruction_file else {
+            continue;
+        };
+        let Some(path) = crate::domain::instruction_file::resolve_user_instruction_path(home, rel)
+        else {
+            continue;
+        };
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if crate::domain::instruction_file::remove_skill_block(&content).is_some()
+            && !files.contains(&path)
+        {
+            files.push(path);
+        }
+    }
+    files
+}
+
 fn is_symlink_pointing_into(path: &Path, target_dir: &Path) -> bool {
     let Ok(meta) = std::fs::symlink_metadata(path) else {
         return false;
@@ -295,6 +326,17 @@ pub fn print_dry_run(plan: &UninstallPlan) {
     } else {
         for link in &plan.skills_symlinks {
             println!("  [remove] Skills symlink: {}", link.display());
+        }
+    }
+
+    if plan.user_instruction_files.is_empty() {
+        println!("  [skip]  No user instruction files contain canopy skill block");
+    } else {
+        for file in &plan.user_instruction_files {
+            println!(
+                "  [edit]  Remove canopy skill block from: {}",
+                file.display()
+            );
         }
     }
 
@@ -397,6 +439,7 @@ pub fn execute_uninstall(plan: &UninstallPlan, purge_data: bool) -> Result<()> {
             skills_dir: None,
             instruction_file: None,
             instruction_precedence: vec![],
+            user_instruction_file: None,
             cli: None,
 
             provider: None,
@@ -421,6 +464,8 @@ pub fn execute_uninstall(plan: &UninstallPlan, purge_data: bool) -> Result<()> {
         let _ = std::fs::remove_file(link);
     }
 
+    revert_user_instruction_files(&plan.user_instruction_files)?;
+
     if purge_data {
         if plan.canopy_dir.exists() {
             println!("  Deleting {}", plan.canopy_dir.display());
@@ -437,6 +482,18 @@ pub fn execute_uninstall(plan: &UninstallPlan, purge_data: bool) -> Result<()> {
         );
     }
 
+    Ok(())
+}
+
+fn revert_user_instruction_files(files: &[PathBuf]) -> Result<()> {
+    for path in files {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            if let Some(stripped) = crate::domain::instruction_file::remove_skill_block(&content) {
+                println!("  Removing canopy skill block from: {}", path.display());
+                atomic_write(path, &stripped)?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -561,6 +618,7 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             instruction_precedence: vec![],
+            user_instruction_file: None,
             cli: None,
 
             provider: None,
@@ -585,6 +643,7 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             instruction_precedence: vec![],
+            user_instruction_file: None,
             cli: None,
 
             provider: None,
@@ -609,6 +668,7 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             instruction_precedence: vec![],
+            user_instruction_file: None,
             cli: None,
 
             provider: None,
@@ -979,6 +1039,7 @@ mod tests {
             canopy_dir,
             platform_edits: vec![],
             skills_symlinks: vec![],
+            user_instruction_files: vec![],
             daemon_running: false,
             agents_skills_dir,
             keep_shared_servers: false,
@@ -1010,5 +1071,32 @@ mod tests {
         execute_uninstall(&plan, true).unwrap();
 
         assert!(!canopy_dir.exists());
+    }
+
+    #[test]
+    fn uninstall_removes_skill_block_and_restores_original_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let user_file = home.join(".test_harness/USER.md");
+        std::fs::create_dir_all(user_file.parent().unwrap()).unwrap();
+        let original = "# User Instructions\nKeep this.\n";
+        let amended = crate::domain::instruction_file::amend_with_skill_line(
+            original,
+            crate::domain::instruction_file::SKILL_LINE,
+        );
+        std::fs::write(&user_file, &amended).unwrap();
+
+        let mut p = json_platform(vec![]);
+        p.name = "test_harness".to_string();
+        p.user_instruction_file = Some(".test_harness/USER.md".to_string());
+
+        let found = collect_user_instruction_files(&[p], home);
+        assert_eq!(found, vec![user_file.clone()]);
+
+        let mut plan = empty_plan(home.join(".canopy"), home.join(".agents/skills"));
+        plan.user_instruction_files = found;
+        execute_uninstall(&plan, false).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&user_file).unwrap(), original);
     }
 }

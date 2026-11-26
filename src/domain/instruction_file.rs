@@ -7,7 +7,8 @@
 //! or does not know the platform, the offline baseline below — the registry's
 //! current published values — is the fallback.
 
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
+use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 
@@ -16,6 +17,14 @@ use crate::setup_module::models::Platform;
 /// Delimiters of the canopy protocol block inside an instruction file.
 pub const PROTOCOL_BEGIN: &str = "<!-- canopy:protocol:begin -->";
 pub const PROTOCOL_END: &str = "<!-- canopy:protocol:end -->";
+
+/// Delimiters and line for the canopy skill pointer inside a user-level instruction file.
+pub const SKILL_BEGIN: &str = "<!-- canopy:skill:begin -->";
+pub const SKILL_END: &str = "<!-- canopy:skill:end -->";
+pub const SKILL_LINE: &str =
+    "At the start of every task, use the canopy skill (run: canopy skill).";
+
+static SKILL_LINE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Where a harness reads its instructions: the file to amend/create when no
 /// precedence path exists, plus the paths checked first, in order.
@@ -95,13 +104,46 @@ fn offline_spec(cli_name: &str) -> InstructionSpec {
 /// otherwise the block is appended at the end after one blank line. Running it
 /// twice with the same protocol returns the same string as running it once.
 pub fn amend_with_protocol(content: &str, protocol: &str) -> String {
-    let block = format!("{PROTOCOL_BEGIN}\n{protocol}\n{PROTOCOL_END}");
-    match find_block(content) {
-        Some((start, end)) => {
+    amend_block(content, protocol, PROTOCOL_BEGIN, PROTOCOL_END)
+}
+
+/// Idempotently amend `content` with the canopy skill pointer line in its own
+/// delimited block (`SKILL_BEGIN` / `SKILL_END`), using the same replacement
+/// and append rules as [`amend_with_protocol`].
+pub fn amend_with_skill_line(content: &str, line: &str) -> String {
+    amend_block(content, line, SKILL_BEGIN, SKILL_END)
+}
+
+/// Remove the `SKILL_BEGIN`..`SKILL_END` block and the blank line added before
+/// it, returning `None` if no skill block is present.
+pub fn remove_skill_block(content: &str) -> Option<String> {
+    let (start, end) = find_block(content, SKILL_BEGIN, SKILL_END)?;
+    let before = &content[..start];
+    let after = &content[end..];
+    if after.trim_matches('\n').is_empty() {
+        if before.trim_matches('\n').is_empty() {
+            return Some(String::new());
+        }
+        return Some(format!("{}\n", before.trim_end_matches('\n')));
+    }
+    let after_trimmed = after.strip_prefix('\n').unwrap_or(after);
+    if before.is_empty() {
+        return Some(after_trimmed.trim_start_matches('\n').to_string());
+    }
+    if before.ends_with("\n\n") && after_trimmed.starts_with('\n') {
+        return Some(format!("{}{}", &before[..before.len() - 1], after_trimmed));
+    }
+    Some(format!("{before}{after_trimmed}"))
+}
+
+fn amend_block(content: &str, body: &str, begin: &str, end: &str) -> String {
+    let block = format!("{begin}\n{body}\n{end}");
+    match find_block(content, begin, end) {
+        Some((start, span_end)) => {
             let mut out = String::with_capacity(content.len() + block.len());
             out.push_str(&content[..start]);
             out.push_str(&block);
-            out.push_str(&content[end..]);
+            out.push_str(&content[span_end..]);
             out
         }
         None => {
@@ -115,21 +157,136 @@ pub fn amend_with_protocol(content: &str, protocol: &str) -> String {
     }
 }
 
-/// Byte span of the existing protocol block, if present. Both markers must sit
+/// Byte span of an existing delimited block, if present. Both markers must sit
 /// at the start of their line. The span is exactly [start of BEGIN, end of END)
 /// — the trailing newline after END is deliberately NOT consumed, so replacing
 /// the block preserves it and the amend stays idempotent.
-fn find_block(content: &str) -> Option<(usize, usize)> {
-    let begin = content.find(PROTOCOL_BEGIN)?;
+fn find_block(content: &str, begin_marker: &str, end_marker: &str) -> Option<(usize, usize)> {
+    let begin = content.find(begin_marker)?;
     if begin > 0 && !content[..begin].ends_with('\n') {
         return None;
     }
-    let after_begin = begin + PROTOCOL_BEGIN.len();
-    let end = after_begin + content[after_begin..].find(PROTOCOL_END)?;
+    let after_begin = begin + begin_marker.len();
+    let end = after_begin + content[after_begin..].find(end_marker)?;
     if end > after_begin && !content[after_begin..end].ends_with('\n') {
         return None;
     }
-    Some((begin, end + PROTOCOL_END.len()))
+    Some((begin, end + end_marker.len()))
+}
+
+/// Resolve a relative `user_instruction_file` field against `home`, rejecting
+/// empty strings, absolute paths, or any `..` / root / prefix component.
+pub(crate) fn resolve_user_instruction_path(home: &Path, rel: &str) -> Option<PathBuf> {
+    if rel.is_empty() {
+        return None;
+    }
+    let rel_path = Path::new(rel);
+    if rel_path.is_absolute() {
+        return None;
+    }
+    if rel_path.components().any(|c| {
+        matches!(
+            c,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return None;
+    }
+    Some(home.join(rel_path))
+}
+
+/// Resolve the harness's user-level instruction file from the cached registry
+/// baseline under `home/.canopy`. Returns `None` when the platform is unknown,
+/// has no `user_instruction_file`, or the field is empty / unsafe.
+pub fn user_instruction_file(cli_name: &str, home: &Path) -> Option<PathBuf> {
+    let baseline = crate::domain::registry_baseline::RegistryBaseline::load(&home.join(".canopy"))?;
+    let platform = baseline.get_platform(cli_name)?;
+    let rel = platform.user_instruction_file.as_deref()?;
+    resolve_user_instruction_path(home, rel)
+}
+
+/// Ensure the harness's existing regular user-level instruction file carries
+/// `SKILL_LINE`. Never creates files or directories, skips symlinks and
+/// non-regular files (logging at DEBUG), and logs errors at WARN with path.
+pub fn ensure_skill_line(cli_name: &str, home: &Path) {
+    let _guard = SKILL_LINE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    let Some(path) = user_instruction_file(cli_name, home) else {
+        tracing::debug!(
+            cli = cli_name,
+            "skipping skill line: no user_instruction_file"
+        );
+        return;
+    };
+
+    if let Some(meta) = stat_regular_file(&path) {
+        amend_skill_line_file(&path, meta.permissions());
+    }
+}
+
+fn stat_regular_file(path: &Path) -> Option<std::fs::Metadata> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::debug!(path = %path.display(), "skipping skill line: file does not exist");
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!(path = %path.display(), "failed to stat user instruction file: {e}");
+            return None;
+        }
+    };
+    if let Some(reason) = non_regular_reason(&meta) {
+        tracing::debug!(path = %path.display(), "skipping skill line: {reason}");
+        return None;
+    }
+    Some(meta)
+}
+
+fn non_regular_reason(meta: &std::fs::Metadata) -> Option<&'static str> {
+    if meta.file_type().is_symlink() {
+        Some("target is a symlink")
+    } else if !meta.file_type().is_file() {
+        Some("target is not a regular file")
+    } else {
+        None
+    }
+}
+
+fn amend_skill_line_file(path: &Path, permissions: std::fs::Permissions) {
+    let existing = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), "failed to read user instruction file: {e}");
+            return;
+        }
+    };
+    let amended = amend_with_skill_line(&existing, SKILL_LINE);
+    if amended == existing {
+        return;
+    }
+    if let Err(e) = write_preserving_permissions(path, &amended, permissions) {
+        tracing::warn!(path = %path.display(), "failed to update user instruction file: {e}");
+    }
+}
+
+fn write_preserving_permissions(
+    path: &Path,
+    content: &str,
+    permissions: std::fs::Permissions,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no parent")
+    })?;
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+    tmp.write_all(content.as_bytes())?;
+    tmp.flush()?;
+    tmp.as_file().set_permissions(permissions)?;
+    tmp.persist(path).map_err(|e| e.error)?; // lint-pattern
+    Ok(())
 }
 
 /// The instruction file to amend inside `worktree`: the first existing path in
@@ -277,6 +434,7 @@ mod tests {
             skills_dir: None,
             instruction_file: instruction_file.map(str::to_string),
             instruction_precedence: precedence.into_iter().map(str::to_string).collect(),
+            user_instruction_file: None,
             provider: None,
             tool_name: None,
             project_paths: Vec::new(),
@@ -440,5 +598,137 @@ mod tests {
             instruction_spec_for("nonexistent", None).instruction_file,
             "AGENTS.md"
         );
+    }
+
+    fn write_baseline_with_user_file(home: &Path, cli: &str, user_instruction_file: Option<&str>) {
+        let mut p = platform(None, vec![]);
+        p.name = cli.to_string();
+        p.user_instruction_file = user_instruction_file.map(str::to_string);
+        crate::domain::registry_baseline::RegistryBaseline {
+            clis: vec![],
+            platforms: vec![p],
+        }
+        .save(&home.join(".canopy"))
+        .unwrap();
+    }
+
+    #[test]
+    fn skill_line_missing_file_and_dir_not_created() {
+        let home = tempfile::tempdir().unwrap();
+        write_baseline_with_user_file(home.path(), "testcli", Some(".testcli/USER.md"));
+
+        ensure_skill_line("testcli", home.path());
+
+        assert!(!home.path().join(".testcli").exists());
+        assert!(!home.path().join(".testcli/USER.md").exists());
+    }
+
+    #[test]
+    fn skill_line_appends_to_existing_file() {
+        let home = tempfile::tempdir().unwrap();
+        write_baseline_with_user_file(home.path(), "testcli", Some(".testcli/USER.md"));
+        let target = home.path().join(".testcli/USER.md");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "# My Rules\n").unwrap();
+
+        ensure_skill_line("testcli", home.path());
+
+        let content = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(
+            content,
+            format!("# My Rules\n\n{SKILL_BEGIN}\n{SKILL_LINE}\n{SKILL_END}\n")
+        );
+    }
+
+    #[test]
+    fn skill_line_second_call_is_byte_identical() {
+        let home = tempfile::tempdir().unwrap();
+        write_baseline_with_user_file(home.path(), "testcli", Some(".testcli/USER.md"));
+        let target = home.path().join(".testcli/USER.md");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "# My Rules\n").unwrap();
+
+        ensure_skill_line("testcli", home.path());
+        let first = std::fs::read(&target).unwrap();
+        ensure_skill_line("testcli", home.path());
+        let second = std::fs::read(&target).unwrap();
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn skill_line_replaces_changed_line_in_place_preserving_surrounding_text() {
+        let initial = format!("# Before\n\n{SKILL_BEGIN}\nOld line.\n{SKILL_END}\n\n# After\n");
+        let updated = amend_with_skill_line(&initial, SKILL_LINE);
+        assert_eq!(
+            updated,
+            format!("# Before\n\n{SKILL_BEGIN}\n{SKILL_LINE}\n{SKILL_END}\n\n# After\n")
+        );
+        assert_eq!(updated.matches(SKILL_BEGIN).count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skill_line_skips_symlink() {
+        let home = tempfile::tempdir().unwrap();
+        write_baseline_with_user_file(home.path(), "testcli", Some(".testcli/USER.md"));
+        std::fs::create_dir_all(home.path().join(".testcli")).unwrap();
+        let real = home.path().join("real.md");
+        std::fs::write(&real, "# Original\n").unwrap();
+        let link = home.path().join(".testcli/USER.md");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        ensure_skill_line("testcli", home.path());
+
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "# Original\n");
+    }
+
+    #[test]
+    fn skill_line_absent_field_leaves_untouched() {
+        let home = tempfile::tempdir().unwrap();
+        write_baseline_with_user_file(home.path(), "testcli", None);
+        let file = home.path().join(".testcli/USER.md");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "# Untouched\n").unwrap();
+
+        assert_eq!(user_instruction_file("testcli", home.path()), None);
+        ensure_skill_line("testcli", home.path());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "# Untouched\n");
+    }
+
+    #[test]
+    fn skill_line_rejects_absolute_and_parent_dir_paths() {
+        let home = tempfile::tempdir().unwrap();
+        write_baseline_with_user_file(home.path(), "abscli", Some("/etc/passwd"));
+        assert_eq!(user_instruction_file("abscli", home.path()), None);
+
+        write_baseline_with_user_file(home.path(), "dotcli", Some("../escape.md"));
+        assert_eq!(user_instruction_file("dotcli", home.path()), None);
+
+        write_baseline_with_user_file(home.path(), "midcli", Some(".testcli/../../escape.md"));
+        assert_eq!(user_instruction_file("midcli", home.path()), None);
+
+        write_baseline_with_user_file(home.path(), "emptycli", Some(""));
+        assert_eq!(user_instruction_file("emptycli", home.path()), None);
+    }
+
+    #[test]
+    fn skill_line_concurrent_calls_leave_exactly_one_block() {
+        let home = tempfile::tempdir().unwrap();
+        write_baseline_with_user_file(home.path(), "testcli", Some(".testcli/USER.md"));
+        let target = home.path().join(".testcli/USER.md");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "# Concurrent\n").unwrap();
+
+        std::thread::scope(|s| {
+            let h1 = s.spawn(|| ensure_skill_line("testcli", home.path()));
+            let h2 = s.spawn(|| ensure_skill_line("testcli", home.path()));
+            h1.join().unwrap();
+            h2.join().unwrap();
+        });
+
+        let content = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(content.matches(SKILL_BEGIN).count(), 1);
+        assert_eq!(content.matches(SKILL_END).count(), 1);
     }
 }

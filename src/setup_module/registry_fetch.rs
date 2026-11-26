@@ -717,6 +717,7 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             instruction_precedence: vec![],
+            user_instruction_file: None,
             cli: Some(cli_json),
 
             provider: None,
@@ -1219,6 +1220,7 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             instruction_precedence: vec![],
+            user_instruction_file: None,
             cli: Some(serde_json::json!({"binary": "ls", "headless_mode": "--headless"})),
 
             provider: None,
@@ -1250,6 +1252,7 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             instruction_precedence: vec![],
+            user_instruction_file: None,
             cli: Some(serde_json::json!({"binary": "ls", "headless_mode": "--headless"})),
 
             provider: None,
@@ -1293,6 +1296,7 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             instruction_precedence: vec![],
+            user_instruction_file: None,
             cli: Some(serde_json::json!({"binary": "ls", "headless_mode": "--headless"})),
 
             provider: None,
@@ -1349,6 +1353,7 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             instruction_precedence: vec![],
+            user_instruction_file: None,
             cli: Some(serde_json::json!({"binary": "ls", "headless_mode": "--headless"})),
 
             provider: None,
@@ -1385,6 +1390,7 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             instruction_precedence: vec![],
+            user_instruction_file: None,
             cli: Some(serde_json::json!({"binary": "ls"})),
 
             provider: None,
@@ -1428,6 +1434,7 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             instruction_precedence: vec![],
+            user_instruction_file: None,
             cli: Some(serde_json::json!({"binary": "ls"})),
 
             provider: None,
@@ -1459,6 +1466,7 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             instruction_precedence: vec![],
+            user_instruction_file: None,
             cli: Some(serde_json::json!({"binary": "ls"})),
 
             provider: None,

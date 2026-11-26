@@ -56,6 +56,10 @@ pub struct Platform {
     pub skills_dir: Option<String>,
     #[serde(default)]
     pub instruction_file: Option<String>,
+    /// Path to the platform's user-level instruction file (relative to home).
+    /// e.g. `".claude/CLAUDE.md"`.
+    #[serde(default)]
+    pub user_instruction_file: Option<String>,
     /// Files the harness reads INSTEAD of `instruction_file` when present, in
     /// order (canopy-registry: claude declares
     /// ["CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md"]). Empty for
@@ -274,6 +278,7 @@ mod tests {
             skills_dir: None,
             instruction_file: Some(".instructions/test.md".to_string()),
             instruction_precedence: vec![],
+            user_instruction_file: None,
             cli: Some(serde_json::json!({
                 "binary": "test-cli",
                 "install": {"type": "none"}
@@ -313,6 +318,7 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             instruction_precedence: vec![],
+            user_instruction_file: None,
             cli: None,
 
             provider: None,
@@ -342,6 +348,7 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             instruction_precedence: vec![],
+            user_instruction_file: None,
             cli: Some(serde_json::json!("not an object")),
 
             provider: None,
@@ -371,6 +378,7 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             instruction_precedence: vec![],
+            user_instruction_file: None,
             provider: Some("Mistral AI".to_string()),
             tool_name: Some("Vibe".to_string()),
             cli: Some(serde_json::json!({"binary": "vibe"})),
@@ -402,6 +410,7 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             instruction_precedence: vec![],
+            user_instruction_file: None,
             cli: Some(serde_json::json!({"binary": "ls"})),
 
             provider: None,
@@ -428,6 +437,7 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             instruction_precedence: vec![],
+            user_instruction_file: None,
             cli: Some(serde_json::json!({"binary": "definitely_not_a_real_binary_xyz123"})),
 
             provider: None,
@@ -454,6 +464,7 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             instruction_precedence: vec![],
+            user_instruction_file: None,
             cli: None,
 
             provider: None,
@@ -571,6 +582,7 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             instruction_precedence: vec![],
+            user_instruction_file: None,
             cli: None,
 
             provider: None,

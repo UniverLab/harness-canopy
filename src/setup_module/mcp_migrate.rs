@@ -165,6 +165,7 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             instruction_precedence: vec![],
+            user_instruction_file: None,
             cli: None,
             provider: None,
             tool_name: None,

@@ -94,7 +94,13 @@ binary's version changes — the same refresh runs on `canopy skill
 install`, after `canopy update`, and on every daemon start (which only
 refreshes harnesses that already have the file). The other
 skills are read live with `canopy skill list` / `canopy skill get`; they
-are never copied into a skills directory. It also rewrites legacy unauthenticated canopy MCP entries (the
+are never copied into a skills directory. When canopy opens an interactive
+terminal session for a harness, it also adds a one-line pointer to the
+`canopy` skill (inside `<!-- canopy:skill:begin -->` / `<!-- canopy:skill:end -->`
+markers) to the user-level instruction file named for that harness in the
+platform registry, only when that file already exists on disk (it never
+creates the file or modifies repository instruction files). `canopy uninstall`
+removes that block from each user instruction file that contains it. It also rewrites legacy unauthenticated canopy MCP entries (the
 old URL form, with or without headers) to the stdio `canopy bridge`
 form, creating a one-time `<config>.canopy-bak` backup before the first
 rewrite of a file. Running `canopy` with no arguments triggers setup
