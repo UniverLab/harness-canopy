@@ -10,6 +10,7 @@ use super::super::terminal_warp::{
 };
 use super::{focused_agent, focused_agent_mut, FocusedAgent};
 use crate::tui::agent::key_to_bytes;
+use crate::tui::agent::pty::agent_key_to_bytes;
 use crate::tui::app::types::App;
 
 pub(super) fn reset_scroll_on_input(app: &mut App, target: FocusedAgent, code: KeyCode) {
@@ -47,6 +48,12 @@ pub(super) fn handle_target_input(
 
 fn handle_interactive_input(app: &mut App, idx: usize, code: KeyCode, modifiers: KeyModifiers) {
     let target = FocusedAgent::Interactive(idx);
+    let mod_enter =
+        modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL | KeyModifiers::ALT);
+    if code == KeyCode::Enter && mod_enter {
+        let _ = with_input_buffer_mut(app, target, |input| input.push('\n'));
+        return;
+    }
     if code == KeyCode::Enter {
         record_interactive_prompt(app, idx);
         clear_input_buffer(app, target);
@@ -206,7 +213,10 @@ pub(super) fn forward_key_to_focused_agent(
     if super::super::ctrl_c::handle_ctrl_c(app, target, code, modifiers) {
         return;
     }
-    let bytes = key_to_bytes(code, modifiers);
+    let bytes = match target {
+        FocusedAgent::Interactive(_) => agent_key_to_bytes(code, modifiers),
+        FocusedAgent::Terminal(_) => key_to_bytes(code, modifiers),
+    };
     if bytes.is_empty() {
         return;
     }
@@ -375,6 +385,108 @@ mod warp_toggle_override_tests {
         app.terminal_agents
             .first_mut()
             .expect("terminal agent")
+            .kill();
+    }
+}
+
+#[cfg(test)]
+mod interactive_newline_tests {
+    use super::*;
+    use crate::db::Database;
+    use crate::tui::agent::InteractiveAgent;
+    use crate::tui::app::types::{AgentEntry, Focus};
+    use ratatui::style::Color;
+    use std::sync::Arc;
+    use tempfile::{tempdir, NamedTempFile};
+
+    fn test_interactive_app(initial_input: &str) -> App {
+        let agent = InteractiveAgent::spawn_terminal(
+            "cat",
+            "/tmp",
+            80,
+            24,
+            Some("interactive-newline"),
+            &[],
+            Color::White,
+        )
+        .expect("spawn interactive agent");
+        agent
+            .input_buffer
+            .lock()
+            .expect("lock input buffer")
+            .push_str(initial_input);
+
+        let tmp = NamedTempFile::new().expect("create temp database");
+        let db = Arc::new(Database::new(&tmp.path().to_path_buf()).expect("create database"));
+        let data_dir = tempdir().expect("create data directory");
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        app.interactive_agents.push(agent);
+        app.agents = vec![AgentEntry::Interactive(0)];
+        app.selected = 0;
+        app.focus = Focus::Agent;
+        app
+    }
+
+    #[test]
+    fn modified_enter_appends_newline_without_submit() {
+        let mut app = test_interactive_app("hi");
+
+        for modifier in [
+            KeyModifiers::SHIFT,
+            KeyModifiers::CONTROL,
+            KeyModifiers::ALT,
+        ] {
+            handle_interactive_input(&mut app, 0, KeyCode::Enter, modifier);
+        }
+
+        let agent = app.interactive_agents.first().expect("interactive agent");
+        let buf = agent
+            .input_buffer
+            .lock()
+            .expect("lock input buffer")
+            .clone();
+        assert_eq!(buf, "hi\n\n\n");
+        assert!(
+            agent
+                .prompt_history
+                .lock()
+                .expect("lock prompt history")
+                .is_empty(),
+            "modified Enter must not record a submitted prompt"
+        );
+
+        app.interactive_agents
+            .first_mut()
+            .expect("interactive agent")
+            .kill();
+    }
+
+    #[test]
+    fn plain_enter_submits_and_clears_buffer() {
+        let mut app = test_interactive_app("hi\nthere");
+
+        handle_interactive_input(&mut app, 0, KeyCode::Enter, KeyModifiers::NONE);
+
+        let agent = app.interactive_agents.first().expect("interactive agent");
+        let buf = agent
+            .input_buffer
+            .lock()
+            .expect("lock input buffer")
+            .clone();
+        assert!(buf.is_empty());
+        let history = agent.prompt_history.lock().expect("lock prompt history");
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].input, "hi\nthere");
+        drop(history);
+
+        app.interactive_agents
+            .first_mut()
+            .expect("interactive agent")
             .kill();
     }
 }

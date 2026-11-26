@@ -100,3 +100,51 @@ pub fn key_to_bytes(
         _ => vec![],
     }
 }
+
+/// Convert a crossterm key event to raw bytes for an interactive agent PTY.
+///
+/// Modified `Enter` (`Shift`, `Control`, or `Alt`) maps to `ESC CR` (`\x1b\r`)
+/// so agent harnesses insert a newline instead of submitting. Plain `Enter`
+/// and all other keys delegate to [`key_to_bytes`].
+pub fn agent_key_to_bytes(
+    code: ratatui::crossterm::event::KeyCode,
+    modifiers: ratatui::crossterm::event::KeyModifiers,
+) -> Vec<u8> {
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+
+    if code == KeyCode::Enter
+        && modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        return b"\x1b\r".to_vec();
+    }
+
+    key_to_bytes(code, modifiers)
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+
+    #[test]
+    fn agent_key_to_bytes_maps_modified_enter_to_esc_cr() {
+        assert_eq!(
+            agent_key_to_bytes(KeyCode::Enter, KeyModifiers::NONE),
+            b"\r"
+        );
+        assert_eq!(
+            agent_key_to_bytes(KeyCode::Enter, KeyModifiers::SHIFT),
+            b"\x1b\r"
+        );
+        assert_eq!(
+            agent_key_to_bytes(KeyCode::Enter, KeyModifiers::CONTROL),
+            b"\x1b\r"
+        );
+        assert_eq!(
+            agent_key_to_bytes(KeyCode::Enter, KeyModifiers::ALT),
+            b"\x1b\r"
+        );
+        assert_eq!(key_to_bytes(KeyCode::Enter, KeyModifiers::NONE), b"\r");
+        assert_eq!(key_to_bytes(KeyCode::Enter, KeyModifiers::SHIFT), b"\r");
+    }
+}

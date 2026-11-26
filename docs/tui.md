@@ -65,6 +65,7 @@ step instead of launching straight away:
 
 ## Interactive sessions
 
+- **Inserting a newline** — `Shift+Enter`, `Ctrl+Enter`, and `Alt+Enter` insert a newline in agent sessions without submitting; terminals without modified-Enter reporting can use `Alt+Enter`.
 - **Copying text** — drag inside a focused session pane to select and copy;
   the key-hint row shows `drag to copy`, so no keyboard modifier is needed.
   A `Ctrl+C` within 3 s of that copy is taken as the copy reflex and
