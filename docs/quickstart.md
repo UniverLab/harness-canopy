@@ -33,7 +33,9 @@ URL form) to the stdio `canopy bridge` form, keeping a one-time
 If no supported platform CLI is on `PATH`, setup prints `No supported
 platform CLI detected on PATH.`, lists every supported platform with its
 CLI binary name, and exits cleanly without writing any configuration —
-install one, make sure it is on your `PATH`, and re-run `canopy setup`.
+install one (press `i` on its row in the harness picker, or run `canopy
+setup --install <platform>`), make sure it is on your `PATH`, and re-run
+`canopy setup`. See [Installation](installation.md#installing-a-harness-from-setup).
 
 ## 3. Launch the TUI
 

@@ -91,7 +91,8 @@ local registry directory instead of fetching from GitHub),
 locally; unedited copies are removed regardless), and
 `--list-harnesses [--json]` (print every registry harness with its
 install status and free-tier fact non-interactively, without running the
-wizard). Setup also writes the embedded `canopy` skill as a regular file
+wizard), and `--install <platform> [--yes]` (run that harness's vendor
+installer — see below). Setup also writes the embedded `canopy` skill as a regular file
 to `<skills_dir>/canopy/SKILL.md` for every configured harness whose
 skills directory exists (creating it), and refreshes it whenever the
 binary's version changes — the same refresh runs on `canopy skill
@@ -127,6 +128,38 @@ or `harness probe`). It then lists every supported platform with its CLI
 binary name, and exits cleanly without writing any configuration.
 Install one of the listed binaries, make sure it is on your `PATH`, then
 re-run `canopy setup`.
+
+### Installing a harness from setup
+
+In the harness picker, a missing harness shows what setup can do about
+it: `i install` (press `i` to install it), `needs <executable> first`
+(the vendor installer needs that tool on `PATH`, and setup never
+installs prerequisites), or `install: see <docs_url>` /
+`install: not available for this OS` (no installer for your OS).
+Pressing `i` shows the vendor name, the exact installer command for your
+OS, its `source_url`, and the warning `this runs a command from the
+harness vendor on your machine`, then asks `Install? [y/N]` — nothing
+runs unless you answer `y`. `--yes` never skips this confirmation in the
+interactive list. On success setup re-checks the binary; a harness that
+is installed but not on the daemon's `PATH` is reported with the
+directory to add, never fixed silently. On failure the row shows
+`failed: <exit code>` and the last 20 lines of installer output stay
+visible.
+
+The same installer runs non-interactively as `canopy setup --install
+<platform>`: it prints the exact command and `source_url` first, then
+asks `Install? [y/N]` (declining runs nothing and exits `0`). With
+`--yes` it runs without prompting — still printing the command first —
+which is required when stdin/stdout is not a terminal (without `--yes`
+there it errors out and runs nothing, exiting `1`). Other non-zero exits:
+unknown platform, no installer for the running OS, a missing `requires`
+executable, or installer failure (the installer's own exit code).
+
+When the registry changes a vendor installer, the refresh holds the new
+command in `registry-pending.json` and keeps the approved one: setup
+shows `install: pending approval` and will not run the staged command
+until you approve it with `canopy registry apply` (or drop it with
+`canopy registry discard`).
 
 The registry itself keeps changing after setup, and the TUI only refreshes it
 in the background at startup, and only when the last refresh is more than 24

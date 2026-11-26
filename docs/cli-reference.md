@@ -108,7 +108,7 @@ Both `canopy setup` and `canopy mcp` also rewrite legacy unauthenticated canopy 
 | `canopy registry refresh --local-registry <path>` | Apply a local registry directory instead of fetching from GitHub (same flag as `canopy setup --local-registry`) |
 | `canopy registry pending` | Show the registry changes waiting for approval (`<cli>.<field>: <old> -> <new>` per change), or `no registry changes waiting for approval` |
 | `canopy registry pending --json` | Print the staged file content as JSON (`{"changes":[]}` when none) |
-| `canopy registry apply [<cli>] [--yes]` | Approve staged changes (all, or one CLI's) and write them to `config.toml`; without `--yes` it asks `Apply <N> change(s)? [y/N]` and needs a terminal |
+| `canopy registry apply [<cli>] [--yes]` | Approve staged changes (all, or one CLI's) and write them — vendor installer updates to the registry baseline, the rest to `config.toml`; without `--yes` it asks `Apply <N> change(s)? [y/N]` and needs a terminal |
 | `canopy registry discard [<cli>]` | Drop staged changes without applying them; the next refresh stages them again while the registry still differs |
 
 Registry-owned CLI metadata fields — display name, accent color,
@@ -118,7 +118,11 @@ refresh reports it as a local override, so a refresh never overwrites your
 choice. Executable fields (anything that changes what the daemon runs:
 binary, flags, argv templates) are never rewritten unattended: the refresh
 keeps your value, stages the registry value in `registry-pending.json`, and
-reports `<cli>: held <field> (waiting for approval)`. The refresh is not
+reports `<cli>: held <field> (waiting for approval)`. Changed vendor
+installer commands (`install_commands`, which change what setup would run)
+are held the same way: the approved command stays in the baseline, the new
+one waits in `registry-pending.json`, and setup refuses to run the staged
+command until it is approved. The refresh is not
 `up_to_date` while anything is staged. `canopy registry pending` shows the
 diff, `canopy registry apply` writes it after you confirm, and
 `canopy registry discard` drops it (the next refresh stages it again).
