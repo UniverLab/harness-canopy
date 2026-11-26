@@ -166,6 +166,12 @@ enum Commands {
         #[command(subcommand)]
         action: NodeAction,
     },
+    /// Read skills from the configured skills registry (list/get print to
+    /// stdout; nothing is installed).
+    Skill {
+        #[command(subcommand)]
+        action: Option<dynamic_skills::cli::SkillAction>,
+    },
     /// Inspect registered agents (read-only, served from the local database).
     Agent {
         #[command(subcommand)]
@@ -400,6 +406,7 @@ async fn main() -> Result<()> {
         Some(Commands::Rag { action }) => handle_rag_action(action).await,
         Some(Commands::Graph { action }) => handle_graph_action(action, cli.port).await,
         Some(Commands::Node { action }) => handle_node_action(action),
+        Some(Commands::Skill { action }) => dynamic_skills::cli::handle_skill_action(action),
         Some(Commands::Agent { action }) => handle_agent_action(action).await,
         Some(Commands::Spec { action }) => handle_spec_action(action, cli.port).await,
         Some(Commands::Roster { action }) => handle_roster_action(action, cli.port).await,
@@ -468,6 +475,7 @@ fn keeps_sigpipe_ignored(cmd: &Option<Commands>) -> bool {
         | Some(Commands::Rag { .. })
         | Some(Commands::Graph { .. })
         | Some(Commands::Node { .. })
+        | Some(Commands::Skill { .. })
         | Some(Commands::Agent { .. })
         | Some(Commands::Spec { .. })
         | Some(Commands::Roster { .. })

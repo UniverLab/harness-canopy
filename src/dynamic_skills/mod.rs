@@ -1,12 +1,13 @@
 //! Dynamic skill system: skills are fetched on demand from configurable git
-//! sources into a canopy-owned store (`~/.canopy/skills/`), kept fresh
+//! sources into a canopy-owned cache (`~/.canopy/cache/skills/`), kept fresh
 //! lazily via a TTL'd commit-hash check, and served to any harness over MCP
-//! by `skill` (`list`/`get`).
+//! by `skill` (`list`/`get`) or printed to stdout by `canopy skill`.
 //!
 //! This is additive to the global-symlink standard in [`crate::skills_module`]
 //! — nothing here touches `~/.agents/skills/` or the platform symlinks.
 
 mod catalog_cache;
+pub mod cli;
 mod frontmatter;
 mod metadata;
 mod source;
@@ -54,6 +55,37 @@ pub struct SkillContent {
 /// response; larger ones are listed by path only.
 const INLINE_FILE_LIMIT: u64 = 64 * 1024;
 
+/// A skill fetched for the `canopy skill get` CLI path: where its files live
+/// on disk plus whether the cached copy was served because the sources were
+/// unreachable at refresh time.
+#[derive(Debug, Clone)]
+pub struct CliSkillFetch {
+    pub skill_dir: PathBuf,
+    pub served_offline: bool,
+}
+
+/// Why `canopy skill get` could not produce a skill.
+#[derive(Debug, Clone)]
+pub enum CliSkillError {
+    /// No configured source carries the skill and nothing is cached.
+    NotFound,
+    /// At least one source failed with a transport/other error (or the
+    /// refresh check failed) and no cached copy could be served. Carries the
+    /// underlying cause for stderr.
+    Unreachable(String),
+}
+
+impl std::fmt::Display for CliSkillError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => write!(f, "skill not found"),
+            Self::Unreachable(cause) => write!(f, "{cause}"),
+        }
+    }
+}
+
+impl std::error::Error for CliSkillError {}
+
 type ClockFn = Box<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 
 /// Owns the on-disk skill store and the configured sources, and implements
@@ -78,7 +110,9 @@ impl SkillStore {
     }
 
     /// Build a store from the `[skills]` section of `CanopyConfig`, rooted at
-    /// `<data_dir>/skills` (i.e. `~/.canopy/skills/`).
+    /// `<data_dir>/cache/skills` (i.e. `~/.canopy/cache/skills/`). Nothing
+    /// is ever written to `~/.agents/skills`, a platform `skills_dir`, or
+    /// the old `~/.canopy/skills` root.
     pub fn from_config(
         data_dir: &Path,
         config: &crate::domain::canopy_config::SkillsConfig,
@@ -88,7 +122,11 @@ impl SkillStore {
             .iter()
             .map(|s| GitSource::new(s.url.clone(), s.git_ref.clone()))
             .collect();
-        Self::new(data_dir.join("skills"), sources, config.ttl_minutes)
+        Self::new(
+            data_dir.join("cache").join("skills"),
+            sources,
+            config.ttl_minutes,
+        )
     }
 
     #[cfg(test)]
@@ -215,22 +253,59 @@ impl SkillStore {
         let now = (self.now)();
 
         match SkillMetadata::load(&dir) {
-            Some(meta) => self.refresh_if_stale(name, &dir, meta, now)?,
+            Some(meta) => {
+                self.refresh_if_stale(name, &dir, meta, now)?;
+            }
             None => self.fetch_fresh(name, &dir, now)?,
         }
 
         self.read_content(name, &dir)
     }
 
+    /// CLI fetch for `canopy skill get`: same lazy fetch/TTL-refresh dance
+    /// as [`Self::get`], but reports the outcome as a [`CliSkillFetch`]
+    /// (with an offline flag) or a [`CliSkillError`] instead of MCP content.
+    /// [`Self::get`] is unchanged for the MCP `skill` tool.
+    pub fn fetch_for_cli(&self, name: &str) -> Result<CliSkillFetch, CliSkillError> {
+        validate_skill_name(name).map_err(|_| CliSkillError::NotFound)?;
+        let _guard = self.fetch_lock.lock().unwrap();
+        let dir = self.skill_dir(name);
+        let now = (self.now)();
+
+        match SkillMetadata::load(&dir) {
+            Some(meta) => {
+                let served_offline = self
+                    .refresh_if_stale(name, &dir, meta, now)
+                    .map_err(|e| CliSkillError::Unreachable(e.to_string()))?;
+                Ok(CliSkillFetch {
+                    skill_dir: dir,
+                    served_offline,
+                })
+            }
+            None => {
+                self.fetch_fresh_for_cli(name, &dir, now)?;
+                Ok(CliSkillFetch {
+                    skill_dir: dir,
+                    served_offline: false,
+                })
+            }
+        }
+    }
+
+    /// Refresh a cached skill past its TTL. Returns `true` when the refresh
+    /// check failed with a transport/other error and the existing cached copy
+    /// was kept, `false` when the cache was fresh or successfully updated.
+    /// A skill the source no longer carries keeps the old delete-and-bail
+    /// behaviour.
     fn refresh_if_stale(
         &self,
         name: &str,
         dir: &Path,
         meta: SkillMetadata,
         now: DateTime<Utc>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         if now - meta.last_checked < self.ttl {
-            return Ok(());
+            return Ok(false);
         }
 
         let source = GitSource::new(meta.source_url.clone(), meta.git_ref.clone());
@@ -239,7 +314,8 @@ impl SkillStore {
                 last_checked: now,
                 ..meta
             }
-            .save(dir),
+            .save(dir)
+            .map(|()| false),
             Ok(head) => match source.fetch_skill(name, dir) {
                 Ok(commit_hash) => SkillMetadata {
                     source_url: meta.source_url,
@@ -247,7 +323,8 @@ impl SkillStore {
                     commit_hash,
                     last_checked: now,
                 }
-                .save(dir),
+                .save(dir)
+                .map(|()| false),
                 Err(SkillFetchError::NotInSource {
                     name,
                     source_url,
@@ -274,7 +351,7 @@ impl SkillStore {
                          (source head {head} vs stored {}): {e}; serving stale copy",
                         meta.commit_hash
                     );
-                    Ok(())
+                    Ok(true)
                 }
             },
             Err(e) => {
@@ -283,7 +360,7 @@ impl SkillStore {
                      serving stale copy from {}",
                     meta.source_url
                 );
-                Ok(())
+                Ok(true)
             }
         }
     }
@@ -306,6 +383,48 @@ impl SkillStore {
             }
         }
         anyhow::bail!("skill '{name}' not found in any configured source")
+    }
+
+    /// Fresh fetch for the CLI path: same source order as [`Self::fetch_fresh`]
+    /// (later sources shadow earlier ones), but distinguishes "no source
+    /// carries it" ([`CliSkillError::NotFound`]) from "at least one source
+    /// failed with a transport/other error" ([`CliSkillError::Unreachable`]).
+    fn fetch_fresh_for_cli(
+        &self,
+        name: &str,
+        dir: &Path,
+        now: DateTime<Utc>,
+    ) -> Result<(), CliSkillError> {
+        let mut last_transport_error: Option<String> = None;
+        for source in self.sources.iter().rev() {
+            match source.fetch_skill(name, dir) {
+                Ok(commit_hash) => {
+                    SkillMetadata {
+                        source_url: source.url.clone(),
+                        git_ref: source.git_ref.clone(),
+                        commit_hash,
+                        last_checked: now,
+                    }
+                    .save(dir)
+                    .map_err(|e| CliSkillError::Unreachable(e.to_string()))?;
+                    return Ok(());
+                }
+                Err(SkillFetchError::NotInSource { .. }) => {
+                    tracing::debug!("dynamic_skills: '{name}' not in {}", source.url);
+                }
+                Err(SkillFetchError::Other(e)) => {
+                    tracing::debug!(
+                        "dynamic_skills: '{name}' fetch failed at {}: {e}",
+                        source.url
+                    );
+                    last_transport_error = Some(e.to_string());
+                }
+            }
+        }
+        match last_transport_error {
+            Some(cause) => Err(CliSkillError::Unreachable(cause)),
+            None => Err(CliSkillError::NotFound),
+        }
     }
 
     fn read_content(&self, name: &str, dir: &Path) -> Result<SkillContent> {

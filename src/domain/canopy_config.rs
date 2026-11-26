@@ -87,7 +87,7 @@ pub struct CanopyConfig {
     #[serde(default)]
     pub clean: CleanConfig,
 
-    /// `[skills]` settings for the dynamic skill store (`~/.canopy/skills/`).
+    /// `[skills]` settings for the dynamic skill store (`~/.canopy/cache/skills/`).
     #[serde(default)]
     pub skills: SkillsConfig,
 

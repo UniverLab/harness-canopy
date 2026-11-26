@@ -239,7 +239,7 @@ pub struct TaskTriggerHandler {
     pub ingestion: Arc<crate::rag::ingestion::IngestionManager>,
     /// Rate limiters for `rag` `search` (10 calls/min). Keyed by agent_id.
     pub rag_limiters: Arc<tokio::sync::Mutex<std::collections::HashMap<String, RateLimiter>>>,
-    /// Backing store for `skill` `list`/`get` (`~/.canopy/skills/`).
+    /// Backing store for `skill` `list`/`get` (`~/.canopy/cache/skills/`).
     /// Git operations block, so callers run it via `spawn_blocking`.
     pub dynamic_skills: Arc<crate::dynamic_skills::SkillStore>,
     /// The session shelf's bytes + rows owner (`session_send_file`).

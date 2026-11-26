@@ -183,6 +183,23 @@ a builtin of the same name.
 `canopy node` runs entirely locally — no daemon needed. See
 [Graphs](graphs-nodes.md#nodes).
 
+## Skills
+
+Read skills from the configured `[skills]` sources (default:
+`https://github.com/UniverLab/skills`). Everything prints to stdout —
+nothing is installed into any harness skills directory.
+
+| Command | Description |
+|---|---|
+| `canopy skill list` | List skills, one `<name> - <description>` per line |
+| `canopy skill list --json` | Print the same list as a JSON array of `{name, description, source_url}` objects |
+| `canopy skill get <name>` | Print a skill's `SKILL.md` followed by every file under its `references/` directory, each headed `=== references/<path> ===` |
+
+```sh
+canopy skill list
+canopy skill get code-review
+```
+
 ## Graph control
 
 Mirrors the `graph_control` actions `run`/`pause`/`continue`/`reset`/
