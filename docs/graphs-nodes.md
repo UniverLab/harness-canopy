@@ -77,10 +77,13 @@ JSON on stdout with the question on stderr.
 Only after the confirmation is the document written to
 `~/.canopy/nodes/<name>.json`, stamped with the catalogue entry it came
 from (`slug`, `owner/repo/slug`, or `draft:<id>`). Its bundled `preset`
-is installed as `~/.canopy/prompts/nodes/<preset.name>.md` with the same
+is installed as `~/.canopy/prompts/<preset.name>.md` with the same
 no-silent-overwrite rule as a graph's presets: a file owned by another
 source aborts the install unless `--overwrite-presets` (or `--replace`)
-is given. A
+is given. The engine resolves that literal path first and falls back
+to `~/.canopy/prompts/nodes/<preset.name>.md`, where a daemon-start or
+`canopy setup` migration moves leftover top-level files (never
+overwriting). A
 graph document fetched from a node endpoint is refused, and a 410 says
 `<name> was removed from the catalogue after a community report:
 <reason> (<issue>)`.

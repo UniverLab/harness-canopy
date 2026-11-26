@@ -98,7 +98,11 @@ carries no preset of its own. Nothing else about prompt resolution
 changes: at spawn time an explicit `prompt_template` still wins, then
 `prompt_preset`, then the fallback template, and a blank
 `prompt_preset` names no preset and takes that fallback exactly as
-before.
+before. Layout: graph-node prompts live under
+`<canopy_dir>/prompts/nodes/`; a daemon start or `canopy setup` moves
+any `*.md` files still sitting directly under `prompts/` there (never
+overwriting an existing file). Interactive quick prompts live
+separately under `prompts/quick/` — see Ready prompts in [the TUI docs](tui.md).
 
 A [crew](graphs-ensembles.md#crews)-bound design travels by name, never by its members:
 `graph` `export` writes `crew: "<name>"` on a bound ensemble (with no

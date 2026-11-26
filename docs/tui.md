@@ -448,7 +448,8 @@ row: `/` filters, `n` creates, `e` edits and `F4` deletes.
   one-line preview: digits `1`–`9` choose directly, items 10+ are
   reached with `↑`/`↓` + `Enter` (or a click), `Esc` closes. On a
   narrow window the strip keeps tabs from item 1 while they fit and
-  shows a trailing `+N` badge (which opens the menu) for the rest.
+  shows a trailing `+N` badge (which opens the menu) for the rest;
+  under 6 columns it hides entirely.
 - **Canopy protocol — once per session** — the builder prepends the
   `[CANOPY]` session-start protocol to the *first* prompt of an
   interactive session, never to the ones that follow. That fact is stored
