@@ -220,6 +220,29 @@ fn apply_pending(
             applied += 1;
             continue;
         }
+        if change.field == "login_command" || change.field == "login_check_command" {
+            let Ok(value) = serde_json::from_value::<Option<String>>(change.new.clone()) else {
+                skipped.push(format!(
+                    "{}: invalid {} payload, skipped",
+                    change.cli, change.field
+                ));
+                continue;
+            };
+            let Some(platform) = baseline
+                .as_mut()
+                .and_then(|b| b.platforms.iter_mut().find(|p| p.name == change.cli))
+            else {
+                skipped.push(format!("{}: not in baseline, skipped", change.cli));
+                continue;
+            };
+            match change.field.as_str() {
+                "login_command" => platform.login_command = value,
+                "login_check_command" => platform.login_check_command = value,
+                _ => {}
+            }
+            applied += 1;
+            continue;
+        }
         let Some(entry) = config.clis.iter_mut().find(|c| c.name == change.cli) else {
             skipped.push(format!("{}: not in config, skipped", change.cli));
             continue;
@@ -539,6 +562,9 @@ mod tests {
             free_tier_source: None,
             install_paths: vec![],
             install_commands: cmds,
+            login_command: None,
+            login_check_command: None,
+            login_checked_at: None,
             cli: None,
         };
 
@@ -584,5 +610,98 @@ mod tests {
             vec![new_cmd]
         );
         assert!(crate::setup_module::registry_pending::load_pending(&canopy_dir).is_empty());
+    }
+
+    #[test]
+    fn reconcile_holds_login_fields_and_apply_pending_updates_baseline() {
+        use crate::domain::registry_baseline::RegistryBaseline;
+        use crate::setup_module::models::{Platform, RegistryRaw};
+        use crate::setup_module::registry_platforms::reconcile_platforms;
+
+        let home = tempfile::tempdir().unwrap();
+        let canopy_dir = home.path().join(".canopy");
+        std::fs::create_dir_all(&canopy_dir).unwrap();
+        std::fs::create_dir_all(home.path().join(".config")).unwrap();
+        std::fs::write(home.path().join(".config/demo"), "{}").unwrap();
+
+        let make_platform = |login: Option<&str>, check: Option<&str>| Platform {
+            name: "demo".to_string(),
+            config_path: ".config/demo".to_string(),
+            config_format: None,
+            toml_array_format: false,
+            command_format: "separate".to_string(),
+            mcp_servers_key: vec![],
+            deprecated_keys: vec![],
+            unsupported_keys: vec![],
+            fields_mapping: std::collections::HashMap::new(),
+            required_fields: std::collections::HashMap::new(),
+            server_extras: std::collections::HashMap::new(),
+            skills_dir: None,
+            instruction_file: None,
+            user_instruction_file: None,
+            instruction_precedence: vec![],
+            provider: None,
+            tool_name: None,
+            project_paths: vec![],
+            docs_url: None,
+            free_tier: None,
+            free_tier_checked_at: None,
+            free_tier_source: None,
+            install_paths: vec![],
+            install_commands: vec![],
+            login_command: login.map(str::to_string),
+            login_check_command: check.map(str::to_string),
+            login_checked_at: None,
+            cli: None,
+        };
+
+        let baseline = RegistryBaseline {
+            clis: vec![],
+            platforms: vec![make_platform(Some("old login"), Some("old check"))],
+        };
+        baseline.save(&canopy_dir).unwrap();
+        let registry = RegistryRaw {
+            platforms: vec![make_platform(Some("new login"), Some("new check"))],
+            canonical_servers: Default::default(),
+        };
+        let refresh = reconcile_platforms(
+            home.path(),
+            Some(&baseline),
+            &registry,
+            "2026-11-26T00:00:00Z",
+        );
+        assert_eq!(refresh.pending.len(), 2);
+        assert_eq!(
+            refresh.reconciled_platforms[0].login_command.as_deref(),
+            Some("old login")
+        );
+        assert_eq!(
+            refresh.reconciled_platforms[0]
+                .login_check_command
+                .as_deref(),
+            Some("old check")
+        );
+
+        RegistryBaseline {
+            clis: vec![],
+            platforms: refresh.reconciled_platforms,
+        }
+        .save(&canopy_dir)
+        .unwrap();
+        crate::setup_module::registry_pending::save_pending(&canopy_dir, &refresh.pending).unwrap();
+
+        let selected = select_pending(home.path(), Some("demo")).unwrap();
+        let outcome = apply_pending(home.path(), &selected).unwrap();
+        assert_eq!(outcome.applied, 2);
+
+        let updated = RegistryBaseline::load(&canopy_dir).unwrap();
+        assert_eq!(
+            updated.platforms[0].login_command.as_deref(),
+            Some("new login")
+        );
+        assert_eq!(
+            updated.platforms[0].login_check_command.as_deref(),
+            Some("new check")
+        );
     }
 }

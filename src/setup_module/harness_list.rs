@@ -301,6 +301,9 @@ mod tests {
             free_tier_source: None,
             install_paths: Vec::new(),
             install_commands: Vec::new(),
+            login_command: None,
+            login_check_command: None,
+            login_checked_at: None,
             cli: Some(serde_json::json!({"binary": binary})),
         }
     }

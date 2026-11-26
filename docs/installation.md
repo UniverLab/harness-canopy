@@ -82,17 +82,22 @@ shows every registry harness with its install status and dated free-tier
 fact, pre-selects the installed ones to configure, and prompts for the
 temperature unit (plus RAG settings and skill sync), asks whether to receive
 UniverLab announcements (default no; stays off unless you say yes),
-then writes `~/.canopy/config.toml`. On an install that still holds the
+then writes `~/.canopy/config.toml`. For installed harnesses with a vendor
+login command, `l` opens the login flow in a PTY (Esc cancels) and `r`
+retries a failed check. On an install that still holds the
 previous STUN fallback, setup prints `STUN fallback is set to the
 previous default (stun.l.google.com); change it with canopy config set
 remote.stun_fallback`. Its flags are `--local-registry` (use a
 local registry directory instead of fetching from GitHub),
 `--force-skills` (also remove legacy skill copies that were edited
-locally; unedited copies are removed regardless), and
+locally; unedited copies are removed regardless),
 `--list-harnesses [--json]` (print every registry harness with its
 install status and free-tier fact non-interactively, without running the
-wizard), and `--install <platform> [--yes]` (run that harness's vendor
-installer — see below). Setup also writes the embedded `canopy` skill as a regular file
+wizard), `--install <platform> [--yes]` (run that harness's vendor
+installer — see below), `--login <platform>` (run a harness's vendor
+login command in a PTY and verify authentication), and
+`--check-logins` (check authentication status for every installed
+harness). Setup also writes the embedded `canopy` skill as a regular file
 to `<skills_dir>/canopy/SKILL.md` for every configured harness whose
 skills directory exists (creating it), and refreshes it whenever the
 binary's version changes — the same refresh runs on `canopy skill

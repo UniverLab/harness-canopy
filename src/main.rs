@@ -136,6 +136,12 @@ enum Commands {
         /// (still prints the exact command and source URL before running).
         #[arg(long)]
         yes: bool,
+        /// Run the vendor's login command for a harness in a local PTY.
+        #[arg(long, value_name = "PLATFORM")]
+        login: Option<String>,
+        /// Check authentication status for every installed harness.
+        #[arg(long = "check-logins")]
+        check_logins: bool,
     },
     /// Apply the platform registry to config.toml without the TUI.
     Registry {
@@ -375,9 +381,13 @@ enum MetricsAction {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     restore_default_sigpipe(&cli.command);
+    dispatch(cli).await
+}
 
+async fn dispatch(cli: Cli) -> Result<()> {
+    let port = cli.port;
     match cli.command {
-        Some(Commands::Daemon { action }) => handle_daemon_action(action, cli.port).await,
+        Some(Commands::Daemon { action }) => handle_daemon_action(action, port).await,
         Some(Commands::Update { check, yes }) => {
             let code = autoupdate::run_update(check, yes)?;
             std::process::exit(code);
@@ -388,7 +398,7 @@ async fn main() -> Result<()> {
             from,
         }) => handle_doctor(verbose, restore, from).await,
         Some(Commands::Stdio) => run_stdio_server().await,
-        Some(Commands::Serve) => run_http_server(cli.port).await,
+        Some(Commands::Serve) => run_http_server(port).await,
         Some(Commands::Setup {
             local_registry,
             force_skills,
@@ -396,14 +406,18 @@ async fn main() -> Result<()> {
             json,
             install,
             yes,
-        }) => handle_setup_action(
+            login,
+            check_logins,
+        }) => handle_setup_action(SetupActionArgs {
             local_registry,
             force_skills,
             list_harnesses,
             json,
             install,
             yes,
-        ),
+            login,
+            check_logins,
+        }),
         Some(Commands::Mcp { local_registry }) => {
             if let Some(path) = local_registry {
                 setup_module::registry_fetch::set_local_registry(path);
@@ -426,17 +440,23 @@ async fn main() -> Result<()> {
             })?;
             Ok(())
         }
+        other => dispatch_rest(other, port).await,
+    }
+}
+
+async fn dispatch_rest(command: Option<Commands>, port: Option<u16>) -> Result<()> {
+    match command {
         Some(Commands::Rag { action }) => handle_rag_action(action).await,
-        Some(Commands::Graph { action }) => handle_graph_action(action, cli.port).await,
+        Some(Commands::Graph { action }) => handle_graph_action(action, port).await,
         Some(Commands::Node { action }) => handle_node_action(action),
         Some(Commands::Skill { action }) => dynamic_skills::cli::handle_skill_action(action),
         Some(Commands::Agent { action }) => handle_agent_action(action).await,
-        Some(Commands::Spec { action }) => handle_spec_action(action, cli.port).await,
-        Some(Commands::Roster { action }) => handle_roster_action(action, cli.port).await,
-        Some(Commands::Crew { action }) => handle_crew_action(action, cli.port).await,
+        Some(Commands::Spec { action }) => handle_spec_action(action, port).await,
+        Some(Commands::Roster { action }) => handle_roster_action(action, port).await,
+        Some(Commands::Crew { action }) => handle_crew_action(action, port).await,
         Some(Commands::Mutex { action }) => handle_mutex_action(action).await,
-        Some(Commands::Config { action }) => handle_settings_action(action, cli.port).await,
-        Some(Commands::Queue { action }) => handle_queue_action(action, cli.port).await,
+        Some(Commands::Config { action }) => handle_settings_action(action, port).await,
+        Some(Commands::Queue { action }) => handle_queue_action(action, port).await,
         Some(Commands::Models { action }) => handle_models_action(action).await,
         Some(Commands::Missions { json }) => handle_missions_action(json).await,
         Some(Commands::Project { action }) => handle_project_action(action).await,
@@ -449,16 +469,16 @@ async fn main() -> Result<()> {
             stop_daemon,
         }) => handle_clean_action(dry_run, older_than, hard, yes, no_reclaim, stop_daemon).await,
         Some(Commands::Prompts { action }) => handle_prompts_action(action).await,
-        Some(Commands::Subagent { action }) => handle_subagent_action(action, cli.port).await,
+        Some(Commands::Subagent { action }) => handle_subagent_action(action, port).await,
         Some(Commands::Sandbox { action }) => handle_sandbox_action(action).await,
-        Some(Commands::Shelf { action }) => handle_shelf_action(action, cli.port).await,
+        Some(Commands::Shelf { action }) => handle_shelf_action(action, port).await,
         Some(Commands::Remote { action }) => handle_remote_action(action).await,
-        Some(Commands::Metrics { action }) => handle_metrics_action(action, cli.port).await,
+        Some(Commands::Metrics { action }) => handle_metrics_action(action, port).await,
         Some(Commands::Bridge {
             agent_id,
-            port,
+            port: bridge_port,
             workdir,
-        }) => run_bridge(agent_id, port.or(cli.port), workdir).await,
+        }) => run_bridge(agent_id, bridge_port.or(port), workdir).await,
         Some(Commands::InternalPdfExtract { path }) => {
             rag::ingestion::run_internal_pdf_extract(&path)
         }
@@ -473,6 +493,7 @@ async fn main() -> Result<()> {
             })?;
             Ok(())
         }
+        Some(_) => unreachable!("handled in dispatch"),
     }
 }
 
@@ -483,41 +504,10 @@ async fn main() -> Result<()> {
 /// stdout reader closes, as any Unix tool does.
 #[cfg_attr(windows, allow(dead_code))]
 fn keeps_sigpipe_ignored(cmd: &Option<Commands>) -> bool {
-    match cmd {
-        None => true,
-        Some(Commands::Daemon { .. }) => true,
-        Some(Commands::Serve) => true,
-        Some(Commands::Bridge { .. }) => true,
-        Some(Commands::Update { .. })
-        | Some(Commands::Doctor { .. })
-        | Some(Commands::Stdio)
-        | Some(Commands::Setup { .. })
-        | Some(Commands::Registry { .. })
-        | Some(Commands::Uninstall { .. })
-        | Some(Commands::Mcp { .. })
-        | Some(Commands::Rag { .. })
-        | Some(Commands::Graph { .. })
-        | Some(Commands::Node { .. })
-        | Some(Commands::Skill { .. })
-        | Some(Commands::Agent { .. })
-        | Some(Commands::Spec { .. })
-        | Some(Commands::Roster { .. })
-        | Some(Commands::Crew { .. })
-        | Some(Commands::Mutex { .. })
-        | Some(Commands::Config { .. })
-        | Some(Commands::Queue { .. })
-        | Some(Commands::Models { .. })
-        | Some(Commands::Missions { .. })
-        | Some(Commands::Project { .. })
-        | Some(Commands::Clean { .. })
-        | Some(Commands::Prompts { .. })
-        | Some(Commands::Subagent { .. })
-        | Some(Commands::Sandbox { .. })
-        | Some(Commands::Shelf { .. })
-        | Some(Commands::Metrics { .. })
-        | Some(Commands::Remote { .. })
-        | Some(Commands::InternalPdfExtract { .. }) => false,
-    }
+    matches!(
+        cmd,
+        None | Some(Commands::Daemon { .. } | Commands::Serve | Commands::Bridge { .. })
+    )
 }
 
 /// Restore the default SIGPIPE disposition for short-lived CLI commands.
@@ -538,31 +528,50 @@ fn restore_default_sigpipe(cmd: &Option<Commands>) {
     }
 }
 
-/// `canopy setup`: non-interactive harness list with `--list-harnesses`
-/// (JSON with `--json`), else the interactive wizard.
-fn handle_setup_action(
+struct SetupActionArgs {
     local_registry: Option<PathBuf>,
     force_skills: bool,
     list_harnesses: bool,
     json: bool,
     install: Option<String>,
     yes: bool,
-) -> Result<()> {
-    if let Some(path) = local_registry {
+    login: Option<String>,
+    check_logins: bool,
+}
+
+/// `canopy setup`: non-interactive harness list with `--list-harnesses`
+/// (JSON with `--json`), else the interactive wizard.
+fn handle_setup_action(args: SetupActionArgs) -> Result<()> {
+    if let Some(path) = args.local_registry {
         setup_module::registry_fetch::set_local_registry(path);
     }
-    if let Some(platform) = install {
-        let code =
-            tokio::task::block_in_place(|| setup_module::install::run_install_cmd(&platform, yes));
+    if let Some(platform) = args.login {
+        let code = tokio::task::block_in_place(|| setup_module::login::run_login_cmd(&platform));
         if code != 0 {
             std::process::exit(code);
         }
         return Ok(());
     }
-    if list_harnesses {
-        setup_module::run_list_harnesses(json)
+    if args.check_logins {
+        let code = tokio::task::block_in_place(setup_module::login::run_check_logins_cmd);
+        if code != 0 {
+            std::process::exit(code);
+        }
+        return Ok(());
+    }
+    if let Some(platform) = args.install {
+        let code = tokio::task::block_in_place(|| {
+            setup_module::install::run_install_cmd(&platform, args.yes)
+        });
+        if code != 0 {
+            std::process::exit(code);
+        }
+        return Ok(());
+    }
+    if args.list_harnesses {
+        setup_module::run_list_harnesses(args.json)
     } else {
-        tokio::task::block_in_place(|| setup_module::run_setup(force_skills))
+        tokio::task::block_in_place(|| setup_module::run_setup(args.force_skills))
     }
 }
 

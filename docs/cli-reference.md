@@ -81,13 +81,15 @@ for `canopy update`. See
 
 | Command | Description |
 |---|---|
-| `canopy setup` | Interactive setup wizard — shows every registry harness with install status and a dated free-tier fact, pre-selects installed harnesses for configuration, and generates `~/.canopy/config.toml`. An uninstalled harness (binary no longer on PATH) is dropped from the config on its own; one still referenced by a crew, graph node, graph hook or scheduled agent is kept and `canopy doctor` warns about it once |
+| `canopy setup` | Interactive setup wizard — shows every registry harness with install status, login status, and a dated free-tier fact, pre-selects installed harnesses for configuration, and generates `~/.canopy/config.toml`. An uninstalled harness (binary no longer on PATH) is dropped from the config on its own; one still referenced by a crew, graph node, graph hook or scheduled agent is kept and `canopy doctor` warns about it once |
 | `canopy setup --local-registry <path>` | Use a local registry directory (for registry development) |
 | `canopy setup --force-skills` | Also remove legacy skill copies that were edited locally when cleaning up copies earlier versions installed (default: edited copies are kept with a notice) |
 | `canopy setup --list-harnesses` | List every registry harness non-interactively, one row each: `installed` / `not installed` / `installed (not responding)`, the dated `free tier` fact, and `docs_url` when not installed; installed harnesses are the ones the wizard pre-selects |
 | `canopy setup --list-harnesses --json` | Same list as JSON (`name`, `installed`, `binary_path`, `free_tier`, `free_tier_checked_at`, `free_tier_source`, `docs_url`), for scripts |
 | `canopy setup --install <platform>` | Install a missing harness using its vendor's official installer after showing the exact command, `source_url`, and confirmation prompt |
 | `canopy setup --install <platform> --yes` | Skip the interactive `[y/N]` prompt (still prints the exact command and `source_url` before running; required non-interactively) |
+| `canopy setup --login <platform>` | Run a harness's vendor login command in a local PTY and verify authentication (requires an interactive terminal) |
+| `canopy setup --check-logins` | Check authentication status for every installed harness; prints one line per harness and exits 1 if any verifiable harness is not authenticated |
 | `canopy mcp` | MCP wizard — sync/add/remove canopy's MCP entry across platforms |
 | `canopy mcp --local-registry <path>` | Run the MCP wizard against a local registry directory instead of GitHub (same flag as `canopy setup --local-registry`) |
 | `canopy mcp` → Add | Add a server via pasted README JSON, local stdio command (with args + env), or remote URL (with headers); previews entries, marks `(replaces existing)` overwrites, then asks `Install on N platform(s)?` |
@@ -119,10 +121,11 @@ choice. Executable fields (anything that changes what the daemon runs:
 binary, flags, argv templates) are never rewritten unattended: the refresh
 keeps your value, stages the registry value in `registry-pending.json`, and
 reports `<cli>: held <field> (waiting for approval)`. Changed vendor
-installer commands (`install_commands`, which change what setup would run)
-are held the same way: the approved command stays in the baseline, the new
-one waits in `registry-pending.json`, and setup refuses to run the staged
-command until it is approved. The refresh is not
+installer commands (`install_commands`) and login commands
+(`login_command`, `login_check_command`) are held the same way: the
+approved value stays in the baseline, the new one waits in
+`registry-pending.json`, and setup refuses to run a staged command until
+it is approved. The refresh is not
 `up_to_date` while anything is staged. `canopy registry pending` shows the
 diff, `canopy registry apply` writes it after you confirm, and
 `canopy registry discard` drops it (the next refresh stages it again).

@@ -390,6 +390,9 @@ mod tests {
             free_tier_source: None,
             install_paths: vec![],
             install_commands: commands,
+            login_command: None,
+            login_check_command: None,
+            login_checked_at: None,
             cli: Some(serde_json::json!({"binary": name})),
         }
     }

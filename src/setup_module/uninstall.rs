@@ -363,23 +363,28 @@ pub(crate) fn format_platform_edit_line(edit: &PlatformEdit, keep_shared: bool) 
     }
 }
 
-pub fn execute_uninstall(plan: &UninstallPlan, purge_data: bool) -> Result<()> {
-    if plan.daemon_running {
-        println!("  Stopping daemon...");
-        let _ = crate::setup_module::daemon_service::stop_daemon();
-        if let Some(pid) = plan.orphan_pid {
-            #[cfg(unix)]
-            unsafe {
-                libc::kill(pid as i32, libc::SIGTERM);
-            }
-            for _ in 0..12 {
-                std::thread::sleep(std::time::Duration::from_millis(250));
-                if !crate::daemon::process::is_process_running(pid) {
-                    break;
-                }
+fn stop_running_daemon(plan: &UninstallPlan) {
+    if !plan.daemon_running {
+        return;
+    }
+    println!("  Stopping daemon...");
+    let _ = crate::setup_module::daemon_service::stop_daemon();
+    if let Some(pid) = plan.orphan_pid {
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(pid as i32, libc::SIGTERM);
+        }
+        for _ in 0..12 {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            if !crate::daemon::process::is_process_running(pid) {
+                break;
             }
         }
     }
+}
+
+pub fn execute_uninstall(plan: &UninstallPlan, purge_data: bool) -> Result<()> {
+    stop_running_daemon(plan);
 
     if plan.service.exists {
         println!(
@@ -431,6 +436,9 @@ pub fn execute_uninstall(plan: &UninstallPlan, purge_data: bool) -> Result<()> {
             free_tier_source: None,
             install_paths: Vec::new(),
             install_commands: Vec::new(),
+            login_command: None,
+            login_check_command: None,
+            login_checked_at: None,
         };
         let removed =
             revert_platform_config(&platform, &edit.config_path, &edit.servers_to_remove)?;
@@ -627,6 +635,9 @@ mod tests {
             free_tier_source: None,
             install_paths: Vec::new(),
             install_commands: Vec::new(),
+            login_command: None,
+            login_check_command: None,
+            login_checked_at: None,
         }
     }
 
@@ -658,6 +669,9 @@ mod tests {
             free_tier_source: None,
             install_paths: Vec::new(),
             install_commands: Vec::new(),
+            login_command: None,
+            login_check_command: None,
+            login_checked_at: None,
         }
     }
 
@@ -689,6 +703,9 @@ mod tests {
             free_tier_source: None,
             install_paths: Vec::new(),
             install_commands: Vec::new(),
+            login_command: None,
+            login_check_command: None,
+            login_checked_at: None,
         }
     }
 

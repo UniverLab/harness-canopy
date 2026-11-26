@@ -56,18 +56,31 @@ pub(crate) fn reconcile_platforms(
                 } else {
                     refresh.unchanged.push(platform.name.clone());
                 }
-                if baseline_platform.install_commands != platform.install_commands {
-                    reconciled.install_commands = baseline_platform.install_commands.clone();
-                    refresh.pending.push(PendingChange {
-                        cli: platform.name.clone(),
-                        field: "install_commands".to_string(),
-                        old: serde_json::to_value(&baseline_platform.install_commands)
-                            .unwrap_or_else(|_| serde_json::Value::Array(Vec::new())),
-                        new: serde_json::to_value(&platform.install_commands)
-                            .unwrap_or_else(|_| serde_json::Value::Array(Vec::new())),
-                        fetched_at: fetched_at.to_string(),
-                    });
-                }
+                hold_install_commands(
+                    baseline_platform,
+                    platform,
+                    &mut reconciled,
+                    &mut refresh.pending,
+                    fetched_at,
+                );
+                hold_login_field(
+                    "login_command",
+                    &baseline_platform.login_command,
+                    &platform.login_command,
+                    &mut reconciled.login_command,
+                    &platform.name,
+                    &mut refresh.pending,
+                    fetched_at,
+                );
+                hold_login_field(
+                    "login_check_command",
+                    &baseline_platform.login_check_command,
+                    &platform.login_check_command,
+                    &mut reconciled.login_check_command,
+                    &platform.name,
+                    &mut refresh.pending,
+                    fetched_at,
+                );
             }
             None => {
                 refresh.added.push(platform.name.clone());
@@ -127,6 +140,52 @@ fn warn_platform_name_list(label: &str, names: &[String]) {
     }
 }
 
+/// Hold a changed `install_commands` field pending approval.
+fn hold_install_commands(
+    baseline: &Platform,
+    registry: &Platform,
+    reconciled: &mut Platform,
+    pending: &mut Vec<PendingChange>,
+    fetched_at: &str,
+) {
+    if baseline.install_commands == registry.install_commands {
+        return;
+    }
+    reconciled.install_commands = baseline.install_commands.clone();
+    pending.push(PendingChange {
+        cli: registry.name.clone(),
+        field: "install_commands".to_string(),
+        old: serde_json::to_value(&baseline.install_commands)
+            .unwrap_or_else(|_| serde_json::Value::Array(Vec::new())),
+        new: serde_json::to_value(&registry.install_commands)
+            .unwrap_or_else(|_| serde_json::Value::Array(Vec::new())),
+        fetched_at: fetched_at.to_string(),
+    });
+}
+
+/// Hold a changed optional-string platform field pending approval.
+fn hold_login_field(
+    field: &str,
+    baseline: &Option<String>,
+    registry: &Option<String>,
+    reconciled: &mut Option<String>,
+    cli: &str,
+    pending: &mut Vec<PendingChange>,
+    fetched_at: &str,
+) {
+    if baseline == registry {
+        return;
+    }
+    *reconciled = baseline.clone();
+    pending.push(PendingChange {
+        cli: cli.to_string(),
+        field: field.to_string(),
+        old: serde_json::to_value(baseline).unwrap_or(serde_json::Value::Null),
+        new: serde_json::to_value(registry).unwrap_or(serde_json::Value::Null),
+        fetched_at: fetched_at.to_string(),
+    });
+}
+
 /// Structural comparison of two Platform objects. Returns true when any
 /// registry-controlled field differs. The `cli` field is excluded — it is
 /// handled by the existing CLI three-way merge.
@@ -150,4 +209,7 @@ fn platforms_differ(old: &Platform, new: &Platform) -> bool {
         || old.free_tier_source != new.free_tier_source
         || old.install_paths != new.install_paths
         || old.install_commands != new.install_commands
+        || old.login_command != new.login_command
+        || old.login_check_command != new.login_check_command
+        || old.login_checked_at != new.login_checked_at
 }

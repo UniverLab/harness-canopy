@@ -81,6 +81,15 @@ pub struct Platform {
     /// Vendor's official getting-started or install page (registry data).
     #[serde(default)]
     pub docs_url: Option<String>,
+    /// Vendor's login command (e.g. `<binary> login`), from registry data.
+    #[serde(default)]
+    pub login_command: Option<String>,
+    /// Non-interactive command whose exit code 0 means authenticated.
+    #[serde(default)]
+    pub login_check_command: Option<String>,
+    /// ISO date the login command was verified.
+    #[serde(default)]
+    pub login_checked_at: Option<String>,
     /// Free-tier fact from the vendor's docs: `"yes"` or `"no"`.
     #[serde(default)]
     pub free_tier: Option<String>,
@@ -319,6 +328,9 @@ mod tests {
             free_tier_source: None,
             install_paths: Vec::new(),
             install_commands: Vec::new(),
+            login_command: None,
+            login_check_command: None,
+            login_checked_at: None,
         };
 
         let result = platform.to_platform_with_cli();
@@ -362,6 +374,9 @@ mod tests {
             free_tier_source: None,
             install_paths: Vec::new(),
             install_commands: Vec::new(),
+            login_command: None,
+            login_check_command: None,
+            login_checked_at: None,
         };
 
         let result = platform.to_platform_with_cli();
@@ -398,6 +413,9 @@ mod tests {
             free_tier_source: None,
             install_paths: Vec::new(),
             install_commands: Vec::new(),
+            login_command: None,
+            login_check_command: None,
+            login_checked_at: None,
         };
 
         let result = platform.to_platform_with_cli();
@@ -433,6 +451,9 @@ mod tests {
             free_tier_source: None,
             install_paths: Vec::new(),
             install_commands: Vec::new(),
+            login_command: None,
+            login_check_command: None,
+            login_checked_at: None,
         };
 
         let result = platform.to_platform_with_cli();
@@ -472,6 +493,9 @@ mod tests {
             free_tier_source: None,
             install_paths: Vec::new(),
             install_commands: Vec::new(),
+            login_command: None,
+            login_check_command: None,
+            login_checked_at: None,
         };
         assert!(is_platform_available(&platform));
     }
@@ -505,6 +529,9 @@ mod tests {
             free_tier_source: None,
             install_paths: Vec::new(),
             install_commands: Vec::new(),
+            login_command: None,
+            login_check_command: None,
+            login_checked_at: None,
         };
         assert!(!is_platform_available(&platform));
     }
@@ -538,6 +565,9 @@ mod tests {
             free_tier_source: None,
             install_paths: Vec::new(),
             install_commands: Vec::new(),
+            login_command: None,
+            login_check_command: None,
+            login_checked_at: None,
         };
         assert!(!is_platform_available(&platform));
     }
@@ -662,6 +692,9 @@ mod tests {
             free_tier_source: None,
             install_paths: Vec::new(),
             install_commands: Vec::new(),
+            login_command: None,
+            login_check_command: None,
+            login_checked_at: None,
         };
         let registry = RegistryRaw {
             platforms: vec![platform],

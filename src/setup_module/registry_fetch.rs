@@ -731,6 +731,9 @@ mod tests {
             free_tier_source: None,
             install_paths: Vec::new(),
             install_commands: Vec::new(),
+            login_command: None,
+            login_check_command: None,
+            login_checked_at: None,
         }
     }
 
@@ -1240,6 +1243,9 @@ mod tests {
             free_tier_source: None,
             install_paths: Vec::new(),
             install_commands: Vec::new(),
+            login_command: None,
+            login_check_command: None,
+            login_checked_at: None,
         };
 
         std::fs::write(home.path().join(&old_platform.config_path), "").unwrap();
@@ -1278,6 +1284,9 @@ mod tests {
             free_tier_source: None,
             install_paths: Vec::new(),
             install_commands: Vec::new(),
+            login_command: None,
+            login_check_command: None,
+            login_checked_at: None,
         };
         let registry = registry_of(vec![new_platform]);
 
@@ -1328,6 +1337,9 @@ mod tests {
             free_tier_source: None,
             install_paths: Vec::new(),
             install_commands: Vec::new(),
+            login_command: None,
+            login_check_command: None,
+            login_checked_at: None,
         };
         std::fs::write(home.path().join(&platform.config_path), "").unwrap();
 
@@ -1391,6 +1403,9 @@ mod tests {
             free_tier_source: None,
             install_paths: Vec::new(),
             install_commands: Vec::new(),
+            login_command: None,
+            login_check_command: None,
+            login_checked_at: None,
         };
         std::fs::write(home.path().join(&platform.config_path), "").unwrap();
 
@@ -1434,6 +1449,9 @@ mod tests {
             free_tier_source: None,
             install_paths: Vec::new(),
             install_commands: Vec::new(),
+            login_command: None,
+            login_check_command: None,
+            login_checked_at: None,
         };
         std::fs::write(home.path().join(&platform.config_path), "").unwrap();
 
@@ -1484,6 +1502,9 @@ mod tests {
             free_tier_source: None,
             install_paths: Vec::new(),
             install_commands: Vec::new(),
+            login_command: None,
+            login_check_command: None,
+            login_checked_at: None,
         };
         std::fs::write(home.path().join(&old_platform.config_path), "").unwrap();
 
@@ -1522,6 +1543,9 @@ mod tests {
             free_tier_source: None,
             install_paths: Vec::new(),
             install_commands: Vec::new(),
+            login_command: None,
+            login_check_command: None,
+            login_checked_at: None,
         };
         let registry = registry_of(vec![new_platform]);
 

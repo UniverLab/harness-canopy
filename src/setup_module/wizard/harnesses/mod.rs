@@ -14,6 +14,10 @@ use crate::setup_module::install::{
     format_confirmation_lines, format_no_command_label, post_install_path_notice, prompt_yes_no,
     resolve_approved_platform, run_vendor_install, select_install_command, InstallAvail,
 };
+use crate::setup_module::login::{
+    check_all_parallel, format_login_label, resolve_login_platform, run_check, run_login_pty,
+    LoginRun, LoginStatus, LOGIN_INSTRUCTION,
+};
 use crate::setup_module::models::Platform;
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
@@ -39,6 +43,8 @@ struct PickerState {
     scroll: usize,
     install_notes: HashMap<String, String>,
     last_failure_tail: Vec<String>,
+    login_status: HashMap<String, LoginStatus>,
+    login_check_rx: Option<std::sync::mpsc::Receiver<Vec<(String, LoginStatus)>>>,
 }
 
 /// Outcome of one key press.
@@ -46,6 +52,7 @@ enum KeyAction {
     Confirm,
     Cancel,
     Install,
+    Login,
     Continue,
 }
 
@@ -78,6 +85,7 @@ impl PickerState {
             .map(|e| e.platform.name.clone())
             .collect();
         let registry_names: Vec<String> = entries.iter().map(|e| e.platform.name.clone()).collect();
+        let login_check_rx = spawn_login_checks(&entries);
         Self {
             entries,
             registry_names,
@@ -89,6 +97,8 @@ impl PickerState {
             scroll: 0,
             install_notes: HashMap::new(),
             last_failure_tail: Vec::new(),
+            login_status: HashMap::new(),
+            login_check_rx: Some(login_check_rx),
         }
     }
 
@@ -140,6 +150,45 @@ impl PickerState {
     }
 }
 
+/// Spawn background login checks for installed harnesses.
+fn spawn_login_checks(
+    entries: &[HarnessEntry],
+) -> std::sync::mpsc::Receiver<Vec<(String, LoginStatus)>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let platforms: Vec<Platform> = entries
+        .iter()
+        .filter(|e| e.status != HarnessInstallStatus::NotInstalled)
+        .map(|e| e.platform.clone())
+        .collect();
+    let canopy_dir = dirs::home_dir()
+        .map(|h| h.join(".canopy"))
+        .unwrap_or_default();
+    std::thread::spawn(move || {
+        let results = check_all_parallel(&platforms, &canopy_dir);
+        let _ = tx.send(results);
+    });
+    rx
+}
+
+/// Apply any completed background login check results.
+fn poll_login_checks(state: &mut PickerState) {
+    let Some(rx) = state.login_check_rx.as_ref() else {
+        return;
+    };
+    match rx.try_recv() {
+        Ok(results) => {
+            for (name, status) in results {
+                state.login_status.insert(name, status);
+            }
+            state.login_check_rx = None;
+        }
+        Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            state.login_check_rx = None;
+        }
+    }
+}
+
 /// Raw-mode event loop; leaves the terminal cooked on every exit.
 fn run_picker_loop(state: &mut PickerState) -> Result<()> {
     use ratatui::crossterm::event::{read, Event, KeyEventKind};
@@ -151,15 +200,22 @@ fn run_picker_loop(state: &mut PickerState) -> Result<()> {
         print!("\r\n");
     }
     loop {
+        poll_login_checks(state);
         let rows = state.visible();
         state.clamp_cursor(&rows);
         render_frame(state, &rows, total_rows);
         let _ = std::io::stdout().flush();
-        let action = match read() {
-            Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
-                handle_key(state, &rows, key.code)
+        let action = if ratatui::crossterm::event::poll(std::time::Duration::from_millis(200))
+            .unwrap_or(false)
+        {
+            match read() {
+                Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
+                    handle_key(state, &rows, key.code)
+                }
+                _ => KeyAction::Continue,
             }
-            _ => KeyAction::Continue,
+        } else {
+            KeyAction::Continue
         };
         match action {
             KeyAction::Confirm => {
@@ -176,6 +232,15 @@ fn run_picker_loop(state: &mut PickerState) -> Result<()> {
                 let _ = disable_raw_mode();
                 print!("\r\n");
                 handle_install_selected(state, &rows);
+                let _ = enable_raw_mode();
+                for _ in 0..total_rows {
+                    print!("\r\n");
+                }
+            }
+            KeyAction::Login => {
+                let _ = disable_raw_mode();
+                print!("\r\n");
+                handle_login_selected(state, &rows);
                 let _ = enable_raw_mode();
                 for _ in 0..total_rows {
                     print!("\r\n");
@@ -219,6 +284,20 @@ fn handle_key(
             KeyAction::Continue
         }
         KeyCode::Char('i') => KeyAction::Install,
+        KeyCode::Char('l') => {
+            if can_login_selected(state, rows) {
+                KeyAction::Login
+            } else {
+                KeyAction::Continue
+            }
+        }
+        KeyCode::Char('r') => {
+            if can_retry_selected(state, rows) {
+                KeyAction::Login
+            } else {
+                KeyAction::Continue
+            }
+        }
         KeyCode::Char('/') => {
             state.filtering = true;
             KeyAction::Continue
@@ -280,6 +359,27 @@ fn toggle_installed(state: &mut PickerState, rows: &[usize]) {
     }
 }
 
+fn can_login_selected(state: &PickerState, rows: &[usize]) -> bool {
+    rows.get(state.cursor)
+        .and_then(|pos| state.entries.get(*pos))
+        .is_some_and(|e| {
+            e.status != HarnessInstallStatus::NotInstalled && e.platform.login_command.is_some()
+        })
+}
+
+fn can_retry_selected(state: &PickerState, rows: &[usize]) -> bool {
+    rows.get(state.cursor)
+        .and_then(|pos| state.entries.get(*pos))
+        .is_some_and(|e| {
+            e.status != HarnessInstallStatus::NotInstalled
+                && e.platform.login_command.is_some()
+                && matches!(
+                    state.login_status.get(&e.platform.name),
+                    Some(LoginStatus::NotAuthenticated)
+                )
+        })
+}
+
 /// Prompt and run the vendor installer for the cursor row when eligible.
 /// `--yes` never skips confirmation in the interactive harness list.
 fn handle_install_selected(state: &mut PickerState, rows: &[usize]) {
@@ -301,6 +401,67 @@ fn handle_install_selected(state: &mut PickerState, rows: &[usize]) {
         },
         run_vendor_install,
     );
+}
+
+/// Run the vendor login flow for the cursor row.
+fn handle_login_selected(state: &mut PickerState, rows: &[usize]) {
+    let home = dirs::home_dir();
+    let Some(entry_pos) = rows.get(state.cursor).copied() else {
+        return;
+    };
+    perform_row_login(state, entry_pos, home.as_deref(), run_login_pty, run_check);
+}
+
+/// Testable core of interactive row login.
+fn perform_row_login(
+    state: &mut PickerState,
+    entry_pos: usize,
+    home: Option<&Path>,
+    runner: impl FnOnce(&str) -> LoginRun,
+    checker: impl Fn(&str) -> bool,
+) {
+    let Some(entry) = state.entries.get(entry_pos) else {
+        return;
+    };
+    if entry.status == HarnessInstallStatus::NotInstalled {
+        return;
+    }
+    let Some(home) = home else {
+        println!("Error: could not determine home directory");
+        return;
+    };
+    let approved = match resolve_login_platform(&home.join(".canopy"), &entry.platform) {
+        Ok(p) => p,
+        Err(msg) => {
+            println!("{msg}");
+            state.install_notes.insert(entry.platform.name.clone(), msg);
+            return;
+        }
+    };
+    let Some(login_cmd) = approved.login_command.as_deref() else {
+        return;
+    };
+
+    println!("{LOGIN_INSTRUCTION}");
+    let _ = std::io::stdout().flush();
+    let run = runner(login_cmd);
+    if matches!(run, LoginRun::Cancelled) {
+        return;
+    }
+
+    let status = match approved.login_check_command.as_deref() {
+        Some(check) => {
+            if checker(check) {
+                LoginStatus::Authenticated
+            } else {
+                LoginStatus::NotAuthenticated
+            }
+        }
+        None => LoginStatus::NotVerifiable,
+    };
+    state
+        .login_status
+        .insert(entry.platform.name.clone(), status);
 }
 
 /// Testable core of interactive row installation.
@@ -393,7 +554,7 @@ fn render_frame(state: &PickerState, rows: &[usize], total_rows: usize) {
     print!("\x1b[{total_rows}A");
     print!("\r\x1b[2KSelect harnesses to configure (all registry harnesses listed)\r\n");
     print!(
-        "\r\x1b[2K\x1b[90m↑↓ move  Space toggle (installed only)  i install  f free-tier first  / filter  Enter confirm  Esc cancel\x1b[0m\r\n"
+        "\r\x1b[2K\x1b[90m↑↓ move  Space toggle  i install  l login  r retry  f free-tier first  / filter  Enter confirm  Esc cancel\x1b[0m\r\n"
     );
     render_filter_line(state);
     render_rows(state, rows);
@@ -437,8 +598,7 @@ fn render_rows(state: &PickerState, rows: &[usize]) {
     }
 }
 
-/// One harness row: checkbox, name, status, free-tier label, docs link
-/// when the harness is missing.
+/// One harness row: checkbox, name, status, free-tier label, login state.
 fn render_row(state: &PickerState, entry_pos: usize, cursor_here: bool) {
     let entry = &state.entries[entry_pos];
     let checkbox = if state.selected.contains(&entry.platform.name) {
@@ -460,8 +620,22 @@ fn render_row(state: &PickerState, entry_pos: usize, cursor_here: bool) {
         if let Some(hint) = format_row_install_hint(entry, dirs::home_dir().as_deref()) {
             text.push_str(&format!(" | {hint}"));
         }
+        text.push_str(&format!(" | {}", format_login_label(&entry.platform, None)));
         if let Some(url) = entry.platform.docs_url.as_deref() {
             text.push_str(&format!(" | docs: {url}"));
+        }
+    } else {
+        let login_status = state.login_status.get(&entry.platform.name).copied();
+        text.push_str(&format!(
+            " | {}",
+            format_login_label(&entry.platform, login_status)
+        ));
+        if entry.platform.login_command.is_some() {
+            if matches!(login_status, Some(LoginStatus::NotAuthenticated)) {
+                text.push_str(" | r retry");
+            } else {
+                text.push_str(" | l login");
+            }
         }
     }
     if let Some(note) = state.install_notes.get(&entry.platform.name) {
@@ -491,207 +665,4 @@ fn format_row_install_hint(entry: &HarnessEntry, home: Option<&Path>) -> Option<
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use ratatui::crossterm::event::KeyCode;
-
-    fn entry(name: &str, status: HarnessInstallStatus, free_tier: Option<&str>) -> HarnessEntry {
-        HarnessEntry {
-            platform: Platform {
-                name: name.to_string(),
-                config_path: format!(".config/{name}"),
-                config_format: None,
-                toml_array_format: false,
-                command_format: "separate".to_string(),
-                mcp_servers_key: vec![],
-                deprecated_keys: vec![],
-                unsupported_keys: vec![],
-                fields_mapping: std::collections::HashMap::new(),
-                required_fields: std::collections::HashMap::new(),
-                server_extras: std::collections::HashMap::new(),
-                skills_dir: None,
-                instruction_file: None,
-                instruction_precedence: vec![],
-                user_instruction_file: None,
-                provider: None,
-                tool_name: None,
-                project_paths: Vec::new(),
-                docs_url: None,
-                free_tier: free_tier.map(str::to_string),
-                free_tier_checked_at: None,
-                free_tier_source: None,
-                install_paths: Vec::new(),
-                install_commands: Vec::new(),
-                cli: None,
-            },
-            status,
-            binary_path: None,
-        }
-    }
-
-    fn state_from(entries: Vec<HarnessEntry>) -> PickerState {
-        let selected = entries
-            .iter()
-            .filter(|e| e.status != HarnessInstallStatus::NotInstalled)
-            .map(|e| e.platform.name.clone())
-            .collect();
-        let registry_names = entries.iter().map(|e| e.platform.name.clone()).collect();
-        PickerState {
-            entries,
-            registry_names,
-            free_first: false,
-            cursor: 0,
-            selected,
-            filter: String::new(),
-            filtering: false,
-            scroll: 0,
-            install_notes: HashMap::new(),
-            last_failure_tail: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn picker_preselects_installed_toggles_only_installed_sorts_and_filters() {
-        let mut state = state_from(vec![
-            entry("z-paid", HarnessInstallStatus::NotInstalled, Some("no")),
-            entry("a-free", HarnessInstallStatus::Installed, Some("yes")),
-        ]);
-        assert!(state.selected.contains("a-free"));
-        assert!(!state.selected.contains("z-paid"));
-
-        // Space on missing harness (cursor 0 = z-paid) does nothing.
-        let rows = state.visible();
-        handle_key(&mut state, &rows, KeyCode::Char(' '));
-        assert!(!state.selected.contains("z-paid"));
-
-        // f sorts free-tier first (a-free moves to index 0), then restores.
-        handle_key(&mut state, &rows, KeyCode::Char('f'));
-        assert_eq!(state.entries[0].platform.name, "a-free");
-        let rows = state.visible();
-        handle_key(&mut state, &rows, KeyCode::Char(' '));
-        assert!(!state.selected.contains("a-free"));
-        handle_key(&mut state, &rows, KeyCode::Char('f'));
-        assert_eq!(state.entries[0].platform.name, "z-paid");
-
-        // / enters filter mode, typing narrows, Esc clears.
-        let rows = state.visible();
-        handle_key(&mut state, &rows, KeyCode::Char('/'));
-        handle_key(&mut state, &rows, KeyCode::Char('f'));
-        assert_eq!(state.visible().len(), 1);
-        handle_key(&mut state, &rows, KeyCode::Esc);
-        assert_eq!(state.visible().len(), 2);
-    }
-
-    fn cmd_for_running_os(
-        command: &str,
-        requires: &[&str],
-    ) -> crate::setup_module::models::InstallCommand {
-        crate::setup_module::models::InstallCommand {
-            os: crate::setup_module::install::running_os().to_string(),
-            command: command.to_string(),
-            description: "Install".to_string(),
-            requires: requires.iter().map(|s| s.to_string()).collect(),
-            source_url: "https://example.com/install".to_string(),
-        }
-    }
-
-    #[test]
-    fn install_decline_runs_nothing_and_keeps_not_installed() {
-        let mut e = entry("demo", HarnessInstallStatus::NotInstalled, None);
-        e.platform.install_commands = vec![cmd_for_running_os("echo hi", &[])];
-        let mut state = state_from(vec![e]);
-
-        let mut runner_called = false;
-        let mut confirm_saw_warning = false;
-        perform_row_install(
-            &mut state,
-            0,
-            None,
-            "",
-            |lines| {
-                confirm_saw_warning = lines
-                    .iter()
-                    .any(|l| l.contains(crate::setup_module::install::CONSENT_WARNING));
-                false
-            },
-            |_| {
-                runner_called = true;
-                Ok((0, vec![]))
-            },
-        );
-        assert!(confirm_saw_warning);
-        assert!(!runner_called);
-        assert_eq!(state.entries[0].status, HarnessInstallStatus::NotInstalled);
-        assert!(!state.selected.contains("demo"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn install_success_flips_row_and_selects_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join("demo");
-        let mut e = entry("demo", HarnessInstallStatus::NotInstalled, None);
-        e.platform.cli = Some(serde_json::json!({"binary": "demo"}));
-        e.platform.install_commands = vec![cmd_for_running_os("install demo", &[])];
-        let mut state = state_from(vec![e]);
-        let path_env = dir.path().display().to_string();
-
-        perform_row_install(
-            &mut state,
-            0,
-            Some(dir.path()),
-            &path_env,
-            |_| true,
-            |_| {
-                std::fs::write(&bin, "#!/bin/sh\nexit 0\n").unwrap();
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = std::fs::metadata(&bin).unwrap().permissions();
-                perms.set_mode(0o755);
-                std::fs::set_permissions(&bin, perms).unwrap();
-                Ok((0, vec![]))
-            },
-        );
-        assert_eq!(state.entries[0].status, HarnessInstallStatus::Installed);
-        assert!(state.selected.contains("demo"));
-    }
-
-    #[test]
-    fn install_failure_keeps_last_20_lines() {
-        let mut e = entry("demo", HarnessInstallStatus::NotInstalled, None);
-        e.platform.install_commands = vec![cmd_for_running_os("install demo", &[])];
-        let mut state = state_from(vec![e]);
-        let tail: Vec<String> = (11..=30).map(|i| format!("line {i}")).collect();
-
-        perform_row_install(&mut state, 0, None, "", |_| true, |_| Ok((2, tail.clone())));
-        assert_eq!(state.entries[0].status, HarnessInstallStatus::NotInstalled);
-        assert_eq!(state.last_failure_tail, tail);
-        assert_eq!(
-            state.install_notes.get("demo").map(String::as_str),
-            Some("failed: 2")
-        );
-    }
-
-    #[test]
-    fn row_install_hint_handles_missing_requires_and_no_command() {
-        let mut needs = entry("needs-tool", HarnessInstallStatus::NotInstalled, None);
-        needs.platform.install_commands =
-            vec![cmd_for_running_os("npm i -g x", &["missing_npm_xyz"])];
-        assert_eq!(
-            format_row_install_hint(&needs, None).as_deref(),
-            Some("needs missing_npm_xyz first")
-        );
-
-        let mut with_docs = entry("no-cmd-docs", HarnessInstallStatus::NotInstalled, None);
-        with_docs.platform.docs_url = Some("https://example.com/docs".to_string());
-        assert_eq!(
-            format_row_install_hint(&with_docs, None).as_deref(),
-            Some("install: see https://example.com/docs")
-        );
-
-        let without_docs = entry("no-cmd", HarnessInstallStatus::NotInstalled, None);
-        assert_eq!(
-            format_row_install_hint(&without_docs, None).as_deref(),
-            Some("install: not available for this OS")
-        );
-    }
-}
+mod tests;
