@@ -178,7 +178,7 @@ session later instead of polling), and `intelligence_upsert` /
 
 ### 🖥️ Interactive TUI (Canopy Hub)
 
-- **NewAgentDialog** — Three modes (Interactive, Background Cron/Watch, Terminal) with CLI picker, model picker, directory browser, and yolo mode toggle.
+- **NewAgentDialog** — Three-step launch (folder & kind, then harness/yolo/sandbox, then New or Resume) with last time's choices preselected, deterministic harness ordering (last-used first, then 7-day use), and direct resume by harness conversation id.
 - **Detachable Sessions** — Sessions run in the daemon, not the TUI: quitting the TUI leaves them running, reopening it reattaches to them live with screen and scrollback, a daemon restart respawns every session still listed as active under the same id and name (a terminal comes back with a clean pane and a fresh prompt), sessions started or closed elsewhere update the sidebar live, and a dropped daemon connection reconnects on its own (0.5 s doubling to 5 s) and re-lists what the daemon still has.
 - **Scheduled Delivery** — `Shift+Enter` (Kitty keyboard protocol) sends prompts at a chosen time instead of immediately.
 - **Session Shelf** — an agent copies up to 10 files per call (any type, 20 MiB each; content sniffing only decides how it is displayed; only files inside its own workdir or the shelf directory — secrets such as the daemon token and key files are always refused with `forbidden`) onto its session's shelf with the `session_send_file` MCP tool, lists a shelf with `session_list_files`, and reads one file with `session_read_file` (text or base64, capped at 1 MiB). A trusted remote guest with the `upload` grant sends files into its granted sessions over the session protocol's `shelf_put_*` frames. The F1 hub's `Shelf` tab lists every shelf newest first, toasts each arrival as `📎 <name> — <from>`, and opens, copies the path of, or deletes the selected file, with `canopy shelf list`/`open` reaching the same files from the CLI.
@@ -302,7 +302,7 @@ On Unix, `~/.canopy/` is private to the user: `~/.canopy/` and `~/.canopy/logs/`
    ```bash
    canopy
    ```
-   Opens the full-screen Canopy Hub. Press `Ctrl+N` or `n` to create a new agent (Interactive, Background, or Terminal).
+   Opens the full-screen Canopy Hub. Press `Ctrl+N` or `n` to create a new agent (Agent or Terminal) in a three-step flow with last time's choices preselected.
 
 4. **Check health:**
    ```bash

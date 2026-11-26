@@ -18,7 +18,8 @@ presses:
 
 1. **Folder & Kind** — the working folder and `Agent` or `Terminal`.
    Choosing `Terminal` launches immediately from this step.
-2. **Agent Options** (agent only) — the harness, the yolo toggle, and the
+2. **Agent Options** (agent only) — the harness, the yolo toggle
+   (preselected from last time when the harness supports it), and the
    sandbox toggle on one screen. Harnesses are ordered deterministically:
    the last-used harness first, then harnesses launched in the last 7 days
    by 7-day launch count descending, then the rest in their previous order.
@@ -29,16 +30,17 @@ presses:
    marker where a conversation id is recorded), ending with `other…`
    which opens the harness's own resume picker (`resume_args`).
 
-`Esc` goes back one step (and closes on the first step). Background work
-stays available through graphs and the CLI, but it is no longer offered
-in this dialog.
+`Esc` goes back one step (and closes on the first step), and every step
+works with keyboard and mouse. Background work stays available through
+graphs and the CLI, but it is no longer offered in this dialog.
 
-- **Resume a session** — lists the finished sessions that belong to the
-  selected harness *and* directory, or the harness's own `session_list_cmd`
-  output when it defines one. `Enter` on a session launches it resumed,
-  skipping the mission step; a harness with nothing to resume shows
-  `No sessions to resume for <harness> in <dir>` and `New session` stays
-  usable.
+- **Resume a session** — for a harness with `session_resume_cmd`, the
+  finished sessions for the selected harness *and* directory from step 3
+  above; `Enter` on one relaunches it resumed. A harness with
+  `session_list_cmd` but no `session_resume_cmd` keeps today's behaviour
+  and shows the harness's own list instead. A harness with nothing to
+  resume shows `No sessions to resume for <harness> in <dir>` and
+  `New session` stays usable.
   - Picking a finished canopy session relaunches that same session: it keeps
     its id and its name — even when canopy never recorded the harness's own
     conversation id — so hooks and scheduled sends addressed to it still
@@ -59,13 +61,9 @@ in this dialog.
     dismissed, so the failure is never silent. A launch flag the session
     already carries is never passed twice. Closing a session
     yourself never leaves such a card.
-  - `↑↓` selects, `Enter` confirms, and `Esc` returns to the form with every
-  value kept. **Background** and **Terminal** launch from the form as
-  before — the Mode step is Interactive-only.
-
-> **Note:** The Session/Mode choice is no longer a row on the form itself.
-> Resume is handled entirely on the separate Mode step, so the form never
-> shows a "Resume <dir>" entry that could be mistaken for the launch button.
+  - `↑↓` selects, `Enter` confirms, and `Esc` goes back one step with every
+  choice kept. **Terminal** launches straight from the first step — only
+  agents reach the Mode step.
 
 ## Interactive sessions
 
