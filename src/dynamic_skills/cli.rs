@@ -1,9 +1,11 @@
-//! `canopy skill` CLI: list skills and print one skill with its references.
+//! `canopy skill` CLI: print the embedded skill, list skills, print one
+//! skill with its references, and install the embedded skill.
 //!
 //! Formatting and suggestion logic lives here; `src/main.rs` only wires the
-//! subcommand. Everything prints to caller-supplied writers so tests run
-//! in-process without spawning a `canopy` binary, and nothing is written to
-//! any harness skills directory.
+//! subcommand. `list`/`get` print to caller-supplied writers so tests run
+//! in-process without spawning a `canopy` binary. `install` writes the
+//! embedded skill as a regular file into every harness skills directory
+//! that exists (via [`crate::skills_module::install_for_home`]).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -24,6 +26,10 @@ pub enum SkillAction {
         /// Name of the skill to print.
         name: String,
     },
+    /// Write the embedded `canopy` skill into every harness skills
+    /// directory that exists (idempotent: only missing or outdated
+    /// copies are rewritten).
+    Install,
 }
 
 /// Print every known skill, one `<name> - <description>` per line, or a JSON
@@ -51,31 +57,62 @@ pub fn run_list(store: &SkillStore, json: bool, out: &mut dyn Write) {
 }
 
 /// Run one `canopy skill` invocation: build the store from the on-disk
-/// config and dispatch. Exits the process for `get` and bare `skill` — the
-/// exit code is the answer.
+/// config and dispatch. Exits the process for `get` only — the exit code
+/// is the answer. Bare `skill` prints the embedded skill to stdout.
 pub fn handle_skill_action(action: Option<SkillAction>) -> anyhow::Result<()> {
     let data_dir = crate::ensure_data_dir()?;
     let config = crate::domain::canopy_config::CanopyConfig::load(&data_dir);
     let store = SkillStore::from_config(&data_dir, &config.skills);
+    handle_skill_action_with(action, &store, &mut std::io::stdout().lock())
+}
+
+/// Dispatch one `canopy skill` invocation with an explicit writer, so the
+/// non-exiting branches are testable in-process without spawning a
+/// `canopy` binary.
+fn handle_skill_action_with(
+    action: Option<SkillAction>,
+    store: &SkillStore,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
     match action {
         None => {
-            eprintln!("canopy skill: no embedded skill in this build");
-            std::process::exit(1);
+            let _ = write!(out, "{}", crate::skills_module::rendered());
+            Ok(())
         }
         Some(SkillAction::List { json }) => {
-            run_list(&store, json, &mut std::io::stdout().lock());
+            run_list(store, json, out);
             Ok(())
         }
         Some(SkillAction::Get { name }) => {
-            let code = run_get(
-                &store,
-                &name,
-                &mut std::io::stdout().lock(),
-                &mut std::io::stderr().lock(),
-            );
+            let code = run_get(store, &name, out, &mut std::io::stderr().lock());
             std::process::exit(code);
         }
+        Some(SkillAction::Install) => {
+            for line in run_install() {
+                let _ = writeln!(out, "{line}");
+            }
+            Ok(())
+        }
     }
+}
+
+/// Install the embedded `canopy` skill into every harness skills directory
+/// that exists on this machine, from the last refreshed registry baseline.
+/// Harnesses whose directory does not exist are skipped, never created.
+pub fn run_install() -> Vec<String> {
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    run_install_in(&home)
+}
+
+/// Install into the harnesses recorded in `home/.canopy`'s registry
+/// baseline. Split out so tests run against a temp home instead of the
+/// real one.
+fn run_install_in(home: &Path) -> Vec<String> {
+    let baseline = crate::domain::registry_baseline::RegistryBaseline::load(&home.join(".canopy"))
+        .unwrap_or_default();
+    crate::skills_module::install_for_home(home, &baseline.platforms, false)
 }
 
 /// Print a skill to `out` (diagnostics to `err`). Returns the process exit
@@ -566,6 +603,69 @@ mod tests {
         assert_eq!(lev("abc", ""), 3);
         assert_eq!(lev("same", "same"), 0);
         assert_eq!(lev("abc", "abd"), 1);
+    }
+
+    #[test]
+    fn bare_skill_prints_the_embedded_canopy_skill() {
+        let registry = registry_with(&[("alpha", "Alpha skill.")]);
+        let store_dir = TempDir::new().unwrap();
+        let store = SkillStore::new(
+            store_dir.path().to_path_buf(),
+            vec![test_source(registry.path())],
+            15,
+        );
+
+        let mut out = Vec::new();
+        handle_skill_action_with(None, &store, &mut out).unwrap();
+
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(text, crate::skills_module::rendered());
+        assert!(text.starts_with("---\nname: canopy\n"));
+        assert!(text.contains("canopy skill list"));
+    }
+
+    #[test]
+    fn install_writes_baseline_harnesses_and_reports_status() {
+        use crate::domain::registry_baseline::RegistryBaseline;
+
+        let home = TempDir::new().unwrap();
+        std::fs::create_dir_all(home.path().join("alpha/.skills")).unwrap();
+        std::fs::create_dir_all(home.path().join("beta/.skills")).unwrap();
+        let platform = |name: &str, skills_dir: &str| {
+            serde_json::from_value::<crate::setup_module::Platform>(serde_json::json!({
+                "name": name,
+                "config_path": ".config/test",
+                "mcp_servers_key": [],
+                "skills_dir": skills_dir,
+            }))
+            .unwrap()
+        };
+        let baseline = RegistryBaseline {
+            clis: Vec::new(),
+            platforms: vec![
+                platform("alpha", "alpha/.skills"),
+                platform("beta", "beta/.skills"),
+            ],
+        };
+        baseline.save(&home.path().join(".canopy")).unwrap();
+
+        assert_eq!(
+            run_install_in(home.path()),
+            vec!["alpha: installed", "beta: installed"]
+        );
+        for harness in ["alpha", "beta"] {
+            let path = home
+                .path()
+                .join(harness)
+                .join(".skills")
+                .join("canopy")
+                .join("SKILL.md");
+            assert!(path.is_file() && !path.is_symlink());
+        }
+        assert_eq!(
+            run_install_in(home.path()),
+            vec!["alpha: current", "beta: current"]
+        );
     }
 
     #[test]

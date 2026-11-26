@@ -167,7 +167,8 @@ enum Commands {
         action: NodeAction,
     },
     /// Read skills from the configured skills registry (list/get print to
-    /// stdout; nothing is installed).
+    /// stdout) and write the embedded `canopy` skill into every harness
+    /// skills directory (install).
     Skill {
         #[command(subcommand)]
         action: Option<dynamic_skills::cli::SkillAction>,

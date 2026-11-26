@@ -38,13 +38,9 @@ pub enum MergeOutcome {
 
 pub fn canopy_protocol_block() -> &'static str {
     "[CANOPY]\n\
-     This workspace is coordinated by Canopy. Use its MCP tools on your own initiative.\n\
-     1. First action, before anything else: get_tools(scope=\"session_start\").\n\
-     2. Before editing files, before running tests or builds, and before ending the session: \
-     call get_tools with scope file_write, test_run or close_session, and follow what it returns.\n\
-     3. Record durable facts and patterns with intelligence_upsert, never only in chat.\n\
-     Skills: execution-mindset always; architect-mindset for design, code-engineering for code, \
-     the canopy-* skills for this MCP surface."
+     This workspace is coordinated by Canopy. Run get_tools(scope=\"session_start\") first.\n\
+     Read the canopy skill with canopy skill. At the start of the task run canopy skill list \
+     and load the skills that apply with canopy skill get <name>."
 }
 
 pub async fn create_sandbox_in(
@@ -888,11 +884,11 @@ mod tests {
         assert!(!block.is_empty());
         assert!(block.contains("[CANOPY]"));
         assert!(block.contains("Canopy"));
-        assert!(block.contains("Skills:"));
+        assert!(block.contains("canopy skill"));
     }
 
-    /// FR5: the minimal block must still carry the three action markers the
-    /// behaviour depends on, stay small, and have no trailing newline.
+    /// The full protocol lives in the embedded `canopy` skill; the sandbox
+    /// text is only a short pointer to it, with no trailing newline.
     #[test]
     fn test_canopy_protocol_block_is_minimal_but_complete() {
         let block = canopy_protocol_block();
@@ -900,11 +896,11 @@ mod tests {
             block.contains("get_tools(scope=\"session_start\")"),
             "the first-action call must be exact-matchable"
         );
-        assert!(block.contains("intelligence_upsert"));
-        assert!(block.contains("execution-mindset"));
+        assert!(block.contains("canopy skill list"));
+        assert!(block.contains("canopy skill get <name>"));
         assert!(
-            block.len() <= 700,
-            "block is {} bytes; the minimal protocol must stay under 700",
+            block.len() < 450,
+            "block is {} bytes; the pointer must stay under 450",
             block.len()
         );
         assert!(

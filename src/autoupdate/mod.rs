@@ -278,11 +278,34 @@ fn run_update_core(
         record_check()?;
     }
     println!("✓ updated to {latest}");
+    refresh_canopy_skill(deps.exe);
 
     if deps.daemon.is_running() {
         restart_daemon_after_update(deps.daemon, deps.graph_running, deps.confirm_restart)?;
     }
     Ok(0)
+}
+
+/// Refresh the embedded `canopy` skill files with the newly installed
+/// executable, so the new version's text is what lands on disk. A failure
+/// prints a warning and never fails the update.
+fn refresh_canopy_skill(exe: &Path) {
+    match std::process::Command::new(exe)
+        .args(["skill", "install"])
+        .output()
+    {
+        Ok(output) => {
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                println!("{line}");
+            }
+            if !output.status.success() {
+                eprintln!("canopy update: skill refresh reported no success; skills left as-is");
+            }
+        }
+        Err(error) => {
+            eprintln!("canopy update: skill refresh skipped: {error}");
+        }
+    }
 }
 
 /// Read-only TUI helper.  Production delegates to the injectable form so

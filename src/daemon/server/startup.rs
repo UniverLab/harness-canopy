@@ -75,6 +75,24 @@ pub(super) fn build_http_core(db: &Arc<Database>, data_dir: &std::path::Path) ->
     }
 }
 
+/// Refresh the embedded `canopy` skill files for harnesses that already
+/// have one, so an update done by any other means is corrected on the next
+/// start. Hand-written files and missing harness directories are skipped by
+/// the installer itself; failures are warn-only, never fatal.
+fn refresh_canopy_skill_files(data_dir: &std::path::Path) {
+    let baseline =
+        crate::domain::registry_baseline::RegistryBaseline::load(data_dir).unwrap_or_default();
+    if baseline.platforms.is_empty() {
+        return;
+    }
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+    for line in crate::skills_module::install_for_home(&home, &baseline.platforms, true) {
+        tracing::info!("canopy skill: {line}");
+    }
+}
+
 pub(super) async fn run_http_startup_reconciliations(
     db: &Arc<Database>,
     data_dir: &std::path::Path,
@@ -82,6 +100,7 @@ pub(super) async fn run_http_startup_reconciliations(
     port: u16,
 ) {
     super::reconcile_orphaned_graphs_on_startup(db, data_dir, port);
+    refresh_canopy_skill_files(data_dir);
     super::reconcile_stranded_queue_specs_on_startup(db);
     super::reconcile_mutex_leases_on_startup(db);
     migrate_agents_to_backing_graphs(db);

@@ -14,6 +14,7 @@
 //! ~/.kiro/skills/code-review → ~/.agents/skills/code-review (symlink)
 //! ```
 
+mod canopy_skill;
 mod download;
 mod sync_policy;
 mod wizard;
@@ -21,6 +22,7 @@ mod wizard;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
+pub use canopy_skill::{install_for_home, rendered};
 pub use download::download_essential_pack;
 #[allow(unused_imports)]
 pub use wizard::run_skills_wizard;

@@ -84,6 +84,13 @@ pub(crate) fn run_essential_skills_step(
             vec![]
         });
 
+    // Write the embedded `canopy` skill into the configured harnesses
+    // in-process (same function `canopy skill install` runs later).
+    let owned: Vec<Platform> = selected.iter().map(|p| (*p).clone()).collect();
+    for line in crate::skills_module::install_for_home(home, &owned, false) {
+        tracing::info!("canopy skill: {line}");
+    }
+
     if downloaded == 0 && symlinks.is_empty() {
         // Check if we actually have any skills installed
         let global_dir = dirs::home_dir()

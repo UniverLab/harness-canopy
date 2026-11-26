@@ -186,18 +186,32 @@ a builtin of the same name.
 ## Skills
 
 Read skills from the configured `[skills]` sources (default:
-`https://github.com/UniverLab/skills`). Everything prints to stdout —
-nothing is installed into any harness skills directory.
+`https://github.com/UniverLab/skills`). `list`/`get` print to stdout.
+`canopy` with no subcommand prints the embedded `canopy` skill — the
+protocol, the capability map, and the rule to list and load the other
+skills — which travels inside the binary and is never older than it.
+`install` writes that skill as a regular file to
+`<skills_dir>/canopy/SKILL.md` for every registry harness whose skills
+directory exists; it rewrites only missing or outdated copies (tracked by
+the `canopy_version` frontmatter marker) and is refreshed automatically by
+`canopy setup`, after `canopy update`, and on every daemon start. Files
+without a `canopy_version` marker are hand-written and left untouched
+(`skipped: not managed by canopy`). The other skills are read live with
+`canopy skill list` / `canopy skill get <name>` and never copied into a
+skills directory.
 
 | Command | Description |
 |---|---|
+| `canopy skill` | Print the embedded `canopy` skill to stdout |
 | `canopy skill list` | List skills, one `<name> - <description>` per line |
 | `canopy skill list --json` | Print the same list as a JSON array of `{name, description, source_url}` objects |
 | `canopy skill get <name>` | Print a skill's `SKILL.md` followed by every file under its `references/` directory, each headed `=== references/<path> ===` |
+| `canopy skill install` | Write the embedded `canopy` skill into every harness skills directory; prints one line per harness (`installed`, `updated from <old>`, `current`, `skipped: not managed by canopy`) |
 
 ```sh
 canopy skill list
 canopy skill get code-review
+canopy skill install
 ```
 
 ## Graph control

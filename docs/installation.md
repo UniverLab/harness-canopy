@@ -87,7 +87,13 @@ previous default (stun.l.google.com); change it with canopy config set
 remote.stun_fallback`. Its only flags are `--local-registry` (use a
 local registry directory instead of fetching from GitHub) and
 `--force-skills` (overwrite local skill files that diverge from the sync
-source). It also rewrites legacy unauthenticated canopy MCP entries (the
+source). Setup also writes the embedded `canopy` skill as a regular file
+to `<skills_dir>/canopy/SKILL.md` for every configured harness whose
+skills directory exists (creating it), and refreshes it whenever the
+binary's version changes — the same refresh runs on `canopy skill
+install`, after `canopy update`, and on every daemon start. The other
+skills are read live with `canopy skill list` / `canopy skill get`; they
+are never copied into a skills directory. It also rewrites legacy unauthenticated canopy MCP entries (the
 old URL form, with or without headers) to the stdio `canopy bridge`
 form, creating a one-time `<config>.canopy-bak` backup before the first
 rewrite of a file. Running `canopy` with no arguments triggers setup
