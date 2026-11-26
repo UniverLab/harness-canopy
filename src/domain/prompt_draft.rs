@@ -446,12 +446,12 @@ pub fn format_project_block(project: &Project) -> String {
 }
 
 /// Render one tool line as a `<skill>` item; `canopy:` lines become a
-/// fetch instruction for the `skill` tool. Moved verbatim from the dialog.
+/// fetch instruction for `canopy skill get`. Moved verbatim from the dialog.
 pub fn append_tool_skill(result: &mut String, tool_line: &str) {
     if let Some(name) = tool_line.strip_prefix("canopy:") {
         result.push_str("  <skill>\n");
         result.push_str(&format!(
-            "    canopy skill {name} — load it with the `skill` tool's `get` action (name=\"{name}\")\n"
+            "    canopy skill {name} — load it with `canopy skill get {name}`\n"
         ));
         result.push_str("  </skill>\n\n");
     } else {

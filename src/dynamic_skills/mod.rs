@@ -1,7 +1,7 @@
 //! Dynamic skill system: skills are fetched on demand from configurable git
 //! sources into a canopy-owned cache (`~/.canopy/cache/skills/`), kept fresh
-//! lazily via a TTL'd commit-hash check, and served to any harness over MCP
-//! by `skill` (`list`/`get`) or printed to stdout by `canopy skill`.
+//! lazily via a TTL'd commit-hash check, and resolved for pinned graph
+//! skills, read by preflight review, or printed to stdout by `canopy skill`.
 //!
 //! This is additive to the global-symlink standard in [`crate::skills_module`]
 //! — nothing here touches `~/.agents/skills/` or the platform symlinks.
@@ -24,7 +24,7 @@ use source::CatalogEntry;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-/// A skill as reported by `skill` `list`: the merged store + catalog view.
+/// A skill as reported by a store listing: the merged store + catalog view.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SkillListEntry {
     pub name: String,
@@ -43,7 +43,7 @@ pub struct SkillFile {
     pub content: Option<String>,
 }
 
-/// Full skill content as returned by `skill` `get`.
+/// Full skill content as returned by a store fetch.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SkillContent {
     pub name: String,
@@ -53,8 +53,8 @@ pub struct SkillContent {
     pub commit_hash: String,
 }
 
-/// Reference files at or under this size are inlined in `skill` `get`'s
-/// response; larger ones are listed by path only.
+/// Reference files at or under this size are inlined in fetched skill
+/// content; larger ones are listed by path only.
 const INLINE_FILE_LIMIT: u64 = 64 * 1024;
 
 /// A skill fetched for the `canopy skill get` CLI path: where its files live
@@ -91,7 +91,7 @@ impl std::error::Error for CliSkillError {}
 type ClockFn = Box<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 
 /// Owns the on-disk skill store and the configured sources, and implements
-/// the lazy fetch/TTL-refresh dance shared by `skill` `list` and `get`.
+/// the lazy fetch/TTL-refresh dance shared by store listing and fetching.
 pub struct SkillStore {
     store_dir: PathBuf,
     sources: Vec<GitSource>,
@@ -266,8 +266,8 @@ impl SkillStore {
 
     /// CLI fetch for `canopy skill get`: same lazy fetch/TTL-refresh dance
     /// as [`Self::get`], but reports the outcome as a [`CliSkillFetch`]
-    /// (with an offline flag) or a [`CliSkillError`] instead of MCP content.
-    /// [`Self::get`] is unchanged for the MCP `skill` tool.
+    /// (with an offline flag) or a [`CliSkillError`] instead of `SkillContent`.
+    /// [`Self::get`] is unchanged for preflight review.
     pub fn fetch_for_cli(&self, name: &str) -> Result<CliSkillFetch, CliSkillError> {
         validate_skill_name(name).map_err(|_| CliSkillError::NotFound)?;
         let _guard = self.fetch_lock.lock().unwrap();
@@ -471,7 +471,7 @@ impl SkillStore {
 }
 
 /// Reject anything but a single, plain path component. `name` comes straight
-/// from the `skill_get` MCP tool's caller-supplied argument and is joined
+/// from the `canopy skill get <name>` CLI's caller-supplied argument and is joined
 /// onto the store dir (and a temp clone dir) to build paths that later get
 /// `remove_dir_all`'d and written to — traversal segments like `..` or `/`
 /// must never reach that.

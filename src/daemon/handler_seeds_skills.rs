@@ -1,37 +1,4 @@
-//! Skill MCP handler tools split out of `daemon::handler`, plus the
-//! redaction helpers for stored node-run input/output.
-
-use crate::daemon::handler::TaskTriggerHandler;
-use crate::daemon::params::*;
-use rmcp::model::{CallToolResult, ContentBlock};
-use rmcp::ErrorData as McpError;
-use std::sync::Arc;
-
-impl TaskTriggerHandler {
-    pub(crate) async fn skill_list_impl(&self) -> Result<CallToolResult, McpError> {
-        let store = Arc::clone(&self.dynamic_skills);
-        let entries = tokio::task::spawn_blocking(move || store.list())
-            .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![ContentBlock::text(
-            serde_json::to_string_pretty(&entries).unwrap_or_default(),
-        )]))
-    }
-
-    pub(crate) async fn skill_get_impl(
-        &self,
-        params: SkillGetParams,
-    ) -> Result<CallToolResult, McpError> {
-        let store = Arc::clone(&self.dynamic_skills);
-        let content = tokio::task::spawn_blocking(move || store.get(&params.name))
-            .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?
-            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![ContentBlock::text(
-            serde_json::to_string_pretty(&content).unwrap_or_default(),
-        )]))
-    }
-}
+//! Redaction helpers for stored node-run input/output.
 
 /// Secret-shaped substrings a node run's stored input/output can carry
 /// through whatever CLI it wrapped (an API key echoed into a shell command,

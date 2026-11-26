@@ -408,8 +408,8 @@ row: `/` filters, `n` creates, `e` edits and `F4` deletes.
   cache only — no network). A name present both on disk and in canopy's
   store appears under both prefixes, so you pick which one to reference.
   Selecting a `[canopy]:` entry renders
-  `canopy skill <name> — load it with the skill tool's get action (name="<name>")` in the
-  built prompt's tools block, so the agent fetches it over MCP; on-disk
+  `canopy skill <name> — load it with \`canopy skill get <name>\`` in the
+  built prompt's tools block, so the agent fetches it via the CLI; on-disk
   skills keep their plain `skill:<name>` entry. `Ctrl+V` (or `Alt+V`, for
   terminals that bind `Ctrl+V` to text paste) attaches the clipboard image,
   and pasting or dropping image-file paths attaches those files instead of

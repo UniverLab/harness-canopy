@@ -1,4 +1,4 @@
-//! TTL-cached catalog listing per source, so `skill` `list` doesn't hit the
+//! TTL-cached catalog listing per source, so a store listing doesn't hit the
 //! network on every call. Cache files live under
 //! `<store_dir>/.catalog/<source-slug>.toml`.
 

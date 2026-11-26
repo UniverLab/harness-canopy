@@ -542,8 +542,8 @@ pub struct SkillSourceConfig {
 ///
 /// Sources are checked in list order for a skill; when two sources publish a
 /// skill with the same name, the *later* source in this list wins — both for
-/// `skill` `list`'s merged catalog and for which source a not-yet-installed
-/// skill is fetched from by `skill` `get`.
+/// the merged store catalog shown by `canopy skill list` and for which source
+/// a not-yet-installed skill is fetched from by `canopy skill get`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillsConfig {
     #[serde(default = "default_skill_sources")]

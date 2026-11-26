@@ -39,7 +39,7 @@
   </skill>
 
   <skill>
-    canopy skill golden-beta — load it with the `skill` tool's `get` action (name="golden-beta")
+    canopy skill golden-beta — load it with `canopy skill get golden-beta`
   </skill>
 
 </tools>

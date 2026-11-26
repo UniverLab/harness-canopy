@@ -359,3 +359,23 @@ fn identity_tool_is_absent_from_mcp_surface() {
         "calling `identity` must hit the standard unknown-tool error"
     );
 }
+
+/// Spec: "The MCP server no longer exposes `skill` (list/get): skills are
+/// read with `canopy skill list` and `canopy skill get`."
+/// A client that still calls it gets the standard unknown-tool error:
+/// `rmcp`'s `ToolRouter::call` returns `invalid_params("tool not found")`
+/// exactly when the route map has no entry, which is what `get` checks.
+#[test]
+fn skill_tool_is_absent_from_mcp_surface() {
+    let router = crate::daemon::handler::TaskTriggerHandler::tool_router();
+    let tools = router.list_all();
+    let names: Vec<_> = tools.iter().map(|t| t.name.as_ref()).collect();
+    assert!(
+        !names.contains(&"skill"),
+        "skill tool must be removed from MCP surface: {names:?}"
+    );
+    assert!(
+        router.get("skill").is_none(),
+        "calling `skill` must hit the standard unknown-tool error"
+    );
+}

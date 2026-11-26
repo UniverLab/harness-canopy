@@ -1156,29 +1156,6 @@ async fn project_remap_refuses_missing_path_without_force() {
     assert!(db.get_project(&project.hash).unwrap().is_some());
 }
 
-// ── skill_list / skill_get ──
-
-#[tokio::test]
-async fn skill_list_empty_and_skill_get_unknown() {
-    let (_dir, _db, handler) = endpoint_test_handler();
-
-    let listed = call_resource_action(&handler, "skill", "list", ())
-        .await
-        .unwrap();
-    assert!(!is_err(&listed));
-
-    let missing = call_resource_action(
-        &handler,
-        "skill",
-        "get",
-        params_id(SkillGetParams {
-            name: "unknown-skill".to_string(),
-        }),
-    )
-    .await;
-    assert!(missing.is_err());
-}
-
 // ── intelligence prefix resolution + created field ──────────────
 
 #[tokio::test]

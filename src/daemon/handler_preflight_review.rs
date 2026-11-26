@@ -28,7 +28,7 @@ pub(crate) fn build_preflight_reviewer_prompt(
         " Read the graph with graph get (and `queue list` for the queue) through the MCP surface.",
     );
     prompt.push_str(
-        " Load the 'graph-reviewer' skill with the `skill` tool's `get` action; if the skill text is appended below under '## Skill: graph-reviewer', that IS its content — do not fetch again.",
+        " Load the 'graph-reviewer' skill with `canopy skill get graph-reviewer`; if the skill text is appended below under '## Skill: graph-reviewer', that IS its content — do not fetch again.",
     );
     prompt.push_str(skill_section);
     prompt.push_str(

@@ -1,13 +1,5 @@
 use super::*;
 
-// ── Dynamic skill store tool parameter types ──────────────────────────
-
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct SkillGetParams {
-    /// Skill directory name, as reported by `skill` `list` (e.g. "code-review").
-    pub name: String,
-}
-
 // ── Ephemeral subagent tool parameter types ───────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]

@@ -829,7 +829,6 @@ mod tests {
             &crate::daemon::handler_resource_tools_final::INTELLIGENCE_ADMIN,
             &crate::daemon::handler_resource_tools_final::PROJECT,
             &crate::daemon::handler_resource_tools_final::SCHEDULED_PROMPTS,
-            &crate::daemon::handler_resource_tools_final::SKILL,
             &crate::daemon::handler_resource_tools_final::SUBAGENT,
             &crate::daemon::handler_resource_tools_final::RAG,
             &crate::daemon::handler_resource_tools_final::CATALOGUE,

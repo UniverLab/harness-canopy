@@ -143,7 +143,7 @@ use crate::daemon::handler_resource_tools::{
 #[cfg(test)]
 use crate::daemon::handler_resource_tools_final::{
     CatalogueObject, IntelligenceAdminObject, NodeObject, ProjectObject, RagObject,
-    ScheduledPromptObject, SkillObject, SubagentObject,
+    ScheduledPromptObject, SubagentObject,
 };
 #[cfg(test)]
 use crate::daemon::handler_sandbox::SandboxObject;
@@ -239,8 +239,8 @@ pub struct TaskTriggerHandler {
     pub ingestion: Arc<crate::rag::ingestion::IngestionManager>,
     /// Rate limiters for `rag` `search` (10 calls/min). Keyed by agent_id.
     pub rag_limiters: Arc<tokio::sync::Mutex<std::collections::HashMap<String, RateLimiter>>>,
-    /// Backing store for `skill` `list`/`get` (`~/.canopy/cache/skills/`).
-    /// Git operations block, so callers run it via `spawn_blocking`.
+    /// Backing store for dynamic skills (`~/.canopy/cache/skills/`),
+    /// read by preflight review. Git operations block, so callers run it via `spawn_blocking`.
     pub dynamic_skills: Arc<crate::dynamic_skills::SkillStore>,
     /// The session shelf's bytes + rows owner (`session_send_file`).
     pub(crate) shelf: Arc<crate::sessions::shelf::ShelfStore>,
@@ -357,7 +357,6 @@ pub const NODE_TOOLS: &[&str] = &[
     "intelligence_upsert",
     "intelligence_admin",
     "rag",
-    "skill",
     "get_tools",
 ];
 
@@ -585,10 +584,10 @@ pub(crate) async fn call_graph_action_value(
     }
 }
 
-/// Test-only dispatch seam for the eighteen second- and final-wave resource
+/// Test-only dispatch seam for the seventeen second- and final-wave resource
 /// tools (`spec`, `spec_edit`, `queue`, `agent`, `agent_edit`, `harness`,
 /// `config`, `crew`, `node`, `intelligence_admin`, `project`,
-/// `scheduled_prompts`, `sandbox`, `skill`, `subagent`, `rag`,
+/// `scheduled_prompts`, `sandbox`, `subagent`, `rag`,
 /// `catalogue`): the
 /// typed params struct is serialized with nulls stripped, `action` is injected,
 /// and the call goes through the tool's own per-tool parameter newtype
@@ -721,13 +720,6 @@ pub(crate) async fn call_resource_action_value(
         "sandbox" => {
             handler
                 .sandbox(crate::daemon::params_extract::Parameters(SandboxObject(
-                    object,
-                )))
-                .await
-        }
-        "skill" => {
-            handler
-                .skill(crate::daemon::params_extract::Parameters(SkillObject(
                     object,
                 )))
                 .await

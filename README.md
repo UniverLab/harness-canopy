@@ -198,22 +198,21 @@ session later instead of polling), and `intelligence_upsert` /
 - **Setup Wizard** — Interactive `canopy setup` detects installed AI CLIs from a GitHub-hosted registry, configures binary paths, model flags, headless modes, environment variables, and temperature units, and asks whether to enable UniverLab announcements (default no). Generates `~/.canopy/config.toml`. It also rewrites legacy unauthenticated URL-form canopy MCP entries to the stdio `canopy bridge` form, with a one-time `.canopy-bak` backup before the first rewrite.
 - **On-Demand Registry Refresh** — `canopy registry refresh` applies platform registry metadata and new CLIs to `config.toml` now, ignoring the 24-hour window the TUI's background refresh uses at startup. Executable CLI changes (command lines, flags, environment variables) are held in `registry-pending.json` until approved via `canopy registry pending` and `canopy registry apply` (or dropped with `canopy registry discard`). Reports the CLI fields it changed, the local overrides it kept, the changes held for approval, and the platforms added, updated or removed. The `harness` `refresh_registry` action runs the refresh from an agent session (there is no MCP action to apply held changes).
 - **MCP Wizard** — `canopy mcp` subcommand for syncing, adding, and removing MCP server entries across all detected platforms with automatic format conversion (JSON ↔ TOML). It also rewrites legacy unauthenticated URL-form canopy MCP entries to the stdio `canopy bridge` form on start.
-- **Skills** — Installs the embedded `canopy` skill into each harness (`canopy skill install`), reads all other skills live via `canopy skill list` / `canopy skill get <name>` (or the `skill` MCP tool) without copying them into harnesses, and cleans up legacy skill copies.
+- **Skills** — Installs the embedded `canopy` skill into each harness (`canopy skill install`), reads all other skills live via `canopy skill list` / `canopy skill get <name>` without copying them into harnesses, and cleans up legacy skill copies.
 - **Doctor Diagnostics** — `canopy doctor` checks data directory, database, config, harnesses, RAG status, file watchers, daemon process, registry connectivity, and auto-update health.
 - **Desktop Notifications** — Cross-platform alerts for task completions, failures, watcher triggers, RAG indexing events, and graph lifecycle (started, spec completed, finished with outcome, blocker, hook failure).
 
 ---
 
-## MCP Tools (35)
+## MCP Tools (34)
 
-Graph-node sessions (agent and ensemble nodes launched by the graph engine) receive a fixed node profile of 12 tools via `CANOPY_MCP_PROFILE=node`, so every node stays well under the 128-tool cap of OpenAI-compatible providers. All other sessions — the orchestrator, check nodes, hooks, TUI, subagents, and background agents — keep the full tool list.
+Graph-node sessions (agent and ensemble nodes launched by the graph engine) receive a fixed node profile of 10 tools via `CANOPY_MCP_PROFILE=node`, so every node stays well under the 128-tool cap of OpenAI-compatible providers. All other sessions — the orchestrator, check nodes, hooks, TUI, subagents, and background agents — keep the full tool list.
 
 | Tools | Category |
 |---|---|
 | `agent`, `agent_edit`, `agent_report`, `subagent` | **Agent management** (4) |
 | `harness` | **Harness** (1) |
 | `intelligence_get_context`, `intelligence_upsert`, `intelligence_search`, `intelligence_admin` | **Intelligence** (4) |
-| `skill` | **Skills** (1) |
 | `graph`, `graph_edit`, `graph_node`, `graph_edge`, `graph_ensemble`, `graph_control`, `graph_complete_node`, `graph_report_blocker`, `sandbox` | **Graph engine** (9) |
 | `crew` | **Crews** (1) |
 | `config` | **Configuration** (1) |

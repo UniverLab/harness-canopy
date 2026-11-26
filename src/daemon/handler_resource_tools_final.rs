@@ -122,22 +122,6 @@ pub(crate) static SCHEDULED_PROMPTS: ToolSpec = ToolSpec {
     ],
 };
 
-pub(crate) static SKILL: ToolSpec = ToolSpec {
-    name: "skill",
-    actions: &[
-        ActionSpec {
-            name: "list",
-            required: &[],
-            optional: &[],
-        },
-        ActionSpec {
-            name: "get",
-            required: &["name"],
-            optional: &[],
-        },
-    ],
-};
-
 pub(crate) static SUBAGENT: ToolSpec = ToolSpec {
     name: "subagent",
     actions: &[
@@ -232,8 +216,6 @@ resource_action_object!(
         ("cancel", ScheduledPromptCancelParams),
     ]
 );
-
-resource_action_object!(SkillObject, SKILL, [("get", SkillGetParams)]);
 
 resource_action_object!(
     SubagentObject,
@@ -397,28 +379,6 @@ impl TaskTriggerHandler {
                 self.scheduled_prompt_cancel_impl(action_params(&params, spec)?)
                     .await
             }
-            _ => unreachable!("validated action"),
-        }
-    }
-
-    #[tool(
-        name = "skill",
-        description = "Discover and fetch skills from the dynamic skill store. Pass `action` plus the parameters listed for it. \
-        Actions (required params; optional params): \
-        `list` (required: none; optional: none) — list skills available to this agent, each with name, description, source, and whether it is installed or merely available. \
-        `get` (required: name; optional: none) — fetch a skill's full instructions by name, cloning or refreshing it on demand."
-    )]
-    pub(crate) async fn skill(
-        &self,
-        Parameters(params): Parameters<SkillObject>,
-    ) -> Result<CallToolResult, McpError> {
-        let mut params = params.into_value();
-        SkillObject::coerce(&mut params);
-        let action = SKILL.validate(&params)?;
-        let spec = SKILL.action(action).expect("validated action");
-        match action {
-            "list" => self.skill_list_impl().await,
-            "get" => self.skill_get_impl(action_params(&params, spec)?).await,
             _ => unreachable!("validated action"),
         }
     }

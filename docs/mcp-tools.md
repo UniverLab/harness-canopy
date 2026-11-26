@@ -1,12 +1,12 @@
 ---
 title: MCP Tools
-description: All 35 MCP tools exposed by the canopy daemon, by category.
+description: All 34 MCP tools exposed by the canopy daemon, by category.
 order: 17
 ---
 
 # MCP Tools
 
-The daemon exposes **35 MCP tools** over Streamable HTTP (port 7755) and
+The daemon exposes **34 MCP tools** over Streamable HTTP (port 7755) and
 stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 
 Every HTTP request under `/mcp` must present the daemon token as an
@@ -47,7 +47,7 @@ refused with the usual per-field error. A null value for a parameter an
 action does not declare is ignored.
 
 Graph-node sessions (agent and ensemble nodes launched by the graph engine) get
-a fixed node profile of 12 tools in `tools/list` (`CANOPY_MCP_PROFILE=node`), so
+a fixed node profile of 10 tools in `tools/list` (`CANOPY_MCP_PROFILE=node`), so
 every node stays under the 128-tool cap of OpenAI-compatible providers. Calls to
 any other tool still work. All other sessions keep the full list.
 
@@ -89,12 +89,6 @@ The multi-agent sync tools are retired: coordination now goes through
 `session_list` (see every live session), `scheduled_prompts` (wake a
 session later instead of polling), and `intelligence_upsert` /
 `intelligence_search` (persist and find shared findings).
-
-## Skills (1)
-
-| Tool | Description |
-|---|---|
-| `skill` | Discover and fetch skills from the dynamic skill store. Actions: `list` (skills available from the store and configured catalogs; an installed skill that its git source no longer lists is marked `orphaned`, and its description starts with `[removed upstream]`), `get` (a skill's full instructions by name, cloning or refreshing it on demand) — pass `action` plus the params the refusal/table lists |
 
 ## Graph engine (9)
 
@@ -146,7 +140,7 @@ See [Graphs](graphs.md).
 
 Kept callable for the whole 3.x line, but excluded from tool listings
 (`tools/list`) so nothing new adopts them — call the 3.x name instead. Not
-counted in the 35 tools above.
+counted in the 34 tools above.
 
 | Deprecated name | Renamed to (3.0.0) |
 |---|---|

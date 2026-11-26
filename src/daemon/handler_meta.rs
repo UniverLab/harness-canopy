@@ -488,7 +488,7 @@ impl TaskTriggerHandler {
     }
 }
 
-/// The 36-tool map every `get_tools` scope serves: one line per tool,
+/// The 34-tool map every `get_tools` scope serves: one line per tool,
 /// each naming the tool, its actions, and what it is for. Alphabetical by
 /// tool name, matching the canonical listing. The sync protocol is retired,
 /// so every scope carries the same map — the scopes differ only in their
@@ -526,7 +526,6 @@ fn tool_map_entries() -> Vec<&'static str> {
         "session_list_files — list one session's shelf files with their origin",
         "session_read_file — read one shelf file (text or base64, capped at 1 MiB)",
         "session_send_file — copy any file type onto a session's shelf for the user to see",
-        "skill — list, get; discover and fetch skills",
         "spec — list, get, section, notes; read specs, sections, and notes",
         "spec_edit — create, update, delete, set_status, note_write; author and transition specs",
         "subagent — spawn, collect; launch ephemeral subagents and collect their results",
