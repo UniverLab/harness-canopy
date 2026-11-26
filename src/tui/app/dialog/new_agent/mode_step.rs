@@ -33,29 +33,58 @@ pub(crate) fn open_mode_step(dialog: &mut NewAgentDialog, sessions: Vec<Interact
     dialog.step = DialogStep::Mode;
 }
 
-/// Sessions resumable for the harness and directory chosen on the form —
-/// the same `(cli, working_dir)` rule the existing Resume path uses, with
-/// paths compared the way the dialog normalises its directory (trailing
-/// slashes stripped). No dedupe: two sessions in the same directory must
-/// both stay listable (FR 4).
+/// Sessions resumable for the harness and directory chosen on Step 2/Step 1:
+/// finished (`status != "active"` and not live in the hub), ordered by
+/// `started_at DESC`, deduplicated by non-empty `harness_conversation_id`
+/// (keeping the newest row), and capped at 20.
 fn filter_candidates(
     dialog: &NewAgentDialog,
     sessions: Vec<InteractiveSession>,
 ) -> Vec<InteractiveSession> {
     let harness = dialog.selected_cli().as_str().to_string();
     let dir = dialog.working_dir.trim_end_matches('/').to_string();
-    sessions
+    let current_boot_id = crate::system::boot_id();
+
+    let mut filtered: Vec<InteractiveSession> = sessions
         .into_iter()
         .filter(|session| {
-            session.cli == harness && session.working_dir.trim_end_matches('/') == dir
+            session.status != "active"
+                && !crate::system::session_process_is_live(
+                    session.pid,
+                    session.boot_id.as_deref(),
+                    current_boot_id.as_deref(),
+                )
+                && session.cli == harness
+                && session.working_dir.trim_end_matches('/') == dir
         })
-        .collect()
+        .collect();
+
+    filtered.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+
+    let mut seen_conv_ids = std::collections::HashSet::new();
+    filtered.retain(|session| {
+        let Some(conv_id) = session
+            .harness_conversation_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        else {
+            return true;
+        };
+        seen_conv_ids.insert(conv_id.to_string())
+    });
+
+    filtered.truncate(20);
+    filtered
 }
 
 /// Whether the Mode step's Resume row has nothing to offer: no native
-/// candidates and no CLI-owned session list to ask instead (FR 5).
+/// candidates, no CLI-owned session list, and no `session_resume_cmd`
+/// (which always offers `"other…"`).
 pub(crate) fn resume_row_is_empty(dialog: &NewAgentDialog) -> bool {
-    dialog.mode_candidates.is_empty() && !dialog.has_cli_session_list()
+    dialog.mode_candidates.is_empty()
+        && !dialog.has_cli_session_list()
+        && !dialog.has_session_resume_cmd()
 }
 
 #[cfg(test)]
@@ -133,7 +162,7 @@ mod tests {
         d.task_mode = NewTaskMode::Resume;
         d.selected_session = Some(("stale".into(), "stale".into()));
         d.session_picker_open = true;
-        d.step = DialogStep::Form;
+        d.step = DialogStep::AgentOptions;
 
         open_mode_step(&mut d, vec![session("s1", "claude", "/tmp/proj")]);
 
@@ -154,5 +183,34 @@ mod tests {
 
         open_mode_step(&mut d, vec![session("s2", "claude", "/tmp/proj")]);
         assert!(!resume_row_is_empty(&d));
+    }
+
+    #[test]
+    fn candidates_are_sorted_newest_first_deduped_by_conv_id_and_capped_at_20() {
+        let mut d = interactive_dialog("/tmp/proj");
+        let mut sessions = Vec::new();
+        for i in 0..25 {
+            let mut s = session(&format!("s{i:02}"), "claude", "/tmp/proj");
+            s.started_at = format!("2026-10-{:02}T09:00:00Z", i + 1);
+            sessions.push(s);
+        }
+        // Two rows sharing a conversation id: only the newer one must survive.
+        sessions[0].harness_conversation_id = Some("conv-dup".to_string());
+        sessions[24].harness_conversation_id = Some("conv-dup".to_string());
+        // Active row must be excluded.
+        sessions[23].status = "active".to_string();
+
+        open_mode_step(&mut d, sessions);
+
+        assert_eq!(d.mode_candidates.len(), 20);
+        assert_eq!(d.mode_candidates[0].id, "s24");
+        assert!(
+            !d.mode_candidates.iter().any(|s| s.id == "s23"),
+            "active sessions must be excluded"
+        );
+        assert!(
+            !d.mode_candidates.iter().any(|s| s.id == "s00"),
+            "older duplicate of conv-dup must be deduplicated"
+        );
     }
 }

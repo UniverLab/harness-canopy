@@ -12,9 +12,7 @@ use super::{
 };
 use crate::application::ports::AgentRepository;
 use crate::tui::app::dialog::launchpad::{LaunchpadChoice, LaunchpadDialog};
-use crate::tui::app::dialog::new_agent::{
-    BackgroundTrigger, NewAgentDialog, NewTaskMode, NewTaskType,
-};
+use crate::tui::app::dialog::new_agent::{BackgroundTrigger, NewAgentDialog, NewTaskType};
 use crate::tui::app::types::App;
 
 impl App {
@@ -57,21 +55,17 @@ impl App {
         }
 
         // ── Create mode ───────────────────────────────────────────────────
+        self.record_last_launch(&dialog);
+
         if matches!(dialog.task_type, NewTaskType::Interactive) {
-            // New (the mission step) is the launchpad; resuming sessions go
-            // straight to the PTY as they always have (CT34).
-            if matches!(dialog.task_mode, NewTaskMode::Resume) {
-                self.launch_interactive(&dialog)?;
-                let name = self.take_new_interactive_name();
-                self.new_agent_dialog = None;
-                self.refresh_agents()?;
-                self.select_agent_by_name(&name);
-                self.focus = crate::tui::app::types::Focus::Agent;
-                return Ok(());
-            } else {
-                self.open_launchpad_dialog(dialog)?;
-                return Ok(());
-            }
+            // Both New and Resume enter the harness directly (no prompt builder).
+            self.launch_interactive(&dialog)?;
+            let name = self.take_new_interactive_name();
+            self.new_agent_dialog = None;
+            self.refresh_agents()?;
+            self.select_agent_by_name(&name);
+            self.focus = crate::tui::app::types::Focus::Agent;
+            return Ok(());
         }
 
         // Track the name of the newly created agent to select it after refresh
@@ -140,7 +134,8 @@ impl App {
         }
     }
 
-    pub(super) fn open_launchpad_dialog(&mut self, dialog: NewAgentDialog) -> Result<()> {
+    #[allow(dead_code)]
+    pub fn open_launchpad_dialog(&mut self, dialog: NewAgentDialog) -> Result<()> {
         // The launchpad opens nested over the new-agent dialog, so the panel
         // behind it must keep the focus from before that dialog opened.
         let prev_focus = dialog.prev_focus.or(Some(self.focus));

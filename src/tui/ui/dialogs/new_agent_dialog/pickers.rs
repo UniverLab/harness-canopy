@@ -181,7 +181,7 @@ fn append_target_section(
     lines.push(Line::from(""));
 }
 
-fn append_cli_section(
+pub(super) fn append_cli_section(
     lines: &mut Vec<Line<'static>>,
     dialog: &NewAgentDialog,
     accent: Color,
@@ -422,28 +422,38 @@ pub(super) fn append_session_resume_picker_rows(
         return;
     };
 
-    let total = picker.sessions.len();
+    let total = picker.total_rows();
     let window = PickerWindow::new(picker.index, total, SESSION_RESUME_PICKER_VISIBLE);
 
-    for (i, session) in picker
-        .sessions
-        .iter()
-        .enumerate()
-        .skip(window.scroll)
-        .take(SESSION_RESUME_PICKER_VISIBLE)
-    {
+    for i in window.scroll..(window.scroll + SESSION_RESUME_PICKER_VISIBLE).min(total) {
         let is_selected = i == picker.index;
         let style = picker_item_style(Color::Cyan, is_selected);
+        let prefix = format!("    {} ", if is_selected { "›" } else { " " });
+
+        if picker.allow_other && i == picker.sessions.len() {
+            lines.push(Line::from(vec![
+                Span::styled(prefix, style),
+                Span::styled("other…", style),
+                Span::styled(
+                    "  (open harness resume picker)",
+                    picker_detail_style(is_selected, style, theme),
+                ),
+            ]));
+            continue;
+        }
+
+        let Some(session) = picker.sessions.get(i) else {
+            continue;
+        };
+        let has_id = session
+            .harness_conversation_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty());
+        let marker = if has_id { "● " } else { "  " };
         lines.push(Line::from(vec![
-            Span::styled(
-                format!("    {} ", if is_selected { "›" } else { " " }),
-                style,
-            ),
+            Span::styled(prefix, style),
+            Span::styled(marker, style),
             Span::styled(truncate_str(&session.name, 22), style),
-            Span::styled(
-                format!("  {}", truncate_str(&session.cli, 12)),
-                picker_detail_style(is_selected, style, theme),
-            ),
             Span::styled(
                 format!("  {}", truncate_str(&session.last_active, 20)),
                 picker_detail_style(is_selected, style, theme),

@@ -195,6 +195,7 @@ macro_rules! app_new_fields {
             last_knowledge_graph_rect: None,
             last_knowledge_list_rect: None,
             last_graph_face_rect: None,
+            last_new_agent_inner_rect: None,
             graph_face_scroll: 0,
             graph_face_total_lines: 0,
             graph_card_click_map: Vec::new(),

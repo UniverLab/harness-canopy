@@ -12,23 +12,27 @@ time.
 
 ## Creating agents
 
-`Ctrl+N` / `n` opens the **NewAgentDialog** with three modes:
+`Ctrl+N` / `n` opens the **NewAgentDialog**, a three-step flow where each
+step preselects last time's choices, so the usual launch is a few `Enter`
+presses:
 
-1. **Interactive** — PTY session with full vt100 emulation, 24-bit color
-   and support for interactive applications.
-2. **Background** — cron-scheduled or file-watcher-triggered agent.
-3. **Terminal** — raw shell session with per-session command history
-   (TOML-backed), cross-session autocomplete search, and a Warp-like
-   input mode.
+1. **Folder & Kind** — the working folder and `Agent` or `Terminal`.
+   Choosing `Terminal` launches immediately from this step.
+2. **Agent Options** (agent only) — the harness, the yolo toggle, and the
+   sandbox toggle on one screen. Harnesses are ordered deterministically:
+   the last-used harness first, then harnesses launched in the last 7 days
+   by 7-day launch count descending, then the rest in their previous order.
+3. **Mode** (agent only) — **New session** enters the harness straight
+   away without opening the prompt builder, or **Resume a session** lists
+   up to 20 finished sessions for the selected harness *and* directory
+   (newest first, deduplicated by harness conversation id, with a `●`
+   marker where a conversation id is recorded), ending with `other…`
+   which opens the harness's own resume picker (`resume_args`).
 
-The dialog includes a CLI picker, model picker, directory browser, and a
-yolo-mode toggle.
+`Esc` goes back one step (and closes on the first step). Background work
+stays available through graphs and the CLI, but it is no longer offered
+in this dialog.
 
-For **Interactive**, `Enter` on the finished form opens a second **Mode**
-step instead of launching straight away:
-
-- **New session** — exactly the launch the form always did: the launchpad
-  opens (or the session starts directly).
 - **Resume a session** — lists the finished sessions that belong to the
   selected harness *and* directory, or the harness's own `session_list_cmd`
   output when it defines one. `Enter` on a session launches it resumed,

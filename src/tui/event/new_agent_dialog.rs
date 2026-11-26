@@ -31,15 +31,15 @@ use prompt_text::{
 
 /// Raw row count fetched from the DB before the Mode step filters it down
 /// to the sessions that apply to the chosen harness and directory (FR 4).
-const RESUME_CANDIDATE_FETCH_LIMIT: usize = 200;
+pub(super) const RESUME_CANDIDATE_FETCH_LIMIT: usize = 200;
 
 pub fn handle_dialog_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
-    // The Mode step owns every key until it hands control back (FR 2).
-    if app
-        .new_agent_dialog
-        .as_ref()
-        .is_some_and(|d| matches!(d.step, DialogStep::Mode))
-    {
+    let (is_edit, step) = match app.new_agent_dialog.as_ref() {
+        Some(d) => (d.is_edit_mode(), d.step),
+        None => return Ok(()),
+    };
+
+    if !is_edit && matches!(step, DialogStep::Mode) {
         return crate::tui::event::new_agent_mode_step::handle_mode_step_key(app, code);
     }
 
@@ -47,10 +47,13 @@ pub fn handle_dialog_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) 
         let Some(dialog) = app.new_agent_dialog.as_mut() else {
             return Ok(());
         };
-
         if handle_picker_key(dialog, code) {
             return Ok(());
         }
+    }
+
+    if !is_edit {
+        return handle_create_step_key(app, step, code, modifiers);
     }
 
     match code {
@@ -66,6 +69,134 @@ pub fn handle_dialog_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) 
     }
 
     Ok(())
+}
+
+fn handle_create_step_key(
+    app: &mut App,
+    step: DialogStep,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) -> Result<()> {
+    match step {
+        DialogStep::FolderAndKind => match code {
+            KeyCode::Esc => app.close_new_agent_dialog(),
+            KeyCode::Enter if !modifiers.contains(KeyModifiers::SHIFT) => {
+                // Only `Interactive` advances to Step 2. `Terminal` launches
+                // immediately; `Background` is absent from the Ctrl+N UI but
+                // can still be constructed (edit legacy path, tests), and a
+                // failed launch there must surface as a notice, not advance.
+                let advances = app
+                    .new_agent_dialog
+                    .as_ref()
+                    .is_some_and(|d| matches!(d.task_type, NewTaskType::Interactive));
+                if advances {
+                    if let Some(dialog) = app.new_agent_dialog.as_mut() {
+                        dialog.step = DialogStep::AgentOptions;
+                        dialog.field = 0;
+                    }
+                } else {
+                    launch_or_report(app);
+                }
+            }
+            _ => {
+                if let Some(dialog) = app.new_agent_dialog.as_mut() {
+                    handle_step1_key(dialog, code);
+                }
+            }
+        },
+        DialogStep::AgentOptions => match code {
+            KeyCode::Esc => {
+                if let Some(dialog) = app.new_agent_dialog.as_mut() {
+                    dialog.step = DialogStep::FolderAndKind;
+                    dialog.field = 0;
+                }
+            }
+            KeyCode::Enter if !modifiers.contains(KeyModifiers::SHIFT) => {
+                let sessions = app
+                    .db
+                    .get_resumable_sessions(RESUME_CANDIDATE_FETCH_LIMIT)
+                    .unwrap_or_default();
+                if let Some(dialog) = app.new_agent_dialog.as_mut() {
+                    mode_step::open_mode_step(dialog, sessions);
+                }
+            }
+            _ => {
+                if let Some(dialog) = app.new_agent_dialog.as_mut() {
+                    handle_step2_key(dialog, code);
+                }
+            }
+        },
+        DialogStep::Mode => {}
+    }
+    Ok(())
+}
+
+fn launch_or_report(app: &mut App) {
+    if let Err(e) = app.launch_new_agent() {
+        report_handler_error(app, "Could not open session", &e);
+        app.close_new_agent_dialog();
+    }
+}
+
+/// Step 1 (`FolderAndKind`): field 0 = Kind (Agent | Terminal), field 1 = Folder.
+fn handle_step1_key(dialog: &mut NewAgentDialog, code: KeyCode) {
+    match dialog.field {
+        0 => match code {
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') => toggle_create_kind(dialog),
+            KeyCode::Down | KeyCode::Tab => dialog.field = 1,
+            _ => {}
+        },
+        _ => {
+            let fields = DialogFields::from(dialog);
+            match code {
+                KeyCode::Up if dialog.dir_selected == 0 => dialog.field = 0,
+                KeyCode::BackTab => dialog.field = 0,
+                KeyCode::Tab => dialog.field = 0,
+                _ => handle_directory_field(dialog, code, fields, false),
+            }
+        }
+    }
+}
+
+fn toggle_create_kind(dialog: &mut NewAgentDialog) {
+    dialog.task_type = match dialog.task_type {
+        NewTaskType::Terminal => NewTaskType::Interactive,
+        _ => NewTaskType::Terminal,
+    };
+    dialog.refresh_dir_entries();
+}
+
+/// Step 2 (`AgentOptions`): field 0 = Harness, field 1 = Yolo, field 2 = Sandbox.
+fn handle_step2_key(dialog: &mut NewAgentDialog, code: KeyCode) {
+    match dialog.field {
+        0 => match code {
+            KeyCode::Char(' ') => dialog.open_cli_picker(),
+            KeyCode::Char(c) => {
+                dialog.open_cli_picker();
+                dialog.push_cli_picker_filter(c);
+            }
+            KeyCode::Left | KeyCode::Right => step_cli_selection(dialog, code == KeyCode::Right),
+            KeyCode::Down | KeyCode::Tab => dialog.field = 1,
+            _ => {}
+        },
+        1 => match code {
+            KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right
+                if dialog.selected_yolo_flag().is_some() =>
+            {
+                dialog.yolo_mode = !dialog.yolo_mode;
+            }
+            KeyCode::Up | KeyCode::BackTab => dialog.field = 0,
+            KeyCode::Down | KeyCode::Tab => dialog.field = 2,
+            _ => {}
+        },
+        _ => match code {
+            KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right => {
+                dialog.sandbox_mode = !dialog.sandbox_mode;
+            }
+            KeyCode::Up | KeyCode::BackTab => dialog.field = 1,
+            _ => {}
+        },
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1025,72 +1156,80 @@ mod tests {
         }
     }
 
-    /// FR 7: Enter on an Interactive create form opens the Mode step and
-    /// launches nothing.
+    /// Enter on Step 1 (Agent) opens Step 2 (`AgentOptions`); Enter on Step 2
+    /// opens Step 3 (`Mode`) without launching.
     #[test]
-    fn enter_on_interactive_form_opens_mode_step_without_launching() {
+    fn enter_on_step1_and_step2_advances_without_launching() {
         let mut app = app_with(interactive_form("/tmp/proj"));
 
         handle_dialog_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
+        assert_eq!(
+            app.new_agent_dialog.as_ref().unwrap().step,
+            DialogStep::AgentOptions
+        );
+        assert!(app.interactive_agents.is_empty());
 
+        handle_dialog_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
         let dialog = app.new_agent_dialog.as_ref().expect("form stays open");
         assert_eq!(dialog.step, DialogStep::Mode);
-        assert!(
-            app.launchpad_dialog.is_none(),
-            "the mission step must not open yet"
-        );
-        assert!(app.pending_launch_dialog.is_none());
+        assert!(app.launchpad_dialog.is_none());
         assert!(app.interactive_agents.is_empty(), "nothing launched");
     }
 
-    /// FR 7: Esc from the Mode step returns to the form with every value —
-    /// the directory above all — unchanged.
+    /// Esc from Step 3 returns to Step 2; Esc from Step 2 returns to Step 1
+    /// with directory and options preserved.
     #[test]
-    fn esc_from_mode_step_returns_to_form_with_directory_kept() {
+    fn esc_navigates_back_across_steps_keeping_state() {
         let mut form = interactive_form("/tmp/proj");
-        form.prompt = "keep me".to_string();
+        form.sandbox_mode = true;
         let mut app = app_with(form);
 
         handle_dialog_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
-        crate::tui::event::new_agent_mode_step::handle_mode_step_key(&mut app, KeyCode::Esc)
-            .unwrap();
-
-        let dialog = app.new_agent_dialog.as_ref().expect("still open");
-        assert_eq!(dialog.step, DialogStep::Form);
+        handle_dialog_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
         assert_eq!(
-            dialog.working_dir, "/tmp/proj",
-            "directory survives the round trip"
+            app.new_agent_dialog.as_ref().unwrap().step,
+            DialogStep::Mode
         );
-        assert_eq!(dialog.prompt, "keep me", "form values survive too");
+
+        handle_dialog_key(&mut app, KeyCode::Esc, KeyModifiers::NONE).unwrap();
+        assert_eq!(
+            app.new_agent_dialog.as_ref().unwrap().step,
+            DialogStep::AgentOptions
+        );
+
+        handle_dialog_key(&mut app, KeyCode::Esc, KeyModifiers::NONE).unwrap();
+        let dialog = app.new_agent_dialog.as_ref().expect("still open");
+        assert_eq!(dialog.step, DialogStep::FolderAndKind);
+        assert_eq!(dialog.working_dir, "/tmp/proj");
+        assert!(dialog.sandbox_mode);
     }
 
-    /// FR 3: New session continues to the mission step (launchpad) exactly
-    /// as today's Interactive create path does.
+    /// Step 3 `New` launches directly into the harness without opening the
+    /// prompt builder / launchpad dialog.
     #[test]
-    fn new_session_opens_the_launchpad() {
-        let mut app = app_with(interactive_form("/tmp/proj"));
-
-        handle_dialog_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
-
-        // FR 2: first Enter opens the Mode step — the form stays open.
-        {
-            let d = app
-                .new_agent_dialog
-                .as_ref()
-                .expect("form stays open as Mode step");
-            assert_eq!(d.step, DialogStep::Mode, "first Enter opens the Mode step");
-        }
+    fn new_session_on_step3_skips_launchpad() {
+        let mut form = interactive_form("/tmp/proj");
+        form.step = DialogStep::Mode;
+        let mut app = app_with(form);
 
         crate::tui::event::new_agent_mode_step::handle_mode_step_key(&mut app, KeyCode::Enter)
             .unwrap();
 
         assert!(
-            app.launchpad_dialog.is_some(),
-            "New session must open the mission step"
+            app.launchpad_dialog.is_none(),
+            "New session must not open the prompt builder / launchpad"
         );
-        assert!(app.pending_launch_dialog.is_some());
-        assert!(app.new_agent_dialog.is_none());
-        assert!(app.interactive_agents.is_empty(), "no session spawned yet");
+        assert!(app.pending_launch_dialog.is_none());
+    }
+
+    /// Background is absent from the Ctrl+N kind toggle on Step 1.
+    #[test]
+    fn step1_kind_toggle_never_selects_background() {
+        let mut d = interactive_form("/tmp/proj");
+        toggle_create_kind(&mut d);
+        assert!(matches!(d.task_type, NewTaskType::Terminal));
+        toggle_create_kind(&mut d);
+        assert!(matches!(d.task_type, NewTaskType::Interactive));
     }
 
     /// FR 7: two native sessions in the chosen dir and one in another dir
@@ -1201,5 +1340,40 @@ mod tests {
         d.task_type = NewTaskType::Interactive;
         d.edit_id = Some("agent-1".into());
         assert!(!mode_step::can_open_mode_step(&d), "edit mode skips it too");
+    }
+
+    #[test]
+    fn step1_terminal_enter_launches_immediately_and_saves_last_launch() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let work_dir = tempfile::tempdir().unwrap();
+        let work_str = work_dir.path().to_string_lossy().to_string();
+
+        let path = crate::test_support::temp_db_path();
+        let db = std::sync::Arc::new(crate::db::Database::new(&path).unwrap());
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
+
+        let mut d = NewAgentDialog::new(Some(&work_str));
+        d.task_type = NewTaskType::Terminal;
+        d.step = DialogStep::FolderAndKind;
+        app.new_agent_dialog = Some(d);
+
+        handle_dialog_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
+
+        assert!(
+            app.new_agent_dialog.is_none(),
+            "Terminal on Step 1 must launch immediately and close the dialog"
+        );
+        assert_eq!(app.cli_usage.last_launch.kind.as_deref(), Some("terminal"));
+        assert_eq!(
+            app.cli_usage.last_launch.workdir.as_deref(),
+            Some(work_str.as_str())
+        );
+        let reloaded = crate::domain::usage_stats::CliUsage::load(data_dir.path());
+        assert_eq!(reloaded.last_launch.kind.as_deref(), Some("terminal"));
     }
 }

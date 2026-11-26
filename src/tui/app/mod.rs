@@ -413,8 +413,33 @@ impl App {
     /// Record a CLI launch in usage stats and persist to disk.
     pub fn record_cli_usage(&mut self, cli_name: &str) {
         self.cli_usage.record(cli_name);
-        let _ =
-            dirs::home_dir().and_then(|h| self.cli_usage.save(&h.join(".canopy")).ok().map(|_| ()));
+        let _ = self.cli_usage.save(&self.data_dir);
+    }
+
+    /// Persist the Ctrl+N dialog's `last_launch` preferences (and `last_order`
+    /// when launching an agent) to `usage.toml` under `self.data_dir`.
+    pub fn record_last_launch(&mut self, dialog: &super::app::dialog::NewAgentDialog) {
+        let kind = match dialog.task_type {
+            super::app::dialog::NewTaskType::Terminal => "terminal",
+            _ => "agent",
+        };
+        self.cli_usage.last_launch = crate::domain::usage_stats::LastLaunchPrefs {
+            workdir: Some(dialog.working_dir.clone()),
+            kind: Some(kind.to_string()),
+            yolo: dialog.yolo_mode,
+            sandbox: dialog.sandbox_mode,
+        };
+        if matches!(
+            dialog.task_type,
+            super::app::dialog::NewTaskType::Interactive
+        ) {
+            self.cli_usage.last_order = dialog
+                .available_clis
+                .iter()
+                .map(|c| c.as_str().to_string())
+                .collect();
+        }
+        let _ = self.cli_usage.save(&self.data_dir);
     }
 
     pub fn toggle_enable(&self) -> Result<()> {

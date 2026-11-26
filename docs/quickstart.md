@@ -49,11 +49,12 @@ canopy
 Opens the full-screen **Canopy Hub**. Press `Ctrl+N` (or `n`) to create a
 new agent:
 
-- **Interactive** — a live PTY session with your chosen AI CLI.
-- **Background** — cron-scheduled or file-watcher-triggered.
+- **Agent** — a live PTY session with your chosen AI CLI.
 - **Terminal** — a raw shell session with per-session history.
 
-Choose the platform, model, and working directory for the session.
+Pick the working folder and kind (each preselected from last time), then
+— for an agent — the harness, yolo, and sandbox toggles, then New or
+Resume. Background work is started through graphs and the CLI instead.
 
 ## 4. Wire up your AI CLI via MCP
 

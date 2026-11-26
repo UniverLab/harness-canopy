@@ -188,3 +188,24 @@ fn selected_args_for_resume_choice_without_id_keeps_the_last_fallback() {
     let args = dialog.selected_args().expect("resume args");
     assert_eq!(args, "--provider echo resume --last");
 }
+
+#[test]
+fn new_with_usage_preselects_last_launch_prefs_and_respects_yolo_support() {
+    let usage = crate::domain::usage_stats::CliUsage {
+        last_launch: crate::domain::usage_stats::LastLaunchPrefs {
+            workdir: Some("/tmp/prev-dir".to_string()),
+            kind: Some("terminal".to_string()),
+            yolo: true,
+            sandbox: true,
+        },
+        ..Default::default()
+    };
+
+    let dialog = NewAgentDialog::new_with_usage(Some("/tmp/fallback"), &usage);
+    assert_eq!(dialog.step, DialogStep::FolderAndKind);
+    assert_eq!(dialog.working_dir, "/tmp/prev-dir");
+    assert!(matches!(dialog.task_type, NewTaskType::Terminal));
+    assert!(dialog.sandbox_mode);
+    // yolo_mode is true only when the top harness has yolo_flag configured
+    assert_eq!(dialog.yolo_mode, dialog.selected_yolo_flag().is_some());
+}

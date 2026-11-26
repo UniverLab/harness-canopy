@@ -8,6 +8,23 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
+/// Persisted choices from the last launch via the Ctrl+N dialog.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LastLaunchPrefs {
+    /// Working directory chosen last time.
+    #[serde(default)]
+    pub workdir: Option<String>,
+    /// Launch kind chosen last time (`"agent"` or `"terminal"`).
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Whether yolo mode was enabled last time.
+    #[serde(default)]
+    pub yolo: bool,
+    /// Whether sandbox mode was enabled last time.
+    #[serde(default)]
+    pub sandbox: bool,
+}
+
 /// Per-CLI launch counters.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CliUsage {
@@ -18,6 +35,15 @@ pub struct CliUsage {
     /// Map of harness name → RFC 3339 timestamp of its last recorded launch.
     #[serde(default)]
     pub last_used: HashMap<String, String>,
+    /// Map of harness name → RFC 3339 UTC timestamps of launches in the last 7 days.
+    #[serde(default)]
+    pub recent_launches: HashMap<String, Vec<String>>,
+    /// Last rendered harness order, updated whenever an agent is launched.
+    #[serde(default)]
+    pub last_order: Vec<String>,
+    /// Last choices from the Ctrl+N launch dialog.
+    #[serde(default)]
+    pub last_launch: LastLaunchPrefs,
 }
 
 /// Outcome of [`CliUsage::load_with_status`], distinguishing "nothing to
@@ -128,12 +154,121 @@ impl CliUsage {
 
     /// Increment the counter for a CLI by name, stamping its last-used time.
     pub fn record(&mut self, cli_name: &str) {
+        self.record_at(cli_name, chrono::Utc::now());
+    }
+
+    /// Record a launch at an explicit timestamp `now`, appending to
+    /// `recent_launches` and pruning timestamps older than 7 days (`now - 7d`).
+    pub fn record_at(&mut self, cli_name: &str, now: chrono::DateTime<chrono::Utc>) {
+        let ts = now.to_rfc3339();
         *self.counts.entry(cli_name.to_string()).or_insert(0) += 1;
-        self.last_used
-            .insert(cli_name.to_string(), chrono::Utc::now().to_rfc3339());
+        self.last_used.insert(cli_name.to_string(), ts.clone());
+        self.recent_launches
+            .entry(cli_name.to_string())
+            .or_default()
+            .push(ts);
+
+        let cutoff = now - chrono::Duration::days(7);
+        self.recent_launches.retain(|_, entries| {
+            entries.retain(|s| parse_rfc3339_utc(s).is_some_and(|dt| dt >= cutoff));
+            !entries.is_empty()
+        });
+    }
+
+    /// Deterministic harness ordering for the Ctrl+N agent options step:
+    /// 1. The harness with the most recent `last_used` timestamp.
+    /// 2. Other harnesses with >= 1 launch in the last 7 days (`>= now - 7d`),
+    ///    sorted by 7-day launch count descending (ties broken by `last_used`
+    ///    descending, then previous relative order).
+    /// 3. Remaining harnesses (0 launches in the last 7 days): keep their
+    ///    previous relative order from `last_order`, with any harness not yet
+    ///    in `last_order` appended in its `cfg` order.
+    pub fn ordered_clis(&self, cfg: &[String], now: chrono::DateTime<chrono::Utc>) -> Vec<String> {
+        let cutoff = now - chrono::Duration::days(7);
+        let top = cfg
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, cli)| {
+                self.last_used_at(cli)
+                    .map(|dt| (dt, self.prev_order_key(cli, idx), cli))
+            })
+            .max_by(|(dt_a, ord_a, _), (dt_b, ord_b, _)| {
+                dt_a.cmp(dt_b).then_with(|| ord_b.cmp(ord_a))
+            })
+            .map(|(_, _, cli)| cli.clone());
+
+        struct RecentCli {
+            count: usize,
+            last_used: Option<chrono::DateTime<chrono::Utc>>,
+            prev_order: (usize, usize),
+            cli: String,
+        }
+
+        let mut recent: Vec<RecentCli> = Vec::new();
+        let mut rest: Vec<((usize, usize), String)> = Vec::new();
+
+        for (idx, cli) in cfg.iter().enumerate() {
+            if top.as_deref() == Some(cli.as_str()) {
+                continue;
+            }
+            let ord = self.prev_order_key(cli, idx);
+            let count = self.recent_count(cli, cutoff);
+            if count > 0 {
+                recent.push(RecentCli {
+                    count,
+                    last_used: self.last_used_at(cli),
+                    prev_order: ord,
+                    cli: cli.clone(),
+                });
+            } else {
+                rest.push((ord, cli.clone()));
+            }
+        }
+
+        recent.sort_by(|a, b| {
+            b.count
+                .cmp(&a.count)
+                .then_with(|| b.last_used.cmp(&a.last_used))
+                .then_with(|| a.prev_order.cmp(&b.prev_order))
+        });
+        rest.sort_by_key(|a| a.0);
+
+        let mut result = Vec::with_capacity(cfg.len());
+        if let Some(first) = top {
+            result.push(first);
+        }
+        result.extend(recent.into_iter().map(|r| r.cli));
+        result.extend(rest.into_iter().map(|(_, cli)| cli));
+        result
+    }
+
+    fn recent_count(&self, cli: &str, cutoff: chrono::DateTime<chrono::Utc>) -> usize {
+        self.recent_launches
+            .get(cli)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter(|s| parse_rfc3339_utc(s).is_some_and(|dt| dt >= cutoff))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    fn last_used_at(&self, cli: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.last_used.get(cli).and_then(|s| parse_rfc3339_utc(s))
+    }
+
+    fn prev_order_key(&self, cli: &str, cfg_idx: usize) -> (usize, usize) {
+        let pos = self
+            .last_order
+            .iter()
+            .position(|item| item == cli)
+            .unwrap_or(usize::MAX);
+        (pos, cfg_idx)
     }
 
     /// Get the usage count for a CLI, defaulting to 0.
+    #[cfg(test)]
     pub fn get(&self, cli_name: &str) -> u64 {
         self.counts.get(cli_name).copied().unwrap_or(0)
     }
@@ -145,6 +280,13 @@ impl CliUsage {
         pairs.sort_by(|a, b| b.1.cmp(a.1));
         pairs
     }
+}
+
+/// Parse an RFC 3339 timestamp string into UTC.
+fn parse_rfc3339_utc(ts: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .ok()
+        .map(|dt| dt.with_timezone(&chrono::Utc))
 }
 
 /// Modification time of `path`, or `None` if it can't be read — treated as
@@ -651,5 +793,82 @@ mod tests {
             reloaded.first_run_at.as_deref(),
             Some("2024-01-01T00:00:00Z")
         );
+    }
+
+    #[test]
+    fn record_at_prunes_recent_launches_older_than_7_days() {
+        let mut usage = CliUsage::default();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-26T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let eight_days_ago = now - chrono::Duration::days(8);
+        let six_days_ago = now - chrono::Duration::days(6);
+
+        usage.record_at("claude", eight_days_ago);
+        usage.record_at("codex", six_days_ago);
+        usage.record_at("opencode", now);
+
+        assert!(
+            !usage.recent_launches.contains_key("claude"),
+            "entries older than 7d must be pruned"
+        );
+        assert_eq!(
+            usage.recent_launches.get("codex").map(Vec::len),
+            Some(1),
+            "6d-old launch must be retained"
+        );
+        assert_eq!(usage.recent_launches.get("opencode").map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn ordered_clis_places_last_used_first_then_7d_count_then_last_order() {
+        let mut usage = CliUsage::default();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-26T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        // `codex` launched 3 times in 7d, `kiro` launched 1 time most recently,
+        // `opencode` and `qwen` unused in 7d, `gemini` unseen in last_order.
+        usage.record_at("codex", now - chrono::Duration::days(3));
+        usage.record_at("codex", now - chrono::Duration::days(2));
+        usage.record_at("codex", now - chrono::Duration::days(1));
+        usage.record_at("kiro", now - chrono::Duration::hours(1));
+        usage.last_order = vec![
+            "qwen".into(),
+            "opencode".into(),
+            "kiro".into(),
+            "codex".into(),
+        ];
+
+        let cfg = vec![
+            "opencode".to_string(),
+            "kiro".to_string(),
+            "codex".to_string(),
+            "qwen".to_string(),
+            "gemini".to_string(),
+        ];
+
+        let ordered = usage.ordered_clis(&cfg, now);
+        assert_eq!(ordered, vec!["kiro", "codex", "qwen", "opencode", "gemini"]);
+    }
+
+    #[test]
+    fn last_launch_prefs_round_trips_via_usage_toml() {
+        let dir = TempDir::new().unwrap();
+        let usage = CliUsage {
+            last_launch: LastLaunchPrefs {
+                workdir: Some("/tmp/my-repo".to_string()),
+                kind: Some("terminal".to_string()),
+                yolo: true,
+                sandbox: true,
+            },
+            last_order: vec!["claude".into(), "codex".into()],
+            ..Default::default()
+        };
+        usage.save(dir.path()).unwrap();
+
+        let loaded = CliUsage::load(dir.path());
+        assert_eq!(loaded.last_launch, usage.last_launch);
+        assert_eq!(loaded.last_order, usage.last_order);
     }
 }

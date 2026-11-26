@@ -15,6 +15,7 @@ use crate::tui::ui::theme::Theme;
 mod fields;
 mod mode_step;
 mod pickers;
+mod steps;
 
 #[cfg(test)]
 use fields::prompt_visual_line_range;
@@ -103,33 +104,40 @@ impl PickerWindow {
     }
 }
 
-pub fn draw_new_agent_dialog(frame: &mut Frame, app: &App, theme: &Theme) {
+pub fn draw_new_agent_dialog(frame: &mut Frame, app: &mut App, theme: &Theme) {
     let Some(dialog) = &app.new_agent_dialog else {
+        app.last_new_agent_inner_rect = None;
         return;
     };
 
-    let lines = match dialog.step {
-        DialogStep::Mode => mode_step::build_dialog_lines(dialog, theme),
-        DialogStep::Form => {
-            let accent = theme.header_color;
-            let filtered_clis = dialog.filtered_cli_indices();
-            let field_width = prompt_field_width(frame.area());
-            let dir_visible = visible_dir_rows(
-                dialog,
-                accent,
-                &filtered_clis,
-                field_width,
-                theme,
-                frame.area(),
-            );
-            build_dialog_lines(
-                dialog,
-                accent,
-                &filtered_clis,
-                field_width,
-                theme,
-                dir_visible,
-            )
+    let lines = if dialog.is_edit_mode() {
+        let accent = theme.header_color;
+        let filtered_clis = dialog.filtered_cli_indices();
+        let field_width = prompt_field_width(frame.area());
+        let dir_visible = visible_dir_rows(
+            dialog,
+            accent,
+            &filtered_clis,
+            field_width,
+            theme,
+            frame.area(),
+        );
+        build_dialog_lines(
+            dialog,
+            accent,
+            &filtered_clis,
+            field_width,
+            theme,
+            dir_visible,
+        )
+    } else {
+        match dialog.step {
+            DialogStep::FolderAndKind => steps::build_step1_lines(dialog, theme, frame.area()),
+            DialogStep::AgentOptions => {
+                let filtered_clis = dialog.filtered_cli_indices();
+                steps::build_step2_lines(dialog, &filtered_clis, theme)
+            }
+            DialogStep::Mode => mode_step::build_dialog_lines(dialog, theme),
         }
     };
     let height = dialog_height(&lines, frame.area());
@@ -145,6 +153,7 @@ pub fn draw_new_agent_dialog(frame: &mut Frame, app: &App, theme: &Theme) {
         .style(Style::default().bg(theme.dialog_bg));
 
     let inner = block.inner(area);
+    app.last_new_agent_inner_rect = Some(inner);
     frame.render_widget(block, area);
     frame.render_widget(Paragraph::new(lines), inner);
 }
@@ -187,10 +196,9 @@ pub(super) fn visible_dir_rows(
 
 fn dialog_title(dialog: &NewAgentDialog) -> &'static str {
     if !dialog.is_edit_mode() {
-        // CT34: the dialog names the step it is showing; the Mode step is the
-        // New-or-Resume choice that follows the setup form.
         return match dialog.step {
-            DialogStep::Form => " New Session · Setup ",
+            DialogStep::FolderAndKind => " New Session · Folder & Kind ",
+            DialogStep::AgentOptions => " New Session · Agent Options ",
             DialogStep::Mode => " New Session · Mode ",
         };
     }
@@ -586,10 +594,12 @@ mod tests {
     }
 
     #[test]
-    fn dialog_title_names_the_setup_form_in_create_mode() {
+    fn dialog_title_names_each_step_in_create_mode() {
         let mut d = NewAgentDialog::new(Some("."));
         d.task_type = NewTaskType::Interactive;
-        assert_eq!(dialog_title(&d), " New Session · Setup ");
+        assert_eq!(dialog_title(&d), " New Session · Folder & Kind ");
+        d.step = DialogStep::AgentOptions;
+        assert_eq!(dialog_title(&d), " New Session · Agent Options ");
         d.step = DialogStep::Mode;
         assert_eq!(dialog_title(&d), " New Session · Mode ");
     }
@@ -1045,7 +1055,7 @@ mod tests {
     /// A rendered dialog row: its text, and the bg color of every cell.
     type RenderedRow = (String, Vec<Option<Color>>);
 
-    fn render_dialog(width: u16, height: u16, app: &App) -> Vec<RenderedRow> {
+    fn render_dialog(width: u16, height: u16, app: &mut App) -> Vec<RenderedRow> {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         let theme = Theme::classic();
@@ -1074,7 +1084,7 @@ mod tests {
             .join("\n")
     }
 
-    fn cell_grid(width: u16, height: u16, app: &App) -> Vec<Vec<(Color, Color)>> {
+    fn cell_grid(width: u16, height: u16, app: &mut App) -> Vec<Vec<(Color, Color)>> {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         let theme = Theme::classic();
@@ -1116,8 +1126,8 @@ mod tests {
         let names = ["Academic", "Projects", "bin", "go", "nltk_data", "temp"];
         let root = root_with_dirs(&names);
         let dialog = NewAgentDialog::new(Some(root.path().to_string_lossy().as_ref()));
-        let app = app_with_dialog(dialog);
-        let rows = render_dialog(200, 50, &app);
+        let mut app = app_with_dialog(dialog);
+        let rows = render_dialog(200, 50, &mut app);
         let text = join_rows(&rows);
         for n in names {
             assert!(
@@ -1140,8 +1150,8 @@ mod tests {
         // 9× ↓ from 0: the list handler ends in selection index 9.
         dialog.dir_selected = 9;
         let accent = Theme::classic().header_color;
-        let app = app_with_dialog(dialog);
-        let rows = render_dialog(200, 50, &app);
+        let mut app = app_with_dialog(dialog);
+        let rows = render_dialog(200, 50, &mut app);
         let text = join_rows(&rows);
         assert!(
             text.contains("dir09/"),
@@ -1168,8 +1178,8 @@ mod tests {
         let root = root_with_dirs(&refs);
         let mut dialog = NewAgentDialog::new(Some(root.path().to_string_lossy().as_ref()));
         dialog.dir_selected = 5; // selection must stay on a drawn row even at the floor
-        let app = app_with_dialog(dialog);
-        let rows = render_dialog(200, 24, &app);
+        let mut app = app_with_dialog(dialog);
+        let rows = render_dialog(200, 24, &mut app);
         let text = join_rows(&rows);
         // 200x24 fits exactly: 15 chrome lines + filter + 3 entries + footer + blank
         // + help = 22 content lines, +2 borders = 24 (visible_dir_rows shrinks 10→3).
@@ -1196,8 +1206,8 @@ mod tests {
         let root = root_with_dirs(&["alpha", "bravo"]);
         let mut dialog = NewAgentDialog::new(Some(root.path().to_string_lossy().as_ref()));
         dialog.cli_picker_open = true; // the harness picker's filter row shares the glyph
-        let app = app_with_dialog(dialog);
-        let text = join_rows(&render_dialog(200, 50, &app));
+        let mut app = app_with_dialog(dialog);
+        let text = join_rows(&render_dialog(200, 50, &mut app));
         assert!(
             !text.contains('📁'),
             "no folder emoji may be rendered: {text}"
@@ -1225,16 +1235,17 @@ mod tests {
         })];
         dialog.cli_index = 0;
         dialog.cli_picker_open = true;
-        dialog.field = FieldLayout::for_task(dialog.task_type).cli; // harness focused: name fills with its accent
+        dialog.step = DialogStep::AgentOptions;
+        dialog.field = 0; // harness focused: name fills with its accent
         let label = dialog.cli_display_label(0);
-        let app = app_with_dialog(dialog);
+        let mut app = app_with_dialog(dialog);
         let theme = Theme::classic();
         let header = theme.header_color;
         let harness = Color::Rgb(255, 0, 0);
         assert_ne!(harness, header);
 
-        let rows = render_dialog(200, 50, &app);
-        let grid = cell_grid(200, 50, &app);
+        let rows = render_dialog(200, 50, &mut app);
+        let grid = cell_grid(200, 50, &mut app);
         const BOX_GLYPHS: [char; 11] = ['┌', '┐', '└', '┘', '─', '│', '├', '┤', '┬', '┴', '┼'];
 
         let mut border_cells = 0;

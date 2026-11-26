@@ -29,6 +29,7 @@ pub struct LaunchpadDialog {
 }
 
 impl LaunchpadDialog {
+    #[allow(dead_code)]
     pub fn for_workdir(db: &Database, workdir: &str) -> Result<Self> {
         let nodes = db.search_operational_sessions(workdir, 50)?;
         let mut recent_missions: Vec<LaunchpadContext> = Vec::new();

@@ -173,6 +173,8 @@ fn draw_confirm_dialogs(frame: &mut Frame, app: &App, theme: &Theme) {
 fn draw_modal_dialogs(frame: &mut Frame, app: &mut App, theme: &Theme) {
     if app.new_agent_dialog.is_some() {
         dialogs::draw_new_agent_dialog(frame, app, theme);
+    } else {
+        app.last_new_agent_inner_rect = None;
     }
 
     if app.launchpad_dialog.is_some() {

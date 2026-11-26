@@ -94,7 +94,10 @@ pub(super) fn handle_mouse(app: &mut App, mouse: MouseEvent) -> Result<()> {
         handle_prompt_dialog_mouse(app, &mouse);
         return Ok(());
     }
-
+    if app.focus == Focus::NewAgentDialog {
+        super::new_agent_mouse::handle_new_agent_dialog_mouse(app, &mouse);
+        return Ok(());
+    }
     // The F5 menu is modal while open; the tab strip (when drawn) claims
     // its own clicks ahead of the PTY so a click inserts instead of typing.
     if crate::tui::app::dialog::quick_menu::handle_quick_menu_mouse(app, &mouse) {

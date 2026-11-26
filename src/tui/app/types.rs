@@ -62,6 +62,7 @@ pub enum Focus {
     Home,
     Preview,
     NewAgentDialog,
+    #[allow(dead_code)]
     LaunchpadDialog,
     KnowledgeDialog,
     KnowledgeViewer,
@@ -518,6 +519,8 @@ pub struct App {
     /// Last-rendered rect of the Graph face's content (the whole face — it
     /// isn't sub-divided).
     pub(crate) last_graph_face_rect: Option<ratatui::layout::Rect>,
+    /// Last-rendered inner rect of the Ctrl+N `NewAgentDialog` (for mouse hit-testing).
+    pub(crate) last_new_agent_inner_rect: Option<ratatui::layout::Rect>,
     /// Wheel-scroll offset (lines) for the right panel's Graph face. Own
     /// field, NOT shared with the main preview pane's
     /// `graph_live_view_scroll` — see design note in canopy-design.md: the

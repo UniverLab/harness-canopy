@@ -56,8 +56,14 @@ fn list_open(dialog: &NewAgentDialog) -> bool {
 /// step (FR 4). Esc just closes the list, back on the choice.
 fn list_key(dialog: &mut NewAgentDialog, code: KeyCode) -> bool {
     if matches!(code, KeyCode::Enter) {
-        if dialog.session_resume_picker.is_some() {
-            confirm_session_resume_picker(dialog);
+        if let Some(picker) = dialog.session_resume_picker.as_ref() {
+            if picker.is_other_selected() {
+                dialog.session_resume_picker = None;
+                dialog.selected_resume_session = None;
+                dialog.selected_session = None;
+            } else {
+                confirm_session_resume_picker(dialog);
+            }
         } else {
             dialog.confirm_session_pick();
         }
@@ -73,8 +79,8 @@ fn list_key(dialog: &mut NewAgentDialog, code: KeyCode) -> bool {
     false
 }
 
-/// The New/Resume choice itself: ↑↓ move, Enter confirm, Esc back to the
-/// form — with every form value kept (FR 2).
+/// The New/Resume choice itself: ↑↓ move, Enter confirm, Esc back to Step 2
+/// (`AgentOptions`) — with every choice kept.
 fn choice_key(dialog: &mut NewAgentDialog, code: KeyCode) -> bool {
     match code {
         KeyCode::Up => {
@@ -86,12 +92,12 @@ fn choice_key(dialog: &mut NewAgentDialog, code: KeyCode) -> bool {
             false
         }
         KeyCode::Esc => {
-            dialog.step = DialogStep::Form;
+            dialog.step = DialogStep::AgentOptions;
+            dialog.field = 0;
             false
         }
         KeyCode::Enter if dialog.mode_index == NEW_ROW => {
-            // New session: exactly today's Interactive create path (FR 3).
-            dialog.step = DialogStep::Form;
+            // New session: launches straight into the harness without prompt builder.
             dialog.task_mode = NewTaskMode::Interactive;
             true
         }
@@ -105,14 +111,25 @@ fn move_mode_index(dialog: &mut NewAgentDialog, forward: bool) {
         crate::tui::selection::move_index(dialog.mode_index, MODE_ROW_COUNT, forward);
 }
 
-/// Resume: show the sessions that apply to the form's harness and directory
-/// — the CLI's own list when the harness has a `session_list_cmd`, the
-/// native candidates otherwise (FR 4). With nothing to resume this is a
-/// no-op; `New session` stays selectable (FR 5). The dialog is marked
-/// `Resume` only once a session is actually confirmed (FR 4).
-fn open_resume_list(dialog: &mut NewAgentDialog) -> bool {
+/// Resume: when the harness supports `session_resume_cmd`, list up to 20
+/// finished sessions for `(harness, working_dir)` followed by `"other…"`
+/// (`resume_args`). For harnesses without `session_resume_cmd`, keep today's
+/// resume behaviour because conversation ids cannot be captured.
+pub(crate) fn open_resume_list(dialog: &mut NewAgentDialog) -> bool {
     dialog.reset_resume_choice();
 
+    if dialog.has_session_resume_cmd() {
+        let sessions = dialog
+            .mode_candidates
+            .iter()
+            .map(crate::tui::app::session_resume::ResumableSession::from)
+            .collect();
+        dialog.session_resume_picker = Some(SessionResumePicker::with_other(sessions));
+        return false;
+    }
+
+    // Harnesses without `session_resume_cmd` cannot capture/resume a specific
+    // conversation id, so keep today's resume behaviour.
     if dialog.has_cli_session_list() {
         // `open_session_picker` only opens when the CLI listed something.
         dialog.open_session_picker();
@@ -196,9 +213,46 @@ mod tests {
     #[test]
     fn new_session_choice_returns_true_without_touching_resume_state() {
         let mut d = dialog_with_cli();
+        d.step = DialogStep::Mode;
         assert!(choice_key(&mut d, KeyCode::Enter));
-        assert_eq!(d.step, DialogStep::Form);
+        assert_eq!(d.step, DialogStep::Mode);
         assert_eq!(d.task_mode, NewTaskMode::Interactive);
+        assert!(d.selected_resume_session.is_none());
+    }
+
+    #[test]
+    fn esc_from_mode_step_returns_to_agent_options() {
+        let mut d = dialog_with_cli();
+        d.step = DialogStep::Mode;
+        assert!(!choice_key(&mut d, KeyCode::Esc));
+        assert_eq!(d.step, DialogStep::AgentOptions);
+    }
+
+    #[test]
+    fn other_entry_in_resume_picker_clears_specific_session_and_launches() {
+        let mut d = dialog_with_cli();
+        d.cli_configs[0] = Some(crate::domain::cli_config::CliConfig {
+            name: "claude".into(),
+            binary: "claude".into(),
+            session_resume_cmd: Some("--resume".into()),
+            resume_args: Some("--continue".into()),
+            ..Default::default()
+        });
+        crate::tui::app::dialog::new_agent::mode_step::open_mode_step(
+            &mut d,
+            vec![session("s1", "claude", "/tmp/proj")],
+        );
+        d.mode_index = RESUME_ROW;
+        assert!(!choice_key(&mut d, KeyCode::Enter));
+        let picker = d.session_resume_picker.as_mut().unwrap();
+        assert!(picker.allow_other);
+        assert_eq!(picker.total_rows(), 2);
+        // Move to "other…"
+        picker.move_selection(true, 6);
+        assert!(picker.is_other_selected());
+
+        assert!(list_key(&mut d, KeyCode::Enter));
+        assert_eq!(d.task_mode, NewTaskMode::Resume);
         assert!(d.selected_resume_session.is_none());
     }
 }

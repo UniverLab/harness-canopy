@@ -35,13 +35,17 @@ pub enum NewTaskMode {
     Resume,
 }
 
-/// Which screen of the new-session dialog is on show (CT34). The Mode step
-/// follows a confirmed Interactive create-mode form and asks New or Resume.
+/// Which screen of the new-session dialog is on show (at most 3 steps):
+/// Step 1 (`FolderAndKind`): working folder and Agent/Terminal.
+/// Step 2 (`AgentOptions`): harness, yolo, and sandbox (agent only).
+/// Step 3 (`Mode`): New session or Resume a session (agent only).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DialogStep {
-    /// The form: type, harness, directory and the rest.
-    Form,
-    /// The New session / Resume a session choice after the form.
+    /// Step 1: folder and kind (Agent or Terminal).
+    FolderAndKind,
+    /// Step 2 (agent only): harness, yolo, and sandbox.
+    AgentOptions,
+    /// Step 3 (agent only): New session or Resume a session.
     Mode,
 }
 
@@ -128,12 +132,32 @@ pub struct NewAgentDialog {
 
 impl NewAgentDialog {
     pub fn new(start_dir: Option<&str>) -> Self {
-        let (available, configs) = available_clis_for_catalog();
-        let cwd = start_dir.map(|s| s.to_string()).unwrap_or_else(|| {
+        Self::new_with_usage(start_dir, &crate::domain::usage_stats::CliUsage::default())
+    }
+
+    /// Construct the Ctrl+N dialog preselecting `usage.last_launch` preferences
+    /// and ordering harnesses deterministically via `usage.ordered_clis`.
+    pub fn new_with_usage(
+        start_dir: Option<&str>,
+        usage: &crate::domain::usage_stats::CliUsage,
+    ) -> Self {
+        let (available, configs) = available_clis_for_catalog_with_usage(usage);
+        let fallback_dir = start_dir.map(|s| s.to_string()).unwrap_or_else(|| {
             std::env::current_dir()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_default()
         });
+        let cwd = usage
+            .last_launch
+            .workdir
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string)
+            .unwrap_or(fallback_dir);
+        let task_type = match usage.last_launch.kind.as_deref() {
+            Some("terminal") => NewTaskType::Terminal,
+            _ => NewTaskType::Interactive,
+        };
         let catalog_ttl = dirs::home_dir()
             .map(|home| {
                 crate::domain::canopy_config::CanopyConfig::load(&home.join(".canopy"))
@@ -144,9 +168,9 @@ impl NewAgentDialog {
         let catalog = models_db::load_catalog_nonblocking(catalog_ttl);
         let mut dialog = Self {
             edit_id: None,
-            task_type: NewTaskType::Interactive,
+            task_type,
             task_mode: NewTaskMode::Interactive,
-            step: DialogStep::Form,
+            step: DialogStep::FolderAndKind,
             mode_index: 0,
             mode_candidates: Vec::new(),
             background_trigger: BackgroundTrigger::Cron,
@@ -163,7 +187,7 @@ impl NewAgentDialog {
             watch_events: vec!["create".to_string(), "modify".to_string()],
             available_shells: detect_available_shells(),
             shell_index: 0,
-            field: 1,
+            field: 0,
             dir_entries: Vec::new(),
             dir_selected: 0,
             dir_scroll: 0,
@@ -184,11 +208,12 @@ impl NewAgentDialog {
             session_resume_picker: None,
             selected_resume_session: None,
             yolo_mode: false,
-            sandbox_mode: false,
+            sandbox_mode: usage.last_launch.sandbox,
             background_action: super::background_action::BackgroundAction::Headless,
             send_target_idx: 0,
             send_target_names: Vec::new(),
         };
+        dialog.yolo_mode = usage.last_launch.yolo && dialog.selected_yolo_flag().is_some();
         dialog.refresh_dir_entries();
         dialog.refresh_model_suggestions();
         dialog
@@ -202,11 +227,9 @@ impl NewAgentDialog {
             .unwrap_or("bash")
     }
 
-    fn load_available_clis() -> (Vec<Cli>, Vec<Option<crate::domain::cli_config::CliConfig>>) {
-        let usage = dirs::home_dir()
-            .map(|h| crate::domain::usage_stats::CliUsage::load(&h.join(".canopy")))
-            .unwrap_or_default();
-
+    fn load_available_clis_with_usage(
+        usage: &crate::domain::usage_stats::CliUsage,
+    ) -> (Vec<Cli>, Vec<Option<crate::domain::cli_config::CliConfig>>) {
         // Try configured CLIs first; fall back to auto-detected ones.
         let pairs = Self::configured_cli_pairs().unwrap_or_else(|| {
             Cli::detect_available()
@@ -214,7 +237,7 @@ impl NewAgentDialog {
                 .map(|cli| (cli, None))
                 .collect()
         });
-        Self::sort_clis_by_usage(pairs, &usage)
+        Self::sort_clis_by_usage(pairs, usage)
     }
 
     fn configured_cli_pairs() -> Option<Vec<(Cli, Option<crate::domain::cli_config::CliConfig>)>> {
@@ -239,17 +262,21 @@ impl NewAgentDialog {
         }
     }
 
-    /// Sort CLI-config pairs by usage count descending (most-used first).
+    /// Sort CLI-config pairs deterministically using [`CliUsage::ordered_clis`].
     fn sort_clis_by_usage(
         mut pairs: Vec<(Cli, Option<crate::domain::cli_config::CliConfig>)>,
         usage: &crate::domain::usage_stats::CliUsage,
     ) -> (Vec<Cli>, Vec<Option<crate::domain::cli_config::CliConfig>>) {
-        pairs.sort_by(|a, b| {
-            let count_a = usage.get(a.0.as_str());
-            let count_b = usage.get(b.0.as_str());
-            count_b.cmp(&count_a)
-        });
-        pairs.into_iter().unzip()
+        let cfg_slugs: Vec<String> = pairs.iter().map(|(c, _)| c.as_str().to_string()).collect();
+        let ordered = usage.ordered_clis(&cfg_slugs, chrono::Utc::now());
+        let mut sorted = Vec::with_capacity(pairs.len());
+        for slug in ordered {
+            if let Some(pos) = pairs.iter().position(|(c, _)| c.as_str() == slug) {
+                sorted.push(pairs.remove(pos));
+            }
+        }
+        sorted.extend(pairs);
+        sorted.into_iter().unzip()
     }
 
     pub fn selected_cli(&self) -> Cli {
@@ -332,6 +359,16 @@ impl NewAgentDialog {
     /// Returns true when the current CLI has no dedicated resume_args configured.
     pub fn is_edit_mode(&self) -> bool {
         self.edit_id.is_some()
+    }
+
+    /// Returns true when the current CLI has a `session_resume_cmd` configured
+    /// so individual conversations can be resumed directly by recorded id.
+    pub fn has_session_resume_cmd(&self) -> bool {
+        self.cli_configs
+            .get(self.cli_index)
+            .and_then(|c| c.as_ref())
+            .and_then(|c| c.session_resume_cmd.as_deref())
+            .is_some_and(|cmd| !cmd.trim().is_empty())
     }
 
     /// Returns true when the current CLI has a dedicated session list command
@@ -574,11 +611,20 @@ impl NewAgentDialog {
 }
 
 /// The New dialog's CLI list with configs, for the hub catalog: configured
-/// CLIs (or auto-detected ones), most-used first — with the same three
-/// fallback slugs the dialog shows when nothing is detected.
+/// CLIs (or auto-detected ones), ordered with `usage.toml` — with the same
+/// three fallback slugs the dialog shows when nothing is detected.
 pub(crate) fn available_clis_for_catalog(
 ) -> (Vec<Cli>, Vec<Option<crate::domain::cli_config::CliConfig>>) {
-    let (available, configs) = NewAgentDialog::load_available_clis();
+    let usage = dirs::home_dir()
+        .map(|h| crate::domain::usage_stats::CliUsage::load(&h.join(".canopy")))
+        .unwrap_or_default();
+    available_clis_for_catalog_with_usage(&usage)
+}
+
+pub(crate) fn available_clis_for_catalog_with_usage(
+    usage: &crate::domain::usage_stats::CliUsage,
+) -> (Vec<Cli>, Vec<Option<crate::domain::cli_config::CliConfig>>) {
+    let (available, configs) = NewAgentDialog::load_available_clis_with_usage(usage);
     if available.is_empty() {
         (
             vec![Cli::new("opencode"), Cli::new("kiro"), Cli::new("qwen")],

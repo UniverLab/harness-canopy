@@ -52,7 +52,7 @@ impl App {
             _ => None,
         });
 
-        let mut dialog = NewAgentDialog::new(agent_dir);
+        let mut dialog = NewAgentDialog::new_with_usage(agent_dir, &self.cli_usage);
         dialog.send_target_names = NewAgentDialog::send_target_names(&self.session_names());
         dialog.prev_focus = Some(prev_focus);
         self.new_agent_dialog = Some(dialog);

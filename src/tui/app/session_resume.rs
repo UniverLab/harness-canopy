@@ -82,6 +82,9 @@ pub(crate) struct SessionResumePicker {
     pub sessions: Vec<ResumableSession>,
     pub index: usize,
     pub scroll: usize,
+    /// When true, a final `"other…"` row follows `sessions` to open the
+    /// harness's own resume picker (`resume_args`).
+    pub allow_other: bool,
 }
 
 impl SessionResumePicker {
@@ -90,14 +93,32 @@ impl SessionResumePicker {
             sessions,
             index: 0,
             scroll: 0,
+            allow_other: false,
         }
+    }
+
+    pub fn with_other(sessions: Vec<ResumableSession>) -> Self {
+        Self {
+            sessions,
+            index: 0,
+            scroll: 0,
+            allow_other: true,
+        }
+    }
+
+    pub fn total_rows(&self) -> usize {
+        self.sessions.len() + usize::from(self.allow_other)
+    }
+
+    pub fn is_other_selected(&self) -> bool {
+        self.allow_other && self.index == self.sessions.len()
     }
 
     pub fn move_selection(&mut self, forward: bool, visible_rows: usize) {
         let (index, scroll) = crate::tui::selection::move_selection(
             self.index,
             self.scroll,
-            self.sessions.len(),
+            self.total_rows(),
             visible_rows,
             forward,
         );
