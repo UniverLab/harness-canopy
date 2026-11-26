@@ -15,6 +15,8 @@ mod source;
 pub use source::GitSource;
 pub use source::SkillFetchError;
 
+pub(crate) use metadata::METADATA_FILE;
+
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use metadata::SkillMetadata;

@@ -108,11 +108,38 @@ pub fn run_install() -> Vec<String> {
 
 /// Install into the harnesses recorded in `home/.canopy`'s registry
 /// baseline. Split out so tests run against a temp home instead of the
-/// real one.
+/// real one. Also runs the legacy-copy cleanup, so `canopy update` (which
+/// refreshes via `skill install`) cleans up too.
 fn run_install_in(home: &Path) -> Vec<String> {
+    match crate::skills_module::cleanup::GithubCatalogSource::new() {
+        Ok(source) => run_install_in_with(home, false, &source),
+        Err(error) => {
+            tracing::warn!("Skills cleanup skipped: {error}");
+            let baseline =
+                crate::domain::registry_baseline::RegistryBaseline::load(&home.join(".canopy"))
+                    .unwrap_or_default();
+            crate::skills_module::install_for_home(home, &baseline.platforms, false)
+        }
+    }
+}
+
+/// Injectable form of [`run_install_in`]: the catalog source is explicit so
+/// tests run the install-plus-cleanup path with a fixture and no network.
+pub(crate) fn run_install_in_with(
+    home: &Path,
+    force: bool,
+    source: &dyn crate::skills_module::cleanup::CatalogSource,
+) -> Vec<String> {
     let baseline = crate::domain::registry_baseline::RegistryBaseline::load(&home.join(".canopy"))
         .unwrap_or_default();
-    crate::skills_module::install_for_home(home, &baseline.platforms, false)
+    let mut lines = crate::skills_module::install_for_home(home, &baseline.platforms, false);
+    lines.extend(crate::skills_module::cleanup::run_skills_cleanup(
+        home,
+        &baseline.platforms,
+        force,
+        source,
+    ));
+    lines
 }
 
 /// Print a skill to `out` (diagnostics to `err`). Returns the process exit
@@ -624,6 +651,22 @@ mod tests {
         assert!(text.contains("canopy skill list"));
     }
 
+    fn empty_catalog() -> crate::skills_module::cleanup::FixtureCatalog {
+        crate::skills_module::cleanup::FixtureCatalog {
+            top: Some(Vec::new()),
+            skills: std::collections::HashMap::new(),
+            bytes: std::collections::HashMap::new(),
+        }
+    }
+
+    fn cleanup_tail() -> Vec<String> {
+        vec![
+            "skills cleanup: removed 0 symlinks".to_string(),
+            "skills cleanup: removed 0 skill copies, kept 0".to_string(),
+            "skills cleanup: removed 0 old store skills".to_string(),
+        ]
+    }
+
     #[test]
     fn install_writes_baseline_harnesses_and_reports_status() {
         use crate::domain::registry_baseline::RegistryBaseline;
@@ -649,9 +692,14 @@ mod tests {
         };
         baseline.save(&home.path().join(".canopy")).unwrap();
 
+        let mut expected = vec![
+            "alpha: installed".to_string(),
+            "beta: installed".to_string(),
+        ];
+        expected.extend(cleanup_tail());
         assert_eq!(
-            run_install_in(home.path()),
-            vec!["alpha: installed", "beta: installed"]
+            run_install_in_with(home.path(), false, &empty_catalog()),
+            expected
         );
         for harness in ["alpha", "beta"] {
             let path = home
@@ -662,10 +710,44 @@ mod tests {
                 .join("SKILL.md");
             assert!(path.is_file() && !path.is_symlink());
         }
+        let mut expected = vec!["alpha: current".to_string(), "beta: current".to_string()];
+        expected.extend(cleanup_tail());
         assert_eq!(
-            run_install_in(home.path()),
-            vec!["alpha: current", "beta: current"]
+            run_install_in_with(home.path(), false, &empty_catalog()),
+            expected
         );
+    }
+
+    #[test]
+    fn install_also_removes_legacy_harness_symlink() {
+        use crate::domain::registry_baseline::RegistryBaseline;
+
+        let home = TempDir::new().unwrap();
+        let harness = home.path().join("alpha/.skills");
+        std::fs::create_dir_all(&harness).unwrap();
+        let global = home.path().join(".agents/skills/legacy");
+        std::fs::create_dir_all(&global).unwrap();
+        std::os::unix::fs::symlink(&global, harness.join("legacy")).unwrap();
+        let baseline = RegistryBaseline {
+            clis: Vec::new(),
+            platforms: vec![serde_json::from_value::<crate::setup_module::Platform>(
+                serde_json::json!({
+                    "name": "alpha",
+                    "config_path": ".config/test",
+                    "mcp_servers_key": [],
+                    "skills_dir": "alpha/.skills",
+                }),
+            )
+            .unwrap()],
+        };
+        baseline.save(&home.path().join(".canopy")).unwrap();
+
+        let lines = run_install_in_with(home.path(), false, &empty_catalog());
+
+        assert!(!harness.join("legacy").is_symlink());
+        assert!(lines
+            .iter()
+            .any(|line| line == "skills cleanup: removed 1 symlinks"));
     }
 
     #[test]

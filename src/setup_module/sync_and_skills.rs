@@ -53,37 +53,16 @@ fn report_migration_results(home: &Path, selected: &[&Platform]) {
     }
 }
 
-/// Download the UniverLab Essential Skills pack and create platform symlinks.
-///
-/// Runs silently on failure so a network error never blocks setup completion.
-///
-/// Local files that diverge from the incoming sync content are never
-/// overwritten (a WARN is logged and left as `.sync-new`) unless
-/// `force_skills` is set — see `skills_module::sync_policy`.
+/// Refresh the embedded `canopy` skill and remove skill copies earlier
+/// versions installed (harness symlinks, Essential Pack directories, the
+/// old MCP store). Runs best-effort so a network error never blocks setup
+/// completion. `force_skills` also removes copies whose local content was
+/// edited; without it, edited copies are kept.
 pub(crate) fn run_essential_skills_step(
     home: &Path,
     selected: &[&Platform],
     force_skills: bool,
 ) -> String {
-    // Ensure global skills directory exists
-    if crate::skills_module::ensure_global_skills_dir().is_err() {
-        return "\x1b[33m⚠\x1b[0m Skills: could not create ~/.agents/skills/".to_string();
-    }
-
-    // Download Essential Pack from GitHub (best-effort)
-    let downloaded =
-        crate::skills_module::download_essential_pack(force_skills).unwrap_or_else(|e| {
-            tracing::warn!("Essential skills download failed: {e}");
-            0
-        });
-
-    // Create platform symlinks for all selected platforms that have skills_dir
-    let symlinks =
-        crate::skills_module::create_platform_symlinks(home, selected).unwrap_or_else(|e| {
-            tracing::warn!("Skills symlink creation failed: {e}");
-            vec![]
-        });
-
     // Write the embedded `canopy` skill into the configured harnesses
     // in-process (same function `canopy skill install` runs later).
     let owned: Vec<Platform> = selected.iter().map(|p| (*p).clone()).collect();
@@ -91,30 +70,19 @@ pub(crate) fn run_essential_skills_step(
         tracing::info!("canopy skill: {line}");
     }
 
-    if downloaded == 0 && symlinks.is_empty() {
-        // Check if we actually have any skills installed
-        let global_dir = dirs::home_dir()
-            .map(|h| h.join(".agents/skills"))
-            .unwrap_or_default();
-        let has_skills = global_dir.exists()
-            && std::fs::read_dir(&global_dir)
-                .map(|mut d| d.next().is_some())
-                .unwrap_or(false);
-        if has_skills {
-            "\x1b[32m✓\x1b[0m Skills: up to date".to_string()
-        } else {
-            "\x1b[33m⚠\x1b[0m Skills: no packs available (repo not found)".to_string()
+    match crate::skills_module::cleanup::GithubCatalogSource::new() {
+        Ok(source) => {
+            for line in crate::skills_module::cleanup::run_skills_cleanup(
+                home,
+                &owned,
+                force_skills,
+                &source,
+            ) {
+                println!("{line}");
+            }
         }
-    } else if downloaded > 0 {
-        format!(
-            "\x1b[32m✓\x1b[0m Skills: {} pack(s) downloaded, {} symlink(s) created",
-            downloaded,
-            symlinks.len()
-        )
-    } else {
-        format!(
-            "\x1b[32m✓\x1b[0m Skills: {} symlink(s) created",
-            symlinks.len()
-        )
+        Err(error) => tracing::warn!("Skills cleanup skipped: {error}"),
     }
+
+    "\x1b[32m✓\x1b[0m Skills: legacy copies cleaned".to_string()
 }

@@ -13,7 +13,7 @@ pub struct UninstallPlan {
     pub service: ServicePlan,
     pub canopy_dir: PathBuf,
     pub platform_edits: Vec<PlatformEdit>,
-    pub skills_symlinks: Vec<PathBuf>,
+    pub canopy_dirs: Vec<PathBuf>,
     pub user_instruction_files: Vec<PathBuf>,
     pub daemon_running: bool,
     pub agents_skills_dir: PathBuf,
@@ -121,14 +121,14 @@ pub fn build_uninstall_plan_with_home(
     let (port_pid, orphan_pid) = detect_uninstall_orphan();
     let daemon_running = check_daemon_running(&canopy_dir)
         || port_pid.is_some_and(crate::daemon::process::is_process_running);
-    let skills_symlinks = collect_skills_symlinks(&registry.platforms, home, &agents_skills_dir);
+    let canopy_dirs = collect_canopy_dirs(&registry.platforms, home);
     let user_instruction_files = collect_user_instruction_files(&registry.platforms, home);
 
     Ok(UninstallPlan {
         service,
         canopy_dir,
         platform_edits,
-        skills_symlinks,
+        canopy_dirs,
         user_instruction_files,
         daemon_running,
         agents_skills_dir,
@@ -213,30 +213,23 @@ fn check_daemon_running(canopy_dir: &Path) -> bool {
     false
 }
 
-fn collect_skills_symlinks(
-    platforms: &[Platform],
-    home: &Path,
-    agents_skills_dir: &Path,
-) -> Vec<PathBuf> {
-    let mut symlinks = Vec::new();
+/// Every harness's installed `canopy` skill directory. Setup and
+/// `canopy skill install` write it as a regular directory, so uninstall
+/// removes the whole directory instead of the Essential Pack symlinks it
+/// used to list.
+fn collect_canopy_dirs(platforms: &[Platform], home: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
     for platform in platforms {
         let Some(ref skills_dir_rel) = platform.skills_dir else {
             continue;
         };
-        let skills_dir = home.join(skills_dir_rel);
-        if !skills_dir.is_dir() {
-            continue;
-        }
-        if let Ok(entries) = std::fs::read_dir(&skills_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if is_symlink_pointing_into(&path, agents_skills_dir) {
-                    symlinks.push(path);
-                }
-            }
+        let candidate = home.join(skills_dir_rel).join("canopy");
+        if candidate.exists() || candidate.is_symlink() {
+            dirs.push(candidate);
         }
     }
-    symlinks
+    dirs.sort();
+    dirs
 }
 
 fn collect_user_instruction_files(platforms: &[Platform], home: &Path) -> Vec<PathBuf> {
@@ -265,19 +258,6 @@ fn collect_user_instruction_files(platforms: &[Platform], home: &Path) -> Vec<Pa
         }
     }
     files
-}
-
-fn is_symlink_pointing_into(path: &Path, target_dir: &Path) -> bool {
-    let Ok(meta) = std::fs::symlink_metadata(path) else {
-        return false;
-    };
-    if !meta.file_type().is_symlink() {
-        return false;
-    }
-    match std::fs::read_link(path) {
-        Ok(target) => target.starts_with(target_dir),
-        Err(_) => false,
-    }
 }
 
 pub fn print_dry_run(plan: &UninstallPlan) {
@@ -321,11 +301,11 @@ pub fn print_dry_run(plan: &UninstallPlan) {
         }
     }
 
-    if plan.skills_symlinks.is_empty() {
-        println!("  [skip]  No skills symlinks found");
+    if plan.canopy_dirs.is_empty() {
+        println!("  [skip]  No canopy skill directories found");
     } else {
-        for link in &plan.skills_symlinks {
-            println!("  [remove] Skills symlink: {}", link.display());
+        for dir in &plan.canopy_dirs {
+            println!("  [remove] Canopy skill: {}", dir.display());
         }
     }
 
@@ -459,9 +439,9 @@ pub fn execute_uninstall(plan: &UninstallPlan, purge_data: bool) -> Result<()> {
         }
     }
 
-    for link in &plan.skills_symlinks {
-        println!("  Removing symlink: {}", link.display());
-        let _ = std::fs::remove_file(link);
+    for dir in &plan.canopy_dirs {
+        println!("  Removing canopy skill dir: {}", dir.display());
+        remove_canopy_dir(dir);
     }
 
     revert_user_instruction_files(&plan.user_instruction_files)?;
@@ -483,6 +463,17 @@ pub fn execute_uninstall(plan: &UninstallPlan, purge_data: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Remove one installed `canopy` skill directory: a legacy symlink is
+/// unlinked, a regular directory is removed wholesale.
+fn remove_canopy_dir(dir: &Path) {
+    let is_link = std::fs::symlink_metadata(dir).is_ok_and(|meta| meta.file_type().is_symlink());
+    if is_link {
+        let _ = std::fs::remove_file(dir);
+    } else {
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 fn revert_user_instruction_files(files: &[PathBuf]) -> Result<()> {
@@ -816,45 +807,43 @@ mod tests {
         assert!(removed.is_empty());
     }
 
-    #[test]
-    fn test_is_symlink_pointing_into_true() {
-        let dir = tempfile::tempdir().unwrap();
-        let target_dir = dir.path().join("targets");
-        std::fs::create_dir_all(&target_dir).unwrap();
-        let target_file = target_dir.join("skill.md");
-        std::fs::write(&target_file, "content").unwrap();
-
-        let link = dir.path().join("link");
-        std::os::unix::fs::symlink(&target_file, &link).unwrap();
-
-        assert!(is_symlink_pointing_into(&link, &target_dir));
+    fn skills_platform(name: &str, skills_dir: &str) -> Platform {
+        let mut platform = json_platform(vec!["mcpServers".to_string()]);
+        platform.name = name.to_string();
+        platform.skills_dir = Some(skills_dir.to_string());
+        platform
     }
 
     #[test]
-    fn test_is_symlink_pointing_into_false_for_external() {
+    fn test_collect_canopy_dirs_finds_installed_skill_and_skips_missing() {
         let dir = tempfile::tempdir().unwrap();
-        let target_dir = dir.path().join("targets");
-        std::fs::create_dir_all(&target_dir).unwrap();
+        let home = dir.path();
+        std::fs::create_dir_all(home.join("alpha/.skills/canopy")).unwrap();
+        std::fs::create_dir_all(home.join("beta/.skills")).unwrap();
 
-        let external = dir.path().join("external");
-        std::fs::write(&external, "content").unwrap();
+        let platforms = vec![
+            skills_platform("alpha", "alpha/.skills"),
+            skills_platform("beta", "beta/.skills"),
+            skills_platform("gamma", "gamma/.skills"),
+        ];
+        let found = collect_canopy_dirs(&platforms, home);
 
-        let link = dir.path().join("link");
-        std::os::unix::fs::symlink(&external, &link).unwrap();
-
-        assert!(!is_symlink_pointing_into(&link, &target_dir));
+        assert_eq!(found, vec![home.join("alpha/.skills/canopy")]);
     }
 
     #[test]
-    fn test_is_symlink_pointing_into_false_for_regular_file() {
+    fn test_execute_removes_canopy_skill_directory() {
         let dir = tempfile::tempdir().unwrap();
-        let target_dir = dir.path().join("targets");
-        std::fs::create_dir_all(&target_dir).unwrap();
+        let home = dir.path();
+        let canopy = home.join("alpha/.skills/canopy");
+        std::fs::create_dir_all(&canopy).unwrap();
+        std::fs::write(canopy.join("SKILL.md"), "skill").unwrap();
 
-        let regular = dir.path().join("regular");
-        std::fs::write(&regular, "content").unwrap();
+        let mut plan = empty_plan(home.join(".canopy"), home.join(".agents/skills"));
+        plan.canopy_dirs = vec![canopy.clone()];
+        execute_uninstall(&plan, false).unwrap();
 
-        assert!(!is_symlink_pointing_into(&regular, &target_dir));
+        assert!(!canopy.exists());
     }
 
     #[test]
@@ -1038,7 +1027,7 @@ mod tests {
             },
             canopy_dir,
             platform_edits: vec![],
-            skills_symlinks: vec![],
+            canopy_dirs: vec![],
             user_instruction_files: vec![],
             daemon_running: false,
             agents_skills_dir,

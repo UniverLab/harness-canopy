@@ -86,15 +86,20 @@ previous STUN fallback, setup prints `STUN fallback is set to the
 previous default (stun.l.google.com); change it with canopy config set
 remote.stun_fallback`. Its only flags are `--local-registry` (use a
 local registry directory instead of fetching from GitHub) and
-`--force-skills` (overwrite local skill files that diverge from the sync
-source). Setup also writes the embedded `canopy` skill as a regular file
+`--force-skills` (also remove legacy skill copies that were edited
+locally; unedited copies are removed regardless). Setup also writes the embedded `canopy` skill as a regular file
 to `<skills_dir>/canopy/SKILL.md` for every configured harness whose
 skills directory exists (creating it), and refreshes it whenever the
 binary's version changes — the same refresh runs on `canopy skill
 install`, after `canopy update`, and on every daemon start (which only
 refreshes harnesses that already have the file). The other
 skills are read live with `canopy skill list` / `canopy skill get`; they
-are never copied into a skills directory. When canopy opens an interactive
+are never copied into a skills directory. Setup removes the copies
+earlier versions installed — harness symlinks into `~/.agents/skills/`,
+skill directories there that still match the Essential Pack, and the old
+`~/.canopy/skills/` store entries — and keeps anything it cannot prove
+canopy installed. The same cleanup runs on `canopy skill install`, so
+`canopy update` runs it too. When canopy opens an interactive
 terminal session for a harness, it also adds a one-line pointer to the
 `canopy` skill (inside `<!-- canopy:skill:begin -->` / `<!-- canopy:skill:end -->`
 markers) to the user-level instruction file named for that harness in the

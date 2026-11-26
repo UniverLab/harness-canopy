@@ -114,9 +114,9 @@ enum Commands {
         /// Useful for development and testing registry changes before publishing.
         #[arg(long = "local-registry", value_name = "PATH")]
         local_registry: Option<PathBuf>,
-        /// Overwrite local skill files that diverge from the sync source,
-        /// even if they were modified locally. Default: diverging files are
-        /// skipped with a WARN and left untouched.
+        /// Also remove legacy skill copies that were edited locally when
+        /// cleaning up copies earlier versions installed. Default: edited
+        /// copies are kept with a notice.
         #[arg(long = "force-skills")]
         force_skills: bool,
     },
