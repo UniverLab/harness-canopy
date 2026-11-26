@@ -128,6 +128,14 @@ enum Commands {
         /// docs_url) instead of plain text rows.
         #[arg(long)]
         json: bool,
+        /// Install a missing harness using its vendor's official installer
+        /// after showing the exact command and obtaining consent.
+        #[arg(long, value_name = "PLATFORM")]
+        install: Option<String>,
+        /// With --install, skip the interactive [y/N] confirmation prompt
+        /// (still prints the exact command and source URL before running).
+        #[arg(long)]
+        yes: bool,
     },
     /// Apply the platform registry to config.toml without the TUI.
     Registry {
@@ -386,7 +394,16 @@ async fn main() -> Result<()> {
             force_skills,
             list_harnesses,
             json,
-        }) => handle_setup_action(local_registry, force_skills, list_harnesses, json),
+            install,
+            yes,
+        }) => handle_setup_action(
+            local_registry,
+            force_skills,
+            list_harnesses,
+            json,
+            install,
+            yes,
+        ),
         Some(Commands::Mcp { local_registry }) => {
             if let Some(path) = local_registry {
                 setup_module::registry_fetch::set_local_registry(path);
@@ -528,9 +545,19 @@ fn handle_setup_action(
     force_skills: bool,
     list_harnesses: bool,
     json: bool,
+    install: Option<String>,
+    yes: bool,
 ) -> Result<()> {
     if let Some(path) = local_registry {
         setup_module::registry_fetch::set_local_registry(path);
+    }
+    if let Some(platform) = install {
+        let code =
+            tokio::task::block_in_place(|| setup_module::install::run_install_cmd(&platform, yes));
+        if code != 0 {
+            std::process::exit(code);
+        }
+        return Ok(());
     }
     if list_harnesses {
         setup_module::run_list_harnesses(json)

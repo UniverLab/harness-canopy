@@ -451,7 +451,7 @@ fn apply_registry_refresh(home: &Path, registry: &RegistryRaw) -> Result<Registr
     // invocation flags is everyone, permanently, with no way to even know.
     backup_config_before_first_refresh(&canopy_dir, baseline.is_none())?;
 
-    let (changed_fields, kept_fields, pending) =
+    let (changed_fields, kept_fields, mut pending) =
         merge_existing_cli_entries(&mut config, &registry_by_name, baseline.as_ref());
     add_newly_detected_clis(&mut config, &cli_registry);
 
@@ -463,8 +463,10 @@ fn apply_registry_refresh(home: &Path, registry: &RegistryRaw) -> Result<Registr
     // Platform-level reconciliation: add / update / delete / unchanged.
     // Structural comparison (field-by-field) rather than textual ensures
     // reformatted content with identical semantics is not treated as a change.
-    let refresh = reconcile_platforms(home, baseline.as_ref(), registry);
+    let fetched_at = chrono::Utc::now().to_rfc3339();
+    let refresh = reconcile_platforms(home, baseline.as_ref(), registry, &fetched_at);
     warn_platform_reconciliation(&refresh);
+    pending.extend(refresh.pending);
 
     let db = Database::new_safe(&database_path(&canopy_dir), &canopy_dir);
     // Self-healing: drop harnesses whose binary is gone (grace-gated, so a
@@ -728,6 +730,7 @@ mod tests {
             free_tier_checked_at: None,
             free_tier_source: None,
             install_paths: Vec::new(),
+            install_commands: Vec::new(),
         }
     }
 
@@ -1236,6 +1239,7 @@ mod tests {
             free_tier_checked_at: None,
             free_tier_source: None,
             install_paths: Vec::new(),
+            install_commands: Vec::new(),
         };
 
         std::fs::write(home.path().join(&old_platform.config_path), "").unwrap();
@@ -1273,6 +1277,7 @@ mod tests {
             free_tier_checked_at: None,
             free_tier_source: None,
             install_paths: Vec::new(),
+            install_commands: Vec::new(),
         };
         let registry = registry_of(vec![new_platform]);
 
@@ -1322,6 +1327,7 @@ mod tests {
             free_tier_checked_at: None,
             free_tier_source: None,
             install_paths: Vec::new(),
+            install_commands: Vec::new(),
         };
         std::fs::write(home.path().join(&platform.config_path), "").unwrap();
 
@@ -1384,6 +1390,7 @@ mod tests {
             free_tier_checked_at: None,
             free_tier_source: None,
             install_paths: Vec::new(),
+            install_commands: Vec::new(),
         };
         std::fs::write(home.path().join(&platform.config_path), "").unwrap();
 
@@ -1426,6 +1433,7 @@ mod tests {
             free_tier_checked_at: None,
             free_tier_source: None,
             install_paths: Vec::new(),
+            install_commands: Vec::new(),
         };
         std::fs::write(home.path().join(&platform.config_path), "").unwrap();
 
@@ -1475,6 +1483,7 @@ mod tests {
             free_tier_checked_at: None,
             free_tier_source: None,
             install_paths: Vec::new(),
+            install_commands: Vec::new(),
         };
         std::fs::write(home.path().join(&old_platform.config_path), "").unwrap();
 
@@ -1512,6 +1521,7 @@ mod tests {
             free_tier_checked_at: None,
             free_tier_source: None,
             install_paths: Vec::new(),
+            install_commands: Vec::new(),
         };
         let registry = registry_of(vec![new_platform]);
 

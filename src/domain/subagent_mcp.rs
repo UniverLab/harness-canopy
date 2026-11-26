@@ -314,6 +314,7 @@ mod tests {
             free_tier_checked_at: None,
             free_tier_source: None,
             install_paths: Vec::new(),
+            install_commands: Vec::new(),
         }
     }
 
@@ -344,6 +345,7 @@ mod tests {
             free_tier_checked_at: None,
             free_tier_source: None,
             install_paths: Vec::new(),
+            install_commands: Vec::new(),
         }
     }
 

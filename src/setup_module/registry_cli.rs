@@ -199,6 +199,27 @@ fn apply_pending(
     let mut applied = 0;
     let mut skipped = Vec::new();
     for change in selected {
+        if change.field == "install_commands" {
+            let Ok(cmds) = serde_json::from_value::<Vec<crate::setup_module::models::InstallCommand>>(
+                change.new.clone(),
+            ) else {
+                skipped.push(format!(
+                    "{}: invalid install_commands payload, skipped",
+                    change.cli
+                ));
+                continue;
+            };
+            let Some(platform) = baseline
+                .as_mut()
+                .and_then(|b| b.platforms.iter_mut().find(|p| p.name == change.cli))
+            else {
+                skipped.push(format!("{}: not in baseline, skipped", change.cli));
+                continue;
+            };
+            platform.install_commands = cmds;
+            applied += 1;
+            continue;
+        }
         let Some(entry) = config.clis.iter_mut().find(|c| c.name == change.cli) else {
             skipped.push(format!("{}: not in config, skipped", change.cli));
             continue;
@@ -464,5 +485,104 @@ mod tests {
             crate::setup_module::registry_pending::load_pending(&home.path().join(".canopy"))
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn reconcile_holds_install_commands_and_apply_pending_updates_baseline() {
+        use crate::domain::registry_baseline::RegistryBaseline;
+        use crate::setup_module::models::{InstallCommand, Platform, RegistryRaw};
+        use crate::setup_module::registry_platforms::reconcile_platforms;
+
+        let home = tempfile::tempdir().unwrap();
+        let canopy_dir = home.path().join(".canopy");
+        std::fs::create_dir_all(&canopy_dir).unwrap();
+        std::fs::create_dir_all(home.path().join(".config")).unwrap();
+        std::fs::write(home.path().join(".config/demo"), "{}").unwrap();
+
+        let old_cmd = InstallCommand {
+            os: "linux".to_string(),
+            command: "echo old".to_string(),
+            description: "Old".to_string(),
+            requires: vec![],
+            source_url: "https://example.com/old".to_string(),
+        };
+        let new_cmd = InstallCommand {
+            os: "linux".to_string(),
+            command: "echo new".to_string(),
+            description: "New".to_string(),
+            requires: vec![],
+            source_url: "https://example.com/new".to_string(),
+        };
+
+        let make_platform = |cmds: Vec<InstallCommand>| Platform {
+            name: "demo".to_string(),
+            config_path: ".config/demo".to_string(),
+            config_format: None,
+            toml_array_format: false,
+            command_format: "separate".to_string(),
+            mcp_servers_key: vec![],
+            deprecated_keys: vec![],
+            unsupported_keys: vec![],
+            fields_mapping: std::collections::HashMap::new(),
+            required_fields: std::collections::HashMap::new(),
+            server_extras: std::collections::HashMap::new(),
+            skills_dir: None,
+            instruction_file: None,
+            user_instruction_file: None,
+            instruction_precedence: vec![],
+            provider: None,
+            tool_name: None,
+            project_paths: vec![],
+            docs_url: None,
+            free_tier: None,
+            free_tier_checked_at: None,
+            free_tier_source: None,
+            install_paths: vec![],
+            install_commands: cmds,
+            cli: None,
+        };
+
+        let baseline = RegistryBaseline {
+            clis: vec![],
+            platforms: vec![make_platform(vec![old_cmd.clone()])],
+        };
+        baseline.save(&canopy_dir).unwrap();
+
+        let registry = RegistryRaw {
+            platforms: vec![make_platform(vec![new_cmd.clone()])],
+            canonical_servers: Default::default(),
+        };
+        let refresh = reconcile_platforms(
+            home.path(),
+            Some(&baseline),
+            &registry,
+            "2026-11-26T00:00:00Z",
+        );
+        assert_eq!(refresh.pending.len(), 1);
+        assert_eq!(refresh.pending[0].field, "install_commands");
+        assert_eq!(
+            refresh.reconciled_platforms[0].install_commands,
+            vec![old_cmd]
+        );
+
+        // Save reconciled baseline + pending, then apply_pending updates baseline.
+        RegistryBaseline {
+            clis: vec![],
+            platforms: refresh.reconciled_platforms,
+        }
+        .save(&canopy_dir)
+        .unwrap();
+        crate::setup_module::registry_pending::save_pending(&canopy_dir, &refresh.pending).unwrap();
+
+        let selected = select_pending(home.path(), Some("demo")).unwrap();
+        let outcome = apply_pending(home.path(), &selected).unwrap();
+        assert_eq!(outcome.applied, 1);
+
+        let updated_baseline = RegistryBaseline::load(&canopy_dir).unwrap();
+        assert_eq!(
+            updated_baseline.platforms[0].install_commands,
+            vec![new_cmd]
+        );
+        assert!(crate::setup_module::registry_pending::load_pending(&canopy_dir).is_empty());
     }
 }

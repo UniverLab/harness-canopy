@@ -8,6 +8,7 @@
 
 use crate::domain::registry_baseline::RegistryBaseline;
 use crate::setup_module::models::{resolve_config_path, Platform, RegistryRaw};
+use crate::setup_module::registry_pending::PendingChange;
 use std::path::Path;
 
 /// Platform-level reconciliation outcome: which registry platforms were
@@ -19,6 +20,7 @@ pub(crate) struct PlatformRefresh {
     pub(crate) unchanged: Vec<String>,
     pub(crate) deleted: Vec<String>,
     pub(crate) reconciled_platforms: Vec<Platform>,
+    pub(crate) pending: Vec<PendingChange>,
 }
 
 /// Reconcile the registry's platforms against the previous baseline:
@@ -27,6 +29,7 @@ pub(crate) fn reconcile_platforms(
     home: &Path,
     baseline: Option<&RegistryBaseline>,
     registry: &RegistryRaw,
+    fetched_at: &str,
 ) -> PlatformRefresh {
     let baseline_platforms: std::collections::HashMap<String, &Platform> = baseline
         .map(|b| b.platforms.iter().map(|p| (p.name.clone(), p)).collect())
@@ -38,12 +41,14 @@ pub(crate) fn reconcile_platforms(
         unchanged: Vec::new(),
         deleted: Vec::new(),
         reconciled_platforms: Vec::new(),
+        pending: Vec::new(),
     };
 
     for platform in &registry.platforms {
         if !resolve_config_path(home, &platform.config_path).exists() {
             continue;
         }
+        let mut reconciled = (*platform).clone();
         match baseline_platforms.get(&platform.name) {
             Some(baseline_platform) => {
                 if platforms_differ(baseline_platform, platform) {
@@ -51,12 +56,24 @@ pub(crate) fn reconcile_platforms(
                 } else {
                     refresh.unchanged.push(platform.name.clone());
                 }
+                if baseline_platform.install_commands != platform.install_commands {
+                    reconciled.install_commands = baseline_platform.install_commands.clone();
+                    refresh.pending.push(PendingChange {
+                        cli: platform.name.clone(),
+                        field: "install_commands".to_string(),
+                        old: serde_json::to_value(&baseline_platform.install_commands)
+                            .unwrap_or_else(|_| serde_json::Value::Array(Vec::new())),
+                        new: serde_json::to_value(&platform.install_commands)
+                            .unwrap_or_else(|_| serde_json::Value::Array(Vec::new())),
+                        fetched_at: fetched_at.to_string(),
+                    });
+                }
             }
             None => {
                 refresh.added.push(platform.name.clone());
             }
         }
-        refresh.reconciled_platforms.push((*platform).clone());
+        refresh.reconciled_platforms.push(reconciled);
     }
 
     let new_platform_names: std::collections::HashSet<String> = refresh
@@ -132,4 +149,5 @@ fn platforms_differ(old: &Platform, new: &Platform) -> bool {
         || old.free_tier_checked_at != new.free_tier_checked_at
         || old.free_tier_source != new.free_tier_source
         || old.install_paths != new.install_paths
+        || old.install_commands != new.install_commands
 }

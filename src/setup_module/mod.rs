@@ -3,6 +3,7 @@ pub mod daemon_service;
 pub mod dir_browser;
 pub mod harness_list;
 pub mod harness_prune;
+pub mod install;
 pub mod mcp_migrate;
 pub mod models;
 pub mod platform_adapter;

@@ -430,6 +430,7 @@ pub fn execute_uninstall(plan: &UninstallPlan, purge_data: bool) -> Result<()> {
             free_tier_checked_at: None,
             free_tier_source: None,
             install_paths: Vec::new(),
+            install_commands: Vec::new(),
         };
         let removed =
             revert_platform_config(&platform, &edit.config_path, &edit.servers_to_remove)?;
@@ -625,6 +626,7 @@ mod tests {
             free_tier_checked_at: None,
             free_tier_source: None,
             install_paths: Vec::new(),
+            install_commands: Vec::new(),
         }
     }
 
@@ -655,6 +657,7 @@ mod tests {
             free_tier_checked_at: None,
             free_tier_source: None,
             install_paths: Vec::new(),
+            install_commands: Vec::new(),
         }
     }
 
@@ -685,6 +688,7 @@ mod tests {
             free_tier_checked_at: None,
             free_tier_source: None,
             install_paths: Vec::new(),
+            install_commands: Vec::new(),
         }
     }
 

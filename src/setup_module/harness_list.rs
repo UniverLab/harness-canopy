@@ -46,7 +46,7 @@ pub fn resolve_harness_binary(
 }
 
 /// Resolve the registry `cli.binary` against an explicit `PATH` string.
-fn resolve_on_path(p: &Platform, path_env: &str) -> Option<PathBuf> {
+pub(crate) fn resolve_on_path(p: &Platform, path_env: &str) -> Option<PathBuf> {
     let binary = p.cli.as_ref()?.get("binary")?.as_str()?;
     let (resolved, _) = crate::domain::cli_strategy::resolve_binary_in(binary, path_env).ok()?;
     resolved.is_file().then_some(resolved)
@@ -300,6 +300,7 @@ mod tests {
             free_tier_checked_at: None,
             free_tier_source: None,
             install_paths: Vec::new(),
+            install_commands: Vec::new(),
             cli: Some(serde_json::json!({"binary": binary})),
         }
     }

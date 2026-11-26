@@ -94,8 +94,22 @@ pub struct Platform {
     /// harness binary may live (registry data).
     #[serde(default)]
     pub install_paths: Vec<String>,
+    /// Official vendor install commands per OS (registry data).
+    #[serde(default)]
+    pub install_commands: Vec<InstallCommand>,
     #[serde(default)]
     pub cli: Option<serde_json::Value>,
+}
+
+/// Official vendor install command for one OS from `platforms/<name>.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct InstallCommand {
+    pub os: String,
+    pub command: String,
+    pub description: String,
+    #[serde(default)]
+    pub requires: Vec<String>,
+    pub source_url: String,
 }
 
 fn default_command_format() -> String {
@@ -304,6 +318,7 @@ mod tests {
             free_tier_checked_at: None,
             free_tier_source: None,
             install_paths: Vec::new(),
+            install_commands: Vec::new(),
         };
 
         let result = platform.to_platform_with_cli();
@@ -346,6 +361,7 @@ mod tests {
             free_tier_checked_at: None,
             free_tier_source: None,
             install_paths: Vec::new(),
+            install_commands: Vec::new(),
         };
 
         let result = platform.to_platform_with_cli();
@@ -381,6 +397,7 @@ mod tests {
             free_tier_checked_at: None,
             free_tier_source: None,
             install_paths: Vec::new(),
+            install_commands: Vec::new(),
         };
 
         let result = platform.to_platform_with_cli();
@@ -415,6 +432,7 @@ mod tests {
             free_tier_checked_at: None,
             free_tier_source: None,
             install_paths: Vec::new(),
+            install_commands: Vec::new(),
         };
 
         let result = platform.to_platform_with_cli();
@@ -453,6 +471,7 @@ mod tests {
             free_tier_checked_at: None,
             free_tier_source: None,
             install_paths: Vec::new(),
+            install_commands: Vec::new(),
         };
         assert!(is_platform_available(&platform));
     }
@@ -485,6 +504,7 @@ mod tests {
             free_tier_checked_at: None,
             free_tier_source: None,
             install_paths: Vec::new(),
+            install_commands: Vec::new(),
         };
         assert!(!is_platform_available(&platform));
     }
@@ -517,6 +537,7 @@ mod tests {
             free_tier_checked_at: None,
             free_tier_source: None,
             install_paths: Vec::new(),
+            install_commands: Vec::new(),
         };
         assert!(!is_platform_available(&platform));
     }
@@ -640,6 +661,7 @@ mod tests {
             free_tier_checked_at: None,
             free_tier_source: None,
             install_paths: Vec::new(),
+            install_commands: Vec::new(),
         };
         let registry = RegistryRaw {
             platforms: vec![platform],
