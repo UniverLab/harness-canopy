@@ -83,11 +83,11 @@ for `canopy update`. See
 |---|---|
 | `canopy setup` | Interactive setup wizard — detects AI CLIs, generates `~/.canopy/config.toml`. An uninstalled harness (binary no longer on PATH) is dropped from the config on its own; one still referenced by a crew, graph node, graph hook or scheduled agent is kept and `canopy doctor` warns about it once |
 | `canopy setup --local-registry <path>` | Use a local registry directory (for registry development) |
-| `canopy setup --force-skills` | Overwrite local skill files that diverge from the sync source, even when they were edited locally (default: skip them with a warning) |
+| `canopy setup --force-skills` | Also remove legacy skill copies that were edited locally when cleaning up copies earlier versions installed (default: edited copies are kept with a notice) |
 | `canopy mcp` | MCP wizard — sync/add/remove canopy's MCP entry across platforms |
 | `canopy mcp --local-registry <path>` | Run the MCP wizard against a local registry directory instead of GitHub (same flag as `canopy setup --local-registry`) |
 | `canopy mcp` → Add | Add a server via pasted README JSON, local stdio command (with args + env), or remote URL (with headers); previews entries, marks `(replaces existing)` overwrites, then asks `Install on N platform(s)?` |
-| `canopy uninstall --dry-run` | Preview removal: stop daemon, remove service unit + `canopy.service.d/` drop-ins, revert platform configs, remove skill symlinks, remove user-instruction skill pointer blocks (changes nothing) |
+| `canopy uninstall --dry-run` | Preview removal: stop daemon, remove service unit + `canopy.service.d/` drop-ins, revert platform configs, remove installed `canopy` skill directories, remove user-instruction skill pointer blocks (changes nothing) |
 | `canopy uninstall --keep-shared-servers` | Only remove canopy's own `canopy` server entry; leave shared `fetch`/`filesystem` entries in place |
 | `canopy doctor` | Full health diagnostics (installed harnesses list with versions; an uninstalled harness stays silent unless something still references it) |
 | `canopy doctor --verbose` | Same, plus the searched PATH for missing harnesses (hidden otherwise) |
@@ -207,7 +207,7 @@ skills directory.
 | `canopy skill list` | List skills, one `<name> - <description>` per line |
 | `canopy skill list --json` | Print the same list as a JSON array of `{name, description, source_url}` objects |
 | `canopy skill get <name>` | Print a skill's `SKILL.md` followed by every file under its `references/` directory, each headed `=== references/<path> ===` |
-| `canopy skill install` | Write the embedded `canopy` skill into every harness skills directory; prints one line per harness (`installed`, `updated from <old>`, `current`, `skipped: not managed by canopy`) |
+| `canopy skill install` | Write the embedded `canopy` skill into every harness skills directory and clean up legacy skill copies (`~/.agents/skills/` symlinks and matching directories, and `~/.canopy/skills/` store entries); prints one line per harness (`installed`, `updated from <old>`, `current`, `skipped: not managed by canopy`) plus cleanup summaries |
 
 ```sh
 canopy skill list
