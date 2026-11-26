@@ -166,6 +166,37 @@ shows `install: pending approval` and will not run the staged command
 until you approve it with `canopy registry apply` (or drop it with
 `canopy registry discard`).
 
+### Logging in to a harness from setup
+
+In the harness picker, each installed harness checks its login status in
+the background (5 s timeout per check) and shows one of: `authenticated`,
+`not authenticated yet` (press `r` to retry the check),
+`login: not verifiable` (no check command in the registry), or
+`login: see <docs_url>` / `login: unknown` (no vendor login command in
+the registry).
+
+Pressing `l` on an installed row with a vendor login command prints
+`A browser window opens; finish the sign-in there, then press Enter here`
+and runs that command in a local PTY with your current environment
+(`BROWSER`, `DISPLAY`, `WAYLAND_DISPLAY`, etc.) so the harness opens the
+browser itself. Press `Esc` to kill the login process and return to the
+list. When the login process exits and a check command is defined, setup
+runs the check (5 s timeout) and updates the row to `authenticated` or
+`not authenticated yet`. Canopy never reads, logs, or copies
+credentials; only the check command's exit code is used.
+
+The same flow runs directly with `canopy setup --login <platform>`
+(requires an interactive terminal; exits `1` when stdin/stdout is not a
+TTY, on unknown/uninstalled platforms, missing or unapproved login
+commands, cancelled/failed login, or failed/timed-out verification, and
+`0` on success). `canopy setup --check-logins` checks all installed
+harnesses in parallel, prints `<name>: authenticated`,
+`<name>: not authenticated yet`, or `<name>: not verifiable`, and exits
+`0` when every verifiable installed harness is authenticated (`1` if any
+is not). Changed `login_command` and `login_check_command` entries from
+the registry are staged in `registry-pending.json` and require
+`canopy registry apply` before setup will run them.
+
 The registry itself keeps changing after setup, and the TUI only refreshes it
 in the background at startup, and only when the last refresh is more than 24
 hours old. To apply the current registry right away without the TUI, run

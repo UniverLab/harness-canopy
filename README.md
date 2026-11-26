@@ -66,9 +66,12 @@ canopy doctor
 
 Its "Harnesses" line confirms each configured platform's binary is present
 and executable on `PATH` — **it does not check that you're logged in.**
-There's no single command across all 16 platforms for that; check the
-platform's own way, e.g. `claude auth status` or `codex login status`. Most
-tools will otherwise tell you the moment you actually run them for real.
+To check login status across installed platforms, run
+`canopy setup --check-logins` (or open `canopy setup`, where installed
+rows show their status and `l` opens the vendor login flow in a
+terminal). Platforms without a registry check command report
+`not verifiable`; check those with the platform's own command, e.g.
+`claude auth status` or `codex login status`.
 
 ### If no platform is installed
 

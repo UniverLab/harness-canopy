@@ -35,7 +35,10 @@ platform CLI detected on PATH.`, lists every supported platform with its
 CLI binary name, and exits cleanly without writing any configuration —
 install one (press `i` on its row in the harness picker, or run `canopy
 setup --install <platform>`), make sure it is on your `PATH`, and re-run
-`canopy setup`. See [Installation](installation.md#installing-a-harness-from-setup).
+`canopy setup`. You can also sign in to an installed harness by pressing
+`l` on its row (or running `canopy setup --login <platform>`), and check
+login status with `canopy setup --check-logins`. See
+[Installation](installation.md#installing-a-harness-from-setup).
 
 ## 3. Launch the TUI
 
