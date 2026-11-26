@@ -95,7 +95,7 @@ for `canopy update`. See
 | `canopy mcp` → Add | Add a server via pasted README JSON, local stdio command (with args + env), or remote URL (with headers); previews entries, marks `(replaces existing)` overwrites, then asks `Install on N platform(s)?` |
 | `canopy uninstall --dry-run` | Preview removal: stop daemon, remove service unit + `canopy.service.d/` drop-ins, revert platform configs, remove installed `canopy` skill directories, remove user-instruction skill pointer blocks (changes nothing) |
 | `canopy uninstall --keep-shared-servers` | Only remove canopy's own `canopy` server entry; leave shared `fetch`/`filesystem` entries in place |
-| `canopy doctor` | Full health diagnostics (installed harnesses list with versions; an uninstalled harness stays silent unless something still references it) |
+| `canopy doctor` | Full health diagnostics (installed harnesses list with versions; an uninstalled harness stays silent unless something still references it; one `Retention:` line with `graph_runs` / session row counts and the active retention settings) |
 | `canopy doctor --verbose` | Same, plus the searched PATH for missing harnesses (hidden otherwise) |
 | `canopy doctor --restore [--from <file>]` | Restore the verified backup over a damaged database (the damaged file is kept as `<name>.damaged-<UTC>`), then verify the restored file; refuses while the daemon is running |
 
@@ -1027,7 +1027,7 @@ it came from. **Apply** says when a change takes effect: `applied` (at once),
 | `retention.graph_runs_days` | 60 | 0–3650 days | next run | Days a graph run's payload is kept before the health routine strips then deletes it; `0` disables pruning |
 | `metrics_retention_days` | 1 | 1–30 days | applied | Days of `host-*.jsonl` kept in `~/.canopy/metrics` |
 | `graph_event_retention_days` | 90 | 1–3650 days | next run | Days a graph's event log is kept before `canopy clean` prunes it |
-| `clean.reclaim_min_deleted_rows` | 50 | 0–100000 | applied | Deleted rows that trigger VACUUM during `canopy clean` |
+| `clean.reclaim_min_deleted_rows` | 50 | 0–100000 | applied | Deleted rows that trigger VACUUM during `canopy clean` and the daemon health routine's prune pass |
 | `activity.retention_per_workdir` | 500 | 50–100000 | applied | Activity-log entries kept per workdir |
 | `remote.enabled` | `false` | bool | applied | Whether this host accepts owner-only remote control via the relay |
 | `remote.relay_url` | `https://remote.univerlab.org` | — | next run | Relay URL for owner-only remote control; `https://`/`wss://`, or plain `http://`/`ws://` only for localhost, 127.x, or ::1 |

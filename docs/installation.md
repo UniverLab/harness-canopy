@@ -359,7 +359,14 @@ at daemon startup and before each check — so stale rows never block it. A
 busy daemon defers it, and after 72 hours of deferral it runs
 anyway. `canopy doctor` reports the routine's last outcome, the backup and
 its age, and how many times it has been deferred, and warns when it has never
-completed. To run the check and backup now:
+completed. The same routine also prunes storage growth: graph run payloads
+older than `retention.graph_runs_days` (default 60) are stripped to metadata,
+then deleted past twice that age — runs of graphs that are running, pausing
+or paused, and of specs still running, pending or interrupted, are never
+touched — and stale sessions older than `clean.retention_days` are removed.
+When a prune deletes at least `clean.reclaim_min_deleted_rows` rows the freed
+space is reclaimed with `VACUUM`, and `canopy doctor` prints the current row
+counts with the active retention settings on one `Retention:` line. To run the check and backup now:
 
 ```bash
 canopy daemon health-check
