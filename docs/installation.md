@@ -78,16 +78,20 @@ canopy setup
 ```
 
 `canopy setup` is an interactive wizard and needs a terminal: it
-prompts you to select the detected AI CLI platforms and the temperature
-unit (plus RAG settings and skill sync), asks whether to receive
+shows every registry harness with its install status and dated free-tier
+fact, pre-selects the installed ones to configure, and prompts for the
+temperature unit (plus RAG settings and skill sync), asks whether to receive
 UniverLab announcements (default no; stays off unless you say yes),
 then writes `~/.canopy/config.toml`. On an install that still holds the
 previous STUN fallback, setup prints `STUN fallback is set to the
 previous default (stun.l.google.com); change it with canopy config set
-remote.stun_fallback`. Its only flags are `--local-registry` (use a
-local registry directory instead of fetching from GitHub) and
+remote.stun_fallback`. Its flags are `--local-registry` (use a
+local registry directory instead of fetching from GitHub),
 `--force-skills` (also remove legacy skill copies that were edited
-locally; unedited copies are removed regardless). Setup also writes the embedded `canopy` skill as a regular file
+locally; unedited copies are removed regardless), and
+`--list-harnesses [--json]` (print every registry harness with its
+install status and free-tier fact non-interactively, without running the
+wizard). Setup also writes the embedded `canopy` skill as a regular file
 to `<skills_dir>/canopy/SKILL.md` for every configured harness whose
 skills directory exists (creating it), and refreshes it whenever the
 binary's version changes — the same refresh runs on `canopy skill

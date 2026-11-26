@@ -81,7 +81,7 @@ for `canopy update`. See
 
 | Command | Description |
 |---|---|
-| `canopy setup` | Interactive setup wizard — detects AI CLIs, generates `~/.canopy/config.toml`. An uninstalled harness (binary no longer on PATH) is dropped from the config on its own; one still referenced by a crew, graph node, graph hook or scheduled agent is kept and `canopy doctor` warns about it once |
+| `canopy setup` | Interactive setup wizard — shows every registry harness with install status and a dated free-tier fact, pre-selects installed harnesses for configuration, and generates `~/.canopy/config.toml`. An uninstalled harness (binary no longer on PATH) is dropped from the config on its own; one still referenced by a crew, graph node, graph hook or scheduled agent is kept and `canopy doctor` warns about it once |
 | `canopy setup --local-registry <path>` | Use a local registry directory (for registry development) |
 | `canopy setup --force-skills` | Also remove legacy skill copies that were edited locally when cleaning up copies earlier versions installed (default: edited copies are kept with a notice) |
 | `canopy setup --list-harnesses` | List every registry harness non-interactively, one row each: `installed` / `not installed` / `installed (not responding)`, the dated `free tier` fact, and `docs_url` when not installed; installed harnesses are the ones the wizard pre-selects |
