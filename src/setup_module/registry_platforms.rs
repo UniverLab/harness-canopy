@@ -127,4 +127,9 @@ fn platforms_differ(old: &Platform, new: &Platform) -> bool {
         || old.skills_dir != new.skills_dir
         || old.instruction_file != new.instruction_file
         || old.instruction_precedence != new.instruction_precedence
+        || old.docs_url != new.docs_url
+        || old.free_tier != new.free_tier
+        || old.free_tier_checked_at != new.free_tier_checked_at
+        || old.free_tier_source != new.free_tier_source
+        || old.install_paths != new.install_paths
 }

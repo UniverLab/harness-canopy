@@ -1,6 +1,7 @@
 pub mod config_manip;
 pub mod daemon_service;
 pub mod dir_browser;
+pub mod harness_list;
 pub mod harness_prune;
 pub mod mcp_migrate;
 pub mod models;
@@ -17,6 +18,7 @@ pub mod wizard;
 // Re-export public types and functions for backward compatibility
 pub use config_manip::strip_jsonc_comments;
 pub use daemon_service::needs_setup;
+pub use harness_list::run_list_harnesses;
 pub use models::{is_platform_available, Platform, PlatformWithCli};
 pub use platform_adapter::adapt_config;
 pub use public_api::{

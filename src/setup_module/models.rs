@@ -78,6 +78,22 @@ pub struct Platform {
     /// writing its own state does not trip a read-only violation.
     #[serde(default)]
     pub project_paths: Vec<String>,
+    /// Vendor's official getting-started or install page (registry data).
+    #[serde(default)]
+    pub docs_url: Option<String>,
+    /// Free-tier fact from the vendor's docs: `"yes"` or `"no"`.
+    #[serde(default)]
+    pub free_tier: Option<String>,
+    /// ISO date the free-tier fact was checked.
+    #[serde(default)]
+    pub free_tier_checked_at: Option<String>,
+    /// URL of the page the free-tier fact comes from.
+    #[serde(default)]
+    pub free_tier_source: Option<String>,
+    /// Extra home-relative (`~/...`) or absolute locations where the
+    /// harness binary may live (registry data).
+    #[serde(default)]
+    pub install_paths: Vec<String>,
     #[serde(default)]
     pub cli: Option<serde_json::Value>,
 }
@@ -125,18 +141,14 @@ impl Platform {
     }
 }
 
-/// Check if a platform is available by detecting its CLI binary using the
-/// shared resolver (B40). Uses the same resolution path as the spawner so
-/// detection can never disagree with runtime spawning.
+/// Check if a platform is available by detecting its CLI binary, also
+/// probing the registry's `install_paths`. Shares
+/// [`crate::setup_module::harness_list::resolve_harness_binary`] with the
+/// harness list so detection can never disagree with it.
 pub fn is_platform_available(p: &Platform) -> bool {
-    p.cli
-        .as_ref()
-        .and_then(|v| v.get("binary").and_then(|b| b.as_str()))
-        .map(|binary| {
-            let path_value = std::env::var("PATH").unwrap_or_default();
-            crate::domain::cli_strategy::resolve_binary_in(binary, &path_value).is_ok()
-        })
-        .unwrap_or(false)
+    let path_value = std::env::var("PATH").unwrap_or_default();
+    super::harness_list::resolve_harness_binary(p, dirs::home_dir().as_deref(), &path_value)
+        .is_some()
 }
 
 /// Resolve the actual config file path for a platform.
@@ -287,6 +299,11 @@ mod tests {
             provider: None,
             tool_name: None,
             project_paths: Vec::new(),
+            docs_url: None,
+            free_tier: None,
+            free_tier_checked_at: None,
+            free_tier_source: None,
+            install_paths: Vec::new(),
         };
 
         let result = platform.to_platform_with_cli();
@@ -324,6 +341,11 @@ mod tests {
             provider: None,
             tool_name: None,
             project_paths: Vec::new(),
+            docs_url: None,
+            free_tier: None,
+            free_tier_checked_at: None,
+            free_tier_source: None,
+            install_paths: Vec::new(),
         };
 
         let result = platform.to_platform_with_cli();
@@ -354,6 +376,11 @@ mod tests {
             provider: None,
             tool_name: None,
             project_paths: Vec::new(),
+            docs_url: None,
+            free_tier: None,
+            free_tier_checked_at: None,
+            free_tier_source: None,
+            install_paths: Vec::new(),
         };
 
         let result = platform.to_platform_with_cli();
@@ -383,6 +410,11 @@ mod tests {
             tool_name: Some("Vibe".to_string()),
             cli: Some(serde_json::json!({"binary": "vibe"})),
             project_paths: Vec::new(),
+            docs_url: None,
+            free_tier: None,
+            free_tier_checked_at: None,
+            free_tier_source: None,
+            install_paths: Vec::new(),
         };
 
         let result = platform.to_platform_with_cli();
@@ -416,6 +448,11 @@ mod tests {
             provider: None,
             tool_name: None,
             project_paths: Vec::new(),
+            docs_url: None,
+            free_tier: None,
+            free_tier_checked_at: None,
+            free_tier_source: None,
+            install_paths: Vec::new(),
         };
         assert!(is_platform_available(&platform));
     }
@@ -443,6 +480,11 @@ mod tests {
             provider: None,
             tool_name: None,
             project_paths: Vec::new(),
+            docs_url: None,
+            free_tier: None,
+            free_tier_checked_at: None,
+            free_tier_source: None,
+            install_paths: Vec::new(),
         };
         assert!(!is_platform_available(&platform));
     }
@@ -470,6 +512,11 @@ mod tests {
             provider: None,
             tool_name: None,
             project_paths: Vec::new(),
+            docs_url: None,
+            free_tier: None,
+            free_tier_checked_at: None,
+            free_tier_source: None,
+            install_paths: Vec::new(),
         };
         assert!(!is_platform_available(&platform));
     }
@@ -588,6 +635,11 @@ mod tests {
             provider: None,
             tool_name: None,
             project_paths: Vec::new(),
+            docs_url: None,
+            free_tier: None,
+            free_tier_checked_at: None,
+            free_tier_source: None,
+            install_paths: Vec::new(),
         };
         let registry = RegistryRaw {
             platforms: vec![platform],

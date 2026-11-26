@@ -170,6 +170,11 @@ mod tests {
             provider: None,
             tool_name: None,
             project_paths: Vec::new(),
+            docs_url: None,
+            free_tier: None,
+            free_tier_checked_at: None,
+            free_tier_source: None,
+            install_paths: Vec::new(),
         }
     }
 

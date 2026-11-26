@@ -119,6 +119,15 @@ enum Commands {
         /// copies are kept with a notice.
         #[arg(long = "force-skills")]
         force_skills: bool,
+        /// List every registry harness with its install status and dated
+        /// free-tier fact instead of running the interactive wizard.
+        #[arg(long = "list-harnesses")]
+        list_harnesses: bool,
+        /// With --list-harnesses, print JSON (keys: name, installed,
+        /// binary_path, free_tier, free_tier_checked_at, free_tier_source,
+        /// docs_url) instead of plain text rows.
+        #[arg(long)]
+        json: bool,
     },
     /// Apply the platform registry to config.toml without the TUI.
     Registry {
@@ -375,13 +384,9 @@ async fn main() -> Result<()> {
         Some(Commands::Setup {
             local_registry,
             force_skills,
-        }) => {
-            if let Some(path) = local_registry {
-                setup_module::registry_fetch::set_local_registry(path);
-            }
-            tokio::task::block_in_place(|| setup_module::run_setup(force_skills))?;
-            Ok(())
-        }
+            list_harnesses,
+            json,
+        }) => handle_setup_action(local_registry, force_skills, list_harnesses, json),
         Some(Commands::Mcp { local_registry }) => {
             if let Some(path) = local_registry {
                 setup_module::registry_fetch::set_local_registry(path);
@@ -513,6 +518,24 @@ fn restore_default_sigpipe(cmd: &Option<Commands>) {
     #[cfg(windows)]
     {
         let _ = cmd;
+    }
+}
+
+/// `canopy setup`: non-interactive harness list with `--list-harnesses`
+/// (JSON with `--json`), else the interactive wizard.
+fn handle_setup_action(
+    local_registry: Option<PathBuf>,
+    force_skills: bool,
+    list_harnesses: bool,
+    json: bool,
+) -> Result<()> {
+    if let Some(path) = local_registry {
+        setup_module::registry_fetch::set_local_registry(path);
+    }
+    if list_harnesses {
+        setup_module::run_list_harnesses(json)
+    } else {
+        tokio::task::block_in_place(|| setup_module::run_setup(force_skills))
     }
 }
 

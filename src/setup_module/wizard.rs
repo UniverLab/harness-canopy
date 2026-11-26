@@ -8,9 +8,10 @@ use crate::setup_module::registry_fetch::{fetch_registry, print_banner};
 use crate::setup_module::sync_and_skills::{run_essential_skills_step, run_sync_step};
 use crate::setup_module::PlatformWithCli;
 use anyhow::{Context, Result};
-use inquire::{Confirm, MultiSelect, Select};
+use inquire::{Confirm, Select};
 use std::io::{self, Write};
 
+pub(crate) mod harnesses;
 mod rag;
 
 #[cfg(test)]
@@ -60,13 +61,14 @@ pub fn run_setup(force_skills: bool) -> Result<()> {
     record_registry_detection(&mut wiz, &detected);
 
     // ── Step 2: Select platforms ─────────────────────────────────
+    // The picker lists every registry harness (installed ones
+    // pre-selected) with its status and dated free-tier fact.
     wiz.render()?;
-    if detected.is_empty() {
+    let selected = harnesses::select_platforms_interactive(&registry.platforms)?;
+    if selected.is_empty() {
         explain_no_platforms_detected(&registry);
         return Ok(());
     }
-
-    let selected = select_platforms(&detected)?;
     record_platform_selection(&mut wiz, &selected);
 
     // ── Step 2.2: Temperature unit preference ────────────────────
@@ -602,41 +604,6 @@ impl WizardState {
     }
 }
 
-fn select_platforms<'a>(detected: &[&'a Platform]) -> Result<Vec<&'a Platform>> {
-    if detected.is_empty() {
-        println!("  Press Enter to continue...");
-        let mut buf = String::new();
-        io::stdin().read_line(&mut buf)?;
-        return Ok(vec![]);
-    }
-
-    let labels: Vec<String> = detected
-        .iter()
-        .copied()
-        .map(format_platform_label)
-        .collect();
-    let all_indices: Vec<usize> = (0..detected.len()).collect();
-
-    let selected = MultiSelect::new("Select platforms to configure:", labels.clone())
-        .with_default(&all_indices)
-        .with_help_message("space: toggle | enter: confirm | ↑↓: navigate")
-        .prompt()
-        .map_err(|e| anyhow::anyhow!("Selection cancelled: {}", e))?;
-
-    // Map selections back by position, not by string equality: two
-    // platforms can share one display string (e.g. two Google harnesses),
-    // so each matched label consumes its index exactly once.
-    let mut remaining: Vec<(usize, &String)> = labels.iter().enumerate().collect();
-    let mut out = Vec::with_capacity(selected.len());
-    for name in &selected {
-        if let Some(pos) = remaining.iter().position(|(_, l)| *l == name) {
-            let (idx, _) = remaining.remove(pos);
-            out.push(detected[idx]);
-        }
-    }
-    Ok(out)
-}
-
 fn select_temperature_unit() -> Result<crate::domain::canopy_config::TemperatureUnit> {
     let options = ["Celsius (°C)", "Fahrenheit (°F)"];
     let selected = Select::new("Temperature unit for sysinfo:", options.to_vec())
@@ -1061,6 +1028,11 @@ mod tests {
             tool_name: tool.map(str::to_string),
             cli: None,
             project_paths: Vec::new(),
+            docs_url: None,
+            free_tier: None,
+            free_tier_checked_at: None,
+            free_tier_source: None,
+            install_paths: Vec::new(),
         }
     }
 

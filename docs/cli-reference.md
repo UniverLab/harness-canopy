@@ -84,6 +84,8 @@ for `canopy update`. See
 | `canopy setup` | Interactive setup wizard — detects AI CLIs, generates `~/.canopy/config.toml`. An uninstalled harness (binary no longer on PATH) is dropped from the config on its own; one still referenced by a crew, graph node, graph hook or scheduled agent is kept and `canopy doctor` warns about it once |
 | `canopy setup --local-registry <path>` | Use a local registry directory (for registry development) |
 | `canopy setup --force-skills` | Also remove legacy skill copies that were edited locally when cleaning up copies earlier versions installed (default: edited copies are kept with a notice) |
+| `canopy setup --list-harnesses` | List every registry harness non-interactively, one row each: `installed` / `not installed` / `installed (not responding)`, the dated `free tier` fact, and `docs_url` when not installed; installed harnesses are the ones the wizard pre-selects |
+| `canopy setup --list-harnesses --json` | Same list as JSON (`name`, `installed`, `binary_path`, `free_tier`, `free_tier_checked_at`, `free_tier_source`, `docs_url`), for scripts |
 | `canopy mcp` | MCP wizard — sync/add/remove canopy's MCP entry across platforms |
 | `canopy mcp --local-registry <path>` | Run the MCP wizard against a local registry directory instead of GitHub (same flag as `canopy setup --local-registry`) |
 | `canopy mcp` → Add | Add a server via pasted README JSON, local stdio command (with args + env), or remote URL (with headers); previews entries, marks `(replaces existing)` overwrites, then asks `Install on N platform(s)?` |
