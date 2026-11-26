@@ -428,6 +428,15 @@ pub struct App {
     /// Raw tab content region `Rect` from the last frame, used for mouse
     /// wheel hit-testing the scrollable content area.
     pub(crate) prompt_raw_content_rect: Option<ratatui::layout::Rect>,
+    /// Open F5 quick-prompt menu (`None` while closed). Focus stays on the
+    /// agent throughout — keys are intercepted before they reach the PTY.
+    pub(crate) quick_menu: Option<super::dialog::quick_menu::QuickMenu>,
+    /// Inner rows `Rect` of the F5 menu from the last frame, for mouse
+    /// hit-testing (row clicks choose).
+    pub(crate) quick_menu_rect: Option<ratatui::layout::Rect>,
+    /// Tab-strip hit boxes from the last frame: the set index, or `None`
+    /// for the `+N` overflow badge (which opens the F5 menu).
+    pub(crate) quick_tab_click_map: Vec<super::dialog::quick_menu::QuickTabHit>,
     /// Whether to send OS-level desktop notifications (agent done/failed).
     pub(crate) notifications_enabled: bool,
     /// CM52: the `[tui]` settings this app renders with (date/time formats,

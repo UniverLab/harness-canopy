@@ -2,79 +2,15 @@
 use super::*;
 
 #[test]
-fn preset_is_discoverable_via_the_add_section_list_like_tools() {
+fn preset_is_absent_from_the_add_section_list() {
     let dialog = SimplePromptDialog::new();
     let names: Vec<&str> = dialog
         .get_addable_sections()
         .into_iter()
         .map(|(name, _)| name)
         .collect();
-    assert!(names.contains(&"preset"));
+    assert!(!names.contains(&"preset"));
     assert!(names.contains(&"tools"));
-}
-
-#[test]
-fn collect_presets_for_picker_lists_md_files_sorted_with_preview() {
-    let dir = tempdir().unwrap();
-    std::fs::write(
-        dir.path().join("reviewer.md"),
-        "You are the reviewer.\n\nMore text.",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.path().join("implementer.md"),
-        "You are the implementer.",
-    )
-    .unwrap();
-    std::fs::write(dir.path().join("notes.txt"), "ignored, not .md").unwrap();
-
-    let entries = SimplePromptDialog::collect_presets_for_picker(dir.path());
-
-    assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].0, "implementer");
-    assert_eq!(entries[0].1, "You are the implementer.");
-    assert_eq!(entries[0].2, "You are the implementer.");
-    assert_eq!(entries[1].0, "reviewer");
-    assert_eq!(entries[1].1, "You are the reviewer.");
-}
-
-#[test]
-fn collect_presets_for_picker_returns_empty_for_missing_directory() {
-    let dir = tempdir().unwrap();
-    let missing = dir.path().join("does-not-exist");
-
-    assert!(SimplePromptDialog::collect_presets_for_picker(&missing).is_empty());
-}
-
-#[test]
-fn filtered_preset_indices_matches_case_insensitive_substring() {
-    let entries = vec![
-        (
-            "implementer".to_string(),
-            "preview".to_string(),
-            "content".to_string(),
-        ),
-        (
-            "reviewer".to_string(),
-            "preview".to_string(),
-            "content".to_string(),
-        ),
-        (
-            "resilience".to_string(),
-            "preview".to_string(),
-            "content".to_string(),
-        ),
-    ];
-
-    let filtered = SimplePromptDialog::filtered_preset_indices(&entries, "RE");
-    let names: Vec<&str> = filtered.iter().map(|&i| entries[i].0.as_str()).collect();
-    assert_eq!(names, vec!["reviewer", "resilience"]);
-
-    assert_eq!(
-        SimplePromptDialog::filtered_preset_indices(&entries, "").len(),
-        3
-    );
-    assert!(SimplePromptDialog::filtered_preset_indices(&entries, "zzz").is_empty());
 }
 
 #[test]

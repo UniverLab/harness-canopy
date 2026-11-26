@@ -1271,46 +1271,4 @@ mod tests {
         // No mission selected -> None
         assert!(App::launchpad_mission_choice(&launchpad).is_none());
     }
-
-    // ── launchpad_initial_content ───────────────────────────────────
-
-    #[test]
-    fn launchpad_initial_content_skips_blank_summary_and_lists_peers() {
-        let db = test_db();
-        let data_dir = tempdir().expect("create data dir");
-        let app = App::new(
-            Arc::clone(&db),
-            data_dir.path(),
-            &crate::domain::canopy_config::CanopyConfig::default(),
-        )
-        .expect("create app");
-        let mut launchpad = LaunchpadDialog::for_workdir(&db, "/tmp").unwrap();
-        // Simulate an empty mission context and some active peer missions
-        launchpad.active_missions =
-            vec![crate::tui::app::dialog::launchpad::ActiveMissionSummary {
-                agent_name: "peer".into(),
-                impact: "low".into(),
-                mission: "peer mission".into(),
-            }];
-        let content = App::launchpad_initial_content(
-            &app,
-            "/tmp",
-            "My Mission",
-            Some(""), // blank summary -> should be skipped
-            &launchpad,
-        );
-        assert!(content
-            .get("context")
-            .unwrap()
-            .contains("mission: My Mission"));
-        assert!(!content.get("context").unwrap().contains("previous_summary"));
-        assert!(content
-            .get("context")
-            .unwrap()
-            .contains("active_peer_missions"));
-        assert!(content
-            .get("context")
-            .unwrap()
-            .contains("peer [low]: peer mission"));
-    }
 }

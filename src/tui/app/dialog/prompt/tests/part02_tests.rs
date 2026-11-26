@@ -1055,7 +1055,7 @@ fn get_available_sections_has_core_types() {
     assert!(names.contains(&"resources"));
     assert!(names.contains(&"constraints"));
     assert!(names.contains(&"tools"));
-    assert!(names.contains(&"preset"));
+    assert!(!names.contains(&"preset"));
 }
 
 // ── focused_section_name edge cases ─────────────────────────

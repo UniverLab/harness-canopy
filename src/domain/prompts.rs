@@ -1,14 +1,16 @@
 //! Prompt presets (P1) — file-backed, user-editable prompt text for builtin
-//! agent node documents. Seeded under `~/.canopy/prompts/` at daemon startup
-//! (never overwriting an existing file — user edits are sacred) and resolved
-//! at agent SPAWN time, so an edit takes effect on the very next run without
+//! agent node documents. Graph-node prompts live under
+//! `~/.canopy/prompts/nodes/` (a startup/setup migration moves top-level
+//! `*.md` files there); quick prompts for interactive sessions live under
+//! `~/.canopy/prompts/quick/` (see `domain::quick_prompts`). Resolved at
+//! agent SPAWN time, so an edit takes effect on the very next run without
 //! a recompile.
 //!
 //! The engine never special-cases a preset name — "implementer"/"reviewer"/
 //! "resilience" are seed data here, exactly like the embedded node documents
-//! in `nodes.rs`. The hardcoded constants below are both the seed
-//! content written to disk *and* the fallback used when a preset file goes
-//! missing or unreadable, so the two can never drift apart.
+//! in `nodes.rs`. The hardcoded constants below are the fallback used when a
+//! preset file goes missing or unreadable, so a graph keeps working with no
+//! file on disk at all.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -158,10 +160,9 @@ fn resilience_preset() -> String {
 }
 
 /// `(name, content)` for every builtin prompt preset — the single source
-/// both [`seed_builtin_prompt_presets`] writes to disk and
-/// [`resolve_prompt_preset`] falls back to. Content is built (not a
-/// hardcoded `&'static str`) so all three presets render through the same
-/// [`Section`] vocabulary above.
+/// [`resolve_prompt_preset`] falls back to when no file exists. Content is
+/// built (not a hardcoded `&'static str`) so all three presets render
+/// through the same [`Section`] vocabulary above.
 pub fn builtin_prompt_preset_specs() -> Vec<(&'static str, String)> {
     vec![
         ("implementer", implementer_preset()),
@@ -170,10 +171,54 @@ pub fn builtin_prompt_preset_specs() -> Vec<(&'static str, String)> {
     ]
 }
 
-/// `<canopy_dir>/prompts/` — where preset files are seeded to and resolved
-/// from.
+/// `<canopy_dir>/prompts/` — the prompts root. Graph-node prompts resolve
+/// from here (with a `nodes/` fallback, see [`resolve_prompt_preset`]);
+/// quick prompts for interactive sessions live in [`quick_dir`].
 pub fn prompts_dir(canopy_dir: &Path) -> PathBuf {
     canopy_dir.join("prompts")
+}
+
+/// `<canopy_dir>/prompts/nodes/` — where graph-node prompt files live.
+pub fn nodes_dir(canopy_dir: &Path) -> PathBuf {
+    prompts_dir(canopy_dir).join("nodes")
+}
+
+/// `<canopy_dir>/prompts/quick/` — where user quick-prompt `*.md` files
+/// live (see `domain::quick_prompts`).
+pub fn quick_dir(canopy_dir: &Path) -> PathBuf {
+    prompts_dir(canopy_dir).join("quick")
+}
+
+/// Move top-level `*.md` files directly under `<canopy_dir>/prompts/` into
+/// `<canopy_dir>/prompts/nodes/`. A file whose name already exists in
+/// `nodes/` is skipped, never overwritten; the `nodes/` and `quick/`
+/// directories themselves are left untouched. Idempotent: a second run
+/// finds nothing left to move.
+pub fn migrate_top_level_to_nodes(canopy_dir: &Path) -> std::io::Result<()> {
+    let dir = prompts_dir(canopy_dir);
+    if !dir.exists() {
+        return Ok(());
+    }
+    let nodes = nodes_dir(canopy_dir);
+    std::fs::create_dir_all(&nodes)?;
+    for entry in std::fs::read_dir(&dir)?.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+            continue;
+        }
+        let Some(file_name) = path.file_name() else {
+            continue;
+        };
+        let target = nodes.join(file_name);
+        if target.exists() {
+            continue;
+        }
+        std::fs::rename(&path, &target)?;
+    }
+    Ok(())
 }
 
 /// Canopy's home directory, honoring `CANOPY_HOME_OVERRIDE` the same way
@@ -188,52 +233,44 @@ pub fn canopy_dir() -> PathBuf {
         .join(".canopy")
 }
 
-/// Seed the builtin prompt presets under `<canopy_dir>/prompts/` if missing.
-/// Idempotent and reseed-if-missing: a file already present (by name) is
-/// left completely untouched — user edits are never overwritten — so this is
-/// safe to call on every daemon startup and every `canopy prompts` CLI
-/// invocation.
-pub fn seed_builtin_prompt_presets(canopy_dir: &Path) -> std::io::Result<()> {
-    let dir = prompts_dir(canopy_dir);
-    std::fs::create_dir_all(&dir)?;
-    for (name, content) in builtin_prompt_preset_specs() {
-        let path = dir.join(format!("{name}.md"));
-        if path.exists() {
-            continue;
-        }
-        std::fs::write(&path, content)?;
+/// Read a graph-node prompt file by name with the literal-then-`nodes/`
+/// precedence: `<prompts_dir>/<name>.md` first (a path pointing directly
+/// under `~/.canopy/prompts/` wins, so nothing a running graph uses breaks
+/// mid-run), then `<prompts_dir>/nodes/<name>.md` (where the startup
+/// migration moves top-level files). Every loader that reads graph-node
+/// prompts by path goes through here, so migrated files resolve everywhere.
+pub fn read_node_prompt_file(prompts_dir: &Path, name: &str) -> Option<String> {
+    let literal = prompts_dir.join(format!("{name}.md"));
+    if let Ok(content) = std::fs::read_to_string(&literal) {
+        return Some(content);
     }
-    Ok(())
+    std::fs::read_to_string(prompts_dir.join("nodes").join(format!("{name}.md"))).ok()
 }
 
-/// Resolve a named preset at agent spawn time: read `<prompts_dir>/<name>.md`.
-/// If the file is missing or unreadable, fall back to the hardcoded seed
-/// constant for that name (logging a WARN naming the missing file) — or an
-/// empty string if `name` isn't a builtin either, since a custom preset with
-/// no file has nothing to fall back to.
+/// Resolve a named preset at agent spawn time via [`read_node_prompt_file`].
+/// If neither file is readable, fall back to the hardcoded constant for
+/// that name (logging a WARN) — or an empty string if `name` isn't a
+/// builtin either, since a custom preset with no file has nothing to fall
+/// back to.
 ///
 /// Takes `prompts_dir` directly (rather than reading `canopy_dir()` itself)
 /// so callers and tests can point it at any directory without touching
 /// process-wide env state — see [`canopy_dir`] to derive the production path.
 pub fn resolve_prompt_preset(prompts_dir: &Path, name: &str) -> String {
-    let path = prompts_dir.join(format!("{name}.md"));
-    match std::fs::read_to_string(&path) {
-        Ok(content) => content,
-        Err(error) => {
-            let fallback = builtin_prompt_preset_specs()
-                .into_iter()
-                .find(|(preset_name, _)| *preset_name == name)
-                .map(|(_, content)| content)
-                .unwrap_or_default();
-            tracing::warn!(
-                preset = name,
-                path = %path.display(),
-                error = %error,
-                "prompt preset file missing or unreadable; falling back to the builtin seed constant"
-            );
-            fallback
-        }
+    if let Some(content) = read_node_prompt_file(prompts_dir, name) {
+        return content;
     }
+    let fallback = builtin_prompt_preset_specs()
+        .into_iter()
+        .find(|(preset_name, _)| *preset_name == name)
+        .map(|(_, content)| content)
+        .unwrap_or_default();
+    tracing::warn!(
+        preset = name,
+        path = %prompts_dir.join(format!("{name}.md")).display(),
+        "prompt preset file missing or unreadable; falling back to the builtin constant"
+    );
+    fallback
 }
 
 /// A `{{name}}` placeholder in a preset's raw content with no bound value
@@ -445,35 +482,98 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn seed_builtin_prompt_presets_writes_missing_files_but_leaves_edited_ones_alone() {
+    fn migrate_moves_top_level_md_files_into_nodes() {
         let dir = tempdir().unwrap();
         let canopy_dir = dir.path();
+        let prompts = prompts_dir(canopy_dir);
+        std::fs::create_dir_all(&prompts).unwrap();
+        std::fs::write(prompts.join("implementer.md"), "custom implementer").unwrap();
+        std::fs::write(prompts.join("notes.txt"), "not a prompt").unwrap();
 
-        seed_builtin_prompt_presets(canopy_dir).unwrap();
-        let implementer_path = prompts_dir(canopy_dir).join("implementer.md");
+        migrate_top_level_to_nodes(canopy_dir).unwrap();
+
+        assert!(!prompts.join("implementer.md").exists());
         assert_eq!(
-            std::fs::read_to_string(&implementer_path).unwrap(),
-            implementer_preset()
+            std::fs::read_to_string(nodes_dir(canopy_dir).join("implementer.md")).unwrap(),
+            "custom implementer"
         );
+        assert!(prompts.join("notes.txt").exists());
+    }
 
-        // Simulate a user edit, then reseed (as a second daemon startup would).
-        std::fs::write(&implementer_path, "my custom implementer prompt").unwrap();
-        seed_builtin_prompt_presets(canopy_dir).unwrap();
+    #[test]
+    fn migrate_never_overwrites_an_existing_nodes_file() {
+        let dir = tempdir().unwrap();
+        let canopy_dir = dir.path();
+        let prompts = prompts_dir(canopy_dir);
+        std::fs::create_dir_all(nodes_dir(canopy_dir)).unwrap();
+        std::fs::write(prompts.join("reviewer.md"), "top-level version").unwrap();
+        std::fs::write(nodes_dir(canopy_dir).join("reviewer.md"), "nodes version").unwrap();
+
+        migrate_top_level_to_nodes(canopy_dir).unwrap();
 
         assert_eq!(
-            std::fs::read_to_string(&implementer_path).unwrap(),
-            "my custom implementer prompt"
+            std::fs::read_to_string(nodes_dir(canopy_dir).join("reviewer.md")).unwrap(),
+            "nodes version"
         );
     }
 
     #[test]
-    fn seed_builtin_prompt_presets_creates_all_three_builtins() {
+    fn migrate_is_idempotent_and_leaves_nodes_and_quick_untouched() {
         let dir = tempdir().unwrap();
-        seed_builtin_prompt_presets(dir.path()).unwrap();
+        let canopy_dir = dir.path();
+        let prompts = prompts_dir(canopy_dir);
+        std::fs::create_dir_all(quick_dir(canopy_dir)).unwrap();
+        std::fs::create_dir_all(nodes_dir(canopy_dir)).unwrap();
+        std::fs::write(prompts.join("custom.md"), "custom").unwrap();
+        std::fs::write(quick_dir(canopy_dir).join("tutor.md"), "quick tutor").unwrap();
+        std::fs::write(nodes_dir(canopy_dir).join("staged.md"), "staged").unwrap();
 
-        for (name, _) in builtin_prompt_preset_specs() {
-            assert!(prompts_dir(dir.path()).join(format!("{name}.md")).exists());
-        }
+        migrate_top_level_to_nodes(canopy_dir).unwrap();
+        migrate_top_level_to_nodes(canopy_dir).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(nodes_dir(canopy_dir).join("custom.md")).unwrap(),
+            "custom"
+        );
+        assert_eq!(
+            std::fs::read_to_string(quick_dir(canopy_dir).join("tutor.md")).unwrap(),
+            "quick tutor"
+        );
+        assert_eq!(
+            std::fs::read_to_string(nodes_dir(canopy_dir).join("staged.md")).unwrap(),
+            "staged"
+        );
+        assert!(!prompts.join("custom.md").exists());
+    }
+
+    #[test]
+    fn resolve_finds_a_migrated_prompt_through_the_nodes_fallback() {
+        let dir = tempdir().unwrap();
+        let canopy_dir = dir.path();
+        let prompts = prompts_dir(canopy_dir);
+        std::fs::create_dir_all(&prompts).unwrap();
+        std::fs::write(prompts.join("my-reviewer.md"), "migrated content").unwrap();
+        migrate_top_level_to_nodes(canopy_dir).unwrap();
+
+        assert_eq!(
+            resolve_prompt_preset(&prompts, "my-reviewer"),
+            "migrated content"
+        );
+    }
+
+    #[test]
+    fn resolve_prefers_the_literal_path_when_both_exist() {
+        let dir = tempdir().unwrap();
+        let canopy_dir = dir.path();
+        let prompts = prompts_dir(canopy_dir);
+        std::fs::create_dir_all(nodes_dir(canopy_dir)).unwrap();
+        std::fs::write(prompts.join("implementer.md"), "literal wins").unwrap();
+        std::fs::write(nodes_dir(canopy_dir).join("implementer.md"), "nodes loses").unwrap();
+
+        assert_eq!(
+            resolve_prompt_preset(&prompts, "implementer"),
+            "literal wins"
+        );
     }
 
     #[test]
@@ -646,7 +746,7 @@ mod tests {
     }
 
     #[test]
-    fn seeding_leaves_an_old_untagged_installation_mixed_with_new_tagged_defaults() {
+    fn an_old_untagged_file_resolves_unchanged_while_a_missing_one_uses_the_default() {
         let dir = tempdir().unwrap();
         let canopy_dir = dir.path();
         let prompts = prompts_dir(canopy_dir);
@@ -656,16 +756,13 @@ mod tests {
         let old_style = "You are the reviewer and committer for this graph.\n{{spec_content}}\n";
         std::fs::write(prompts.join("reviewer.md"), old_style).unwrap();
 
-        // A daemon startup on the new binary reseeds missing files only.
-        seed_builtin_prompt_presets(canopy_dir).unwrap();
-
-        // The old file is untouched...
+        // The old file resolves byte-for-byte...
         assert_eq!(
             resolve_prompt_preset(&prompts, "reviewer"),
             old_style,
-            "an edited file predating this change must not be overwritten"
+            "an edited file predating this change must resolve unchanged"
         );
-        // ...while a preset with no file on disk gets the new tagged form.
+        // ...while a preset with no file on disk gets the tagged default.
         assert_eq!(
             resolve_prompt_preset(&prompts, "implementer"),
             implementer_preset()

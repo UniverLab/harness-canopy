@@ -77,7 +77,7 @@ JSON on stdout with the question on stderr.
 Only after the confirmation is the document written to
 `~/.canopy/nodes/<name>.json`, stamped with the catalogue entry it came
 from (`slug`, `owner/repo/slug`, or `draft:<id>`). Its bundled `preset`
-is installed as `~/.canopy/prompts/<preset.name>.md` with the same
+is installed as `~/.canopy/prompts/nodes/<preset.name>.md` with the same
 no-silent-overwrite rule as a graph's presets: a file owned by another
 source aborts the install unless `--overwrite-presets` (or `--replace`)
 is given. A

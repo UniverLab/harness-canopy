@@ -52,6 +52,12 @@ pub static KEY_REFS: &[KeyRef] = &[
         code: "F2",
     },
     KeyRef {
+        key: "F5",
+        context: "Global",
+        action: "open the ready-prompt menu (focused agent session)",
+        code: "F5",
+    },
+    KeyRef {
         key: "Ctrl+N",
         context: "Global",
         action: "new agent",

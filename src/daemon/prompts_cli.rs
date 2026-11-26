@@ -1,13 +1,14 @@
 //! CLI handlers for `canopy prompts` subcommands (P1) — discovery for the
-//! file-backed prompt presets under `~/.canopy/prompts/`. Read-only, mirrors
-//! `canopy graph list/info` in spirit and structure (see `graph_cli.rs`).
+//! file-backed graph-node prompt presets under `~/.canopy/prompts/nodes/`.
+//! Read-only, mirrors `canopy graph list/info` in spirit and structure (see
+//! `graph_cli.rs`).
 
 use std::path::Path;
 
 use anyhow::{anyhow, Result};
 use clap::Subcommand;
 
-use crate::domain::prompts::{prompts_dir, seed_builtin_prompt_presets};
+use crate::domain::prompts::{migrate_top_level_to_nodes, nodes_dir, prompts_dir};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum PromptsAction {
@@ -15,7 +16,7 @@ pub(crate) enum PromptsAction {
     List,
     /// Show the full content of a prompt preset.
     Show {
-        /// Preset name — the file's stem under ~/.canopy/prompts/ (e.g. "implementer").
+        /// Preset name — the file's stem under ~/.canopy/prompts/nodes/ (e.g. "implementer").
         name: String,
     },
 }
@@ -23,16 +24,15 @@ pub(crate) enum PromptsAction {
 pub(crate) async fn handle_prompts_action(action: PromptsAction) -> Result<()> {
     let canopy_dir = crate::ensure_data_dir()?;
     // Idempotent and never overwrites an existing file (see
-    // `seed_builtin_prompt_presets`), so this makes `canopy prompts` work
+    // `migrate_top_level_to_nodes`), so this makes `canopy prompts` work
     // even before the daemon has ever started.
-    if let Err(e) = seed_builtin_prompt_presets(&canopy_dir) {
-        tracing::warn!("Could not seed builtin prompt presets: {e}");
+    if let Err(e) = migrate_top_level_to_nodes(&canopy_dir) {
+        tracing::warn!("Could not migrate top-level prompt presets to nodes/: {e}");
     }
-    let dir = prompts_dir(&canopy_dir);
 
     match action {
-        PromptsAction::List => handle_prompts_list(&dir),
-        PromptsAction::Show { name } => handle_prompts_show(&dir, &name),
+        PromptsAction::List => handle_prompts_list(&nodes_dir(&canopy_dir)),
+        PromptsAction::Show { name } => handle_prompts_show(&prompts_dir(&canopy_dir), &name),
     }
 }
 
@@ -55,9 +55,15 @@ fn handle_prompts_list(dir: &Path) -> Result<()> {
 }
 
 fn handle_prompts_show(dir: &Path, name: &str) -> Result<()> {
-    let path = dir.join(format!("{name}.md"));
-    let content = std::fs::read_to_string(&path)
-        .map_err(|_| anyhow!("Prompt preset '{name}' not found at {}.", path.display()))?;
+    // Literal path first, `nodes/` fallback — the same precedence the spawn
+    // path uses (see `domain::prompts::read_node_prompt_file`).
+    let content = crate::domain::prompts::read_node_prompt_file(dir, name).ok_or_else(|| {
+        anyhow!(
+            "Prompt preset '{name}' not found at {} or {}.",
+            dir.join(format!("{name}.md")).display(),
+            dir.join("nodes").join(format!("{name}.md")).display()
+        )
+    })?;
     println!("\n\x1b[1m── Prompt Preset: {name} ──\x1b[0m\n");
     println!("{content}");
     Ok(())

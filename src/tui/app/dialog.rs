@@ -14,6 +14,7 @@ pub mod new_agent;
 pub mod node_tail;
 pub(crate) mod node_tail_worker;
 pub mod prompt;
+pub mod quick_menu;
 
 pub use at_picker::*;
 pub(crate) use graph_control::*;

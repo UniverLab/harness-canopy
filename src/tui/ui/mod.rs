@@ -228,6 +228,10 @@ fn draw_modal_dialogs(frame: &mut Frame, app: &mut App, theme: &Theme) {
     if app.version_notice.is_some() {
         dialogs::draw_version_notice_dialog(frame, app, theme);
     }
+
+    if app.quick_menu.is_some() {
+        crate::tui::app::dialog::quick_menu::draw_quick_menu(frame, app, theme);
+    }
 }
 
 /// The suggestion picker and the terminal search bar.

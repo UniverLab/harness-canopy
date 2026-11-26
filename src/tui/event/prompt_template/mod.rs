@@ -1,6 +1,5 @@
 use anyhow::Result;
 use ratatui::crossterm::event::{KeyCode, KeyModifiers};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::db::Database;
@@ -725,9 +724,6 @@ fn selected_interactive_index(app: &App) -> Option<usize> {
 
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-mod preset_picker_tests;
 
 #[cfg(test)]
 mod recall_last_prompt_tests;

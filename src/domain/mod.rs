@@ -28,6 +28,7 @@ pub mod prompt_catalog;
 pub mod prompt_draft;
 pub mod prompts;
 pub mod queues;
+pub mod quick_prompts;
 pub mod quota_reset;
 pub mod registry_baseline;
 pub mod remote_config;

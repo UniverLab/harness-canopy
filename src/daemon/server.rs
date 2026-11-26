@@ -49,8 +49,8 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
     let _daemon_lock = acquire_daemon_lock(&data_dir)?;
     let db = Arc::new(super::db_recovery::open_database(&data_dir)?);
     crate::setup_module::harness_prune::prune_on_startup(&data_dir, &db);
-    if let Err(e) = crate::domain::prompts::seed_builtin_prompt_presets(&data_dir) {
-        tracing::warn!("Could not seed builtin prompt presets: {e}");
+    if let Err(e) = crate::domain::prompts::migrate_top_level_to_nodes(&data_dir) {
+        tracing::warn!("Could not migrate top-level prompt presets to nodes/: {e}");
     }
 
     let core = build_http_core(&db, &data_dir);
@@ -670,8 +670,8 @@ struct StdioServerStartup {
 }
 
 async fn stdio_server_startup(db: Arc<Database>, data_dir: &std::path::Path) -> StdioServerStartup {
-    if let Err(e) = crate::domain::prompts::seed_builtin_prompt_presets(data_dir) {
-        tracing::warn!("Could not seed builtin prompt presets: {e}");
+    if let Err(e) = crate::domain::prompts::migrate_top_level_to_nodes(data_dir) {
+        tracing::warn!("Could not migrate top-level prompt presets to nodes/: {e}");
     }
     let notification_service: Arc<dyn NotificationService> = Arc::new(DefaultNotificationService);
     // No hub here (a stdio server has no session hub), so the delivery task

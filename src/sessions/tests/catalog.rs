@@ -221,7 +221,7 @@ fn catalog_lists_temp_dir_sources() {
     .unwrap();
 
     let canopy_dir = tempfile::tempdir().expect("canopy dir");
-    let prompts = canopy_dir.path().join("prompts");
+    let prompts = canopy_dir.path().join("prompts").join("nodes");
     std::fs::create_dir_all(&prompts).unwrap();
     std::fs::write(prompts.join("gold.md"), "First line preview.\n\nBody here.").unwrap();
 

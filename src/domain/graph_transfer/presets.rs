@@ -51,7 +51,7 @@ pub fn collect(
         if by_name.contains_key(name) {
             continue;
         }
-        let Ok(content) = std::fs::read_to_string(prompts_dir.join(format!("{name}.md"))) else {
+        let Some(content) = crate::domain::prompts::read_node_prompt_file(prompts_dir, name) else {
             continue;
         };
         if content.is_empty() {

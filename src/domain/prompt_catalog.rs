@@ -1,8 +1,9 @@
 //! Loading the [`PromptCatalog`] the hub resolves draft choices against.
 //!
 //! The sources mirror the TUI pickers exactly: registered projects from the
-//! database (the Project picker), `*.md` files under `<canopy_dir>/prompts/`
-//! (the Preset picker), and directory skills plus the configured skill store
+//! database (the Project picker), `*.md` files under
+//! `<canopy_dir>/prompts/nodes/` (graph-node presets, for hub-side draft
+//! composition), and directory skills plus the configured skill store
 //! (the Skills picker). Read fresh on every load — no caching — so an
 //! external edit shows up immediately, exactly like the pickers.
 
@@ -16,11 +17,12 @@ use super::prompt_draft::{
 
 impl PromptCatalog {
     /// Load the full catalog: projects from `db`, presets from
-    /// `<canopy_dir>/prompts/`, skills from `workdir`'s `.agents/skills` plus
-    /// the global one and the store configured in `canopy_dir`.
+    /// `<canopy_dir>/prompts/nodes/`, skills from `workdir`'s
+    /// `.agents/skills` plus the global one and the store configured in
+    /// `canopy_dir`.
     pub fn load(db: &Database, workdir: &Path, canopy_dir: &Path) -> anyhow::Result<PromptCatalog> {
         Ok(PromptCatalog {
-            presets: collect_preset_entries(&super::prompts::prompts_dir(canopy_dir)),
+            presets: collect_node_prompt_entries(&super::prompts::nodes_dir(canopy_dir)),
             skills: collect_skill_entries(workdir, canopy_dir),
             projects: load_project_entries(db)?,
         })
@@ -42,13 +44,12 @@ fn load_project_entries(db: &Database) -> anyhow::Result<Vec<ProjectEntry>> {
     Ok(entries)
 }
 
-/// Collect prompt presets: every `*.md` file under `dir` (typically
-/// `~/.canopy/prompts/`), sorted by name, with the file's first non-empty
-/// line as the preview. Moved from the dialog's
-/// `collect_presets_for_picker`, which now delegates here. A missing
-/// directory yields an empty list rather than an error; an unreadable file
-/// is skipped rather than aborting the whole listing.
-pub(crate) fn collect_preset_entries(dir: &Path) -> Vec<PresetEntry> {
+/// Collect graph-node prompt presets: every `*.md` file under `dir`
+/// (typically `~/.canopy/prompts/nodes/`), sorted by name, with the file's
+/// first non-empty line as the preview. A missing directory yields an empty
+/// list rather than an error; an unreadable file is skipped rather than
+/// aborting the whole listing.
+pub(crate) fn collect_node_prompt_entries(dir: &Path) -> Vec<PresetEntry> {
     let Ok(read_dir) = std::fs::read_dir(dir) else {
         return Vec::new();
     };

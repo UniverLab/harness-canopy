@@ -72,10 +72,11 @@ import unchanged (they carry fewer fields, never more — a document
 without the fields imports with the trigger active and no schedules).
 
 A node's `prompt_preset` names a preset that must exist on the
-importing machine: a file `<canopy_dir>/prompts/<name>.md` (the same
-file the engine reads at spawn time) or one of the builtins (`implementer`,
-`reviewer`, `resilience`, which are seeded on daemon start and fall back
-to embedded constants). Since version 6 the document **bundles** every
+importing machine: a file `<canopy_dir>/prompts/<name>.md` or
+`<canopy_dir>/prompts/nodes/<name>.md` (the same files the engine reads
+at spawn time, literal path first) or one of the builtins (`implementer`,
+`reviewer`, `resilience`, which fall back to embedded constants when no
+file exists). Since version 6 the document **bundles** every
 custom preset its agent nodes reference — a `prompt_presets` array of
 `{"name", "content"}` entries carrying the full text, so a shared
 recipe arrives with everything its nodes need. On import, each bundled
@@ -89,7 +90,7 @@ preset and writing nothing — rather than importing a graph whose agent
 would silently run on an empty prompt:
 
 ```
-Unknown prompt preset(s): my-auditor, my-reviewer. Add file(s) under /home/you/.canopy/prompts or use a builtin (implementer, reviewer, resilience).
+Unknown prompt preset(s): my-auditor, my-reviewer. Add file(s) under /home/you/.canopy/prompts/nodes or use a builtin (implementer, reviewer, resilience).
 ```
 
 Ensemble members are not checked — a member

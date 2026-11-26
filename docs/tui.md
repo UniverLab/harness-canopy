@@ -412,8 +412,10 @@ row: `/` filters, `n` creates, `e` edits and `F4` deletes.
 - **Prompt builder** — structured prompt templates with configurable
   sections (instruction, context, resources, examples) and @-mention
   agent references. Press `Ctrl+L` to recall the last prompt you sent
-  in the current project, restoring the full prompt text, tools, and
-  preset selection. The Tools picker (opened from the `Tools` section in
+  in the current project, restoring the full prompt text and tools.
+  A new agent session opens directly in its harness — the prompt
+  builder no longer opens on its own (`Ctrl+B` opens it on demand).
+  The Tools picker (opened from the `Tools` section in
   the section-add menu) lists on-disk `[skill]:`/`[global]:` skills first,
   then canopy's dynamic skills as `[canopy]:<name>` (name-sorted, local
   cache only — no network). A name present both on disk and in canopy's
@@ -433,6 +435,20 @@ row: `/` filters, `n` creates, `e` edits and `F4` deletes.
   `Tab` reaches the row, `←`/`→` move along it and `Backspace`/`Delete`
   removes the focused chip (the shelf copy stays). Attachments persist with
   the draft across close/reopen, recall and scheduled sends.
+- **Ready prompts** — a passive strip of small numbered tabs
+  (`[1 Builder] [2 onboarding] …`) sits at the top right of the focused
+  session's work window: a mouse click inserts that prompt into the
+  session's input box via bracketed paste, without submitting. The
+  first tab opens the prompt builder; the rest are canopy's built-in
+  prompts (onboarding, protocol, tutor, contextualization,
+  schedule-prompt) plus every `*.md` file in
+  `~/.canopy/prompts/quick/` (named by file stem, sorted; a file whose
+  stem matches a built-in overrides that built-in's text). `F5` opens
+  the same set as a menu dialog listing each name, number (1–9) and a
+  one-line preview: digits `1`–`9` choose directly, items 10+ are
+  reached with `↑`/`↓` + `Enter` (or a click), `Esc` closes. On a
+  narrow window the strip keeps tabs from item 1 while they fit and
+  shows a trailing `+N` badge (which opens the menu) for the rest.
 - **Canopy protocol — once per session** — the builder prepends the
   `[CANOPY]` session-start protocol to the *first* prompt of an
   interactive session, never to the ones that follow. That fact is stored

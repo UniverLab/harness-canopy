@@ -48,9 +48,9 @@ pub(super) fn reject_unknown_output_references(
 }
 
 /// Every `prompt_preset` an agent node names must be resolvable on this
-/// machine: a `<prompts_dir>/<name>.md` file (what
-/// `domain::prompts::resolve_prompt_preset` reads at spawn time), one of the
-/// builtins seeded on daemon start, or a preset the document itself bundles
+/// machine: a `<prompts_dir>/<name>.md` or `<prompts_dir>/nodes/<name>.md`
+/// file (what `domain::prompts::resolve_prompt_preset` reads at spawn
+/// time), one of the builtins, or a preset the document itself bundles
 /// (v6). A document from an older version carries only the preset NAME, so a
 /// document written elsewhere would otherwise import cleanly and then run that
 /// node on an empty prompt — a hard refusal at import time is the safety net
@@ -96,7 +96,7 @@ pub(super) fn reject_unknown_prompt_presets(
     referenced.retain(|name| {
         !builtins.contains(name)
             && !bundled.contains(name)
-            && !prompts_dir.join(format!("{name}.md")).is_file()
+            && crate::domain::prompts::read_node_prompt_file(prompts_dir, name).is_none()
     });
     if referenced.is_empty() {
         return Ok(());
@@ -106,7 +106,7 @@ pub(super) fn reject_unknown_prompt_presets(
     Err(format!(
         "Unknown prompt preset(s): {}. Add file(s) under {} or use a builtin ({}).",
         referenced.into_iter().collect::<Vec<_>>().join(", "),
-        prompts_dir.display(),
+        prompts_dir.join("nodes").display(),
         builtin_names.join(", ")
     ))
 }

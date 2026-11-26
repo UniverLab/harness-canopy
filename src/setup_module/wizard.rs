@@ -46,6 +46,11 @@ pub fn run_setup(force_skills: bool) -> Result<()> {
     // absent); the notice below fires whenever the legacy value is in
     // effect, whether this run pinned it or an earlier start did.
     let _ = crate::domain::config_pin::pin_legacy_defaults(&canopy_dir);
+    // Graph-node prompts live under `prompts/nodes/` now: move any
+    // top-level `*.md` files there (idempotent, never overwrites).
+    if let Err(error) = crate::domain::prompts::migrate_top_level_to_nodes(&canopy_dir) {
+        eprintln!("warning: could not migrate prompt presets to nodes/: {error}");
+    }
     let existing_config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
     let legacy_stun =
         existing_config.remote.stun_fallback == crate::remote::peer_ice::LEGACY_STUN_URL;

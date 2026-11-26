@@ -196,15 +196,7 @@ impl App {
         self.refresh_agents()?;
         self.select_agent_by_name(&name);
 
-        let initial_content = Self::launchpad_initial_content(
-            self,
-            &dialog.working_dir,
-            &mission_title,
-            mission_context.as_deref(),
-            &launchpad,
-        );
         self.focus = crate::tui::app::types::Focus::Agent;
-        self.open_simple_prompt_dialog(Some(initial_content));
         Ok(())
     }
 
@@ -254,37 +246,6 @@ impl App {
                 session_id: Some(launchpad_node_id.clone()),
             })?;
         Ok(launchpad_node_id)
-    }
-
-    pub(super) fn launchpad_initial_content(
-        &self,
-        workdir: &str,
-        mission_title: &str,
-        mission_context: Option<&str>,
-        launchpad: &LaunchpadDialog,
-    ) -> std::collections::HashMap<String, String> {
-        let mut initial_content = std::collections::HashMap::new();
-        let mut launchpad_context = format!("mission: {mission_title}");
-        if let Some(context) = mission_context {
-            if !context.trim().is_empty() {
-                launchpad_context.push_str("\n\nprevious_summary:\n");
-                launchpad_context.push_str(context.trim());
-            }
-        }
-        if !launchpad.active_missions.is_empty() {
-            launchpad_context.push_str("\n\nactive_peer_missions:\n");
-            for m in &launchpad.active_missions {
-                launchpad_context.push_str(&format!(
-                    "- {} [{}]: {}\n",
-                    m.agent_name, m.impact, m.mission
-                ));
-            }
-        }
-        initial_content.insert("context".to_string(), launchpad_context);
-        if let Ok(Some(project)) = self.db.get_project_by_path_or_ancestor(Path::new(workdir)) {
-            initial_content.insert("project_context".to_string(), project.path);
-        }
-        initial_content
     }
 
     pub(super) fn update_scheduled(
@@ -1091,20 +1052,18 @@ mod tests {
     }
 
     /// The open completed: one interactive session, both dialogs consumed,
-    /// the prompt builder up and the session selected in the sidebar.
+    /// no prompt builder (the harness opens directly), and the session
+    /// selected in the sidebar.
     fn assert_session_opened(app: &App) {
         assert_eq!(app.interactive_agents.len(), 1);
         assert!(app.launchpad_dialog.is_none());
         assert!(app.pending_launch_dialog.is_none());
-        assert!(app.simple_prompt_dialog.is_some());
+        assert!(app.simple_prompt_dialog.is_none());
         assert!(matches!(
             app.agents.get(app.selected),
             Some(AgentEntry::Interactive(0))
         ));
-        assert!(matches!(
-            app.focus,
-            crate::tui::app::types::Focus::PromptTemplateDialog
-        ));
+        assert!(matches!(app.focus, crate::tui::app::types::Focus::Agent));
     }
 
     fn kill_spawned_agents(app: &mut App) {

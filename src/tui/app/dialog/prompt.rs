@@ -50,24 +50,14 @@ pub enum SectionPickerMode {
         /// `None` → create a new tools section on confirm; `Some(id)` → replace content of that section
         replace_id: Option<String>,
     },
-    /// `selected`/`scroll` index into the FILTERED list (mirroring
-    /// `PresetPicker`), so typing narrows `entries` in place without a
-    /// re-query while the highlighted row and scroll window stay in sync.
+    /// `selected`/`scroll` index into the FILTERED list, so typing narrows
+    /// `entries` in place without a re-query while the highlighted row and
+    /// scroll window stay in sync.
     ProjectPicker {
         selected: usize,
         entries: Vec<ProjectPickerEntry>,
         filter: String,
         scroll: usize,
-    },
-    /// Prompt-preset picker (P2): entries are read fresh from
-    /// `~/.canopy/prompts/*.md` (P1) each time the picker opens — `(name,
-    /// preview, full content)`. `filter` is the user's typed substring
-    /// filter; `selected` indexes into the FILTERED list, mirroring
-    /// `NewAgentDialog`'s CLI picker (`cli_picker_idx`).
-    PresetPicker {
-        selected: usize,
-        entries: Vec<(String, String, String)>,
-        filter: String,
     },
 }
 
@@ -430,7 +420,6 @@ impl SimplePromptDialog {
         // The manual resend path: a locked, read-only section holding the
         // canonical protocol block (see `prompt_protocol`).
         sections.push(("canopy_protocol", "Canopy protocol"));
-        sections.push(("preset", "Preset"));
         sections
     }
 
@@ -462,37 +451,6 @@ impl SimplePromptDialog {
         entries
     }
 
-    /// Collect prompt presets for the Preset picker (P2): every `*.md` file
-    /// under `dir` (typically `~/.canopy/prompts/`, see
-    /// `domain::prompts::prompts_dir`), sorted by name. Returns `(name,
-    /// preview, full content)` where `preview` is the file's first
-    /// non-empty line. Read fresh at picker-open time — no caching — so an
-    /// external edit shows up immediately (spec P2). A missing directory
-    /// yields an empty list rather than an error; an unreadable file is
-    /// skipped rather than aborting the whole listing.
-    pub fn collect_presets_for_picker(dir: &std::path::Path) -> Vec<(String, String, String)> {
-        crate::domain::prompt_catalog::collect_preset_entries(dir)
-            .into_iter()
-            .map(|entry| (entry.name, entry.preview, entry.content))
-            .collect()
-    }
-
-    /// Indices into `entries` whose name matches `filter` as a
-    /// case-insensitive substring — the same "fuzzy" filter convention
-    /// `NewAgentDialog::filtered_cli_indices` uses for the CLI picker.
-    pub fn filtered_preset_indices(
-        entries: &[(String, String, String)],
-        filter: &str,
-    ) -> Vec<usize> {
-        let query = filter.trim().to_lowercase();
-        entries
-            .iter()
-            .enumerate()
-            .filter(|(_, (name, _, _))| query.is_empty() || name.to_lowercase().contains(&query))
-            .map(|(idx, _)| idx)
-            .collect()
-    }
-
     pub fn collect_projects_for_picker(db: &Database) -> Result<Vec<ProjectPickerEntry>> {
         let mut entries = db
             .list_projects()?
@@ -508,9 +466,10 @@ impl SimplePromptDialog {
     }
 
     /// Indices into `entries` whose name or path match `filter` as a
-    /// case-insensitive substring — same convention as
-    /// [`Self::filtered_preset_indices`], extended to path since a project's
-    /// path is often what a user remembers about it.
+    /// case-insensitive substring — the same "fuzzy" filter convention
+    /// `NewAgentDialog::filtered_cli_indices` uses for its picker, extended
+    /// to path since a project's path is often what a user remembers about
+    /// it.
     pub fn filtered_project_indices(entries: &[ProjectPickerEntry], filter: &str) -> Vec<usize> {
         let query = filter.trim().to_lowercase();
         entries

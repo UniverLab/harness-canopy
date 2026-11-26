@@ -1,7 +1,6 @@
 use anyhow::Result;
 
 use crate::db::Database;
-use crate::domain::sync::summarize_sync_context;
 use crate::tui::app::types::Focus;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -17,14 +16,6 @@ pub struct LaunchpadContext {
     pub summary: Option<String>,
 }
 
-/// A brief summary of an active mission from another agent.
-#[derive(Clone)]
-pub struct ActiveMissionSummary {
-    pub agent_name: String,
-    pub impact: String,
-    pub mission: String,
-}
-
 #[derive(Clone)]
 pub struct LaunchpadDialog {
     pub workdir: String,
@@ -33,8 +24,6 @@ pub struct LaunchpadDialog {
     pub new_mission: String,
     pub cursor: usize,
     pub submit_blocked: bool,
-    /// Active missions from peer agents in this workdir (mission handoff context).
-    pub active_missions: Vec<ActiveMissionSummary>,
     /// Focus before the dialog opened; the panel behind keeps drawing it.
     pub prev_focus: Option<Focus>,
 }
@@ -102,31 +91,6 @@ impl LaunchpadDialog {
 
         let selected_index = 0;
 
-        let active_missions = db
-            .list_activity_log_entries(workdir, 30)
-            .ok()
-            .map(|entries| {
-                let messages: Vec<crate::domain::sync::SyncMessage> = entries
-                    .into_iter()
-                    .map(crate::domain::sync::SyncMessage::from)
-                    .collect();
-                let agent_ids = messages
-                    .iter()
-                    .map(|m| m.agent_id.clone())
-                    .collect::<std::collections::HashSet<_>>();
-                let snapshot = summarize_sync_context(&messages, &agent_ids, 5);
-                snapshot
-                    .active_intents
-                    .into_iter()
-                    .map(|intent| ActiveMissionSummary {
-                        agent_name: intent.agent_name,
-                        impact: intent.impact.as_str().to_owned(),
-                        mission: intent.mission,
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-
         Ok(Self {
             workdir: workdir.to_owned(),
             recent_missions,
@@ -134,7 +98,6 @@ impl LaunchpadDialog {
             new_mission: String::new(),
             cursor: 0,
             submit_blocked: false,
-            active_missions,
             prev_focus: None,
         })
     }
@@ -282,7 +245,6 @@ mod tests {
             new_mission: "   ".to_string(),
             cursor: 3,
             submit_blocked: false,
-            active_missions: Vec::new(),
             prev_focus: None,
         };
 
@@ -319,7 +281,6 @@ mod tests {
             new_mission: String::new(),
             cursor: 0,
             submit_blocked: false,
-            active_missions: Vec::new(),
             prev_focus: None,
         };
 
@@ -349,7 +310,6 @@ mod tests {
             new_mission: String::new(),
             cursor: 0,
             submit_blocked: false,
-            active_missions: Vec::new(),
             prev_focus: None,
         };
 
@@ -371,7 +331,6 @@ mod tests {
             new_mission: String::new(),
             cursor: 0,
             submit_blocked: false,
-            active_missions: Vec::new(),
             prev_focus: None,
         };
 

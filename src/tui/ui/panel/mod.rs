@@ -1946,7 +1946,6 @@ mod tests {
             new_mission: String::new(),
             cursor: 0,
             submit_blocked: false,
-            active_missions: Vec::new(),
             prev_focus: Some(Focus::Agent),
         });
         assert!(panel_background_focus(&app) == Focus::Agent);

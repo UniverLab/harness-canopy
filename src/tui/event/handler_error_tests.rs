@@ -129,7 +129,6 @@ fn launchpad_launch_failure_sets_the_notice_and_keeps_running() {
         new_mission: "test mission".to_string(),
         cursor: 12,
         submit_blocked: false,
-        active_missions: Vec::new(),
         prev_focus: None,
     });
     app.focus = Focus::LaunchpadDialog;

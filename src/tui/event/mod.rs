@@ -262,6 +262,17 @@ pub fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Resu
         return handle_terminal_search_key(app, code);
     }
 
+    // The F5 quick-prompt menu owns its keys while open; F5 itself opens it
+    // from a focused agent session. Focus never leaves the agent.
+    if app.quick_menu.is_some() {
+        return crate::tui::app::dialog::quick_menu::handle_quick_menu_key(app, code);
+    }
+    if code == KeyCode::F(5) && modifiers == KeyModifiers::NONE && matches!(app.focus, Focus::Agent)
+    {
+        app.open_quick_menu();
+        return Ok(());
+    }
+
     dispatch_focus_key(app, code, modifiers)
 }
 
