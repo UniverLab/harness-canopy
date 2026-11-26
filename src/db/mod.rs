@@ -743,6 +743,7 @@ pub mod project;
 pub mod queues;
 pub mod remote_devices;
 pub mod remote_trust;
+pub mod retention;
 pub(crate) mod roster_entries;
 pub mod run;
 pub mod sandbox;

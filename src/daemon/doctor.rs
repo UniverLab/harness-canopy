@@ -25,6 +25,8 @@ mod path_copies;
 use path_copies::*;
 mod rag_report;
 use rag_report::*;
+mod retention;
+use retention::*;
 
 /// CB68 FR3: aggregated result of scanning every non-archived graph's
 /// node/ensemble prompts and hooks, and every scheduled agent's prompt, for a
@@ -311,7 +313,7 @@ fn report_database(db_path: &PathBuf, canopy_dir: &Path, issues: &mut Vec<String
         return;
     }
     match Database::new_safe(db_path, canopy_dir) {
-        Ok(db) => report_open_database(db_path, &db, issues),
+        Ok(db) => report_open_database(db_path, &db, canopy_dir, issues),
         Err(e) => {
             println!(" \x1b[31m✗\x1b[0m Database exists but could not be opened: {e}");
             issues.push(format!(
@@ -323,9 +325,16 @@ fn report_database(db_path: &PathBuf, canopy_dir: &Path, issues: &mut Vec<String
 }
 
 /// Everything printed from an already-opened database handle, in order:
-/// agent counts, `quick_check`, the daily health verdict, stale 2.x names.
-fn report_open_database(db_path: &Path, db: &Database, issues: &mut Vec<String>) {
+/// agent counts, retention row counts, `quick_check`, the daily health
+/// verdict, stale 2.x names.
+fn report_open_database(
+    db_path: &Path,
+    db: &Database,
+    canopy_dir: &Path,
+    issues: &mut Vec<String>,
+) {
     success(format!("Database: {}", db_path.display()));
+    report_retention_counts(db, canopy_dir);
     if let Ok(agents) = db.list_agents() {
         let cron_count = agents.iter().filter(|a| a.is_cron()).count();
         let watch_count = agents.iter().filter(|a| a.is_watch()).count();

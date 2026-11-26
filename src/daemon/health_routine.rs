@@ -273,6 +273,26 @@ impl HealthRoutine {
         };
         new_status.ran_while_busy = ran_while_busy;
         Self::record_health_outcome(&self.db, &new_status);
+        // Retention pruning rides the same idle gate: `allow_vacuum` is false
+        // on the forced path, where a graph may still be running.
+        self.run_retention_prune_blocking(!ran_while_busy).await;
+    }
+
+    /// Runs the retention prune off the async runtime: old `graph_runs`
+    /// payloads are stripped then deleted, stale sessions are deleted, and —
+    /// on the idle path only — the freed space is reclaimed with `VACUUM`.
+    async fn run_retention_prune_blocking(&self, allow_vacuum: bool) {
+        let db = Arc::clone(&self.db);
+        let data_dir = self.data_dir.clone();
+        let db_path = database_path(&self.data_dir);
+        let outcome = tokio::task::spawn_blocking(move || {
+            let config = crate::domain::canopy_config::CanopyConfig::load(&data_dir);
+            crate::db::retention::run_retention_prune(&db, &config, &db_path, allow_vacuum)
+        })
+        .await;
+        if let Err(e) = outcome {
+            tracing::warn!("db health routine: retention prune task panicked: {e}");
+        }
     }
 }
 

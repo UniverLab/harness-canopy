@@ -142,6 +142,15 @@ pub static REGISTRY: &[SettingDef] = &[
         wizard: false,
     },
     SettingDef {
+        key: "retention.graph_runs_days",
+        kind: Kind::Int { min: 0, max: 3_650 },
+        default: DefaultValue::Literal("60"),
+        group: Group::DaemonStorage,
+        description: "Days a graph run's payload is kept; older runs are stripped then deleted, 0 disables pruning.",
+        apply: Apply::NextRun,
+        wizard: false,
+    },
+    SettingDef {
         key: "graph_event_retention_days",
         kind: Kind::Duration {
             unit: DurationUnit::Days,
@@ -603,7 +612,7 @@ mod tests {
 
     #[test]
     fn registry_has_one_entry_per_setting_and_they_are_unique() {
-        assert_eq!(REGISTRY.len(), 61);
+        assert_eq!(REGISTRY.len(), 62);
         for def in REGISTRY {
             assert_eq!(find(def.key).map(|d| d.key), Some(def.key));
         }

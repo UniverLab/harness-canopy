@@ -11,6 +11,8 @@ use super::settings;
 
 mod spec_review;
 pub use spec_review::SpecReviewConfig;
+mod retention;
+pub use retention::{CleanConfig, RetentionConfig};
 
 /// Top-level canopy configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +88,10 @@ pub struct CanopyConfig {
     /// `[clean]` settings for the `canopy clean` CLI command.
     #[serde(default)]
     pub clean: CleanConfig,
+
+    /// `[retention]` settings for the daemon health routine's prune pass.
+    #[serde(default)]
+    pub retention: RetentionConfig,
 
     /// `[skills]` settings for the dynamic skill store (`~/.canopy/cache/skills/`).
     #[serde(default)]
@@ -574,34 +580,6 @@ fn default_skill_ttl_minutes() -> u64 {
     settings::default_duration_units("skills.ttl_minutes")
 }
 
-/// Settings for `canopy clean` (soft cleanup). Read from the `[clean]` table
-/// in `config.toml`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CleanConfig {
-    /// Days of retention before orphaned/error/completed
-    /// `interactive_sessions` rows and orphaned log/terminal/RAG-residue
-    /// artifacts become eligible for removal. Overridable per-run with
-    /// `canopy clean --older-than <days>`.
-    #[serde(default = "default_retention_days")]
-    pub retention_days: u64,
-    /// Minimum deleted rows to trigger VACUUM during clean.
-    #[serde(default = "default_reclaim_min_deleted_rows")]
-    pub reclaim_min_deleted_rows: usize,
-}
-
-impl Default for CleanConfig {
-    fn default() -> Self {
-        Self {
-            retention_days: default_retention_days(),
-            reclaim_min_deleted_rows: default_reclaim_min_deleted_rows(),
-        }
-    }
-}
-
-fn default_reclaim_min_deleted_rows() -> usize {
-    settings::default_int("clean.reclaim_min_deleted_rows") as usize
-}
-
 /// Settings for the `harness models` catalog cache. Read from the `[models]`
 /// table in `config.toml`.
 ///
@@ -654,10 +632,6 @@ impl ModelsConfig {
     pub fn native_ttl(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.native_ttl_minutes.max(1) * 60)
     }
-}
-
-fn default_retention_days() -> u64 {
-    settings::default_duration_units("clean.retention_days")
 }
 
 /// Preferred unit for temperature display.
@@ -774,6 +748,7 @@ impl Default for CanopyConfig {
             ensemble_concurrency_cap: default_ensemble_concurrency_cap(),
             spec_attempt_limit: default_spec_attempt_limit(),
             clean: CleanConfig::default(),
+            retention: RetentionConfig::default(),
             skills: SkillsConfig::default(),
             models: ModelsConfig::default(),
             theme: default_theme(),
@@ -861,6 +836,26 @@ mod tests {
         let loaded = CanopyConfig::load(&canopy_dir);
         assert_eq!(loaded.rag_max_file_mb, 25);
         assert_eq!(loaded.rag_max_file_bytes(), 25 * 1024 * 1024);
+    }
+
+    #[test]
+    fn retention_graph_runs_days_defaults_to_60_and_round_trips() {
+        assert_eq!(CanopyConfig::default().retention.graph_runs_days, 60);
+
+        let dir = TempDir::new().unwrap();
+        let canopy_dir = dir.path().join(".canopy");
+        std::fs::create_dir_all(&canopy_dir).unwrap();
+
+        let config = CanopyConfig {
+            retention: RetentionConfig {
+                graph_runs_days: 30,
+            },
+            ..Default::default()
+        };
+        config.save_for_tests(&canopy_dir).unwrap();
+
+        let loaded = CanopyConfig::load(&canopy_dir);
+        assert_eq!(loaded.retention.graph_runs_days, 30);
     }
 
     #[test]
