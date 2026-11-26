@@ -1117,13 +1117,18 @@ async fn a_small_cap_peer_gets_frame_too_large_for_a_desktop_sized_list() {
     assert_eq!(error["req"], "l1");
 
     // The refusal killed nothing: the doomed session's exit still arrives.
+    // The kill races the reader thread's natural-exit record, which emits
+    // `session_removed` before the kill's `exited` reaches the peer, so
+    // lifecycle strays are skipped the same way the kill test above does.
     drop(doomed_kill);
-    let exited = peer.recv("the exit after the refusal").await;
-    assert_eq!(
-        exited.json["t"], "exited",
-        "expected the exit, got {}",
-        exited.raw
-    );
+    let exited = loop {
+        let frame = peer.recv("the exit after the refusal").await;
+        match frame.json["t"].as_str() {
+            Some("exited") => break frame,
+            Some("session_removed" | "session_added") => {}
+            _ => panic!("expected the exit, got {}", frame.raw),
+        }
+    };
     assert_eq!(exited.json["id"], doomed.id);
 
     close_by_revoking(&mut peer, DEVICE_ID).await;

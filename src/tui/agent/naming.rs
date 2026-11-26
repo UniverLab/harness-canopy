@@ -30,15 +30,12 @@ const RANDOM_NAMES: &[&str] = &[
     "magnolia",
     "ginkgo",
     "quercus",
-    "amanita",
     "boletus",
     "morchella",
     "cantharellus",
     "pleurotus",
     "ganoderma",
     "lentinula",
-    "psilocybe",
-    "coprinus",
     "hydnum",
     "trametes",
     "russula",
@@ -59,7 +56,6 @@ const RANDOM_NAMES: &[&str] = &[
     "xylaria",
     "fistulina",
     "grifola",
-    "stereum",
     "daedalea",
     "clitocybe",
     "inocybe",
@@ -69,7 +65,18 @@ const RANDOM_NAMES: &[&str] = &[
     "omphalotus",
     "sparassis",
     "calvatia",
-    "phallus",
+    "tilia",
+    "betula",
+    "salix",
+    "fagus",
+    "acer",
+    "ulmus",
+    "fraxinus",
+    "taxus",
+    "tuber",
+    "ramaria",
+    "tricholoma",
+    "agrocybe",
 ];
 
 /// Session names for background/scheduled agents (weather/nature terms).
@@ -159,4 +166,46 @@ pub fn pick_terminal_name(existing: &[&str]) -> String {
 #[allow(dead_code)]
 pub fn pick_background_name(existing: &[&str]) -> String {
     pick_name_from(BACKGROUND_NAMES, existing)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    const DENYLIST: &[&str] = &[
+        "phallus",
+        "psilocybe",
+        "coprinus",
+        "amanita",
+        "death",
+        "dead",
+        "kill",
+        "poison",
+        "toxic",
+        "curse",
+        "hate",
+        "doom",
+        "plague",
+    ];
+
+    #[test]
+    fn session_names_are_safe_and_unique() {
+        for list in [RANDOM_NAMES, BACKGROUND_NAMES, TERMINAL_NAMES] {
+            for name in list {
+                assert!(!DENYLIST.contains(name), "denied name present: {name}");
+            }
+            let unique: HashSet<&&str> = list.iter().collect();
+            assert_eq!(unique.len(), list.len(), "duplicate entry in list");
+        }
+        let mut all = Vec::new();
+        for list in [RANDOM_NAMES, BACKGROUND_NAMES, TERMINAL_NAMES] {
+            all.extend(list.iter());
+        }
+        let unique: HashSet<&&str> = all.iter().copied().collect();
+        assert_eq!(unique.len(), all.len(), "duplicate across lists");
+
+        assert_eq!(pick_name_from(&["tilia"], &["tilia"]), "tilia-2");
+        assert_eq!(pick_name_from(&["tilia"], &["tilia", "tilia-2"]), "tilia-3");
+    }
 }
