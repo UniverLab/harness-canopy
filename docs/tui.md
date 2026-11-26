@@ -147,6 +147,16 @@ step instead of launching straight away:
   mode off, alternate screen left, mouse capture and bracketed paste
   disabled) and the panic, with its file:line:col location and its
   backtrace, is appended to `~/.canopy/logs/tui-panic.log`.
+- **Performance log** — opt-in via `tui.perf_log` (Settings tab, applied at
+  once) or `CANOPY_TUI_PERF=1`. While on, the TUI appends one line per slow
+  event to `~/.canopy/logs/tui-perf.log` (mode `0600`): a frame draw over
+  16 ms (with the slowest panel name), a fast refresh over 5 ms, a slow
+  refresh over 100 ms, or an input dispatch over 20 ms — each with the
+  session count and terminal size — plus one summary line every 60 s
+  (frame count, p50/p95 draw ms, fingerprint skips, slow refreshes). At
+  5 MiB the log rotates to `tui-perf.log.1`. Only panel names and numbers
+  are recorded, never screen text. `canopy doctor` prints the log path and
+  whether the log is enabled.
 
 ## Terminal sessions
 

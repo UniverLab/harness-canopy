@@ -279,6 +279,7 @@ On Unix, `~/.canopy/` is private to the user: `~/.canopy/` and `~/.canopy/logs/`
 | Agent logs | `~/.canopy/logs/<id>.log` | Text (5 MB rotation) |
 | TUI log | `~/.canopy/logs/tui.log` | Text (append-only) |
 | TUI panic log | `~/.canopy/logs/tui-panic.log` | Text (append-only) |
+| TUI perf log | `~/.canopy/logs/tui-perf.log` | Text (5 MB rotation, only while `tui.perf_log` is on) |
 | Daemon log | `~/.canopy/daemon.log` | Text |
 | RAG indexed files | `~/.canopy/rag/` | Markdown, PDF |
 

@@ -95,7 +95,7 @@ for `canopy update`. See
 | `canopy mcp` → Add | Add a server via pasted README JSON, local stdio command (with args + env), or remote URL (with headers); previews entries, marks `(replaces existing)` overwrites, then asks `Install on N platform(s)?` |
 | `canopy uninstall --dry-run` | Preview removal: stop daemon, remove service unit + `canopy.service.d/` drop-ins, revert platform configs, remove installed `canopy` skill directories, remove user-instruction skill pointer blocks (changes nothing) |
 | `canopy uninstall --keep-shared-servers` | Only remove canopy's own `canopy` server entry; leave shared `fetch`/`filesystem` entries in place |
-| `canopy doctor` | Full health diagnostics (installed harnesses list with versions; an uninstalled harness stays silent unless something still references it; one `Retention:` line with `graph_runs` / session row counts and the active retention settings) |
+| `canopy doctor` | Full health diagnostics (installed harnesses list with versions; an uninstalled harness stays silent unless something still references it; one `Retention:` line with `graph_runs` / session row counts and the active retention settings; one `TUI perf log` line with the log path and whether `tui.perf_log` is enabled) |
 | `canopy doctor --verbose` | Same, plus the searched PATH for missing harnesses (hidden otherwise) |
 | `canopy doctor --restore [--from <file>]` | Restore the verified backup over a damaged database (the damaged file is kept as `<name>.damaged-<UTC>`), then verify the restored file; refuses while the daemon is running |
 
