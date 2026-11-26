@@ -118,7 +118,9 @@ const EXPECTED_TOOL_NAMES: &[&str] = &[
 /// params (field docs are part of the input schema). The `graph` row was
 /// re-pinned when it gained the `metrics` read action. The
 /// `session_send_file` row was re-pinned when source paths were confined to
-/// the caller workdir/shelf dir with the `forbidden` code.
+/// the caller workdir/shelf dir with the `forbidden` code. The `subagent`
+/// row was re-pinned when `spawn` gained the optional `notify_session`
+/// param (field docs are part of the input schema).
 const EXPECTED_TOOL_ROWS: &[&str] = &[
     "agent|d8f9c6d2e27d78721e0e68301793b430eb079a49d68e003c0a36062ade4326c2|d713589e444e00e203c10fb39b668774212540a62cec84a04d9f2b34b7c386b1",
     "agent_edit|9f9d97739be8934e8023b86d6ed35d9acf9209d18d42a8cafd8ffc99154965cf|eb0e7e1757828c2db9669176f36f437dc1cfc1797eacee875d69ff61ae80b271",
@@ -155,7 +157,7 @@ const EXPECTED_TOOL_ROWS: &[&str] = &[
     "session_send_file|108b5bbbcdb5cd31c6e48f4aa33915cdb051ec0225f76194ac50236ae46dd26d|7b00317cbbccf23c31655fef847e4b653da23f3df1a3978bcd34f7ed977930af",
     "spec|3a76fcb9ac04bc4e33bf9e92b34c5a16ab77d4f9fd73e8411eba177341ab04ea|95a2a14538394eafccf45e3054aaffd06ee7ff0573212da02bc7649d35fd1620",
     "spec_edit|31d7b1f8b84218068fbc4083e6be6b5ef73feeaa096664c657593eb02b368df1|f2f6eeb5d00df4962e1f15049036238f0aab8796e3821ba66c42f0e6394284d8",
-    "subagent|5e0c38144198037deab293244b2839d8b17dad4cd1afc1f9ea76952712e95657|36b2b21117d562b09f957fa0f6c4a5c85d5dbebec594923718c3dd8636ac4e87",
+    "subagent|5e0c38144198037deab293244b2839d8b17dad4cd1afc1f9ea76952712e95657|8887a5a1bd7b3a6fe854055717fe0be918a9df6c43110b90fd1aec910c04550d",
 ];
 
 fn spec_with_status(graph_id: &str, id: &str, position: i64, status: GraphSpecStatus) -> GraphSpec {

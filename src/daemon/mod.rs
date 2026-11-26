@@ -117,6 +117,7 @@ pub(crate) mod shelf_cli;
 pub(crate) mod spec_cli;
 pub(crate) mod subagent;
 pub(crate) mod subagent_cli;
+pub(crate) mod subagent_notify;
 pub(crate) mod unit_kill_mode;
 pub(crate) mod unit_restart_limits;
 

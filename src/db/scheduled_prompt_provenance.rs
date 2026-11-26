@@ -80,6 +80,25 @@ impl ScheduledPromptProvenance {
         }
     }
 
+    /// Provenance for a non-blocking subagent's completion notice: the
+    /// session that spawned it learns the outcome without polling
+    /// `subagent` `collect`. Same delivery pipeline as a hook send
+    /// (`kind: "hook"`, empty graph id), with `event: "subagent"` and the
+    /// finished run id in `run_id`.
+    pub fn subagent(run_id: &str) -> Self {
+        Self {
+            kind: "hook".to_string(),
+            graph_id: String::new(),
+            event: "subagent".to_string(),
+            session_id: None,
+            agent_id: None,
+            trigger: None,
+            target_session_name: None,
+            node_id: None,
+            run_id: Some(run_id.to_string()),
+        }
+    }
+
     /// Provenance for a message an agent scheduled via the MCP surface.
     pub fn agent(session_id: &str) -> Self {
         Self {

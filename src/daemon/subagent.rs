@@ -179,6 +179,7 @@ pub async fn spawn_subagent(
     timeout_minutes: u64,
     ttl_minutes: u64,
     effort: Option<&str>,
+    notify: Option<super::subagent_notify::SubagentNotify>,
 ) -> Result<(String, Option<String>)> {
     // FR2: refuse a missing/non-directory workdir before anything else
     // runs — no effort resolution, no binary resolution, no DB row.
@@ -257,6 +258,7 @@ pub async fn spawn_subagent(
     let boot_id = crate::system::boot_id();
     db.set_subagent_run_pid(&run_id, pid as i64, boot_id.as_deref())?;
 
+    let started = std::time::Instant::now();
     tokio::spawn(async move {
         let timeout_result = tokio::time::timeout(
             std::time::Duration::from_secs(timeout_minutes * 60),
@@ -273,7 +275,7 @@ pub async fn spawn_subagent(
         // Async path keeps today's timeout text byte-for-byte.
         let timeout_stderr = format!("{warn_prefix}Timed out");
 
-        finalize_subagent_outcome(
+        let timed_out = finalize_subagent_outcome(
             &db_clone,
             &run_id_clone,
             &mcp_surface,
@@ -283,6 +285,17 @@ pub async fn spawn_subagent(
             pid,
             timeout_result,
         );
+
+        if let Some(notify) = notify {
+            let elapsed_secs = started.elapsed().as_secs();
+            super::subagent_notify::enqueue_subagent_notification(
+                &db_clone,
+                &notify,
+                &run_id_clone,
+                timed_out,
+                elapsed_secs,
+            );
+        }
 
         let _ = std::fs::remove_file(&config_path);
     });
@@ -729,57 +742,6 @@ mod tests {
         assert!(
             err.contains("dangling"),
             "refusal must name the path, got: {err}"
-        );
-    }
-
-    // ── workdir validation wiring (FR2) ────────────────────────────────
-    // The unit tests above pin `validate_workdir` itself; these two pin that
-    // the spawn functions actually CALL it before anything else runs.
-    // Removing the `validate_workdir(workdir)?` call makes the spawn walk
-    // past it, so the explicit refusal (and the inline unit tests) alone
-    // cannot keep the feature alive. Going through the full handler is
-    // unnecessary: the handler's own default resolution (omit => caller's
-    // project) sits in handler_meta and is unchanged here.
-
-    #[tokio::test]
-    async fn spawn_subagent_refuses_a_missing_workdir_naming_the_path() {
-        let tmp = tempfile::tempdir().unwrap();
-        let db = Arc::new(Database::new(&tmp.path().join("test.db")).unwrap());
-        let missing = "/nonexistent-subagent-spawn-cwd-check";
-        let err = spawn_subagent(&db, "opencode", "prompt", None, missing, &[], 15, 60, None)
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("does not exist") && err.contains(missing),
-            "spawn must refuse before touching the registry, config, DB or process, got: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn spawn_subagent_blocking_refuses_a_missing_workdir_naming_the_path() {
-        let tmp = tempfile::tempdir().unwrap();
-        let db = Arc::new(Database::new(&tmp.path().join("test.db")).unwrap());
-        let missing = "/nonexistent-subagent-blocking-cwd-check";
-        let err = match spawn_subagent_blocking(
-            &db,
-            "opencode",
-            "prompt",
-            None,
-            missing,
-            &[],
-            15,
-            60,
-            None,
-        )
-        .await
-        {
-            Ok(_) => panic!("blocking spawn must refuse the missing workdir, not spawn through it"),
-            Err(e) => e.to_string(),
-        };
-        assert!(
-            err.contains("does not exist") && err.contains(missing),
-            "blocking spawn must refuse before touching the registry, config, DB or process, got: {err}"
         );
     }
 }

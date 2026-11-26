@@ -301,17 +301,12 @@ impl TaskTriggerHandler {
         Ok(CallToolResult::success(vec![ContentBlock::text(report)]))
     }
 
-    pub(crate) async fn subagent_spawn_impl(
-        &self,
-        params: SubagentSpawnParams,
-        parts: Option<&Parts>,
-    ) -> Result<CallToolResult, McpError> {
-        self.record_harness_id(parts);
-
-        let platform = params.cli.as_deref().unwrap_or("opencode");
-        let workdir = params
-            .workdir
-            .clone()
+    /// Workdir an async or blocking spawn runs in: the explicit value, else
+    /// the caller's project, else the process directory, else `/tmp`.
+    /// Unchanged by notify resolution, which only reads it.
+    fn resolve_spawn_workdir(&self, configured: Option<&str>, parts: Option<&Parts>) -> String {
+        configured
+            .map(str::to_string)
             .filter(|value| !value.trim().is_empty())
             .or_else(|| {
                 self.resolve_sync_agent_id(parts)
@@ -323,7 +318,18 @@ impl TaskTriggerHandler {
                     .ok()
                     .and_then(|p| p.to_str().map(String::from))
             })
-            .unwrap_or_else(|| "/tmp".to_string());
+            .unwrap_or_else(|| "/tmp".to_string())
+    }
+
+    pub(crate) async fn subagent_spawn_impl(
+        &self,
+        params: SubagentSpawnParams,
+        parts: Option<&Parts>,
+    ) -> Result<CallToolResult, McpError> {
+        self.record_harness_id(parts);
+
+        let platform = params.cli.as_deref().unwrap_or("opencode");
+        let workdir = self.resolve_spawn_workdir(params.workdir.as_deref(), parts);
 
         let mcp_servers = params.mcp_servers.unwrap_or_default();
         let timeout_minutes = params.timeout_minutes.unwrap_or(15);
@@ -335,6 +341,23 @@ impl TaskTriggerHandler {
         let model = params.model.clone();
         let effort = params.effort.clone();
         let workdir_clone = workdir.clone();
+
+        // Resolve the notify target before anything spawns: an explicit
+        // session must be live and share the spawn workdir (refused naming
+        // both otherwise); an omitted value defaults to the caller's own
+        // live session, or to nobody for non-interactive callers.
+        let caller_session_id = self.resolve_sync_agent_id(parts).ok();
+        let (notify, notify_name) = match crate::daemon::subagent_notify::prepare_spawn_notify(
+            &db,
+            params.notify_session.as_deref(),
+            blocking,
+            caller_session_id.as_deref(),
+            &workdir,
+            Arc::clone(&self.scheduled_prompt_notify),
+        ) {
+            Ok(prepared) => prepared,
+            Err(message) => return Ok(error_result(&message)),
+        };
 
         // CM18: blocking stays opt-in; absent/false is today's async path,
         // unchanged. The blocking wait holds no DB guard across its await
@@ -354,25 +377,7 @@ impl TaskTriggerHandler {
             .await
             {
                 Ok(blocking_result) => {
-                    // Identical shape to `subagent` `collect` (guideline), plus
-                    // the wait accounting FR3 requires on timeouts.
-                    let result = blocking_result.result;
-                    let mut json = serde_json::json!({
-                        "id": result.id,
-                        "status": result.status,
-                        "exit_code": result.exit_code,
-                        "stdout": result.stdout,
-                        "stderr": result.stderr,
-                        "mcp_surface": result.mcp_surface,
-                        "platform": result.platform,
-                        "model": result.model,
-                        "waited_secs": blocking_result.waited_secs,
-                        "waited_minutes": timeout_minutes,
-                        "timed_out": blocking_result.timed_out,
-                    });
-                    if let Some(reason) = blocking_result.effort_not_applied {
-                        json["effort_not_applied"] = serde_json::json!(reason);
-                    }
+                    let json = blocking_spawn_json(blocking_result, timeout_minutes);
                     Ok(CallToolResult::success(vec![ContentBlock::text(
                         serde_json::to_string_pretty(&json).unwrap_or_default(),
                     )]))
@@ -390,18 +395,16 @@ impl TaskTriggerHandler {
                 timeout_minutes,
                 ttl_minutes,
                 effort.as_deref(),
+                notify,
             )
             .await
             {
                 Ok((id, effort_not_applied)) => {
-                    let mut result = serde_json::json!({
-                        "id": id,
-                        "status": "running",
-                        "handle": id,
-                    });
-                    if let Some(reason) = effort_not_applied {
-                        result["effort_not_applied"] = serde_json::json!(reason);
-                    }
+                    let result = async_spawn_json(
+                        &id,
+                        notify_name.as_deref(),
+                        effort_not_applied.as_deref(),
+                    );
                     Ok(CallToolResult::success(vec![ContentBlock::text(
                         serde_json::to_string_pretty(&result).unwrap_or_default(),
                     )]))
@@ -449,6 +452,55 @@ impl TaskTriggerHandler {
             Err(e) => Ok(error_result(&e.to_string())),
         }
     }
+}
+
+/// Async spawn response body: the running handle plus `"notify"` — the
+/// notified session's name, or `"none"` when nobody is notified (FR6).
+/// `notify_name` is the `prepare_spawn_notify` name resolved above.
+pub(crate) fn async_spawn_json(
+    id: &str,
+    notify_name: Option<&str>,
+    effort_not_applied: Option<&str>,
+) -> serde_json::Value {
+    let mut json = serde_json::json!({
+        "id": id,
+        "status": "running",
+        "handle": id,
+    });
+    json["notify"] = match notify_name {
+        Some(name) => serde_json::json!(name),
+        None => serde_json::json!("none"),
+    };
+    if let Some(reason) = effort_not_applied {
+        json["effort_not_applied"] = serde_json::json!(reason);
+    }
+    json
+}
+
+/// Blocking spawn response body: identical shape to `subagent` `collect`
+/// (guideline), plus the wait accounting FR3 requires on timeouts.
+fn blocking_spawn_json(
+    blocking_result: crate::daemon::subagent::BlockingSpawnResult,
+    timeout_minutes: u64,
+) -> serde_json::Value {
+    let result = blocking_result.result;
+    let mut json = serde_json::json!({
+        "id": result.id,
+        "status": result.status,
+        "exit_code": result.exit_code,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "mcp_surface": result.mcp_surface,
+        "platform": result.platform,
+        "model": result.model,
+        "waited_secs": blocking_result.waited_secs,
+        "waited_minutes": timeout_minutes,
+        "timed_out": blocking_result.timed_out,
+    });
+    if let Some(reason) = blocking_result.effort_not_applied {
+        json["effort_not_applied"] = serde_json::json!(reason);
+    }
+    json
 }
 
 impl TaskTriggerHandler {
@@ -606,7 +658,37 @@ pub(crate) fn rag_result_json(r: &crate::rag::vector_store::SearchResult) -> ser
 
 #[cfg(test)]
 mod tests {
-    use super::build_get_tools_response;
+    use super::{async_spawn_json, build_get_tools_response};
+
+    /// FR6: the async spawn response carries the notified session's name —
+    /// this is the `"notify"` contract `subagent_spawn_impl` serves, pinned
+    /// here without spawning a child (the success path needs a real
+    /// platform binary, so no handler test can reach it).
+    #[test]
+    fn async_spawn_json_reports_resolved_notify_name() {
+        let json = async_spawn_json("run-1", Some("orch"), None);
+        assert_eq!(json["notify"], serde_json::json!("orch"));
+        assert_eq!(json["status"], serde_json::json!("running"));
+        assert_eq!(json["handle"], serde_json::json!("run-1"));
+        assert!(json.get("effort_not_applied").is_none());
+    }
+
+    /// FR6/FR7: nothing to notify renders as `"none"`, never an absent key.
+    #[test]
+    fn async_spawn_json_reports_none_when_nobody_notified() {
+        let json = async_spawn_json("run-2", None, None);
+        assert_eq!(json["notify"], serde_json::json!("none"));
+    }
+
+    #[test]
+    fn async_spawn_json_carries_effort_not_applied() {
+        let json = async_spawn_json("run-3", Some("orch"), Some("no effort knob"));
+        assert_eq!(
+            json["effort_not_applied"],
+            serde_json::json!("no effort knob")
+        );
+        assert_eq!(json["notify"], serde_json::json!("orch"));
+    }
 
     /// Every `intelligence_upsert(kind="…")` named in any get_tools protocol
     /// string must be accepted by the same validation `intelligence_upsert`

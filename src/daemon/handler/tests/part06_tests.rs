@@ -188,3 +188,235 @@ fn spec_ids_refused_on_blocked_naming_event() {
     assert!(text.contains("on_blocked"), "{text}");
     assert!(text.contains("spec_ids"), "{text}");
 }
+
+// ── subagent spawn notify_session ───────────────────────────────
+// These pin the spawn-time half of the notify contract (resolution and
+// refusal happen before any child spawns, so no platform binary runs).
+// The delivery half lives in `daemon::subagent_notify` tests.
+
+use crate::daemon::params::SubagentSpawnParams;
+use crate::daemon::subagent::{spawn_subagent, spawn_subagent_blocking};
+use std::sync::Arc;
+
+fn notify_spawn_params(notify_session: Option<&str>, blocking: bool) -> SubagentSpawnParams {
+    SubagentSpawnParams {
+        prompt: "hi".to_string(),
+        cli: None,
+        workdir: None,
+        model: None,
+        effort: None,
+        mcp_servers: None,
+        timeout_minutes: None,
+        ttl_minutes: None,
+        blocking: Some(blocking),
+        notify_session: notify_session.map(str::to_string),
+    }
+}
+
+fn parts_for_session(session_id: &str) -> axum::http::request::Parts {
+    let request = axum::http::Request::builder()
+        .header(CANOPY_AGENT_ID_HEADER, session_id)
+        .body(())
+        .unwrap();
+    let (parts, _) = request.into_parts();
+    parts
+}
+
+fn add_notify_session(db: &Database, id: &str, name: &str, workdir: &str) {
+    db.insert_interactive_session(
+        id,
+        name,
+        "opencode",
+        workdir,
+        None,
+        None,
+        "interactive",
+        None,
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn subagent_spawn_blocking_with_notify_session_is_refused() {
+    let (_dir, _db, handler) = queue_test_handler();
+    let result = handler
+        .subagent_spawn_impl(notify_spawn_params(Some("orch"), true), None)
+        .await
+        .unwrap();
+    assert!(
+        queue_is_err(&result),
+        "blocking+notify must fail: {result:?}"
+    );
+    let text = queue_raw_text(&result);
+    assert!(
+        text.contains("blocking") && text.contains("already returns"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn subagent_spawn_unknown_notify_target_is_refused() {
+    let (_dir, _db, handler) = queue_test_handler();
+    let result = handler
+        .subagent_spawn_impl(notify_spawn_params(Some("ghost"), false), None)
+        .await
+        .unwrap();
+    assert!(
+        queue_is_err(&result),
+        "unknown target must fail: {result:?}"
+    );
+    let text = queue_raw_text(&result);
+    assert!(
+        text.contains("ghost") && text.contains("no longer live"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn subagent_spawn_ambiguous_notify_name_is_refused() {
+    let (_dir, db, handler) = queue_test_handler();
+    add_notify_session(&db, "sess-1", "orch", "/tmp");
+    add_notify_session(&db, "sess-2", "orch", "/tmp");
+    let result = handler
+        .subagent_spawn_impl(notify_spawn_params(Some("orch"), false), None)
+        .await
+        .unwrap();
+    assert!(
+        queue_is_err(&result),
+        "ambiguous name must fail: {result:?}"
+    );
+    assert!(queue_raw_text(&result).contains("live sessions"));
+}
+
+#[tokio::test]
+async fn subagent_spawn_notify_target_in_other_workdir_is_refused_naming_both() {
+    let spawn_dir = tempdir().unwrap();
+    let target_dir = tempdir().unwrap();
+    let (_dir, db, handler) = queue_test_handler();
+    let target_path = target_dir.path().to_str().unwrap();
+    add_notify_session(&db, "sess-1", "orch", target_path);
+    let mut params = notify_spawn_params(Some("orch"), false);
+    params.workdir = Some(spawn_dir.path().to_str().unwrap().to_string());
+    let result = handler.subagent_spawn_impl(params, None).await.unwrap();
+    assert!(
+        queue_is_err(&result),
+        "other-workdir target must fail: {result:?}"
+    );
+    let text = queue_raw_text(&result);
+    assert!(
+        text.contains(target_path),
+        "refusal must name target workdir: {text}"
+    );
+    assert!(
+        text.contains(spawn_dir.path().to_str().unwrap()),
+        "refusal must name spawn workdir: {text}"
+    );
+}
+
+#[tokio::test]
+async fn subagent_spawn_finished_target_is_refused_as_not_live() {
+    let (_dir, db, handler) = queue_test_handler();
+    add_notify_session(&db, "sess-1", "orch", "/tmp");
+    db.finish_interactive_session("sess-1", 0).unwrap();
+    let result = handler
+        .subagent_spawn_impl(notify_spawn_params(Some("orch"), false), None)
+        .await
+        .unwrap();
+    assert!(
+        queue_is_err(&result),
+        "finished session must fail: {result:?}"
+    );
+    assert!(queue_raw_text(&result).contains("no longer live"));
+}
+
+#[tokio::test]
+async fn subagent_spawn_notify_resolves_before_workdir_validation() {
+    // Resolution runs in the handler before `spawn_subagent` validates the
+    // workdir: an unknown target with a missing workdir must fail on the
+    // target, never on the directory.
+    let (_dir, _db, handler) = queue_test_handler();
+    let mut params = notify_spawn_params(Some("ghost"), false);
+    params.workdir = Some("/nonexistent-notify-spawn-cwd".to_string());
+    let result = handler.subagent_spawn_impl(params, None).await.unwrap();
+    assert!(
+        queue_is_err(&result),
+        "unknown target must fail: {result:?}"
+    );
+    let text = queue_raw_text(&result);
+    assert!(
+        text.contains("ghost") && text.contains("no longer live"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn subagent_spawn_default_target_passes_resolution_to_workdir_check() {
+    // Omitted target with a live caller resolves (not refused), so a
+    // missing workdir is what fails — the spawn never runs.
+    let (_dir, db, handler) = queue_test_handler();
+    add_notify_session(&db, "sess-1", "orch", "/tmp");
+    let parts = parts_for_session("sess-1");
+    let mut params = notify_spawn_params(None, false);
+    params.workdir = Some("/nonexistent-notify-spawn-cwd".to_string());
+    let result = handler
+        .subagent_spawn_impl(params, Some(&parts))
+        .await
+        .unwrap();
+    assert!(
+        queue_is_err(&result),
+        "missing workdir must fail: {result:?}"
+    );
+    assert!(queue_raw_text(&result).contains("does not exist"));
+}
+
+// ── spawn-side workdir validation wiring (FR2) ───────────────────
+// These pin that the spawn functions actually CALL `validate_workdir`
+// before anything else runs: removing the call makes the spawn walk past
+// it, so the explicit refusal (and the `validate_workdir` unit tests)
+// alone cannot keep the feature alive. They take the direct-spawn path
+// rather than the handler because the handler's success path would
+// spawn a real platform binary.
+
+#[tokio::test]
+async fn spawn_subagent_refuses_a_missing_workdir_naming_the_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = Arc::new(Database::new(&tmp.path().join("test.db")).unwrap());
+    let missing = "/nonexistent-subagent-spawn-cwd-check";
+    let err = spawn_subagent(
+        &db,
+        "opencode",
+        "prompt",
+        None,
+        missing,
+        &[],
+        15,
+        60,
+        None,
+        None,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("does not exist") && err.contains(missing),
+        "spawn must refuse before touching the registry, config, DB or process, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn spawn_subagent_blocking_refuses_a_missing_workdir_naming_the_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = Arc::new(Database::new(&tmp.path().join("test.db")).unwrap());
+    let missing = "/nonexistent-subagent-blocking-cwd-check";
+    let err =
+        match spawn_subagent_blocking(&db, "opencode", "prompt", None, missing, &[], 15, 60, None)
+            .await
+        {
+            Ok(_) => panic!("blocking spawn must refuse the missing workdir, not spawn through it"),
+            Err(e) => e.to_string(),
+        };
+    assert!(
+        err.contains("does not exist") && err.contains(missing),
+        "blocking spawn must refuse before touching the registry, config, DB or process, got: {err}"
+    );
+}

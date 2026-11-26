@@ -30,6 +30,12 @@ pub struct SubagentSpawnParams {
     /// Default false (async, today's behaviour).
     #[serde(default)]
     pub blocking: Option<bool>,
+    /// Notify this live interactive session (id or name) with a scheduled
+    /// prompt when a non-blocking subagent ends. Omitted from a live
+    /// interactive session defaults to that session; omitted from anywhere
+    /// else notifies nobody. Refused with `blocking: true`.
+    #[serde(default)]
+    pub notify_session: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
