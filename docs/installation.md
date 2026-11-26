@@ -91,7 +91,8 @@ source). Setup also writes the embedded `canopy` skill as a regular file
 to `<skills_dir>/canopy/SKILL.md` for every configured harness whose
 skills directory exists (creating it), and refreshes it whenever the
 binary's version changes — the same refresh runs on `canopy skill
-install`, after `canopy update`, and on every daemon start. The other
+install`, after `canopy update`, and on every daemon start (which only
+refreshes harnesses that already have the file). The other
 skills are read live with `canopy skill list` / `canopy skill get`; they
 are never copied into a skills directory. It also rewrites legacy unauthenticated canopy MCP entries (the
 old URL form, with or without headers) to the stdio `canopy bridge`

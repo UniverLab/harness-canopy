@@ -194,7 +194,8 @@ skills — which travels inside the binary and is never older than it.
 `<skills_dir>/canopy/SKILL.md` for every registry harness whose skills
 directory exists; it rewrites only missing or outdated copies (tracked by
 the `canopy_version` frontmatter marker) and is refreshed automatically by
-`canopy setup`, after `canopy update`, and on every daemon start. Files
+`canopy setup`, after `canopy update`, and on every daemon start (which
+only refreshes harnesses that already have the file). Files
 without a `canopy_version` marker are hand-written and left untouched
 (`skipped: not managed by canopy`). The other skills are read live with
 `canopy skill list` / `canopy skill get <name>` and never copied into a
