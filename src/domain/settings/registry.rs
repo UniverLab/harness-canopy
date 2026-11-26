@@ -541,6 +541,15 @@ pub static REGISTRY: &[SettingDef] = &[
         wizard: false,
     },
     SettingDef {
+        key: "tui.perf_log",
+        kind: Kind::Bool,
+        default: DefaultValue::Literal("false"),
+        group: Group::TuiAppearance,
+        description: "Append slow-frame/slow-refresh lines to tui-perf.log.",
+        apply: Apply::Hot,
+        wizard: false,
+    },
+    SettingDef {
         key: "remote.enabled",
         kind: Kind::Bool,
         default: DefaultValue::Literal("false"),
@@ -612,7 +621,7 @@ mod tests {
 
     #[test]
     fn registry_has_one_entry_per_setting_and_they_are_unique() {
-        assert_eq!(REGISTRY.len(), 62);
+        assert_eq!(REGISTRY.len(), 63);
         for def in REGISTRY {
             assert_eq!(find(def.key).map(|d| d.key), Some(def.key));
         }

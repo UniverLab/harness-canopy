@@ -443,6 +443,8 @@ pub struct TuiConfig {
     pub page_step: usize,
     #[serde(default = "default_animations")]
     pub animations: AnimationsMode,
+    #[serde(default = "default_perf_log")]
+    pub perf_log: bool,
 }
 
 impl Default for TuiConfig {
@@ -456,6 +458,7 @@ impl Default for TuiConfig {
             scroll_step: default_scroll_step(),
             page_step: default_page_step(),
             animations: default_animations(),
+            perf_log: default_perf_log(),
         }
     }
 }
@@ -492,6 +495,10 @@ fn default_animations() -> AnimationsMode {
     settings::default_string("tui.animations")
         .parse()
         .unwrap_or_default()
+}
+
+fn default_perf_log() -> bool {
+    settings::default_bool("tui.perf_log")
 }
 
 /// Highest per-file indexing cap a user may configure, in MB. Text/PDF

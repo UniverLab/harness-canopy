@@ -537,6 +537,7 @@ value's apply mode.
 | `tui.scroll_step` | 3 | Terminal scroll step, in lines. |
 | `tui.page_step` | 15 | Terminal page step, in lines. |
 | `tui.animations` | `reduced` | Animation budget: `full` (20 fps), `reduced` (8 fps, pauses on focus loss or 45 s idle), `off` (static frame). |
+| `tui.perf_log` | false | Append slow-frame/slow-refresh lines and 60 s summaries to `~/.canopy/logs/tui-perf.log` (also enabled by `CANOPY_TUI_PERF=1`). |
 
 Both animation toggles off is the master switch: the header spinner, sweep,
 dialog waves and pulse indicators freeze, and an idle TUI performs no

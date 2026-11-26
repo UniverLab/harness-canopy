@@ -46,6 +46,7 @@ impl App {
         // restart, exactly like theme and the pinned face.
         self.ctrl_c_exits_clis = crate::tui::app::types::ctrl_c_exits_clis(&config);
         self.tui_settings = config.tui;
+        self.perf_logger.set_enabled(self.tui_settings.perf_log);
     }
 
     pub(crate) fn interpolate_system_info(&mut self) {

@@ -436,6 +436,8 @@ pub struct App {
     /// revision — the TUI redraws every frame and cannot reload
     /// `config.toml` per draw.
     pub(crate) tui_settings: crate::domain::canopy_config::TuiConfig,
+    /// Optional slow-frame/slow-refresh logger (`tui.perf_log` / `CANOPY_TUI_PERF=1`).
+    pub(crate) perf_logger: crate::tui::perf_log::PerfLogger,
     /// Notification service for sending cross-platform notifications.
     pub(crate) notification_service: Arc<dyn NotificationService>,
     /// IDs of runs that were active on the previous refresh tick.

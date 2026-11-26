@@ -271,6 +271,8 @@ pub const ENV_RETRY_DELAY_MINUTES: &str = "CANOPY_RETRY_DELAY_MINUTES";
 pub const ENV_RETRY_MAX: &str = "CANOPY_RETRY_MAX";
 /// Environment variable overriding `scheduler.delivery_merge_window_s`.
 pub const ENV_DELIVERY_MERGE_WINDOW_S: &str = "CANOPY_DELIVERY_MERGE_WINDOW_S";
+/// Environment variable overriding `tui.perf_log` when set to `1`.
+pub const ENV_TUI_PERF: &str = "CANOPY_TUI_PERF";
 
 /// The environment variable overriding `key`, if any.
 pub fn env_name_for(key: &str) -> Option<&'static str> {
@@ -279,6 +281,7 @@ pub fn env_name_for(key: &str) -> Option<&'static str> {
         "scheduler.retry_delay_minutes" => Some(ENV_RETRY_DELAY_MINUTES),
         "scheduler.retry_max" => Some(ENV_RETRY_MAX),
         "scheduler.delivery_merge_window_s" => Some(ENV_DELIVERY_MERGE_WINDOW_S),
+        "tui.perf_log" => Some(ENV_TUI_PERF),
         _ => None,
     }
 }
@@ -301,6 +304,7 @@ pub fn env_override_applies(key: &str, env: &dyn Fn(&str) -> Option<String>) -> 
         "scheduler.retry_delay_minutes" => raw.parse::<u64>().is_ok(),
         "scheduler.retry_max" => raw.parse::<u32>().is_ok(),
         "scheduler.delivery_merge_window_s" => raw.parse::<u64>().is_ok(),
+        "tui.perf_log" => raw == "1",
         _ => false,
     }
 }
@@ -337,6 +341,9 @@ pub fn apply_env_overrides(config: &mut CanopyConfig, env: &dyn Fn(&str) -> Opti
         .and_then(|v| v.trim().parse::<u64>().ok())
     {
         config.scheduler.delivery_merge_window_s = raw;
+    }
+    if env(ENV_TUI_PERF).as_deref().map(str::trim) == Some("1") {
+        config.tui.perf_log = true;
     }
 }
 
@@ -486,6 +493,31 @@ mod tests {
             (k == ENV_RETRY_MAX).then(|| "x".to_string())
         });
         assert_eq!(config.scheduler.retry_max, 5);
+    }
+
+    /// `CANOPY_TUI_PERF=1` enables `tui.perf_log` regardless of the file;
+    /// any other value leaves the file value alone.
+    #[test]
+    fn tui_perf_env_override_enables_regardless_of_config() {
+        let mut config = CanopyConfig::default();
+        assert!(!config.tui.perf_log);
+        apply_env_overrides(&mut config, &|k| {
+            (k == ENV_TUI_PERF).then(|| "1".to_string())
+        });
+        assert!(config.tui.perf_log);
+        assert!(env_name_for("tui.perf_log").is_some());
+        assert!(env_override_applies("tui.perf_log", &|k| {
+            (k == ENV_TUI_PERF).then(|| "1".to_string())
+        }));
+
+        let mut config = CanopyConfig::default();
+        apply_env_overrides(&mut config, &|k| {
+            (k == ENV_TUI_PERF).then(|| "0".to_string())
+        });
+        assert!(!config.tui.perf_log);
+        assert!(!env_override_applies("tui.perf_log", &|k| {
+            (k == ENV_TUI_PERF).then(|| "0".to_string())
+        }));
     }
 
     #[test]

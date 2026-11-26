@@ -58,8 +58,22 @@ pub fn run_event_graph(terminal: &mut Terminal, app: &mut App) -> Result<()> {
             slow: slow_ran,
         });
         if dirty {
-            terminal.draw(|frame| ui::draw(frame, app))?;
+            let perf_on = app.perf_logger.is_enabled();
+            let start = perf_on.then(std::time::Instant::now);
+            let mut draw_size = (0, 0);
+            let mut slowest_panel = "log_panel";
+            terminal.draw(|frame| {
+                let area = frame.area();
+                draw_size = (area.width, area.height);
+                slowest_panel = ui::draw_timed(frame, app, perf_on);
+            })?;
+            if let Some(start) = start {
+                let sessions = app.interactive_agents.len() + app.terminal_agents.len();
+                app.perf_logger
+                    .record_draw(start.elapsed(), sessions, draw_size, slowest_panel);
+            }
         }
+        app.perf_logger.flush_summary_if_due();
     }
 
     app.cleanup();
@@ -111,6 +125,20 @@ fn drain_pending_events(app: &mut App) -> Result<()> {
 }
 
 fn dispatch_event(app: &mut App, event: Event) -> Result<()> {
+    let is_input = matches!(&event, Event::Key(k) if k.kind == KeyEventKind::Press)
+        || matches!(&event, Event::Mouse(_) | Event::Paste(_));
+    let start = (is_input && app.perf_logger.is_enabled()).then(std::time::Instant::now);
+    let res = dispatch_event_inner(app, event);
+    if let Some(start) = start {
+        let sessions = app.interactive_agents.len() + app.terminal_agents.len();
+        let size = ratatui::crossterm::terminal::size().unwrap_or((0, 0));
+        app.perf_logger
+            .record_input(start.elapsed(), sessions, size);
+    }
+    res
+}
+
+fn dispatch_event_inner(app: &mut App, event: Event) -> Result<()> {
     match event {
         Event::Key(key) if key.kind == KeyEventKind::Press => {
             // FR2: key and mouse input (plus paste and focus gain below)

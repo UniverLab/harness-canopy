@@ -81,15 +81,33 @@ pub(crate) struct TickState {
 /// mouse, resize, paste): input always dirties the tick.
 pub(crate) fn tick(app: &mut App, state: &mut TickState, input: bool) -> Result<(bool, bool)> {
     let mut dirty = input;
+    let fast_start = app.perf_logger.is_enabled().then(std::time::Instant::now);
     dirty |= app.refresh_fast();
+    if let Some(start) = fast_start {
+        let sessions = app.interactive_agents.len() + app.terminal_agents.len();
+        let size = ratatui::crossterm::terminal::size().unwrap_or((0, 0));
+        app.perf_logger
+            .record_refresh_fast(start.elapsed(), sessions, size);
+    }
     dirty |= pty_seq_changed(app, &mut state.pty_seqs);
     dirty |= activity_changed(app, &mut state.activity);
     let mut slow_ran = false;
     if app.slow_refresh_due() {
         let before = SlowFingerprint::capture(app);
+        let slow_start = app.perf_logger.is_enabled().then(std::time::Instant::now);
         app.refresh_slow()?;
+        if let Some(start) = slow_start {
+            let sessions = app.interactive_agents.len() + app.terminal_agents.len();
+            let size = ratatui::crossterm::terminal::size().unwrap_or((0, 0));
+            app.perf_logger
+                .record_refresh_slow(start.elapsed(), sessions, size);
+        }
         slow_ran = true;
-        dirty |= before != SlowFingerprint::capture(app);
+        let changed = before != SlowFingerprint::capture(app);
+        if !changed {
+            app.perf_logger.record_fingerprint_skip();
+        }
+        dirty |= changed;
     }
     dirty |= animation_on_screen(app, state);
     Ok((dirty, slow_ran))

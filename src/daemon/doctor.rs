@@ -589,6 +589,7 @@ fn report_configuration(
         } else {
             println!(" {}", installed_summary(entries));
         }
+        report_tui_perf_log(config);
         report_settings_problems(canopy_dir);
         return;
     }
@@ -602,7 +603,14 @@ fn report_configuration(
     } else {
         println!(" \x1b[33m⚠\x1b[0m Config not found (run setup)");
     }
+    report_tui_perf_log(config);
     report_settings_problems(canopy_dir);
+}
+
+fn report_tui_perf_log(config: &crate::domain::canopy_config::CanopyConfig) {
+    let on = ["disabled", "enabled"][usize::from(config.tui.perf_log)];
+    let path = crate::tui::perf_log::perf_log_path();
+    println!(" \x1b[90m–\x1b[0m TUI perf log {on}: {}", path.display());
 }
 
 /// CM51: surface every setting the file gets wrong — an invalid value (still

@@ -60,7 +60,14 @@ const MODERN_USES_SEPARATOR_COLUMN: bool = false;
 
 // ── Main draw entry point ───────────────────────────────────────
 
+#[cfg(test)]
 pub fn draw(frame: &mut Frame, app: &mut App) {
+    draw_timed(frame, app, false);
+}
+
+/// Render the full UI, optionally timing `draw_sidebar` vs `draw_log_panel`
+/// and returning the slower panel name for the perf logger.
+pub(crate) fn draw_timed(frame: &mut Frame, app: &mut App, measure: bool) -> &'static str {
     let theme = app.theme;
     let full = frame.area();
     frame.render_widget(
@@ -75,32 +82,44 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     ])
     .areas(frame.area());
 
-    let body_area = draw_body(frame, app, &theme, header_area, body);
+    let (body_area, sidebar_dur) = draw_body(frame, app, &theme, header_area, body, measure);
     let panel_area = draw_panel_and_sync(frame, app, &theme, body_area);
+    let panel_start = measure.then(std::time::Instant::now);
     panel::draw_log_panel(frame, panel_area, app, &theme);
+    let panel_dur = panel_start.map_or(std::time::Duration::ZERO, |t| t.elapsed());
     footer::draw_footer(frame, footer_area, app, &theme);
     draw_ctrl_c_notice(frame, body, app, &theme);
     draw_modal_dialogs(frame, app, &theme);
     draw_picker_overlays(frame, app, &theme, panel_area);
     draw_top_overlays(frame, app, &theme);
+
+    if sidebar_dur > panel_dur {
+        "sidebar"
+    } else {
+        "log_panel"
+    }
 }
 
-/// Draw the header and sidebar, returning the area left for the content face.
+/// Draw the header and sidebar, returning the area left for the content face
+/// and the sidebar draw duration when `measure` is true.
 fn draw_body(
     frame: &mut Frame,
     app: &mut App,
     theme: &Theme,
     header_area: Rect,
     body: Rect,
-) -> Rect {
+    measure: bool,
+) -> (Rect, std::time::Duration) {
     if !app.sidebar_visible {
         header::draw_header(frame, header_area, app, theme);
-        return body;
+        return (body, std::time::Duration::ZERO);
     }
     let [sidebar, content] =
         Layout::horizontal([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(0)]).areas(body);
     header::draw_header(frame, header_area, app, theme);
+    let sidebar_start = measure.then(std::time::Instant::now);
     sidebar::draw_sidebar(frame, sidebar, app, theme);
+    let sidebar_dur = sidebar_start.map_or(std::time::Duration::ZERO, |t| t.elapsed());
     if !theme.show_borders && MODERN_USES_SEPARATOR_COLUMN {
         let separator = Rect::new(sidebar.x + sidebar.width, sidebar.y, 1, sidebar.height);
         frame.render_widget(
@@ -108,7 +127,7 @@ fn draw_body(
             separator,
         );
     }
-    content
+    (content, sidebar_dur)
 }
 
 /// CT1 multi-face right panel: the visible face decides, and the face

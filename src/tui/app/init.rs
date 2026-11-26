@@ -134,6 +134,7 @@ macro_rules! app_new_fields {
             prompt_raw_content_rect: None,
             notifications_enabled: true,
             tui_settings: $canopy_config.tui.clone(),
+            perf_logger: crate::tui::perf_log::PerfLogger::new($canopy_config.tui.perf_log),
             notification_service: Arc::new(DefaultNotificationService),
             prev_active_run_ids: std::collections::HashSet::new(),
             animation_tick: 0,

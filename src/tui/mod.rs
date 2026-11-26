@@ -18,6 +18,7 @@ pub(crate) mod mcp_client;
 #[cfg(unix)]
 mod orphan_watchdog;
 mod panic_hook;
+pub(crate) mod perf_log;
 pub(crate) mod prompt_templates;
 pub(crate) mod selection;
 pub(crate) mod terminal_history;
