@@ -79,7 +79,7 @@ pub fn run_mcp_wizard() -> Result<()> {
     clear_screen()?;
     print_mcp_banner();
 
-    let registry = fetch_registry()?;
+    let (registry, _) = fetch_registry()?;
     let detected = detect_available_platforms(&registry.platforms);
 
     if detected.is_empty() {
@@ -105,16 +105,16 @@ pub fn run_mcp_wizard() -> Result<()> {
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-fn fetch_registry() -> Result<crate::setup_module::models::RegistryRaw> {
+fn fetch_registry() -> Result<(crate::setup_module::models::RegistryRaw, String)> {
     print!("  Fetching platform registry… ");
     io::stdout().flush()?;
-    let registry = setup::fetch_registry_raw().context("Failed to fetch registry")?;
+    let (registry, source) = setup::fetch_registry_raw().context("Failed to fetch registry")?;
     // CB65: show which registry the wizard actually used — a silent GitHub
     // fetch after `--local-registry` was once indistinguishable from success.
     let label =
         registry_source_label(setup::registry_fetch::local_registry_path().map(|p| p.as_path()));
-    println!("\x1b[32m✓\x1b[0m ({})", label);
-    Ok(registry)
+    println!("\x1b[32m✓\x1b[0m ({label}, {source})");
+    Ok((registry, source))
 }
 
 fn detect_available_platforms(platforms: &[Platform]) -> Vec<&Platform> {

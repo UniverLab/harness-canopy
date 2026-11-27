@@ -40,6 +40,10 @@ pub(crate) struct RegistryRefreshReport {
     /// Local overrides (fields that drifted from the baseline) that were
     /// preserved verbatim, keyed by platform name.
     pub(crate) kept: BTreeMap<String, Vec<String>>,
+    /// Where the fetched registry was read from: `commit <sha7>` for a pinned
+    /// fetch, `branch main (...)` after a failed commit lookup, or
+    /// `local registry <path>`.
+    pub(crate) source: String,
     /// Platforms newly added to the baseline this refresh.
     pub(crate) added: Vec<String>,
     /// Platforms whose structural definition was updated this refresh.
@@ -54,10 +58,11 @@ pub(crate) struct RegistryRefreshReport {
 
 impl RegistryRefreshReport {
     /// Human-readable, one line per affected platform — or a single
-    /// "registry already up to date" line when there was nothing to report.
+    /// "registry already up to date" line when there was nothing to report —
+    /// always ending with the `source:` line naming where it was read from.
     pub(crate) fn render_text(&self) -> String {
         if self.up_to_date {
-            return "registry already up to date".to_string();
+            return format!("registry already up to date\nsource: {}", self.source);
         }
 
         let mut lines: Vec<String> = Vec::new();
@@ -98,8 +103,9 @@ impl RegistryRefreshReport {
         }
 
         if lines.is_empty() {
-            "registry already up to date".to_string()
+            format!("registry already up to date\nsource: {}", self.source)
         } else {
+            lines.push(format!("source: {}", self.source));
             lines.join("\n")
         }
     }
@@ -142,25 +148,25 @@ struct LegacyRegistryIndex {
     platforms: Vec<IndexEntry>,
 }
 
-const REGISTRY_BASE_URL: &str = "https://raw.githubusercontent.com/UniverLab/canopy-registry/main/";
-
-const REGISTRY_LEGACY_URL: &str =
-    "https://raw.githubusercontent.com/UniverLab/canopy-registry/main/platforms.json";
+const REGISTRY_API_URL: &str =
+    "https://api.github.com/repos/UniverLab/canopy-registry/commits/main";
+const REGISTRY_RAW_ROOT: &str = "https://raw.githubusercontent.com/UniverLab/canopy-registry";
 
 /// How often to refresh the registry in the background (24 hours).
 const REGISTRY_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
 
-/// Fetch the platform registry (public for use by config commands).
+/// Fetch the platform registry (public for use by config commands) with the
+/// label naming where it was read from (see [`super::registry_source`]).
 #[allow(dead_code)]
-pub fn fetch_registry_raw() -> Result<RegistryRaw> {
+pub fn fetch_registry_raw() -> Result<(RegistryRaw, String)> {
     fetch_registry()
 }
 
-pub(crate) fn fetch_registry() -> Result<RegistryRaw> {
+pub(crate) fn fetch_registry() -> Result<(RegistryRaw, String)> {
     // Development mode: read from local filesystem if configured
     if let Some(local_path) = local_registry_path() {
         if let Some(reg) = try_fetch_local(local_path) {
-            return Ok(reg);
+            return Ok((reg, format!("local registry {}", local_path.display())));
         }
         anyhow::bail!(
             "Local registry not found or invalid at: {}",
@@ -168,21 +174,30 @@ pub(crate) fn fetch_registry() -> Result<RegistryRaw> {
         );
     }
 
+    fetch_registry_from(REGISTRY_API_URL, REGISTRY_RAW_ROOT)
+}
+
+/// Fetch the remote registry with injectable endpoints (production values are
+/// [`REGISTRY_API_URL`] and [`REGISTRY_RAW_ROOT`]). The commit sha is resolved
+/// once and every file of this refresh is read under it, so the index and the
+/// platform files can never come from two different commits.
+pub(crate) fn fetch_registry_from(api_url: &str, raw_root: &str) -> Result<(RegistryRaw, String)> {
     let client = reqwest::blocking::Client::new();
+    let base = super::registry_source::resolve_registry_base(&client, api_url, raw_root);
 
     // Try v6 (TOML) first
-    if let Some(reg) = try_fetch_v6(&client) {
-        return Ok(reg);
+    if let Some(reg) = try_fetch_v6(&client, &base.base_url) {
+        return Ok((reg, base.source));
     }
 
     // Try v5 (JSON per-platform)
-    if let Some(reg) = try_fetch_v5(&client) {
-        return Ok(reg);
+    if let Some(reg) = try_fetch_v5(&client, &base.base_url) {
+        return Ok((reg, base.source));
     }
 
     // Fallback: legacy monolithic platforms.json (v4)
     let response = client
-        .get(REGISTRY_LEGACY_URL)
+        .get(format!("{}platforms.json", base.base_url))
         .header("User-Agent", "canopy")
         .send()
         .context("Failed to connect to platform registry")?;
@@ -197,10 +212,13 @@ pub(crate) fn fetch_registry() -> Result<RegistryRaw> {
     }
 
     let legacy: LegacyRaw = response.json().context("Invalid registry JSON")?;
-    Ok(RegistryRaw {
-        platforms: legacy.platforms,
-        canonical_servers: CanonicalServers::default(),
-    })
+    Ok((
+        RegistryRaw {
+            platforms: legacy.platforms,
+            canonical_servers: CanonicalServers::default(),
+        },
+        base.source,
+    ))
 }
 
 /// Try reading registry v6 from a local directory (development mode).
@@ -245,10 +263,11 @@ fn try_fetch_local(base: &Path) -> Option<RegistryRaw> {
     })
 }
 
-/// Try fetching registry v6 (TOML index + servers + platforms).
-fn try_fetch_v6(client: &reqwest::blocking::Client) -> Option<RegistryRaw> {
+/// Try fetching registry v6 (TOML index + servers + platforms) under one
+/// commit-pinned `base` (see [`super::registry_source`]).
+fn try_fetch_v6(client: &reqwest::blocking::Client, base: &str) -> Option<RegistryRaw> {
     let index_resp = client
-        .get(format!("{REGISTRY_BASE_URL}index.toml"))
+        .get(format!("{base}index.toml"))
         .header("User-Agent", "canopy")
         .send()
         .ok()?;
@@ -262,7 +281,7 @@ fn try_fetch_v6(client: &reqwest::blocking::Client) -> Option<RegistryRaw> {
 
     // Fetch canonical servers
     let servers_resp = client
-        .get(format!("{REGISTRY_BASE_URL}servers.toml"))
+        .get(format!("{base}servers.toml"))
         .header("User-Agent", "canopy")
         .send()
         .ok()?;
@@ -276,7 +295,7 @@ fn try_fetch_v6(client: &reqwest::blocking::Client) -> Option<RegistryRaw> {
 
     let mut platforms = Vec::new();
     for entry in &index.platforms {
-        let url = format!("{REGISTRY_BASE_URL}platforms/{}.toml", entry.name);
+        let url = format!("{base}platforms/{}.toml", entry.name);
         match client
             .get(&url)
             .header("User-Agent", "canopy")
@@ -301,10 +320,10 @@ fn try_fetch_v6(client: &reqwest::blocking::Client) -> Option<RegistryRaw> {
     })
 }
 
-/// Try fetching registry v5 (JSON per-platform).
-fn try_fetch_v5(client: &reqwest::blocking::Client) -> Option<RegistryRaw> {
+/// Try fetching registry v5 (JSON per-platform) under one commit-pinned `base`.
+fn try_fetch_v5(client: &reqwest::blocking::Client, base: &str) -> Option<RegistryRaw> {
     let resp = client
-        .get(format!("{REGISTRY_BASE_URL}index.json"))
+        .get(format!("{base}index.json"))
         .header("User-Agent", "canopy")
         .send()
         .ok()?;
@@ -317,7 +336,7 @@ fn try_fetch_v5(client: &reqwest::blocking::Client) -> Option<RegistryRaw> {
 
     let mut platforms = Vec::new();
     for entry in &index.platforms {
-        let url = format!("{REGISTRY_BASE_URL}platforms/{}.json", entry.name);
+        let url = format!("{base}platforms/{}.json", entry.name);
         match client
             .get(&url)
             .header("User-Agent", "canopy")
@@ -403,10 +422,10 @@ fn needs_refresh(canopy_dir: &Path) -> bool {
 
 pub(crate) fn refresh_registry_inner(
     home: &Path,
-    fetch: impl FnOnce() -> Result<RegistryRaw>,
+    fetch: impl FnOnce() -> Result<(RegistryRaw, String)>,
 ) -> Result<RegistryRefreshReport> {
-    let registry = fetch()?;
-    apply_registry_refresh(home, &registry)
+    let (registry, source) = fetch()?;
+    apply_registry_refresh(home, &registry, &source)
 }
 
 /// The testable heart of a registry refresh: given an already-fetched
@@ -416,7 +435,11 @@ pub(crate) fn refresh_registry_inner(
 /// record the successful refresh time. Split out from [`refresh_registry_inner`]
 /// so tests can drive it with an in-memory [`RegistryRaw`] instead of a real
 /// fetch.
-fn apply_registry_refresh(home: &Path, registry: &RegistryRaw) -> Result<RegistryRefreshReport> {
+fn apply_registry_refresh(
+    home: &Path,
+    registry: &RegistryRaw,
+    source: &str,
+) -> Result<RegistryRefreshReport> {
     let detected: Vec<&Platform> = registry
         .platforms
         .iter()
@@ -541,6 +564,7 @@ fn apply_registry_refresh(home: &Path, registry: &RegistryRaw) -> Result<Registr
     Ok(RegistryRefreshReport {
         changed,
         kept,
+        source: source.to_string(),
         added: refresh.added,
         updated: refresh.updated,
         deleted: refresh.deleted,
@@ -782,7 +806,7 @@ mod tests {
             serde_json::json!({"binary": "ls", "headless_mode": "--headless", "prompt_via_stdin": true}),
         )]);
 
-        apply_registry_refresh(home.path(), &registry).unwrap();
+        apply_registry_refresh(home.path(), &registry, "test").unwrap();
 
         let config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
         let cli = config.get_cli("testcli").unwrap();
@@ -822,7 +846,7 @@ mod tests {
             }),
         )]);
 
-        apply_registry_refresh(home.path(), &registry).unwrap();
+        apply_registry_refresh(home.path(), &registry, "test").unwrap();
 
         let config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
         let cli = config.get_cli("testcli").unwrap();
@@ -863,7 +887,7 @@ mod tests {
             }),
         )]);
 
-        apply_registry_refresh(home.path(), &registry).unwrap();
+        apply_registry_refresh(home.path(), &registry, "test").unwrap();
 
         let config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
         let cli = config.get_cli("testcli").unwrap();
@@ -908,7 +932,7 @@ mod tests {
             }),
         )]);
 
-        apply_registry_refresh(home.path(), &registry).unwrap();
+        apply_registry_refresh(home.path(), &registry, "test").unwrap();
 
         let config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
         let cli = config.get_cli("testcli").unwrap();
@@ -939,7 +963,7 @@ mod tests {
         );
         platform.provider = Some("Mistral AI".to_string());
         platform.tool_name = Some("Vibe".to_string());
-        apply_registry_refresh(home.path(), &registry_of(vec![platform])).unwrap();
+        apply_registry_refresh(home.path(), &registry_of(vec![platform]), "test").unwrap();
 
         let config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
         let cli = config.get_cli("testcli").unwrap();
@@ -975,7 +999,7 @@ mod tests {
         );
         platform.provider = Some("New".to_string());
         platform.tool_name = Some("New Tool".to_string());
-        apply_registry_refresh(home.path(), &registry_of(vec![platform])).unwrap();
+        apply_registry_refresh(home.path(), &registry_of(vec![platform]), "test").unwrap();
 
         let config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
         let cli = config.get_cli("testcli").unwrap();
@@ -995,7 +1019,7 @@ mod tests {
             serde_json::json!({"binary": "ls", "headless_mode": "--headless"}),
         )]);
 
-        apply_registry_refresh(home.path(), &registry).unwrap();
+        apply_registry_refresh(home.path(), &registry, "test").unwrap();
 
         let config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
         assert!(config.get_cli("brandnew").is_some());
@@ -1026,7 +1050,7 @@ mod tests {
         };
 
         // Refresh #1: first sighting — kept, and the sighting is recorded.
-        apply_registry_refresh(home.path(), &registry()).unwrap();
+        apply_registry_refresh(home.path(), &registry(), "test").unwrap();
         let config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
         assert!(config.get_cli("ghost").is_some());
         let db = Database::new_safe(&database_path(&canopy_dir), &canopy_dir).unwrap();
@@ -1039,7 +1063,7 @@ mod tests {
         let backdated = chrono::Utc::now() - chrono::Duration::minutes(11);
         db.set_state("harness_absent_since:ghost", &backdated.to_rfc3339())
             .unwrap();
-        apply_registry_refresh(home.path(), &registry()).unwrap();
+        apply_registry_refresh(home.path(), &registry(), "test").unwrap();
         let config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
         assert!(config.get_cli("ghost").is_none());
     }
@@ -1069,7 +1093,7 @@ mod tests {
             }),
         )]);
 
-        let report = apply_registry_refresh(home.path(), &registry).unwrap();
+        let report = apply_registry_refresh(home.path(), &registry, "test").unwrap();
 
         let config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
         // Metadata is adopted outright...
@@ -1145,7 +1169,9 @@ mod tests {
         let empty_registry_dir = TempDir::new().unwrap();
 
         let result = refresh_registry_inner(home.path(), || {
-            try_fetch_local(empty_registry_dir.path()).context("x")
+            try_fetch_local(empty_registry_dir.path())
+                .context("x")
+                .map(|reg| (reg, "test".to_string()))
         });
         assert!(result.is_err());
 
@@ -1290,7 +1316,7 @@ mod tests {
         };
         let registry = registry_of(vec![new_platform]);
 
-        apply_registry_refresh(home.path(), &registry).unwrap();
+        apply_registry_refresh(home.path(), &registry, "test").unwrap();
 
         let updated_baseline = RegistryBaseline::load(&canopy_dir).unwrap();
         let updated_platform = updated_baseline
@@ -1352,7 +1378,7 @@ mod tests {
         .unwrap();
 
         let registry = registry_of(vec![platform]);
-        apply_registry_refresh(home.path(), &registry).unwrap();
+        apply_registry_refresh(home.path(), &registry, "test").unwrap();
 
         let updated = RegistryBaseline::load(&canopy_dir).unwrap();
         assert_eq!(updated.platforms.len(), 1);
@@ -1410,7 +1436,7 @@ mod tests {
         std::fs::write(home.path().join(&platform.config_path), "").unwrap();
 
         let registry = registry_of(vec![platform]);
-        apply_registry_refresh(home.path(), &registry).unwrap();
+        apply_registry_refresh(home.path(), &registry, "test").unwrap();
 
         let updated = RegistryBaseline::load(&canopy_dir).unwrap();
         assert_eq!(updated.platforms.len(), 1);
@@ -1464,7 +1490,7 @@ mod tests {
         .unwrap();
 
         let registry = registry_of(vec![]);
-        apply_registry_refresh(home.path(), &registry).unwrap();
+        apply_registry_refresh(home.path(), &registry, "test").unwrap();
 
         let updated = RegistryBaseline::load(&canopy_dir).unwrap();
         assert!(updated.platforms.is_empty());
@@ -1549,7 +1575,7 @@ mod tests {
         };
         let registry = registry_of(vec![new_platform]);
 
-        apply_registry_refresh(home.path(), &registry).unwrap();
+        apply_registry_refresh(home.path(), &registry, "test").unwrap();
         let after_first = RegistryBaseline::load(&canopy_dir).unwrap();
         let first_platform = after_first
             .platforms
@@ -1558,7 +1584,7 @@ mod tests {
             .unwrap()
             .clone();
 
-        apply_registry_refresh(home.path(), &registry).unwrap();
+        apply_registry_refresh(home.path(), &registry, "test").unwrap();
         let after_second = RegistryBaseline::load(&canopy_dir).unwrap();
         let second_platform = after_second
             .platforms
@@ -1721,7 +1747,9 @@ unsupported_keys = []
         );
 
         let report = refresh_registry_inner(home.path(), || {
-            try_fetch_local(dir.path()).context("local registry fetch")
+            try_fetch_local(dir.path())
+                .context("local registry fetch")
+                .map(|reg| (reg, "test".to_string()))
         })
         .unwrap();
 
@@ -1770,7 +1798,9 @@ unsupported_keys = []
         );
 
         let report = refresh_registry_inner(home.path(), || {
-            try_fetch_local(dir.path()).context("local registry fetch")
+            try_fetch_local(dir.path())
+                .context("local registry fetch")
+                .map(|reg| (reg, "test".to_string()))
         })
         .unwrap();
 
@@ -1795,12 +1825,17 @@ unsupported_keys = []
         write_in_sync_setup(home.path(), dir.path(), "--headless");
 
         let report = refresh_registry_inner(home.path(), || {
-            try_fetch_local(dir.path()).context("local registry fetch")
+            try_fetch_local(dir.path())
+                .context("local registry fetch")
+                .map(|reg| (reg, "test".to_string()))
         })
         .unwrap();
 
         assert!(report.up_to_date);
-        assert_eq!(report.render_text(), "registry already up to date");
+        assert_eq!(
+            report.render_text(),
+            "registry already up to date\nsource: test"
+        );
     }
 
     /// (d) The on-demand refresh ignores the 24-hour interval: even with a
@@ -1821,7 +1856,9 @@ unsupported_keys = []
         assert!(!needs_refresh(&canopy_dir));
 
         let report = refresh_registry_inner(home.path(), || {
-            try_fetch_local(dir.path()).context("local registry fetch")
+            try_fetch_local(dir.path())
+                .context("local registry fetch")
+                .map(|reg| (reg, "test".to_string()))
         })
         .unwrap();
         assert!(report.up_to_date);

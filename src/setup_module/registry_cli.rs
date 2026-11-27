@@ -101,7 +101,7 @@ fn handle_registry_refresh(local_registry: Option<PathBuf>, json: bool) -> anyho
 /// `canopy setup` is the thing that creates it.
 fn run_refresh(
     home: &std::path::Path,
-    fetch: impl FnOnce() -> anyhow::Result<crate::setup_module::models::RegistryRaw>,
+    fetch: impl FnOnce() -> anyhow::Result<(crate::setup_module::models::RegistryRaw, String)>,
 ) -> anyhow::Result<crate::setup_module::registry_fetch::RegistryRefreshReport> {
     let config_path = home.join(".canopy").join("config.toml");
     anyhow::ensure!(

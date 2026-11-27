@@ -159,10 +159,7 @@ fn fetch_registry_step() -> Result<crate::setup_module::models::RegistryRaw> {
     print_banner();
     print!("  Fetching platform registry... ");
     io::stdout().flush()?;
-    let mut registry = fetch_registry()?;
-
-    // Legacy v5 compat: no longer needed with v6
-    let _ = &mut registry;
+    let (registry, _) = fetch_registry()?;
     println!("\x1b[32m✓\x1b[0m");
 
     Ok(registry)

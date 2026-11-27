@@ -424,7 +424,7 @@ pub(crate) fn run_login_cmd_with(
     platform_name: &str,
     is_tty: bool,
     canopy_dir: &Path,
-    fetch: impl FnOnce() -> anyhow::Result<crate::setup_module::models::RegistryRaw>,
+    fetch: impl FnOnce() -> anyhow::Result<(crate::setup_module::models::RegistryRaw, String)>,
     runner: impl FnOnce(&str) -> LoginRun,
 ) -> i32 {
     if !is_tty {
@@ -432,7 +432,7 @@ pub(crate) fn run_login_cmd_with(
         return 1;
     }
     let registry = match fetch() {
-        Ok(r) => r,
+        Ok((r, _)) => r,
         Err(err) => {
             eprintln!("Error fetching registry: {err}");
             return 1;
@@ -501,12 +501,12 @@ pub fn run_check_logins_cmd() -> i32 {
 
 /// Testable core of `run_check_logins_cmd`.
 pub(crate) fn run_check_logins_cmd_with(
-    fetch: impl FnOnce() -> anyhow::Result<crate::setup_module::models::RegistryRaw>,
+    fetch: impl FnOnce() -> anyhow::Result<(crate::setup_module::models::RegistryRaw, String)>,
     canopy_dir: &Path,
     out: &mut dyn std::io::Write,
 ) -> i32 {
     let registry = match fetch() {
-        Ok(r) => r,
+        Ok((r, _)) => r,
         Err(err) => {
             eprintln!("Error fetching registry: {err}");
             return 1;
@@ -718,7 +718,7 @@ mod tests {
             "demo",
             false,
             &canopy_dir,
-            || Ok(registry(vec![p])),
+            || Ok((registry(vec![p]), "test".to_string())),
             |_| unreachable!("should not run"),
         );
         assert_eq!(code, 1);
@@ -747,11 +747,10 @@ mod tests {
         let mut out_buf = Vec::new();
         let code = run_check_logins_cmd_with(
             || {
-                Ok(registry(vec![
-                    ok.clone(),
-                    bad.clone(),
-                    unverifiable.clone(),
-                ]))
+                Ok((
+                    registry(vec![ok.clone(), bad.clone(), unverifiable.clone()]),
+                    "test".to_string(),
+                ))
             },
             &canopy_dir,
             &mut out_buf,
@@ -764,7 +763,7 @@ mod tests {
 
         let mut out_ok = Vec::new();
         let code_ok = run_check_logins_cmd_with(
-            || Ok(registry(vec![ok, unverifiable])),
+            || Ok((registry(vec![ok, unverifiable]), "test".to_string())),
             &canopy_dir,
             &mut out_ok,
         );
@@ -881,8 +880,11 @@ mod tests {
         )
         .unwrap();
 
-        let code =
-            run_check_logins_cmd_with(|| Ok(registry(vec![p])), &canopy_dir, &mut Vec::new());
+        let code = run_check_logins_cmd_with(
+            || Ok((registry(vec![p]), "test".to_string())),
+            &canopy_dir,
+            &mut Vec::new(),
+        );
         assert_eq!(code, 0);
     }
 
@@ -900,7 +902,7 @@ mod tests {
             "demo",
             true,
             &canopy_dir,
-            || Ok(registry(vec![p.clone()])),
+            || Ok((registry(vec![p.clone()]), "test".to_string())),
             |_| LoginRun::Exited(0),
         );
         assert_eq!(no_check, 0);
@@ -911,7 +913,7 @@ mod tests {
             "demo",
             true,
             &canopy_dir,
-            || Ok(registry(vec![p.clone()])),
+            || Ok((registry(vec![p.clone()]), "test".to_string())),
             |_| LoginRun::Exited(0),
         );
         assert_eq!(ok, 0);
@@ -922,7 +924,7 @@ mod tests {
             "demo",
             true,
             &canopy_dir,
-            || Ok(registry(vec![p.clone()])),
+            || Ok((registry(vec![p.clone()]), "test".to_string())),
             |_| LoginRun::Exited(0),
         );
         assert_eq!(bad_check, 1);
@@ -933,7 +935,7 @@ mod tests {
             "demo",
             true,
             &canopy_dir,
-            || Ok(registry(vec![p])),
+            || Ok((registry(vec![p]), "test".to_string())),
             |_| LoginRun::Exited(2),
         );
         assert_eq!(bad_login, 1);
@@ -953,7 +955,7 @@ mod tests {
             "demo",
             true,
             &canopy_dir,
-            || Ok(registry(vec![p.clone()])),
+            || Ok((registry(vec![p.clone()]), "test".to_string())),
             |_| LoginRun::Cancelled,
         );
         assert_eq!(cancelled, 1);
@@ -962,7 +964,7 @@ mod tests {
             "demo",
             true,
             &canopy_dir,
-            || Ok(registry(vec![p.clone()])),
+            || Ok((registry(vec![p.clone()]), "test".to_string())),
             |_| LoginRun::Failed("boom".to_string()),
         );
         assert_eq!(failed, 1);
@@ -971,7 +973,7 @@ mod tests {
             "demo",
             true,
             &canopy_dir,
-            || Ok(registry(vec![p])),
+            || Ok((registry(vec![p]), "test".to_string())),
             |_| LoginRun::Exited(2),
         );
         assert_eq!(bad_exit, 1);

@@ -111,7 +111,7 @@ pub fn needs_setup() -> bool {
 pub fn run_setup_silent() -> Result<()> {
     let home = dirs::home_dir().context("No home directory")?;
 
-    let registry = fetch_registry()?;
+    let (registry, _) = fetch_registry()?;
 
     let detected: Vec<&Platform> = registry
         .platforms

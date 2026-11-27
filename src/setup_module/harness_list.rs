@@ -259,7 +259,7 @@ fn harness_json(entry: &HarnessEntry) -> serde_json::Value {
 /// Print every registry harness non-interactively: plain text rows, or
 /// JSON with `--json`, for scripts and the install/login specs.
 pub fn run_list_harnesses(json: bool) -> Result<()> {
-    let registry = super::registry_fetch::fetch_registry()?;
+    let (registry, _) = super::registry_fetch::fetch_registry()?;
     let entries = collect_harnesses(&registry.platforms);
     if json {
         println!("{}", format_harnesses_json(&entries));

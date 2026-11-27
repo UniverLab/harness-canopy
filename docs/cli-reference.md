@@ -105,8 +105,8 @@ Both `canopy setup` and `canopy mcp` also rewrite legacy unauthenticated canopy 
 
 | Command | Description |
 |---|---|
-| `canopy registry refresh` | Fetch the platform registry and apply it now, ignoring the 24-hour interval the TUI's background refresh uses; prints one line per affected platform (`<platform>: changed <fields>`, `<platform>: kept local override <fields>`, `<platform>: added`, `<platform>: updated`, `<platform>: removed`), or `registry already up to date` when nothing changed. Rewrites only `config.toml` and the baseline file — never starts the TUI, wizard or daemon, safe while graphs run |
-| `canopy registry refresh --json` | Print the same report as JSON (`changed`, `kept`, `added`, `updated`, `deleted`, `pending`, `up_to_date`) |
+| `canopy registry refresh` | Fetch the platform registry and apply it now, ignoring the 24-hour interval the TUI's background refresh uses; prints one line per affected platform (`<platform>: changed <fields>`, `<platform>: kept local override <fields>`, `<platform>: added`, `<platform>: updated`, `<platform>: removed`), or `registry already up to date` when nothing changed, always ending with a `source: <commit <sha7> \| branch main (…) \| local registry <path>>` line naming where the registry was read from. Rewrites only `config.toml` and the baseline file — never starts the TUI, wizard or daemon, safe while graphs run |
+| `canopy registry refresh --json` | Print the same report as JSON (`changed`, `kept`, `added`, `updated`, `deleted`, `pending`, `up_to_date`, `source`) |
 | `canopy registry refresh --local-registry <path>` | Apply a local registry directory instead of fetching from GitHub (same flag as `canopy setup --local-registry`) |
 | `canopy registry pending` | Show the registry changes waiting for approval (`<cli>.<field>: <old> -> <new>` per change), or `no registry changes waiting for approval` |
 | `canopy registry pending --json` | Print the staged file content as JSON (`{"changes":[]}` when none) |

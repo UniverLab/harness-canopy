@@ -462,7 +462,7 @@ pub fn already_delivered_message(id: &str) -> String {
 }
 
 fn find_platform(cli: &Cli) -> Result<Platform> {
-    let registry = crate::setup_module::registry_fetch::fetch_registry()
+    let (registry, _) = crate::setup_module::registry_fetch::fetch_registry()
         .map_err(|e| anyhow::anyhow!("Failed to load platform registry: {e}"))?;
     registry
         .platforms

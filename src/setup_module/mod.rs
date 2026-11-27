@@ -13,6 +13,7 @@ pub mod registry_cli;
 pub mod registry_fetch;
 pub mod registry_pending;
 pub mod registry_platforms;
+pub(crate) mod registry_source;
 pub mod sync_and_skills;
 pub mod uninstall;
 pub mod wizard;

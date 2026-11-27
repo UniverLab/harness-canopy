@@ -410,7 +410,8 @@ mod tests {
             "testcli.marker",
             serde_json::json!({"binary": "ls", "headless_mode": "--new"}),
         )]);
-        let report = refresh_registry_inner(home.path(), || Ok(registry)).unwrap();
+        let report =
+            refresh_registry_inner(home.path(), || Ok((registry, "test".to_string()))).unwrap();
 
         // config.toml is byte-identical: the registry value never landed.
         let mut after = Vec::new();
@@ -449,8 +450,10 @@ mod tests {
             serde_json::json!({"binary": "ls", "headless_mode": "--headless"}),
         );
         platform.provider = Some("Someone".to_string());
-        let report =
-            refresh_registry_inner(home.path(), || Ok(registry_of(vec![platform]))).unwrap();
+        let report = refresh_registry_inner(home.path(), || {
+            Ok((registry_of(vec![platform]), "test".to_string()))
+        })
+        .unwrap();
 
         assert!(report.pending.is_empty());
         let config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
@@ -464,11 +467,14 @@ mod tests {
     fn second_identical_refresh_keeps_a_single_entry() {
         let home = tempfile::TempDir::new().unwrap();
         let registry = || {
-            Ok::<_, anyhow::Error>(registry_of(vec![detected(
-                home.path(),
-                "testcli.marker",
-                serde_json::json!({"binary": "ls", "headless_mode": "--new"}),
-            )]))
+            Ok::<_, anyhow::Error>((
+                registry_of(vec![detected(
+                    home.path(),
+                    "testcli.marker",
+                    serde_json::json!({"binary": "ls", "headless_mode": "--new"}),
+                )]),
+                "test".to_string(),
+            ))
         };
 
         let local = cli_with("--old", None);
@@ -481,11 +487,14 @@ mod tests {
         // Local config still holds the old value, so the second refresh
         // must stage the same change again — exactly once, never duplicated.
         let registry = || {
-            Ok::<_, anyhow::Error>(registry_of(vec![detected(
-                home.path(),
-                "testcli.marker",
-                serde_json::json!({"binary": "ls", "headless_mode": "--new"}),
-            )]))
+            Ok::<_, anyhow::Error>((
+                registry_of(vec![detected(
+                    home.path(),
+                    "testcli.marker",
+                    serde_json::json!({"binary": "ls", "headless_mode": "--new"}),
+                )]),
+                "test".to_string(),
+            ))
         };
         refresh_registry_inner(home.path(), registry).unwrap();
         let second = load_pending(&home.path().join(".canopy"));

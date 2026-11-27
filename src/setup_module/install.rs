@@ -273,7 +273,7 @@ pub(crate) fn run_install_cmd_with(
     platform_name: &str,
     yes: bool,
     is_tty: bool,
-    fetch: impl FnOnce() -> anyhow::Result<crate::setup_module::models::RegistryRaw>,
+    fetch: impl FnOnce() -> anyhow::Result<(crate::setup_module::models::RegistryRaw, String)>,
 ) -> i32 {
     if !yes && !is_tty {
         eprintln!(
@@ -283,7 +283,7 @@ pub(crate) fn run_install_cmd_with(
     }
 
     let registry = match fetch() {
-        Ok(r) => r,
+        Ok((r, _)) => r,
         Err(err) => {
             eprintln!("Error fetching registry: {err}");
             return 1;
@@ -520,10 +520,13 @@ mod tests {
     fn run_install_cmd_requires_yes_non_interactively() {
         let p = test_platform("demo", vec![cmd(running_os(), "echo hi", &[])], None);
         let code = run_install_cmd_with("demo", false, false, || {
-            Ok(RegistryRaw {
-                platforms: vec![p],
-                canonical_servers: Default::default(),
-            })
+            Ok((
+                RegistryRaw {
+                    platforms: vec![p],
+                    canonical_servers: Default::default(),
+                },
+                "test".to_string(),
+            ))
         });
         assert_eq!(code, 1);
     }
@@ -537,10 +540,13 @@ mod tests {
         let p = test_platform("demo", vec![cmd(running_os(), &command, &[])], None);
 
         let code = run_install_cmd_with("demo", true, false, || {
-            Ok(RegistryRaw {
-                platforms: vec![p],
-                canonical_servers: Default::default(),
-            })
+            Ok((
+                RegistryRaw {
+                    platforms: vec![p],
+                    canonical_servers: Default::default(),
+                },
+                "test".to_string(),
+            ))
         });
         assert_eq!(code, 0);
         assert!(marker.exists());
@@ -601,10 +607,13 @@ mod tests {
         unsafe { libc::close(pipe_fds[1]) };
 
         let code = run_install_cmd_with("demo", true, false, || {
-            Ok(RegistryRaw {
-                platforms: vec![p],
-                canonical_servers: Default::default(),
-            })
+            Ok((
+                RegistryRaw {
+                    platforms: vec![p],
+                    canonical_servers: Default::default(),
+                },
+                "test".to_string(),
+            ))
         });
 
         unsafe { libc::dup2(saved_stdout, stdout_fd) };

@@ -25,10 +25,13 @@ fn test_app() -> (App, tempfile::TempDir) {
     (app, data_dir)
 }
 
-/// A wide, tall terminal: hints are never suppressed for size.
+/// A wide, tall terminal: hints are never suppressed for size. The random
+/// atmosphere overlay stays off so text assertions never flake when a
+/// firefly lands on the marker or tip cells.
 fn wide(app: &mut App) {
     app.term_width = 120;
     app.term_height = 30;
+    app.atmosphere_hidden = true;
 }
 
 fn press(app: &mut App, code: KeyCode) {

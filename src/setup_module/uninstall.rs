@@ -54,7 +54,7 @@ pub fn build_uninstall_plan_with_home(
     let agents_skills_dir = home.join(".agents").join("skills");
 
     let registry = match fetch_registry() {
-        Ok(reg) => reg,
+        Ok((reg, _)) => reg,
         Err(e) => {
             // The registry is the source of truth for where setup wrote
             // (config_path + mcp_servers_key). When it is unreachable, fall
