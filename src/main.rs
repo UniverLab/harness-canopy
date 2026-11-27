@@ -42,6 +42,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use daemon::agent_cli::{handle_agent_action, AgentAction};
 use daemon::bridge::run_bridge;
+use daemon::calendar_cli::{handle_calendar_action, CalendarAction};
 use daemon::clean_cli::handle_clean_action;
 use daemon::cli::{handle_daemon_action, DaemonAction};
 use daemon::crew_cli::{handle_crew_action, CrewAction};
@@ -220,6 +221,11 @@ enum Commands {
     Crew {
         #[command(subcommand)]
         action: CrewAction,
+    },
+    /// Manage personal calendar events and per-project roadmap milestones.
+    Calendar {
+        #[command(subcommand)]
+        action: CalendarAction,
     },
     /// Inspect named mutexes nodes hold while they run.
     Mutex {
@@ -416,6 +422,7 @@ async fn dispatch_rest(command: Option<Commands>, port: Option<u16>) -> Result<(
         Some(Commands::Spec { action }) => handle_spec_action(action, port).await,
         Some(Commands::Roster { action }) => handle_roster_action(action, port).await,
         Some(Commands::Crew { action }) => handle_crew_action(action, port).await,
+        Some(Commands::Calendar { action }) => handle_calendar_action(action, port).await,
         Some(Commands::Mutex { action }) => handle_mutex_action(action).await,
         Some(Commands::Config { action }) => handle_settings_action(action, port).await,
         Some(Commands::Queue { action }) => handle_queue_action(action, port).await,

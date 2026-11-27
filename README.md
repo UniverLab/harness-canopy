@@ -208,7 +208,7 @@ session later instead of polling), and `intelligence_upsert` /
 
 ---
 
-## MCP Tools (35)
+## MCP Tools (36)
 
 Graph-node sessions (agent and ensemble nodes launched by the graph engine) receive a fixed node profile of 10 tools via `CANOPY_MCP_PROFILE=node`, so every node stays well under the 128-tool cap of OpenAI-compatible providers. All other sessions — the orchestrator, check nodes, hooks, TUI, subagents, and background agents — keep the full tool list.
 
@@ -231,6 +231,7 @@ Graph-node sessions (agent and ensemble nodes launched by the graph engine) rece
 | `scheduled_prompts` | **Scheduled prompts** (1) |
 | `session_send_file`, `session_list_files`, `session_read_file` | **Session shelf** (3) |
 | `remote` | **Remote control** (1) |
+| `calendar` | **Calendar** (1) |
 
 ---
 

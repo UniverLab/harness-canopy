@@ -131,6 +131,8 @@ pub struct OptionalExtension<T>(pub Option<T>);
 // Test seams below construct per-tool parameter newtypes; production code
 // reaches them only through the `#[tool]` methods' own extractor.
 #[cfg(test)]
+use crate::daemon::handler_calendar::CalendarObject;
+#[cfg(test)]
 use crate::daemon::handler_graph_tools::{
     GraphControlObject, GraphEdgeObject, GraphEditObject, GraphEnsembleObject, GraphNodeObject,
     GraphObject,
@@ -318,6 +320,7 @@ impl TaskTriggerHandler {
     pub(crate) fn tool_router() -> ToolRouter<Self> {
         let mut router = ToolRouter::new();
         router.merge(TaskTriggerHandler::tool_router_agents());
+        router.merge(TaskTriggerHandler::tool_router_calendar());
         router.merge(TaskTriggerHandler::tool_router_sandbox());
         router.merge(TaskTriggerHandler::tool_router_shelf());
         router.merge(TaskTriggerHandler::tool_router_resource_tools());
@@ -749,6 +752,13 @@ pub(crate) async fn call_resource_action_value(
         "catalogue" => {
             handler
                 .catalogue(crate::daemon::params_extract::Parameters(CatalogueObject(
+                    object,
+                )))
+                .await
+        }
+        "calendar" => {
+            handler
+                .calendar(crate::daemon::params_extract::Parameters(CalendarObject(
                     object,
                 )))
                 .await

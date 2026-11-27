@@ -5,6 +5,7 @@
 
 pub mod activity;
 pub mod animations_mode;
+pub mod calendar;
 pub mod canopy_config;
 pub mod clean;
 pub mod cli_config;

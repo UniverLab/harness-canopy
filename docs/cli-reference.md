@@ -1087,6 +1087,18 @@ drain; specs with no recorded session produce no message.
 
 ## Spec queues
 
+## Calendar
+
+| Command | Description |
+|---|---|
+| `canopy calendar list [--from <rfc3339>] [--to <rfc3339>] [--json]` | List personal calendar events |
+| `canopy calendar add <title> --at <rfc3339> [--notes <text>] [--recurrence none\|daily\|weekly\|monthly] [--lead <minutes>]` | Add a personal calendar event |
+| `canopy calendar remove <id>` | Remove a personal calendar event |
+| `canopy calendar milestones [--project <path>] [--status planned\|active\|done] [--json]` | List per-project roadmap milestones |
+| `canopy calendar milestone add <title> --project <path> [--due <rfc3339>] [--notes <text>] [--status planned\|active\|done]` | Add a project milestone |
+| `canopy calendar milestone set <id> --status planned\|active\|done [--due <rfc3339>]` | Update a milestone's status and optional due date |
+| `canopy calendar milestone remove <id>` | Remove a project milestone |
+
 ## Plumbing
 
 | Command | Description |

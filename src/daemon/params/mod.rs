@@ -31,6 +31,8 @@ mod remote;
 pub use remote::*;
 mod catalogue;
 pub use catalogue::*;
+mod calendar;
+pub use calendar::*;
 
 #[cfg(test)]
 mod tests {

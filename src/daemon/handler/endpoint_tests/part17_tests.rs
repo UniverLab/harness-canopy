@@ -6,13 +6,14 @@ use super::*;
 use crate::daemon::graph_install::stub::{StubCatalogue, StubRoute};
 use serde_json::json;
 
-/// The 35 visible tools, alphabetical: the decision's final surface plus
-/// `remote` and `session_send_file` (with `skill` removed to the CLI). The
-/// two hidden `loop_*` aliases stay registered but are not visible.
-const VISIBLE_35: &[&str] = &[
+/// The 36 visible tools, alphabetical: the decision's final surface plus
+/// `remote`, `session_send_file`, and `calendar` (with `skill` removed to the CLI).
+/// The two hidden `loop_*` aliases stay registered but are not visible.
+const VISIBLE_36: &[&str] = &[
     "agent",
     "agent_edit",
     "agent_report",
+    "calendar",
     "catalogue",
     "config",
     "crew",
@@ -48,11 +49,11 @@ const VISIBLE_35: &[&str] = &[
 ];
 
 #[tokio::test]
-async fn visible_tool_surface_is_exactly_the_35() {
+async fn visible_tool_surface_is_exactly_the_36() {
     let visible = visible_tool_list();
     let names: Vec<&str> = visible.iter().map(|tool| tool.name.as_ref()).collect();
-    assert_eq!(names.len(), 35, "visible tool count drifted: {names:?}");
-    assert_eq!(names, VISIBLE_35, "visible tool list drifted");
+    assert_eq!(names.len(), 36, "visible tool count drifted: {names:?}");
+    assert_eq!(names, VISIBLE_36, "visible tool list drifted");
     assert!(
         !names.iter().any(|name| name.starts_with("loop_")),
         "hidden loop_* aliases must stay out of the visible list"
@@ -488,10 +489,10 @@ async fn new_tools_refuse_unknown_actions_with_their_full_table() {
     }
 }
 
-/// Every scope serves the same 35-map: one line per visible tool, each
+/// Every scope serves the same 36-map: one line per visible tool, each
 /// naming the tool and its actions.
 #[tokio::test]
-async fn get_tools_serves_the_same_35_map_for_every_scope() {
+async fn get_tools_serves_the_same_36_map_for_every_scope() {
     let (_dir, _db, handler) = endpoint_test_handler();
     let scopes = [
         "session_start",
@@ -516,7 +517,7 @@ async fn get_tools_serves_the_same_35_map_for_every_scope() {
         let body: serde_json::Value =
             serde_json::from_str(&raw_text(&result)).expect("get_tools body is JSON");
         let tools = body["tools"].as_array().expect("tools is an array");
-        assert_eq!(tools.len(), 35, "{scope} must serve 35 tools");
+        assert_eq!(tools.len(), 36, "{scope} must serve 36 tools");
         maps.push(
             tools
                 .iter()
@@ -527,10 +528,116 @@ async fn get_tools_serves_the_same_35_map_for_every_scope() {
     for (scope, map) in scopes.iter().zip(maps.iter()).skip(1) {
         assert_eq!(map, &maps[0], "{scope} map must equal session_start's");
     }
-    for (entry, name) in maps[0].iter().zip(VISIBLE_35.iter()) {
+    for (entry, name) in maps[0].iter().zip(VISIBLE_36.iter()) {
         assert!(
             entry.starts_with(&format!("{name} — ")),
             "map entry must lead with its tool name: {entry}"
         );
     }
+}
+
+#[tokio::test]
+async fn calendar_all_eight_actions_smoke() {
+    let (_dir, _db, handler) = endpoint_test_handler();
+
+    let created_ev = call_resource_action_value(
+        &handler,
+        "calendar",
+        "create_event",
+        json!({
+            "title": "Design review",
+            "at": "2026-11-27T14:00:00Z",
+            "recurrence": "weekly",
+            "lead_minutes": 15
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!is_err(&created_ev), "{}", text(&created_ev));
+    let ev_json: serde_json::Value = serde_json::from_str(&raw_text(&created_ev)).unwrap();
+    let ev_id = ev_json["id"].as_str().unwrap().to_string();
+
+    let listed_ev = call_resource_action_value(
+        &handler,
+        "calendar",
+        "list_events",
+        json!({ "include_dismissed": false }),
+    )
+    .await
+    .unwrap();
+    assert!(!is_err(&listed_ev), "{}", text(&listed_ev));
+    assert!(raw_text(&listed_ev).contains(&ev_id));
+
+    let updated_ev = call_resource_action_value(
+        &handler,
+        "calendar",
+        "update_event",
+        json!({
+            "id": ev_id,
+            "title": "Arch review",
+            "dismissed_at": "2026-11-27T14:05:00Z"
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!is_err(&updated_ev), "{}", text(&updated_ev));
+    assert!(raw_text(&updated_ev).contains("Arch review"));
+
+    let deleted_ev =
+        call_resource_action_value(&handler, "calendar", "delete_event", json!({ "id": ev_id }))
+            .await
+            .unwrap();
+    assert!(!is_err(&deleted_ev), "{}", text(&deleted_ev));
+
+    let created_ms = call_resource_action_value(
+        &handler,
+        "calendar",
+        "create_milestone",
+        json!({
+            "project_path": "/tmp/proj",
+            "title": "Beta",
+            "due_at": "2026-12-10T00:00:00Z",
+            "status": "active"
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!is_err(&created_ms), "{}", text(&created_ms));
+    let ms_json: serde_json::Value = serde_json::from_str(&raw_text(&created_ms)).unwrap();
+    let ms_id = ms_json["id"].as_str().unwrap().to_string();
+
+    let listed_ms = call_resource_action_value(
+        &handler,
+        "calendar",
+        "list_milestones",
+        json!({ "project_path": "/tmp/proj" }),
+    )
+    .await
+    .unwrap();
+    assert!(!is_err(&listed_ms), "{}", text(&listed_ms));
+    assert!(raw_text(&listed_ms).contains(&ms_id));
+
+    let updated_ms = call_resource_action_value(
+        &handler,
+        "calendar",
+        "update_milestone",
+        json!({
+            "id": ms_id,
+            "status": "done"
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!is_err(&updated_ms), "{}", text(&updated_ms));
+    assert!(raw_text(&updated_ms).contains("\"done\""));
+
+    let deleted_ms = call_resource_action_value(
+        &handler,
+        "calendar",
+        "delete_milestone",
+        json!({ "id": ms_id }),
+    )
+    .await
+    .unwrap();
+    assert!(!is_err(&deleted_ms), "{}", text(&deleted_ms));
 }

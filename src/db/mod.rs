@@ -646,6 +646,8 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
     remote_trust::REMOTE_TRUST_SCHEMA,
     // One-shot scheduled graph runs.
     graph_scheduled_runs::GRAPH_SCHEDULED_RUNS_SCHEMA,
+    // Personal calendar events and per-project milestones.
+    calendar::CALENDAR_SCHEMA,
 ];
 
 impl Database {
@@ -720,6 +722,7 @@ impl Database {
         Self::migrate_shelf_files(&conn)?;
         Self::migrate_graph_enabled_columns(&conn)?;
         Self::migrate_graph_scheduled_runs(&conn)?;
+        Self::migrate_calendar_tables(&conn)?;
 
         Self::set_schema_version(&conn)?;
 
@@ -733,6 +736,7 @@ pub mod achievements;
 pub mod activity_log;
 pub mod agent;
 pub mod agent_backing;
+pub mod calendar;
 pub mod clean;
 pub(crate) mod connection;
 pub mod crew_binding;

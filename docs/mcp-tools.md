@@ -235,6 +235,12 @@ ensembles — a crew.
 |---|---|
 | `catalogue` | Search the community graphs catalogue before building your own. Actions: `search` (`q`, optional `sort`/`page`/`limit` — free-text search over community graphs and nodes; `sort` is `top` (default) or `new`, `page` starts at 1, `limit` (default 10, max 50) truncates the returned page client-side and deeper access uses `page`; returns `items` with `q`/`sort`/`page`/`total`/`truncated`, each item carrying kind, slug, `repo` (owner/repo), `official`, stars and description — the install ref is the bare slug when official, else `repo/slug` — plus the model verdict when the catalogue exposes it) — pass `action` plus the params the refusal/table lists |
 
+## Calendar (1)
+
+| Tool | Description |
+|---|---|
+| `calendar` | Manage personal calendar events and per-project roadmap milestones. Actions: `list_events` (optional `from`, `to`, `include_dismissed`), `create_event` (`title`, `at`, optional `notes`, `recurrence`, `lead_minutes`), `update_event` (`id`, optional `title`, `notes`, `at`, `recurrence`, `lead_minutes`, `snoozed_until`, `dismissed_at`), `delete_event` (`id`), `list_milestones` (optional `project_path`, `status`), `create_milestone` (`project_path`, `title`, optional `notes`, `due_at`, `status`), `update_milestone` (`id`, optional `title`, `notes`, `due_at`, `status`), `delete_milestone` (`id`) — pass `action` plus the params the refusal/table lists |
+
 ## Project (1)
 
 | Tool | Description |

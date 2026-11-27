@@ -834,6 +834,7 @@ mod tests {
             &crate::daemon::handler_resource_tools_final::CATALOGUE,
             &crate::daemon::handler_sandbox::SANDBOX,
             &crate::daemon::handler_remote::REMOTE,
+            &crate::daemon::handler_calendar::CALENDAR,
         ]
     }
 
