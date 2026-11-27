@@ -184,9 +184,16 @@ A **crew** is a named, ordered list of members — `(platform, model, timeout,
 infra-retry budget)` — kept in one place, so the same "designer crew" or
 "implementer crew" is written once instead of copied into every graph. The
 tool is `crew` with actions `list`, `get`, `create` (`members` or
-`from_ensemble`), `update` and `delete`; the CLI mirrors them as
-`canopy crew list | show | create --from-ensemble | delete` (member editing
-is MCP/TUI only). `from_ensemble` refuses an ensemble whose members carry a
+`from_ensemble`), `update`, `delete`, `model_set`, `model_list`,
+`model_delete` and `assignments`; the CLI mirrors them as
+`canopy crew list | show | create --from-ensemble | delete` and
+`canopy crew model set | list | delete` (member editing is MCP/TUI only).
+A named model entry (`model_set`) stores a `(platform, model)` pair once
+so crew members can reference it by `model_ref` instead of passing
+`platform` (exactly one of `platform` or `model_ref` per member); updating
+an entry rewrites every tracking member, bumps each touched crew's version
+once, and syncs bound ensembles through the same path as `crew update`,
+while `model_delete` is refused while any crew references the entry. `from_ensemble` refuses an ensemble whose members carry a
 per-member `prompt_override` — a review panel with its own angles stays
 literal.
 
