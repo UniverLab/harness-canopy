@@ -1100,8 +1100,21 @@ fn write_freebuff_config(home: &std::path::Path) -> std::path::PathBuf {
 
 fn crew_json_member(model: &str) -> crate::daemon::params::CrewMemberJson {
     crate::daemon::params::CrewMemberJson {
-        platform: "openrouter".to_string(),
+        platform: Some("openrouter".to_string()),
         model: Some(model.to_string()),
+        model_ref: None,
+        timeout_minutes: None,
+        infra_retry_limit: None,
+        infra_crash_max_seconds: None,
+        infra_backoff_seconds: None,
+    }
+}
+
+fn crew_json_ref_member(model_ref: &str) -> crate::daemon::params::CrewMemberJson {
+    crate::daemon::params::CrewMemberJson {
+        platform: None,
+        model: None,
+        model_ref: Some(model_ref.to_string()),
         timeout_minutes: None,
         infra_retry_limit: None,
         infra_crash_max_seconds: None,
@@ -1374,3 +1387,4 @@ mod part21_tests;
 mod part22_tests;
 mod part23_tests;
 mod part24_tests;
+mod part25_tests;

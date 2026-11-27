@@ -41,10 +41,77 @@ pub struct CrewMember {
     pub position: i64,
     pub platform: String,
     pub model: Option<String>,
+    /// Named model entry this member tracks (`crew_models.name`), or `None`
+    /// for a literal member. A member with a `model_ref` always stores the
+    /// entry's current `platform`/`model` in its own columns, so the engine
+    /// and every reader keep working unchanged.
+    pub model_ref: Option<String>,
     pub timeout_minutes: Option<i64>,
     pub infra_retry_limit: Option<i64>,
     pub infra_crash_max_seconds: Option<i64>,
     pub infra_backoff_seconds: Option<i64>,
+}
+
+/// A member as submitted: exactly one of `platform` (literal pair) or
+/// `model_ref` (track a named entry) must be present. Resolution against
+/// the entry table happens inside the member-write transaction; this type
+/// carries the unresolved form across that boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnresolvedCrewMember {
+    pub platform: Option<String>,
+    pub model: Option<String>,
+    pub model_ref: Option<String>,
+    pub timeout_minutes: Option<i64>,
+    pub infra_retry_limit: Option<i64>,
+    pub infra_crash_max_seconds: Option<i64>,
+    pub infra_backoff_seconds: Option<i64>,
+}
+
+/// Reads one model entry by (trimmed) name: the `platform` plus optional
+/// `model` a tracked member materializes.
+pub type CrewModelLookup<'a> = &'a dyn Fn(&str) -> Result<Option<(String, Option<String>)>, String>;
+
+impl UnresolvedCrewMember {
+    /// Materialize one member: a literal keeps its own pair, a reference
+    /// takes the entry's current pair. `lookup` reads the entry table.
+    /// Errors name the member's index.
+    pub fn resolve(&self, index: usize, lookup: CrewModelLookup<'_>) -> Result<CrewMember, String> {
+        match (self.platform.as_ref(), self.model_ref.as_ref()) {
+            (Some(_), Some(_)) | (None, None) => Err(format!(
+                "member {index}: exactly one of platform/model_ref must be given"
+            )),
+            (Some(platform), None) => Ok(CrewMember {
+                position: index as i64,
+                platform: platform.clone(),
+                model: self.model.clone(),
+                model_ref: None,
+                timeout_minutes: self.timeout_minutes,
+                infra_retry_limit: self.infra_retry_limit,
+                infra_crash_max_seconds: self.infra_crash_max_seconds,
+                infra_backoff_seconds: self.infra_backoff_seconds,
+            }),
+            (None, Some(model_ref)) => {
+                if self.model.is_some() {
+                    return Err(format!(
+                        "member {index}: model cannot be combined with model_ref"
+                    ));
+                }
+                let name = model_ref.trim();
+                let (platform, model) =
+                    lookup(name)?.ok_or_else(|| format!("unknown model_ref '{name}'"))?;
+                Ok(CrewMember {
+                    position: index as i64,
+                    platform,
+                    model,
+                    model_ref: Some(name.to_string()),
+                    timeout_minutes: self.timeout_minutes,
+                    infra_retry_limit: self.infra_retry_limit,
+                    infra_crash_max_seconds: self.infra_crash_max_seconds,
+                    infra_backoff_seconds: self.infra_backoff_seconds,
+                })
+            }
+        }
+    }
 }
 
 /// Validate a crew name: trimmed, non-empty, at most 64 characters.
@@ -107,6 +174,7 @@ mod tests {
             position: 0,
             platform: platform.to_string(),
             model: None,
+            model_ref: None,
             timeout_minutes: None,
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
@@ -140,11 +208,87 @@ mod tests {
             ..member("opencode")
         };
         assert!(validate_crew_members(&[blank], default_max).is_err());
+        let tracked = CrewMember {
+            model_ref: Some("agy-main".to_string()),
+            ..member("antigravity")
+        };
+        assert!(validate_crew_members(&[tracked], default_max).is_ok());
         let negative = CrewMember {
             timeout_minutes: Some(-1),
             ..member("opencode")
         };
         assert!(validate_crew_members(&[negative], default_max).is_err());
+    }
+
+    #[test]
+    fn unresolved_member_resolve_rules() {
+        let table = |name: &str| -> Result<Option<(String, Option<String>)>, String> {
+            match name {
+                "agy-main" => Ok(Some((
+                    "antigravity".to_string(),
+                    Some("gemini-4-hydrogen-medium".to_string()),
+                ))),
+                _ => Ok(None),
+            }
+        };
+        let literal = UnresolvedCrewMember {
+            platform: Some("opencode".to_string()),
+            model: Some("m".to_string()),
+            model_ref: None,
+            timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+        };
+        let member = literal.resolve(0, &table).unwrap();
+        assert_eq!(member.platform, "opencode");
+        assert_eq!(member.model_ref, None);
+        let tracked = UnresolvedCrewMember {
+            platform: None,
+            model: None,
+            model_ref: Some("  agy-main ".to_string()),
+            timeout_minutes: Some(5),
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+        };
+        let member = tracked.resolve(2, &table).unwrap();
+        assert_eq!(member.position, 2);
+        assert_eq!(member.platform, "antigravity");
+        assert_eq!(member.model.as_deref(), Some("gemini-4-hydrogen-medium"));
+        assert_eq!(member.model_ref.as_deref(), Some("agy-main"));
+        assert_eq!(member.timeout_minutes, Some(5));
+        let both = UnresolvedCrewMember {
+            platform: Some("x".to_string()),
+            model: None,
+            model_ref: Some("agy-main".to_string()),
+            timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+        };
+        assert!(both.resolve(1, &table).unwrap_err().contains("member 1"));
+        let neither = UnresolvedCrewMember {
+            platform: None,
+            model: None,
+            model_ref: None,
+            timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+        };
+        assert!(neither.resolve(3, &table).unwrap_err().contains("member 3"));
+        let unknown = UnresolvedCrewMember {
+            platform: None,
+            model: None,
+            model_ref: Some("nope".to_string()),
+            timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+        };
+        let err = unknown.resolve(0, &table).unwrap_err();
+        assert!(err.contains("unknown model_ref 'nope'"), "{err}");
     }
 
     #[test]

@@ -29,6 +29,7 @@ pub(crate) mod handler_agents_watcher;
 pub(crate) mod handler_catalogue;
 pub(crate) mod handler_copy;
 pub(crate) mod handler_crew;
+pub(crate) mod handler_crew_models;
 pub(crate) mod handler_edges;
 pub(crate) mod handler_ensemble_add;
 pub(crate) mod handler_ensemble_core;

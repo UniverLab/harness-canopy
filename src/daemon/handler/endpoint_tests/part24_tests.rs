@@ -9,6 +9,7 @@ fn crew_member(platform: &str) -> CrewMember {
         position: 0,
         platform: platform.to_string(),
         model: None,
+        model_ref: None,
         timeout_minutes: None,
         infra_retry_limit: None,
         infra_crash_max_seconds: None,

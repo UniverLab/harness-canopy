@@ -288,6 +288,7 @@ mod tests {
                 position: 1,
                 platform: "ghost".to_string(),
                 model: None,
+                model_ref: None,
                 timeout_minutes: None,
                 infra_retry_limit: None,
                 infra_crash_max_seconds: None,

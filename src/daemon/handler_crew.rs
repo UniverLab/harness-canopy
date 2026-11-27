@@ -16,8 +16,8 @@ use crate::domain::crews::CrewMember;
 use rmcp::model::CallToolResult;
 use rmcp::ErrorData as McpError;
 
-fn member_json(member: &CrewMember) -> serde_json::Value {
-    serde_json::json!({
+pub(crate) fn member_json(member: &CrewMember) -> serde_json::Value {
+    let mut body = serde_json::json!({
         "position": member.position,
         "platform": member.platform,
         "model": member.model,
@@ -25,7 +25,11 @@ fn member_json(member: &CrewMember) -> serde_json::Value {
         "infra_retry_limit": member.infra_retry_limit,
         "infra_crash_max_seconds": member.infra_crash_max_seconds,
         "infra_backoff_seconds": member.infra_backoff_seconds,
-    })
+    });
+    if let Some(model_ref) = member.model_ref.as_deref() {
+        body["model_ref"] = serde_json::json!(model_ref);
+    }
+    body
 }
 
 impl TaskTriggerHandler {
@@ -97,11 +101,12 @@ impl TaskTriggerHandler {
             )),
             (None, None) => Ok(error_result("pass either crew members or from_ensemble.")),
             (Some(members), None) => {
-                let members = members_from_json(members.clone());
-                match self
-                    .db
-                    .crew_create(&params.name, params.description.as_deref(), &members)
-                {
+                let members = unresolved_from_json(members.clone());
+                match self.db.crew_create_resolved(
+                    &params.name,
+                    params.description.as_deref(),
+                    &members,
+                ) {
                     Ok(crew) => Ok(success_result(&format!(
                         "Crew '{}' created with {} member(s), version {}.",
                         crew.name,
@@ -132,8 +137,8 @@ impl TaskTriggerHandler {
         let members = params
             .members
             .as_ref()
-            .map(|m| members_from_json(m.clone()));
-        let crew = match self.db.crew_update(
+            .map(|m| unresolved_from_json(m.clone()));
+        let crew = match self.db.crew_update_resolved(
             &params.name,
             members.as_deref(),
             params.description.as_deref(),
@@ -142,33 +147,7 @@ impl TaskTriggerHandler {
             Ok(crew) => crew,
             Err(e) => return Ok(error_result(&e.to_string())),
         };
-        let mut sync = Vec::new();
-        for (ensemble_id, status) in self
-            .db
-            .crew_bound_ensembles(&crew.name)
-            .map_err(internal_error)?
-        {
-            // Never touch a bound ensemble whose graph is running or pausing —
-            // replacing members under an in-flight dispatch is forbidden.
-            // Say so in the reply: the ensemble lags and applies the newer
-            // version at its next dispatch.
-            if status == "running" || status == "pausing" {
-                sync.push(serde_json::json!({
-                    "ensemble_id": ensemble_id,
-                    "outcome": "DeferredRunningGraph",
-                    "note": "applies at next dispatch",
-                }));
-                continue;
-            }
-            let outcome = self
-                .db
-                .sync_ensemble_with_crew(&ensemble_id)
-                .map_err(internal_error)?;
-            sync.push(serde_json::json!({
-                "ensemble_id": ensemble_id,
-                "outcome": format!("{outcome:?}"),
-            }));
-        }
+        let sync = self.sync_crew_bound_ensembles(&crew.name).await?;
         Ok(success_result(
             &serde_json::to_string_pretty(&serde_json::json!({
                 "name": crew.name,

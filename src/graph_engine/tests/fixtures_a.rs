@@ -1267,6 +1267,21 @@ fn test_crew_member(platform: &str) -> crate::domain::crews::CrewMember {
         position: 0,
         platform: platform.to_string(),
         model: None,
+        model_ref: None,
+        timeout_minutes: None,
+        infra_retry_limit: None,
+        infra_crash_max_seconds: None,
+        infra_backoff_seconds: None,
+    }
+}
+
+/// A literal (untracked) crew member update: the resolving write path takes
+/// unresolved members, so tests wrap literals in this.
+fn test_unresolved_crew_member(platform: &str) -> crate::domain::crews::UnresolvedCrewMember {
+    crate::domain::crews::UnresolvedCrewMember {
+        platform: Some(platform.to_string()),
+        model: None,
+        model_ref: None,
         timeout_minutes: None,
         infra_retry_limit: None,
         infra_crash_max_seconds: None,

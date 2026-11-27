@@ -341,6 +341,21 @@ pub(crate) static CREW: ToolSpec = ToolSpec {
             optional: &[],
         },
         ActionSpec {
+            name: "model_set",
+            required: &["name", "platform"],
+            optional: &["model"],
+        },
+        ActionSpec {
+            name: "model_list",
+            required: &[],
+            optional: &[],
+        },
+        ActionSpec {
+            name: "model_delete",
+            required: &["name"],
+            optional: &[],
+        },
+        ActionSpec {
             name: "assignments",
             required: &[],
             optional: &[
@@ -446,6 +461,8 @@ resource_action_object!(
         ("create", CrewCreateParams),
         ("update", CrewUpdateParams),
         ("delete", CrewDeleteParams),
+        ("model_set", CrewModelSetParams),
+        ("model_delete", CrewModelDeleteParams),
         ("assignments", GraphCrewParams),
     ]
 );
@@ -738,6 +755,9 @@ impl TaskTriggerHandler {
         `create` (required: name; optional: description, members, from_ensemble) — create a crew from an ordered member list or by seeding from an ensemble; pass exactly one of members or from_ensemble. \
         `update` (required: name; optional: members, description, rename) — replace the member list, set the description, and/or rename. \
         `delete` (required: name; optional: none) — delete a crew; refused while anything still binds it. \
+        `model_set` (required: name, platform; optional: model) — create or replace a named model entry; rewrites every tracking member and bumps each touched crew once. \
+        `model_list` (required: none; optional: none) — list every entry with the crews referencing it. \
+        `model_delete` (required: name; optional: none) — delete an entry; refused while any crew references it. \
         `assignments` (required: none; optional: graph_id, platform, model, include_archived, group_by) — every graph's harness/model assignments, without prompt text; group_by \"pair\" summarises per platform/model pair. `crew_pending` marks an ensemble that applies a newer crew version at its next dispatch."
     )]
     pub(crate) async fn crew(
@@ -754,6 +774,15 @@ impl TaskTriggerHandler {
             "create" => self.crew_create_impl(action_params(&params, spec)?).await,
             "update" => self.crew_update_impl(action_params(&params, spec)?).await,
             "delete" => self.crew_delete_impl(action_params(&params, spec)?).await,
+            "model_set" => {
+                self.crew_model_set_impl(action_params(&params, spec)?)
+                    .await
+            }
+            "model_list" => self.crew_model_list_impl().await,
+            "model_delete" => {
+                self.crew_model_delete_impl(action_params(&params, spec)?)
+                    .await
+            }
             "assignments" => {
                 self.crew_assignments_impl(action_params(&params, spec)?)
                     .await

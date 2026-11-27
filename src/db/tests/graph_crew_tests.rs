@@ -6,7 +6,7 @@ use super::*;
 use crate::daemon::graph_cli::format::format_graph_crew_table;
 use crate::db::graph_crew::GraphCrewDbParams;
 use crate::db::roster_entries::{NewRosterEntry, RosterState};
-use crate::domain::crews::CrewMember;
+use crate::domain::crews::{CrewMember, UnresolvedCrewMember};
 use crate::domain::graphs::{
     ArchiveGraphOutcome, CrewRowKind, Ensemble, EnsembleKind, EnsembleMember, GraphCompletionHook,
     GraphCrewGroup, GraphCrewRow, GraphHookEvent,
@@ -92,12 +92,26 @@ fn member(
     }
 }
 
+/// One unresolved (literal) crew member for the fixture's crew updates.
+fn unresolved_crew_member(platform: &str, model: Option<&str>) -> UnresolvedCrewMember {
+    UnresolvedCrewMember {
+        platform: Some(platform.to_string()),
+        model: model.map(str::to_string),
+        model_ref: None,
+        timeout_minutes: None,
+        infra_retry_limit: None,
+        infra_crash_max_seconds: None,
+        infra_backoff_seconds: None,
+    }
+}
+
 /// One crew member (CM49) for the fixture's crew creation.
 fn crew_member(position: i64, platform: &str, model: Option<&str>) -> CrewMember {
     CrewMember {
         position,
         platform: platform.to_string(),
         model: model.map(str::to_string),
+        model_ref: None,
         timeout_minutes: None,
         infra_retry_limit: None,
         infra_crash_max_seconds: None,
@@ -675,8 +689,16 @@ fn graph_crew_reports_crew_bindings() {
     ];
     let crew = db.crew_create("reviewers", None, &crew_members).unwrap();
     for _ in 0..2 {
-        db.crew_update("reviewers", Some(&crew_members), None, None)
-            .unwrap();
+        db.crew_update_resolved(
+            "reviewers",
+            Some(&[
+                unresolved_crew_member("claude", Some("opus")),
+                unresolved_crew_member("opencode-go", Some("gpt-5")),
+            ]),
+            None,
+            None,
+        )
+        .unwrap();
     }
     insert_ensemble(
         &db,
@@ -780,8 +802,16 @@ fn lagging_crew_db() -> Database {
 
     // A second crew write moves the crew to version 2 while the ensemble
     // still applies version 1.
-    db.crew_update("lagging", Some(&members), None, None)
-        .unwrap();
+    db.crew_update_resolved(
+        "lagging",
+        Some(&[
+            unresolved_crew_member("claude", Some("opus")),
+            unresolved_crew_member("opencode-go", Some("gpt-5")),
+        ]),
+        None,
+        None,
+    )
+    .unwrap();
     db
 }
 

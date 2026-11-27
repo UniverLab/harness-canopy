@@ -589,9 +589,12 @@ async fn crew_lazy_sync_at_dispatch_picks_up_a_mid_run_edit() {
     // A mid-run crew edit: the DB layer is used directly, so the eager
     // sync (which lives in the `crew_update` MCP tool) does NOT run —
     // exactly the state a running graph is left in.
-    db.crew_update(
+    db.crew_update_resolved(
         "impl",
-        Some(&[test_crew_member("new-a"), test_crew_member("new-b")]),
+        Some(&[
+            test_unresolved_crew_member("new-a"),
+            test_unresolved_crew_member("new-b"),
+        ]),
         None,
         None,
     )

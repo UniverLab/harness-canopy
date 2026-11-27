@@ -615,7 +615,14 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
                 infra_retry_limit INTEGER,
                 infra_crash_max_seconds INTEGER,
                 infra_backoff_seconds INTEGER,
+                model_ref TEXT,
                 PRIMARY KEY (crew_id, position)
+            );
+            CREATE TABLE IF NOT EXISTS crew_models (
+                name TEXT PRIMARY KEY,
+                platform TEXT NOT NULL,
+                model TEXT,
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             );",
     "
             -- CM49 import: entry sources of a crew-bound ensemble whose member
@@ -697,6 +704,7 @@ impl Database {
         Self::migrate_spec_notes_table(&conn)?;
         Self::migrate_roster_entries_table(&conn)?;
         Self::migrate_crews_tables(&conn)?;
+        Self::migrate_crew_models(&conn)?;
         Self::migrate_remote_devices(&conn)?;
         Self::migrate_remote_trust(&conn)?;
         Self::migrate_agent_action_columns(&conn)?;
@@ -726,6 +734,7 @@ pub(crate) mod connection;
 pub mod crew_binding;
 pub mod crew_bindings;
 pub(crate) mod crew_member_config;
+pub mod crew_models;
 pub mod crews;
 pub mod ensembles;
 pub mod gamification;

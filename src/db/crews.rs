@@ -18,7 +18,7 @@ use super::crew_member_config::member_node_config;
 
 /// The crew member cap: `graphs.ensemble_max_members_sequential`, read at each
 /// write. A crew is kind-agnostic, so it takes the sequential ensemble cap.
-fn crew_member_cap() -> usize {
+pub(in crate::db) fn crew_member_cap() -> usize {
     crate::domain::canopy_config::CanopyConfig::load(&crate::domain::prompts::canopy_dir())
         .graphs
         .ensemble_max_members_sequential
@@ -60,6 +60,7 @@ fn read_crew_member_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CrewMember>
         position: row.get(0)?,
         platform: row.get(1)?,
         model: row.get(2)?,
+        model_ref: row.get(7)?,
         timeout_minutes: row.get(3)?,
         infra_retry_limit: row.get(4)?,
         infra_crash_max_seconds: row.get(5)?,
@@ -131,6 +132,9 @@ impl Database {
                 position: index as i64,
                 platform: member.platform.clone(),
                 model: member.model.clone(),
+                // Seeding from an ensemble materializes the literal pair;
+                // the seed carries no entry reference.
+                model_ref: None,
                 timeout_minutes: member.timeout_minutes,
                 infra_retry_limit: member.infra_retry_limit,
                 infra_crash_max_seconds: member.infra_crash_max_seconds,
@@ -167,7 +171,7 @@ impl Database {
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
             "SELECT position, platform, model, timeout_minutes, infra_retry_limit, \
-                    infra_crash_max_seconds, infra_backoff_seconds
+                    infra_crash_max_seconds, infra_backoff_seconds, model_ref
              FROM crew_members WHERE crew_id = ?1 ORDER BY position ASC",
         )?;
         let rows = stmt.query_map(params![crew_id], read_crew_member_row)?;
@@ -194,84 +198,6 @@ impl Database {
             .collect()
     }
 
-    /// Update a crew. A member-list write bumps `version` in the same
-    /// transaction; a description/rename-only write does not.
-    pub fn crew_update(
-        &self,
-        name: &str,
-        members: Option<&[CrewMember]>,
-        description: Option<&str>,
-        rename: Option<&str>,
-    ) -> Result<Crew> {
-        let name = name.trim();
-        if let Some(rename) = rename {
-            validate_crew_name(rename).map_err(|e| anyhow!(e))?;
-        }
-        if let Some(members) = members {
-            validate_crew_members(members, crew_member_cap()).map_err(|e| anyhow!(e))?;
-        }
-        let (crew_id, current_version) = self
-            .crew_id_and_version(name)?
-            .ok_or_else(|| anyhow!("crew '{name}' not found."))?;
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
-        let tx = conn.transaction()?;
-        let new_name = rename.map(str::trim).unwrap_or(name);
-        if rename.is_some() {
-            let taken: bool = tx
-                .query_row(
-                    "SELECT 1 FROM crews WHERE name = ?1 AND id != ?2",
-                    params![new_name, &crew_id],
-                    |_| Ok(true),
-                )
-                .optional()?
-                .unwrap_or(false);
-            if taken {
-                anyhow::bail!("crew '{new_name}' already exists.");
-            }
-        }
-        tx.execute(
-            "UPDATE crews SET name = ?1, description = COALESCE(?2, description), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?3",
-            params![new_name, description, &crew_id],
-        )?;
-        // Keep the denormalised display name on bound ensembles current.
-        // Bindings join on `crew_id`, so nothing else depends on it.
-        tx.execute(
-            "UPDATE ensembles SET crew_name = ?1 WHERE crew_id = ?2",
-            params![new_name, &crew_id],
-        )?;
-        let new_version = if let Some(members) = members {
-            tx.execute(
-                "DELETE FROM crew_members WHERE crew_id = ?1",
-                params![&crew_id],
-            )?;
-            for (index, member) in members.iter().enumerate() {
-                insert_crew_member(&tx, &crew_id, index as i64, member)?;
-            }
-            tx.execute(
-                "UPDATE crews SET version = version + 1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?1",
-                params![&crew_id],
-            )?;
-            current_version + 1
-        } else {
-            current_version
-        };
-        let description: Option<String> = tx.query_row(
-            "SELECT description FROM crews WHERE id = ?1",
-            params![&crew_id],
-            |row| row.get(0),
-        )?;
-        tx.commit()?;
-        Ok(Crew {
-            id: crew_id,
-            name: new_name.to_string(),
-            description,
-            version: new_version,
-        })
-    }
-
     /// Delete a crew. Refused while any ensemble, node or hook binds it; the
     /// error names every binding.
     pub fn crew_delete(&self, name: &str) -> Result<()> {
@@ -294,20 +220,6 @@ impl Database {
             anyhow::bail!("crew '{name}' not found.");
         }
         Ok(())
-    }
-
-    fn crew_id_and_version(&self, name: &str) -> Result<Option<(String, i64)>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
-        Ok(conn
-            .query_row(
-                "SELECT id, version FROM crews WHERE name = ?1",
-                params![name],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?)
     }
 
     /// Ensemble ids bound to a crew, each with its graph's status string.
@@ -582,17 +494,21 @@ impl Database {
     }
 }
 
-fn insert_crew_member(
+pub(in crate::db) fn insert_crew_member(
     tx: &rusqlite::Transaction<'_>,
     crew_id: &str,
     position: i64,
     member: &CrewMember,
 ) -> Result<()> {
+    // `model_ref` records which named entry a member tracks; the entry's
+    // current pair is materialized in `platform`/`model` by the writer, so
+    // readers never branch on it. The column is added by
+    // `migrate_crew_models`, which runs on every open before any write.
     tx.execute(
         "INSERT INTO crew_members
          (crew_id, position, platform, model, timeout_minutes, infra_retry_limit,
-          infra_crash_max_seconds, infra_backoff_seconds)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+          infra_crash_max_seconds, infra_backoff_seconds, model_ref)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             crew_id,
             position,
@@ -602,6 +518,7 @@ fn insert_crew_member(
             &member.infra_retry_limit,
             &member.infra_crash_max_seconds,
             &member.infra_backoff_seconds,
+            &member.model_ref,
         ],
     )?;
     Ok(())
@@ -655,6 +572,19 @@ mod tests {
             position: 0,
             platform: platform.to_string(),
             model: None,
+            model_ref: None,
+            timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+        }
+    }
+
+    fn unresolved(platform: &str) -> crate::domain::crews::UnresolvedCrewMember {
+        crate::domain::crews::UnresolvedCrewMember {
+            platform: Some(platform.to_string()),
+            model: None,
+            model_ref: None,
             timeout_minutes: None,
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
@@ -798,12 +728,12 @@ mod tests {
         assert_eq!(created.version, 1);
         // Description-only write: version unchanged.
         let same = db
-            .crew_update("implementers", None, Some("the implementers"), None)
+            .crew_update_resolved("implementers", None, Some("the implementers"), None)
             .unwrap();
         assert_eq!(same.version, 1, "description-only write must not bump");
         // Member-list write: version bumped in the same call.
         let bumped = db
-            .crew_update("implementers", Some(&[member("claude")]), None, None)
+            .crew_update_resolved("implementers", Some(&[unresolved("claude")]), None, None)
             .unwrap();
         assert_eq!(bumped.version, 2, "member write must bump the version");
     }
@@ -900,9 +830,13 @@ mod tests {
             executed_model: None,
         })
         .unwrap();
-        db.crew_update(
+        db.crew_update_resolved(
             "two",
-            Some(&[member("claude"), member("codex"), member("gemini")]),
+            Some(&[
+                unresolved("claude"),
+                unresolved("codex"),
+                unresolved("gemini"),
+            ]),
             None,
             None,
         )
@@ -949,8 +883,13 @@ mod tests {
         db.crew_create("two", None, &[member("claude"), member("codex")])
             .unwrap();
         db.bind_ensemble_to_crew("ens1", "two").unwrap();
-        db.crew_update("two", Some(&[member("gemini"), member("grok")]), None, None)
-            .unwrap();
+        db.crew_update_resolved(
+            "two",
+            Some(&[unresolved("gemini"), unresolved("grok")]),
+            None,
+            None,
+        )
+        .unwrap();
 
         let outcome = db.sync_ensemble_with_crew("ens1").unwrap();
         assert_eq!(

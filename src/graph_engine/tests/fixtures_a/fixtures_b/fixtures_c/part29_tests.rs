@@ -339,9 +339,12 @@ async fn random_crew_update_reaches_the_ensemble() {
     )
     .unwrap();
     db.bind_ensemble_to_crew("ens1", "impl").unwrap();
-    db.crew_update(
+    db.crew_update_resolved(
         "impl",
-        Some(&[test_crew_member("new-a"), test_crew_member("new-b")]),
+        Some(&[
+            test_unresolved_crew_member("new-a"),
+            test_unresolved_crew_member("new-b"),
+        ]),
         None,
         None,
     )

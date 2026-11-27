@@ -410,10 +410,16 @@ agent node or hook — it never edits a graph.
 | `canopy crew show <name>` | Show one crew and every binding of it |
 | `canopy crew create <name> --from-ensemble <id> [--description <text>]` | Create a crew seeded from an ensemble's current members |
 | `canopy crew delete <name>` | Delete a crew (refused while any ensemble, node or hook binds it) |
+| `canopy crew model set <name> <platform> [<model>]` | Create or replace a named model entry; every crew member tracking it is rewritten to the entry's pair |
+| `canopy crew model list` | List every named model entry with the crews referencing it |
+| `canopy crew model delete <name>` | Delete a named model entry (refused while any crew references it) |
 
 A crew is a named, ordered member list ensembles and agent nodes/hooks bind
 to; member editing is MCP/TUI only (see
-[MCP tools](mcp-tools.md)).
+[MCP tools](mcp-tools.md)). A model entry names a `platform`/`model` pair
+once so crews can track it by `model_ref` instead of repeating it: changing
+the entry is one edit that reaches every tracking crew and, through the
+usual version sync, every bound ensemble.
 
 ## Sessions
 

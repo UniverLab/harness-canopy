@@ -122,14 +122,17 @@ const EXPECTED_TOOL_NAMES: &[&str] = &[
 /// the caller workdir/shelf dir with the `forbidden` code. The `subagent`
 /// row was re-pinned when `spawn` gained the optional `notify_session`
 /// param (field docs are part of the input schema). The `crew` row was
-/// re-pinned when the `assignments` action documented `crew_pending`.
+/// re-pinned when the `assignments` action documented `crew_pending`. The
+/// `crew` row was re-pinned again when `model_set`/`model_list`/`model_delete`
+/// actions were added and the tool description began listing them (the
+/// description hash changed; the schema hash moved with the new actions).
 const EXPECTED_TOOL_ROWS: &[&str] = &[
     "agent|d8f9c6d2e27d78721e0e68301793b430eb079a49d68e003c0a36062ade4326c2|d713589e444e00e203c10fb39b668774212540a62cec84a04d9f2b34b7c386b1",
     "agent_edit|9f9d97739be8934e8023b86d6ed35d9acf9209d18d42a8cafd8ffc99154965cf|eb0e7e1757828c2db9669176f36f437dc1cfc1797eacee875d69ff61ae80b271",
     "agent_report|998eb6d649fe53809656f0a4db81248aa0feb0b045f957686d917fbcfe289224|f40f986d373435cf862cf0e260812d92f78eaf4bfcfbe98ffce5d724a1685d54",
     "catalogue|5084e83660b0e00c3592158b31c8407706d10cbd8a3387e08c927a7536f98712|54b0d07012084989914328de42d7bddc35ad16ebe2f14dec04aecbdaa7292a51",
     "config|eb46212a6d527f698017c0360b099c7ae3d4b01e690fcd3c879ab8764368ee63|9c61b49e03def9786bddde303a06fa926bc59590ec475298d0422eb795af9d4b",
-    "crew|37185a31f038f2d3952862b3ca0ef5334af95859a2493d40ed99e394e4c13b9a|88f5e7ff9d44dbf81716852b19df5fe0764a848aab616b3cb7ea8bb2f5c2d113",
+    "crew|7478318263f03a48fe4f23c85fb354b5be8e9c937cdad5ae1e8d67d85c1af250|1fbcb96edfca507204079a93d37686dc20792a6f5fdcb031ddd3d1d5ef9a8acc",
     "get_tools|1e7a235797cc4043ef72fbe9821989c7fdf78c19dfb4afa2f97dec22b28ad2b9|8d1085667f9f7b280bc979a52911ce87934bee573c8dd9a35175afad22365c8f",
     "graph|486646d49b9f83189be74e22f237a8a22119147935a74af7e3e4101125a7be66|c2420d13b7b0c8cf64e0ea3ff2b470afb01cd3ba6318db9d47d593a3f8810882",
     "graph_complete_node|cd65852e0bb702902c8fc61858fb514f0f75d749de39d9014f2ae037d39a5a24|174f4383731a376d4ffd07080c26cbc61bd66839093939ea3f6defaebd64cd5e",
