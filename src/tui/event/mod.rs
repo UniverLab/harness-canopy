@@ -255,7 +255,21 @@ pub fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Resu
     if crews_keys::handle_crews_face_key(app, code, modifiers) {
         return Ok(());
     }
+    // An open hint tip owns its action keys before anything behind it —
+    // including the hub and the agent PTY — sees them. It never writes to
+    // the PTY. The one exception is F1 while the hub is open: F1 always
+    // closes the hub (and the tip with it), so the hub handler runs first.
+    // Without this the modal hub swallows the tip's y/n/Esc keys and Esc
+    // strands an open tip behind the closed hub.
+    let tip_first = app.hint_tip_open.is_some() && !(app.hub_open && code == KeyCode::F(1));
+    if tip_first && crate::tui::hints::handle_tip_key(app, code, modifiers) {
+        return Ok(());
+    }
     if hub::handle_hub_key(app, code, modifiers) || handle_global_key(app, code, modifiers) {
+        return Ok(());
+    }
+
+    if !tip_first && crate::tui::hints::handle_tip_key(app, code, modifiers) {
         return Ok(());
     }
 

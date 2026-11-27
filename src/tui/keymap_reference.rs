@@ -42,7 +42,7 @@ pub static KEY_REFS: &[KeyRef] = &[
     KeyRef {
         key: "F1",
         context: "Global",
-        action: "open the Canopy hub",
+        action: "open the hub — or the hint tip when one is showing",
         code: "F1",
     },
     KeyRef {
@@ -91,7 +91,7 @@ pub static KEY_REFS: &[KeyRef] = &[
     KeyRef {
         key: "F1",
         context: "Home and sidebar",
-        action: "open the Canopy hub",
+        action: "open the hub — or the hint tip when one is showing",
         code: "F1",
     },
     KeyRef {
@@ -266,7 +266,7 @@ pub static KEY_REFS: &[KeyRef] = &[
     KeyRef {
         key: "F1",
         context: "Graph live",
-        action: "open the Canopy hub",
+        action: "open the hub — or the hint tip when one is showing",
         code: "F1",
     },
     KeyRef {
@@ -339,7 +339,7 @@ pub static KEY_REFS: &[KeyRef] = &[
     KeyRef {
         key: "F1",
         context: "Agent focus",
-        action: "open the Canopy hub",
+        action: "open the hub — or the hint tip when one is showing",
         code: "F1",
     },
     KeyRef {

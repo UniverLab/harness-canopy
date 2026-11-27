@@ -274,14 +274,18 @@ Press **F1** to open the **Canopy hub**, a centered tabbed dialog:
 mode and status), **Keys** is a grouped reference of every shortcut the TUI
 handles, **Missions & stats** lists all the missions above — unlocked
 ones in full colour, locked ones dimmed — **Shelf** lists the files
-agents have sent (see below), and **Remote** is everything `canopy remote`
-does (see below). `Shift+←`/`Shift+→`
-switch tabs, as everywhere else in Canopy; `Tab`/`Shift+Tab` and `1`/`2`/`3`/`4`/`5`
+agents have sent (see below), **Remote** is everything `canopy remote`
+does (see below), and **Help** lists the main keys, explains graphs in one
+line, and resets the first-run hints. `Shift+←`/`Shift+→`
+switch tabs, as everywhere else in Canopy; `Tab`/`Shift+Tab` and `1`–`6`
 also switch. `F1` closes the hub from any state; `Esc` closes it from the top
 level of every tab. `F1` works everywhere — including inside a focused
 interactive session whose harness has claimed the keyboard (alternate screen
 or the Kitty protocol) — the key opens the hub instead of being forwarded to
-the session.
+the session, except when a hint marker is showing: then `F1` opens that
+hint's tip (clicking the `[?]` marker does the same), and `F1` or `Esc`
+closes the tip. The tip's `Got it` (`y`/`Enter`) and `Hide all hints` (`n`)
+actions persist; hints stay hidden on terminals under 80×20.
 
 In **Settings**, the `↑`/`↓` keys move within the focused column and `→` or
 `Enter` step from the category list into its properties (`←` goes back, keeping

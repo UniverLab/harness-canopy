@@ -1,7 +1,8 @@
 //! CT31: key routing while the F1 Canopy hub is open.
 //!
-//! `handle_hub_key` is called first from `event::handle_key`; it returns
-//! `true` for every key while the hub is open, so the hub is modal. The
+//! `handle_hub_key` runs early from `event::handle_key` (after an open hint
+//! tip's action keys, except F1); it returns `true` for every other key
+//! while the hub is open, so the hub is modal. The
 //! Missions tab keeps the same ↑↓/jk selection the old legend had; the Keys
 //! tab scrolls; the Settings tab has its editors.
 
@@ -12,18 +13,24 @@ use crate::tui::app::hub_settings::{dir_picker_at, SettingsEditor, SettingsFocus
 use crate::tui::app::types::App;
 
 /// Route one key to the open hub. Returns `false` when the hub is closed, so
-/// the caller falls through to the normal handler chain.
+/// the caller falls through to the normal handler chain. Runs after an open
+/// hint tip's action keys (except F1, which always closes the hub first).
 pub(super) fn handle_hub_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
     if !app.hub_open {
         return false;
     }
-    // F1 closes the hub from any state, even mid-edit or mid-filter.
+    // F1 closes the hub from any state, even mid-edit or mid-filter —
+    // and any open hint tip with it, whose anchor leaves the screen.
     if code == KeyCode::F(1) {
         app.cancel_editor();
         app.hub.settings.filter_mode = false;
         app.close_hub();
+        app.hint_tip_open = None;
         return true;
     }
+    // A tab switch moves the HubHeader anchor off screen; drop the tip so
+    // it never points at a hint whose marker just disappeared.
+    let tab_before = app.hub.tab;
     // The dir picker and the open editor take every key first.
     if app.hub.settings.dir_picker.is_some() {
         hub_dir_picker_key(app, code);
@@ -79,7 +86,11 @@ pub(super) fn handle_hub_key(app: &mut App, code: KeyCode, modifiers: KeyModifie
         _ if app.hub.tab == HubTab::Keys => hub_keys_key(app, code),
         _ if app.hub.tab == HubTab::Shelf => hub_shelf_key(app, code),
         _ if app.hub.tab == HubTab::Remote => app.hub_remote_key(code),
+        _ if app.hub.tab == HubTab::Help => crate::tui::hints::handle_help_key(app, code),
         _ => hub_missions_key(app, code),
+    }
+    if app.hub.tab != tab_before {
+        app.hint_tip_open = None;
     }
     true
 }
@@ -358,6 +369,8 @@ mod tests {
         handle_hub_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
         assert_eq!(app.hub.tab, HubTab::Remote);
         handle_hub_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(app.hub.tab, HubTab::Help, "Tab reaches the Help tab");
+        handle_hub_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
         assert_eq!(app.hub.tab, HubTab::Settings, "Tab wraps forward");
 
         handle_hub_key(&mut app, KeyCode::Char('2'), KeyModifiers::NONE);
@@ -365,6 +378,8 @@ mod tests {
 
         handle_hub_key(&mut app, KeyCode::Char('5'), KeyModifiers::NONE);
         assert_eq!(app.hub.tab, HubTab::Remote, "digit 5 opens Remote");
+        handle_hub_key(&mut app, KeyCode::Char('6'), KeyModifiers::NONE);
+        assert_eq!(app.hub.tab, HubTab::Help, "digit 6 opens Help");
         handle_hub_key(&mut app, KeyCode::Char('2'), KeyModifiers::NONE);
         assert_eq!(app.hub.tab, HubTab::Keys);
 
@@ -692,7 +707,9 @@ mod tests {
         assert!(!app.hub.remote.pair_open, "Esc still hides the overlay");
         assert!(app.hub_open, "the hub stays open");
         handle_hub_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
-        assert_eq!(app.hub.tab, HubTab::Settings, "keys work again after");
+        assert_eq!(app.hub.tab, HubTab::Help, "keys work again after");
+        handle_hub_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(app.hub.tab, HubTab::Settings, "Tab wraps past Help");
     }
 
     /// `r` on a device row arms the revoke, `n`/Esc cancel it, `y` revokes

@@ -4,7 +4,7 @@
 
 use super::types::App;
 
-/// The five hub tabs, in the order the tab bar shows them.
+/// The six hub tabs, in the order the tab bar shows them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum HubTab {
     #[default]
@@ -13,14 +13,16 @@ pub(crate) enum HubTab {
     Missions,
     Shelf,
     Remote,
+    Help,
 }
 
-pub(crate) const HUB_TABS: [HubTab; 5] = [
+pub(crate) const HUB_TABS: [HubTab; 6] = [
     HubTab::Settings,
     HubTab::Keys,
     HubTab::Missions,
     HubTab::Shelf,
     HubTab::Remote,
+    HubTab::Help,
 ];
 
 impl HubTab {
@@ -31,10 +33,11 @@ impl HubTab {
             HubTab::Missions => "Missions & stats",
             HubTab::Shelf => "Shelf",
             HubTab::Remote => "Remote",
+            HubTab::Help => "Help",
         }
     }
 
-    /// The `1`/`2`/`3`/`4`/`5` shortcut for a tab, or `None`.
+    /// The `1`/`2`/`3`/`4`/`5`/`6` shortcut for a tab, or `None`.
     pub(crate) fn from_digit(c: char) -> Option<HubTab> {
         match c {
             '1' => Some(HubTab::Settings),
@@ -42,6 +45,7 @@ impl HubTab {
             '3' => Some(HubTab::Missions),
             '4' => Some(HubTab::Shelf),
             '5' => Some(HubTab::Remote),
+            '6' => Some(HubTab::Help),
             _ => None,
         }
     }
@@ -72,6 +76,9 @@ pub(crate) struct HubState {
     pub shelf: super::hub_shelf::ShelfState,
     /// The Remote tab's cached status view, cursor and flows.
     pub remote: super::hub_remote::RemoteState,
+    /// Last-rendered row of the Help tab's "Reset hints" action, for
+    /// click hit-testing. Cleared at the start of every frame.
+    pub help_reset_rect: Option<ratatui::layout::Rect>,
 }
 
 impl App {
@@ -140,13 +147,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hub_tab_digits_map_to_the_five_tabs() {
+    fn hub_tab_digits_map_to_the_six_tabs() {
         assert_eq!(HubTab::from_digit('1'), Some(HubTab::Settings));
         assert_eq!(HubTab::from_digit('2'), Some(HubTab::Keys));
         assert_eq!(HubTab::from_digit('3'), Some(HubTab::Missions));
         assert_eq!(HubTab::from_digit('4'), Some(HubTab::Shelf));
         assert_eq!(HubTab::from_digit('5'), Some(HubTab::Remote));
-        assert_eq!(HubTab::from_digit('6'), None);
+        assert_eq!(HubTab::from_digit('6'), Some(HubTab::Help));
+        assert_eq!(HubTab::from_digit('7'), None);
     }
 
     #[test]
@@ -155,8 +163,10 @@ mod tests {
         assert_eq!(HubTab::Keys.next(true), HubTab::Missions);
         assert_eq!(HubTab::Missions.next(true), HubTab::Shelf);
         assert_eq!(HubTab::Shelf.next(true), HubTab::Remote);
-        assert_eq!(HubTab::Remote.next(true), HubTab::Settings);
-        assert_eq!(HubTab::Settings.next(false), HubTab::Remote);
+        assert_eq!(HubTab::Remote.next(true), HubTab::Help);
+        assert_eq!(HubTab::Help.next(true), HubTab::Settings);
+        assert_eq!(HubTab::Settings.next(false), HubTab::Help);
+        assert_eq!(HubTab::Help.next(false), HubTab::Remote);
         assert_eq!(HubTab::Remote.next(false), HubTab::Shelf);
         assert_eq!(HubTab::Shelf.next(false), HubTab::Missions);
     }

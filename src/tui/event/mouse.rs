@@ -98,9 +98,11 @@ pub(super) fn handle_mouse(app: &mut App, mouse: MouseEvent) -> Result<()> {
         super::new_agent_mouse::handle_new_agent_dialog_mouse(app, &mouse);
         return Ok(());
     }
-    // The F5 menu is modal while open; the tab strip (when drawn) claims
-    // its own clicks ahead of the PTY so a click inserts instead of typing.
-    if crate::tui::app::dialog::quick_menu::handle_quick_menu_mouse(app, &mouse) {
+    // Modal overlays own their clicks while open: the F5 menu, then the
+    // hint marker and the open tip's actions; anything else falls through.
+    if crate::tui::app::dialog::quick_menu::handle_quick_menu_mouse(app, &mouse)
+        || crate::tui::hints::handle_hint_mouse(app, &mouse)
+    {
         return Ok(());
     }
 
@@ -111,11 +113,7 @@ pub(super) fn handle_mouse(app: &mut App, mouse: MouseEvent) -> Result<()> {
         return Ok(());
     }
 
-    if handle_sidebar_mouse(app, &mouse) {
-        return Ok(());
-    }
-
-    if handle_panel_mouse(app, &mouse) {
+    if handle_sidebar_mouse(app, &mouse) || handle_panel_mouse(app, &mouse) {
         return Ok(());
     }
 

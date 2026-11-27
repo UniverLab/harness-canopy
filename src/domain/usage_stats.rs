@@ -44,6 +44,12 @@ pub struct CliUsage {
     /// Last choices from the Ctrl+N launch dialog.
     #[serde(default)]
     pub last_launch: LastLaunchPrefs,
+    /// Hint ids dismissed via "Got it" — never shown again.
+    #[serde(default)]
+    pub hints_dismissed: Vec<String>,
+    /// "Hide all hints" — suppresses every hint until reset from the hub.
+    #[serde(default)]
+    pub hints_hidden: bool,
 }
 
 /// Outcome of [`CliUsage::load_with_status`], distinguishing "nothing to
@@ -267,6 +273,27 @@ impl CliUsage {
         (pos, cfg_idx)
     }
 
+    /// Remember a dismissed hint id and persist, so it never shows again.
+    pub fn dismiss_hint(&mut self, canopy_dir: &Path, id: &str) {
+        if !self.hints_dismissed.iter().any(|done| done == id) {
+            self.hints_dismissed.push(id.to_string());
+        }
+        let _ = self.save(canopy_dir);
+    }
+
+    /// Suppress every hint and persist.
+    pub fn hide_all_hints(&mut self, canopy_dir: &Path) {
+        self.hints_hidden = true;
+        let _ = self.save(canopy_dir);
+    }
+
+    /// Bring dismissed/hidden hints back and persist.
+    pub fn reset_hints(&mut self, canopy_dir: &Path) {
+        self.hints_dismissed.clear();
+        self.hints_hidden = false;
+        let _ = self.save(canopy_dir);
+    }
+
     /// Get the usage count for a CLI, defaulting to 0.
     #[cfg(test)]
     pub fn get(&self, cli_name: &str) -> u64 {
@@ -397,6 +424,27 @@ mod tests {
         usage.save(dir.path()).unwrap();
         let loaded = CliUsage::load(dir.path());
         assert_eq!(loaded.get("mistral"), 1);
+    }
+
+    #[test]
+    fn test_hint_dismiss_hide_reset_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let mut usage = CliUsage::default();
+        usage.dismiss_hint(dir.path(), "start_session");
+        usage.dismiss_hint(dir.path(), "start_session");
+        assert_eq!(usage.hints_dismissed, vec!["start_session".to_string()]);
+        usage.hide_all_hints(dir.path());
+        assert!(usage.hints_hidden);
+
+        let loaded = CliUsage::load(dir.path());
+        assert_eq!(loaded.hints_dismissed, vec!["start_session".to_string()]);
+        assert!(loaded.hints_hidden);
+
+        let mut loaded = loaded;
+        loaded.reset_hints(dir.path());
+        let reloaded = CliUsage::load(dir.path());
+        assert!(reloaded.hints_dismissed.is_empty());
+        assert!(!reloaded.hints_hidden);
     }
 
     #[test]

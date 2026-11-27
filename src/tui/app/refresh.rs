@@ -528,11 +528,12 @@ impl App {
     }
 
     pub(crate) fn auto_hide_sidebar(&mut self) {
-        let Ok((tw, _th)) = ratatui::crossterm::terminal::size() else {
+        let Ok((tw, th)) = ratatui::crossterm::terminal::size() else {
             return;
         };
 
         self.term_width = tw;
+        self.term_height = th;
         let should_hide =
             self.focus == Focus::Agent && self.selected_live_agent().is_some() && tw < 80;
         let should_show = tw >= 80 && !self.sidebar_visible;

@@ -150,7 +150,9 @@ fn handle_background_agent_key(app: &mut App, code: KeyCode, modifiers: KeyModif
         KeyCode::Down | KeyCode::Char('j') => app.scroll_log_down(),
         KeyCode::Up | KeyCode::Char('k') => app.scroll_log_up(),
         KeyCode::Char('q') => app.running = false,
-        KeyCode::F(1) => app.toggle_hub(),
+        KeyCode::F(1) => {
+            crate::tui::hints::handle_f1(app);
+        }
         KeyCode::Char('e') if !app.agents_rag_focused => app.open_edit_dialog(),
         _ => {}
     }
@@ -342,8 +344,7 @@ fn handle_hub_shortcut(app: &mut App, code: KeyCode) -> bool {
         return false;
     }
 
-    app.toggle_hub();
-    true
+    crate::tui::hints::handle_f1(app)
 }
 
 fn handle_agent_cycle_shortcut(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {

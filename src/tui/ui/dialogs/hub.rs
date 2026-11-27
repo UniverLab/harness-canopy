@@ -8,7 +8,8 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
 
 use super::{
-    centered_rect, draw_dialog_left_wave, hub_keys, hub_legend, hub_remote, hub_settings, hub_shelf,
+    centered_rect, draw_dialog_left_wave, hub_help, hub_keys, hub_legend, hub_remote, hub_settings,
+    hub_shelf,
 };
 use crate::tui::app::hub::{HubTab, HUB_TABS};
 use crate::tui::app::hub_settings::SettingsFocus;
@@ -58,7 +59,7 @@ pub fn draw_hub(frame: &mut Frame, app: &mut App, theme: &Theme) {
     }
 }
 
-fn draw_tab_bar(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
+fn draw_tab_bar(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     let mut spans: Vec<Span> = Vec::new();
     for tab in HUB_TABS {
         let active = tab == app.hub.tab;
@@ -76,6 +77,13 @@ fn draw_tab_bar(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         spans.push(Span::raw(" "));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    if matches!(
+        crate::tui::hints::active_hint(app),
+        Some(hint) if hint.anchor == crate::tui::hints::HintAnchor::HubHeader
+    ) {
+        let marker = Rect::new(area.x + area.width.saturating_sub(4), area.y, 3, 1);
+        crate::tui::ui::hint_overlay::draw_marker(frame, app, theme, marker);
+    }
 }
 
 fn draw_body(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
@@ -85,6 +93,7 @@ fn draw_body(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         HubTab::Missions => hub_legend::draw_missions_tab(frame, app, theme, area),
         HubTab::Shelf => hub_shelf::draw_shelf_tab(frame, app, theme, area),
         HubTab::Remote => hub_remote::draw_remote_tab(frame, app, theme, area),
+        HubTab::Help => hub_help::draw_help_tab(frame, app, theme, area),
     }
 }
 
@@ -109,6 +118,7 @@ fn footer_hint(app: &App) -> &'static str {
         HubTab::Missions => "↑↓ mission · Shift+←→ tab · Esc close",
         HubTab::Shelf => "Enter open   d delete   c copy path",
         HubTab::Remote => "↑↓ move · Enter select · d disconnect · r revoke · t trust · Esc close",
+        HubTab::Help => "r reset hints · Shift+←→ tab · Esc close",
     }
 }
 

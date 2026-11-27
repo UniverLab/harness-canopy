@@ -4,6 +4,7 @@ pub(crate) mod brand;
 pub(crate) mod dialogs;
 mod footer;
 mod header;
+mod hint_overlay;
 pub(crate) use header::{header_frame_id, HeaderFrameId};
 mod panel;
 mod sidebar;
@@ -69,6 +70,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 /// and returning the slower panel name for the perf logger.
 pub(crate) fn draw_timed(frame: &mut Frame, app: &mut App, measure: bool) -> &'static str {
     let theme = app.theme;
+    // Hint hit-boxes are re-recorded by every draw; clear them first so a
+    // dismissed or hidden marker leaves no clickable ghost behind.
+    app.hint_marker = None;
+    app.hint_tip_got_it = None;
+    app.hint_tip_hide_all = None;
+    app.hub.help_reset_rect = None;
     let full = frame.area();
     frame.render_widget(
         ratatui::widgets::Paragraph::new("").style(Style::default().bg(theme.panel_bg)),
@@ -402,6 +409,7 @@ fn draw_top_overlays(frame: &mut Frame, app: &mut App, theme: &Theme) {
     // CM52: `tui.atmosphere = false` skips both the scene tick and the draw.
     // FR2/FR3: while paused or off the scene holds its last state — the
     // frame renders frozen instead of advancing on unrelated draws.
+    hint_overlay::draw_tip_overlay(frame, app, theme);
     if atmosphere_active(app) {
         let area = frame.area();
         if animations_enabled(app) {

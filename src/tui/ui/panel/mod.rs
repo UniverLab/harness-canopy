@@ -371,6 +371,25 @@ fn draw_home_panel(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) 
         draw_brians_brain(frame, area, brain, theme.panel_bg);
     }
     draw_canopy_banner_animation(frame, area, app);
+    if matches!(
+        crate::tui::hints::active_hint(app),
+        Some(hint) if hint.anchor == crate::tui::hints::HintAnchor::HomeBanner
+    ) {
+        let total = crate::shared::banner::BANNER
+            .trim_matches('\n')
+            .lines()
+            .count() as u16;
+        let top_pad = if area.height > total {
+            (area.height - total) / 2
+        } else {
+            0
+        };
+        let y = area.y + top_pad + total + 1;
+        if y < area.y + area.height && area.width >= 3 {
+            let x = area.x + area.width / 2 - 1;
+            crate::tui::ui::hint_overlay::draw_marker(frame, app, theme, Rect::new(x, y, 3, 1));
+        }
+    }
 }
 
 /// Renders a corrupt agent row's detail panel: id and parse error, no

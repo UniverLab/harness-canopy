@@ -12,6 +12,9 @@ mod clipboard;
 pub(crate) mod context_transfer;
 mod event;
 mod gamification;
+pub(crate) mod hints;
+#[cfg(test)]
+mod hints_tests;
 pub mod keymap_reference;
 pub(crate) mod logging;
 pub(crate) mod mcp_client;

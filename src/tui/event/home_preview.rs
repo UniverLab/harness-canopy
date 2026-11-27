@@ -44,7 +44,7 @@ pub fn handle_home_key(app: &mut App, code: KeyCode, _modifiers: KeyModifiers) -
             }
         }
         KeyCode::F(1) => {
-            app.open_hub();
+            crate::tui::hints::handle_f1(app);
         }
         KeyCode::Down | KeyCode::Char('j') if has_sidebar_preview => {
             app.dismiss_brain();
@@ -630,7 +630,9 @@ fn preview_function_key(
             }
         }
         KeyCode::F(10) => app.focus = Focus::Home,
-        KeyCode::F(1) => app.open_hub(),
+        KeyCode::F(1) => {
+            crate::tui::hints::handle_f1(app);
+        }
         _ => return false,
     }
     true

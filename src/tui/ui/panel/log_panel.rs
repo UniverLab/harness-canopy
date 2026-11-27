@@ -141,7 +141,7 @@ pub(super) fn draw_agent_panel(
         return false;
     };
 
-    match selected {
+    let shown = match selected {
         AgentEntry::Interactive(idx) => {
             let shown = draw_focused_interactive_panel(frame, area, app, *idx);
             crate::tui::app::dialog::quick_menu::draw_quick_tabs(frame, area, app, theme);
@@ -172,7 +172,22 @@ pub(super) fn draw_agent_panel(
             }
             true
         }
+    };
+    if matches!(
+        crate::tui::hints::active_hint(app),
+        Some(hint) if hint.anchor == crate::tui::hints::HintAnchor::AgentPromptBar
+    ) {
+        let end = app.quick_tab_click_map.last().map(|hit| hit.x1 + 1);
+        let right = area.x + area.width.saturating_sub(4);
+        let x = end.unwrap_or(right).min(right).max(area.x);
+        crate::tui::ui::hint_overlay::draw_marker(
+            frame,
+            app,
+            theme,
+            ratatui::layout::Rect::new(x, area.y, 3, 1),
+        );
     }
+    shown
 }
 
 pub(super) fn draw_interactive_preview(

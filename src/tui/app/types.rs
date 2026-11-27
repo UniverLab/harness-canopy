@@ -382,8 +382,16 @@ pub struct App {
     pub(crate) project_filter: String,
     pub(crate) sidebar_visible: bool,
     pub(crate) term_width: u16,
+    pub(crate) term_height: u16,
     /// CT31: whether the F1 Canopy hub overlay is open.
     pub(crate) hub_open: bool,
+    /// Id of the open first-run hint tip (`None` while closed).
+    pub(crate) hint_tip_open: Option<&'static str>,
+    /// Last-rendered `[?]` marker cell, for click hit-testing.
+    pub(crate) hint_marker: Option<ratatui::layout::Rect>,
+    /// Last-rendered tip action rows, for click hit-testing.
+    pub(crate) hint_tip_got_it: Option<ratatui::layout::Rect>,
+    pub(crate) hint_tip_hide_all: Option<ratatui::layout::Rect>,
     /// Cursor of the hub's `Missions & stats` tab.
     pub(crate) legend_selected: usize,
     pub(crate) show_copied: bool,
