@@ -466,15 +466,26 @@ fn run_model_enumeration(binary: &str, args: &str) -> Option<Vec<String>> {
     Some(ids)
 }
 
-/// Each non-empty, trimmed stdout line is one passable model id. Kept pure so
-/// the enumeration output shape (verified against real `opencode models`) is
-/// unit-testable.
+/// Parse stdout from a platform's `models_list_cmd` into passable model ids.
+/// Kept pure so both plain id-per-line output (`opencode models`) and
+/// tab-separated output with status lines (`agy models`) are unit-testable.
 fn parse_native_ids(stdout: &str) -> Vec<String> {
     stdout
         .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_string)
+        .filter_map(|raw| {
+            let line = raw.trim();
+            if line.is_empty() {
+                return None;
+            }
+            let id = match line.split_once('\t') {
+                Some((head, _)) => head.trim(),
+                None => line,
+            };
+            if id.is_empty() || id.chars().any(char::is_whitespace) {
+                return None;
+            }
+            Some(id.to_string())
+        })
         .collect()
 }
 
@@ -1353,6 +1364,36 @@ mod tests {
                 "opencode/mimo-v2.5-free".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn parse_native_ids_parses_agy_tab_separated_listing_and_skips_status_lines() {
+        let out = "\
+Fetching available models...
+gemini-4-neon-high\tGemini 4 Neon (High)
+gemini-pro-orchestrator-neon\tOrchestrator (Neon)
+gemini-3.8-flash-high\tGemini 3.8 Flash (High)
+";
+        assert_eq!(
+            parse_native_ids(out),
+            vec![
+                "gemini-4-neon-high".to_string(),
+                "gemini-pro-orchestrator-neon".to_string(),
+                "gemini-3.8-flash-high".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_native_ids_skips_empty_tab_id_and_spaces_without_tab() {
+        let out = "\tGemini 4 Neon (High)\n   \t   \nhas spaces, no tab\nbad id\tLabel\nvalid-id\tValid Label\n";
+        assert_eq!(parse_native_ids(out), vec!["valid-id".to_string()]);
+    }
+
+    #[test]
+    fn parse_native_ids_status_lines_only_returns_empty() {
+        let out = "Fetching available models...\nNo models found.\n";
+        assert_eq!(parse_native_ids(out), Vec::<String>::new());
     }
 
     // ── resolve_native edge cases ──────────────────────────────────────

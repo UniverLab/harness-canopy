@@ -445,8 +445,9 @@ pub(crate) async fn catalogue_models_result(
     match catalogue_models_text(platform, force_refresh, full).await {
         Ok(text) => CallToolResult::success(vec![ContentBlock::text(text)]),
         Err(CatalogTextError::NoProviderMapping) => error_result(&format!(
-            "No known model providers are mapped for platform '{}'. \
-             Omit `platform` to list all providers.",
+            "No known model providers are mapped for platform '{}', and its registry entry \
+             declares no models_list_cmd, so its models cannot be enumerated. \
+             Omit platform to list all providers.",
             platform.unwrap_or_default(),
         )),
         Err(CatalogTextError::Unavailable) => error_result(

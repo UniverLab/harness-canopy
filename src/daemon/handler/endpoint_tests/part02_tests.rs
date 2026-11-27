@@ -710,6 +710,14 @@ async fn catalogue_platform_without_provider_mapping_says_so_not_network_error()
         "must name the real cause (no provider mapping): {out}"
     );
     assert!(
+        out.contains("models_list_cmd"),
+        "must mention missing models_list_cmd remedy: {out}"
+    );
+    assert!(
+        out.contains("Omit platform to list all providers."),
+        "must mention omitting platform remedy: {out}"
+    );
+    assert!(
         !out.contains("could not reach models.dev"),
         "must NOT blame the network when the catalog is reachable: {out}"
     );
