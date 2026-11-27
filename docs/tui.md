@@ -288,9 +288,11 @@ mode and status), **Keys** is a grouped reference of every shortcut the TUI
 handles, **Missions & stats** lists all the missions above — unlocked
 ones in full colour, locked ones dimmed — **Shelf** lists the files
 agents have sent (see below), **Remote** is everything `canopy remote`
-does (see below), and **Help** lists the main keys, explains graphs in one
+does (see below), **Calendar** merges personal events, read-only `.ics`
+feeds, schedules, missed runs, and milestones (see below), and **Help**
+lists the main keys, explains graphs in one
 line, and resets the first-run hints (`r` or click). `Shift+←`/`Shift+→`
-switch tabs, as everywhere else in Canopy; `Tab`/`Shift+Tab` and `1`–`6`
+switch tabs, as everywhere else in Canopy; `Tab`/`Shift+Tab` and `1`–`7`
 also switch. `F1` closes the hub from any state; `Esc` closes it from the top
 level of every tab. `F1` works everywhere — including inside a focused
 interactive session whose harness has claimed the keyboard (alternate screen
@@ -341,12 +343,31 @@ peers at once. While any device is
 live the sidebar header shows `⇄ n`.
 
 In **Calendar** (`F1`, then `6`), `m` (or clicking `[Timeline]` / `[Milestones]`)
-toggles between the unified 14-day **Timeline** (`[event]`, `[ics:<feed>]`,
-`[cron]`, `[graph-at]`, `[missed]` pinned at top, and `[prompt]`) and per-project
-**Milestones**. In Timeline, `d` dismisses an event or feed item, `s` snoozes it
+toggles between the unified 14-day **Timeline** and per-project
+**Milestones** grouped by project. `↑`/`↓` (or `j`/`k`, or a click) select a
+row. The Timeline merges personal events, cached `.ics` feed items, next
+`cron` graph runs, pending and missed one-shot `at` graph runs, and pending
+scheduled prompts — tagged `[event]`, `[ics:<feed>]`, `[cron]`, `[graph-at]`,
+`[missed]`, and `[prompt]` — over the next 14 days; missed runs stay pinned at
+the top. External feeds are read-only and configured in
+`~/.canopy/config.toml`:
+
+```toml
+[[calendar.feeds]]
+name = "Work"
+source = "https://example.com/calendar.ics" # or a local path
+refresh_minutes = 15 # optional; defaults to 15
+```
+
+The daemon refreshes each feed at startup and on its interval; if a feed
+cannot be fetched, it logs a warning and keeps the last cached entries.
+
+In Timeline, `d` dismisses an event or feed item, `s` snoozes it
 for 5 minutes, `r` runs a `[missed]` one-shot `at` graph run immediately via the
 daemon, and `a` opens the inline add form. In Milestones, `Space` cycles status
 (`planned` → `active` → `done`) and `a` opens the inline add-milestone form.
+The add form uses `Tab`/`Up`/`Down` to move fields, `Enter` to save, and `Esc`
+to cancel.
 
 ### Session shelf
 
@@ -543,10 +564,11 @@ notification naming that session once it has been held for over a minute.
 
 ### Calendar reminder toasts
 
-When a personal calendar event reaches its alert time (`at - lead_minutes`,
-or `snoozed_until` after a snooze), the daemon fires both a native OS
-notification (`Canopy Calendar: <title>` with the local event time and
-optional notes) and a non-blocking TUI toast over every connected session:
+When a personal calendar event or cached `.ics` feed item reaches its alert
+time (`at - lead_minutes`, or `snoozed_until` after a snooze), the daemon
+fires both a native OS notification and a non-blocking TUI toast over every
+connected session. The notification is `Canopy Calendar: <title>` — feed
+items show `[<feed>] <title>` — with the local event time and optional notes:
 
 - **Placement & stacking** — toasts render at the top-right corner above
   any active view (Home, Agent session, Terminal, or Hub) without stealing
@@ -560,8 +582,8 @@ optional notes) and a non-blocking TUI toast over every connected session:
     any active view, including a focused agent or terminal PTY and the Hub.
   - **`d` / `s`** — dismiss or snooze for 5 minutes when focused on Home
     or Preview with no modal, Hub, or text input active.
-- **Behaviour** — dismissing a non-recurring event marks it dismissed;
-  dismissing a recurring event advances `at` to its next occurrence and
+- **Behaviour** — dismissing a non-recurring calendar item marks it dismissed;
+  dismissing a recurring item advances `at` to its next occurrence and
   clears its snooze and notification state. Snoozing reschedules the
   reminder 5 minutes from now.
 

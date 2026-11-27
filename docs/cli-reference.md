@@ -1048,6 +1048,7 @@ it came from. **Apply** says when a change takes effect: `applied` (at once),
 | `remote.host_label` | empty | — | next run | Label shown for this host; empty means the hostname |
 | `remote.stun_fallback` | empty | `stun:`/`stuns:` URL | applied | STUN fallback server used when the relay returns no ICE servers; empty means no fallback |
 | `daemon.cpu_quota_percent` | half the host's logical CPUs | 0–25600 | applied | CPU cap for every agent and gate the daemon spawns, in percent of one core (600 = 6 cores); `0` disables the cap ([CPU quota cap](graphs-isolation.md#cpu-quota-cap)) |
+| `calendar.feeds` | `[]` | list of tables | restart the daemon | Read-only external `.ics` feeds as `[[calendar.feeds]]` entries with `name`, `source` (HTTP(S) URL or local path), and `refresh_minutes` (default 15); edit by hand |
 
 `scheduler.retry_*`, `spec_attempt_limit` and `spec_review.*` are not in
 `graphs.*`, which is why they are listed here.
@@ -1098,7 +1099,7 @@ drain; specs with no recorded session produce no message.
 | `canopy calendar milestone add <title> --project <path> [--due <rfc3339>] [--notes <text>] [--status planned\|active\|done]` | Add a project milestone |
 | `canopy calendar milestone set <id> --status planned\|active\|done [--due <rfc3339>]` | Update a milestone's status and optional due date |
 | `canopy calendar milestone remove <id>` | Remove a project milestone |
-| `canopy calendar export [--out <path>] [--include-milestones]` | Export calendar events (and optionally milestones with `due_at`) as RFC 5545 `.ics` |
+| `canopy calendar export [--out <path>] [--include-milestones]` | Export calendar events (and optionally milestones with `due_at`) as RFC 5545 `.ics` to stdout, or to `--out` |
 
 All `canopy calendar` subcommands delegate to the running daemon's `calendar`
 MCP tool. For events, `--recurrence` defaults to `none` and `--lead` defaults to
