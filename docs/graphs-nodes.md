@@ -29,8 +29,10 @@ document carries the ensemble shape in `config`: `prompt_template`,
 fields `graph_ensemble` `add` accepts (`kind`, timeouts, infra budgets,
 `commit_rights`, `read_only`, `mutex`). A `deliver` document hands a rendered
 prompt to a live interactive session — the node form of a `send_to_session`
-background agent. Its config is exactly one target plus the prompt:
-`target_session_name` or `target_session_id` (exactly one, blanks unset)
+background agent. Its config is a target plus the prompt:
+`target_session_name` and/or `target_session_id` (at least one, blanks unset;
+both must resolve to the same session, and an id holding no live UUID falls
+back to a name lookup)
 and a non-empty `prompt_template` rendered with the router decision
 markers (`previous_feedback`, `previous_output`, `spec_content`,
 `spec_name`). A deliver node holds no platform, model or crew, counts for

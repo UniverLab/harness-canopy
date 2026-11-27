@@ -97,6 +97,12 @@ graphs and the CLI, but it is no longer offered in this dialog.
   keyboard navigation still scrolls a section to keep the selected row in
   view, and adding or closing a session clamps the offset to the remaining
   rows.
+- **Renaming a session** — with a live session card focused on the **Live**
+  tab, `r` opens a short inline rename prompt: type the new name, `Enter`
+  submits it, `Esc` cancels. Names are 1–32 chars of lowercase `a-z`,
+  digits, or `-`, and a name held by another live session is refused. The
+  new name appears at once in the sidebar, the session cards,
+  `session_list`, and agent listings, and survives daemon restarts.
 - **Overlays keep the panel live behind them** — opening the prompt
   builder, the knowledge list or viewer, context transfer, RAG transfer, the
   launchpad or the new-agent form never replaces the panel behind it: a

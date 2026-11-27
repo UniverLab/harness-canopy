@@ -91,9 +91,11 @@ The first intended use is a documentation-maintenance agent: on
 completion, review the specs this run closed, the resulting code, and
 `docs/`/`README`, then update the docs to match what actually shipped.
 
-An interactive hook targets a session either by its exact id
-(`target_session_id`) or by its name (`target_session_name`) — exactly one
-of the two must be set. Picking a finished session in the New Session Resume
+An interactive hook targets a session by its id (`target_session_id`),
+by its name (`target_session_name`), or by both when they resolve to the
+same session — a `target_session_id` holding no live UUID falls back to a
+name lookup, and an id and a name resolving to different sessions refuse the
+fire. Picking a finished session in the New Session Resume
 step relaunches that same session — it keeps its id and its name even when
 canopy never recorded the harness's own conversation id — so a hook
 addressed to either keeps reaching it afterwards. Only when another live
@@ -106,8 +108,10 @@ redirecting the message anywhere else.
 `target_session_name` exists for exactly this case: a name-targeted hook is
 resolved against the live session set fresh on every fire — never cached —
 the same set `session_list` reads. Exactly one live session with that name resolves and
-delivers; zero matches fails naming the name, and more than one match fails
-listing every matching id, rather than guessing which one was meant. Session
+delivers; zero matches fails naming the name and listing the live session
+names sorted alphabetically (or `none`), and more than one match fails
+listing every `name (id)` match sorted by id, rather than guessing which one
+was meant. Session
 names are not required to be unique, so a hook aimed at a name that two
 people are using at once will fail until only one of them is live.
 
@@ -127,9 +131,11 @@ then is not lost either — the prompt is preserved for recall and a
 notification reports that the session was not found.
 
 A `deliver` node ([Nodes](graphs-nodes.md)) enqueues through this same
-mechanism, with the same single-target rule and the same live-target
+mechanism, with the same shared target rules (id falls back to a name
+lookup; id plus name must resolve to the same session) and the same live-target
 resolution: a missing name fails the node with `session does not exist or
-is no longer live`, an ambiguous name fails it listing the matching ids,
+is no longer live` (listing the live session names), an ambiguous name fails
+it listing the `name (id)` matches sorted by id,
 and nothing is enqueued in either case. Its provenance kind is `deliver`
 and carries the graph, node and run ids, so a pending send in
 `scheduled_prompts` `list` shows `| origin: deliver` and traces back to

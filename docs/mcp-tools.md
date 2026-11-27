@@ -171,8 +171,9 @@ shell quoting. A known marker with no value for the event renders `(none)` in
 all hook modes. Unknown marker names are rejected during `graph_edit` `update`, so a
 hook never fires with a marker left literal.
 
-An interactive hook targets a session by `target_session_id` or by
-`target_session_name` (exactly one) — see [Graphs](graphs-hooks-and-queues.md#event-keyed-hooks)
+An interactive hook targets a session by `target_session_id`, by
+`target_session_name`, or by both when they resolve to the same session (a
+`target_session_id` holding no live UUID falls back to a name lookup) — see [Graphs](graphs-hooks-and-queues.md#event-keyed-hooks)
 for how name resolution and its failure modes work. `session_list` remains
 the way to see both the names and ids of every live session a hook can
 target.
