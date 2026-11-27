@@ -3,10 +3,15 @@
 //! Split from `hub.rs` for the file-size gate.
 
 use std::io::Read;
-use std::sync::Mutex;
-use std::time::Duration;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
 
-use super::{HubSession, OutputState, SessionHub};
+use crate::db::session::SessionRegistration;
+use crate::db::Database;
+use crate::domain::models::Cli;
+
+use super::{HubSession, OutputState, SessionHub, SessionKind, SpawnRequest};
 
 /// Send `SIGHUP` to the child process group the way closing a session in
 /// the TUI does, so the shell and its children all observe the hangup.
@@ -83,4 +88,98 @@ pub(super) fn wait_for_exit_code(session: &HubSession) -> Option<i32> {
         std::thread::sleep(Duration::from_millis(20));
     }
     session.poll_exit_code()
+}
+
+/// Write the `interactive_sessions` / `terminal_sessions` row the TUI
+/// writes for the same kind of launch.
+pub(super) fn insert_db_row(
+    db: &Database,
+    req: &SpawnRequest,
+    session: &HubSession,
+    args: Option<&str>,
+    generated_cid: Option<&str>,
+) {
+    match req.kind {
+        SessionKind::Agent => {
+            let boot_id = crate::system::boot_id();
+            let session_name = session.name();
+            let harness_conversation_id = req
+                .harness_conversation_id
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .or(generated_cid);
+            let registration = SessionRegistration {
+                id: &session.id,
+                name: &session_name,
+                cli: req.cli.as_str(),
+                working_dir: req.workdir.as_str(),
+                args,
+                pid: session.pid,
+                session_type: "interactive",
+                boot_id: boot_id.as_deref(),
+                harness_conversation_id,
+                preserve_args: req.preserve_args,
+            };
+            if let Err(e) = db.register_interactive_session(&registration) {
+                tracing::warn!("Failed to register hub session: {e}");
+            }
+        }
+        SessionKind::Terminal => {
+            let session_name = session.name();
+            let _ = db.insert_terminal_session(
+                &session.id,
+                &session_name,
+                req.cli.as_str(),
+                req.workdir.as_str(),
+            );
+        }
+    }
+}
+
+/// A fresh `muse` or `antigravity` spawn is a new conversation: discover
+/// the harness's own id for it on a background thread, so a later restart
+/// resumes this conversation. Done here, not by each launcher, so every
+/// spawn path (TUI, remote, scheduler) records it.
+pub(super) fn record_harness_conversation(
+    db: Arc<Database>,
+    req: &SpawnRequest,
+    session: &HubSession,
+    since: SystemTime,
+    muse_store_override: Option<PathBuf>,
+    antigravity_history_override: Option<PathBuf>,
+) {
+    if req.kind != SessionKind::Agent
+        || req.preserve_args
+        || req
+            .harness_conversation_id
+            .as_deref()
+            .is_some_and(|s| !s.is_empty())
+    {
+        return;
+    }
+    match Cli::from_str(&req.cli).as_str() {
+        "muse" => {
+            let store =
+                muse_store_override.or_else(crate::sessions::muse_conversation::muse_store_dir);
+            crate::sessions::muse_conversation::record_fresh_conversation(
+                db,
+                session.id.clone(),
+                req.workdir.clone(),
+                since,
+                session.pid,
+                store,
+            );
+        }
+        "antigravity" => {
+            crate::sessions::antigravity_conversation::record_fresh_conversation(
+                db,
+                session.id.clone(),
+                req.workdir.clone(),
+                since,
+                session.pid,
+                antigravity_history_override,
+            );
+        }
+        _ => {}
+    }
 }

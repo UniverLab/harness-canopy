@@ -549,7 +549,7 @@ fn hub_spawn_command_never_carries_a_session_id_flag() {
     req.interactive_args = Some("--provider echo resume uuid-aaa".to_string());
     req.harness_conversation_id = Some("uuid-aaa".to_string());
 
-    let (_, args) = build_spawn_command(&req, "sess-1", "one");
+    let (_, args, _) = build_spawn_command(&req, "sess-1", "one");
     let args = args.expect("agent args");
     assert!(
         !args.contains("session-id") && !args.contains("session_id"),

@@ -5,6 +5,7 @@
 //! parser helpers live here (see [`spawn`]), so both sides build identical
 //! children and handle their parsers identically.
 
+pub mod antigravity_conversation;
 pub mod auth;
 pub mod catalog;
 pub mod client;

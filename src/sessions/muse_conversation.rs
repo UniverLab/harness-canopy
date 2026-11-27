@@ -367,6 +367,7 @@ fn trim_slashes(path: &str) -> &str {
 /// carries its harness conversation id keeps the id it has — a resume that
 /// falls back to a fresh conversation clears and records it itself (see
 /// `sessions::resume`).
+#[cfg(test)]
 pub(crate) fn hub_spawn_records_conversation(req: &super::hub::SpawnRequest) -> bool {
     req.kind == super::hub::SessionKind::Agent
         && crate::domain::models::Cli::from_str(&req.cli).as_str() == "muse"

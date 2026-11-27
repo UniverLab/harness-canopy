@@ -12,6 +12,7 @@ use crate::db::session::{InteractiveSession, TerminalSession};
 use crate::db::Database;
 use crate::domain::canopy_config::CanopyConfig;
 use crate::domain::models::Cli;
+use crate::sessions::antigravity_conversation;
 use crate::sessions::muse_conversation::record_fresh_conversation;
 use crate::sessions::{HubSession, SessionHub, SessionKind, SpawnRequest};
 use crate::tui::build_resumed_session_args;
@@ -281,7 +282,7 @@ pub(crate) fn spawn_resumed_or_fresh(
                 Ok(agent) => {
                     // The fresh fallback is a new conversation: record its
                     // harness id like a fresh launch does.
-                    record_fresh_muse_conversation(hub, session, since, agent.pid);
+                    record_fresh_harness_conversation(hub, session, since, agent.pid);
                     Some(agent)
                 }
                 Err(e2) => {
@@ -299,28 +300,42 @@ pub(crate) fn spawn_resumed_or_fresh(
     }
 }
 
-/// After a fresh fallback for a muse session, record the new conversation's
-/// own harness id — the same background discovery a fresh launch runs. The
-/// stale id is forgotten first: the fallback is a NEW conversation, and the
-/// no-overwrite recorder could never store its id over the dead one.
-fn record_fresh_muse_conversation(
+/// After a fresh fallback for a `muse` or `antigravity` session, record the
+/// new conversation's own harness id — the same background discovery a fresh
+/// launch runs. The stale id is forgotten first: the fallback is a NEW
+/// conversation, and the no-overwrite recorder could never store its id over
+/// the dead one.
+fn record_fresh_harness_conversation(
     hub: &SessionHub,
     session: &InteractiveSession,
     since: std::time::SystemTime,
     pid: Option<i64>,
 ) {
-    if Cli::from_str(&session.cli).as_str() != "muse" {
-        return;
+    match Cli::from_str(&session.cli).as_str() {
+        "muse" => {
+            let _ = hub.db().clear_session_harness_conversation_id(&session.id);
+            record_fresh_conversation(
+                hub.db().clone(),
+                session.id.clone(),
+                session.working_dir.clone(),
+                since,
+                pid,
+                crate::sessions::muse_conversation::muse_store_dir(),
+            );
+        }
+        "antigravity" => {
+            let _ = hub.db().clear_session_harness_conversation_id(&session.id);
+            antigravity_conversation::record_fresh_conversation(
+                hub.db().clone(),
+                session.id.clone(),
+                session.working_dir.clone(),
+                since,
+                pid,
+                None,
+            );
+        }
+        _ => {}
     }
-    let _ = hub.db().clear_session_harness_conversation_id(&session.id);
-    record_fresh_conversation(
-        hub.db().clone(),
-        session.id.clone(),
-        session.working_dir.clone(),
-        since,
-        pid,
-        crate::sessions::muse_conversation::muse_store_dir(),
-    );
 }
 
 /// Persist the resumed session once its PTY is up.
@@ -581,5 +596,51 @@ mod guard_tests {
     fn unknown_cli_resumes_alone() {
         let (_dir, config) = config_with("[[clis]]\nname = \"muse\"\n");
         assert!(!uses_shared_last_resort(&idless_session("nope"), &config));
+    }
+
+    #[test]
+    fn two_antigravity_sessions_in_one_workdir_resume_by_distinct_conversation_ids() {
+        let (_dir, config) = config_with(
+            "[[clis]]\nname = \"antigravity\"\nresume_args = \"--continue\"\nsession_resume_cmd = \"--conversation\"\n",
+        );
+        let mut s1 = idless_session("antigravity");
+        s1.id = "sess-agy-1".to_string();
+        s1.args = None;
+        s1.harness_conversation_id = Some("11111111-1111-4111-8111-111111111111".to_string());
+
+        let mut s2 = idless_session("antigravity");
+        s2.id = "sess-agy-2".to_string();
+        s2.args = None;
+        s2.harness_conversation_id = Some("22222222-2222-4222-8222-222222222222".to_string());
+
+        assert!(!uses_shared_last_resort(&s1, &config));
+        assert!(!uses_shared_last_resort(&s2, &config));
+
+        let agy_cfg = config.get_cli("antigravity").expect("antigravity config");
+        let args1 = build_resumed_session_args(
+            s1.args.as_deref(),
+            agy_cfg.interactive_args.as_deref(),
+            agy_cfg.resume_args.as_deref(),
+            agy_cfg.session_resume_cmd.as_deref(),
+            agy_cfg.yolo_flag.as_deref(),
+            s1.harness_conversation_id.as_deref(),
+        );
+        let args2 = build_resumed_session_args(
+            s2.args.as_deref(),
+            agy_cfg.interactive_args.as_deref(),
+            agy_cfg.resume_args.as_deref(),
+            agy_cfg.session_resume_cmd.as_deref(),
+            agy_cfg.yolo_flag.as_deref(),
+            s2.harness_conversation_id.as_deref(),
+        );
+
+        assert_eq!(
+            args1.as_deref(),
+            Some("--conversation 11111111-1111-4111-8111-111111111111")
+        );
+        assert_eq!(
+            args2.as_deref(),
+            Some("--conversation 22222222-2222-4222-8222-222222222222")
+        );
     }
 }

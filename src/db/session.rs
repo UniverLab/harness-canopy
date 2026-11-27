@@ -265,37 +265,6 @@ impl Database {
         }
     }
 
-    /// Record the harness's own conversation identifier on a session row.
-    /// Best-effort by design (the caller never fails on it) and never
-    /// overwrites an identifier already recorded for that row: the first
-    /// identifier a session reports is the conversation it belongs to.
-    pub fn set_session_harness_conversation_id(
-        &self,
-        session_id: &str,
-        harness_id: &str,
-    ) -> Result<()> {
-        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
-        conn.execute(
-            "UPDATE interactive_sessions SET harness_conversation_id = ?1
-              WHERE id = ?2
-                AND (harness_conversation_id IS NULL OR harness_conversation_id = '')",
-            params![harness_id, session_id],
-        )?;
-        Ok(())
-    }
-
-    /// Forget the recorded harness conversation id: a fresh fallback after a
-    /// failed resume is a NEW conversation, and the no-overwrite recorder can
-    /// only store its id once the stale one is gone.
-    pub fn clear_session_harness_conversation_id(&self, session_id: &str) -> Result<()> {
-        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
-        conn.execute(
-            "UPDATE interactive_sessions SET harness_conversation_id = NULL WHERE id = ?1",
-            params![session_id],
-        )?;
-        Ok(())
-    }
-
     /// Read a session row's exit code, if it finished (`None` while active or
     /// when the row is gone).
     pub fn get_session_exit_code(&self, session_id: &str) -> Result<Option<i32>> {

@@ -763,6 +763,7 @@ pub mod scheduled_prompts_agent;
 mod schema;
 mod schema_spec_review;
 pub mod session;
+mod session_conversation;
 pub mod session_finish;
 pub mod session_target;
 pub mod shelf;

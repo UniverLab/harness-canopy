@@ -291,7 +291,7 @@ fn hub_leaves_args_untouched_without_yolo_even_for_unknown_harnesses() {
     let workdir = tempfile::tempdir().expect("workdir");
     let mut req = agent_spawn("no-such-harness-xyz", &workdir.path().to_string_lossy());
     req.interactive_args = Some("--tui".to_string());
-    let (_, args) = build_spawn_command(&req, "sess-plain", "plain-name");
+    let (_, args, _) = build_spawn_command(&req, "sess-plain", "plain-name");
     assert_eq!(args.as_deref(), Some("--tui"));
 }
 
@@ -307,7 +307,7 @@ fn hub_appends_the_harness_yolo_flag() {
     let mut req = agent_spawn(&cli, &workdir.path().to_string_lossy());
     req.interactive_args = Some("--tui".to_string());
 
-    let (_, plain) = build_spawn_command(&req, "sess-plain", "plain-name");
+    let (_, plain, _) = build_spawn_command(&req, "sess-plain", "plain-name");
     assert_eq!(
         plain.as_deref(),
         Some("--tui"),
@@ -315,7 +315,7 @@ fn hub_appends_the_harness_yolo_flag() {
     );
 
     req.yolo = true;
-    let (cmd, args) = build_spawn_command(&req, "sess-yolo", "yolo-name");
+    let (cmd, args, _) = build_spawn_command(&req, "sess-yolo", "yolo-name");
     let args = args.expect("agent args");
     assert_eq!(
         args,
@@ -340,7 +340,7 @@ fn hub_appends_the_harness_yolo_flag() {
         .and_then(|config| config.interactive_args);
     let mut req = agent_spawn(&cli, &workdir.path().to_string_lossy());
     req.yolo = true;
-    let (_, args) = build_spawn_command(&req, "sess-registry", "registry-name");
+    let (_, args, _) = build_spawn_command(&req, "sess-registry", "registry-name");
     let expected = with_yolo(registry_interactive.as_deref(), &flag);
     assert_eq!(
         args.as_deref(),
@@ -354,7 +354,7 @@ fn hub_appends_the_harness_yolo_flag() {
     let mut req = agent_spawn(&cli, &workdir.path().to_string_lossy());
     req.interactive_args = Some(format!("--tui {flag} resume uuid-aaa"));
     req.yolo = true;
-    let (_, args) = build_spawn_command(&req, "sess-resume", "resume-name");
+    let (_, args, _) = build_spawn_command(&req, "sess-resume", "resume-name");
     let args = args.expect("agent args");
     assert_eq!(
         args.matches(&flag).count(),

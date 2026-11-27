@@ -970,7 +970,7 @@ mod tests {
             yolo: false,
             preserve_args: false,
         };
-        let (cmd, _) = build_spawn_command(&req, "sess-stub", "platanus");
+        let (cmd, _, _) = build_spawn_command(&req, "sess-stub", "platanus");
         let argv: Vec<String> = cmd
             .get_argv()
             .iter()

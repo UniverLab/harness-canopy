@@ -16,7 +16,6 @@ use chrono::{DateTime, Utc};
 use portable_pty::{native_pty_system, PtySize};
 use tokio::sync::broadcast;
 
-use crate::db::session::SessionRegistration;
 use crate::db::Database;
 use crate::domain::models::Cli;
 
@@ -439,6 +438,10 @@ struct HubInner {
     /// the live store ([`super::muse_conversation::muse_store_dir`]). Tests
     /// point it at a scratch store.
     muse_store_override: std::sync::OnceLock<std::path::PathBuf>,
+    /// Where fresh antigravity spawns look for history fallback; unset means
+    /// [`super::antigravity_conversation::default_history_path`]. Tests point
+    /// it at a scratch file.
+    antigravity_history_override: std::sync::OnceLock<std::path::PathBuf>,
     /// Set when the daemon's stop signal arrives: child exits from then on
     /// keep their rows resumable instead of finishing them.
     shutdown: Arc<HubShutdown>,
@@ -464,6 +467,7 @@ impl SessionHub {
                 host_label,
                 shelf: super::hub_shelf::ShelfLink::default(),
                 muse_store_override: std::sync::OnceLock::new(),
+                antigravity_history_override: std::sync::OnceLock::new(),
                 shutdown: Arc::new(HubShutdown::new()),
             }),
         }
@@ -494,13 +498,7 @@ impl SessionHub {
         &self.inner.db
     }
 
-    /// Spawn a hub session: build the child exactly like the TUI does, open
-    /// its PTY, record its database row, start its reader thread, and announce
-    /// it. `prompt`, when given, is delivered through the paste path.
-    pub fn spawn(&self, req: &SpawnRequest) -> anyhow::Result<Arc<HubSession>> {
-        #[cfg(unix)]
-        install_signal_handlers();
-
+    fn resolve_spawn_identity(&self, req: &SpawnRequest) -> (String, String) {
         let existing: Vec<String> = self
             .inner
             .sessions
@@ -515,7 +513,7 @@ impl SessionHub {
             .map(|map| map.keys().cloned().collect())
             .unwrap_or_default();
         let wanted_id = req.id.as_deref().filter(|id| !live_ids.contains(*id));
-        let (id, name) = match req.kind {
+        match req.kind {
             SessionKind::Agent => spawn_identity(wanted_id, req.name.as_deref(), &existing_refs),
             SessionKind::Terminal => {
                 let name = req.name.clone().unwrap_or_else(|| {
@@ -526,7 +524,17 @@ impl SessionHub {
                     .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
                 (id, name)
             }
-        };
+        }
+    }
+
+    /// Spawn a hub session: build the child exactly like the TUI does, open
+    /// its PTY, record its database row, start its reader thread, and announce
+    /// it. `prompt`, when given, is delivered through the paste path.
+    pub fn spawn(&self, req: &SpawnRequest) -> anyhow::Result<Arc<HubSession>> {
+        #[cfg(unix)]
+        install_signal_handlers();
+
+        let (id, name) = self.resolve_spawn_identity(req);
 
         if req.kind == SessionKind::Agent {
             let home = std::env::var_os("CANOPY_HOME_OVERRIDE")
@@ -537,7 +545,7 @@ impl SessionHub {
             }
         }
 
-        let (cmd, args) = super::hub_command::build_spawn_command(req, &id, &name);
+        let (cmd, args, generated_cid) = super::hub_command::build_spawn_command(req, &id, &name);
         // Sampled before the child exists: its conversation lock is newer.
         let spawn_since = std::time::SystemTime::now();
         let pty_system = native_pty_system();
@@ -591,8 +599,23 @@ impl SessionHub {
         if let Ok(mut map) = self.inner.sessions.lock() {
             map.insert(id.clone(), Arc::clone(&session));
         }
-        self.insert_db_row(req, &session, args.as_deref());
-        self.record_muse_conversation(req, &session, spawn_since);
+        child::insert_db_row(
+            &self.inner.db,
+            req,
+            &session,
+            args.as_deref(),
+            generated_cid.as_deref(),
+        );
+        if generated_cid.is_none() {
+            child::record_harness_conversation(
+                Arc::clone(&self.inner.db),
+                req,
+                &session,
+                spawn_since,
+                self.inner.muse_store_override.get().cloned(),
+                self.inner.antigravity_history_override.get().cloned(),
+            );
+        }
         spawn_reader_thread(self.clone(), Arc::clone(&session), reader);
         self.emit(HubEvent::SessionAdded(Box::new(session.item())));
 
@@ -602,70 +625,6 @@ impl SessionHub {
             }
         }
         Ok(session)
-    }
-
-    /// Write the `interactive_sessions` / `terminal_sessions` row the TUI
-    /// writes for the same kind of launch.
-    fn insert_db_row(&self, req: &SpawnRequest, session: &HubSession, args: Option<&str>) {
-        match req.kind {
-            SessionKind::Agent => {
-                let boot_id = crate::system::boot_id();
-                let session_name = session.name();
-                let registration = SessionRegistration {
-                    id: &session.id,
-                    name: &session_name,
-                    cli: req.cli.as_str(),
-                    working_dir: req.workdir.as_str(),
-                    args,
-                    pid: session.pid,
-                    session_type: "interactive",
-                    boot_id: boot_id.as_deref(),
-                    harness_conversation_id: req.harness_conversation_id.as_deref(),
-                    preserve_args: req.preserve_args,
-                };
-                if let Err(e) = self.inner.db.register_interactive_session(&registration) {
-                    tracing::warn!("Failed to register hub session: {e}");
-                }
-            }
-            SessionKind::Terminal => {
-                let session_name = session.name();
-                let _ = self.inner.db.insert_terminal_session(
-                    &session.id,
-                    &session_name,
-                    req.cli.as_str(),
-                    req.workdir.as_str(),
-                );
-            }
-        }
-    }
-
-    /// A fresh muse spawn is a new conversation: discover the harness's own
-    /// id for it on a background thread, so a later restart resumes this
-    /// conversation. Done here, not by each launcher, so every spawn path
-    /// (TUI, remote, scheduler) records it.
-    fn record_muse_conversation(
-        &self,
-        req: &SpawnRequest,
-        session: &HubSession,
-        since: std::time::SystemTime,
-    ) {
-        if !super::muse_conversation::hub_spawn_records_conversation(req) {
-            return;
-        }
-        let store = self
-            .inner
-            .muse_store_override
-            .get()
-            .cloned()
-            .or_else(super::muse_conversation::muse_store_dir);
-        super::muse_conversation::record_fresh_conversation(
-            Arc::clone(&self.inner.db),
-            session.id.clone(),
-            req.workdir.clone(),
-            since,
-            session.pid,
-            store,
-        );
     }
 
     /// Resize `session` and, when its size really changed, tell every
