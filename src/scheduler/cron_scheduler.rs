@@ -39,6 +39,7 @@ pub(crate) mod held_sends;
 mod retry;
 mod schedule_math;
 pub(crate) mod scheduled_prompts;
+mod scheduled_runs;
 /// The internal cron scheduler that runs as a tokio background_agent.
 pub struct CronScheduler {
     db: Arc<Database>,
@@ -306,6 +307,8 @@ impl CronScheduler {
                 fold_earliest_instant(earliest, lp.auto_continue_at);
             }
         }
+
+        self.fold_scheduled_run_wakeups(earliest);
     }
 
     /// Fire all cron-triggered graphs whose next cron time is now. Agents
@@ -333,6 +336,7 @@ impl CronScheduler {
         self.fire_due_enable_graphs(now_utc).await?;
         self.fire_due_autorun_graphs(now_utc).await?;
         self.fire_due_auto_continue_graphs(now_utc)?;
+        self.fire_due_scheduled_runs(now_utc)?;
 
         Ok(())
     }

@@ -340,6 +340,26 @@ pub(crate) static GRAPH_CONTROL: ToolSpec = ToolSpec {
             required: &["graph_id"],
             optional: &["at", "quota_reset_message"],
         },
+        ActionSpec {
+            name: "schedule_run",
+            required: &["graph_id", "at"],
+            optional: &["idea", "queue_id", "workdir", "on_miss"],
+        },
+        ActionSpec {
+            name: "list_scheduled_runs",
+            required: &[],
+            optional: &["graph_id", "status"],
+        },
+        ActionSpec {
+            name: "cancel_scheduled_run",
+            required: &["id"],
+            optional: &[],
+        },
+        ActionSpec {
+            name: "run_scheduled_run",
+            required: &["id"],
+            optional: &[],
+        },
     ],
 };
 
@@ -419,6 +439,10 @@ resource_action_object!(
         ("preflight", GraphPreflightParams),
         ("schedule_continue", GraphScheduleContinueParams),
         ("schedule_autorun", GraphScheduleAutorunParams),
+        ("schedule_run", GraphScheduleRunParams),
+        ("list_scheduled_runs", GraphListScheduledRunsParams),
+        ("cancel_scheduled_run", GraphScheduledRunIdParams),
+        ("run_scheduled_run", GraphScheduledRunIdParams),
     ]
 );
 
@@ -652,7 +676,11 @@ impl TaskTriggerHandler {
         `reset` (required: graph_id; optional: specs, clear_notes) — reset a completed/failed graph back to pending. \
         `preflight` (required: graph_id; optional: timeout_seconds, reviewer) — probe a graph's platforms and audit its design. \
         `schedule_continue` (required: graph_id; optional: at, mode) — schedule a one-shot deferred continue for a paused graph (mode: retry_current_node or skip_next_spec, default retry_current_node), or cancel a pending one. \
-        `schedule_autorun` (required: graph_id; optional: at, quota_reset_message) — schedule a one-shot resume for a graph, or cancel a pending one."
+        `schedule_autorun` (required: graph_id; optional: at, quota_reset_message) — schedule a one-shot resume for a graph, or cancel a pending one. \
+        `schedule_run` (required: graph_id, at; optional: idea, queue_id, workdir, on_miss) — schedule a one-shot run at an RFC 3339 timestamp with on_miss policy (`skip` or `run`, default `skip`). \
+        `list_scheduled_runs` (required: none; optional: graph_id, status) — list one-shot scheduled runs ordered by fire_at. \
+        `cancel_scheduled_run` (required: id; optional: none) — cancel a pending or missed scheduled run. \
+        `run_scheduled_run` (required: id; optional: none) — manually launch a missed or pending scheduled run now."
     )]
     pub(crate) async fn graph_control(
         &self,
@@ -680,6 +708,22 @@ impl TaskTriggerHandler {
             }
             "schedule_autorun" => {
                 self.graph_schedule_autorun_impl(action_params(&params, spec)?)
+                    .await
+            }
+            "schedule_run" => {
+                self.graph_schedule_run_impl(action_params(&params, spec)?)
+                    .await
+            }
+            "list_scheduled_runs" => {
+                self.graph_list_scheduled_runs_impl(action_params(&params, spec)?)
+                    .await
+            }
+            "cancel_scheduled_run" => {
+                self.graph_cancel_scheduled_run_impl(action_params(&params, spec)?)
+                    .await
+            }
+            "run_scheduled_run" => {
+                self.graph_run_scheduled_run_impl(action_params(&params, spec)?)
                     .await
             }
             _ => unreachable!("validated action"),

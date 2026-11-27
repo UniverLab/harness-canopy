@@ -644,6 +644,8 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
     remote_devices::REMOTE_DEVICES_SCHEMA,
     // Trusted GitHub profiles and their session grants (remote guests).
     remote_trust::REMOTE_TRUST_SCHEMA,
+    // One-shot scheduled graph runs.
+    graph_scheduled_runs::GRAPH_SCHEDULED_RUNS_SCHEMA,
 ];
 
 impl Database {
@@ -717,6 +719,7 @@ impl Database {
         Self::migrate_sandbox_intelligence_attribution(&conn)?;
         Self::migrate_shelf_files(&conn)?;
         Self::migrate_graph_enabled_columns(&conn)?;
+        Self::migrate_graph_scheduled_runs(&conn)?;
 
         Self::set_schema_version(&conn)?;
 
@@ -740,6 +743,7 @@ pub mod crews;
 pub mod ensembles;
 pub mod gamification;
 pub mod graph_crew;
+pub mod graph_scheduled_runs;
 pub mod graph_transfer;
 pub mod graphs;
 pub mod group;

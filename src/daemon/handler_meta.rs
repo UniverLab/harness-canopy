@@ -556,7 +556,7 @@ fn tool_map_entries() -> Vec<&'static str> {
         "get_tools — this map: the right tools and protocol per scope",
         "graph — list, get, export, validate, audit, events, node_runs, node_run, metrics; read graphs, specs, runs, events, metrics",
         "graph_complete_node — complete an active graph node",
-        "graph_control — run, pause, continue, reset, preflight, schedule_continue, schedule_autorun; run and manage graph execution",
+        "graph_control — run, pause, continue, reset, preflight, schedule_continue, schedule_autorun, schedule_run, list_scheduled_runs, cancel_scheduled_run, run_scheduled_run; run and manage graph execution",
         "graph_edge — add, update, delete; wire graph nodes",
         "graph_edit — create, update, archive, restore, import, install, attach_spec, detach_spec, update_spec; author graphs and specs",
         "graph_ensemble — add, update, delete, copy; author multi-member ensembles",

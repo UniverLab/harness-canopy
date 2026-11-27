@@ -312,3 +312,33 @@ pub struct GraphMetricsParams {
     /// Grouping: `graph` (default), `node`, or `model`.
     pub by: Option<String>,
 }
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GraphScheduleRunParams {
+    /// Graph ID (or unambiguous id prefix).
+    pub graph_id: String,
+    /// RFC 3339 timestamp in the future at which the graph should run once.
+    pub at: String,
+    /// Optional free-form text fed to nodes as `{{spec_content}}`. Mutually exclusive with `queue_id`.
+    pub idea: Option<String>,
+    /// Optional queue ID to run instead of bound specs. Mutually exclusive with `idea`.
+    pub queue_id: Option<String>,
+    /// Optional absolute workdir override for this run.
+    pub workdir: Option<String>,
+    /// Policy when `at` was missed while the daemon was offline: `"skip"` (default) or `"run"`.
+    pub on_miss: Option<String>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GraphListScheduledRunsParams {
+    /// Optional graph ID (or prefix) filter.
+    pub graph_id: Option<String>,
+    /// Optional status filter: `"pending"`, `"fired"`, `"missed"`, or `"cancelled"`.
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GraphScheduledRunIdParams {
+    /// Scheduled run ID.
+    pub id: String,
+}
