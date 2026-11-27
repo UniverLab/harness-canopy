@@ -317,9 +317,12 @@ as a quick reference and counts features and bugs.
 
 3. **Commit message.** Every spec exposes `CANOPY_SPEC_COMMIT_MESSAGE`
    to check nodes and `{{spec_commit_message}}` to agent prompts. The
-   message is `<type>(<scope>): <name>` (or `<type>: <name>` without scope).
-   A deterministic commit node uses `$CANOPY_SPEC_COMMIT_MESSAGE` as the
-   commit message and never guesses.
+   message is `<type>(<scope>): <name>` (or `<type>: <name>` without scope),
+   stripping any leading conventional header(s) from `<name>` so a stored
+   name never produces a double prefix (the stored type and scope always
+   win, and an empty remainder is left unstripped for the commit guard to
+   reject). A deterministic commit node uses `$CANOPY_SPEC_COMMIT_MESSAGE`
+   as the commit message and never guesses.
 
 4. **Opt-in enforcement.** `require_spec_type: true` (default `false`)
    makes `graph_edit` `attach_spec` and `graph_control` `run` refuse an
@@ -342,12 +345,13 @@ Add a check node with `commit_rights: true` and use the prebuilt message:
 
 A commit node (`commit_rights: true`, or a check command consuming
 `{{spec_commit_message}}` / `$CANOPY_SPEC_COMMIT_MESSAGE`) validates the
-prebuilt message before anything spawns: an empty, multi-line, or
-header-repeating subject (`fix(tui): fix(tui): ...`) fails with
-`failure_kind: "commit_subject_invalid"` and commits nothing. The
-failure is deterministic, so it settles without spending the infra-retry
-budget; a member's failure propagates through the ensemble verdict, and
-fixing the spec's name unblocks the node. Specs without a type are exempt.
+prebuilt message before anything spawns: an empty subject (including one
+that becomes empty after stripping a header, such as `fix(tui): `) or a
+multi-line subject fails with `failure_kind: "commit_subject_invalid"` and
+commits nothing. The failure is deterministic, so it settles without
+spending the infra-retry budget; a member's failure propagates through the
+ensemble verdict, and fixing the spec's name unblocks the node. Specs
+without a type are exempt.
 
 ## Spec notes
 
