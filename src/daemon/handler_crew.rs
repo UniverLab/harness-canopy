@@ -150,7 +150,14 @@ impl TaskTriggerHandler {
         {
             // Never touch a bound ensemble whose graph is running or pausing —
             // replacing members under an in-flight dispatch is forbidden.
+            // Say so in the reply: the ensemble lags and applies the newer
+            // version at its next dispatch.
             if status == "running" || status == "pausing" {
+                sync.push(serde_json::json!({
+                    "ensemble_id": ensemble_id,
+                    "outcome": "DeferredRunningGraph",
+                    "note": "applies at next dispatch",
+                }));
                 continue;
             }
             let outcome = self

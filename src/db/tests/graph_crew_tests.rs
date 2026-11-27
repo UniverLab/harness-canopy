@@ -738,3 +738,136 @@ fn graph_crew_cli_table_format() {
         "No matching crew assignments found."
     );
 }
+
+/// A crew at version 2 whose ensemble still applies version 1, plus a
+/// crew-bound node and an unbound literal node.
+fn lagging_crew_db() -> Database {
+    let db = test_db();
+    let mut lp = sample_graph("graph-crew-pending");
+    lp.name = "Pending".to_string();
+    db.insert_graph(&lp).unwrap();
+    let spec = sample_graph_spec(&lp.id, "spec-crew-pending", 1);
+    db.insert_graph_spec(&spec).unwrap();
+
+    let members = [
+        crew_member(0, "claude", Some("opus")),
+        crew_member(1, "opencode-go", Some("gpt-5")),
+    ];
+    let crew = db.crew_create("lagging", None, &members).unwrap();
+    insert_ensemble(
+        &db,
+        &spec.id,
+        "ens-lagging",
+        "Lagging reviewers",
+        Some((crew.id.as_str(), crew.name.as_str(), 1)),
+    );
+    db.insert_graph_node(&agent_node(
+        &spec.id,
+        "node-crew",
+        "Crew bound",
+        5,
+        serde_json::json!({ "crew": "lagging" }),
+    ))
+    .unwrap();
+    db.insert_graph_node(&agent_node(
+        &spec.id,
+        "node-literal",
+        "Literal",
+        6,
+        serde_json::json!({ "platform": "claude", "model": "opus" }),
+    ))
+    .unwrap();
+
+    // A second crew write moves the crew to version 2 while the ensemble
+    // still applies version 1.
+    db.crew_update("lagging", Some(&members), None, None)
+        .unwrap();
+    db
+}
+
+/// A lagging ensemble's member rows carry the applied version, the current
+/// version and the pending marker; a crew-bound node row carries the current
+/// version but no marker; unbound rows carry none of the three (omitted from
+/// the JSON); the CLI table shows the pending `v1 -> v2` text.
+#[test]
+fn graph_crew_reports_pending_crew_version() {
+    let db = lagging_crew_db();
+    let groups = db.graph_crew(GraphCrewDbParams::default()).unwrap();
+    assert_eq!(groups.len(), 1);
+    let rows = flat(&groups);
+
+    let member = rows
+        .iter()
+        .find(|r| r.kind == CrewRowKind::EnsembleMember)
+        .expect("ensemble member row");
+    assert_eq!(member.crew.as_deref(), Some("lagging"));
+    assert_eq!(member.crew_version_applied, Some(1));
+    assert_eq!(member.crew_version_current, Some(2));
+    assert_eq!(
+        member.crew_pending.as_deref(),
+        Some("applies at next dispatch")
+    );
+
+    let node = rows
+        .iter()
+        .find(|r| r.name == "Crew bound")
+        .expect("crew-bound node row");
+    assert_eq!(node.crew_version_current, Some(2));
+    assert_eq!(node.crew_pending, None);
+    assert_eq!(node.crew_version_applied, None);
+
+    let value = serde_json::to_value(&groups[0].rows).unwrap();
+    let items = value.as_array().unwrap();
+    let pending_json = items
+        .iter()
+        .find(|v| v["kind"] == "ensemble_member")
+        .expect("member JSON");
+    assert_eq!(pending_json["crew_pending"], "applies at next dispatch");
+    let bound_json = items
+        .iter()
+        .find(|v| v["name"] == "Crew bound")
+        .expect("bound node JSON");
+    assert!(bound_json.get("crew_pending").is_none(), "{bound_json}");
+    let literal_json = items
+        .iter()
+        .find(|v| v["name"] == "Literal")
+        .expect("unbound node JSON");
+    for key in [
+        "crew",
+        "crew_version_applied",
+        "crew_version_current",
+        "crew_pending",
+    ] {
+        assert!(literal_json.get(key).is_none(), "{literal_json}");
+    }
+
+    let owned: Vec<GraphCrewRow> = rows.into_iter().cloned().collect();
+    let table = format_graph_crew_table(&owned);
+    assert!(
+        table.contains("crew lagging v1 -> v2 (applies at next dispatch)"),
+        "{table}"
+    );
+}
+
+/// After `sync_ensemble_with_crew` the pending marker clears and the CLI
+/// table shows the current version with no pending text.
+#[test]
+fn graph_crew_clears_pending_crew_version_after_sync() {
+    let db = lagging_crew_db();
+    db.sync_ensemble_with_crew("ens-lagging").unwrap();
+
+    let groups = db.graph_crew(GraphCrewDbParams::default()).unwrap();
+    let rows = flat(&groups);
+    let member = rows
+        .iter()
+        .find(|r| r.kind == CrewRowKind::EnsembleMember)
+        .expect("ensemble member row");
+    assert_eq!(member.crew_version_applied, Some(2));
+    assert_eq!(member.crew_version_current, Some(2));
+    assert_eq!(member.crew_pending, None);
+
+    let owned: Vec<GraphCrewRow> = rows.into_iter().cloned().collect();
+    let table = format_graph_crew_table(&owned);
+    assert!(table.contains("crew lagging v2"), "{table}");
+    assert!(!table.contains("applies at next dispatch"), "{table}");
+}

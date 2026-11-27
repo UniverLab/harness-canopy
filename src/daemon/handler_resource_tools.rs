@@ -738,7 +738,7 @@ impl TaskTriggerHandler {
         `create` (required: name; optional: description, members, from_ensemble) — create a crew from an ordered member list or by seeding from an ensemble; pass exactly one of members or from_ensemble. \
         `update` (required: name; optional: members, description, rename) — replace the member list, set the description, and/or rename. \
         `delete` (required: name; optional: none) — delete a crew; refused while anything still binds it. \
-        `assignments` (required: none; optional: graph_id, platform, model, include_archived, group_by) — every graph's harness/model assignments, without prompt text; group_by \"pair\" summarises per platform/model pair."
+        `assignments` (required: none; optional: graph_id, platform, model, include_archived, group_by) — every graph's harness/model assignments, without prompt text; group_by \"pair\" summarises per platform/model pair. `crew_pending` marks an ensemble that applies a newer crew version at its next dispatch."
     )]
     pub(crate) async fn crew(
         &self,

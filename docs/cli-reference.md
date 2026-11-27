@@ -147,7 +147,7 @@ grace-gated check on every startup (and reinstalls re-appear on their own).
 | `canopy graph list --json` | Print one JSON array on stdout (keys: `id`, `name`, `status`, `workdir`, `current_spec`, `current_node`, the last two null when absent) instead of the table |
 | `canopy graph list --running` | Only graphs whose status is `running` (combinable with `--workdir` and `--json`); prints a compact one-line JSON array unless combined with `--json` |
 | `canopy graph info <id-or-name>` | Detailed status for a single graph (specs, runs, hooks) |
-| `canopy graph crew [id-or-name]` | List harness/model assignments — agent nodes outside ensembles, ensemble members and agent hooks, each with platform, model, timeout, crew and availability. Omit the graph for every graph |
+| `canopy graph crew [id-or-name]` | List harness/model assignments — agent nodes outside ensembles, ensemble members and agent hooks, each with platform, model, timeout, crew and availability. A member row bound to a crew shows `crew <name> v<applied>`, or `crew <name> v<applied> -> v<current> (applies at next dispatch)` when a newer crew version is pending. Omit the graph for every graph |
 | `canopy graph crew --platform <p> --model <m>` | Filter by exact platform and case-insensitive model substring |
 | `canopy graph crew --all` | Include archived graphs |
 | `canopy graph crew --group-by-pair` | Summarise per platform/model pair: graph, ensemble, node and hook counts plus the graph names |

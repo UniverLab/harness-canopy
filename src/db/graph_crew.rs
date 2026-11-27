@@ -6,8 +6,9 @@
 //! [`Database::list_all_graph_nodes`], [`Database::list_all_ensembles`],
 //! [`Database::list_all_specs_for_conversion`],
 //! [`Database::roster_list`]) — one pass each, never one query per graph —
-//! so this module adds no SQL of its own. Prompt text is never read into a
-//! row: only identity, pair, timeout and the CM49/CM48 metadata travel.
+//! plus one `crews` version lookup for the whole call. Prompt text is never
+//! read into a row: only identity, pair, timeout and the CM49/CM48 metadata
+//! travel.
 
 use std::collections::{HashMap, HashSet};
 
@@ -82,6 +83,7 @@ impl Database {
         let nodes = self.list_all_graph_nodes()?;
         let ensembles = self.list_all_ensembles()?;
         let roster = self.roster_by_platform()?;
+        let crew_versions = self.crew_versions_by_name()?;
         let now = Utc::now();
 
         let member_nodes = member_node_ids(&ensembles);
@@ -98,6 +100,7 @@ impl Database {
             collect_member_rows(graph, &ensembles, &spec_graph, &params, &mut rows);
             collect_hook_rows(graph, &params, &mut rows);
         }
+        apply_crew_versions(&mut rows, &crew_versions);
         apply_availability(&mut rows, &roster, &now);
 
         let mut groups = group_graph_crew_rows(&selected, rows);
@@ -132,6 +135,25 @@ impl Database {
             .into_iter()
             .filter_map(|spec| spec.graph_id.map(|graph_id| (spec.id, graph_id)))
             .collect())
+    }
+
+    /// The current `version` of every crew by name — one query feeding
+    /// `crew_version_current` for every row.
+    fn crew_versions_by_name(&self) -> Result<HashMap<String, i64>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let mut stmt = conn.prepare("SELECT name, version FROM crews")?;
+        let pairs = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        let mut versions = HashMap::new();
+        for pair in pairs {
+            let (name, version) = pair?;
+            versions.insert(name, version);
+        }
+        Ok(versions)
     }
 
     /// Every roster entry, bucketed by platform — one query feeding
@@ -251,6 +273,8 @@ fn row_shell(graph: &Graph) -> GraphCrewRow {
         ensemble_commit_rights: None,
         crew: None,
         crew_version_applied: None,
+        crew_version_current: None,
+        crew_pending: None,
         availability: None,
         availability_reason: None,
         availability_until: None,
@@ -357,6 +381,28 @@ fn hook_row(graph: &Graph, event: GraphHookEvent, hook: &GraphCompletionHook) ->
         timeout_minutes: hook.timeout_minutes.map(|minutes| minutes as i64),
         crew: hook.crew.clone(),
         ..row_shell(graph)
+    }
+}
+
+/// Stamp the bound crew's current version onto every row that names a crew.
+/// An ensemble-member row whose applied version lags the current one is
+/// marked pending: the newer version applies at its next dispatch. A crew
+/// name that no longer resolves leaves both fields `None`; `Node` and
+/// `Hook` rows never carry a pending marker.
+fn apply_crew_versions(rows: &mut [GraphCrewRow], versions: &HashMap<String, i64>) {
+    for row in rows.iter_mut() {
+        let Some(name) = row.crew.as_deref() else {
+            continue;
+        };
+        let Some(current) = versions.get(name).copied() else {
+            continue;
+        };
+        row.crew_version_current = Some(current);
+        if row.kind == CrewRowKind::EnsembleMember
+            && row.crew_version_applied.unwrap_or(0) < current
+        {
+            row.crew_pending = Some("applies at next dispatch".to_string());
+        }
     }
 }
 

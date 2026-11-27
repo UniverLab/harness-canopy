@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 
 use crate::db::Database;
 use crate::domain::graphs::{
-    Graph, GraphCrewRow, GraphCrewSummary, GraphNodeRun, GraphRunStatus, GraphSpec,
+    CrewRowKind, Graph, GraphCrewRow, GraphCrewSummary, GraphNodeRun, GraphRunStatus, GraphSpec,
     GraphSpecStatus, GraphStatus,
 };
 
@@ -340,6 +340,29 @@ fn availability_cell(row: &GraphCrewRow) -> String {
     }
 }
 
+/// The Crew column: `-` when the row names no crew, `crew <name> v<applied>`
+/// when the applied version is current, and
+/// `crew <name> v<applied> -> v<current> (applies at next dispatch)` when a
+/// bound ensemble lags its crew.
+fn crew_cell(row: &GraphCrewRow) -> String {
+    let Some(name) = row.crew.as_deref().filter(|name| !name.is_empty()) else {
+        return "-".to_string();
+    };
+    if row.kind != CrewRowKind::EnsembleMember {
+        return name.to_string();
+    }
+    if row.crew_pending.is_some() {
+        if let Some(current) = row.crew_version_current {
+            let applied = row.crew_version_applied.unwrap_or(0);
+            return format!("crew {name} v{applied} -> v{current} (applies at next dispatch)");
+        }
+    }
+    match row.crew_version_applied {
+        Some(applied) => format!("crew {name} v{applied}"),
+        None => name.to_string(),
+    }
+}
+
 /// `canopy graph crew`'s per-graph table: kind, name, pair, timeout, and
 /// the CM49 crew / CM48 availability columns when a row carries them.
 pub(crate) fn format_graph_crew_table(rows: &[GraphCrewRow]) -> String {
@@ -366,7 +389,7 @@ pub(crate) fn format_graph_crew_table(rows: &[GraphCrewRow]) -> String {
                 row.timeout_minutes
                     .map(|minutes| format!("{minutes}m"))
                     .unwrap_or_else(|| "-".to_string()),
-                cell(row.crew.as_deref().unwrap_or_default()),
+                crew_cell(row),
                 availability_cell(row),
             ]
         })

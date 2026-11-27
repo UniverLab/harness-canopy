@@ -1394,7 +1394,7 @@ async fn crew_update_eager_sync_skips_a_running_graph() {
         .unwrap();
 
     // Grow the crew to three members.
-    call_resource_action(
+    let updated = call_resource_action(
         &handler,
         "crew",
         "update",
@@ -1411,6 +1411,28 @@ async fn crew_update_eager_sync_skips_a_running_graph() {
     )
     .await
     .unwrap();
+    assert!(!is_err(&updated), "{}", text(&updated));
+    let body: serde_json::Value = serde_json::from_str(&raw_text(&updated)).unwrap();
+    let sync = body["sync"].as_array().expect("sync array in {body}");
+    let running_entry = sync
+        .iter()
+        .find(|entry| entry["ensemble_id"] == running_ens)
+        .expect("a sync entry for the running graph's ensemble");
+    assert_eq!(running_entry["outcome"], "DeferredRunningGraph");
+    assert_eq!(
+        running_entry["note"], "applies at next dispatch",
+        "{running_entry}"
+    );
+    let idle_entry = sync
+        .iter()
+        .find(|entry| entry["ensemble_id"] == idle_ens)
+        .expect("a sync entry for the idle graph's ensemble");
+    assert!(
+        idle_entry["outcome"]
+            .as_str()
+            .is_some_and(|outcome| outcome.contains("Synced")),
+        "{idle_entry}"
+    );
 
     let running = db.get_ensemble_details(&running_ens).unwrap().unwrap();
     assert_eq!(

@@ -69,6 +69,16 @@ pub struct GraphCrewRow {
     /// CM49: the crew version materialized into the row's members.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crew_version_applied: Option<i64>,
+    /// The bound crew's current `crews.version`, for every row that names
+    /// a crew. `None` when the row names no crew or the name no longer
+    /// resolves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crew_version_current: Option<i64>,
+    /// Set exactly on an ensemble-member row whose `crew_version_applied`
+    /// lags `crew_version_current`: the newer version applies at next
+    /// dispatch. `None` everywhere else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crew_pending: Option<String>,
     /// CM48: `"available"` or `"unavailable"` — `None` when the row has no
     /// platform to ask the roster about (e.g. a crew-bound row).
     #[serde(default, skip_serializing_if = "Option::is_none")]
